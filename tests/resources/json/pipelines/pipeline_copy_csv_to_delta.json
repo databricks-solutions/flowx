@@ -1,0 +1,116 @@
+{
+  "name": "pipeline_copy_csv_to_delta",
+  "properties": {
+    "activities": [
+      {
+        "name": "Copy CSV to Delta Lake",
+        "type": "Copy",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.12:00:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "DelimitedTextSource",
+            "storeSettings": {
+              "type": "AzureBlobFSReadSettings",
+              "recursive": true,
+              "wildcardFolderPath": "raw/customers",
+              "wildcardFileName": "*.csv",
+              "enablePartitionDiscovery": false
+            },
+            "formatSettings": {
+              "type": "DelimitedTextReadSettings",
+              "skipLineCount": 0,
+              "compressionProperties": null
+            }
+          },
+          "sink": {
+            "type": "DeltaSink",
+            "writeBatchSize": 10000,
+            "writeBatchTimeout": "00:30:00",
+            "importSettings": {
+              "type": "DeltaImportCommand"
+            }
+          },
+          "enableStaging": false,
+          "translator": {
+            "type": "TabularTranslator",
+            "mappings": [
+              {
+                "source": { "name": "customer_id", "type": "String" },
+                "sink": { "name": "customer_id", "type": "String" }
+              },
+              {
+                "source": { "name": "first_name", "type": "String" },
+                "sink": { "name": "first_name", "type": "String" }
+              },
+              {
+                "source": { "name": "last_name", "type": "String" },
+                "sink": { "name": "last_name", "type": "String" }
+              },
+              {
+                "source": { "name": "email", "type": "String" },
+                "sink": { "name": "email", "type": "String" }
+              },
+              {
+                "source": { "name": "signup_date", "type": "DateTime" },
+                "sink": { "name": "signup_date", "type": "Timestamp" }
+              }
+            ],
+            "typeConversion": true,
+            "typeConversionSettings": {
+              "allowDataTruncation": true,
+              "treatBooleanAsNumber": false
+            }
+          },
+          "parallelCopies": 4,
+          "dataIntegrationUnits": 8
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_csv_adls_customers",
+            "type": "DatasetReference",
+            "parameters": {
+              "folderPath": "@pipeline().parameters.sourceFolderPath"
+            }
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "ds_delta_customers",
+            "type": "DatasetReference"
+          }
+        ]
+      }
+    ],
+    "parameters": {
+      "sourceFolderPath": {
+        "type": "String",
+        "defaultValue": "raw/customers/2024"
+      },
+      "triggerDate": {
+        "type": "String",
+        "defaultValue": ""
+      }
+    },
+    "variables": {
+      "rowsCopied": {
+        "type": "String",
+        "defaultValue": "0"
+      }
+    },
+    "annotations": [
+      "etl",
+      "customers",
+      "csv-to-delta"
+    ],
+    "folder": {
+      "name": "ETL/Ingestion"
+    }
+  }
+}

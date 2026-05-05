@@ -1,0 +1,164 @@
+{
+  "name": "pipeline_if_condition_branching",
+  "properties": {
+    "activities": [
+      {
+        "name": "Lookup Row Count",
+        "type": "Lookup",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:10:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT COUNT(*) as row_count FROM dbo.staging_data WHERE process_date = '@{pipeline().parameters.processDate}'",
+            "queryTimeout": "00:05:00"
+          },
+          "dataset": {
+            "referenceName": "ds_azure_sql_staging",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": true
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_azure_sql_staging",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+      {
+        "name": "Check Data Exists",
+        "type": "IfCondition",
+        "dependsOn": [
+          {
+            "activity": "Lookup Row Count",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "expression": {
+            "value": "@greater(int(activity('Lookup Row Count').output.firstRow.row_count), 0)",
+            "type": "Expression"
+          },
+          "ifTrueActivities": [
+            {
+              "name": "Copy Staging to Curated",
+              "type": "Copy",
+              "dependsOn": [],
+              "policy": {
+                "timeout": "0.02:00:00",
+                "retry": 2,
+                "retryIntervalInSeconds": 30,
+                "secureOutput": false,
+                "secureInput": false
+              },
+              "typeProperties": {
+                "source": {
+                  "type": "AzureSqlSource",
+                  "sqlReaderQuery": "SELECT * FROM dbo.staging_data WHERE process_date = '@{pipeline().parameters.processDate}'"
+                },
+                "sink": {
+                  "type": "DeltaSink",
+                  "writeBatchSize": 25000,
+                  "importSettings": {
+                    "type": "DeltaImportCommand"
+                  }
+                },
+                "enableStaging": false
+              },
+              "inputs": [
+                {
+                  "referenceName": "ds_azure_sql_staging",
+                  "type": "DatasetReference"
+                }
+              ],
+              "outputs": [
+                {
+                  "referenceName": "ds_delta_curated",
+                  "type": "DatasetReference"
+                }
+              ]
+            },
+            {
+              "name": "Run Quality Check Notebook",
+              "type": "DatabricksNotebook",
+              "dependsOn": [
+                {
+                  "activity": "Copy Staging to Curated",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "policy": {
+                "timeout": "0.01:00:00",
+                "retry": 0,
+                "retryIntervalInSeconds": 30,
+                "secureOutput": false,
+                "secureInput": false
+              },
+              "typeProperties": {
+                "notebookPath": "/Shared/DQ/quality_checks",
+                "baseParameters": {
+                  "tableName": "curated.staging_data",
+                  "processDate": "@pipeline().parameters.processDate"
+                }
+              },
+              "linkedServiceName": {
+                "referenceName": "ls_databricks_existing_cluster",
+                "type": "LinkedServiceReference"
+              }
+            }
+          ],
+          "ifFalseActivities": [
+            {
+              "name": "Log No Data Found",
+              "type": "WebActivity",
+              "dependsOn": [],
+              "policy": {
+                "timeout": "0.00:05:00",
+                "retry": 1,
+                "retryIntervalInSeconds": 10,
+                "secureOutput": false,
+                "secureInput": false
+              },
+              "typeProperties": {
+                "url": "https://example.com/webhook/notify",
+                "method": "POST",
+                "headers": {
+                  "Content-Type": "application/json"
+                },
+                "body": {
+                  "text": "@concat('No data found for process date: ', pipeline().parameters.processDate, ' in pipeline: ', pipeline().Pipeline)"
+                }
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "parameters": {
+      "processDate": {
+        "type": "String",
+        "defaultValue": "@utcNow('yyyy-MM-dd')"
+      }
+    },
+    "variables": {},
+    "annotations": [
+      "conditional",
+      "branching",
+      "etl"
+    ],
+    "folder": {
+      "name": "ETL/Conditional"
+    }
+  }
+}

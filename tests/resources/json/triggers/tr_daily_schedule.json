@@ -1,0 +1,22 @@
+{
+  "name": "tr_daily_schedule",
+  "properties": {
+    "type": "ScheduleTrigger",
+    "typeProperties": {
+      "recurrence": {
+        "frequency": "Day",
+        "interval": 1,
+        "startTime": "2024-01-01T06:00:00Z",
+        "timeZone": "UTC"
+      }
+    },
+    "pipelines": [
+      {
+        "pipelineReference": {
+          "referenceName": "pipeline_copy_csv_to_delta",
+          "type": "PipelineReference"
+        }
+      }
+    ]
+  }
+}

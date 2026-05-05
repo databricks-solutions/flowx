@@ -1,0 +1,114 @@
+{
+  "name": "pipeline_lookup_and_foreach",
+  "properties": {
+    "activities": [
+      {
+        "name": "Lookup Config Tables",
+        "type": "Lookup",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:10:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 15,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT table_schema, table_name, watermark_column, watermark_value, is_active FROM dbo.etl_config WHERE is_active = 1 ORDER BY load_priority",
+            "queryTimeout": "00:05:00"
+          },
+          "dataset": {
+            "referenceName": "ds_azure_sql_config",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": false
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_azure_sql_config",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+      {
+        "name": "ForEach Config Table",
+        "type": "ForEach",
+        "dependsOn": [
+          {
+            "activity": "Lookup Config Tables",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "value": "@activity('Lookup Config Tables').output.value",
+            "type": "Expression"
+          },
+          "isSequential": true,
+          "activities": [
+            {
+              "name": "Copy Config Driven Table",
+              "type": "Copy",
+              "dependsOn": [],
+              "policy": {
+                "timeout": "0.01:00:00",
+                "retry": 2,
+                "retryIntervalInSeconds": 30,
+                "secureOutput": false,
+                "secureInput": false
+              },
+              "typeProperties": {
+                "source": {
+                  "type": "AzureSqlSource",
+                  "sqlReaderQuery": "@concat('SELECT * FROM ', item().table_schema, '.', item().table_name, ' WHERE ', item().watermark_column, ' > ''', item().watermark_value, '''')",
+                  "queryTimeout": "00:30:00"
+                },
+                "sink": {
+                  "type": "DeltaSink",
+                  "writeBatchSize": 20000,
+                  "importSettings": {
+                    "type": "DeltaImportCommand"
+                  }
+                },
+                "enableStaging": false
+              },
+              "inputs": [
+                {
+                  "referenceName": "ds_azure_sql_generic",
+                  "type": "DatasetReference",
+                  "parameters": {
+                    "tableName": "@item().table_name",
+                    "schemaName": "@item().table_schema"
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "referenceName": "ds_delta_generic",
+                  "type": "DatasetReference",
+                  "parameters": {
+                    "tableName": "@item().table_name"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "parameters": {},
+    "variables": {},
+    "annotations": [
+      "etl",
+      "config-driven",
+      "lookup-foreach"
+    ],
+    "folder": {
+      "name": "ETL/ConfigDriven"
+    }
+  }
+}

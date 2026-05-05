@@ -1,0 +1,324 @@
+{
+  "name": "pipeline_complex_etl",
+  "properties": {
+    "activities": [
+      {
+        "name": "Lookup ETL Config",
+        "type": "Lookup",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:10:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 15,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT source_schema, source_table, target_table, watermark_column, last_watermark, incremental_flag, partition_column FROM dbo.etl_control WHERE pipeline_group = '@{pipeline().parameters.pipelineGroup}' AND is_active = 1 ORDER BY load_sequence",
+            "queryTimeout": "00:05:00"
+          },
+          "dataset": {
+            "referenceName": "ds_azure_sql_config",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": false
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_azure_sql_config",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+      {
+        "name": "ForEach Table In Config",
+        "type": "ForEach",
+        "dependsOn": [
+          {
+            "activity": "Lookup ETL Config",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "value": "@activity('Lookup ETL Config').output.value",
+            "type": "Expression"
+          },
+          "isSequential": false,
+          "batchCount": 8,
+          "activities": [
+            {
+              "name": "Copy Source to Staging",
+              "type": "Copy",
+              "dependsOn": [],
+              "policy": {
+                "timeout": "0.02:00:00",
+                "retry": 3,
+                "retryIntervalInSeconds": 60,
+                "secureOutput": false,
+                "secureInput": false
+              },
+              "typeProperties": {
+                "source": {
+                  "type": "AzureSqlSource",
+                  "sqlReaderQuery": "@if(equals(item().incremental_flag, 1), concat('SELECT * FROM ', item().source_schema, '.', item().source_table, ' WHERE ', item().watermark_column, ' > ''', item().last_watermark, ''''), concat('SELECT * FROM ', item().source_schema, '.', item().source_table))",
+                  "queryTimeout": "01:00:00",
+                  "partitionOption": "None"
+                },
+                "sink": {
+                  "type": "DeltaSink",
+                  "writeBatchSize": 50000,
+                  "importSettings": {
+                    "type": "DeltaImportCommand"
+                  },
+                  "tableActionOption": "Append"
+                },
+                "enableStaging": true,
+                "stagingSettings": {
+                  "linkedServiceName": {
+                    "referenceName": "ls_azure_blob",
+                    "type": "LinkedServiceReference"
+                  },
+                  "path": "@concat('staging/', item().source_table)"
+                },
+                "translator": {
+                  "type": "TabularTranslator",
+                  "typeConversion": true,
+                  "typeConversionSettings": {
+                    "allowDataTruncation": true,
+                    "treatBooleanAsNumber": false
+                  }
+                },
+                "parallelCopies": 4,
+                "dataIntegrationUnits": 8
+              },
+              "inputs": [
+                {
+                  "referenceName": "ds_azure_sql_generic",
+                  "type": "DatasetReference",
+                  "parameters": {
+                    "tableName": "@item().source_table",
+                    "schemaName": "@item().source_schema"
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "referenceName": "ds_delta_staging",
+                  "type": "DatasetReference",
+                  "parameters": {
+                    "tableName": "@concat('stg_', item().source_table)"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "name": "Run Transform Notebook",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          {
+            "activity": "ForEach Table In Config",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.04:00:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 120,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookPath": "/Repos/data-engineering/notebooks/transform_and_merge",
+          "baseParameters": {
+            "pipelineGroup": "@pipeline().parameters.pipelineGroup",
+            "processDate": "@pipeline().parameters.processDate",
+            "environment": "@pipeline().parameters.environment",
+            "enableMerge": "@string(pipeline().parameters.enableMerge)"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_new_cluster",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Run Data Quality Checks",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          {
+            "activity": "Run Transform Notebook",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.01:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookPath": "/Repos/data-engineering/notebooks/quality_gate",
+          "baseParameters": {
+            "pipelineGroup": "@pipeline().parameters.pipelineGroup",
+            "qualityThreshold": "0.98",
+            "failOnBreach": "true"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_existing_cluster",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Delete Staging Data",
+        "type": "Delete",
+        "dependsOn": [
+          {
+            "activity": "Run Data Quality Checks",
+            "dependencyConditions": ["Completed"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.01:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "ds_adls_staging_folder",
+            "type": "DatasetReference",
+            "parameters": {
+              "folderPath": "@concat('staging/', pipeline().parameters.pipelineGroup)"
+            }
+          },
+          "storeSettings": {
+            "type": "AzureBlobFSReadSettings",
+            "recursive": true
+          },
+          "recursive": true,
+          "enableLogging": true,
+          "logStorageSettings": {
+            "linkedServiceName": {
+              "referenceName": "ls_adls_gen2",
+              "type": "LinkedServiceReference"
+            },
+            "path": "logs/cleanup"
+          }
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_adls_staging_folder",
+            "type": "DatasetReference",
+            "parameters": {
+              "folderPath": "@concat('staging/', pipeline().parameters.pipelineGroup)"
+            }
+          }
+        ]
+      },
+      {
+        "name": "Update Watermarks",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          {
+            "activity": "Run Data Quality Checks",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:30:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 15,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookPath": "/Repos/data-engineering/notebooks/update_watermarks",
+          "baseParameters": {
+            "pipelineGroup": "@pipeline().parameters.pipelineGroup",
+            "processDate": "@pipeline().parameters.processDate"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_existing_cluster",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Send Completion Notification",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "Update Watermarks",
+            "dependencyConditions": ["Succeeded"]
+          },
+          {
+            "activity": "Delete Staging Data",
+            "dependencyConditions": ["Completed"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "https://example.com/webhook/notify",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "@concat('ETL Pipeline [', pipeline().parameters.pipelineGroup, '] completed successfully for ', pipeline().parameters.processDate, '. Run ID: ', pipeline().RunId)"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "pipelineGroup": {
+        "type": "String",
+        "defaultValue": "sales"
+      },
+      "processDate": {
+        "type": "String",
+        "defaultValue": "@utcNow('yyyy-MM-dd')"
+      },
+      "environment": {
+        "type": "String",
+        "defaultValue": "prod"
+      },
+      "enableMerge": {
+        "type": "Bool",
+        "defaultValue": true
+      }
+    },
+    "variables": {
+      "etlStatus": {
+        "type": "String",
+        "defaultValue": "InProgress"
+      },
+      "processedTableCount": {
+        "type": "String",
+        "defaultValue": "0"
+      }
+    },
+    "annotations": [
+      "complex-etl",
+      "multi-stage",
+      "production"
+    ],
+    "folder": {
+      "name": "ETL/Production"
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "name": "ds_csv_adls_customers",
+  "properties": {
+    "type": "DelimitedText",
+    "linkedServiceName": {
+      "referenceName": "ls_adls_gen2",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "fileName": {
+          "value": "@dataset().fileName",
+          "type": "Expression"
+        },
+        "folderPath": {
+          "value": "@dataset().folderPath",
+          "type": "Expression"
+        },
+        "fileSystem": "raw"
+      },
+      "columnDelimiter": ",",
+      "rowDelimiter": "\n",
+      "encodingName": "UTF-8",
+      "escapeChar": "\\",
+      "quoteChar": "\"",
+      "firstRowAsHeader": true,
+      "compressionCodec": "none",
+      "nullValue": ""
+    },
+    "parameters": {
+      "folderPath": {
+        "type": "String",
+        "defaultValue": "customers"
+      },
+      "fileName": {
+        "type": "String",
+        "defaultValue": "*.csv"
+      }
+    },
+    "schema": [
+      { "name": "customer_id", "type": "String" },
+      { "name": "first_name", "type": "String" },
+      { "name": "last_name", "type": "String" },
+      { "name": "email", "type": "String" },
+      { "name": "signup_date", "type": "String" },
+      { "name": "region", "type": "String" },
+      { "name": "tier", "type": "String" }
+    ],
+    "annotations": [
+      "csv",
+      "customers",
+      "raw"
+    ],
+    "folder": {
+      "name": "Raw/CSV"
+    }
+  }
+}

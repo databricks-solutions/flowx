@@ -1,0 +1,29 @@
+{
+  "name": "ls_databricks_existing_cluster",
+  "properties": {
+    "type": "AzureDatabricks",
+    "typeProperties": {
+      "domain": "https://adb-1234567890123456.7.azuredatabricks.net",
+      "accessToken": {
+        "type": "AzureKeyVaultSecret",
+        "store": {
+          "referenceName": "ls_key_vault",
+          "type": "LinkedServiceReference"
+        },
+        "secretName": "databricks-access-token"
+      },
+      "existingClusterId": "0123-456789-abcde123",
+      "authentication": "MSI",
+      "workspaceResourceId": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-data-platform/providers/Microsoft.Databricks/workspaces/contoso-databricks-prod"
+    },
+    "annotations": [
+      "databricks",
+      "existing-cluster",
+      "interactive"
+    ],
+    "connectVia": {
+      "referenceName": "AutoResolveIntegrationRuntime",
+      "type": "IntegrationRuntimeReference"
+    }
+  }
+}

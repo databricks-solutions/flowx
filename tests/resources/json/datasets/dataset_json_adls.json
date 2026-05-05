@@ -1,0 +1,41 @@
+{
+  "name": "ds_json_adls_api_responses",
+  "properties": {
+    "type": "Json",
+    "linkedServiceName": {
+      "referenceName": "ls_adls_gen2",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "folderPath": {
+          "value": "@dataset().folderPath",
+          "type": "Expression"
+        },
+        "fileSystem": "landing"
+      },
+      "encodingName": "UTF-8",
+      "documentForm": "documentPerLine",
+      "compressionProperties": {
+        "type": "GZipReadSettings",
+        "compressionCodec": "gzip"
+      }
+    },
+    "parameters": {
+      "folderPath": {
+        "type": "String",
+        "defaultValue": "api-responses/daily"
+      }
+    },
+    "schema": {},
+    "annotations": [
+      "json",
+      "api-responses",
+      "landing"
+    ],
+    "folder": {
+      "name": "Landing/JSON"
+    }
+  }
+}

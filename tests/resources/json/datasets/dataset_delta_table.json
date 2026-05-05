@@ -1,0 +1,49 @@
+{
+  "name": "ds_delta_customers",
+  "properties": {
+    "type": "AzureDatabricksDeltaLakeDataset",
+    "linkedServiceName": {
+      "referenceName": "ls_databricks_existing_cluster",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "database": {
+        "value": "@dataset().databaseName",
+        "type": "Expression"
+      },
+      "table": {
+        "value": "@dataset().tableName",
+        "type": "Expression"
+      }
+    },
+    "parameters": {
+      "databaseName": {
+        "type": "String",
+        "defaultValue": "curated"
+      },
+      "tableName": {
+        "type": "String",
+        "defaultValue": "customers"
+      }
+    },
+    "schema": [
+      { "name": "customer_id", "type": "string" },
+      { "name": "first_name", "type": "string" },
+      { "name": "last_name", "type": "string" },
+      { "name": "email", "type": "string" },
+      { "name": "signup_date", "type": "timestamp" },
+      { "name": "region", "type": "string" },
+      { "name": "tier", "type": "string" },
+      { "name": "_load_timestamp", "type": "timestamp" },
+      { "name": "_source_file", "type": "string" }
+    ],
+    "annotations": [
+      "delta",
+      "curated",
+      "customers"
+    ],
+    "folder": {
+      "name": "Curated/Delta"
+    }
+  }
+}

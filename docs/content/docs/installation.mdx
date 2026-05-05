@@ -1,0 +1,73 @@
+---
+title: Installation
+description: Install flowx in Databricks Genie Code, Claude Code, or other agentic tools.
+---
+
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Flowx contains four [agent skills](https://github.com/ghanse/flowx/tree/main/skills) (`ingest`, `translate`, `prepare`, and `migrate`) that teach agentic tools how to use the flowx Python modules.
+Installing flowx also installs all required dependencies to run the Python modules.
+
+<Tabs items={['Databricks Genie Code', 'Claude Code', 'Other AI tools']}>
+<Tab value="Databricks Genie Code">
+Clone the flowx repo into your workspace using a [Git folder](https://docs.databricks.com/aws/en/repos/git-operations-with-repos), then copy the `skills/` directory into a user-level skills folder:
+
+```bash
+databricks workspace import-dir skills /Users/<your-email>/.assistant/skills
+```
+
+To make flowx available for other workspace users, copy `skills/` into a workspace-level skills folder:
+
+```bash
+databricks workspace import-dir skills /Workspace/.assistant/skills
+```
+
+Genie Code picks up skills from these directories automatically. Skills fire automatically when their description matches your request. 
+To invoke a specific skill, use the `@` prefix (e.g. `@migrate translate the ADF pipelines I exported to /Volumes/main/default/adf_export`).
+
+See the [Databricks Genie Code Skills documentation](https://docs.databricks.com/aws/en/genie-code/skills) for more details.
+</Tab>
+
+<Tab value="Claude Code">
+Flowx is packaged as a Claude Code plugin. The plugin manifest lives at [`.claude-plugin/plugin.json`](https://github.com/ghanse/flowx/blob/main/.claude-plugin/plugin.json).  To install 
+flowx, run the following command from a Claude Code session:
+
+```bash
+/plugin marketplace add ghanse/flowx
+/plugin install flowx
+```
+
+You can also copy the skill folders into your local `/.claude/skills` folder:
+
+```bash
+cp -R skills/{ingest,translate,prepare,migrate} ~/.claude/skills/
+```
+
+Once installed, the skills are can be invoked using `/flowx:migrate`, `/flowx:ingest`, etc. Claude Code can also invoke the skills when prompted.  See the [Claude Code Plugins documentation](https://docs.claude.com/en/docs/claude-code/plugins) for more details.
+</Tab>
+
+<Tab value="Other AI tools">
+Any tool that supports the [Agent Skills](https://agentskills.io/) open standard can install the flowx skills. The general pattern:
+
+1. Copy each skill folder (`skills/ingest`, `skills/translate`, `skills/prepare`, `skills/migrate`) into the tool's configured skills directory.
+2. Make sure the path contains `SKILL.md` directly,
+3. Restart the tool if it caches skill metadata at startup.
+
+<Callout type="info" title="Flat-file tools">
+If your tool expects a single Markdown file instead of a directory tree, use the following command to concatenate the skills:
+
+```bash
+cat skills/*/SKILL.md > flowx-skills.md
+```
+</Callout>
+</Tab>
+</Tabs>
+
+## Verifying the install
+
+Open your agent and ask:
+
+> What flowx skills do you have available?
+
+You should see all four skills listed with their descriptions. If only some appear, double-check the install path your tool watches for skills.

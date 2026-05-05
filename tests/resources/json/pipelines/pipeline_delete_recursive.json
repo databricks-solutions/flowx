@@ -1,0 +1,114 @@
+{
+  "name": "pipeline_delete_recursive",
+  "properties": {
+    "activities": [
+      {
+        "name": "Delete Staging Files",
+        "type": "Delete",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.01:00:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "ds_adls_staging_folder",
+            "type": "DatasetReference",
+            "parameters": {
+              "folderPath": "@pipeline().parameters.stagingPath"
+            }
+          },
+          "enableLogging": true,
+          "logStorageSettings": {
+            "linkedServiceName": {
+              "referenceName": "ls_adls_gen2",
+              "type": "LinkedServiceReference"
+            },
+            "path": "logs/delete-activity"
+          },
+          "storeSettings": {
+            "type": "AzureBlobFSReadSettings",
+            "recursive": true,
+            "wildcardFolderPath": "@pipeline().parameters.stagingPath",
+            "wildcardFileName": "*"
+          },
+          "recursive": true,
+          "maxConcurrentConnections": 4
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_adls_staging_folder",
+            "type": "DatasetReference",
+            "parameters": {
+              "folderPath": "@pipeline().parameters.stagingPath"
+            }
+          }
+        ]
+      },
+      {
+        "name": "Delete Archive Files Older Than 30 Days",
+        "type": "Delete",
+        "dependsOn": [
+          {
+            "activity": "Delete Staging Files",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "timeout": "0.02:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "ds_adls_archive_folder",
+            "type": "DatasetReference"
+          },
+          "enableLogging": true,
+          "logStorageSettings": {
+            "linkedServiceName": {
+              "referenceName": "ls_adls_gen2",
+              "type": "LinkedServiceReference"
+            },
+            "path": "logs/delete-activity"
+          },
+          "storeSettings": {
+            "type": "AzureBlobFSReadSettings",
+            "recursive": true,
+            "modifiedDatetimeEnd": "@adddays(utcNow(), -30)",
+            "wildcardFileName": "*.parquet"
+          },
+          "recursive": true
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_adls_archive_folder",
+            "type": "DatasetReference"
+          }
+        ]
+      }
+    ],
+    "parameters": {
+      "stagingPath": {
+        "type": "String",
+        "defaultValue": "staging/daily"
+      }
+    },
+    "variables": {},
+    "annotations": [
+      "cleanup",
+      "delete",
+      "maintenance"
+    ],
+    "folder": {
+      "name": "Maintenance/Cleanup"
+    }
+  }
+}

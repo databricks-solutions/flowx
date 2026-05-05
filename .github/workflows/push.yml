@@ -1,0 +1,40 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Scrub internal proxy URLs from uv.lock
+        run: sed -i 's|https://pypi-proxy\.dev\.databricks\.com/simple|https://pypi.org/simple|g' uv.lock
+      - run: uv sync --frozen
+      - run: make test
+
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Scrub internal proxy URLs from uv.lock
+        run: sed -i 's|https://pypi-proxy\.dev\.databricks\.com/simple|https://pypi.org/simple|g' uv.lock
+      - run: uv sync --frozen
+      - run: make fmt
+      - name: Check for formatting changes
+        run: |
+          if [ -n "$(git diff)" ]; then
+            echo "Code formatting issues detected. Run 'make fmt' locally."
+            git diff
+            exit 1
+          fi

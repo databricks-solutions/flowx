@@ -1,0 +1,26 @@
+{
+  "name": "ls_postgresql",
+  "properties": {
+    "type": "AzurePostgreSql",
+    "typeProperties": {
+      "connectionString": {
+        "type": "AzureKeyVaultSecret",
+        "store": {
+          "referenceName": "ls_key_vault",
+          "type": "LinkedServiceReference"
+        },
+        "secretName": "postgresql-connection-string"
+      },
+      "encryptedCredential": "ew0KICAiVmVyc2lvbiI6ICIyMDE3LTExLTMwIiwNCn0="
+    },
+    "annotations": [
+      "postgresql",
+      "database",
+      "source"
+    ],
+    "connectVia": {
+      "referenceName": "AutoResolveIntegrationRuntime",
+      "type": "IntegrationRuntimeReference"
+    }
+  }
+}

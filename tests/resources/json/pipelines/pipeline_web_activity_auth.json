@@ -1,0 +1,119 @@
+{
+  "name": "pipeline_web_activity_auth",
+  "properties": {
+    "activities": [
+      {
+        "name": "Get OAuth Token",
+        "type": "WebActivity",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 3,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": true,
+          "secureInput": true
+        },
+        "typeProperties": {
+          "url": "https://login.microsoftonline.com/@{pipeline().parameters.tenantId}/oauth2/v2.0/token",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          "body": "grant_type=client_credentials&client_id=@{pipeline().parameters.clientId}&client_secret=@{pipeline().parameters.clientSecret}&scope=https://management.azure.com/.default",
+          "authentication": {
+            "type": "MSI",
+            "resource": "https://management.azure.com/"
+          },
+          "disableCertValidation": false,
+          "httpRequestTimeout": "00:01:00"
+        }
+      },
+      {
+        "name": "Call External API",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "Get OAuth Token",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:10:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "@concat(pipeline().parameters.apiBaseUrl, '/api/v2/data/export')",
+          "method": "GET",
+          "headers": {
+            "Authorization": "@concat('Bearer ', activity('Get OAuth Token').output.access_token)",
+            "Accept": "application/json",
+            "X-Correlation-Id": "@pipeline().RunId"
+          },
+          "disableCertValidation": false,
+          "httpRequestTimeout": "00:05:00"
+        }
+      },
+      {
+        "name": "Post Status Webhook",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "Call External API",
+            "dependencyConditions": [
+              "Completed"
+            ]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:02:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 5,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "https://example.com/webhook/notify",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "@concat('Pipeline ', pipeline().Pipeline, ' completed. Run ID: ', pipeline().RunId, '. Status: ', if(equals(activity('Call External API').Status, 'Succeeded'), 'SUCCESS', 'FAILURE'))"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "tenantId": {
+        "type": "String",
+        "defaultValue": "00000000-0000-0000-0000-000000000000"
+      },
+      "clientId": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "clientSecret": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "apiBaseUrl": {
+        "type": "String",
+        "defaultValue": "https://api.contoso.com"
+      }
+    },
+    "variables": {},
+    "annotations": [
+      "web-activity",
+      "authentication",
+      "api-call"
+    ],
+    "folder": {
+      "name": "Integration/API"
+    }
+  }
+}
