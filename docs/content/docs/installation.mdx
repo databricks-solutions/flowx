@@ -44,7 +44,7 @@ You can also copy the skill folders into your local `/.claude/skills` folder:
 cp -R skills/{ingest,translate,prepare,migrate} ~/.claude/skills/
 ```
 
-Once installed, the skills are can be invoked using `/orchestra:migrate`, `/orchestra:ingest`, etc. Claude Code can also invoke the skills when prompted.  See the [Claude Code Plugins documentation](https://docs.claude.com/en/docs/claude-code/plugins) for more details.
+Once installed, the skills can be invoked using `/orchestra:migrate`, `/orchestra:ingest`, etc. Claude Code can also invoke the skills when prompted.  See the [Claude Code Plugins documentation](https://docs.claude.com/en/docs/claude-code/plugins) for more details.
 </Tab>
 
 <Tab value="Other AI tools">
@@ -54,8 +54,8 @@ Any tool that supports the [Agent Skills](https://agentskills.io/) open standard
 2. Make sure the path contains `SKILL.md` directly,
 3. Restart the tool if it caches skill metadata at startup.
 
-<Callout type="info" title="Flat-file tools">
-If your tool expects a single Markdown file instead of a directory tree, use the following command to concatenate the skills:
+<Callout type="info" title="Flattening skills files">
+If your tool expects a single Markdown file instead of a directory tree, use the following command to flatten Orchestra's skills files:
 
 ```bash
 cat skills/*/SKILL.md > orchestra-skills.md
@@ -64,7 +64,7 @@ cat skills/*/SKILL.md > orchestra-skills.md
 </Tab>
 </Tabs>
 
-## Verifying the install
+## Verifying the installation
 
 Open your agent and ask:
 
