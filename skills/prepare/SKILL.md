@@ -50,6 +50,7 @@ Ask the user for the following (provide defaults):
 | Bundle name | Name for the DABs project | derived from first pipeline name |
 | Target environments | Deployment targets to configure | `dev, staging, prod` |
 | Warehouse ID | SQL warehouse for SQL tasks (optional) | prompt if SQL tasks exist |
+| Databricks CLI profile | Profile used to download workspace-resident notebooks / JARs / Python files (`--profile`). Required only when the bundle references absolute workspace paths. | resolved from `~/.databrickscfg` (auto-prompt if multiple) |
 
 ### Step 3 — Run bundle generation
 
@@ -62,13 +63,34 @@ python3 <plugin_dir>/src/flowx/bundler/dab_writer.py \
   --catalog <catalog> \
   --schema <schema> \
   --bundle-name <bundle_name> \
-  --targets <targets>
+  [--profile <databricks-cli-profile>] \
+  [--no-vendor-workspace-files]
 ```
 
 Where:
 - `<plugin_dir>` is the root of the flowx plugin
 - `<translation_report_path>` is the path to `translation_report.json`
 - Other parameters are from step 2
+
+**Workspace artifact vendoring (default: enabled).** When the report references workspace-resident notebooks (`/Shared/...`), DBFS Spark JARs (`dbfs:/...`), or Spark Python files, the preparer downloads them via the Databricks CLI auth so the resulting bundle is self-contained and deployable across environments. Downloaded notebooks are vendored under `src/notebooks/` and bound to the default `job_cluster` (since they may rely on classic-compute features). The original `notebook_path` in the resource YAML is rewritten to the bundle-relative path `../src/notebooks/<file>.py`.
+
+If no Databricks CLI auth is detected on the host (`~/.databrickscfg` empty AND no `DATABRICKS_CONFIG_PROFILE` / `DATABRICKS_HOST`+`DATABRICKS_TOKEN` env vars), the CLI prints the workspace paths it was about to download and prompts:
+
+```
+Workspace downloads are enabled but no Databricks CLI auth was found.
+  Looked for profiles in: /Users/<you>/.databrickscfg
+  Artifacts to vendor: /Shared/ETL/transform, …
+
+To authenticate, run one of:
+  databricks auth login --host https://<your-workspace>.cloud.databricks.com
+  databricks configure --token
+
+Continue with placeholders (downloads will be skipped)? [y/N]:
+```
+
+Answering `n` aborts with exit code 2 so the user can authenticate and re-run. Answering `y` continues with placeholder notebooks (legacy in-place workspace paths). In non-interactive sessions the prompt defaults to placeholders.
+
+Use `--no-vendor-workspace-files` to opt out entirely; the bundle then keeps original workspace paths exactly as in the IR.
 
 ### Step 4 — Present the generated file tree
 

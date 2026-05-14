@@ -28,6 +28,7 @@ from flowx.models.ir import (
     WaitActivity,
     WebActivity,
 )
+from flowx.preparer import workspace_downloader
 from flowx.preparer.workflow_preparer import (
     PreparedActivity,
     PreparedWorkflow,
@@ -85,6 +86,67 @@ class TestNotebookPreparer:
         prepared = prepare_activity(activity)
         assert "base_parameters" not in prepared.task.get("notebook_task", {})
         # No placeholder for an absolute workspace path.
+        assert prepared.notebooks == []
+
+    def test_prepare_notebook_vendors_downloaded_workspace_notebook(self, monkeypatch):
+        """When downloads are enabled and the SDK returns content, the workspace notebook
+        is vendored into src/notebooks/ under the workspace basename, and the task is
+        bound to the default cluster."""
+        monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
+        monkeypatch.setattr(
+            "flowx.preparer.activity_preparers.notebook.download_notebook",
+            lambda path: "# Databricks notebook source\nprint('hi from /Shared/ETL/transform')\n",
+        )
+        activity = NotebookActivity(
+            **_make_base("Run NB", "run_nb"),
+            notebook_path="/Shared/ETL/transform",
+            base_parameters={"env": "dev"},
+        )
+        prepared = prepare_activity(activity)
+        # Path rewritten to bundle-local; basename mirrors the workspace name
+        # ("transform"), not the activity task_key ("run_nb").
+        assert prepared.task["notebook_task"]["notebook_path"] == "../src/notebooks/transform.py"
+        # Cluster bound explicitly by the preparer (the post-process bind step
+        # skips ../src/ paths because flowx-generated notebooks are
+        # serverless-only; downloaded notebooks need classic compute).
+        assert prepared.task["job_cluster_key"] == "default_cluster"
+        # Notebook vendored under the workspace basename
+        assert len(prepared.notebooks) == 1
+        assert prepared.notebooks[0].relative_path == "notebooks/transform.py"
+        assert "from /Shared/ETL/transform" in prepared.notebooks[0].content
+        # Params preserved
+        assert prepared.task["notebook_task"]["base_parameters"] == {"env": "dev"}
+
+    def test_prepare_notebook_preserves_workspace_basename_verbatim(self, monkeypatch):
+        """Underscored / numbered workspace names like test_notebook_001 are preserved as-is."""
+        monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
+        monkeypatch.setattr(
+            "flowx.preparer.activity_preparers.notebook.download_notebook",
+            lambda path: "# Databricks notebook source\nprint('hello')\n",
+        )
+        activity = NotebookActivity(
+            **_make_base("Bronze Ingest", "BronzeIngest"),
+            notebook_path="/Shared/test_notebook_001",
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.task["notebook_task"]["notebook_path"] == "../src/notebooks/test_notebook_001.py"
+        assert prepared.notebooks[0].relative_path == "notebooks/test_notebook_001.py"
+
+    def test_prepare_notebook_falls_back_to_in_place_when_download_fails(self, monkeypatch):
+        """If downloads are enabled but the SDK returns None, behavior matches the
+        legacy in-place reference (no vendor, no cluster bind in the preparer)."""
+        monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
+        monkeypatch.setattr(
+            "flowx.preparer.activity_preparers.notebook.download_notebook",
+            lambda path: None,
+        )
+        activity = NotebookActivity(
+            **_make_base("NB", "nb"),
+            notebook_path="/Shared/missing",
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.task["notebook_task"]["notebook_path"] == "/Shared/missing"
+        assert "job_cluster_key" not in prepared.task
         assert prepared.notebooks == []
 
     def test_prepare_notebook_resolves_expression_params(self):

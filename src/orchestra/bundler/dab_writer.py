@@ -43,6 +43,11 @@ from flowx.models.ir import (
     WebActivity,
 )
 from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
+from flowx.preparer.workspace_downloader import (
+    enable_workspace_downloads,
+    prompt_for_auth_if_missing,
+    set_profile,
+)
 from flowx.utils import normalize_task_key
 
 
@@ -277,11 +282,39 @@ def main() -> None:
         default=None,
         help="Override the bundle name (defaults to the workflow name).",
     )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        help="Databricks CLI profile to use when downloading workspace artifacts.",
+    )
+    parser.add_argument(
+        "--no-vendor-workspace-files",
+        action="store_true",
+        help=(
+            "Skip downloading workspace-resident notebooks / Python files / JARs. "
+            "Tasks keep their original workspace paths and the bundle is not self-contained."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.report.exists():
         print(f"Error: Report file not found: {args.report}", file=sys.stderr)
         sys.exit(1)
+
+    if args.profile:
+        set_profile(args.profile)
+
+    if not args.no_vendor_workspace_files:
+        workspace_paths = _collect_workspace_artifact_paths(args.report)
+        if workspace_paths:
+            if not prompt_for_auth_if_missing(workspace_paths):
+                print(
+                    "Aborted. Run `databricks auth login --host <workspace-url>` and retry.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            enable_workspace_downloads(True)
 
     print(f"Loading translation report: {args.report}")
     workflows = _load_report(args.report)
@@ -741,6 +774,54 @@ def _normalize_base_parameters(
             )
         resolved[key] = normalized
     return resolved
+
+
+def _collect_workspace_artifact_paths(report_path: Path) -> list[str]:
+    """Return workspace-resident artifact paths the bundler would try to download.
+
+    Used as a pre-flight before invoking the preparers: when the report
+    contains any absolute workspace paths (``/Shared/...``, ``/Workspace/...``)
+    or DBFS / Volume URIs, we want to surface them to the user so they can
+    authenticate before the prepare pass.
+    """
+    try:
+        with open(report_path, encoding="utf-8") as report_file:
+            report = json.load(report_file)
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    candidates: list[str] = []
+
+    def _walk_tasks(tasks: list[dict[str, Any]] | None) -> None:
+        for task in tasks or []:
+            task_type = task.get("type")
+            if task_type == "NotebookActivity":
+                path = task.get("notebook_path") or ""
+                if isinstance(path, str) and path.startswith("/") and not path.startswith("../"):
+                    candidates.append(path)
+            elif task_type == "SparkPythonActivity":
+                path = task.get("python_file") or ""
+                if isinstance(path, str) and (path.startswith("dbfs:") or path.startswith("/")):
+                    candidates.append(path)
+            elif task_type == "SparkJarActivity":
+                for lib in task.get("libraries") or []:
+                    jar = lib.get("jar") if isinstance(lib, dict) else None
+                    if isinstance(jar, str) and (jar.startswith("dbfs:") or jar.startswith("/")):
+                        candidates.append(jar)
+            _walk_tasks(task.get("inner_activities"))
+            _walk_tasks(task.get("if_true_activities"))
+            _walk_tasks(task.get("if_false_activities"))
+            for case in task.get("cases") or []:
+                _walk_tasks(case.get("activities"))
+            _walk_tasks(task.get("default_activities"))
+
+    if "tasks" in report:
+        _walk_tasks(report.get("tasks"))
+    for translation in report.get("translations") or []:
+        ir = translation.get("ir") or {}
+        _walk_tasks(ir.get("tasks"))
+
+    return candidates
 
 
 def _load_report(report_path: Path) -> list[PreparedWorkflow]:
