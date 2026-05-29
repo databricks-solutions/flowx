@@ -31,6 +31,22 @@ Each phase builds on the output of the previous phase. The user is shown a summa
 
 Follow these steps in order:
 
+### Step 0 — Gather phase inputs via the adapter
+
+Before invoking ingest, run the adapter inputs subcommand once per
+phase so the agent surfaces the matching free-text prompts:
+
+```bash
+python3 -m orchestra.adapter inputs ingest
+python3 -m orchestra.adapter inputs translate
+python3 -m orchestra.adapter inputs prepare
+```
+
+Each response carries the questions for that phase plus their
+descriptions and defaults.  Collect answers from the user (or accept
+the defaults), persist them to `<output_dir>/<phase>/inputs.json`, and
+thread the values into the downstream CLI calls.
+
 ### Step 1 — Gather inputs
 
 Ask the user for all required inputs upfront:
@@ -112,6 +128,57 @@ For failures, suggest:
 - Retry with additional context
 - Skip and add placeholder
 
+### Step 5.1 — Gather just-in-time translation preferences
+
+Drive the loop multi-pass: re-run `inspect --answers <answers.json>`
+after each batch of answers so the adapter can surface chained
+metadata-driven prompts.  When the user opts to consolidate a
+metadata-driven motif and the agent has a database tool, run the
+lookup query directly and persist the rows to
+`<output_dir>/translate/lookup_values.json`; otherwise prompt the user
+for a CSV file or comma-separated string and run:
+
+```bash
+python3 -m orchestra.adapter materialize-lookup "<csv-or-path>" \
+    --out <output_dir>/translate/lookup_values.json
+```
+
+Pass `--lookup-values` to the modify call when the file exists.
+
+#### Legacy flow details
+
+Before bundle generation, run the adapter inspect CLI on the translation
+report to surface any pipeline-modifier questions the IR raises:
+
+```bash
+python3 -m orchestra.adapter inspect <output_dir>/translate/translation_report.json
+```
+
+For each question in the JSON output, prompt the user with the rationale,
+options, and the affected task keys.  Collect answers into
+`<output_dir>/translate/answers.json` keyed by `question_id`, then apply
+them to a stamped report:
+
+```bash
+python3 -m orchestra.adapter modify \
+  <output_dir>/translate/translation_report.json \
+  <output_dir>/translate/answers.json \
+  --out <output_dir>/translate/translation_report.stamped.json
+```
+
+Use the stamped report (when produced) as the input to the prepare phase.
+When inspect emits no questions for any pipeline, skip modify and use the
+original report.
+
+The four questions the adapter raises:
+
+| `question_id` | Allowed values | Default |
+|---|---|---|
+| `copy_activity_paradigm` | `notebook`, `sdp` | `notebook` |
+| `non_databricks_task_compute` | `serverless`, `classic` | `serverless` |
+| `use_lakeflow_connectors` | `existing`, `lakeflow_connect` | `existing` |
+| `databricks_task_compute` | `existing`, `serverless` | `existing` |
+
 ### Step 6 — Checkpoint: confirm proceed to bundle generation
 
 > Translation is 91.5% complete. 4 activities could not be translated automatically.
@@ -122,10 +189,36 @@ For failures, suggest:
 >
 > What would you like to do?
 
+### Step 6.5 — Detect workspace artifacts and authenticate
+
+Before invoking the prepare phase, run the adapter's
+`workspace-paths` subcommand to detect any absolute workspace paths
+the bundle would need to vendor:
+
+```bash
+python3 -m orchestra.adapter workspace-paths \
+  <output_dir>/translate/translation_report.stamped.json \
+  --source-dir <adf_source_path>
+```
+
+When the response carries `needs_auth: true`:
+
+1. Confirm the workspace host with the user, defaulting to the first
+   entry in `suggested_hosts` (extracted from the Databricks linked
+   services in the ADF export).
+2. Run `databricks auth login --host <host>` interactively to set up
+   a local profile.
+3. Pass `--profile <name>` to the prepare invocation in Step 7 so
+   orchestra downloads the referenced notebooks and vendors them under
+   `bundle/src/notebooks/` with the task references rewritten to the
+   relative `../src/notebooks/...` paths.
+
+Skip this step entirely when `needs_auth` is `false`.
+
 ### Step 7 — Phase 3: Prepare
 
 Invoke the `orchestra:prepare` skill with:
-- Translation report: `<output_dir>/translate/translation_report.json`
+- Translation report: `<output_dir>/translate/translation_report.stamped.json` if step 5.5 produced one, otherwise `<output_dir>/translate/translation_report.json`
 - Output dir: `<output_dir>/dab_output/`
 - Catalog: user-specified or `main`
 - Schema: user-specified or `default`

@@ -52,6 +52,53 @@ Ask the user for the following (provide defaults):
 | Warehouse ID | SQL warehouse for SQL tasks (optional) | prompt if SQL tasks exist |
 | Databricks CLI profile | Profile used to download workspace-resident notebooks / JARs / Python files (`--profile`). Required only when the bundle references absolute workspace paths. | resolved from `~/.databrickscfg` (auto-prompt if multiple) |
 
+### Step 2.5 — Detect workspace artifacts and authenticate
+
+Before running the bundle writer, check whether the report references
+absolute workspace paths (notebooks under `/Shared/`, SparkPython
+files, SparkJar libraries) or DBFS paths that the bundle should
+download to be self-contained:
+
+```bash
+python3 -m orchestra.adapter workspace-paths \
+  <translation_report_path> \
+  --source-dir <adf_source_dir>
+```
+
+The command emits:
+
+```json
+{
+  "paths": ["/Shared/team/notebook_a", "/Shared/team/notebook_b"],
+  "suggested_hosts": ["https://adb-1234.5.azuredatabricks.net"],
+  "needs_auth": true
+}
+```
+
+When `needs_auth` is `true`:
+
+1. Surface the suggested hosts to the user with `AskUserQuestion`.  Use
+   the first `suggested_hosts` value as the default; allow the user to
+   override.  When no host is suggested (no Databricks linked service
+   in the export), prompt for the host with no default.
+2. Run the interactive Databricks CLI login command and wait for it to
+   complete:
+
+   ```bash
+   databricks auth login --host <host>
+   ```
+
+   This writes a profile into `~/.databrickscfg`.  When the user has
+   chosen a specific profile name, append `--profile <name>` to both
+   the login and the prepare invocation below.
+
+3. Pass the resolved profile to step 3 via `--profile <name>` (default
+   profile name is `DEFAULT`).  When `needs_auth` is `false` skip steps
+   1–2 and omit `--profile` from step 3.
+
+The `paths` list is informational; you can echo it to the user so they
+know which notebooks the bundle will vendor.
+
 ### Step 3 — Run bundle generation
 
 Execute the DAB writer:

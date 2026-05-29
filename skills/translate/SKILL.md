@@ -30,6 +30,21 @@ This approach maximizes reliability while covering the long tail of ADF activity
 
 Follow these steps in order:
 
+### Step 0 — Gather phase inputs
+
+Run the adapter inputs subcommand so the agent surfaces the free-text
+questions the phase needs (inventory path, ADF source dir, output
+directory):
+
+```bash
+python3 -m orchestra.adapter inputs translate
+```
+
+The JSON response carries the prompts and defaults; collect answers
+from the user (or fall back to the defaults) and persist them to
+`<output_dir>/translate/inputs.json` so later steps and subsequent
+phases can read the same values.
+
 ### Step 1 — Locate the inventory
 
 Read `inventory.json` from the ingest phase. If the path is not already in conversation context, ask the user:
@@ -155,6 +170,96 @@ python3 <plugin_dir>/src/orchestra/translator/engine.py \
 ```
 
 This updates `translation_report.json` with the agentic results merged in, changing their status from `pending` to `translated` (or `failed` if the agentic skill could not produce a result).
+
+### Step 6.1 — Gather just-in-time translation preferences
+
+The adapter raises several preference questions plus a chained set for
+metadata-driven motifs.  Drive the loop multi-pass: every time the user
+answers a question whose value gates further prompts, re-run `inspect
+--answers <answers.json>` to surface the next batch.
+
+When the metadata-driven flow ends with `metadata_driven_lookup_tool=have`
+and the agent has a database tool (Genie, MCP SQL, or a workspace SDK),
+run the lookup query directly and write the rows to
+`<output_dir>/lookup_values.json`.  When the answer is `none`, prompt
+the user for a CSV file or comma-separated string and call:
+
+```bash
+python3 -m orchestra.adapter materialize-lookup "<csv-or-path>" \
+    --out <output_dir>/lookup_values.json
+```
+
+Then call `modify` with the lookup values:
+
+```bash
+python3 -m orchestra.adapter modify \
+    <translation_report_path> \
+    <output_dir>/answers.json \
+    --lookup-values <output_dir>/lookup_values.json \
+    --out <output_dir>/translation_report.stamped.json
+```
+
+When no metadata-driven motif is consolidated, `--lookup-values` is
+omitted.
+
+#### Legacy flow details
+
+Before writing the final report, surface any pipeline-modifier questions the
+IR raises (Copy Data paradigm, non-Databricks task compute, Lakeflow Connect
+opt-in, Databricks task compute).  Use the adapter CLI bridge:
+
+```bash
+python3 -m orchestra.adapter inspect <translation_report_path>
+```
+
+The command emits JSON:
+
+```json
+{
+  "pipelines": [
+    {
+      "pipeline_name": "ETL_Main",
+      "questions": [
+        {
+          "question_id": "copy_activity_paradigm",
+          "prompt": "How should Copy Data activities targeting Delta be implemented?",
+          "rationale": "...",
+          "options": [{"value": "notebook", "label": "...", "description": "..."}, ...],
+          "affected_task_keys": ["copy_orders", "copy_customers"],
+          "default": "notebook"
+        },
+        ...
+      ]
+    }
+  ]
+}
+```
+
+For each question, prompt the user with the rationale, options, and the
+task keys it affects.  Use the default when the user defers.  Collect the
+answers into a JSON file (`<output_dir>/answers.json`) shaped like:
+
+```json
+{
+  "copy_activity_paradigm": "sdp",
+  "non_databricks_task_compute": "serverless",
+  "use_lakeflow_connectors": "lakeflow_connect",
+  "databricks_task_compute": "existing"
+}
+```
+
+Then apply the answers to produce a stamped report the prepare phase
+consumes:
+
+```bash
+python3 -m orchestra.adapter modify \
+  <translation_report_path> \
+  <output_dir>/answers.json \
+  --out <output_dir>/translation_report.stamped.json
+```
+
+The prepare phase (next skill) must be pointed at the stamped report.
+When no questions are raised, the inspect output is `{"pipelines": [{"pipeline_name": "...", "questions": []}, ...]}` — skip the modify step and pass the original report straight through.
 
 ### Step 7 — Present translation summary
 

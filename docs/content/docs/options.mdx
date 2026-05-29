@@ -1,0 +1,74 @@
+---
+title: Translation options
+description: Control orchestra's translation behavior and outputs
+---
+
+Orchestra defers some architectural choices to allow users to specify properties of the output jobs. When options are available for controlling
+translation, the agent session prompts the user for their preferences.
+
+## Available options
+
+### `copy_activity_paradigm`
+
+Controls how Copy Data activities whose sink resolves to a Delta table are translated.
+
+| Value        | Default | Behavior                                                                                   |
+|--------------|---------|--------------------------------------------------------------------------------------------|
+| `notebook`   | True    | Generates a Notebook task that copies data using PySpark `read` and `write` methods.       |
+| `sdp`        | False   | Generates a Run Pipeline task that copies data using Lakeflow Spark Declarative Pipelines. |
+
+### `non_databricks_task_compute`
+
+Controls compute for non-Databricks tasks (e.g. Lookup, Web, Delete, Wait, Filter, and Set Variable activities).
+
+| Value         | Default | Behavior                                                                                                                                                                                                                |
+|---------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `serverless`  | True    | Translated tasks run on serverless compute.                                                                                                                                                                             |
+| `classic`     | False   | Most tasks run on a single-node classic compute cluster; Translated Copy Data tasks run on a fixed-size multi-node cluster.  Clusters referenced by tasks are included in the output bundle resources' `job_clusters`.  |
+
+### `use_lakeflow_connectors`
+
+Controls whether eligible Copy Data activities are replaced with a managed Lakeflow Connect pipeline.
+
+| Value              | Default | Behavior                                                                                                               |
+|--------------------|---------|------------------------------------------------------------------------------------------------------------------------|
+| `existing`         | True    | Translates the Copy Data activity as a Notebook or Run Pipeline task using PySpark `read` and `write` methods.         |
+| `lakeflow_connect` | False   | Translates the Copy Data activity as a Run Pipeline task that triggers a Lakeflow Connect managed ingestion pipeline.  |
+
+### `lakeflow_connector_type`
+
+Controls how Lakeflow Connect reads from a database when copying data.
+
+| Value         | Default   | Behavior                                                                                                                                          |
+|---------------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| `cdc`         | True      | Creates an ingestion pipeline using a [CDC-based connector](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/cdc-overview)           |
+| `query_based` | False     | Creates an ingestion pipeline using a [query-based connector](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/query-based-overview) |
+
+<Callout type="info" title="Query-based copying">
+Copy activities that carry an explicit SQL query (`sqlReaderQuery`, `query`, or `sql_query` on `source_properties`) 
+must use a [query-based connector](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/query-based-overview).
+</Callout>
+
+### `databricks_task_compute`
+
+Controls the compute used to run Databricks Notebook and Spark Python tasks in the translated job.
+
+| Value        | Default | Behavior                                                                                                                          |
+|--------------|---------|-----------------------------------------------------------------------------------------------------------------------------------|
+| `existing`   | True    | Uses the source pipeline's compute definition (e.g. a job cluster). Preserves init scripts, DBR-version, and other configuration. |
+| `serverless` | False   | Drops the source pipeline's cluster definition; The translated tasks run on serverless compute.                                   |
+
+### `metadata_driven_consolidate`
+
+Configures orchestra to detect and consolidate ingestion pipelines that read from configuration and run parameterized data copying. Allows users to create a consolidated pipeline.
+
+| Value         | Default | Behavior                                                                                                                                                           |
+|---------------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `keep`        | True    | Preserves the source pipeline's metadata-driven patterns.                                                                                                          |
+| `consolidate` | False   | Replaces metadata-driven patterns with a consolidated Lakeflow Connect ingestion pipeline whose `objects` list has one entry per row in the source configuration.  |
+
+<Callout type="info" title="Consolidation-requirements">
+The following are required to consolidate into a single ingestion pipeline:
+- Access to query the file or database where metadata is stored or a CSV file containing the exported metadata
+- The number of metadata rows or objects must be less than 250
+</Callout>

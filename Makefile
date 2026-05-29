@@ -1,4 +1,4 @@
-.PHONY: clean dev ci test integration fmt help docs-install docs-clean docs-build docs-serve
+.PHONY: clean dev ci test integration fmt help docs-install docs-clean docs-build docs-serve lock-dependencies
 
 clean:
 	rm -rf .venv .pytest_cache .ruff_cache .mypy_cache __pycache__
@@ -34,15 +34,25 @@ docs-build: docs-install
 docs-serve: docs-build
 	cd docs && bun run dev
 
+
+lock-dependencies: export UV_FROZEN := 0
+lock-dependencies:
+	uv lock --exclude-newer "7 days"
+	uv run --exact --all-extras --group yq tomlq -r '.["build-system"].requires[]' pyproject.toml | \
+	  uv pip compile --generate-hashes --universal --no-header - > build-constraints-new.txt
+	mv build-constraints-new.txt .build-constraints.txt
+	perl -pi -e 's|registry = "https://[^"]*"|registry = "https://pypi.org/simple"|g' uv.lock
+
 help:
 	@echo "Available targets:"
-	@echo "  dev          Install dependencies"
-	@echo "  ci           Install dependencies (frozen lockfile)"
-	@echo "  test         Run unit tests"
-	@echo "  integration  Run integration tests"
-	@echo "  fmt          Format and lint code"
-	@echo "  clean        Remove build artifacts"
-	@echo "  docs-install Install docs dependencies (bun)"
-	@echo "  docs-clean   Remove docs build artifacts"
-	@echo "  docs-build   Build the static docs site to docs/site"
-	@echo "  docs-serve   Run the docs dev server (next dev)"
+	@echo "  dev          		Install dependencies"
+	@echo "  ci           		Install dependencies (frozen lockfile)"
+	@echo "  test         		Run unit tests"
+	@echo "  integration  		Run integration tests"
+	@echo "  fmt          		Format and lint code"
+	@echo "  clean        		Remove build artifacts"
+	@echo "  docs-install 		Install docs dependencies (bun)"
+	@echo "  docs-clean   		Remove docs build artifacts"
+	@echo "  docs-build   		Build the static docs site to docs/site"
+	@echo "  docs-serve   		Run the docs dev server (next dev)"
+	@echo "  lock-dependencies	Write the uv.lock file"

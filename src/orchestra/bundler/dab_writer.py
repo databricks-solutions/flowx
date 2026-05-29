@@ -12,6 +12,14 @@ from typing import Any
 
 import yaml
 
+from orchestra.adapter.operations import collect_workspace_artifact_paths
+from orchestra.bundler.constants import (
+    COMPUTE_MODE_TO_CLUSTER_KEY,
+    DEFAULT_JOB_CLUSTER_KEY,
+    MULTI_NODE_CLUSTER_NODE_TYPE_ID,
+    MULTI_NODE_JOB_CLUSTER_KEY,
+    SINGLE_NODE_JOB_CLUSTER_KEY,
+)
 from orchestra.bundler.inner_job_params import normalize_value
 from orchestra.bundler.notebook_writer import write_notebooks
 from orchestra.bundler.prereqs_writer import ManualParameter, build_prereqs, render_setup_md
@@ -176,6 +184,26 @@ def write_bundle(
         )
         created_files.append(inner_yml_path.resolve())
 
+    # 2b. Write Lakeflow pipeline resources (Lakeflow Connect ingestion
+    # definitions emitted by the Copy preparer's LFC branch).  Each
+    # resource lives in its own YAML so the bundle parser merges them
+    # alongside the job resources via the ``include`` glob.
+    pipelines_dir = resources_dir / "pipelines"
+    for resource in _collect_pipeline_resources(workflow):
+        pipelines_dir.mkdir(parents=True, exist_ok=True)
+        resource_yml_path = pipelines_dir / f"{resource['resource_key']}.yml"
+        resource_yml_path.write_text(
+            yaml.dump(
+                _wrap_pipeline_resource(resource),
+                default_flow_style=False,
+                sort_keys=False,
+                allow_unicode=True,
+                Dumper=_BundleYamlDumper,
+            ),
+            encoding="utf-8",
+        )
+        created_files.append(resource_yml_path.resolve())
+
     # 3. Write generated notebooks
     src_dir = output_dir / "src"
     if workflow.notebooks:
@@ -306,7 +334,7 @@ def main() -> None:
         set_profile(args.profile)
 
     if not args.no_vendor_workspace_files:
-        workspace_paths = _collect_workspace_artifact_paths(args.report)
+        workspace_paths = collect_workspace_artifact_paths(args.report)
         if workspace_paths:
             if not prompt_for_auth_if_missing(workspace_paths):
                 print(
@@ -459,22 +487,131 @@ def _build_databricks_yml(
     }
 
 
-_DEFAULT_JOB_CLUSTER_KEY = "default_cluster"
+def _build_default_job_clusters(needed_keys: set[str]) -> list[dict[str, Any]]:
+    """Builds the job_clusters stanza, emitting only the clusters in use.
+
+    Args:
+        needed_keys: Set of job_cluster_key strings referenced by any task
+            in the workflow.
+
+    Returns:
+        Ordered list of cluster definitions for inclusion under the job's
+        ``job_clusters`` block.
+    """
+    builders = (
+        (DEFAULT_JOB_CLUSTER_KEY, _build_default_cluster),
+        (SINGLE_NODE_JOB_CLUSTER_KEY, _build_single_node_cluster),
+        (MULTI_NODE_JOB_CLUSTER_KEY, _build_multi_node_cluster),
+    )
+    return [builder() for key, builder in builders if key in needed_keys]
 
 
-def _build_default_job_clusters() -> list[dict[str, Any]]:
-    """Return a job_clusters stanza that binds notebook tasks to a real cluster."""
-    return [
-        {
-            "job_cluster_key": _DEFAULT_JOB_CLUSTER_KEY,
-            "new_cluster": {
-                "spark_version": "${var.spark_version}",
-                "node_type_id": "${var.node_type_id}",
-                "num_workers": 1,
-                "data_security_mode": "SINGLE_USER",
-            },
-        }
-    ]
+def _build_default_cluster() -> dict[str, Any]:
+    """Builds the multi-purpose default job_cluster used for legacy bindings.
+
+    Returns:
+        Cluster definition with one worker and bundle-variable knobs for
+        spark_version and node_type_id.
+    """
+    return {
+        "job_cluster_key": DEFAULT_JOB_CLUSTER_KEY,
+        "new_cluster": {
+            "spark_version": "${var.spark_version}",
+            "node_type_id": "${var.node_type_id}",
+            "num_workers": 1,
+            "data_security_mode": "SINGLE_USER",
+        },
+    }
+
+
+def _build_single_node_cluster() -> dict[str, Any]:
+    """Builds the single-node job_cluster used for non-Databricks tasks under classic compute.
+
+    Returns:
+        Cluster definition using ``is_single_node`` so Databricks
+        configures the cluster for single-node execution without
+        requiring ``num_workers``, custom Spark conf, or tags.
+    """
+    return {
+        "job_cluster_key": SINGLE_NODE_JOB_CLUSTER_KEY,
+        "new_cluster": {
+            "spark_version": "${var.spark_version}",
+            "node_type_id": "${var.node_type_id}",
+            "is_single_node": True,
+            "data_security_mode": "SINGLE_USER",
+        },
+    }
+
+
+def _build_multi_node_cluster() -> dict[str, Any]:
+    """Builds the fixed two-node job_cluster used for Copy Data tasks under classic compute.
+
+    Returns:
+        Cluster definition with two workers on the Copy Data instance
+        type and the bundle-variable spark_version knob.
+    """
+    return {
+        "job_cluster_key": MULTI_NODE_JOB_CLUSTER_KEY,
+        "new_cluster": {
+            "spark_version": "${var.spark_version}",
+            "node_type_id": MULTI_NODE_CLUSTER_NODE_TYPE_ID,
+            "num_workers": 2,
+            "data_security_mode": "SINGLE_USER",
+        },
+    }
+
+
+def _collect_pipeline_resources(workflow: PreparedWorkflow) -> list[dict[str, Any]]:
+    """Returns every Lakeflow pipeline resource carried by *workflow* and its inner jobs.
+
+    Args:
+        workflow: The prepared workflow being written.
+
+    Returns:
+        Flat list of pipeline-resource dicts (each with ``resource_key``
+        and ``definition``), including entries from inner workflows.
+    """
+    resources = list(workflow.pipeline_resources)
+    for inner in workflow.inner_workflows:
+        resources.extend(inner.pipeline_resources)
+    return resources
+
+
+def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
+    """Wraps a pipeline definition in the DAB ``resources.pipelines`` envelope.
+
+    Args:
+        resource: Dict with ``resource_key`` and ``definition`` keys as
+            produced by the Copy preparer's Lakeflow Connect branch.
+
+    Returns:
+        A dict shaped for direct YAML serialisation under a bundle
+        resource file.
+    """
+    return {"resources": {"pipelines": {resource["resource_key"]: resource["definition"]}}}
+
+
+def _collect_required_cluster_keys(tasks: list[dict[str, Any]]) -> set[str]:
+    """Walks every task and returns the set of job_cluster keys actually bound.
+
+    Args:
+        tasks: Top-level task dicts after cluster binding has run.
+
+    Returns:
+        Set of ``job_cluster_key`` values present anywhere in the task
+        tree (including bodies under ``for_each_task.task``).
+    """
+    return {task["job_cluster_key"] for task in _iter_tasks_recursively(tasks) if task.get("job_cluster_key")}
+
+
+def _strip_compute_mode_markers(tasks: list[dict[str, Any]]) -> None:
+    """Removes the private ``_compute_mode`` marker from every task before YAML output.
+
+    Args:
+        tasks: Top-level task dicts (mutated in place).
+    """
+    for task in _iter_tasks_recursively(tasks):
+        task.pop("_compute_mode", None)
 
 
 # Patterns that signal a base_parameter value couldn't be evaluated cleanly.
@@ -547,17 +684,35 @@ def _any_task_uses_classic_cluster(tasks: list[dict[str, Any]]) -> bool:
 
 
 def _bind_cluster_to_notebook_tasks(tasks: list[dict[str, Any]]) -> None:
-    """Attaches the default job_cluster_key to existing-notebook tasks."""
+    """Binds notebook tasks to the cluster their compute_mode marker dictates.
+
+    Tasks that the pipeline modifier marked ``serverless`` are left
+    unbound so they run on serverless compute.  Tasks marked
+    ``classic_single_node`` or ``classic_multi_node`` bind to the
+    matching job_cluster.  Tasks without a marker fall back to the
+    legacy behaviour: existing-workspace notebooks bind to
+    ``default_cluster`` and orchestra-generated notebooks stay unbound.
+
+    Args:
+        tasks: Top-level task dicts (mutated in place).
+    """
     for task in _iter_tasks_recursively(tasks):
         notebook_task = task.get("notebook_task")
         if notebook_task is None:
             continue
+        if any(key in task for key in _CLUSTER_BINDING_KEYS):
+            continue
+        compute_mode = task.get("_compute_mode")
+        if compute_mode == "serverless":
+            continue
+        cluster_key = COMPUTE_MODE_TO_CLUSTER_KEY.get(compute_mode or "")
+        if cluster_key is not None:
+            task["job_cluster_key"] = cluster_key
+            continue
         notebook_path = notebook_task.get("notebook_path", "")
         if notebook_path.startswith("../src/"):
             continue
-        if any(key in task for key in _CLUSTER_BINDING_KEYS):
-            continue
-        task["job_cluster_key"] = _DEFAULT_JOB_CLUSTER_KEY
+        task["job_cluster_key"] = DEFAULT_JOB_CLUSTER_KEY
 
 
 def _rewrite_post_branch_dependencies(tasks: list[dict[str, Any]]) -> None:
@@ -728,12 +883,11 @@ def _build_job_resource(
 
     if attach_clusters:
         _bind_cluster_to_notebook_tasks(workflow.tasks)
-        # Only emit the ``job_clusters`` block when at least one task is
-        # actually bound to it.  When every task runs on serverless (the
-        # generated-notebook case), the job stays cluster-free and inherits
-        # the workspace's serverless defaults.
-        if _any_task_uses_classic_cluster(workflow.tasks):
-            job_def["job_clusters"] = _build_default_job_clusters()
+        needed_keys = _collect_required_cluster_keys(workflow.tasks)
+        if needed_keys:
+            job_def["job_clusters"] = _build_default_job_clusters(needed_keys)
+
+    _strip_compute_mode_markers(workflow.tasks)
 
     if workflow.parameters:
         job_def["parameters"] = workflow.parameters
@@ -774,54 +928,6 @@ def _normalize_base_parameters(
             )
         resolved[key] = normalized
     return resolved
-
-
-def _collect_workspace_artifact_paths(report_path: Path) -> list[str]:
-    """Return workspace-resident artifact paths the bundler would try to download.
-
-    Used as a pre-flight before invoking the preparers: when the report
-    contains any absolute workspace paths (``/Shared/...``, ``/Workspace/...``)
-    or DBFS / Volume URIs, we want to surface them to the user so they can
-    authenticate before the prepare pass.
-    """
-    try:
-        with open(report_path, encoding="utf-8") as report_file:
-            report = json.load(report_file)
-    except (OSError, json.JSONDecodeError):
-        return []
-
-    candidates: list[str] = []
-
-    def _walk_tasks(tasks: list[dict[str, Any]] | None) -> None:
-        for task in tasks or []:
-            task_type = task.get("type")
-            if task_type == "NotebookActivity":
-                path = task.get("notebook_path") or ""
-                if isinstance(path, str) and path.startswith("/") and not path.startswith("../"):
-                    candidates.append(path)
-            elif task_type == "SparkPythonActivity":
-                path = task.get("python_file") or ""
-                if isinstance(path, str) and (path.startswith("dbfs:") or path.startswith("/")):
-                    candidates.append(path)
-            elif task_type == "SparkJarActivity":
-                for lib in task.get("libraries") or []:
-                    jar = lib.get("jar") if isinstance(lib, dict) else None
-                    if isinstance(jar, str) and (jar.startswith("dbfs:") or jar.startswith("/")):
-                        candidates.append(jar)
-            _walk_tasks(task.get("inner_activities"))
-            _walk_tasks(task.get("if_true_activities"))
-            _walk_tasks(task.get("if_false_activities"))
-            for case in task.get("cases") or []:
-                _walk_tasks(case.get("activities"))
-            _walk_tasks(task.get("default_activities"))
-
-    if "tasks" in report:
-        _walk_tasks(report.get("tasks"))
-    for translation in report.get("translations") or []:
-        ir = translation.get("ir") or {}
-        _walk_tasks(ir.get("tasks"))
-
-    return candidates
 
 
 def _load_report(report_path: Path) -> list[PreparedWorkflow]:
@@ -879,25 +985,65 @@ def _pipeline_dict_to_workflow(pipeline_dict: dict[str, Any]) -> PreparedWorkflo
     expression resolution, and motif handling without duplicating the
     per-activity preparer logic.
     """
-    activities = [_reconstruct_ir(task_ir) for task_ir in pipeline_dict.get("tasks", [])]
+    pipeline, parameters = pipeline_dict_to_ir(pipeline_dict)
+    workflow = prepare_workflow(pipeline)
+    if parameters:
+        workflow.parameters.extend(parameters)
+    return workflow
 
+
+def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[dict[str, Any]]]:
+    """Rehydrates a serialised pipeline IR dict into a typed :class:`Pipeline`.
+
+    Args:
+        pipeline_dict: Dict produced by ``engine._pipeline_to_dict`` (or
+            the equivalent shape emitted by the adapter CLI bridge).
+
+    Returns:
+        Tuple of ``(pipeline, parameters)`` where ``pipeline`` is the
+        rehydrated :class:`Pipeline` and ``parameters`` is the normalised
+        list of pipeline-level parameter definitions (empty when the
+        report carries no parameters).
+    """
+    activities = [_reconstruct_ir(task_ir) for task_ir in pipeline_dict.get("tasks", [])]
     parameters: list[dict[str, Any]] = []
     for param in pipeline_dict.get("parameters") or []:
         entry: dict[str, Any] = {"name": param["name"]}
         if "default" in param and param["default"] is not None:
             entry["default"] = normalize_value(str(param["default"]))
         parameters.append(entry)
-
     pipeline = Pipeline(
         name=pipeline_dict.get("name", "unknown"),
         tasks=activities,
         parameters=parameters or None,
+        translation_preferences=_reconstruct_preferences(pipeline_dict.get("translation_preferences")),
     )
+    return pipeline, parameters
 
-    workflow = prepare_workflow(pipeline)
-    if parameters:
-        workflow.parameters.extend(parameters)
-    return workflow
+
+def _reconstruct_preferences(raw: dict[str, Any] | None) -> Any:
+    """Rebuilds a :class:`TranslationPreferences` from its serialised form.
+
+    Args:
+        raw: Dict emitted by ``engine._preferences_to_dict``, or ``None``
+            when the report carries no preferences.
+
+    Returns:
+        A :class:`TranslationPreferences` instance, or ``None`` when
+        *raw* is falsy.
+    """
+    if not raw:
+        return None
+    from orchestra.adapter.models import TranslationPreferences
+
+    return TranslationPreferences(
+        copy_activity_paradigm=raw.get("copy_activity_paradigm", "notebook"),
+        non_databricks_task_compute=raw.get("non_databricks_task_compute", "serverless"),
+        use_lakeflow_connectors=raw.get("use_lakeflow_connectors", "existing"),
+        databricks_task_compute=raw.get("databricks_task_compute", "existing"),
+        lakeflow_connector_type=raw.get("lakeflow_connector_type", "cdc"),
+        per_task=dict(raw.get("per_task") or {}),
+    )
 
 
 def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
@@ -929,6 +1075,9 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             sink_format=task_ir.get("sink_format"),
             sink_resolved_path=task_ir.get("sink_resolved_path"),
             column_mapping=task_ir.get("column_mapping"),
+            target_format=task_ir.get("target_format"),
+            use_lakeflow_connector=bool(task_ir.get("use_lakeflow_connector", False)),
+            lakeflow_connector_type=task_ir.get("lakeflow_connector_type"),
         )
     if task_type == "WebActivity":
         return WebActivity(
@@ -1051,6 +1200,8 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             original_activities=[],
             notebook_template=task_ir.get("notebook_template"),
             motif_config=task_ir.get("motif_config") or {},
+            consolidate_metadata_driven=bool(task_ir.get("consolidate_metadata_driven", False)),
+            lookup_values=list(task_ir.get("lookup_values") or []),
         )
     if task_type == "UnsupportedActivity":
         return UnsupportedActivity(
@@ -1085,6 +1236,7 @@ def _common_activity_kwargs(task_ir: dict[str, Any]) -> dict[str, Any]:
         "depends_on": _reconstruct_dependencies(task_ir.get("depends_on")),
         "cluster": task_ir.get("cluster"),
         "required_parameters": dict(task_ir.get("required_parameters") or {}),
+        "compute_mode": task_ir.get("compute_mode"),
     }
 
 

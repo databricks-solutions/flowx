@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
+
+if TYPE_CHECKING:
+    from orchestra.adapter.models import TranslationPreferences
 
 
 @dataclass(slots=True, kw_only=True)
@@ -58,6 +61,10 @@ class Activity:
     # activity.  Preparers thread these into ``base_parameters`` so DAB
     # resolves the refs at job runtime.
     required_parameters: dict[str, str] = field(default_factory=dict)
+    # Compute mode stamped by the pipeline modifier in response to user
+    # preferences.  One of "serverless", "classic_single_node",
+    # "classic_multi_node", "inherit", or None when no preferences were applied.
+    compute_mode: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -104,6 +111,16 @@ class CopyActivity(Activity):
     sink_format: str | None = None
     sink_resolved_path: str | None = None
     column_mapping: list[dict[str, str]] | None = None
+    # Code paradigm chosen by the pipeline modifier: "notebook" (default
+    # PySpark output) or "sdp" (Lakeflow Spark Declarative Pipeline).
+    target_format: str | None = None
+    # True when the modifier selected Lakeflow Connect for an eligible
+    # database-source Copy → Delta ingestion.
+    use_lakeflow_connector: bool = False
+    # Lakeflow Connect connector flavour resolved by the modifier when
+    # use_lakeflow_connector is True: "query_based" or "cdc".  None when
+    # the modifier did not stamp a connector type.
+    lakeflow_connector_type: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -407,6 +424,17 @@ class MotifActivity(Activity):
     confidence_notes: list[str] = field(default_factory=list)
     original_activities: list[Activity] = field(default_factory=list)
     notebook_template: str | None = None
+    # Set by the pipeline modifier when the user opts into metadata-driven
+    # consolidation, has access to query the lookup source, and the
+    # configuration size is S or M.  When True the preparer should emit
+    # a single consolidated pipeline whose objects come from lookup_values.
+    consolidate_metadata_driven: bool = False
+    # Concrete lookup rows materialised at translation time (CLI
+    # ``materialize-lookup`` subcommand or agent-supplied JSON).  Each
+    # element is a dict mirroring a row from the original ADF Lookup
+    # query.  Empty when consolidation is requested but values have not
+    # been resolved yet.
+    lookup_values: list[dict[str, Any]] = field(default_factory=list)
     # Small dict of motif-specific settings extracted from the collapsed
     # activities — e.g. ``{"lookup_query": ..., "lookup_scope": ...}`` for
     # ``for_each_ingestion``.  Used by the notebook generator so the motif
@@ -434,6 +462,7 @@ class Pipeline:
     tasks: list[Activity] = field(default_factory=list)
     tags: dict[str, str] = field(default_factory=dict)
     not_translatable: list[dict[str, Any]] = field(default_factory=list)
+    translation_preferences: TranslationPreferences | None = None
 
 
 @dataclass(frozen=True, slots=True)

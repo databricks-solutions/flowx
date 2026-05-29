@@ -182,6 +182,21 @@ MOTIF_COPY_AND_NOTIFY = MotifDefinition(
     notebook_template="copy_and_notify.py",
 )
 
+MOTIF_LAKEFLOW_CONNECT_DATABASE = MotifDefinition(
+    motif_id="lakeflow_connect_database",
+    display_name="Lakeflow Connect Database Ingestion",
+    description=(
+        "A database ingestion (SQL Server, MySQL, or PostgreSQL writing "
+        "into Delta) that the pipeline modifier replaced with a managed "
+        "Lakeflow Connect pipeline.  Emitted in place of a bespoke Copy "
+        "activity or a watermarked file-landing motif when the user opts "
+        "into Lakeflow Connect."
+    ),
+    expected_activity_types=("Copy", "Lookup", "SqlServerStoredProcedure"),
+    databricks_replacement="lakeflow_connect_database",
+    notebook_template="lakeflow_connect_database.py",
+)
+
 ALL_MOTIFS: tuple[MotifDefinition, ...] = (
     MOTIF_INCREMENTAL_LOAD_WATERMARK,
     MOTIF_CDC_CHANGE_TRACKING,
@@ -193,4 +208,5 @@ ALL_MOTIFS: tuple[MotifDefinition, ...] = (
     MOTIF_SCD_TYPE_2,
     MOTIF_STAGED_LOAD_SYNAPSE,
     MOTIF_COPY_AND_NOTIFY,
+    MOTIF_LAKEFLOW_CONNECT_DATABASE,
 )

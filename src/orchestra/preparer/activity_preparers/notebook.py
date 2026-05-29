@@ -116,20 +116,13 @@ def prepare(
     if is_existing_notebook:
         downloaded = download_notebook(resolved_path) if workspace_downloads_enabled() else None
         if downloaded is not None:
-            # Preserve the workspace basename so the bundle file mirrors the
-            # source notebook name; fall back to the activity-derived snake
-            # case when the workspace path is unusable (empty trailing
-            # segment, all special chars, etc.).
             filename = workspace_notebook_filename(resolved_path) or notebook_filename(activity.task_key, activity.name)
             notebook_relative_path = f"notebooks/{filename}"
             task["notebook_task"] = {"notebook_path": f"../src/{notebook_relative_path}"}
             if base_parameters is not None:
                 task["notebook_task"]["base_parameters"] = base_parameters
-            # Downloaded notebooks were authored for classic compute and may
-            # use init scripts or DBR-only features that serverless can't run.
-            # _bind_cluster_to_notebook_tasks skips "../src/" paths because
-            # orchestra-generated notebooks target serverless, so bind here.
-            task["job_cluster_key"] = "default_cluster"
+            if activity.compute_mode != "serverless":
+                task["job_cluster_key"] = "default_cluster"
             notebooks = [DabNotebook(relative_path=notebook_relative_path, content=downloaded)]
             return PreparedActivity(task=task, notebooks=notebooks)
 

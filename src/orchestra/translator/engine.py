@@ -476,12 +476,35 @@ def _pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
     Returns:
         Dictionary suitable for ``json.dumps``.
     """
-    return {
+    result: dict[str, Any] = {
         "name": pipeline.name,
         "parameters": pipeline.parameters,
         "schedule": pipeline.schedule,
         "tags": pipeline.tags,
         "tasks": [_activity_to_dict(task) for task in pipeline.tasks],
+    }
+    if pipeline.translation_preferences is not None:
+        result["translation_preferences"] = _preferences_to_dict(pipeline.translation_preferences)
+    return result
+
+
+def _preferences_to_dict(preferences: Any) -> dict[str, Any]:
+    """Serialise a TranslationPreferences instance to a JSON-friendly dictionary.
+
+    Args:
+        preferences: The :class:`TranslationPreferences` snapshot to serialise.
+
+    Returns:
+        Dictionary with the four StrEnum fields rendered as their string
+        values and per-task overrides preserved verbatim.
+    """
+    return {
+        "copy_activity_paradigm": str(preferences.copy_activity_paradigm),
+        "non_databricks_task_compute": str(preferences.non_databricks_task_compute),
+        "use_lakeflow_connectors": str(preferences.use_lakeflow_connectors),
+        "databricks_task_compute": str(preferences.databricks_task_compute),
+        "lakeflow_connector_type": str(preferences.lakeflow_connector_type),
+        "per_task": dict(preferences.per_task),
     }
 
 
@@ -513,6 +536,8 @@ def _activity_to_dict(task: Activity) -> dict[str, Any]:
         ]
     if task.cluster:
         task_dict["cluster"] = task.cluster
+    if task.compute_mode:
+        task_dict["compute_mode"] = task.compute_mode
 
     extra = _activity_extra_fields(task)
     task_dict.update(extra)
@@ -550,6 +575,12 @@ def _activity_extra_fields(activity: Activity) -> dict[str, Any]:
                 extra["sink_resolved_path"] = activity.sink_resolved_path
             if activity.column_mapping:
                 extra["column_mapping"] = activity.column_mapping
+            if activity.target_format:
+                extra["target_format"] = activity.target_format
+            if activity.use_lakeflow_connector:
+                extra["use_lakeflow_connector"] = activity.use_lakeflow_connector
+            if activity.lakeflow_connector_type:
+                extra["lakeflow_connector_type"] = activity.lakeflow_connector_type
         case ForEachActivity():
             extra["items_expression"] = activity.items_expression
             extra["concurrency"] = activity.concurrency
@@ -651,6 +682,10 @@ def _activity_extra_fields(activity: Activity) -> dict[str, Any]:
                 extra["notebook_template"] = activity.notebook_template
             if activity.motif_config:
                 extra["motif_config"] = activity.motif_config
+            if activity.consolidate_metadata_driven:
+                extra["consolidate_metadata_driven"] = activity.consolidate_metadata_driven
+            if activity.lookup_values:
+                extra["lookup_values"] = activity.lookup_values
         case PlaceholderActivity():
             extra["original_type"] = activity.original_type
             extra["comment"] = activity.comment
