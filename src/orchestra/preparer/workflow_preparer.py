@@ -45,6 +45,11 @@ class PreparedActivity:
     # ``<activity>_case_<value>``; ``prepare_workflow`` reads this map to
     # rewrite ``depends_on`` edges that referenced the original key.
     task_key_remap: dict[str, str] = field(default_factory=dict)
+    # Lakeflow pipeline resources (e.g. Lakeflow Connect managed
+    # ingestion pipelines) the bundle writer emits under
+    # ``resources/pipelines/<resource_key>.yml``.  Each entry is a dict
+    # with ``resource_key`` and ``definition`` keys.
+    pipeline_resources: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -59,6 +64,7 @@ class PreparedWorkflow:
     inner_workflows: list[PreparedWorkflow] = field(default_factory=list)
     parameters: list[dict[str, Any]] = field(default_factory=list)
     cluster_hints: list[dict[str, Any]] = field(default_factory=list)
+    pipeline_resources: list[dict[str, Any]] = field(default_factory=list)
 
 
 def run_if_from_adf_outcomes(outcomes: list[str | None]) -> str | None:
@@ -153,18 +159,38 @@ def prepare_activity(
     preparer_fn = dispatch.get(type(activity))
     if preparer_fn is None:
         if isinstance(activity, (PlaceholderActivity, UnsupportedActivity)):
-            return _prepare_placeholder(activity)
-        raise ValueError(
-            f"No preparer registered for activity type {type(activity).__name__} (task_key={activity.task_key!r})"
-        )
+            prepared = _prepare_placeholder(activity)
+        else:
+            raise ValueError(
+                f"No preparer registered for activity type {type(activity).__name__} (task_key={activity.task_key!r})"
+            )
+    elif type(activity) is NotebookActivity:
+        prepared = preparer_fn(activity, scope=scope, variable_task_keys=variable_task_keys)
+    elif type(activity) is AppendVariableActivity:
+        prepared = preparer_fn(activity, scope=scope, variable_task_keys=variable_task_keys)
+    else:
+        prepared = preparer_fn(activity, scope=scope)
 
-    # NotebookActivity rewrites ``@variables()`` references; AppendVariable
-    # reads the prior writer's task_key to find the value to append to.
-    if type(activity) is NotebookActivity:
-        return preparer_fn(activity, scope=scope, variable_task_keys=variable_task_keys)
-    if type(activity) is AppendVariableActivity:
-        return preparer_fn(activity, scope=scope, variable_task_keys=variable_task_keys)
-    return preparer_fn(activity, scope=scope)
+    prepared.task = _stamp_compute_mode(prepared.task, activity.compute_mode)
+    return prepared
+
+
+def _stamp_compute_mode(task: dict[str, Any], compute_mode: str | None) -> dict[str, Any]:
+    """Returns a new task dict carrying a private compute-mode marker.
+
+    Args:
+        task: Task dict produced by a per-type preparer.  Not mutated.
+        compute_mode: Value from ``Activity.compute_mode``.  When ``None``
+            the marker is omitted and the original *task* is returned
+            unchanged.
+
+    Returns:
+        A new dict shallow-copied from *task* with the ``_compute_mode``
+        marker attached, or *task* itself when no marker applies.
+    """
+    if not compute_mode:
+        return task
+    return {**task, "_compute_mode": compute_mode}
 
 
 def _prepare_placeholder(activity: Activity) -> PreparedActivity:
@@ -210,12 +236,13 @@ def _prepare_placeholder(activity: Activity) -> PreparedActivity:
 
 @dataclass(frozen=True, slots=True)
 class PreparedArtifacts:
-    """Immutable accumulator for the four artifact lists a workflow collects."""
+    """Immutable accumulator for the artifact lists a workflow collects."""
 
     notebooks: tuple[DabNotebook, ...] = ()
     secrets: tuple[SecretInstruction, ...] = ()
     setup_tasks: tuple[SetupTask, ...] = ()
     inner_workflows: tuple[PreparedWorkflow, ...] = ()
+    pipeline_resources: tuple[dict[str, Any], ...] = ()
 
 
 def merge_prepared_artifacts(
@@ -228,6 +255,7 @@ def merge_prepared_artifacts(
         secrets=artifacts.secrets + tuple(prepared.secrets),
         setup_tasks=artifacts.setup_tasks + tuple(prepared.setup_tasks),
         inner_workflows=artifacts.inner_workflows + tuple(prepared.inner_workflows),
+        pipeline_resources=artifacts.pipeline_resources + tuple(prepared.pipeline_resources),
     )
 
 
@@ -275,7 +303,57 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         tasks=all_tasks,
         notebooks=list(artifacts.notebooks),
         secrets=unique_secrets,
-        setup_tasks=list(artifacts.setup_tasks),
+        setup_tasks=_dedupe_setup_tasks(artifacts.setup_tasks),
         inner_workflows=list(artifacts.inner_workflows),
         cluster_hints=cluster_hints,
+        pipeline_resources=list(artifacts.pipeline_resources),
     )
+
+
+def _dedupe_setup_tasks(setup_tasks: tuple[SetupTask, ...]) -> list[SetupTask]:
+    """Returns the setup-task list with duplicates collapsed by identifying config.
+
+    Args:
+        setup_tasks: Setup tasks aggregated across every prepared
+            activity in the workflow.
+
+    Returns:
+        List with at most one entry per logical resource: connection
+        tasks dedupe by ``connection_name``; volume tasks dedupe by
+        ``volume_name``.  Other task types are kept as-is so the
+        downstream setup-notebook generator still sees them.
+    """
+    seen: set[tuple[str, str]] = set()
+    unique: list[SetupTask] = []
+    for task in setup_tasks:
+        key = _setup_task_dedupe_key(task)
+        if key is None:
+            unique.append(task)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(task)
+    return unique
+
+
+def _setup_task_dedupe_key(task: SetupTask) -> tuple[str, str] | None:
+    """Returns the identity tuple used to dedupe a :class:`SetupTask`.
+
+    Args:
+        task: A setup task collected from a prepared activity.
+
+    Returns:
+        A ``(type, identifier)`` tuple for known setup task types, or
+        ``None`` when the task type does not have a stable identity
+        (which preserves the original behaviour of emitting each
+        occurrence).
+    """
+    config = task.config or {}
+    if task.type == "connection":
+        name = config.get("connection_name")
+        return (task.type, str(name)) if name else None
+    if task.type == "volume":
+        name = config.get("volume_name")
+        return (task.type, str(name)) if name else None
+    return None
