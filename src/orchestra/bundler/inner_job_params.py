@@ -38,6 +38,7 @@ def collect_inner_job_params(
     tasks: list[dict[str, Any]],
     *,
     raw_ir_tasks: list[dict[str, Any]] | None = None,
+    variable_task_keys: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Scans task dicts for parameter references and return declarations + pass-through map.
 
@@ -46,6 +47,15 @@ def collect_inner_job_params(
         raw_ir_tasks: Optional raw IR dicts (before DAB conversion) to scan
             for references in fields that are consumed during conversion
             (e.g. WebActivity ``url``, ``body``).
+        variable_task_keys: C-06 (VAREX-004): mapping of pipeline-variable
+            names to the setter task_key on the parent job that owns the
+            variable.  Names that match a variable do NOT get declared as
+            inner-job parameters; instead the parent passes the variable's
+            task-value reference (``{{tasks.<setter>.values.<var>}}``)
+            through the ``job_parameters`` map.  Without this the parent
+            would emit ``{{job.parameters.<var>}}`` referring to a name
+            that's never declared on the parent job, so the inner job
+            would receive an empty string.
 
     Returns:
         Tuple of:
@@ -53,19 +63,28 @@ def collect_inner_job_params(
           the inner job definition.
         - ``job_parameters``: dict mapping param name -> parent expression,
           suitable for the ``run_job_task.job_parameters`` block.  ``item``
-          always maps to ``"{{input}}"``, pipeline/variable params map to
-          ``"{{job.parameters.<name>}}"``.
+          always maps to ``"{{input}}"``, pipeline params map to
+          ``"{{job.parameters.<name>}}"``, variables resolved via the
+          *variable_task_keys* map route through ``{{tasks.X.values.Y}}``.
     """
     param_names: set[str] = set()
     item_field_names: set[str] = set()
+    variable_names: set[str] = set()
 
-    _scan_tasks(tasks, param_names, item_field_names=item_field_names)
+    _scan_tasks(tasks, param_names, item_field_names=item_field_names, variable_names=variable_names)
 
     if raw_ir_tasks:
-        _scan_ir_tasks(raw_ir_tasks, param_names, item_field_names=item_field_names)
+        _scan_ir_tasks(raw_ir_tasks, param_names, item_field_names=item_field_names, variable_names=variable_names)
+
+    var_task_keys = variable_task_keys or {}
 
     parameters: list[dict[str, Any]] = []
     for name in sorted(param_names):
+        # C-06: variables with a known setter task on the parent job route
+        # via {{tasks.X.values.Y}} -- they must NOT show up as inner-job
+        # parameter declarations.
+        if name in variable_names and name in var_task_keys:
+            continue
         param: dict[str, Any] = {"name": name}
         if name != "item":
             param["default"] = ""
@@ -80,6 +99,9 @@ def collect_inner_job_params(
             job_parameters[name] = "{{input}}"
         elif name in item_field_names:
             job_parameters[name] = "{{input." + name + "}}"
+        elif name in variable_names and name in var_task_keys:
+            setter = var_task_keys[name]
+            job_parameters[name] = "{{tasks." + setter + ".values." + name + "}}"
         else:
             job_parameters[name] = "{{job.parameters." + name + "}}"
 
@@ -119,6 +141,7 @@ def _scan_tasks(
     param_names: set[str],
     *,
     item_field_names: set[str] | None = None,
+    variable_names: set[str] | None = None,
 ) -> None:
     """Recursively scan task dicts for ADF parameter references.
 
@@ -126,28 +149,31 @@ def _scan_tasks(
         tasks: List of task dicts to scan.
         param_names: Accumulator set of discovered parameter names.
         item_field_names: Optional accumulator for field names from item().field refs.
+        variable_names: Optional accumulator for names sourced from
+            ``variables('X')`` references (separate from pipeline params).
     """
+    kw: dict[str, Any] = {"item_field_names": item_field_names, "variable_names": variable_names}
     for task in tasks:
         notebook_task = task.get("notebook_task", {})
         params = notebook_task.get("base_parameters", {})
         for value in params.values():
-            _extract_refs(value, param_names, item_field_names=item_field_names)
+            _extract_refs(value, param_names, **kw)
 
         run_job_task = task.get("run_job_task", {})
         for value in run_job_task.get("job_parameters", {}).values():
-            _extract_refs(value, param_names, item_field_names=item_field_names)
+            _extract_refs(value, param_names, **kw)
 
         condition_task = task.get("condition_task", {})
         if condition_task:
-            _extract_refs(condition_task.get("left", ""), param_names, item_field_names=item_field_names)
-            _extract_refs(condition_task.get("right", ""), param_names, item_field_names=item_field_names)
-            _scan_tasks(condition_task.get("if_true", []), param_names, item_field_names=item_field_names)
-            _scan_tasks(condition_task.get("if_false", []), param_names, item_field_names=item_field_names)
+            _extract_refs(condition_task.get("left", ""), param_names, **kw)
+            _extract_refs(condition_task.get("right", ""), param_names, **kw)
+            _scan_tasks(condition_task.get("if_true", []), param_names, **kw)
+            _scan_tasks(condition_task.get("if_false", []), param_names, **kw)
 
         for_each_task = task.get("for_each_task", {})
         body = for_each_task.get("task")
         if body:
-            _scan_tasks([body], param_names, item_field_names=item_field_names)
+            _scan_tasks([body], param_names, **kw)
 
 
 def _scan_ir_tasks(
@@ -155,6 +181,7 @@ def _scan_ir_tasks(
     param_names: set[str],
     *,
     item_field_names: set[str] | None = None,
+    variable_names: set[str] | None = None,
 ) -> None:
     """Scans raw IR task dicts for parameter references in all fields.
 
@@ -162,8 +189,9 @@ def _scan_ir_tasks(
         ir_tasks: Raw serialised IR task dicts.
         param_names: Accumulator set of discovered parameter names.
         item_field_names: Optional accumulator for field names from item().field refs.
+        variable_names: Optional accumulator for variable names.
     """
-    field_name_kwargs = {"item_field_names": item_field_names}
+    field_name_kwargs = {"item_field_names": item_field_names, "variable_names": variable_names}
     for task_dict in ir_tasks:
         _extract_refs(task_dict.get("url", ""), param_names, **field_name_kwargs)
         _extract_refs(task_dict.get("body"), param_names, **field_name_kwargs)
@@ -195,6 +223,7 @@ def _extract_refs(
     param_names: set[str],
     *,
     item_field_names: set[str] | None = None,
+    variable_names: set[str] | None = None,
 ) -> None:
     """Extracts parameter names from a single value that may be a string or ADF expression dict."""
     text = ""
@@ -211,6 +240,8 @@ def _extract_refs(
 
     for match in _VARIABLES_RE.finditer(text):
         param_names.add(match.group(1))
+        if variable_names is not None:
+            variable_names.add(match.group(1))
 
     for match in _ITEM_FIELD_RE.finditer(text):
         field_name = match.group(1)
