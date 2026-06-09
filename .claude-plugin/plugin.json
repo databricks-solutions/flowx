@@ -9,6 +9,7 @@
   "license": "MIT",
   "keywords": ["adf", "databricks", "migration", "dabs", "lakeflow", "orchestration", "azure-data-factory"],
   "skills": [
+    "./skills/setup",
     "./skills/ingest",
     "./skills/translate",
     "./skills/prepare",

@@ -25,6 +25,28 @@ This is phase 1 of the orchestra migration workflow. It takes raw ADF JSON expor
 - **Agentic** — requires LLM-assisted translation via the `adf-to-databricks-plugin` skills (ExecuteDataFlow, Switch, Until, StoredProc, etc.)
 - **Unsupported** — no known translation path; requires manual intervention
 
+## Prerequisite — Python environment
+
+This skill runs the plugin's Python code, which depends on third-party packages. Before running
+any Python commands, ensure the plugin's virtual environment is bootstrapped. Run the
+**`setup`** skill, or directly:
+
+```bash
+bash <plugin_dir>/scripts/bootstrap.sh
+```
+
+This creates `<plugin_dir>/.venv` and installs dependencies from `requirements.txt`. If Python or 
+pip is missing, the script prints a warning telling the user what to install — relay it and stop
+until they have installed Python 3.12+ and pip.
+
+Run **every** Python command in this skill with the venv interpreter and `src/` on `PYTHONPATH` 
+(use it anywhere a command below shows `python3`):
+
+```bash
+export PYTHONPATH="<plugin_dir>/src"
+"<plugin_dir>/.venv/bin/python" <plugin_dir>/src/orchestra/parser/adf_loader.py ...
+```
+
 ## Workflow
 
 Follow these steps in order:

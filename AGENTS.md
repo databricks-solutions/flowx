@@ -3,11 +3,20 @@
 ## Quick Command Reference
 
 ```bash
-make dev          # Install dependencies
+make dev          # Install dependencies (development; uses uv)
 make test         # Unit tests
 make integration  # Integration tests (requires ADF fixtures)
 make fmt          # Format + lint (ruff + mypy)
 make clean        # Remove build artifacts
+```
+
+To run the **plugin skills** (ingest/translate/prepare/migrate) without a uv-based dev setup,
+bootstrap a self-contained virtual environment with pip via the `setup` skill or directly:
+
+```bash
+bash scripts/bootstrap.sh   # creates .venv and pip-installs requirements.txt
+# then run plugin code with src/ on PYTHONPATH:
+PYTHONPATH=src .venv/bin/python -m orchestra.adapter inputs ingest
 ```
 
 ## Project Overview

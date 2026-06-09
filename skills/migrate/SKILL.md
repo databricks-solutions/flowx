@@ -27,6 +27,28 @@ This is the top-level orchestration skill. It runs the full migration pipeline:
 
 Each phase builds on the output of the previous phase. The user is shown a summary and asked to confirm before proceeding to the next phase.
 
+## Prerequisite — Python environment
+
+This skill runs the plugin's Python code, which depends on third-party packages. Before running
+any Python commands, ensure the plugin's virtual environment is bootstrapped. Run the
+**`setup`** skill, or directly:
+
+```bash
+bash <plugin_dir>/scripts/bootstrap.sh
+```
+
+This creates `<plugin_dir>/.venv` and installs dependencies from `requirements.txt`. If Python or 
+pip is missing, the script prints a warning telling the user what to install — relay it and stop
+until they have installed Python 3.12+ and pip.
+
+Run **every** Python command in this skill with the venv interpreter and `src/` on `PYTHONPATH` 
+(use it anywhere a command below shows `python3`):
+
+```bash
+export PYTHONPATH="<plugin_dir>/src"
+"<plugin_dir>/.venv/bin/python" <plugin_dir>/src/orchestra/parser/adf_loader.py ...
+```
+
 ## Workflow
 
 Follow these steps in order:
@@ -180,13 +202,12 @@ The questions the adapter raises:
 | `consolidate_motif:<motif_id>` | `keep`, `consolidate` | `keep` |
 
 DatabricksNotebook and DatabricksSparkPython tasks always inherit the cluster binding derived from
-their source linked service; the serverless replacement option was removed because it silently
-discarded init scripts and DBR-version pins from the source pipeline.
+their source linked service.
 
 For each multi-activity motif the detector matches (rest_api_pagination,
 incremental_load_watermark, metadata_driven_bulk_copy, ...) the adapter emits one
-`consolidate_motif:<motif_id>` question. Default is `keep` so motif detection cannot silently
-rewrite a pipeline; the user must explicitly opt in to `consolidate` for each pattern.
+`consolidate_motif:<motif_id>` question. The user must explicitly opt in to `consolidate` 
+for each detected pattern.
 
 ### Step 6 — Checkpoint: confirm proceed to bundle generation
 

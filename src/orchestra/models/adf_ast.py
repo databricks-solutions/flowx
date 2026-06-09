@@ -105,10 +105,14 @@ class AdfLinkedServiceReference:
     Attributes:
         reference_name: Logical name of the linked service.
         type: Reference type (always ``"LinkedServiceReference"``).
+        parameters: Runtime parameter overrides supplied by the activity,
+            keyed by parameter name.  These flow into the resolver as
+            ``@linkedService().X`` substitutions.
     """
 
     reference_name: str
     type: str = "LinkedServiceReference"
+    parameters: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -241,12 +245,46 @@ class AdfDefinitions:
         datasets: Dataset definitions keyed by name.
         linked_services: Linked service definitions keyed by name.
         triggers: Trigger definitions.
+        global_parameters: Factory-level ``globalParameters`` keyed by name,
+            with each value parsed into ``{"type": str, "value": Any}``.
     """
 
     pipelines: list[AdfPipeline]
     datasets: dict[str, AdfDataset] = field(default_factory=dict)
     linked_services: dict[str, AdfLinkedService] = field(default_factory=dict)
     triggers: list[AdfTrigger] = field(default_factory=list)
+    global_parameters: dict[str, Any] = field(default_factory=dict)
+
+    def get_dataset(self, name: str | None) -> AdfDataset | None:
+        """Case-insensitive dataset lookup.
+
+        LSC3-005: ADF identifiers are documented as case-insensitive; pipelines
+        sometimes reference a dataset by a different casing than the source
+        JSON file declares.  Tolerate the mismatch instead of returning None.
+        """
+        if not name:
+            return None
+        found = self.datasets.get(name)
+        if found is not None:
+            return found
+        lowered = name.lower()
+        for key, value in self.datasets.items():
+            if key.lower() == lowered:
+                return value
+        return None
+
+    def get_linked_service(self, name: str | None) -> AdfLinkedService | None:
+        """Case-insensitive linked service lookup; see :meth:`get_dataset`."""
+        if not name:
+            return None
+        found = self.linked_services.get(name)
+        if found is not None:
+            return found
+        lowered = name.lower()
+        for key, value in self.linked_services.items():
+            if key.lower() == lowered:
+                return value
+        return None
 
 
 # ---------------------------------------------------------------------------
