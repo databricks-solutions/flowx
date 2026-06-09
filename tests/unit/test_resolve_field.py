@@ -68,8 +68,9 @@ class TestResolveField:
         assert "tasks.Lookup.values.cnt" in result
 
     def test_boolean_value(self):
-        result = resolve_field(True, _ctx())
-        assert result == "True"
+        # VAREX3-002: Python bool renders lowercase 'true'/'false' to match ADF.
+        assert resolve_field(True, _ctx()) == "true"
+        assert resolve_field(False, _ctx()) == "false"
 
     def test_variables_with_context(self):
         result = resolve_field("@variables('runDate')", _ctx(runDate="SetRunDate"))

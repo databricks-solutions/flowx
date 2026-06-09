@@ -1,4 +1,4 @@
-.PHONY: clean dev ci test integration fmt help docs-install docs-clean docs-build docs-serve lock-dependencies
+.PHONY: clean dev ci test integration fmt help docs-install docs-clean docs-build docs-serve lock-dependencies requirements precommit
 
 clean:
 	rm -rf .venv .pytest_cache .ruff_cache .mypy_cache __pycache__
@@ -42,6 +42,12 @@ lock-dependencies:
 	  uv pip compile --generate-hashes --universal --no-header - > build-constraints-new.txt
 	mv build-constraints-new.txt .build-constraints.txt
 	perl -pi -e 's|registry = "https://[^"]*"|registry = "https://pypi.org/simple"|g' uv.lock
+	$(MAKE) requirements
+
+requirements:
+	uv export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt -o requirements.txt
+
+precommit: fmt requirements
 
 help:
 	@echo "Available targets:"
@@ -50,9 +56,11 @@ help:
 	@echo "  test         		Run unit tests"
 	@echo "  integration  		Run integration tests"
 	@echo "  fmt          		Format and lint code"
+	@echo "  precommit    		Format, lint, and refresh requirements.txt (run before committing)"
 	@echo "  clean        		Remove build artifacts"
 	@echo "  docs-install 		Install docs dependencies (bun)"
 	@echo "  docs-clean   		Remove docs build artifacts"
 	@echo "  docs-build   		Build the static docs site to docs/site"
 	@echo "  docs-serve   		Run the docs dev server (next dev)"
 	@echo "  lock-dependencies	Write the uv.lock file"
+	@echo "  requirements 		Generate requirements.txt from the lockfile"

@@ -35,8 +35,27 @@ def translate(
 
     items_raw = type_properties.get("items")
     expr_result = resolve_expression(items_raw, context) if items_raw is not None else None
+    inputs_bridge_notebook_code: str | None = None
+    inputs_bridge_notebook_imports: list[str] = []
+    inputs_bridge_required_parameters: dict[str, str] = {}
     if expr_result is not None and expr_result.kind in ("dab_ref", "literal"):
         items_expression = expr_result.value
+    elif expr_result is not None and expr_result.kind == "notebook_code":
+        # C-31 (CF4-001): the preparer used to construct a bare
+        # TranslationContext() and re-resolve the items expression on the
+        # JSON-reload path, but ``variable_cache`` is empty there so the
+        # bridge never fired and DAB rejected the raw @split(...) call.
+        # Capture the resolved notebook_code here while the full context
+        # is available; the preparer reads it from these IR fields.
+        if isinstance(items_raw, dict) and items_raw.get("type") == "Expression":
+            items_expression = items_raw.get("value", "")
+        elif isinstance(items_raw, str):
+            items_expression = items_raw
+        else:
+            items_expression = ""
+        inputs_bridge_notebook_code = expr_result.value
+        inputs_bridge_notebook_imports = list(expr_result.imports)
+        inputs_bridge_required_parameters = dict(expr_result.required_parameters)
     else:
         # Fallback: extract raw string
         if isinstance(items_raw, dict) and items_raw.get("type") == "Expression":
@@ -64,6 +83,8 @@ def translate(
             registry=context.registry,
             variable_cache=context.variable_cache,
             variable_value_cache=context.variable_value_cache,
+            global_parameters=context.global_parameters,
+            linked_service_parameters=context.linked_service_parameters,
         )
         inner_activities, _ = translate_activities_fn(child_adf_activities, child_context, definitions)
 
@@ -72,6 +93,9 @@ def translate(
         items_expression=items_expression,
         inner_activities=inner_activities,
         concurrency=batch_count,
+        inputs_bridge_notebook_code=inputs_bridge_notebook_code,
+        inputs_bridge_notebook_imports=inputs_bridge_notebook_imports,
+        inputs_bridge_required_parameters=inputs_bridge_required_parameters,
     )
 
     return foreach_activity, context
