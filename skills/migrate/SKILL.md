@@ -170,14 +170,23 @@ Use the stamped report (when produced) as the input to the prepare phase.
 When inspect emits no questions for any pipeline, skip modify and use the
 original report.
 
-The four questions the adapter raises:
+The questions the adapter raises:
 
 | `question_id` | Allowed values | Default |
 |---|---|---|
 | `copy_activity_paradigm` | `notebook`, `sdp` | `notebook` |
 | `non_databricks_task_compute` | `serverless`, `classic` | `serverless` |
 | `use_lakeflow_connectors` | `existing`, `lakeflow_connect` | `existing` |
-| `databricks_task_compute` | `existing`, `serverless` | `existing` |
+| `consolidate_motif:<motif_id>` | `keep`, `consolidate` | `keep` |
+
+DatabricksNotebook and DatabricksSparkPython tasks always inherit the cluster binding derived from
+their source linked service; the serverless replacement option was removed because it silently
+discarded init scripts and DBR-version pins from the source pipeline.
+
+For each multi-activity motif the detector matches (rest_api_pagination,
+incremental_load_watermark, metadata_driven_bulk_copy, ...) the adapter emits one
+`consolidate_motif:<motif_id>` question. Default is `keep` so motif detection cannot silently
+rewrite a pipeline; the user must explicitly opt in to `consolidate` for each pattern.
 
 ### Step 6 — Checkpoint: confirm proceed to bundle generation
 

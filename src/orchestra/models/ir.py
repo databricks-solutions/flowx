@@ -14,10 +14,11 @@ if TYPE_CHECKING:
 class ExpressionResult:
     """Result of resolving an ADF expression."""
 
-    kind: str  # "literal", "dab_ref", "notebook_code"
+    kind: str
     value: str
     imports: list[str] = field(default_factory=list)
     required_parameters: dict[str, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -46,6 +47,12 @@ class Activity:
         min_retry_interval_millis: Minimum delay between retries (ms).
         depends_on: Upstream task dependencies.
         cluster: Cluster configuration for the task, if any.
+        existing_cluster_id: ID of an existing all-purpose cluster the task
+            should run on.
+        libraries: Task-scoped library descriptors carried through from ADF.
+            Each entry is a supported Databricks task library; see
+            https://docs.databricks.com/aws/en/dev-tools/bundles/library-dependencies
+            for the supported shapes.
     """
 
     name: str
@@ -56,10 +63,13 @@ class Activity:
     min_retry_interval_millis: int | None = None
     depends_on: list[Dependency] | None = None
     cluster: dict[str, Any] | None = None
-    # Widget-name → DAB-ref mapping for every `dbutils.widgets.get()` call
-    # that shows up in any notebook_code the translator produced for this
-    # activity.  Preparers thread these into ``base_parameters`` so DAB
-    # resolves the refs at job runtime.
+    existing_cluster_id: str | None = None
+    libraries: list[dict[str, Any]] | None = None
+    # Approximate parameter substitutions made at translation time (e.g.
+    # ``utcnow()`` mapped to ``{{job.start_time.iso_datetime}}``).  Each
+    # entry has keys ``widget_name``, ``raw_expression``, ``replacement``,
+    # and ``note``; the bundler surfaces these in SETUP.md.
+    parameter_approximations: list[dict[str, str]] = field(default_factory=list)
     required_parameters: dict[str, str] = field(default_factory=dict)
     # Compute mode stamped by the pipeline modifier in response to user
     # preferences.  One of "serverless", "classic_single_node",
@@ -269,12 +279,10 @@ class SparkJarActivity(Activity):
     Attributes:
         main_class_name: Fully qualified main class within the JAR.
         parameters: Arguments passed to the main class.
-        libraries: Library descriptors (JARs, wheels, etc.).
     """
 
     main_class_name: str
     parameters: list[str] | None = None
-    libraries: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -578,7 +586,15 @@ class TranslationReport:
         agentic_count: Activities requiring agentic translation.
         unsupported_count: Activities that could not be translated.
         gaps: List of agentic gaps identified during translation.
-        warnings: Human-readable warning messages emitted during translation.
+        warnings: Human-readable warning messages emitted during translation,
+            including unresolved ``@{...}`` ADF expressions surfaced by the
+            whole-IR rewriter.
+        detected_motifs: Multi-activity patterns the detector matched on the
+            source AST.  When the caller did not supply a motif-consolidation
+            answer the translator collapses every entry into a single
+            :class:`MotifActivity`; otherwise the list still reports what
+            was detected so the adapter can prompt the user.  The objects
+            here are :class:`~flowx.models.motifs.DetectedMotif` instances.
     """
 
     pipeline: Pipeline
@@ -587,3 +603,4 @@ class TranslationReport:
     unsupported_count: int = 0
     gaps: list[AgenticGap] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    detected_motifs: list[Any] = field(default_factory=list)

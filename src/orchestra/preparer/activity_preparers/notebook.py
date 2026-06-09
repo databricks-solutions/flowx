@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from flowx.models.dab import DabNotebook
+from flowx.models.dab import DabNotebook, ParameterApproximation
 from flowx.models.ir import TranslationContext
 from flowx.parser.expression_parser import resolve_expression, resolve_interpolated_string
 from flowx.preparer.activity_preparers.naming import notebook_filename, workspace_notebook_filename
@@ -113,6 +113,17 @@ def prepare(
             existing_notebook=is_existing_notebook,
         )
 
+    approximations = [
+        ParameterApproximation(
+            task_key=activity.task_key,
+            widget_name=entry["widget_name"],
+            raw_expression=entry["raw_expression"],
+            replacement=entry["replacement"],
+            note=entry["note"],
+        )
+        for entry in activity.parameter_approximations
+    ]
+
     if is_existing_notebook:
         downloaded = download_notebook(resolved_path) if workspace_downloads_enabled() else None
         if downloaded is not None:
@@ -121,15 +132,19 @@ def prepare(
             task["notebook_task"] = {"notebook_path": f"../src/{notebook_relative_path}"}
             if base_parameters is not None:
                 task["notebook_task"]["base_parameters"] = base_parameters
-            if activity.compute_mode != "serverless":
+            if activity.compute_mode != "serverless" and not task.get("existing_cluster_id"):
                 task["job_cluster_key"] = "default_cluster"
+            if activity.libraries:
+                task["libraries"] = activity.libraries
             notebooks = [DabNotebook(relative_path=notebook_relative_path, content=downloaded)]
-            return PreparedActivity(task=task, notebooks=notebooks)
+            return PreparedActivity(task=task, notebooks=notebooks, parameter_approximations=approximations)
 
         task["notebook_task"] = {"notebook_path": resolved_path}
         if base_parameters is not None:
             task["notebook_task"]["base_parameters"] = base_parameters
-        return PreparedActivity(task=task)
+        if activity.libraries:
+            task["libraries"] = activity.libraries
+        return PreparedActivity(task=task, parameter_approximations=approximations)
 
     placeholder_filename = notebook_filename(activity.task_key, activity.name)
     notebook_relative_path = f"notebooks/{placeholder_filename}"
@@ -140,6 +155,8 @@ def prepare(
     task["notebook_task"] = {"notebook_path": f"../src/{notebook_relative_path}"}
     if base_parameters is not None:
         task["notebook_task"]["base_parameters"] = base_parameters
+    if activity.libraries:
+        task["libraries"] = activity.libraries
 
     notebooks = [DabNotebook(relative_path=notebook_relative_path, content=content)]
-    return PreparedActivity(task=task, notebooks=notebooks)
+    return PreparedActivity(task=task, notebooks=notebooks, parameter_approximations=approximations)

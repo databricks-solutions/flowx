@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from flowx.models.dab import DabNotebook
+from flowx.models.dab import DabNotebook, ParameterApproximation
 
 # Regexes used to mine the generated artifacts for external dependencies.
 # Kept as compiled patterns so :func:`build_prereqs` is cheap to call.
@@ -110,6 +110,7 @@ class Prereqs:
     compute_notes: list[str] = field(default_factory=list)
     network_endpoints: list[NetworkEndpoint] = field(default_factory=list)
     manual_parameters: list[ManualParameter] = field(default_factory=list)
+    parameter_approximations: list[ParameterApproximation] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         """Return ``True`` when nothing needs to happen before ``bundle run``."""
@@ -121,6 +122,7 @@ class Prereqs:
             and not self.compute_notes
             and not self.network_endpoints
             and not self.manual_parameters
+            and not self.parameter_approximations
         )
 
 
@@ -323,6 +325,7 @@ def build_prereqs(
     cross_bundle_variables: dict[str, str] | None = None,
     compute_notes: list[str] | None = None,
     manual_parameters: list[ManualParameter] | None = None,
+    parameter_approximations: list[ParameterApproximation] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
 
@@ -356,6 +359,7 @@ def build_prereqs(
         compute_notes=list(compute_notes or []),
         network_endpoints=collect_network_endpoints(notebooks),
         manual_parameters=list(manual_parameters or []),
+        parameter_approximations=list(parameter_approximations or []),
     )
 
 
@@ -515,6 +519,26 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
             lines.append(
                 f"| `{manual_parameter.task_key}` | `{manual_parameter.notebook_path}` "
                 f"| `{manual_parameter.widget_name}` | `{manual_parameter.raw_expression}` |"
+            )
+        lines.append("")
+
+    if prereqs.parameter_approximations:
+        lines.append("## Parameter substitutions")
+        lines.append("")
+        lines.append(
+            "Flowx mapped the ADF expressions below to Databricks dynamic value "
+            "references so they land directly in the bundle YAML. The substitutions are "
+            "semantically *close* but not identical to the originals; review the listed "
+            "caveats and decide whether each replacement is acceptable for your workload."
+        )
+        lines.append("")
+        lines.append("| Task | Widget | Original ADF expression | Replacement | Caveat |")
+        lines.append("|---|---|---|---|---|")
+        for approximation in prereqs.parameter_approximations:
+            lines.append(
+                f"| `{approximation.task_key}` | `{approximation.widget_name}` "
+                f"| `{approximation.raw_expression}` | `{approximation.replacement}` "
+                f"| {approximation.note} |"
             )
         lines.append("")
 

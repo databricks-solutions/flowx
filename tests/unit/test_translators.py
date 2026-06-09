@@ -176,6 +176,110 @@ class TestNotebookTranslator:
         assert isinstance(result, NotebookActivity)
         assert result.base_parameters == {}
 
+    def test_translate_notebook_passes_libraries_through(self):
+        from flowx.translator.activity_translators.notebook import translate
+
+        libraries = [
+            {"jar": "dbfs:/libs/util.jar"},
+            {"whl": "dbfs:/libs/pkg-1.0-py3-none-any.whl"},
+            {"pypi": {"package": "requests==2.31.0"}},
+            {"maven": {"coordinates": "org.jsoup:jsoup:1.7.2", "exclusions": ["slf4j:slf4j"]}},
+            {"cran": {"package": "ada", "repo": "https://cran.us.r-project.org"}},
+        ]
+        activity = _make_activity(
+            "Run Notebook",
+            "DatabricksNotebook",
+            {"notebookPath": "/Shared/nb", "libraries": libraries},
+        )
+        result = translate(activity, _base_kwargs(), _context(), _EMPTY_DEFS)
+        assert isinstance(result, NotebookActivity)
+        assert result.libraries == libraries
+
+    def test_translate_notebook_captures_utcnow_approximation(self):
+        from flowx.translator.activity_translators.notebook import translate
+
+        activity = _make_activity(
+            "Score",
+            "DatabricksNotebook",
+            {
+                "notebookPath": "/Shared/score",
+                "baseParameters": {
+                    "scoring_date": {"value": "@formatDateTime(utcnow(), 'yyyy-MM-dd')", "type": "Expression"},
+                    "env": "dev",
+                },
+            },
+        )
+        result = translate(activity, _base_kwargs(), _context(), _EMPTY_DEFS)
+        assert isinstance(result, NotebookActivity)
+        assert result.base_parameters["scoring_date"] == "{{job.start_time.iso_date}}"
+        assert result.base_parameters["env"] == "dev"
+        assert len(result.parameter_approximations) == 1
+        approximation = result.parameter_approximations[0]
+        assert approximation["widget_name"] == "scoring_date"
+        assert approximation["raw_expression"] == "@formatDateTime(utcnow(), 'yyyy-MM-dd')"
+        assert approximation["replacement"] == "{{job.start_time.iso_date}}"
+        assert "utcnow" in approximation["note"].lower()
+
+
+class TestCommonAttributes:
+    def test_existing_cluster_id_extracted_from_linked_service(self):
+        from flowx.models.adf_ast import AdfLinkedService
+        from flowx.translator.engine import _build_base_kwargs
+
+        linked_service = AdfLinkedService(
+            name="AzureDatabricks_LS",
+            type="AzureDatabricks",
+            properties={
+                "typeProperties": {
+                    "existingClusterId": "1234-567890-abcde123",
+                },
+            },
+        )
+        definitions = AdfDefinitions(
+            pipelines=[],
+            datasets={},
+            linked_services={"AzureDatabricks_LS": linked_service},
+            triggers=[],
+        )
+        activity = _make_activity(
+            "Run Notebook",
+            "DatabricksNotebook",
+            {"notebookPath": "/Shared/nb"},
+            linked_service_name=AdfLinkedServiceReference(reference_name="AzureDatabricks_LS"),
+        )
+        kwargs = _build_base_kwargs(activity, definitions)
+        assert kwargs["existing_cluster_id"] == "1234-567890-abcde123"
+        assert kwargs["cluster"] == {"existing_cluster_id": "1234-567890-abcde123"}
+
+    def test_existing_cluster_id_none_when_linked_service_uses_new_cluster(self):
+        from flowx.models.adf_ast import AdfLinkedService
+        from flowx.translator.engine import _build_base_kwargs
+
+        linked_service = AdfLinkedService(
+            name="AzureDatabricks_LS",
+            type="AzureDatabricks",
+            properties={
+                "typeProperties": {
+                    "newClusterSparkVersion": "15.4.x-scala2.12",
+                    "newClusterNumOfWorker": 2,
+                },
+            },
+        )
+        definitions = AdfDefinitions(
+            pipelines=[],
+            datasets={},
+            linked_services={"AzureDatabricks_LS": linked_service},
+            triggers=[],
+        )
+        activity = _make_activity(
+            "Run Notebook",
+            "DatabricksNotebook",
+            {"notebookPath": "/Shared/nb"},
+            linked_service_name=AdfLinkedServiceReference(reference_name="AzureDatabricks_LS"),
+        )
+        kwargs = _build_base_kwargs(activity, definitions)
+        assert kwargs["existing_cluster_id"] is None
+
 
 class TestSparkJarTranslator:
     def test_translate_spark_jar(self):
@@ -210,6 +314,22 @@ class TestSparkPythonTranslator:
         assert isinstance(result, SparkPythonActivity)
         assert result.python_file == "dbfs:/scripts/etl.py"
         assert result.parameters == ["--mode", "batch"]
+
+    def test_translate_spark_python_passes_libraries_through(self):
+        from flowx.translator.activity_translators.spark_python import translate
+
+        libraries = [
+            {"egg": "dbfs:/libs/util.egg"},
+            {"pypi": {"package": "pandas", "repo": "https://pypi.example.com"}},
+        ]
+        activity = _make_activity(
+            "Run Python",
+            "DatabricksSparkPython",
+            {"pythonFile": "dbfs:/scripts/etl.py", "libraries": libraries},
+        )
+        result = translate(activity, _base_kwargs(), _context(), _EMPTY_DEFS)
+        assert isinstance(result, SparkPythonActivity)
+        assert result.libraries == libraries
 
 
 class TestLookupTranslator:
@@ -512,10 +632,26 @@ class TestSetVariableTranslator:
     def test_translate_set_variable_utcnow(self):
         from flowx.translator.activity_translators.set_variable import translate
 
+        # ``utcNow('yyyy-MM-dd')`` now maps to a DAB dynamic value, so the
+        # SetVariable result is dab_ref rather than notebook_code.
         activity = _make_activity(
             "SetRunDate",
             "SetVariable",
             {"variableName": "runDate", "value": {"type": "Expression", "value": "@utcNow('yyyy-MM-dd')"}},
+        )
+        result, context = translate(activity, _base_kwargs("SetRunDate"), _context(), _EMPTY_DEFS)
+        assert isinstance(result, SetVariableActivity)
+        assert result.value_kind == "dab_ref"
+        assert result.variable_value == "{{job.start_time.iso_date}}"
+
+    def test_translate_set_variable_utcnow_unknown_format(self):
+        from flowx.translator.activity_translators.set_variable import translate
+
+        # Unrecognised format falls back to the legacy notebook_code path.
+        activity = _make_activity(
+            "SetRunDate",
+            "SetVariable",
+            {"variableName": "runDate", "value": {"type": "Expression", "value": "@utcNow('yyyyMMdd')"}},
         )
         result, context = translate(activity, _base_kwargs("SetRunDate"), _context(), _EMPTY_DEFS)
         assert isinstance(result, SetVariableActivity)

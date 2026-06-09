@@ -261,6 +261,38 @@ class TestWriteBundle:
         assert task_keys == {"pause", "run_nb"}
 
 
+class TestSetupMd:
+    def test_parameter_approximations_render_to_setup_md(self, tmp_path):
+        pipeline = Pipeline(
+            name="approx_pipeline",
+            tasks=[
+                NotebookActivity(
+                    name="Score",
+                    task_key="score",
+                    notebook_path="/Shared/score",
+                    base_parameters={"scoring_date": "{{job.start_time.iso_date}}"},
+                    parameter_approximations=[
+                        {
+                            "widget_name": "scoring_date",
+                            "raw_expression": "@formatDateTime(utcnow(), 'yyyy-MM-dd')",
+                            "replacement": "{{job.start_time.iso_date}}",
+                            "note": "Mapped ADF `utcnow()` to the Databricks job start time.",
+                        }
+                    ],
+                ),
+            ],
+        )
+        wf = prepare_workflow(pipeline)
+        write_bundle(wf, tmp_path)
+        setup_md = (tmp_path / "SETUP.md").read_text()
+        assert "## Parameter substitutions" in setup_md
+        assert "`score`" in setup_md
+        assert "`scoring_date`" in setup_md
+        assert "@formatDateTime(utcnow(), 'yyyy-MM-dd')" in setup_md
+        assert "{{job.start_time.iso_date}}" in setup_md
+        assert "Mapped ADF `utcnow()`" in setup_md
+
+
 class TestSetupGenerator:
     def test_secrets_setup_notebook_content(self):
         from flowx.bundler.setup_generator import generate_setup_tasks

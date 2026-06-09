@@ -352,22 +352,53 @@ def _resolve_variable(
     return ExpressionResult(kind="dab_ref", value="{{" + f"tasks.{setter_key}.values.{var_name}" + "}}")
 
 
+_UTCNOW_APPROXIMATION_NOTE = (
+    "Mapped ADF `utcnow()` to the Databricks job start time. "
+    "Single-task jobs see sub-second skew; multi-task jobs can see minutes of skew "
+    "between job start and the moment the activity actually runs."
+)
+
+# ADF .NET-style format strings that map cleanly onto a Databricks dynamic
+# value reference.  Anything not in this table falls back to a notebook_code
+# strftime call.
+_UTCNOW_FORMAT_TO_DAB_REF: dict[str, str] = {
+    "yyyy-MM-dd": "{{job.start_time.iso_date}}",
+    "yyyy-MM-ddTHH:mm:ss": "{{job.start_time.iso_datetime}}",
+    "yyyy-MM-ddTHH:mm:ssZ": "{{job.start_time.iso_datetime}}",
+    "o": "{{job.start_time.iso_datetime}}",
+    "s": "{{job.start_time.iso_datetime}}",
+}
+
+
 def _resolve_utcnow(expr: str) -> ExpressionResult | None:
-    """Resolves ``utcNow()`` or ``utcNow('format')`` -> notebook_code."""
+    """Resolves ``utcNow()`` / ``utcNow('format')``.
+
+    Bare ``utcnow()`` and ``utcnow('<known iso fmt>')`` map to a Databricks
+    dynamic value reference so the result can land directly inside DAB
+    YAML (``base_parameters`` and similar).  Unrecognised format strings
+    keep the legacy ``notebook_code`` translation.
+    """
     match = _UTCNOW_RE.match(expr)
     if match is None:
         return None
     format_string = match.group(1)
-    if format_string:
-        python_format = _convert_date_format(format_string)
+    if not format_string:
         return ExpressionResult(
-            kind="notebook_code",
-            value=f"datetime.now(timezone.utc).strftime('{python_format}')",
-            imports=["from datetime import datetime, timezone"],
+            kind="dab_ref",
+            value="{{job.start_time.iso_datetime}}",
+            notes=[_UTCNOW_APPROXIMATION_NOTE],
         )
+    dab_ref = _UTCNOW_FORMAT_TO_DAB_REF.get(format_string)
+    if dab_ref:
+        return ExpressionResult(
+            kind="dab_ref",
+            value=dab_ref,
+            notes=[_UTCNOW_APPROXIMATION_NOTE],
+        )
+    python_format = _convert_date_format(format_string)
     return ExpressionResult(
         kind="notebook_code",
-        value="datetime.now(timezone.utc).isoformat()",
+        value=f"datetime.now(timezone.utc).strftime('{python_format}')",
         imports=["from datetime import datetime, timezone"],
     )
 
@@ -628,6 +659,11 @@ def _collect_required_parameters(*args: ExpressionResult) -> dict[str, str]:
     return merged
 
 
+def _collect_notes(*args: ExpressionResult) -> list[str]:
+    """Collects caveat notes across resolved arguments."""
+    return [note for arg in args for note in arg.notes]
+
+
 def _result_from_args(
     value: str,
     args: list[ExpressionResult],
@@ -649,6 +685,7 @@ def _result_from_args(
         value=value,
         imports=imports,
         required_parameters=_collect_required_parameters(*args),
+        notes=_collect_notes(*args),
     )
 
 
@@ -1140,6 +1177,18 @@ def _handle_format_date_time(args: list[ExpressionResult]) -> ExpressionResult |
     """formatDateTime(ts, fmt?) -> datetime.fromisoformat(ts).strftime(converted_fmt)"""
     if len(args) < 1 or len(args) > 2:
         return None
+    # formatDateTime(utcnow(), '<known iso fmt>') -> remap straight to the
+    # matching Databricks dynamic value so the result lands in YAML.
+    if (
+        len(args) == 2
+        and args[0].kind == "dab_ref"
+        and args[0].value == "{{job.start_time.iso_datetime}}"
+        and _UTCNOW_APPROXIMATION_NOTE in args[0].notes
+        and args[1].kind == "literal"
+    ):
+        dab_ref = _UTCNOW_FORMAT_TO_DAB_REF.get(args[1].value)
+        if dab_ref:
+            return ExpressionResult(kind="dab_ref", value=dab_ref, notes=[_UTCNOW_APPROXIMATION_NOTE])
     timestamp_dt = _datetime_arg_code(args[0])
     if len(args) == 2 and args[1].kind == "literal":
         python_format = _convert_date_format(args[1].value)

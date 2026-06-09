@@ -48,6 +48,7 @@ from flowx.models.ir import (
 from flowx.motifs.collapser import collapse_motifs
 from flowx.motifs.detector import detect_motifs
 from flowx.parser.adf_loader import classify_activity, load_adf_definitions
+from flowx.parser.ir_rewriter import rewrite_pipeline_expressions
 from flowx.translator.activity_translators import (
     append_variable,
     copy,
@@ -84,17 +85,38 @@ TRANSLATOR_REGISTRY: dict[str, Callable[..., Activity]] = {
 }
 
 
-def translate_pipeline(pipeline: AdfPipeline, definitions: AdfDefinitions) -> TranslationReport:
+def translate_pipeline(
+    pipeline: AdfPipeline,
+    definitions: AdfDefinitions,
+    *,
+    motif_consolidations: dict[str, str] | None = None,
+) -> TranslationReport:
     """Translates an ADF pipeline into a Databricks pipeline IR.
 
     Args:
         pipeline: Parsed ADF pipeline AST.
         definitions: Full ADF definitions for cross-referencing datasets,
             linked services, etc.
+        motif_consolidations: Optional mapping of ``motif_id`` ->
+            ``"keep"`` / ``"consolidate"`` answers gathered from the
+            adapter.  When ``None`` (back-compat default) the translator
+            consolidates every detected motif.  When provided, only
+            motifs whose id maps to ``"consolidate"`` are collapsed; the
+            rest remain as the original activity-by-activity translation.
 
     Returns:
-        :class:`TranslationReport` containing the translated :class:`Pipeline`
-        and any gaps encountered.
+        :class:`TranslationReport` containing the translated :class:`Pipeline`,
+        the list of detected motifs, and any gaps encountered.
+
+    Notes:
+        After dispatching individual activities the translator runs
+        :func:`~flowx.parser.ir_rewriter.rewrite_pipeline_expressions`
+        over the whole IR so that ``@{...}`` ADF expressions embedded in
+        SQL bodies, REST payloads, dataset paths, and other string-typed
+        fields are rewritten through the same parser the per-activity
+        translators use.  Tokens that cannot be resolved are recorded
+        as translation warnings instead of shipping into the bundle
+        verbatim.
     """
     context = TranslationContext(
         activity_cache=MappingProxyType({}),
@@ -154,17 +176,34 @@ def translate_pipeline(pipeline: AdfPipeline, definitions: AdfDefinitions) -> Tr
         tags={"source": "adf", "pipeline": pipeline.name},
     )
 
-    # Motif detection and collapsing: scan for known multi-activity patterns
-    # and replace matched groups with single MotifActivity nodes.
+    # Whole-IR expression rewrite: catches @{...} tokens the per-activity
+    # translators didn't address (raw SQL WHERE clauses inside source_properties,
+    # REST request bodies, dataset folder paths, ...).  Unresolved tokens are
+    # surfaced as translation warnings.
+    pipeline_ir = rewrite_pipeline_expressions(pipeline_ir, warnings=warnings)
+
+    # Motif detection: scan for known multi-activity patterns.  Collapsing is
+    # gated on the per-motif preference -- when *motif_consolidations* is
+    # ``None`` we preserve back-compat behaviour and collapse every detected
+    # motif; otherwise only motifs whose motif_id maps to ``"consolidate"`` are
+    # collapsed.
     detected_motifs = detect_motifs(pipeline, definitions)
-    if detected_motifs:
-        pipeline_ir = collapse_motifs(pipeline_ir, detected_motifs)
-        for motif in detected_motifs:
+    motifs_to_collapse = _filter_motifs_for_collapse(detected_motifs, motif_consolidations)
+    if motifs_to_collapse:
+        pipeline_ir = collapse_motifs(pipeline_ir, motifs_to_collapse)
+        for motif in motifs_to_collapse:
             logger.info(
                 "Collapsed motif '%s': %d activities -> %s",
                 motif.definition.display_name,
                 len(motif.matched_activities),
                 motif.definition.databricks_replacement,
+            )
+    for motif in detected_motifs:
+        if motif not in motifs_to_collapse:
+            logger.info(
+                "Detected motif '%s' left expanded: matched %d activities (user opted to keep)",
+                motif.definition.display_name,
+                len(motif.matched_activities),
             )
 
     return TranslationReport(
@@ -174,7 +213,30 @@ def translate_pipeline(pipeline: AdfPipeline, definitions: AdfDefinitions) -> Tr
         unsupported_count=unsupported_count,
         gaps=gaps,
         warnings=warnings,
+        detected_motifs=list(detected_motifs),
     )
+
+
+def _filter_motifs_for_collapse(
+    detected_motifs: list,
+    motif_consolidations: dict[str, str] | None,
+) -> list:
+    """Returns the subset of detected motifs the caller asked to collapse.
+
+    Args:
+        detected_motifs: Output of
+            :func:`flowx.motifs.detector.detect_motifs`.
+        motif_consolidations: Caller-supplied answers.  ``None`` means
+            "collapse all" (back-compat).  Otherwise only motifs whose
+            ``motif_id`` maps to ``"consolidate"`` are collapsed.
+
+    Returns:
+        The subset of motifs to pass to
+        :func:`flowx.motifs.collapser.collapse_motifs`.
+    """
+    if motif_consolidations is None:
+        return list(detected_motifs)
+    return [m for m in detected_motifs if motif_consolidations.get(m.definition.motif_id) == "consolidate"]
 
 
 def _dispatch_activity(
@@ -378,11 +440,14 @@ def _build_base_kwargs(activity: AdfActivity, definitions: AdfDefinitions) -> di
             )
 
     cluster: dict[str, Any] | None = None
+    existing_cluster_id: str | None = None
     if activity.linked_service_name:
         linked_service_name = activity.linked_service_name.reference_name
         linked_service_def = definitions.linked_services.get(linked_service_name)
         if linked_service_def:
             cluster = _extract_cluster_config(linked_service_def.properties)
+            if cluster:
+                existing_cluster_id = cluster.get("existing_cluster_id")
 
     return {
         "name": activity.name,
@@ -393,6 +458,7 @@ def _build_base_kwargs(activity: AdfActivity, definitions: AdfDefinitions) -> di
         "min_retry_interval_millis": min_retry_interval_millis,
         "depends_on": depends_on,
         "cluster": cluster,
+        "existing_cluster_id": existing_cluster_id,
     }
 
 
@@ -495,15 +561,17 @@ def _preferences_to_dict(preferences: Any) -> dict[str, Any]:
         preferences: The :class:`TranslationPreferences` snapshot to serialise.
 
     Returns:
-        Dictionary with the four StrEnum fields rendered as their string
-        values and per-task overrides preserved verbatim.
+        Dictionary with each StrEnum field rendered as its string value
+        and per-task overrides preserved verbatim.
     """
     return {
         "copy_activity_paradigm": str(preferences.copy_activity_paradigm),
         "non_databricks_task_compute": str(preferences.non_databricks_task_compute),
         "use_lakeflow_connectors": str(preferences.use_lakeflow_connectors),
-        "databricks_task_compute": str(preferences.databricks_task_compute),
         "lakeflow_connector_type": str(preferences.lakeflow_connector_type),
+        "motif_consolidations": {
+            motif_id: str(choice) for motif_id, choice in preferences.motif_consolidations.items()
+        },
         "per_task": dict(preferences.per_task),
     }
 
@@ -536,8 +604,14 @@ def _activity_to_dict(task: Activity) -> dict[str, Any]:
         ]
     if task.cluster:
         task_dict["cluster"] = task.cluster
+    if task.existing_cluster_id:
+        task_dict["existing_cluster_id"] = task.existing_cluster_id
     if task.compute_mode:
         task_dict["compute_mode"] = task.compute_mode
+    if task.libraries:
+        task_dict["libraries"] = task.libraries
+    if task.parameter_approximations:
+        task_dict["parameter_approximations"] = task.parameter_approximations
 
     extra = _activity_extra_fields(task)
     task_dict.update(extra)
@@ -638,8 +712,6 @@ def _activity_extra_fields(activity: Activity) -> dict[str, Any]:
             extra["main_class_name"] = activity.main_class_name
             if activity.parameters:
                 extra["parameters"] = activity.parameters
-            if activity.libraries:
-                extra["libraries"] = activity.libraries
         case SparkPythonActivity():
             extra["python_file"] = activity.python_file
             if activity.parameters:

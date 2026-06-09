@@ -166,6 +166,66 @@ class TestNotebookPreparer:
         assert params["env"] == "dev"
         assert params["trigger_time"] == "{{job.start_time.iso_datetime}}"
 
+    def test_prepare_notebook_emits_libraries(self):
+        libraries = [
+            {"whl": "dbfs:/libs/pkg.whl"},
+            {"pypi": {"package": "requests"}},
+        ]
+        activity = NotebookActivity(
+            **_make_base("NB", "nb"),
+            notebook_path="/Shared/nb",
+            libraries=libraries,
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.task["libraries"] == libraries
+
+    def test_prepare_notebook_emits_existing_cluster_id(self):
+        activity = NotebookActivity(
+            **{**_make_base("NB", "nb"), "existing_cluster_id": "1234-567890-abcde123"},
+            notebook_path="/Shared/nb",
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.task["existing_cluster_id"] == "1234-567890-abcde123"
+        assert "job_cluster_key" not in prepared.task
+
+    def test_prepare_notebook_surfaces_parameter_approximations(self):
+        activity = NotebookActivity(
+            **_make_base("Score", "score"),
+            notebook_path="/Shared/score",
+            base_parameters={"scoring_date": "{{job.start_time.iso_date}}"},
+            parameter_approximations=[
+                {
+                    "widget_name": "scoring_date",
+                    "raw_expression": "@formatDateTime(utcnow(), 'yyyy-MM-dd')",
+                    "replacement": "{{job.start_time.iso_date}}",
+                    "note": "Mapped ADF `utcnow()` to the Databricks job start time.",
+                }
+            ],
+        )
+        prepared = prepare_activity(activity)
+        assert len(prepared.parameter_approximations) == 1
+        approximation = prepared.parameter_approximations[0]
+        assert approximation.task_key == "score"
+        assert approximation.widget_name == "scoring_date"
+        assert approximation.raw_expression == "@formatDateTime(utcnow(), 'yyyy-MM-dd')"
+        assert approximation.replacement == "{{job.start_time.iso_date}}"
+
+    def test_prepare_notebook_existing_cluster_id_wins_over_default_cluster_bind(self, monkeypatch):
+        """When a downloaded workspace notebook would otherwise bind to default_cluster,
+        an explicit existing_cluster_id from the linked service takes precedence."""
+        monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
+        monkeypatch.setattr(
+            "flowx.preparer.activity_preparers.notebook.download_notebook",
+            lambda path: "# Databricks notebook source\nprint('hi')\n",
+        )
+        activity = NotebookActivity(
+            **{**_make_base("NB", "nb"), "existing_cluster_id": "9876-543210-zyxwv987"},
+            notebook_path="/Shared/ETL/transform",
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.task["existing_cluster_id"] == "9876-543210-zyxwv987"
+        assert "job_cluster_key" not in prepared.task
+
 
 class TestCopyPreparer:
     def test_prepare_copy_generates_notebook(self):
@@ -228,6 +288,19 @@ class TestSparkPythonPreparer:
         assert len(prepared.notebooks) == 1
         assert "scripts/etl.py" in prepared.notebooks[0].relative_path
         assert "dbfs:/scripts/etl.py" in prepared.notebooks[0].content
+
+    def test_prepare_spark_python_emits_libraries(self):
+        libraries = [
+            {"pypi": {"package": "pandas"}},
+            {"maven": {"coordinates": "org.example:lib:1.0"}},
+        ]
+        activity = SparkPythonActivity(
+            **_make_base("Py Task", "py_task"),
+            python_file="dbfs:/scripts/etl.py",
+            libraries=libraries,
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.task["libraries"] == libraries
 
 
 class TestLookupPreparer:

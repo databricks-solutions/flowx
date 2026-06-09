@@ -55,6 +55,7 @@ def translate(
 
     python_file = resolve_field(type_properties.get("pythonFile", ""), context)
     raw_parameters = type_properties.get("parameters") or []
+    libraries = type_properties.get("libraries")
 
     parameters = [_resolve_parameter(p, context) for p in raw_parameters]
 
@@ -62,4 +63,5 @@ def translate(
         **base_kwargs,
         python_file=python_file,
         parameters=parameters,
+        libraries=libraries,
     )

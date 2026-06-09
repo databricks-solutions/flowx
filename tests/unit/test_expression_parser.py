@@ -153,22 +153,32 @@ class TestItem:
 
 class TestUtcNow:
     def test_utcnow_no_format(self):
-        # ``@utcNow()`` resolves to Python ``datetime.now(...).isoformat()``
-        # rather than the DAB ref ``{{job.start_time.iso_datetime}}`` so
-        # compositions like ``@formatDateTime(utcNow(), '...')`` chain
-        # correctly.  DAB does not evaluate ADF expressions, so wrapping a
-        # DAB ref in another ADF function would emit broken YAML.
+        # ``@utcNow()`` maps to the Databricks job start time so the result
+        # lands directly in DAB YAML.  The translator attaches a note so
+        # the bundler can surface the activity-vs-job-start skew caveat in
+        # SETUP.md.
         result = resolve_expression("@utcNow()", _context())
         assert result is not None
-        assert result.kind == "notebook_code"
-        assert result.value == "datetime.now(timezone.utc).isoformat()"
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.start_time.iso_datetime}}"
+        assert any("utcnow" in note.lower() for note in result.notes)
 
-    def test_utcnow_with_format(self):
+    def test_utcnow_with_known_iso_format(self):
         result = resolve_expression("@utcNow('yyyy-MM-dd')", _context())
+        assert result is not None
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.start_time.iso_date}}"
+        assert any("utcnow" in note.lower() for note in result.notes)
+
+    def test_utcnow_with_unknown_format_falls_back_to_notebook_code(self):
+        # ``yyyyMMdd`` (no separators) is not in the DAB dynamic-value
+        # vocabulary, so flowx keeps the legacy Python strftime path.
+        result = resolve_expression("@utcNow('yyyyMMdd')", _context())
         assert result is not None
         assert result.kind == "notebook_code"
         assert "strftime" in result.value
-        assert "%Y-%m-%d" in result.value
+        assert "%Y%m%d" in result.value
+        assert result.notes == []
 
     def test_utcnow_expression_dict(self):
         result = resolve_expression(
@@ -176,7 +186,8 @@ class TestUtcNow:
             _context(),
         )
         assert result is not None
-        assert result.kind == "notebook_code"
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.start_time.iso_date}}"
 
 
 class TestConcat:
@@ -197,10 +208,13 @@ class TestConcat:
         assert "runDate" in result.value
 
     def test_concat_with_utcnow(self):
+        # ``utcNow('yyyy-MM-dd')`` is now a DAB ref, so concat wraps it as a
+        # widget read.  The result is still notebook_code because concat
+        # composes Python strings.
         result = resolve_expression("@concat('date_', utcNow('yyyy-MM-dd'))", _context())
         assert result is not None
         assert result.kind == "notebook_code"
-        assert "strftime" in result.value
+        assert "dbutils.widgets.get('iso_date')" in result.value
 
     def test_concat_with_pipeline_param(self):
         result = resolve_expression(
@@ -743,13 +757,11 @@ class TestBackwardCompat:
         result = parse_expression_for_dab("@pipeline().RunId")
         assert result == "{{job.run_id}}"
 
-    def test_parse_expression_for_dab_returns_none_for_utcnow(self):
-        # ``@utcNow()`` now resolves to notebook_code so it composes correctly
-        # with other ADF time functions.  ``parse_expression_for_dab`` only
-        # returns dab_ref kinds, so utcNow now yields ``None`` (the caller
-        # routes through the notebook_code path instead).
+    def test_parse_expression_for_dab_returns_ref_for_utcnow(self):
+        # ``@utcNow()`` maps to the Databricks job start time dynamic value
+        # so it can land in DAB YAML directly.
         result = parse_expression_for_dab("@utcNow()")
-        assert result is None
+        assert result == "{{job.start_time.iso_datetime}}"
 
     def test_parse_expression_for_dab_returns_none_for_non_expression(self):
         result = parse_expression_for_dab("plain_string")

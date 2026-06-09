@@ -243,8 +243,7 @@ answers into a JSON file (`<output_dir>/answers.json`) shaped like:
 {
   "copy_activity_paradigm": "sdp",
   "non_databricks_task_compute": "serverless",
-  "use_lakeflow_connectors": "lakeflow_connect",
-  "databricks_task_compute": "existing"
+  "use_lakeflow_connectors": "lakeflow_connect"
 }
 ```
 

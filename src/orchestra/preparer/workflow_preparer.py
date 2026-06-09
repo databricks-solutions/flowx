@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from flowx.models.dab import DabNotebook, SecretInstruction, SetupTask
+from flowx.models.dab import DabNotebook, ParameterApproximation, SecretInstruction, SetupTask
 from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
@@ -50,6 +50,7 @@ class PreparedActivity:
     # ``resources/pipelines/<resource_key>.yml``.  Each entry is a dict
     # with ``resource_key`` and ``definition`` keys.
     pipeline_resources: list[dict[str, Any]] = field(default_factory=list)
+    parameter_approximations: list[ParameterApproximation] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -65,6 +66,7 @@ class PreparedWorkflow:
     parameters: list[dict[str, Any]] = field(default_factory=list)
     cluster_hints: list[dict[str, Any]] = field(default_factory=list)
     pipeline_resources: list[dict[str, Any]] = field(default_factory=list)
+    parameter_approximations: list[ParameterApproximation] = field(default_factory=list)
 
 
 def run_if_from_adf_outcomes(outcomes: list[str | None]) -> str | None:
@@ -105,6 +107,9 @@ def build_common_task_fields(activity: Activity) -> dict[str, Any]:
 
     if activity.description:
         task["description"] = activity.description
+
+    if activity.existing_cluster_id:
+        task["existing_cluster_id"] = activity.existing_cluster_id
 
     return task
 
@@ -243,6 +248,7 @@ class PreparedArtifacts:
     setup_tasks: tuple[SetupTask, ...] = ()
     inner_workflows: tuple[PreparedWorkflow, ...] = ()
     pipeline_resources: tuple[dict[str, Any], ...] = ()
+    parameter_approximations: tuple[ParameterApproximation, ...] = ()
 
 
 def merge_prepared_artifacts(
@@ -256,6 +262,7 @@ def merge_prepared_artifacts(
         setup_tasks=artifacts.setup_tasks + tuple(prepared.setup_tasks),
         inner_workflows=artifacts.inner_workflows + tuple(prepared.inner_workflows),
         pipeline_resources=artifacts.pipeline_resources + tuple(prepared.pipeline_resources),
+        parameter_approximations=artifacts.parameter_approximations + tuple(prepared.parameter_approximations),
     )
 
 
@@ -307,6 +314,7 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         inner_workflows=list(artifacts.inner_workflows),
         cluster_hints=cluster_hints,
         pipeline_resources=list(artifacts.pipeline_resources),
+        parameter_approximations=list(artifacts.parameter_approximations),
     )
 
 

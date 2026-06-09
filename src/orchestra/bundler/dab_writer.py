@@ -244,6 +244,9 @@ def write_bundle(
     all_tasks = list(workflow.tasks)
     for inner in workflow.inner_workflows:
         all_tasks.extend(inner.tasks)
+    parameter_approximations = list(workflow.parameter_approximations)
+    for inner in workflow.inner_workflows:
+        parameter_approximations.extend(inner.parameter_approximations)
     known_bundle_jobs = {resource_key} | {normalize_task_key(inner.name) for inner in workflow.inner_workflows}
     # ``manual_parameters`` was collected above (before YAML emission) so
     # the broken values are also stripped from the on-disk YAML.
@@ -253,6 +256,7 @@ def write_bundle(
         known_bundle_jobs=known_bundle_jobs,
         cross_bundle_variables=dict(_cross_bundle_variables),
         manual_parameters=manual_parameters,
+        parameter_approximations=parameter_approximations,
     )
     setup_path = output_dir / "SETUP.md"
     setup_path.write_text(render_setup_md(prereqs, bundle_name=effective_name), encoding="utf-8")
@@ -1036,12 +1040,15 @@ def _reconstruct_preferences(raw: dict[str, Any] | None) -> Any:
         return None
     from flowx.adapter.models import TranslationPreferences
 
+    # Reports authored before the databricks_task_compute option was
+    # removed may still carry that key; drop it silently so old reports
+    # remain rehydratable.
     return TranslationPreferences(
         copy_activity_paradigm=raw.get("copy_activity_paradigm", "notebook"),
         non_databricks_task_compute=raw.get("non_databricks_task_compute", "serverless"),
         use_lakeflow_connectors=raw.get("use_lakeflow_connectors", "existing"),
-        databricks_task_compute=raw.get("databricks_task_compute", "existing"),
         lakeflow_connector_type=raw.get("lakeflow_connector_type", "cdc"),
+        motif_consolidations=dict(raw.get("motif_consolidations") or {}),
         per_task=dict(raw.get("per_task") or {}),
     )
 
@@ -1137,7 +1144,6 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             **base,
             main_class_name=task_ir.get("main_class_name", ""),
             parameters=task_ir.get("parameters"),
-            libraries=task_ir.get("libraries"),
         )
     if task_type == "SparkPythonActivity":
         return SparkPythonActivity(
@@ -1235,6 +1241,9 @@ def _common_activity_kwargs(task_ir: dict[str, Any]) -> dict[str, Any]:
         "min_retry_interval_millis": task_ir.get("min_retry_interval_millis"),
         "depends_on": _reconstruct_dependencies(task_ir.get("depends_on")),
         "cluster": task_ir.get("cluster"),
+        "existing_cluster_id": task_ir.get("existing_cluster_id"),
+        "libraries": task_ir.get("libraries"),
+        "parameter_approximations": list(task_ir.get("parameter_approximations") or []),
         "required_parameters": dict(task_ir.get("required_parameters") or {}),
         "compute_mode": task_ir.get("compute_mode"),
     }
