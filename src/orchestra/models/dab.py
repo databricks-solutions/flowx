@@ -123,6 +123,27 @@ class SetupTask:
     config: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True, kw_only=True)
+class ParameterApproximation:
+    """A base_parameter where orchestra substituted a DAB dynamic value for an
+    ADF expression with non-identical semantics (e.g. ``utcnow()`` mapped to
+    job start time).
+
+    Attributes:
+        task_key: DAB task key.
+        widget_name: The base_parameter name.
+        raw_expression: The original ADF expression text.
+        replacement: The DAB dynamic value reference orchestra emitted.
+        note: Human-readable caveat explaining the semantic difference.
+    """
+
+    task_key: str
+    widget_name: str
+    raw_expression: str
+    replacement: str
+    note: str
+
+
 # ---------------------------------------------------------------------------
 # Top-level bundle
 # ---------------------------------------------------------------------------

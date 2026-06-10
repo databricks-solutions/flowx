@@ -14,12 +14,17 @@ from typing import Final
 QUESTION_COPY_ACTIVITY_PARADIGM: Final[str] = "copy_activity_paradigm"
 QUESTION_NON_DATABRICKS_TASK_COMPUTE: Final[str] = "non_databricks_task_compute"
 QUESTION_USE_LAKEFLOW_CONNECTORS: Final[str] = "use_lakeflow_connectors"
-QUESTION_DATABRICKS_TASK_COMPUTE: Final[str] = "databricks_task_compute"
 QUESTION_LAKEFLOW_CONNECTOR_TYPE: Final[str] = "lakeflow_connector_type"
 QUESTION_METADATA_DRIVEN_CONSOLIDATE: Final[str] = "metadata_driven_consolidate"
 QUESTION_METADATA_DRIVEN_ACCESS: Final[str] = "metadata_driven_access"
 QUESTION_METADATA_DRIVEN_SIZE: Final[str] = "metadata_driven_size"
 QUESTION_METADATA_DRIVEN_LOOKUP_TOOL: Final[str] = "metadata_driven_lookup_tool"
+
+# Per-detected-motif consolidation question_ids carry the motif_id as a suffix
+# (e.g. ``consolidate_motif:rest_api_pagination``) so each detected motif gets
+# its own question.  Validation strips the prefix and validates the answer
+# against the :class:`MotifConsolidate` enum.
+MOTIF_CONSOLIDATE_QUESTION_PREFIX: Final[str] = "consolidate_motif:"
 
 METADATA_DRIVEN_MOTIF_ID: Final[str] = "metadata_driven_bulk_copy"
 

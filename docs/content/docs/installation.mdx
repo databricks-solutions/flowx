@@ -6,8 +6,8 @@ description: Install orchestra in Databricks Genie Code, Claude Code, or other a
 import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
 import { Callout } from 'fumadocs-ui/components/callout';
 
-Orchestra contains four [agent skills](https://github.com/ghanse/orchestra/tree/main/skills) (`ingest`, `translate`, `prepare`, and `migrate`) that teach agentic tools how to use the orchestra Python modules.
-Installing orchestra also installs all required dependencies to run the Python modules.
+Orchestra is a set of [agent skills](https://github.com/ghanse/orchestra/tree/main/skills) that can be installed and used with AI coding assistants.
+To use these skills, install orchestra as a plugin using your AI assistant's preferred installation method.
 
 <Tabs items={['Databricks Genie Code', 'Claude Code', 'Other AI tools']}>
 <Tab value="Databricks Genie Code">
@@ -41,7 +41,7 @@ orchestra, run the following command from a Claude Code session:
 You can also copy the skill folders into your local `/.claude/skills` folder:
 
 ```bash
-cp -R skills/{ingest,translate,prepare,migrate} ~/.claude/skills/
+cp -R skills/{setup,ingest,translate,prepare,migrate} ~/.claude/skills/
 ```
 
 Once installed, the skills can be invoked using `/orchestra:migrate`, `/orchestra:ingest`, etc. Claude Code can also invoke the skills when prompted.  See the [Claude Code Plugins documentation](https://docs.claude.com/en/docs/claude-code/plugins) for more details.
@@ -50,7 +50,7 @@ Once installed, the skills can be invoked using `/orchestra:migrate`, `/orchestr
 <Tab value="Other AI tools">
 Any tool that supports the [Agent Skills](https://agentskills.io/) open standard can install the orchestra skills. The general pattern:
 
-1. Copy each skill folder (`skills/ingest`, `skills/translate`, `skills/prepare`, `skills/migrate`) into the tool's configured skills directory.
+1. Copy each skill folder (`skills/setup`, `skills/ingest`, `skills/translate`, `skills/prepare`, `skills/migrate`) into the tool's configured skills directory.
 2. Make sure the path contains `SKILL.md` directly,
 3. Restart the tool if it caches skill metadata at startup.
 
@@ -64,10 +64,50 @@ cat skills/*/SKILL.md > orchestra-skills.md
 </Tab>
 </Tabs>
 
+## Setting up the Python environment
+
+Orchestra's skills invoke Python modules that may depend on third-party packages. The `setup` skill provisions an isolated virtual environment with the required dependencies.
+
+Run it **once** after installing the skills, before `ingest`, `translate`, `prepare`, or `migrate`. Just ask your agent:
+
+> Set up the orchestra environment
+
+The setup script can also be run directly from the plugin root:
+
+```bash
+bash <plugin_dir>/scripts/bootstrap.sh
+```
+
+Running the setup process will:
+
+1. Check that `python3`, `pip`, and `venv` are available.
+2. Create `<plugin_dir>/.venv` if it doesn't already exist.
+3. Install the `requirements.txt` dependencies into your virtual environment using `pip`.
+
+The environment is created once and reused. Re-running the script simply confirms the venv exists and its dependencies are satisfied.
+
+<Callout type="warn" title="Python not found">
+If `python3`, `pip`, or the `venv` module are missing, the script will print a warning and exit **without** creating anything.
+To install Python in your environment, run one of the following commands:
+
+* **macOS:** `brew install python`
+* **Debian/Ubuntu:** `sudo apt-get install python3 python3-venv python3-pip`
+* **Windows:** [python.org/downloads](https://www.python.org/downloads/) (enable "Add python.exe to PATH")
+</Callout>
+
+After the venv exists, every Python command the skills run uses the venv interpreter with `src/` on `PYTHONPATH`:
+
+```bash
+export PYTHONPATH="<plugin_dir>/src"
+"<plugin_dir>/.venv/bin/python" -m orchestra.adapter inputs ingest
+```
+
+On Windows, the interpreter is `<plugin_dir>\.venv\Scripts\python.exe`. The agent normally runs these commands for you; they are handy for troubleshooting a `ModuleNotFoundError`.
+
 ## Verifying the installation
 
 Open your agent and ask:
 
 > What orchestra skills do you have available?
 
-You should see all four skills listed with their descriptions. If only some appear, double-check the install path your tool watches for skills.
+You should see all five skills listed with their descriptions. If only some appear, double-check the install path your tool watches for skills.

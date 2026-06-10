@@ -12,12 +12,34 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True, kw_only=True)
 class ExpressionResult:
-    """Result of resolving an ADF expression."""
+    """Result of resolving an ADF expression.
 
-    kind: str  # "literal", "dab_ref", "notebook_code"
+    Attributes:
+        kind: One of ``"literal"`` / ``"dab_ref"`` / ``"notebook_code"``.
+        value: The resolved value text.
+        imports: Imports the notebook_code value needs.
+        required_parameters: Widget name -> DAB ref mapping for
+            base_parameters threading.
+        notes: Free-form caveats surfaced in SETUP.md.
+        was_string_literal: C-34 (VAREX4-002): True when the original
+            ADF token was a quoted string (``'09'``, ``"12"``) so the
+            function-call codegen path can ``repr()`` it instead of
+            emitting a bare numeric token that strips quotedness.
+        was_bool_literal: C-34 (VAREX4-003): True when the original ADF
+            token was ``true`` / ``false``.  ADF Booleans serialise as
+            the lowercase strings ``'true'``/``'false'`` on the
+            SetVariable consumer side (post-C-21), so comparisons must
+            emit ``'true'`` / ``'false'`` Python strings rather than the
+            bare Python ``True`` / ``False``.
+    """
+
+    kind: str
     value: str
     imports: list[str] = field(default_factory=list)
     required_parameters: dict[str, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+    was_string_literal: bool = False
+    was_bool_literal: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -46,6 +68,12 @@ class Activity:
         min_retry_interval_millis: Minimum delay between retries (ms).
         depends_on: Upstream task dependencies.
         cluster: Cluster configuration for the task, if any.
+        existing_cluster_id: ID of an existing all-purpose cluster the task
+            should run on.
+        libraries: Task-scoped library descriptors carried through from ADF.
+            Each entry is a supported Databricks task library; see
+            https://docs.databricks.com/aws/en/dev-tools/bundles/library-dependencies
+            for the supported shapes.
     """
 
     name: str
@@ -56,10 +84,13 @@ class Activity:
     min_retry_interval_millis: int | None = None
     depends_on: list[Dependency] | None = None
     cluster: dict[str, Any] | None = None
-    # Widget-name → DAB-ref mapping for every `dbutils.widgets.get()` call
-    # that shows up in any notebook_code the translator produced for this
-    # activity.  Preparers thread these into ``base_parameters`` so DAB
-    # resolves the refs at job runtime.
+    existing_cluster_id: str | None = None
+    libraries: list[dict[str, Any]] | None = None
+    # Approximate parameter substitutions made at translation time (e.g.
+    # ``utcnow()`` mapped to ``{{job.start_time.iso_datetime}}``).  Each
+    # entry has keys ``widget_name``, ``raw_expression``, ``replacement``,
+    # and ``note``; the bundler surfaces these in SETUP.md.
+    parameter_approximations: list[dict[str, str]] = field(default_factory=list)
     required_parameters: dict[str, str] = field(default_factory=dict)
     # Compute mode stamped by the pipeline modifier in response to user
     # preferences.  One of "serverless", "classic_single_node",
@@ -75,11 +106,27 @@ class NotebookActivity(Activity):
         notebook_path: Workspace path to the notebook.
         base_parameters: Parameters passed to the notebook at runtime.
         linked_service_definition: Raw linked-service dictionary for cluster config.
+        notebook_path_unresolved: C-28 (NB-ITER4-001): True when the ADF
+            ``notebookPath`` is a dynamic expression the translator couldn't
+            reduce to a literal/dab_ref workspace path.  The preparer emits
+            a dispatch-stub notebook that reads ``notebook_path`` from a
+            widget and ``dbutils.notebook.run()``s the resolved value.
+        notebook_path_expression: Raw ADF expression text captured when
+            ``notebook_path_unresolved`` is True, surfaced in SETUP.md.
+        unresolved_libraries: C-30 (NB-ITER4-003): library descriptor
+            entries whose value (jar/whl/egg/requirements path) carried an
+            ADF expression the resolver couldn't reduce to a literal or
+            dab_ref.  Each entry has ``type`` (library shape key),
+            ``expression`` (raw ADF text), and ``missing`` (referenced
+            identifier names not bound in the translation context).
     """
 
     notebook_path: str
     base_parameters: dict[str, str] | None = None
     linked_service_definition: dict[str, Any] | None = None
+    notebook_path_unresolved: bool = False
+    notebook_path_expression: str | None = None
+    unresolved_libraries: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -132,11 +179,23 @@ class ForEachActivity(Activity):
         inner_activities: Translated activities executed for each item.
         concurrency: Maximum parallel iterations (maps to Databricks
             ``for_each_task.concurrency``).
+        inputs_bridge_notebook_code: C-31 (CF4-001): when the items
+            expression resolves to ``notebook_code`` (e.g.
+            ``@split(variables('fecha'),',')``), the translator captures
+            the Python code here while the full TranslationContext is
+            available.  The preparer reads it instead of re-resolving
+            against an empty context (which silently failed before).
+        inputs_bridge_notebook_imports: Imports the bridge code needs.
+        inputs_bridge_required_parameters: Widget name → DAB ref mapping
+            for the bridge notebook's base_parameters.
     """
 
     items_expression: str
     inner_activities: list[Activity] = field(default_factory=list)
     concurrency: int | None = None
+    inputs_bridge_notebook_code: str | None = None
+    inputs_bridge_notebook_imports: list[str] = field(default_factory=list)
+    inputs_bridge_required_parameters: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -149,6 +208,16 @@ class IfConditionActivity(Activity):
         right: Right-hand operand expression.
         if_true_activities: Activities for the true branch.
         if_false_activities: Activities for the false branch.
+        bridge_notebook_code: C-07 (CF-iter2-001 / VAREX-003): when the
+            ADF condition expression contained a function call that
+            couldn't be lowered to a literal/dab_ref operand,
+            ``bridge_notebook_code`` carries the Python code that
+            evaluates it.  The preparer synthesises a hidden SetVariable
+            task that runs this code and points ``left`` at the
+            resulting task value.
+        bridge_notebook_imports: Imports the bridge notebook code needs.
+        bridge_required_parameters: Widget name -> DAB ref mapping for
+            the bridge notebook's base_parameters.
     """
 
     op: str
@@ -156,6 +225,9 @@ class IfConditionActivity(Activity):
     right: str
     if_true_activities: list[Activity] = field(default_factory=list)
     if_false_activities: list[Activity] = field(default_factory=list)
+    bridge_notebook_code: str | None = None
+    bridge_notebook_imports: list[str] = field(default_factory=list)
+    bridge_required_parameters: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -165,16 +237,23 @@ class SetVariableActivity(Activity):
     Attributes:
         variable_name: Name of the variable being set.
         variable_value: Expression string that evaluates to the value.
-        value_kind: Kind of the resolved expression ("literal", "dab_ref", "notebook_code").
+        value_kind: Kind of the resolved expression ("literal", "dab_ref",
+            "notebook_code", "unresolved").
         notebook_code: Python code for notebook_code kind values.
         notebook_imports: Import statements needed for notebook_code.
+        raw_expression: C-33 (VAREX4-001 / CF4-003): when ``value_kind`` is
+            ``"unresolved"`` (the resolver returned None for an ADF
+            ``@``-prefixed value), this carries the original ADF
+            expression text so SETUP.md can surface the manual
+            initialisation step.
     """
 
     variable_name: str
     variable_value: str
-    value_kind: str = "literal"  # "literal", "dab_ref", "notebook_code"
+    value_kind: str = "literal"  # "literal", "dab_ref", "notebook_code", "unresolved"
     notebook_code: str | None = None
     notebook_imports: list[str] = field(default_factory=list)
+    raw_expression: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -269,12 +348,10 @@ class SparkJarActivity(Activity):
     Attributes:
         main_class_name: Fully qualified main class within the JAR.
         parameters: Arguments passed to the main class.
-        libraries: Library descriptors (JARs, wheels, etc.).
     """
 
     main_class_name: str
     parameters: list[str] | None = None
-    libraries: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -311,11 +388,21 @@ class SwitchActivity(Activity):
         on_expression: The ADF expression to evaluate.
         cases: Ordered list of case branches.
         default_activities: Activities to run when no case matches.
+        bridge_notebook_code: C-07 (CF-iter2-001 / CF-iter2-003): when
+            ``on_expression`` cannot be lowered to a literal/dab_ref, this
+            field carries the Python code the preparer runs in a bridge
+            task so the resolved value drives ``condition_task.left``.
+        bridge_notebook_imports: Imports for the bridge notebook code.
+        bridge_required_parameters: Widget name -> DAB ref mapping for
+            the bridge notebook's base_parameters.
     """
 
     on_expression: str
     cases: list[SwitchCase] = field(default_factory=list)
     default_activities: list[Activity] = field(default_factory=list)
+    bridge_notebook_code: str | None = None
+    bridge_notebook_imports: list[str] = field(default_factory=list)
+    bridge_required_parameters: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -480,6 +567,10 @@ class TranslationContext:
     registry: MappingProxyType[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     variable_cache: MappingProxyType[str, str] = field(default_factory=lambda: MappingProxyType({}))
     variable_value_cache: MappingProxyType[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    variable_types: MappingProxyType[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    variable_default_literals: MappingProxyType[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    global_parameters: MappingProxyType[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    linked_service_parameters: MappingProxyType[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
     def with_activity(self, name: str, activity: Activity) -> TranslationContext:
         """Return a new context with *activity* added to the cache.
@@ -496,6 +587,10 @@ class TranslationContext:
             registry=self.registry,
             variable_cache=self.variable_cache,
             variable_value_cache=self.variable_value_cache,
+            variable_types=self.variable_types,
+            variable_default_literals=self.variable_default_literals,
+            global_parameters=self.global_parameters,
+            linked_service_parameters=self.linked_service_parameters,
         )
 
     def get_activity(self, activity_name: str) -> Activity | None:
@@ -537,15 +632,101 @@ class TranslationContext:
             registry=self.registry,
             variable_cache=MappingProxyType({**self.variable_cache, variable_name: task_key}),
             variable_value_cache=new_variable_value_cache,
+            variable_types=self.variable_types,
+            variable_default_literals=self.variable_default_literals,
+            global_parameters=self.global_parameters,
+            linked_service_parameters=self.linked_service_parameters,
+        )
+
+    def with_variable_types(
+        self,
+        types: dict[str, str],
+        *,
+        default_literals: dict[str, str] | None = None,
+    ) -> TranslationContext:
+        """Return a new context seeded with declared variable types.
+
+        Args:
+            types: Mapping of variable name -> ADF declared type
+                (``"String"``, ``"Boolean"``, ``"Array"``, ...).  Used by
+                the IfCondition fallback to recognise Boolean variables
+                whose value is seeded only by a literal init task (and
+                therefore absent from ``variable_value_cache``).
+            default_literals: Optional mapping of variable name -> seeded
+                literal default (e.g. ``"true"``/``"false"``).  The
+                IfCondition bridge (C-43) recomputes a Boolean operand
+                locally from this literal so an inner-ForEach condition does
+                not dangle to a parent-job task value.
+
+        Returns:
+            New context carrying the variable type / default-literal maps.
+        """
+        return TranslationContext(
+            activity_cache=self.activity_cache,
+            registry=self.registry,
+            variable_cache=self.variable_cache,
+            variable_value_cache=self.variable_value_cache,
+            variable_types=MappingProxyType({**self.variable_types, **types}),
+            variable_default_literals=MappingProxyType({**self.variable_default_literals, **(default_literals or {})}),
+            global_parameters=self.global_parameters,
+            linked_service_parameters=self.linked_service_parameters,
         )
 
     def get_variable_task_key(self, variable_name: str) -> str | None:
         """Look up the task key that sets a variable."""
         return self.variable_cache.get(variable_name)
 
+    def get_variable_type(self, variable_name: str) -> str | None:
+        """Look up a variable's declared ADF type, if known."""
+        return self.variable_types.get(variable_name)
+
+    def get_variable_default_literal(self, variable_name: str) -> str | None:
+        """Look up a variable's seeded literal default value, if known."""
+        return self.variable_default_literals.get(variable_name)
+
     def get_variable_dab_ref(self, variable_name: str) -> str | None:
         """Look up the inlined DAB ref value for a variable, if available."""
         return self.variable_value_cache.get(variable_name)
+
+    def with_linked_service_parameters(self, params: dict[str, Any]) -> TranslationContext:
+        """Return a new context with linked-service-scoped parameters applied.
+
+        Args:
+            params: Mapping of LS parameter name -> resolved value.  Used
+                by ``@linkedService().X`` references in LS typeProperties.
+
+        Returns:
+            New context with the parameters bound for the current activity.
+        """
+        return TranslationContext(
+            activity_cache=self.activity_cache,
+            registry=self.registry,
+            variable_cache=self.variable_cache,
+            variable_value_cache=self.variable_value_cache,
+            variable_types=self.variable_types,
+            variable_default_literals=self.variable_default_literals,
+            global_parameters=self.global_parameters,
+            linked_service_parameters=MappingProxyType(dict(params)),
+        )
+
+    def get_global_parameter(self, name: str) -> Any:
+        """Look up a factory-level global parameter value.
+
+        Args:
+            name: Global parameter name (e.g. ``"env_variable"``).
+
+        Returns:
+            The parameter value if present, else ``None``.  Values may be
+            scalar or dict-typed (e.g. ``{"type": "string", "value": "t"}``).
+        """
+        raw = self.global_parameters.get(name)
+        if isinstance(raw, dict) and "value" in raw:
+            return raw["value"]
+        return raw
+
+    def get_linked_service_parameter(self, name: str) -> Any:
+        """Look up an activity-supplied linked-service parameter value."""
+        return self.linked_service_parameters.get(name)
 
 
 TranslationResult: TypeAlias = Activity | UnsupportedActivity
@@ -578,7 +759,15 @@ class TranslationReport:
         agentic_count: Activities requiring agentic translation.
         unsupported_count: Activities that could not be translated.
         gaps: List of agentic gaps identified during translation.
-        warnings: Human-readable warning messages emitted during translation.
+        warnings: Human-readable warning messages emitted during translation,
+            including unresolved ``@{...}`` ADF expressions surfaced by the
+            whole-IR rewriter.
+        detected_motifs: Multi-activity patterns the detector matched on the
+            source AST.  When the caller did not supply a motif-consolidation
+            answer the translator collapses every entry into a single
+            :class:`MotifActivity`; otherwise the list still reports what
+            was detected so the adapter can prompt the user.  The objects
+            here are :class:`~orchestra.models.motifs.DetectedMotif` instances.
     """
 
     pipeline: Pipeline
@@ -587,3 +776,4 @@ class TranslationReport:
     unsupported_count: int = 0
     gaps: list[AgenticGap] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    detected_motifs: list[Any] = field(default_factory=list)

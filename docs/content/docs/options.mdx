@@ -49,14 +49,24 @@ Copy activities that carry an explicit SQL query (`sqlReaderQuery`, `query`, or 
 must use a [query-based connector](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/query-based-overview).
 </Callout>
 
-## databricks_task_compute
+## consolidate_motif:&lt;motif_id&gt;
 
-Controls the compute used to run Databricks Notebook and Spark Python tasks in the translated job.
+For every multi-activity motif the detector matches in a pipeline (`incremental_load_watermark`,
+`rest_api_pagination`, `metadata_driven_bulk_copy`, ...), orchestra raises a per-motif
+question with id `consolidate_motif:<motif_id>` so each detected pattern can be approved
+or rejected independently.
 
-| Value        | Default | Behavior                                                                                                                          |
-|--------------|---------|-----------------------------------------------------------------------------------------------------------------------------------|
-| `existing`   | True    | Uses the source pipeline's compute definition (e.g. a job cluster). Preserves init scripts, DBR-version, and other configuration. |
-| `serverless` | False   | Drops the source pipeline's cluster definition; The translated tasks run on serverless compute.                                   |
+| Value         | Default | Behavior                                                                                                                                 |
+|---------------|---------|------------------------------------------------------------------------------------------------------------------------------------------|
+| `keep`        | True    | Preserves the activity-by-activity translation; the motif detection result is informational only.                                        |
+| `consolidate` | False   | Collapses the matched activities into a single `MotifActivity` whose target is the motif's `databricks_replacement` (e.g. `auto_loader`).  |
+
+<Callout type="info" title="Why opt-in?">
+Motif detection is heuristic. Defaulting to `keep` means a false-positive match (e.g. classifying
+a submit-and-poll Web/Until/SetVariable chain as REST pagination) cannot silently rewrite the
+pipeline; the activities continue to translate one-for-one until the user explicitly confirms the
+pattern.
+</Callout>
 
 ## metadata_driven_consolidate
 

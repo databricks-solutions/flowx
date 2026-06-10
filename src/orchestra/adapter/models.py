@@ -29,13 +29,6 @@ class UseLakeflowConnectors(StrEnum):
     EXISTING = "existing"
 
 
-class DatabricksTaskCompute(StrEnum):
-    """Compute mode used for ADF DatabricksNotebook and DatabricksSparkPython tasks."""
-
-    SERVERLESS = "serverless"
-    EXISTING = "existing"
-
-
 class LakeflowConnectorType(StrEnum):
     """Lakeflow Connect connector flavour for an eligible Copy ingestion.
 
@@ -85,12 +78,24 @@ class MetadataDrivenLookupTool(StrEnum):
     NONE = "none"
 
 
+class MotifConsolidate(StrEnum):
+    """Whether to collapse a detected motif into a single :class:`MotifActivity`.
+
+    Default for every detected motif is :data:`KEEP` -- preserving the
+    underlying activity-by-activity translation -- so motif detection
+    can never silently rewrite a pipeline without an explicit user
+    opt-in.
+    """
+
+    KEEP = "keep"
+    CONSOLIDATE = "consolidate"
+
+
 FIELD_TO_ENUM: Final[MappingProxyType[str, type[StrEnum]]] = MappingProxyType(
     {
         "copy_activity_paradigm": CopyActivityParadigm,
         "non_databricks_task_compute": NonDatabricksTaskCompute,
         "use_lakeflow_connectors": UseLakeflowConnectors,
-        "databricks_task_compute": DatabricksTaskCompute,
         "lakeflow_connector_type": LakeflowConnectorType,
         "metadata_driven_consolidate": MetadataDrivenConsolidate,
         "metadata_driven_access": MetadataDrivenAccess,
@@ -113,22 +118,26 @@ class TranslationPreferences:
         non_databricks_task_compute: Compute mode for non-Databricks tasks.
         use_lakeflow_connectors: Whether eligible database-source Copy
             patterns are migrated to managed Lakeflow Connect pipelines.
-        databricks_task_compute: Compute mode for ADF DatabricksNotebook and
-            DatabricksSparkPython tasks.
         per_task: Optional per-activity overrides keyed by task_key.  Each
-            value is a partial mapping of the four fields above; only the
+            value is a partial mapping of the fields above; only the
             keys present win over the pipeline-wide defaults.
+
+    ADF DatabricksNotebook and DatabricksSparkPython tasks always keep
+    the cluster binding derived from the source linked service -- the
+    serverless replacement option was removed because it silently
+    discarded init scripts and DBR-version constraints that the source
+    pipeline relied on.
     """
 
     copy_activity_paradigm: CopyActivityParadigm = CopyActivityParadigm.NOTEBOOK
     non_databricks_task_compute: NonDatabricksTaskCompute = NonDatabricksTaskCompute.SERVERLESS
     use_lakeflow_connectors: UseLakeflowConnectors = UseLakeflowConnectors.EXISTING
-    databricks_task_compute: DatabricksTaskCompute = DatabricksTaskCompute.EXISTING
     lakeflow_connector_type: LakeflowConnectorType = LakeflowConnectorType.CDC
     metadata_driven_consolidate: MetadataDrivenConsolidate = MetadataDrivenConsolidate.KEEP
     metadata_driven_access: MetadataDrivenAccess = MetadataDrivenAccess.NO
     metadata_driven_size: MetadataDrivenSize = MetadataDrivenSize.LARGE
     metadata_driven_lookup_tool: MetadataDrivenLookupTool = MetadataDrivenLookupTool.NONE
+    motif_consolidations: dict[str, MotifConsolidate] = field(default_factory=dict)
     per_task: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -142,6 +151,13 @@ class TranslationPreferences:
             value = getattr(self, field_name)
             if not isinstance(value, enum_cls):
                 object.__setattr__(self, field_name, enum_cls(value))
+        # motif_consolidations is keyed by dynamic motif_id rather than a
+        # fixed field name, so it is not in FIELD_TO_ENUM.  Coerce its
+        # values to MotifConsolidate members here.
+        coerced: dict[str, MotifConsolidate] = {}
+        for motif_id, choice in self.motif_consolidations.items():
+            coerced[motif_id] = choice if isinstance(choice, MotifConsolidate) else MotifConsolidate(choice)
+        object.__setattr__(self, "motif_consolidations", coerced)
 
     def effective_for(self, task_key: str) -> TranslationPreferences:
         """Returns a preferences view where per-task overrides for *task_key* win.
@@ -167,9 +183,6 @@ class TranslationPreferences:
             use_lakeflow_connectors=UseLakeflowConnectors(
                 override.get("use_lakeflow_connectors", self.use_lakeflow_connectors)
             ),
-            databricks_task_compute=DatabricksTaskCompute(
-                override.get("databricks_task_compute", self.databricks_task_compute)
-            ),
             lakeflow_connector_type=LakeflowConnectorType(
                 override.get("lakeflow_connector_type", self.lakeflow_connector_type)
             ),
@@ -183,6 +196,7 @@ class TranslationPreferences:
             metadata_driven_lookup_tool=MetadataDrivenLookupTool(
                 override.get("metadata_driven_lookup_tool", self.metadata_driven_lookup_tool)
             ),
+            motif_consolidations=dict(self.motif_consolidations),
             per_task=self.per_task,
         )
 

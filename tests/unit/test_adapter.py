@@ -10,7 +10,6 @@ import pytest
 
 from orchestra.adapter import (
     CopyActivityParadigm,
-    DatabricksTaskCompute,
     NonDatabricksTaskCompute,
     TranslationInputRequired,
     TranslationPreferences,
@@ -29,7 +28,6 @@ from orchestra.adapter.constants import (
     COMPUTE_MODE_SERVERLESS,
     LAKEFLOW_CONNECT_REPLACEMENT,
     QUESTION_COPY_ACTIVITY_PARADIGM,
-    QUESTION_DATABRICKS_TASK_COMPUTE,
     QUESTION_LAKEFLOW_CONNECTOR_TYPE,
     QUESTION_METADATA_DRIVEN_ACCESS,
     QUESTION_METADATA_DRIVEN_CONSOLIDATE,
@@ -129,7 +127,6 @@ class TestPreferences:
         assert prefs.copy_activity_paradigm is CopyActivityParadigm.NOTEBOOK
         assert prefs.non_databricks_task_compute is NonDatabricksTaskCompute.SERVERLESS
         assert prefs.use_lakeflow_connectors is UseLakeflowConnectors.EXISTING
-        assert prefs.databricks_task_compute is DatabricksTaskCompute.EXISTING
 
     def test_string_values_coerce_to_enums(self):
         prefs = TranslationPreferences(
@@ -235,21 +232,23 @@ class TestGatherQuestions:
         lfc_question = next(q for q in pending.questions if q.question_id == QUESTION_USE_LAKEFLOW_CONNECTORS)
         assert "motif_incremental_load_watermark" in lfc_question.affected_task_keys
 
-    def test_databricks_task_compute_question_when_notebook_present(self):
+    def test_no_databricks_task_compute_question_for_notebook(self):
+        """The serverless-replacement question for Databricks tasks was removed."""
         pipeline = Pipeline(
             name="p",
             tasks=[NotebookActivity(**_make_base("nb"), notebook_path="/Shared/x")],
         )
         ids = {q.question_id for q in gather_questions(pipeline).questions}
-        assert QUESTION_DATABRICKS_TASK_COMPUTE in ids
+        assert "databricks_task_compute" not in ids
 
-    def test_databricks_task_compute_question_for_spark_python(self):
+    def test_no_databricks_task_compute_question_for_spark_python(self):
+        """The serverless-replacement question for Databricks tasks was removed."""
         pipeline = Pipeline(
             name="p",
             tasks=[SparkPythonActivity(**_make_base("py"), python_file="dbfs:/scripts/etl.py")],
         )
         ids = {q.question_id for q in gather_questions(pipeline).questions}
-        assert QUESTION_DATABRICKS_TASK_COMPUTE in ids
+        assert "databricks_task_compute" not in ids
 
     def test_already_answered_filters_pending(self):
         pipeline = Pipeline(name="p", tasks=[_delta_copy()])
@@ -271,6 +270,56 @@ class TestGatherQuestions:
         )
         assert question is not None
         assert "inner_copy" in question.affected_task_keys
+
+    def test_motif_consolidation_question_emitted_per_detected_motif(self):
+        """Each detected motif produces a ``consolidate_motif:<id>`` question."""
+        pipeline = Pipeline(name="p", tasks=[_delta_copy()])
+        motifs = [
+            DetectedMotif(
+                definition=MOTIF_INCREMENTAL_LOAD_WATERMARK,
+                matched_activities=["WatermarkLookup", "DeltaCopy"],
+                source_type_hint="database",
+                confidence_notes=["Detector matched Lookup→Copy→SP chain"],
+            )
+        ]
+        pending = gather_questions(pipeline, motifs)
+        ids = {q.question_id for q in pending.questions}
+        assert "consolidate_motif:incremental_load_watermark" in ids
+        motif_question = next(
+            q for q in pending.questions if q.question_id == "consolidate_motif:incremental_load_watermark"
+        )
+        assert motif_question.default == "keep"
+        assert {opt.value for opt in motif_question.options} == {"keep", "consolidate"}
+        assert "WatermarkLookup" in motif_question.affected_task_keys
+        # Confidence note must surface in the rationale so the agent can quote it
+        assert "Detector matched Lookup→Copy→SP chain" in motif_question.rationale
+
+    def test_motif_consolidation_question_filtered_by_answer(self):
+        """Once answered the per-motif question must drop out of pending."""
+        pipeline = Pipeline(name="p", tasks=[_delta_copy()])
+        motifs = [
+            DetectedMotif(
+                definition=MOTIF_INCREMENTAL_LOAD_WATERMARK,
+                matched_activities=["WatermarkLookup"],
+                source_type_hint=None,
+                confidence_notes=[],
+            )
+        ]
+        pending = gather_questions(
+            pipeline,
+            motifs,
+            answers={"consolidate_motif:incremental_load_watermark": "consolidate"},
+        )
+        ids = {q.question_id for q in pending.questions}
+        assert "consolidate_motif:incremental_load_watermark" not in ids
+
+    def test_motif_consolidation_validate_answer_accepts_keep_or_consolidate(self):
+        assert validate_answer("consolidate_motif:rest_api_pagination", "keep") == "keep"
+        assert validate_answer("consolidate_motif:rest_api_pagination", "consolidate") == "consolidate"
+
+    def test_motif_consolidation_validate_answer_rejects_unknown_value(self):
+        with pytest.raises(ValueError, match="Invalid answer"):
+            validate_answer("consolidate_motif:rest_api_pagination", "merge")
 
 
 class TestValidateAnswer:
@@ -302,14 +351,19 @@ class TestApplyPreferences:
         assert modified.tasks[0].compute_mode == COMPUTE_MODE_CLASSIC_MULTI_NODE
         assert modified.tasks[1].compute_mode == COMPUTE_MODE_CLASSIC_SINGLE_NODE
 
-    def test_databricks_task_serverless_stamps_serverless(self):
+    def test_databricks_task_always_inherits_linked_service_cluster(self):
+        """DatabricksNotebook activities always inherit the source linked-service cluster
+        binding; the serverless replacement option was removed."""
         pipeline = Pipeline(name="p", tasks=[NotebookActivity(**_make_base("nb"), notebook_path="/Shared/x")])
-        prefs = TranslationPreferences(databricks_task_compute="serverless")
-        modified = apply_preferences(pipeline, prefs)
-        assert modified.tasks[0].compute_mode == COMPUTE_MODE_SERVERLESS
+        modified = apply_preferences(pipeline, TranslationPreferences())
+        assert modified.tasks[0].compute_mode == COMPUTE_MODE_INHERIT
 
-    def test_databricks_task_existing_stamps_inherit(self):
-        pipeline = Pipeline(name="p", tasks=[NotebookActivity(**_make_base("nb"), notebook_path="/Shared/x")])
+    def test_spark_python_always_inherits_linked_service_cluster(self):
+        """DatabricksSparkPython activities always inherit the source linked-service cluster
+        binding; the serverless replacement option was removed."""
+        pipeline = Pipeline(
+            name="p", tasks=[SparkPythonActivity(**_make_base("py"), python_file="dbfs:/scripts/etl.py")]
+        )
         modified = apply_preferences(pipeline, TranslationPreferences())
         assert modified.tasks[0].compute_mode == COMPUTE_MODE_INHERIT
 
@@ -459,7 +513,6 @@ class TestSerializationRoundtrip:
             copy_activity_paradigm="sdp",
             non_databricks_task_compute="classic",
             use_lakeflow_connectors="lakeflow_connect",
-            databricks_task_compute="serverless",
         )
         stamped = apply_preferences(pipeline, prefs)
         roundtripped, _ = pipeline_dict_to_ir(json.loads(json.dumps(_pipeline_to_dict(stamped), default=str)))
@@ -467,7 +520,9 @@ class TestSerializationRoundtrip:
         assert roundtripped.tasks[0].target_format == "sdp"
         assert roundtripped.tasks[0].use_lakeflow_connector is True
         assert roundtripped.tasks[0].compute_mode == COMPUTE_MODE_CLASSIC_MULTI_NODE
-        assert roundtripped.tasks[1].compute_mode == COMPUTE_MODE_SERVERLESS
+        # NotebookActivity always inherits the linked-service cluster binding now
+        # that the serverless replacement option has been removed.
+        assert roundtripped.tasks[1].compute_mode == COMPUTE_MODE_INHERIT
 
 
 class TestMigrationInputSession:
@@ -1122,23 +1177,6 @@ class TestBundleOutput:
         body = setup_notebook.read_text()
         assert "orchestra_copy_a_connection" in body
         assert "SQLSERVER" in body
-
-    def test_serverless_existing_notebook_skips_default_cluster_bind(self, tmp_path: Path):
-        import yaml
-
-        from orchestra.bundler.dab_writer import write_bundle
-        from orchestra.preparer.workflow_preparer import prepare_workflow
-
-        pipeline = Pipeline(
-            name="job",
-            tasks=[NotebookActivity(**_make_base("nb"), notebook_path="/Shared/existing")],
-        )
-        stamped = apply_preferences(pipeline, TranslationPreferences(databricks_task_compute="serverless"))
-        workflow = prepare_workflow(stamped)
-        write_bundle(workflow, tmp_path)
-        job_yml = yaml.safe_load((tmp_path / "resources" / "job.yml").read_text())
-        task = job_yml["resources"]["jobs"]["job"]["tasks"][0]
-        assert "job_cluster_key" not in task
 
     def test_existing_default_binds_to_default_cluster(self, tmp_path: Path):
         import yaml

@@ -10,7 +10,10 @@ from orchestra.models.ir import ExpressionResult, TranslationContext
 
 _ITEM_RE = re.compile(r"item\(\s*\)$", re.IGNORECASE)
 
-_ITEM_FIELD_RE = re.compile(r"item\(\s*\)\.(\w+)", re.IGNORECASE)
+# C-35 (CF4-004): anchor the end-of-string so multi-segment chains like
+# ``item().condition.name`` don't match here and silently drop the trailing
+# ``.name`` (the previous behaviour mapped to ``{{input.condition}}``).
+_ITEM_FIELD_RE = re.compile(r"item\(\s*\)\.(\w+)\s*$", re.IGNORECASE)
 
 _ACTIVITY_OUTPUT_RE = re.compile(
     r"""activity\(\s*'([^']+)'\s*\)\.output(?:\.(.+))?""",
@@ -22,8 +25,23 @@ _PIPELINE_PARAM_RE = re.compile(
     re.IGNORECASE,
 )
 
+_PIPELINE_GLOBAL_PARAM_RE = re.compile(
+    r"""pipeline\(\s*\)\.globalParameters\.(\w+)""",
+    re.IGNORECASE,
+)
+
 _PIPELINE_PROPERTY_RE = re.compile(
     r"""pipeline\(\s*\)\.(\w+)""",
+    re.IGNORECASE,
+)
+
+_LINKED_SERVICE_PARAM_RE = re.compile(
+    r"""linkedService\(\s*\)\.(\w+)""",
+    re.IGNORECASE,
+)
+
+_ITEM_SAFE_NAV_RE = re.compile(
+    r"item\(\s*\)((?:\??\.\w+)+)$",
     re.IGNORECASE,
 )
 
@@ -67,9 +85,16 @@ _DAB_PIPELINE_PROPERTY_MAP: dict[str, str] = {
 _INTERPOLATION_RE = re.compile(r"@\{(.+?)\}")
 
 _FUNCTION_CALL_RE = re.compile(
-    r"([a-zA-Z_]\w*)\((.*)?\)$",
+    r"([a-zA-Z_]\w*)\((.*)?\)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+
+# Function names that are no-op wrappers when they appear at the outermost
+# position around a single deterministic parameter / variable reference.
+# Stripping these lets resolve_expression reach the underlying ref instead
+# of falling through to notebook_code for trivial @json(pipeline().parameters.X)
+# style wrappers commonly used in ADF for type coercion.
+_NOOP_WRAPPER_NAMES: frozenset[str] = frozenset({"json", "string", "array"})
 
 _DATETIME_IMPORTS = ["from datetime import datetime, timezone, timedelta"]
 
@@ -109,7 +134,10 @@ def resolve_expression(
         return None
 
     if isinstance(value, bool):
-        return ExpressionResult(kind="literal", value=str(value))
+        # VAREX3-002: render Python bool as lowercase 'true'/'false' so
+        # downstream ADF comparisons like @equals(variables('X'), true)
+        # match ADF's lowercase boolean tokens.
+        return ExpressionResult(kind="literal", value="true" if value else "false")
     if isinstance(value, (int, float)):
         return ExpressionResult(kind="literal", value=str(value))
 
@@ -119,7 +147,15 @@ def resolve_expression(
     if not value.startswith("@"):
         return ExpressionResult(kind="literal", value=value)
 
-    expr = value[1:]  # strip leading @
+    expr = value[1:].rstrip()  # strip leading @ and trailing whitespace/newlines
+
+    # Strip no-op wrappers like @json(pipeline().parameters.X) so the inner
+    # ref resolves to its DAB dynamic value.  We only unwrap when the inner
+    # expression itself resolves cleanly (literal / dab_ref) so we don't
+    # eat the wrapper's semantics where it actually matters.
+    unwrapped = _unwrap_noop_call(expr, context, variable_task_keys=variable_task_keys)
+    if unwrapped is not None:
+        return unwrapped
 
     if _ITEM_RE.match(expr):
         return ExpressionResult(kind="dab_ref", value="{{input}}")
@@ -128,6 +164,18 @@ def resolve_expression(
     if match:
         field_name = match.group(1)
         return ExpressionResult(kind="dab_ref", value="{{input." + field_name + "}}")
+
+    result = _resolve_item_safe_nav(expr)
+    if result is not None:
+        return result
+
+    result = _resolve_pipeline_global_param(expr, context)
+    if result is not None:
+        return result
+
+    result = _resolve_linked_service_param(expr, context)
+    if result is not None:
+        return result
 
     result = _resolve_pipeline_param(expr)
     if result is not None:
@@ -154,6 +202,21 @@ def resolve_expression(
         return result
 
     result = _resolve_function_call(expr, context, variable_task_keys=variable_task_keys)
+    if result is not None:
+        return result
+
+    # CF3-004 / fix-attribute-access-on-function-results: handle
+    # ``<function_call>.<attribute>...`` chains like
+    # ``json(pipeline().parameters.items).type`` by resolving the function
+    # call first then chaining `.get('attr')` onto the resulting code.
+    result = _resolve_function_call_with_attribute(expr, context, variable_task_keys=variable_task_keys)
+    if result is not None:
+        return result
+
+    # C-33 (VAREX4-001): handle ``<function_call>[N]`` chains so e.g.
+    # ``@split(pipeline().parameters.referenceDate,'/')[0]`` lowers to
+    # notebook_code.
+    result = _resolve_function_call_with_index(expr, context, variable_task_keys=variable_task_keys)
     if result is not None:
         return result
 
@@ -295,6 +358,114 @@ def _resolve_pipeline_param(expr: str) -> ExpressionResult | None:
     return ExpressionResult(kind="dab_ref", value="{{" + f"job.parameters.{param_name}" + "}}")
 
 
+def _resolve_pipeline_global_param(expr: str, context: TranslationContext) -> ExpressionResult | None:
+    """Resolves ``pipeline().globalParameters.X`` against factory globals.
+
+    When ``context.global_parameters`` carries a concrete value for *X*
+    the expression collapses to a literal so downstream callers (notably
+    ``concat`` reductions) get the actual factory value baked in.  When
+    no factory value is available we fall back to a job-parameter DAB
+    ref so the bundle YAML can supply it.
+    """
+    match = _PIPELINE_GLOBAL_PARAM_RE.match(expr)
+    if match is None:
+        return None
+    param_name = match.group(1)
+    value = context.get_global_parameter(param_name)
+    if value is None:
+        return ExpressionResult(kind="dab_ref", value="{{" + f"job.parameters.{param_name}" + "}}")
+    return ExpressionResult(kind="literal", value=str(value))
+
+
+def _resolve_linked_service_param(expr: str, context: TranslationContext) -> ExpressionResult | None:
+    """Resolves ``linkedService().X`` against activity-supplied LS parameters."""
+    match = _LINKED_SERVICE_PARAM_RE.match(expr)
+    if match is None:
+        return None
+    param_name = match.group(1)
+    if param_name in context.linked_service_parameters:
+        value = context.get_linked_service_parameter(param_name)
+        if value is None:
+            return None
+        return ExpressionResult(kind="literal", value=str(value))
+    return None
+
+
+def _resolve_item_safe_nav(expr: str) -> ExpressionResult | None:
+    """Resolves ``item()?.X``, ``item().a?.b?.c`` and ``item().a.b`` chains.
+
+    Any chain that uses the ADF safe-navigation operator ``?.`` — even a
+    single segment ``item()?.X`` — must lower to notebook_code so the bridge
+    lowering can fire (the trivial ``item().X`` case stays a DAB ref via
+    ``_ITEM_FIELD_RE``).  The returned ``notebook_code`` walks the chain
+    using ``.get()`` so missing keys do not raise.
+
+    C-16 (CF3-005 / VAREX3-005): the previous ``len(parts) < 2`` guard
+    blocked Switch on-expressions and SetVariable expressions wrapping
+    ``item()?.X`` from triggering bridge lowering.
+    """
+    match = _ITEM_SAFE_NAV_RE.match(expr)
+    if match is None:
+        return None
+    chain = match.group(1)
+    # Collect (operator, field) tuples so single-segment item()?.X still
+    # lowers to notebook_code (was: skipped when len(parts) < 2).
+    segments: list[tuple[str, str]] = re.findall(r"(\??\.)(\w+)", chain)
+    if not segments:
+        return None
+    # If the chain has no safe-nav operator at all (purely ``item().a.b``)
+    # AND only one segment, defer to _ITEM_FIELD_RE's dab_ref path.
+    # C-35 (CF4-004): multi-segment pure-dotted chains like
+    # ``item().condition.name`` must lower to notebook_code so the
+    # downstream consumers can walk both segments instead of mapping to
+    # ``{{input.condition}}`` and silently dropping ``.name``.
+    has_safe_nav = any(op == "?." for op, _ in segments)
+    if not has_safe_nav and len(segments) < 2:
+        return None
+    expr_code = "__import__('json').loads(dbutils.widgets.get('item'))"
+    for _, part in segments:
+        expr_code = f"({expr_code} or {{}}).get('{part}')"
+    return ExpressionResult(kind="notebook_code", value=expr_code)
+
+
+def _unwrap_noop_call(
+    expr: str,
+    context: TranslationContext,
+    *,
+    variable_task_keys: dict[str, str] | None = None,
+) -> ExpressionResult | None:
+    """If *expr* is a no-op wrapper around a deterministic ref, return inner.
+
+    Handles patterns like ``@json(pipeline().parameters.items)``,
+    ``@string(pipeline().parameters.X)``, and ``@array(...)`` where the
+    sole argument resolves to a clean literal/dab_ref.  When the inner
+    cannot be deterministically resolved we return ``None`` so the
+    regular function dispatcher takes over.
+    """
+    match = _FUNCTION_CALL_RE.match(expr)
+    if match is None:
+        return None
+    func_name = match.group(1)
+    if func_name.lower() not in _NOOP_WRAPPER_NAMES:
+        return None
+    inner = (match.group(2) or "").strip()
+    if not inner:
+        return None
+    args = _split_args(inner)
+    if len(args) != 1:
+        return None
+    sole_arg = args[0].strip()
+    if sole_arg.startswith("'") and sole_arg.endswith("'"):
+        return None  # bare literal, let upstream string() handler decide
+    sub_expr = sole_arg if sole_arg.startswith("@") else "@" + sole_arg
+    inner_result = resolve_expression(sub_expr, context, variable_task_keys=variable_task_keys)
+    if inner_result is None:
+        return None
+    if inner_result.kind in ("literal", "dab_ref"):
+        return inner_result
+    return None
+
+
 def _resolve_pipeline_property(expr: str) -> ExpressionResult | None:
     """Resolves ``pipeline().PropertyName`` -> DAB ref."""
     match = _PIPELINE_PROPERTY_RE.match(expr)
@@ -336,38 +507,77 @@ def _resolve_variable(
     *,
     variable_task_keys: dict[str, str] | None = None,
 ) -> ExpressionResult | None:
-    """Resolves ``variables('name')`` -> task value DAB ref."""
+    """Resolves ``variables('name')`` -> task value DAB ref.
+
+    C-05 (VAREX-002): when neither the explicit mapping nor the context's
+    variable_cache knows a setter for *var_name*, return ``None`` instead
+    of falling back to ``{{tasks.<name>.values.<name>}}`` — that
+    self-referential placeholder is never satisfied at runtime and
+    pollutes the bundle with hundreds of dangling refs.  Init tasks
+    synthesised in :func:`engine._build_variable_init_activities` seed
+    the cache for default-valued variables, so this path now triggers
+    only for genuinely unset variables (caller logs / surfaces a setup
+    note).
+    """
     match = _VARIABLE_RE.match(expr)
     if match is None:
         return None
     var_name = match.group(1)
 
-    # Always resolve to the task value reference.  This preserves the
-    # explicit task dependency chain — downstream tasks must depend on the
-    # setter task.  Even when the variable was set to a DAB built-in like
-    # {{job.start_time.iso_datetime}}, the task value is the canonical
-    # source since the setter notebook may transform the value.
     variable_task_keys_map = variable_task_keys or {}
-    setter_key = variable_task_keys_map.get(var_name) or context.get_variable_task_key(var_name) or var_name
+    setter_key = variable_task_keys_map.get(var_name) or context.get_variable_task_key(var_name)
+    if setter_key is None:
+        return None
     return ExpressionResult(kind="dab_ref", value="{{" + f"tasks.{setter_key}.values.{var_name}" + "}}")
 
 
+_UTCNOW_APPROXIMATION_NOTE = (
+    "Mapped ADF `utcnow()` to the Databricks job start time. "
+    "Single-task jobs see sub-second skew; multi-task jobs can see minutes of skew "
+    "between job start and the moment the activity actually runs."
+)
+
+# ADF .NET-style format strings that map cleanly onto a Databricks dynamic
+# value reference.  Anything not in this table falls back to a notebook_code
+# strftime call.
+_UTCNOW_FORMAT_TO_DAB_REF: dict[str, str] = {
+    "yyyy-MM-dd": "{{job.start_time.iso_date}}",
+    "yyyy-MM-ddTHH:mm:ss": "{{job.start_time.iso_datetime}}",
+    "yyyy-MM-ddTHH:mm:ssZ": "{{job.start_time.iso_datetime}}",
+    "o": "{{job.start_time.iso_datetime}}",
+    "s": "{{job.start_time.iso_datetime}}",
+}
+
+
 def _resolve_utcnow(expr: str) -> ExpressionResult | None:
-    """Resolves ``utcNow()`` or ``utcNow('format')`` -> notebook_code."""
+    """Resolves ``utcNow()`` / ``utcNow('format')``.
+
+    Bare ``utcnow()`` and ``utcnow('<known iso fmt>')`` map to a Databricks
+    dynamic value reference so the result can land directly inside DAB
+    YAML (``base_parameters`` and similar).  Unrecognised format strings
+    keep the legacy ``notebook_code`` translation.
+    """
     match = _UTCNOW_RE.match(expr)
     if match is None:
         return None
     format_string = match.group(1)
-    if format_string:
-        python_format = _convert_date_format(format_string)
+    if not format_string:
         return ExpressionResult(
-            kind="notebook_code",
-            value=f"datetime.now(timezone.utc).strftime('{python_format}')",
-            imports=["from datetime import datetime, timezone"],
+            kind="dab_ref",
+            value="{{job.start_time.iso_datetime}}",
+            notes=[_UTCNOW_APPROXIMATION_NOTE],
         )
+    dab_ref = _UTCNOW_FORMAT_TO_DAB_REF.get(format_string)
+    if dab_ref:
+        return ExpressionResult(
+            kind="dab_ref",
+            value=dab_ref,
+            notes=[_UTCNOW_APPROXIMATION_NOTE],
+        )
+    python_format = _convert_date_format(format_string)
     return ExpressionResult(
         kind="notebook_code",
-        value="datetime.now(timezone.utc).isoformat()",
+        value=f"datetime.now(timezone.utc).strftime('{python_format}')",
         imports=["from datetime import datetime, timezone"],
     )
 
@@ -405,6 +615,8 @@ def _resolve_concat(
 
     all_imports: list[str] = []
     code_parts: list[str] = []
+    literal_parts: list[str] = []
+    all_literal = True
     all_required_parameters: dict[str, str] = {}
 
     for part in parts:
@@ -412,24 +624,35 @@ def _resolve_concat(
         if not part:
             continue
         if part.startswith("'") and part.endswith("'"):
-            code_parts.append(repr(part[1:-1]))
+            value_text = part[1:-1]
+            code_parts.append(repr(value_text))
+            literal_parts.append(value_text)
         else:
             sub_result = resolve_expression("@" + part, context, variable_task_keys=variable_task_keys)
             if sub_result is None:
                 return None
             if sub_result.kind == "literal":
                 code_parts.append(repr(sub_result.value))
+                literal_parts.append(sub_result.value)
             elif sub_result.kind == "dab_ref":
                 code_parts.append(_dab_ref_to_widget_code(sub_result.value))
                 widget_name, dab_ref = _required_parameter_for_ref(sub_result.value)
                 all_required_parameters.setdefault(widget_name, dab_ref)
+                all_literal = False
             elif sub_result.kind == "notebook_code":
                 code_parts.append(f"str({sub_result.value})")
                 all_imports.extend(sub_result.imports)
                 all_required_parameters.update(sub_result.required_parameters)
+                all_literal = False
 
     if not code_parts:
         return None
+
+    # If every part collapsed to a literal value, fold the whole concat into
+    # a single literal so downstream consumers (notebook library install,
+    # cluster fields, etc.) get a plain string instead of Python source.
+    if all_literal:
+        return ExpressionResult(kind="literal", value="".join(literal_parts))
 
     value = " + ".join(code_parts)
     return ExpressionResult(
@@ -503,6 +726,113 @@ def _split_args(inner: str) -> list[str]:
     return parts
 
 
+_FUNCTION_CALL_WITH_ATTRIBUTE_RE = re.compile(
+    # Captures `funcName(args).attr.attr...` -- the trailing attribute chain
+    # must end with a word character so we don't accidentally swallow other
+    # closing parens / spaces.  Used to lower
+    # ``json(pipeline().parameters.items).type`` to a notebook_code expression
+    # since the bare function dispatcher requires the function call to be the
+    # outermost token.
+    r"^([a-zA-Z_]\w*)\((.*)\)((?:\.\w+)+)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_FUNCTION_CALL_WITH_INDEX_RE = re.compile(
+    # C-33 (VAREX4-001): ``funcName(args)[N]`` — captures a trailing
+    # integer subscript so ``split(...)[0]`` and similar ADF expressions
+    # lower to notebook_code (the bare dispatcher only matched when the
+    # function call was the outermost token).  We support a single
+    # numeric subscript for now; nested chains (``...[0][1]``) fall
+    # through to the legacy unsupported path.
+    r"^([a-zA-Z_]\w*)\((.*)\)\[\s*(-?\d+)\s*\]\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _resolve_function_call_with_index(
+    expr: str,
+    context: TranslationContext,
+    *,
+    variable_task_keys: dict[str, str] | None = None,
+) -> ExpressionResult | None:
+    """Lowers ``<func_call>[N]`` to notebook_code.
+
+    C-33 (VAREX4-001): ADF SetVariable expressions like
+    ``@split(pipeline().parameters.referenceDate,'/')[0]`` were
+    previously rejected because the bare function dispatcher matched
+    only when the call was the outermost token.  Resolve the function
+    call as usual, then append ``[N]`` to the resulting Python code.
+    """
+    match = _FUNCTION_CALL_WITH_INDEX_RE.match(expr)
+    if match is None:
+        return None
+    func_name = match.group(1)
+    inner = match.group(2)
+    index = match.group(3)
+    func_expr = f"@{func_name}({inner})"
+    base_result = resolve_expression(func_expr, context, variable_task_keys=variable_task_keys)
+    if base_result is None:
+        return None
+    if base_result.kind == "literal":
+        base_code = repr(base_result.value)
+    elif base_result.kind == "dab_ref":
+        base_code = _dab_ref_to_widget_code(base_result.value)
+    else:
+        base_code = base_result.value
+    code = f"({base_code})[{index}]"
+    return ExpressionResult(
+        kind="notebook_code",
+        value=code,
+        imports=list(base_result.imports),
+        required_parameters=dict(base_result.required_parameters),
+    )
+
+
+def _resolve_function_call_with_attribute(
+    expr: str,
+    context: TranslationContext,
+    *,
+    variable_task_keys: dict[str, str] | None = None,
+) -> ExpressionResult | None:
+    """Lowers `<func_call>.<attr>...` chains to a notebook_code expression.
+
+    CF3-004 / fix-attribute-access-on-function-results: the bare function
+    dispatcher only matches when the function call is the outermost token,
+    so an expression like ``json(pipeline().parameters.items).type`` falls
+    through with ``None`` and ships unmodified into ``condition_task.left``.
+    We resolve the function call, render it as Python code, then chain
+    ``.get('attr')`` for each segment of the trailing attribute path so the
+    bridge lowering picks it up.
+    """
+    match = _FUNCTION_CALL_WITH_ATTRIBUTE_RE.match(expr)
+    if match is None:
+        return None
+    func_name = match.group(1)
+    inner = match.group(2)
+    attr_chain = match.group(3)
+    func_expr = f"@{func_name}({inner})"
+    base_result = resolve_expression(func_expr, context, variable_task_keys=variable_task_keys)
+    if base_result is None:
+        return None
+    if base_result.kind == "literal":
+        # The result is a known literal -- render it as a Python expression
+        # then chain `.get(...)` so the resulting notebook_code is valid.
+        base_code = repr(base_result.value)
+    elif base_result.kind == "dab_ref":
+        base_code = _dab_ref_to_widget_code(base_result.value)
+    else:
+        base_code = base_result.value
+    code = base_code
+    for segment in attr_chain.strip(".").split("."):
+        code = f"({code}).get('{segment}')"
+    return ExpressionResult(
+        kind="notebook_code",
+        value=code,
+        imports=list(base_result.imports),
+        required_parameters=dict(base_result.required_parameters),
+    )
+
+
 def _resolve_function_call(
     expr: str,
     context: TranslationContext,
@@ -535,12 +865,26 @@ def _resolve_function_call(
             continue
 
         if (raw_arg.startswith("'") and raw_arg.endswith("'")) or (raw_arg.startswith('"') and raw_arg.endswith('"')):
-            resolved_args.append(ExpressionResult(kind="literal", value=raw_arg[1:-1]))
+            # C-34 (VAREX4-002): preserve the quotedness so the codegen
+            # downstream emits ``repr(value)`` rather than a bare token —
+            # otherwise quoted ``'09'`` / ``'12'`` collapse to a bare
+            # numeric and either raise a SyntaxError (leading zero) or
+            # silently compare against the wrong value.
+            resolved_args.append(ExpressionResult(kind="literal", value=raw_arg[1:-1], was_string_literal=True))
         elif _is_numeric(raw_arg):
             resolved_args.append(ExpressionResult(kind="literal", value=raw_arg))
         elif raw_arg.lower() in ("true", "false"):
+            # C-34 (VAREX4-003): ADF Booleans (``true`` / ``false``) match
+            # lowercase strings on the SetVariable consumer side (C-21).
+            # Mark the literal so ``_arg_to_code`` emits ``'true'`` /
+            # ``'false'`` strings rather than the bare Python ``True`` /
+            # ``False`` (whose ``str()`` is title-case and never matches).
             resolved_args.append(
-                ExpressionResult(kind="literal", value="True" if raw_arg.lower() == "true" else "False")
+                ExpressionResult(
+                    kind="literal",
+                    value="true" if raw_arg.lower() == "true" else "false",
+                    was_bool_literal=True,
+                )
             )
         elif raw_arg.lower() == "null":
             resolved_args.append(ExpressionResult(kind="literal", value="None"))
@@ -579,8 +923,18 @@ def _is_numeric(text: str) -> bool:
 
 
 def _arg_to_code(arg: ExpressionResult) -> str:
-    """Converts a resolved argument to a Python code snippet."""
+    """Converts a resolved argument to a Python code snippet.
+
+    C-34 (VAREX4-002/003): quoted-string and Boolean-literal arguments
+    must emit ``repr()`` of the value (e.g. ``'09'`` rather than the
+    bare token ``09``) so the resulting code (a) parses (leading-zero
+    integers are SyntaxErrors in modern Python) and (b) compares against
+    the right concrete value (Booleans on the SetVariable consumer side
+    serialise as lowercase strings, not Python bools).
+    """
     if arg.kind == "literal":
+        if arg.was_string_literal or arg.was_bool_literal:
+            return repr(arg.value)
         if arg.value in ("True", "False", "None") or _is_numeric(arg.value):
             return arg.value
         return repr(arg.value)
@@ -628,6 +982,11 @@ def _collect_required_parameters(*args: ExpressionResult) -> dict[str, str]:
     return merged
 
 
+def _collect_notes(*args: ExpressionResult) -> list[str]:
+    """Collects caveat notes across resolved arguments."""
+    return [note for arg in args for note in arg.notes]
+
+
 def _result_from_args(
     value: str,
     args: list[ExpressionResult],
@@ -649,13 +1008,22 @@ def _result_from_args(
         value=value,
         imports=imports,
         required_parameters=_collect_required_parameters(*args),
+        notes=_collect_notes(*args),
     )
 
 
 def _handle_concat(args: list[ExpressionResult]) -> ExpressionResult | None:
-    """concat(a, b, ...) -> str(a) + str(b) + ..."""
+    """concat(a, b, ...) -> str(a) + str(b) + ...
+
+    When every argument resolved to a ``literal`` kind, collapse the whole
+    expression to a single literal so downstream consumers (cluster fields,
+    library paths, notebook-install jar refs, etc.) get a plain string
+    instead of Python source.
+    """
     if not args:
         return None
+    if all(a.kind == "literal" for a in args):
+        return ExpressionResult(kind="literal", value="".join(a.value for a in args))
     parts = [f"str({_arg_to_code(a)})" for a in args]
     return _result_from_args(" + ".join(parts), args)
 
@@ -725,7 +1093,17 @@ def _handle_starts_with(args: list[ExpressionResult]) -> ExpressionResult | None
 
 
 def _handle_substring(args: list[ExpressionResult]) -> ExpressionResult | None:
-    """substring(text, start, length) -> str(text)[int(start):int(start)+int(length)]"""
+    """substring(text, start[, length]) -> Python slice.
+
+    C-33 (VAREX4-001): ADF accepts the 2-arg form ``substring(x, start)``
+    in addition to the documented 3-arg form.  Treat the 2-arg case as
+    ``str(text)[int(start):]`` so SetVariable activities that wrap it can
+    actually resolve.
+    """
+    if len(args) == 2:
+        text = _arg_to_code(args[0])
+        start = _arg_to_code(args[1])
+        return _result_from_args(f"str({text})[int({start}):]", args)
     if len(args) != 3:
         return None
     text = _arg_to_code(args[0])
@@ -1140,6 +1518,18 @@ def _handle_format_date_time(args: list[ExpressionResult]) -> ExpressionResult |
     """formatDateTime(ts, fmt?) -> datetime.fromisoformat(ts).strftime(converted_fmt)"""
     if len(args) < 1 or len(args) > 2:
         return None
+    # formatDateTime(utcnow(), '<known iso fmt>') -> remap straight to the
+    # matching Databricks dynamic value so the result lands in YAML.
+    if (
+        len(args) == 2
+        and args[0].kind == "dab_ref"
+        and args[0].value == "{{job.start_time.iso_datetime}}"
+        and _UTCNOW_APPROXIMATION_NOTE in args[0].notes
+        and args[1].kind == "literal"
+    ):
+        dab_ref = _UTCNOW_FORMAT_TO_DAB_REF.get(args[1].value)
+        if dab_ref:
+            return ExpressionResult(kind="dab_ref", value=dab_ref, notes=[_UTCNOW_APPROXIMATION_NOTE])
     timestamp_dt = _datetime_arg_code(args[0])
     if len(args) == 2 and args[1].kind == "literal":
         python_format = _convert_date_format(args[1].value)

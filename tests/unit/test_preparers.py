@@ -15,6 +15,7 @@ from orchestra.models.ir import (
     ExecutePipelineActivity,
     FilterActivity,
     ForEachActivity,
+    IfConditionActivity,
     LookupActivity,
     NotebookActivity,
     Pipeline,
@@ -76,6 +77,55 @@ class TestNotebookPreparer:
         assert prepared.task["notebook_task"]["notebook_path"] == "/Shared/ETL/transform"
         assert prepared.task["notebook_task"]["base_parameters"] == {"env": "dev"}
         assert prepared.notebooks == []
+
+    def test_prepare_notebook_dispatch_stub_for_unresolved_path(self):
+        """C-28 (NB-ITER4-001): a NotebookActivity flagged
+        ``notebook_path_unresolved`` produces a dispatch-stub notebook
+        (not a NotImplementedError placeholder) plus a
+        ``dynamic_notebook_dispatch`` SetupTask for SETUP.md."""
+        activity = NotebookActivity(
+            **_make_base("Dispatch", "dispatch"),
+            notebook_path="",
+            notebook_path_unresolved=True,
+            notebook_path_expression="@trim(json(activity('cfg').output.firstRow).notebook_path)",
+            base_parameters={"env": "dev"},
+        )
+        prepared = prepare_activity(activity)
+        assert len(prepared.notebooks) == 1
+        content = prepared.notebooks[0].content
+        assert "dbutils.widgets.get('notebook_path')" in content
+        assert "dbutils.notebook.run" in content
+        assert "raise NotImplementedError" not in content
+        # SETUP.md SetupTask is emitted.
+        kinds = [st.type for st in prepared.setup_tasks]
+        assert "dynamic_notebook_dispatch" in kinds
+        config = next(st.config for st in prepared.setup_tasks if st.type == "dynamic_notebook_dispatch")
+        assert config["task_key"] == "dispatch"
+        assert "@trim" in config["expression"]
+        # The notebook_path widget is registered with an empty default.
+        assert prepared.task["notebook_task"]["base_parameters"]["notebook_path"] == ""
+
+    def test_prepare_notebook_emits_unresolved_library_setup_task(self):
+        """C-30 (NB-ITER4-003): unresolved_libraries on the IR emerge as
+        ``unresolved_library`` SetupTasks the bundler renders in SETUP.md."""
+        activity = NotebookActivity(
+            **_make_base("Run NB", "run_nb"),
+            notebook_path="/Shared/x",
+            unresolved_libraries=[
+                {
+                    "type": "jar",
+                    "expression": "@concat('/Volumes/x/', pipeline().globalParameters.proj4jLibFileName)",
+                    "missing": ["proj4jLibFileName"],
+                }
+            ],
+        )
+        prepared = prepare_activity(activity)
+        kinds = [st.type for st in prepared.setup_tasks]
+        assert "unresolved_library" in kinds
+        config = next(st.config for st in prepared.setup_tasks if st.type == "unresolved_library")
+        assert config["task_key"] == "run_nb"
+        assert config["library_type"] == "jar"
+        assert "proj4jLibFileName" in config["missing"]
 
     def test_prepare_notebook_no_params(self):
         activity = NotebookActivity(
@@ -166,6 +216,66 @@ class TestNotebookPreparer:
         assert params["env"] == "dev"
         assert params["trigger_time"] == "{{job.start_time.iso_datetime}}"
 
+    def test_prepare_notebook_emits_libraries(self):
+        libraries = [
+            {"whl": "dbfs:/libs/pkg.whl"},
+            {"pypi": {"package": "requests"}},
+        ]
+        activity = NotebookActivity(
+            **_make_base("NB", "nb"),
+            notebook_path="/Shared/nb",
+            libraries=libraries,
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.task["libraries"] == libraries
+
+    def test_prepare_notebook_emits_existing_cluster_id(self):
+        activity = NotebookActivity(
+            **{**_make_base("NB", "nb"), "existing_cluster_id": "1234-567890-abcde123"},
+            notebook_path="/Shared/nb",
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.task["existing_cluster_id"] == "1234-567890-abcde123"
+        assert "job_cluster_key" not in prepared.task
+
+    def test_prepare_notebook_surfaces_parameter_approximations(self):
+        activity = NotebookActivity(
+            **_make_base("Score", "score"),
+            notebook_path="/Shared/score",
+            base_parameters={"scoring_date": "{{job.start_time.iso_date}}"},
+            parameter_approximations=[
+                {
+                    "widget_name": "scoring_date",
+                    "raw_expression": "@formatDateTime(utcnow(), 'yyyy-MM-dd')",
+                    "replacement": "{{job.start_time.iso_date}}",
+                    "note": "Mapped ADF `utcnow()` to the Databricks job start time.",
+                }
+            ],
+        )
+        prepared = prepare_activity(activity)
+        assert len(prepared.parameter_approximations) == 1
+        approximation = prepared.parameter_approximations[0]
+        assert approximation.task_key == "score"
+        assert approximation.widget_name == "scoring_date"
+        assert approximation.raw_expression == "@formatDateTime(utcnow(), 'yyyy-MM-dd')"
+        assert approximation.replacement == "{{job.start_time.iso_date}}"
+
+    def test_prepare_notebook_existing_cluster_id_wins_over_default_cluster_bind(self, monkeypatch):
+        """When a downloaded workspace notebook would otherwise bind to default_cluster,
+        an explicit existing_cluster_id from the linked service takes precedence."""
+        monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
+        monkeypatch.setattr(
+            "orchestra.preparer.activity_preparers.notebook.download_notebook",
+            lambda path: "# Databricks notebook source\nprint('hi')\n",
+        )
+        activity = NotebookActivity(
+            **{**_make_base("NB", "nb"), "existing_cluster_id": "9876-543210-zyxwv987"},
+            notebook_path="/Shared/ETL/transform",
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.task["existing_cluster_id"] == "9876-543210-zyxwv987"
+        assert "job_cluster_key" not in prepared.task
+
 
 class TestCopyPreparer:
     def test_prepare_copy_generates_notebook(self):
@@ -229,6 +339,19 @@ class TestSparkPythonPreparer:
         assert "scripts/etl.py" in prepared.notebooks[0].relative_path
         assert "dbfs:/scripts/etl.py" in prepared.notebooks[0].content
 
+    def test_prepare_spark_python_emits_libraries(self):
+        libraries = [
+            {"pypi": {"package": "pandas"}},
+            {"maven": {"coordinates": "org.example:lib:1.0"}},
+        ]
+        activity = SparkPythonActivity(
+            **_make_base("Py Task", "py_task"),
+            python_file="dbfs:/scripts/etl.py",
+            libraries=libraries,
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.task["libraries"] == libraries
+
 
 class TestLookupPreparer:
     def test_prepare_lookup_generates_notebook(self):
@@ -267,6 +390,57 @@ class TestWebActivityPreparer:
         prepared = prepare_activity(activity)
         assert len(prepared.secrets) >= 1
         assert any(s.key == "auth-credential" for s in prepared.secrets)
+
+    def test_prepare_web_activity_key_vault_secret_uses_vault_scope_and_secret_name(self):
+        """C-11 (LSC2-005): an AzureKeyVaultSecret payload preserves the Key
+        Vault scope and secret name instead of collapsing to the generic
+        ``auth-credential`` placeholder."""
+        activity = WebActivity(
+            **_make_base("Auth API", "auth_api"),
+            url="https://api.example.com",
+            method="POST",
+            authentication={
+                "type": "ServicePrincipal",
+                "password": {
+                    "type": "AzureKeyVaultSecret",
+                    "store": {"referenceName": "lakeh_ls_keyvault"},
+                    "secretName": "adapp-auccommonutilssp-secret",
+                    "typeProperties": {"baseUrl": "https://kv.example.net/"},
+                },
+            },
+        )
+        prepared = prepare_activity(activity)
+        assert any(
+            s.scope == "lakeh_ls_keyvault" and s.key == "adapp-auccommonutilssp-secret" for s in prepared.secrets
+        )
+        # The generic auth-credential placeholder is suppressed when a real
+        # secret reference is available.
+        assert not any(s.key == "auth-credential" for s in prepared.secrets)
+        # C-38 (LSC4-002): the generated notebook must reference the
+        # resolved AKV scope and key, not the legacy
+        # ``(task_key, 'auth-credential')`` placeholder.
+        notebook_content = prepared.notebooks[0].content
+        assert 'scope="lakeh_ls_keyvault"' in notebook_content
+        assert 'key="adapp-auccommonutilssp-secret"' in notebook_content
+        assert 'key="auth-credential"' not in notebook_content
+
+    def test_prepare_web_activity_credential_reference_emits_setup_note(self):
+        """C-11: CredentialReference (managed identity) routes to a SetupTask
+        instead of fabricating a static secret placeholder."""
+        activity = WebActivity(
+            **_make_base("Auth API", "auth_api"),
+            url="https://api.example.com",
+            method="POST",
+            authentication={
+                "type": "MSI",
+                "credential": {"referenceName": "msi_credential"},
+            },
+        )
+        prepared = prepare_activity(activity)
+        manual = [t for t in prepared.setup_tasks if t.type == "manual_credential"]
+        assert manual, "credential reference must surface a manual_credential SetupTask"
+        # No static placeholder secret emitted for managed-identity auth.
+        assert not any(s.key == "auth-credential" for s in prepared.secrets)
 
 
 class TestDeletePreparer:
@@ -395,6 +569,288 @@ class TestForEachPreparer:
         assert "for_each_task" in prepared.task
         assert prepared.task["for_each_task"]["concurrency"] == 10
         assert prepared.task["for_each_task"]["inputs"] == "@output.value"
+
+    def test_prepare_for_each_uses_ir_bridge_for_variable_based_split(self):
+        """C-31 (CF4-001): when the items expression references a
+        ``@variables('X')`` setter, the translator captures the bridge
+        code on the IR while the variable_cache is populated.  The
+        preparer must consume that IR-supplied bridge rather than
+        re-resolving against an empty TranslationContext (which used to
+        silently fail and ship the raw @split string as inputs)."""
+        inner = WaitActivity(**_make_base("Inner", "inner"), wait_time_seconds=1)
+        activity = ForEachActivity(
+            **_make_base("Loop", "loop"),
+            items_expression="@split(variables('fecha'),',')",
+            inputs_bridge_notebook_code=(
+                "str(dbutils.jobs.taskValues.get(taskKey='_init_fecha', key='fecha')).split(str(','))"
+            ),
+            inputs_bridge_notebook_imports=[],
+            inputs_bridge_required_parameters={"fecha": "{{tasks._init_fecha.values.fecha}}"},
+            inner_activities=[inner],
+            concurrency=10,
+        )
+        prepared = prepare_activity(activity)
+        # The bridge fires off the IR fields even though resolve_expression
+        # against a bare context would fail to resolve @variables('fecha').
+        bridge_keys = [
+            t.get("task_key") for t in prepared.extra_tasks if t.get("task_key", "").endswith("_inputs_bridge")
+        ]
+        assert bridge_keys == ["loop_inputs_bridge"]
+        assert prepared.task["for_each_task"]["inputs"] == "{{tasks.loop_inputs_bridge.values.items}}"
+        bridge_task = next(t for t in prepared.extra_tasks if t["task_key"] == "loop_inputs_bridge")
+        assert bridge_task["notebook_task"]["base_parameters"]["fecha"] == "{{tasks._init_fecha.values.fecha}}"
+
+    def test_prepare_for_each_bridges_split_items_via_seed_task(self):
+        """C-08 (CF-iter2-002): @split(<param>, ',') as items_expression must
+        route through a seed bridge task so for_each_task.inputs is a real
+        DAB task-value reference rather than a raw ADF expression."""
+        inner = WaitActivity(**_make_base("Inner", "inner"), wait_time_seconds=1)
+        activity = ForEachActivity(
+            **_make_base("Loop", "loop"),
+            items_expression="@split(pipeline().parameters.ejecuciones, ';')",
+            inner_activities=[inner],
+            concurrency=10,
+        )
+        prepared = prepare_activity(activity)
+        # Bridge task synthesised ahead of the ForEach.
+        bridge_keys = [
+            t.get("task_key") for t in prepared.extra_tasks if t.get("task_key", "").endswith("_inputs_bridge")
+        ]
+        assert bridge_keys == ["loop_inputs_bridge"]
+        bridge_task = next(t for t in prepared.extra_tasks if t["task_key"] == "loop_inputs_bridge")
+        assert "notebook_task" in bridge_task
+        assert "ejecuciones" in bridge_task["notebook_task"]["base_parameters"]
+        # inputs now reference the bridge task value, not the @split string.
+        assert prepared.task["for_each_task"]["inputs"] == "{{tasks.loop_inputs_bridge.values.items}}"
+        # ForEach depends on the bridge so the value is materialised first.
+        assert any(dep.get("task_key") == "loop_inputs_bridge" for dep in prepared.task.get("depends_on") or [])
+
+    def test_for_each_with_inner_if_condition_carries_branches(self):
+        """Change foreach-inner-extra-tasks (P0): CF-001.
+
+        When the ForEach has multiple children and one of them is an
+        IfCondition / Switch, the branch bodies live in the child's
+        extra_tasks.  The preparer must extend inner_tasks with those
+        so they land in the inner-job, not get dropped.
+        """
+        from orchestra.models.ir import IfConditionActivity
+
+        # IfCondition with two branch tasks.
+        true_act = WaitActivity(**_make_base("TrueWait", "true_wait"), wait_time_seconds=1)
+        false_act = WaitActivity(**_make_base("FalseWait", "false_wait"), wait_time_seconds=2)
+        if_act = IfConditionActivity(
+            **_make_base("If_Condition1", "if_condition1"),
+            op="EQUAL_TO",
+            left="@item().x",
+            right="1",
+            if_true_activities=[true_act],
+            if_false_activities=[false_act],
+        )
+        sibling = WaitActivity(**_make_base("Sibling", "sibling"), wait_time_seconds=3)
+        activity = ForEachActivity(
+            **_make_base("Loop", "loop"),
+            items_expression="@output.value",
+            inner_activities=[if_act, sibling],
+            concurrency=5,
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.inner_workflows, "should escalate to sub-job"
+        inner_wf = prepared.inner_workflows[0]
+        task_keys = {t["task_key"] for t in inner_wf.tasks}
+        # Branch tasks survive alongside the condition task.
+        assert "true_wait" in task_keys
+        assert "false_wait" in task_keys
+        assert "sibling" in task_keys
+
+    def test_for_each_inner_workflow_carries_cluster_hints_from_inner_activity(self):
+        """LSC3-001: ForEach inner-job PreparedWorkflow must carry cluster
+        hints lifted from nested NotebookActivity.cluster so the inner job's
+        default_cluster picks up LS-derived spark_env_vars / custom_tags /
+        driver_node_type_id.
+        """
+        inner_nb = NotebookActivity(
+            **_make_base("InnerNB", "inner_nb"),
+            notebook_path="/Shared/ETL/inner",
+            base_parameters={},
+        )
+        inner_nb.cluster = {
+            "spark_version": "16.4.x-scala2.12",
+            "node_type_id": "Standard_D4s_v3",
+            "driver_node_type_id": "Standard_D8s_v3",
+            "spark_env_vars": {"PYSPARK_PYTHON": "/databricks/python3/bin/python3"},
+            "custom_tags": {"DigitalCase": "X"},
+        }
+        sibling = WaitActivity(**_make_base("Sibling", "sibling"), wait_time_seconds=1)
+        activity = ForEachActivity(
+            **_make_base("Loop", "loop"),
+            items_expression="@output.value",
+            inner_activities=[inner_nb, sibling],
+            concurrency=5,
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.inner_workflows
+        inner_wf = prepared.inner_workflows[0]
+        # The cluster hint from inner_nb propagates through to the inner
+        # workflow so _infer_bundle_cluster_extras picks it up.
+        assert inner_wf.cluster_hints, "inner workflow must carry cluster hints"
+        hint = inner_wf.cluster_hints[0]
+        assert hint["driver_node_type_id"] == "Standard_D8s_v3"
+        assert hint["spark_env_vars"]["PYSPARK_PYTHON"] == "/databricks/python3/bin/python3"
+        assert hint["custom_tags"]["DigitalCase"] == "X"
+
+    def test_for_each_single_child_inner_workflow_carries_cluster_hints(self):
+        """LSC3-001 single-child escalation path equally must propagate
+        cluster hints from the single nested IfCondition-wrapped activity.
+        """
+        inner_nb = NotebookActivity(
+            **_make_base("InnerNB", "inner_nb"),
+            notebook_path="/Shared/ETL/inner",
+            base_parameters={},
+        )
+        inner_nb.cluster = {"custom_tags": {"DigitalCase": "Y"}}
+        if_act = IfConditionActivity(
+            **_make_base("If1", "if1"),
+            op="EQUAL_TO",
+            left="@item().x",
+            right="1",
+            if_true_activities=[inner_nb],
+            if_false_activities=[],
+        )
+        activity = ForEachActivity(
+            **_make_base("Loop", "loop"),
+            items_expression="@output.value",
+            inner_activities=[if_act],
+            concurrency=2,
+        )
+        prepared = prepare_activity(activity)
+        assert prepared.inner_workflows
+        inner_wf = prepared.inner_workflows[0]
+        assert inner_wf.cluster_hints, "single-child escalation must propagate cluster hints"
+        assert inner_wf.cluster_hints[0]["custom_tags"]["DigitalCase"] == "Y"
+
+    def test_for_each_with_single_child_if_condition_escalates_to_subjob(self):
+        """Single-child IfCondition forces the sub-job path so branches survive."""
+        from orchestra.models.ir import IfConditionActivity
+
+        true_act = WaitActivity(**_make_base("Hot", "hot"), wait_time_seconds=1)
+        false_act = WaitActivity(**_make_base("Cold", "cold"), wait_time_seconds=2)
+        if_act = IfConditionActivity(
+            **_make_base("Maybe", "maybe"),
+            op="EQUAL_TO",
+            left="@item().x",
+            right="1",
+            if_true_activities=[true_act],
+            if_false_activities=[false_act],
+        )
+        activity = ForEachActivity(
+            **_make_base("Loop", "loop"),
+            items_expression="@output.value",
+            inner_activities=[if_act],
+            concurrency=2,
+        )
+        prepared = prepare_activity(activity)
+        # Branch bodies require a sub-job (for_each_task.task is a single task).
+        assert prepared.inner_workflows
+        inner_wf = prepared.inner_workflows[0]
+        task_keys = {t["task_key"] for t in inner_wf.tasks}
+        assert "hot" in task_keys
+        assert "cold" in task_keys
+
+
+class TestCrossForEachVariableReadDetection:
+    """Change fix-cross-foreach-variable-read-warning (P1): VAREX3-003."""
+
+    def test_set_var_in_foreach_read_by_sibling_emits_setup_task(self):
+        """When a SetVariable for `continue` lives only inside a ForEach and
+        a sibling IfCondition reads @variables('continue'), prepare_workflow
+        must emit a manual_variable_rollup SetupTask naming the variable
+        and the parent ForEach."""
+        # Inside the ForEach: a SetVariable that mutates `continue`.
+        setter = SetVariableActivity(
+            **_make_base("Mark Continue", "mark_continue"),
+            variable_name="continue",
+            variable_value="false",
+        )
+        loop = ForEachActivity(
+            **_make_base("Loop", "loop"),
+            items_expression="@output.value",
+            inner_activities=[setter],
+            concurrency=2,
+        )
+        sibling = IfConditionActivity(
+            **_make_base("CheckCont", "check_cont"),
+            op="EQUAL_TO",
+            left="@variables('continue')",
+            right="true",
+            if_true_activities=[],
+            if_false_activities=[],
+        )
+        pipeline = Pipeline(name="cross_foreach_pipe", tasks=[loop, sibling])
+        wf = prepare_workflow(pipeline)
+        rollups = [st for st in wf.setup_tasks if st.type == "manual_variable_rollup"]
+        assert len(rollups) == 1
+        config = rollups[0].config
+        assert config["variable_name"] == "continue"
+        assert config["parent_foreach"] == "loop"
+
+    def test_set_var_with_parent_scope_setter_emits_no_warning(self):
+        """When the variable is ALSO set at the parent scope, no warning."""
+        parent_setter = SetVariableActivity(
+            **_make_base("Init", "init_cont"),
+            variable_name="continue",
+            variable_value="true",
+        )
+        inner_setter = SetVariableActivity(
+            **_make_base("ResetInside", "reset_inside"),
+            variable_name="continue",
+            variable_value="false",
+        )
+        loop = ForEachActivity(
+            **_make_base("Loop", "loop"),
+            items_expression="@output.value",
+            inner_activities=[inner_setter],
+            concurrency=2,
+        )
+        sibling = IfConditionActivity(
+            **_make_base("CheckCont", "check_cont"),
+            op="EQUAL_TO",
+            left="@variables('continue')",
+            right="true",
+            if_true_activities=[],
+            if_false_activities=[],
+        )
+        pipeline = Pipeline(
+            name="parent_scope_pipe",
+            tasks=[parent_setter, loop, sibling],
+        )
+        wf = prepare_workflow(pipeline)
+        rollups = [st for st in wf.setup_tasks if st.type == "manual_variable_rollup"]
+        assert rollups == []
+
+
+class TestManualScheduleTimeOfDaySetupTask:
+    """C-36 (SCHED4-001): a pipeline schedule whose recurrence carries
+    hours/minutes/weekDays that periodic can't encode emits a
+    manual_schedule_time_of_day SetupTask so SETUP.md can flag it."""
+
+    def test_periodic_schedule_with_time_of_day_emits_setup_task(self):
+        pipeline = Pipeline(
+            name="every_three_days",
+            tasks=[],
+            schedule={
+                "kind": "periodic",
+                "interval": 3,
+                "unit": "DAYS",
+                "pause_status": "UNPAUSED",
+                "time_of_day_note": {"hours": [2]},
+            },
+        )
+        wf = prepare_workflow(pipeline)
+        tasks = [st for st in wf.setup_tasks if st.type == "manual_schedule_time_of_day"]
+        assert len(tasks) == 1
+        config = tasks[0].config
+        assert config["pipeline"] == "every_three_days"
+        assert config["time_of_day_note"] == {"hours": [2]}
 
 
 class TestExecutePipelinePreparer:
@@ -560,8 +1016,28 @@ class TestSwitchPreparer:
         # Default hangs off the last case's outcome=false.
         assert extra_by_key["default_wait"]["depends_on"] == [{"task_key": "route_case_prod", "outcome": "false"}]
 
-    def test_prepare_switch_resolves_variables_expression(self):
-        """Switch on @variables('x') resolves to a DAB task value ref."""
+    def test_resolve_switch_on_expression_is_idempotent_for_dab_refs(self):
+        """C-13 (CF-iter2-004): an already-resolved {{tasks.X.values.Y}} ref
+        passes through resolve_switch_on_expression unchanged rather than
+        being re-resolved with an empty context (which would strip globals
+        and variable_cache)."""
+        from orchestra.preparer.activity_preparers.switch import (
+            resolve_switch_on_expression,
+        )
+
+        assert resolve_switch_on_expression("{{tasks.x.values.x}}") == "{{tasks.x.values.x}}"
+        assert resolve_switch_on_expression("{{job.parameters.env}}") == "{{job.parameters.env}}"
+        # A bare literal passes through unchanged.
+        assert resolve_switch_on_expression("hello") == "hello"
+        # Translator-side bridge placeholder is preserved.
+        assert resolve_switch_on_expression("__BRIDGE__::result") == "__BRIDGE__::result"
+
+    def test_prepare_switch_unresolved_variable_left_as_raw(self):
+        """C-05 (VAREX-002): when no setter for the variable is known the
+        Switch on-expression is left as the raw ``@variables(...)`` string
+        rather than producing a self-referential dangling task ref.  C-07
+        will eventually bridge this through a hidden task; until then the
+        raw string is preserved so a SETUP.md note can flag it."""
         inner = WaitActivity(**_make_base("CaseWait", "case_wait"), wait_time_seconds=1)
         activity = SwitchActivity(
             **_make_base("Route", "route"),
@@ -571,9 +1047,9 @@ class TestSwitchPreparer:
         )
         prepared = prepare_activity(activity)
         cond = prepared.task["condition_task"]
-        # Should be resolved to a DAB ref (fallback: variable name used as task key)
-        assert "tasks." in cond["left"]
-        assert "sourceType" in cond["left"]
+        # Without a setter the raw ADF expression is preserved (no
+        # dangling {{tasks.sourceType.values.sourceType}} placeholder).
+        assert cond["left"] == "@variables('sourceType')"
 
     def test_prepare_switch_resolves_pipeline_param(self):
         """Switch on @pipeline().parameters.X resolves to a DAB job parameter ref."""
@@ -814,6 +1290,55 @@ class TestPrepareWorkflow:
         second_task = next(t for t in wf.tasks if t["task_key"] == "second")
         assert "depends_on" in second_task
         assert second_task["depends_on"][0]["task_key"] == "first"
+
+    def test_prepare_workflow_collects_cluster_hints_from_nested_activities(self):
+        """C-04 (NB-ITER2-4 / LSC2-001): cluster hints from activities
+        nested inside IfCondition / Switch / ForEach must surface in the
+        workflow-level cluster_hints aggregation so the default-cluster
+        inference picks the LS-intended node type."""
+        nested_nb = NotebookActivity(
+            **_make_base("Inner", "inner"),
+            notebook_path="/Shared/inner",
+        )
+        # Override the cluster after construction since _make_base sets it None.
+        nested_nb.cluster = {
+            "spark_version": "16.4.x-scala2.12",
+            "num_workers": 0,
+            "node_type_id": "Standard_D8s_v3",
+        }
+        if_act = IfConditionActivity(
+            **_make_base("IfCond", "ifcond"),
+            op="EQUAL",
+            left="x",
+            right="y",
+            if_true_activities=[nested_nb],
+        )
+        pipeline = Pipeline(name="nested_cluster", tasks=[if_act])
+        wf = prepare_workflow(pipeline)
+        node_types = [hint.get("node_type_id") for hint in wf.cluster_hints]
+        assert "Standard_D8s_v3" in node_types
+
+    def test_prepare_workflow_collects_cluster_hints_from_switch_default_branch(self):
+        """C-04: Switch default_activities cluster hints surface too."""
+        nested_nb = NotebookActivity(
+            **_make_base("DefaultBranch", "default_branch"),
+            notebook_path="/Shared/default",
+        )
+        nested_nb.cluster = {
+            "spark_version": "16.4.x-scala2.12",
+            "num_workers": 0,
+            "node_type_id": "Standard_D16s_v3",
+        }
+        switch_act = SwitchActivity(
+            **_make_base("Switch", "switch"),
+            on_expression="x",
+            cases=[],
+            default_activities=[nested_nb],
+        )
+        pipeline = Pipeline(name="switch_default", tasks=[switch_act])
+        wf = prepare_workflow(pipeline)
+        node_types = [hint.get("node_type_id") for hint in wf.cluster_hints]
+        assert "Standard_D16s_v3" in node_types
 
     def test_prepare_workflow_with_retries(self):
         """Retry settings are carried through."""

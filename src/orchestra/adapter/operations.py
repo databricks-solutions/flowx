@@ -23,8 +23,8 @@ from orchestra.adapter.constants import (
     LAKEFLOW_CONNECT_REPLACEMENT,
     LAKEFLOW_CONNECTOR_TYPE_QUERY_BASED,
     METADATA_DRIVEN_MOTIF_ID,
+    MOTIF_CONSOLIDATE_QUESTION_PREFIX,
     QUESTION_COPY_ACTIVITY_PARADIGM,
-    QUESTION_DATABRICKS_TASK_COMPUTE,
     QUESTION_METADATA_DRIVEN_ACCESS,
     QUESTION_METADATA_DRIVEN_CONSOLIDATE,
     QUESTION_METADATA_DRIVEN_LOOKUP_TOOL,
@@ -35,12 +35,12 @@ from orchestra.adapter.constants import (
 from orchestra.adapter.models import (
     FIELD_TO_ENUM,
     CopyActivityParadigm,
-    DatabricksTaskCompute,
     LakeflowConnectorType,
     MetadataDrivenAccess,
     MetadataDrivenConsolidate,
     MetadataDrivenLookupTool,
     MetadataDrivenSize,
+    MotifConsolidate,
     NonDatabricksTaskCompute,
     PendingQuestions,
     QuestionOption,
@@ -62,9 +62,7 @@ from orchestra.models.ir import (
     ForEachActivity,
     IfConditionActivity,
     MotifActivity,
-    NotebookActivity,
     Pipeline,
-    SparkPythonActivity,
     SwitchActivity,
     SwitchCase,
 )
@@ -75,12 +73,15 @@ def enum_for(question_id: str) -> type[StrEnum] | None:
     """Returns the enum class backing a preference field.
 
     Args:
-        question_id: Field name (e.g. ``"copy_activity_paradigm"``).
+        question_id: Field name (e.g. ``"copy_activity_paradigm"``) or
+            per-motif id (e.g. ``"consolidate_motif:rest_api_pagination"``).
 
     Returns:
         The :class:`StrEnum` subclass that defines the allowed values, or
-        ``None`` when the field is unknown.
+        ``None`` when the question_id is unknown.
     """
+    if question_id.startswith(MOTIF_CONSOLIDATE_QUESTION_PREFIX):
+        return MotifConsolidate
     return FIELD_TO_ENUM.get(question_id)
 
 
@@ -241,7 +242,6 @@ def gather_questions(
         _build_lakeflow_connector_type_question,
         _build_copy_activity_paradigm_question,
         _build_non_databricks_task_compute_question,
-        _build_databricks_task_compute_question,
         _build_metadata_driven_consolidate_question,
         _build_metadata_driven_access_question,
         _build_metadata_driven_size_question,
@@ -255,6 +255,14 @@ def gather_questions(
         and question.question_id not in answer_map
         and _conditions_met(question.conditions, answer_map)
     ]
+    # Per-motif "consolidate?" questions: one per detected motif.  Each
+    # gets its own question_id ``consolidate_motif:<motif_id>`` so the
+    # adapter can solicit and validate them independently.  Default is
+    # ``keep`` -- nothing is collapsed without an explicit yes.
+    for motif_question in _build_motif_consolidation_questions(motif_list):
+        if motif_question.question_id in answer_map:
+            continue
+        pending.append(motif_question)
     return PendingQuestions(pipeline_name=pipeline.name, questions=pending)
 
 
@@ -468,52 +476,6 @@ def _build_lakeflow_connector_type_question(
     return None
 
 
-def _build_databricks_task_compute_question(
-    pipeline: Pipeline, motifs: list, answers: dict[str, str] | None = None
-) -> TranslationQuestion | None:
-    """Builds the serverless-vs-existing question for ADF Databricks-* tasks.
-
-    Args:
-        pipeline: Translated pipeline IR.
-        motifs: Detected motifs (unused; accepted for builder uniformity).
-
-    Returns:
-        The constructed :class:`TranslationQuestion`, or ``None`` when
-        no Databricks notebook or Python task is present.
-    """
-    affected = tuple(
-        activity.task_key
-        for activity in walk_activities(pipeline.tasks)
-        if isinstance(activity, (NotebookActivity, SparkPythonActivity))
-    )
-    if not affected:
-        return None
-    return TranslationQuestion(
-        question_id=QUESTION_DATABRICKS_TASK_COMPUTE,
-        prompt="Migrate existing Databricks notebook and Python tasks to serverless?",
-        rationale=(
-            "ADF DatabricksNotebook and DatabricksSparkPython tasks bind to a "
-            "classic cluster derived from the source linked service.  Serverless "
-            "drops that binding; keeping the existing compute preserves init "
-            "scripts or DBR-specific features."
-        ),
-        options=(
-            QuestionOption(
-                value=DatabricksTaskCompute.EXISTING.value,
-                label="Keep linked-service compute",
-                description="Binds the task to the cluster derived from the ADF linked service.",
-            ),
-            QuestionOption(
-                value=DatabricksTaskCompute.SERVERLESS.value,
-                label="Serverless",
-                description="Removes the cluster binding so the task runs on serverless compute.",
-            ),
-        ),
-        affected_task_keys=affected,
-        default=DatabricksTaskCompute.EXISTING.value,
-    )
-
-
 def _build_metadata_driven_consolidate_question(
     pipeline: Pipeline,
     motifs: list,
@@ -704,6 +666,80 @@ def _build_metadata_driven_lookup_tool_question(
     )
 
 
+def _build_motif_consolidation_questions(motifs: list) -> list[TranslationQuestion]:
+    """Builds one ``consolidate_motif:<id>`` question per detected motif.
+
+    Args:
+        motifs: Detected :class:`~orchestra.models.motifs.DetectedMotif`
+            instances from :func:`orchestra.motifs.detector.detect_motifs`.
+
+    Returns:
+        A list of :class:`TranslationQuestion` instances, one per
+        detected motif.  Each question uses a unique question_id of the
+        form ``consolidate_motif:<motif_id>`` so multiple distinct motif
+        types in the same pipeline (e.g. ``rest_api_pagination`` *and*
+        ``metadata_driven_bulk_copy``) each get their own prompt.
+        Returns an empty list when no motifs were detected.
+
+    Notes:
+        - The default for every motif is ``keep``.  Motif detection is
+          a heuristic match and over-collapsing silently rewrites
+          pipelines; requiring an explicit ``consolidate`` answer is
+          the safer default.
+        - When the same motif type is detected more than once in the
+          same pipeline (rare in practice but possible) the builder
+          emits a single question covering all instances of that type.
+          Per-instance overrides can still be expressed by adding more
+          fine-grained gating in :class:`MotifActivity`.
+        - The ``affected_task_keys`` field lists the *underlying* ADF
+          activity names so the agent can quote them when asking the
+          user, e.g. ``"Consolidate REST API Pagination motif spanning
+          GetToken, InitCursor, PollLoop into a single notebook?"``.
+    """
+    if not motifs:
+        return []
+    seen: set[str] = set()
+    questions: list[TranslationQuestion] = []
+    for motif in motifs:
+        definition = motif.definition
+        motif_id = definition.motif_id
+        if motif_id in seen:
+            continue
+        seen.add(motif_id)
+        affected = tuple(motif.matched_activities)
+        question_id = f"{MOTIF_CONSOLIDATE_QUESTION_PREFIX}{motif_id}"
+        confidence_suffix = ""
+        if motif.confidence_notes:
+            confidence_suffix = "  Detector notes: " + " | ".join(motif.confidence_notes)
+        questions.append(
+            TranslationQuestion(
+                question_id=question_id,
+                prompt=f"Consolidate the {definition.display_name!r} motif into a single task?",
+                rationale=(
+                    f"{definition.description} "
+                    f"Affected activities: {', '.join(affected) if affected else '(none)'}.{confidence_suffix} "
+                    "Keep preserves the activity-by-activity translation; consolidate replaces "
+                    f"them with a single {definition.databricks_replacement!r} task."
+                ),
+                options=(
+                    QuestionOption(
+                        value=MotifConsolidate.KEEP.value,
+                        label="Keep individual activities",
+                        description="Preserves the per-activity translation; no motif collapse.",
+                    ),
+                    QuestionOption(
+                        value=MotifConsolidate.CONSOLIDATE.value,
+                        label="Consolidate into one task",
+                        description=f"Replaces matched activities with a {definition.databricks_replacement!r} task.",
+                    ),
+                ),
+                affected_task_keys=affected,
+                default=MotifConsolidate.KEEP.value,
+            )
+        )
+    return questions
+
+
 def _metadata_driven_motif_task_keys(
     pipeline: Pipeline, motifs: list, answers: dict[str, str] | None = None
 ) -> tuple[str, ...]:
@@ -851,11 +887,6 @@ def _stamp_activity(activity: Activity, pipeline_preferences: TranslationPrefere
         return _stamp_copy_activity(activity, activity_preferences)
     if isinstance(activity, MotifActivity):
         return _stamp_motif_activity(activity, activity_preferences)
-    if isinstance(activity, (NotebookActivity, SparkPythonActivity)):
-        return dataclasses.replace(
-            activity,
-            compute_mode=_resolve_databricks_task_compute_mode(activity_preferences),
-        )
     return dataclasses.replace(activity, compute_mode=_resolve_compute_mode(activity, activity_preferences))
 
 
@@ -1097,9 +1128,11 @@ def _resolve_compute_mode(activity: Activity, activity_preferences: TranslationP
         :data:`COMPUTE_MODE_CLASSIC_SINGLE_NODE`,
         :data:`COMPUTE_MODE_CLASSIC_MULTI_NODE`, or
         :data:`COMPUTE_MODE_INHERIT`.
+
+    DatabricksNotebook and DatabricksSparkPython activities always
+    inherit the linked-service-derived cluster binding; serverless is
+    no longer offered as a replacement for source-defined clusters.
     """
-    if isinstance(activity, (NotebookActivity, SparkPythonActivity)):
-        return _resolve_databricks_task_compute_mode(activity_preferences)
     if not is_non_databricks_task(activity):
         return COMPUTE_MODE_INHERIT
     if activity_preferences.non_databricks_task_compute is NonDatabricksTaskCompute.SERVERLESS:
@@ -1107,19 +1140,3 @@ def _resolve_compute_mode(activity: Activity, activity_preferences: TranslationP
     if isinstance(activity, CopyActivity):
         return COMPUTE_MODE_CLASSIC_MULTI_NODE
     return COMPUTE_MODE_CLASSIC_SINGLE_NODE
-
-
-def _resolve_databricks_task_compute_mode(activity_preferences: TranslationPreferences) -> str:
-    """Resolves the compute mode for an ADF Databricks-* task.
-
-    Args:
-        activity_preferences: Effective preferences for the task.
-
-    Returns:
-        :data:`COMPUTE_MODE_SERVERLESS` when the caller opted into
-        serverless; otherwise :data:`COMPUTE_MODE_INHERIT`, which leaves
-        the linked-service-derived binding in place.
-    """
-    if activity_preferences.databricks_task_compute is DatabricksTaskCompute.SERVERLESS:
-        return COMPUTE_MODE_SERVERLESS
-    return COMPUTE_MODE_INHERIT

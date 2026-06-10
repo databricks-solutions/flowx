@@ -14,17 +14,37 @@ triggers:
 
 # Translate ADF to Databricks IR
 
-Convert the parsed ADF inventory into Databricks intermediate representation (IR) using deterministic translators for known types and agentic fallback for complex/unknown types.
+Convert the parsed ADF inventory into Databricks intermediate representation (IR) using deterministic translators for known types and agentic fallback for unknown types.
 
 ## Context
 
 This is phase 2 of the orchestra migration workflow. It consumes the `inventory.json` produced by the `ingest` skill and produces a `translation_report.json` that the `prepare` skill uses to generate Databricks Declarative Automation Bundles.
 
 The translation follows a **deterministic-first** strategy:
-1. Activities with known, well-defined mappings are translated by built-in Python translators (fast, reliable, no LLM needed)
-2. Activities that require interpretation, complex expression conversion, or lack a direct mapping are handled by agentic skills from the `adf-to-databricks-plugin` (LLM-assisted)
+1. Activities with known, well-defined mappings are translated by built-in Python translators
+2. Activities that require interpretation, expression conversion, or lack a Python translator are handled by agent skills from the `adf-to-databricks-plugin`
 
-This approach maximizes reliability while covering the long tail of ADF activity types.
+## Prerequisite — Python environment
+
+This skill runs the plugin's Python code, which depends on third-party packages. Before running
+any Python commands, ensure the plugin's virtual environment is bootstrapped. Run the
+**`setup`** skill, or directly:
+
+```bash
+bash <plugin_dir>/scripts/bootstrap.sh
+```
+
+This creates `<plugin_dir>/.venv` and installs dependencies from `requirements.txt`. If Python or 
+pip is missing, the script prints a warning telling the user what to install — relay it and stop
+until they have installed Python 3.12+ and pip.
+
+Run **every** Python command in this skill with the venv interpreter and `src/` on `PYTHONPATH` 
+(use it anywhere a command below shows `python3`):
+
+```bash
+export PYTHONPATH="<plugin_dir>/src"
+"<plugin_dir>/.venv/bin/python" <plugin_dir>/src/orchestra/parser/adf_loader.py ...
+```
 
 ## Workflow
 
@@ -68,12 +88,12 @@ Where:
 - `<plugin_dir>` is the root of the orchestra plugin
 - `<inventory_path>` is the path to `inventory.json`
 - `<adf_source_dir>` is the original ADF JSON directory (from the ingest phase)
-- `<output_dir>` is where to write translation output (default: `./orchestra_output/translate/`)
+- `<output_dir>` is the translation output path (default: `./orchestra_output/translate/`)
 
 This produces:
 - `translation_report.json` — results for deterministic activities + placeholders for agentic gaps
-- `ir/` directory — the Databricks IR for each translated activity
-- `notebooks/` directory — any generated helper notebooks
+- `ir/` directory — Databricks IR for each translated activity
+- `notebooks/` directory — generated helper notebooks
 
 ### Step 3 — Read the translation report
 
@@ -125,7 +145,7 @@ Invoke `adf-to-databricks:adf-dataflow-converter` with the raw activity JSON and
 - The raw `typeProperties` from the ADF activity
 - The data flow JSON definition (if available in the source directory under `dataflow/`)
 - The linked service configurations for source/sink connections
-- Target catalog and schema for the DLT pipeline or PySpark notebook output
+- Target catalog and schema for the SDP pipeline or PySpark notebook output
 
 **Control flow activities (Switch, Until, Wait, Filter, AppendVariable):**
 Invoke `adf-to-databricks:adf-pipeline-converter` with the raw activity JSON. Provide context:
@@ -174,14 +194,14 @@ This updates `translation_report.json` with the agentic results merged in, chang
 ### Step 6.1 — Gather just-in-time translation preferences
 
 The adapter raises several preference questions plus a chained set for
-metadata-driven motifs.  Drive the loop multi-pass: every time the user
-answers a question whose value gates further prompts, re-run `inspect
---answers <answers.json>` to surface the next batch.
+metadata-driven motifs. Every time the user answers a question whose value 
+gates further prompts, re-run `inspect --answers <answers.json>` to surface 
+the next batch.
 
 When the metadata-driven flow ends with `metadata_driven_lookup_tool=have`
 and the agent has a database tool (Genie, MCP SQL, or a workspace SDK),
 run the lookup query directly and write the rows to
-`<output_dir>/lookup_values.json`.  When the answer is `none`, prompt
+`<output_dir>/lookup_values.json`. When the answer is `none`, prompt
 the user for a CSV file or comma-separated string and call:
 
 ```bash
@@ -199,14 +219,13 @@ python3 -m orchestra.adapter modify \
     --out <output_dir>/translation_report.stamped.json
 ```
 
-When no metadata-driven motif is consolidated, `--lookup-values` is
-omitted.
+When no metadata-driven motif is consolidated, `--lookup-values` is omitted.
 
 #### Legacy flow details
 
 Before writing the final report, surface any pipeline-modifier questions the
 IR raises (Copy Data paradigm, non-Databricks task compute, Lakeflow Connect
-opt-in, Databricks task compute).  Use the adapter CLI bridge:
+opt-in, Databricks task compute). Use the adapter CLI bridge:
 
 ```bash
 python3 -m orchestra.adapter inspect <translation_report_path>
@@ -236,20 +255,18 @@ The command emits JSON:
 ```
 
 For each question, prompt the user with the rationale, options, and the
-task keys it affects.  Use the default when the user defers.  Collect the
+task keys it affects. Use the default when the user defers. Collect the
 answers into a JSON file (`<output_dir>/answers.json`) shaped like:
 
 ```json
 {
   "copy_activity_paradigm": "sdp",
   "non_databricks_task_compute": "serverless",
-  "use_lakeflow_connectors": "lakeflow_connect",
-  "databricks_task_compute": "existing"
+  "use_lakeflow_connectors": "lakeflow_connect"
 }
 ```
 
-Then apply the answers to produce a stamped report the prepare phase
-consumes:
+Then apply the answers to produce a stamped report the prepare phase consumes:
 
 ```bash
 python3 -m orchestra.adapter modify \

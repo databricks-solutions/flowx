@@ -225,6 +225,68 @@ class TestGenerateLookupNotebook:
         # ("dbutils.widgets.get(..."), not as executable Python.
         assert 'query = "dbutils.widgets.get(' in content
 
+    def test_file_lookup_coerces_expression_dict_path_components(self):
+        """C-37 (LSC4-001): folder_path / file_name that arrive as ADF
+        expression dicts must not crash ``_assemble_file_lookup_source_path``
+        with AttributeError on ``.strip('/')``."""
+        activity = LookupActivity(
+            **_make_base("Read_Cfg", "read_cfg"),
+            source_type="JsonSource",
+            first_row_only=False,
+            source_properties={
+                "dataset_type": "Json",
+                "container": "configs",
+                "folder_path": {"value": "@pipeline().parameters.folder", "type": "Expression"},
+                "file_name": "tables.json",
+            },
+        )
+        # Must not raise.
+        content = generate_lookup_notebook(activity)
+        _assert_valid_python(content, "read_cfg (expression-dict folder)")
+
+    def test_file_lookup_rewrites_https_to_abfss(self):
+        """C-37 (LSC4-003): AzureBlobFS https URLs lower to abfss:// in
+        the generated lookup notebook so the read can succeed on a
+        Databricks cluster."""
+        activity = LookupActivity(
+            **_make_base("Read_Cfg", "read_cfg"),
+            source_type="JsonSource",
+            first_row_only=False,
+            source_properties={
+                "dataset_type": "Json",
+                "container": "configext",
+                "folder_path": "lookups",
+                "file_name": "tables.json",
+                "linked_service_url": "https://datahub01textcfdls.dfs.core.windows.net",
+            },
+        )
+        content = generate_lookup_notebook(activity)
+        _assert_valid_python(content, "read_cfg (abfss rewrite)")
+        assert "abfss://configext@datahub01textcfdls.dfs.core.windows.net" in content
+        assert "https://datahub01textcfdls" not in content
+
+    def test_file_source_lookup_emits_spark_read(self):
+        """Change lookup-file-dataset-support (P0): JsonSource + firstRowOnly=False."""
+        activity = LookupActivity(
+            **_make_base("Read_Configuration", "read_configuration"),
+            source_type="JsonSource",
+            first_row_only=False,
+            source_properties={
+                "dataset_type": "Json",
+                "container": "configs",
+                "folder_path": "lookup",
+                "file_name": "tables.json",
+                "multiLineJson": True,
+            },
+        )
+        content = generate_lookup_notebook(activity)
+        _assert_valid_python(content, "read_configuration (file source)")
+        # File-source branch: no spark.sql(''), uses spark.read.format().load().
+        assert "spark.sql" not in content
+        assert "spark.read.format('json')" in content
+        assert '.option("multiline", "true")' in content
+        assert "source_path" in content
+
 
 # ---------------------------------------------------------------------------
 # Web activity notebook generator
@@ -277,6 +339,23 @@ class TestGenerateWebActivityNotebook:
         _assert_valid_python(content, "auth_api (ServicePrincipal)")
         assert "auth-credential" in content
         assert "Bearer" in content
+
+    def test_auth_block_msi_raises_not_implemented(self):
+        """LSC3-002: MSI / ManagedServiceIdentity has no static secret to
+        read; the generated notebook must raise NotImplementedError pointing
+        at SETUP.md, not emit a fake dbutils.secrets.get('auth-credential')."""
+        for auth_type in ("MSI", "ManagedServiceIdentity"):
+            activity = WebActivity(
+                **_make_base(f"MsiApi_{auth_type}", f"msi_api_{auth_type.lower()}"),
+                url="https://api.example.com",
+                method="GET",
+                authentication={"type": auth_type, "resource": "https://management.azure.com"},
+            )
+            content = generate_web_activity_notebook(activity, scope=f"msi_api_{auth_type.lower()}")
+            _assert_valid_python(content, f"msi_api ({auth_type})")
+            assert "auth-credential" not in content
+            assert "NotImplementedError" in content
+            assert "SETUP.md" in content
 
     def test_auth_block_basic(self):
         """Basic auth generates username/password secret retrieval."""

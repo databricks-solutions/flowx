@@ -7,29 +7,45 @@ from typing import Any
 from orchestra.models.adf_ast import AdfActivity, AdfDefinitions
 from orchestra.models.ir import Activity, SwitchActivity, SwitchCase, TranslationContext
 from orchestra.parser.adf_loader import parse_activity
-from orchestra.parser.expression_parser import resolve_expression, resolve_interpolated_string
-from orchestra.translator.activity_translators.resolve import resolve_field
+from orchestra.parser.expression_parser import resolve_interpolated_string
+from orchestra.translator.activity_translators.resolve import (
+    BridgeRequest,
+    lower_to_bridge,
+    resolve_field,
+)
+
+_BRIDGE_PLACEHOLDER = "__BRIDGE__::result"
 
 
-def _resolve_on_expression(on_expression: str, context: TranslationContext) -> str:
-    """Resolves the ``on`` expression to a DAB dynamic value ref.
+def _resolve_on_expression(on_expression: str, context: TranslationContext) -> tuple[str, BridgeRequest | None]:
+    """Resolves the ``on`` expression to a DAB dynamic value ref or a bridge request.
+
+    C-07 (CF-iter2-001 / CF-iter2-003): when the expression involves an
+    ADF function call (e.g. ``@toUpper(coalesce(...))``), lower it to a
+    bridge SetVariable task instead of shipping the raw ADF string into
+    the condition_task operand.
 
     Args:
         on_expression: Raw ADF on-expression string.
         context: Translation context for resolving variables.
 
     Returns:
-        Resolved DAB ref string, or the original if unresolvable.
+        Tuple of ``(resolved_value_or_placeholder, bridge_request_or_None)``.
     """
     if "@{" in on_expression:
-        return resolve_interpolated_string(on_expression, context)
+        return resolve_interpolated_string(on_expression, context), None
 
     if on_expression.startswith("@"):
-        result = resolve_expression(on_expression, context)
-        if result is not None and result.kind in ("dab_ref", "literal"):
-            return result.value
+        operand, bridge = lower_to_bridge(on_expression, context)
+        if operand is not None:
+            return operand, None
+        if bridge is not None:
+            return _BRIDGE_PLACEHOLDER, bridge
+        # Resolution failed entirely -- preserve the raw string so the
+        # preparer can flag it via SETUP.md.
+        return on_expression, None
 
-    return on_expression
+    return on_expression, None
 
 
 def translate(
@@ -63,7 +79,7 @@ def translate(
     else:
         on_expression_raw = str(on_raw) if on_raw else ""
 
-    on_expression = _resolve_on_expression(on_expression_raw, context)
+    on_expression, bridge = _resolve_on_expression(on_expression_raw, context)
 
     cases: list[SwitchCase] = []
     raw_cases = type_properties.get("cases", [])
@@ -93,11 +109,20 @@ def translate(
             definitions,
         )
 
+    bridge_kwargs: dict[str, Any] = {}
+    if bridge is not None:
+        bridge_kwargs = {
+            "bridge_notebook_code": bridge.notebook_code,
+            "bridge_notebook_imports": list(bridge.notebook_imports),
+            "bridge_required_parameters": dict(bridge.required_parameters),
+        }
+
     switch_activity = SwitchActivity(
         **base_kwargs,
         on_expression=on_expression,
         cases=cases,
         default_activities=default_activities,
+        **bridge_kwargs,
     )
 
     return switch_activity, context

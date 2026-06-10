@@ -74,11 +74,21 @@ def _generate_secrets_setup_notebook(secrets: list[SecretInstruction]) -> DabNot
     for s in secrets:
         scopes.setdefault(s.scope, []).append(s)
 
-    body_parts: list[str] = []
+    # C-46 (LSC5-002): the ``dbutils.secrets`` submodule is read-only
+    # (get / getBytes / list / listScopes) — ``createScope`` and ``put`` do
+    # not exist and raise AttributeError on the first cell.  Provision via
+    # the Databricks SDK ``WorkspaceClient`` instead.
+    init_cell = textwrap.dedent("""\
+        from databricks.sdk import WorkspaceClient
+
+        w = WorkspaceClient()
+    """).rstrip()
+
+    body_parts: list[str] = [init_cell]
     for scope_name, scope_secrets in sorted(scopes.items()):
         lines: list[str] = [f"# Create scope: {scope_name}"]
         lines.append("try:")
-        lines.append(f'    dbutils.secrets.createScope(scope="{scope_name}")')
+        lines.append(f'    w.secrets.create_scope(scope="{scope_name}")')
         lines.append(f'    print("Created scope: {scope_name}")')
         lines.append("except Exception as e:")
         lines.append('    if "RESOURCE_ALREADY_EXISTS" in str(e):')
@@ -89,7 +99,7 @@ def _generate_secrets_setup_notebook(secrets: list[SecretInstruction]) -> DabNot
 
         for secret in scope_secrets:
             lines.append(f"# {secret.value_source}")
-            lines.append(f'dbutils.secrets.put(scope="{scope_name}", key="{secret.key}", string_value="PLACEHOLDER")')
+            lines.append(f'w.secrets.put_secret(scope="{scope_name}", key="{secret.key}", string_value="PLACEHOLDER")')
             lines.append(f'print("Created secret: {scope_name}/{secret.key}")')
             lines.append("")
 

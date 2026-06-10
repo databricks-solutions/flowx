@@ -18,6 +18,11 @@ jobs:
         run: sed -i 's|https://pypi-proxy\.dev\.databricks\.com/simple|https://pypi.org/simple|g' uv.lock
       - run: uv sync --frozen
       - run: make test
+      - name: Verify requirements.txt is in sync with the lockfile
+        run: |
+          make requirements
+          git diff --exit-code -- requirements.txt \
+            || { echo "requirements.txt is stale. Run 'make requirements' (or 'make precommit') and commit it."; exit 1; }
 
   fmt:
     runs-on: ubuntu-latest

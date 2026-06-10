@@ -69,4 +69,6 @@ def prepare(activity: SparkPythonActivity, *, scope: str = "") -> PreparedActivi
     }
     if activity.parameters:
         task["spark_python_task"]["parameters"] = list(activity.parameters)
+    if activity.libraries:
+        task["libraries"] = activity.libraries
     return PreparedActivity(task=task, notebooks=notebooks)

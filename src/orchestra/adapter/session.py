@@ -31,13 +31,13 @@ from orchestra.adapter.constants import (
 from orchestra.adapter.models import (
     DEFAULT_PREFERENCES,
     CopyActivityParadigm,
-    DatabricksTaskCompute,
     LakeflowConnectorType,
     MetadataDrivenAccess,
     MetadataDrivenConsolidate,
     MetadataDrivenLookupTool,
     MetadataDrivenSize,
     MigrationInputQuestion,
+    MotifConsolidate,
     NonDatabricksTaskCompute,
     PendingMigrationInputs,
     PendingQuestions,
@@ -174,9 +174,6 @@ class TranslationSession:
             use_lakeflow_connectors=UseLakeflowConnectors(
                 self._answers.get("use_lakeflow_connectors", self.defaults.use_lakeflow_connectors)
             ),
-            databricks_task_compute=DatabricksTaskCompute(
-                self._answers.get("databricks_task_compute", self.defaults.databricks_task_compute)
-            ),
             lakeflow_connector_type=LakeflowConnectorType(
                 self._answers.get("lakeflow_connector_type", self.defaults.lakeflow_connector_type)
             ),
@@ -192,8 +189,30 @@ class TranslationSession:
             metadata_driven_lookup_tool=MetadataDrivenLookupTool(
                 self._answers.get("metadata_driven_lookup_tool", self.defaults.metadata_driven_lookup_tool)
             ),
+            motif_consolidations=self._collect_motif_consolidations(),
             per_task=self.defaults.per_task,
         )
+
+    def _collect_motif_consolidations(self) -> dict[str, MotifConsolidate]:
+        """Returns the per-motif consolidation answers gathered so far.
+
+        Returns:
+            Dict mapping ``motif_id`` to the user's :class:`MotifConsolidate`
+            answer.  Motifs the user did not answer fall back to the
+            value carried on ``self.defaults`` (default
+            :data:`MotifConsolidate.KEEP`).  The dict is the union of
+            the defaults and any answers whose ``question_id`` starts
+            with ``consolidate_motif:``.
+        """
+        from orchestra.adapter.constants import MOTIF_CONSOLIDATE_QUESTION_PREFIX
+
+        consolidations: dict[str, MotifConsolidate] = dict(self.defaults.motif_consolidations)
+        for question_id, answer in self._answers.items():
+            if not question_id.startswith(MOTIF_CONSOLIDATE_QUESTION_PREFIX):
+                continue
+            motif_id = question_id[len(MOTIF_CONSOLIDATE_QUESTION_PREFIX) :]
+            consolidations[motif_id] = MotifConsolidate(answer)
+        return consolidations
 
     def resume(self) -> Pipeline:
         """Returns the preference-stamped pipeline IR.

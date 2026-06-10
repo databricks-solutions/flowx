@@ -57,9 +57,16 @@ class TestResolveParamValue:
 
     def test_notebook_code_returns_raw_for_manual_handling(self):
         """Expressions that resolve to Python code return raw text (manual handling)."""
-        raw = "@formatDateTime(utcnow(), 'yyyy-MM-dd')"
+        # Pick a format that intentionally does NOT map to a DAB dynamic
+        # value so the resolver falls back to notebook_code.
+        raw = "@formatDateTime(utcnow(), 'dd MMM yyyy')"
         result = resolve_param_value(raw)
         assert result == raw
+
+    def test_formatdatetime_utcnow_known_format_resolves_to_dab_ref(self):
+        """``formatDateTime(utcnow(), '<iso fmt>')`` short-circuits to a DAB ref."""
+        result = resolve_param_value("@formatDateTime(utcnow(), 'yyyy-MM-dd')")
+        assert result == "{{job.start_time.iso_date}}"
 
 
 class TestBuildNotebookTaskArtifacts:

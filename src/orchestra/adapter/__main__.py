@@ -19,15 +19,16 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from orchestra.adapter.constants import MOTIF_CONSOLIDATE_QUESTION_PREFIX
 from orchestra.adapter.models import (
     DEFAULT_PREFERENCES,
     CopyActivityParadigm,
-    DatabricksTaskCompute,
     LakeflowConnectorType,
     MetadataDrivenAccess,
     MetadataDrivenConsolidate,
     MetadataDrivenLookupTool,
     MetadataDrivenSize,
+    MotifConsolidate,
     NonDatabricksTaskCompute,
     PendingQuestions,
     TranslationPreferences,
@@ -484,6 +485,10 @@ def _preferences_from_answers(answers: dict[str, str]) -> TranslationPreferences
             question.
     """
     validated = {qid: validate_answer(qid, value) for qid, value in answers.items()}
+    motif_consolidations: dict[str, MotifConsolidate] = {}
+    for qid, value in validated.items():
+        if qid.startswith(MOTIF_CONSOLIDATE_QUESTION_PREFIX):
+            motif_consolidations[qid[len(MOTIF_CONSOLIDATE_QUESTION_PREFIX) :]] = MotifConsolidate(value)
     return TranslationPreferences(
         copy_activity_paradigm=CopyActivityParadigm(
             validated.get("copy_activity_paradigm", DEFAULT_PREFERENCES.copy_activity_paradigm)
@@ -493,9 +498,6 @@ def _preferences_from_answers(answers: dict[str, str]) -> TranslationPreferences
         ),
         use_lakeflow_connectors=UseLakeflowConnectors(
             validated.get("use_lakeflow_connectors", DEFAULT_PREFERENCES.use_lakeflow_connectors)
-        ),
-        databricks_task_compute=DatabricksTaskCompute(
-            validated.get("databricks_task_compute", DEFAULT_PREFERENCES.databricks_task_compute)
         ),
         lakeflow_connector_type=LakeflowConnectorType(
             validated.get("lakeflow_connector_type", DEFAULT_PREFERENCES.lakeflow_connector_type)
@@ -512,6 +514,7 @@ def _preferences_from_answers(answers: dict[str, str]) -> TranslationPreferences
         metadata_driven_lookup_tool=MetadataDrivenLookupTool(
             validated.get("metadata_driven_lookup_tool", DEFAULT_PREFERENCES.metadata_driven_lookup_tool)
         ),
+        motif_consolidations=motif_consolidations,
     )
 
 

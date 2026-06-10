@@ -156,7 +156,9 @@ class TestWriteBundle:
             secrets_nb = setup_dir / "create_secrets.py"
             if secrets_nb.exists():
                 content = secrets_nb.read_text()
-                assert "createScope" in content
+                # C-46 (LSC5-002): provision via the SDK WorkspaceClient, not
+                # the non-existent dbutils.secrets write API.
+                assert "create_scope" in content
 
     def test_write_bundle_returns_created_files(self, tmp_path):
         """write_bundle returns a list of all created file paths."""
@@ -261,6 +263,645 @@ class TestWriteBundle:
         assert task_keys == {"pause", "run_nb"}
 
 
+class TestScheduleEmission:
+    """C-10 (SCHED-001): schedule spec on PreparedWorkflow lands in job YAML."""
+
+    def test_schedule_block_emitted(self, tmp_path):
+        pipeline = Pipeline(
+            name="scheduled_job",
+            tasks=[
+                WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10),
+            ],
+            schedule={
+                "kind": "schedule",
+                "quartz_cron_expression": "0 0 8 * * ?",
+                "timezone_id": "Europe/Madrid",
+                "pause_status": "UNPAUSED",
+            },
+        )
+        wf = prepare_workflow(pipeline)
+        write_bundle(wf, tmp_path)
+        resource_file = list((tmp_path / "resources").glob("*.yml"))[0]
+        content = yaml.safe_load(resource_file.read_text())
+        job_key = list(content["resources"]["jobs"].keys())[0]
+        job = content["resources"]["jobs"][job_key]
+        assert job["schedule"]["quartz_cron_expression"] == "0 0 8 * * ?"
+        assert job["schedule"]["timezone_id"] == "Europe/Madrid"
+        assert job["schedule"]["pause_status"] == "UNPAUSED"
+
+    def test_periodic_trigger_emitted(self, tmp_path):
+        """SCHED3-002: periodic schedule spec renders as trigger.periodic."""
+        pipeline = Pipeline(
+            name="periodic_job",
+            tasks=[
+                WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10),
+            ],
+            schedule={
+                "kind": "periodic",
+                "interval": 3,
+                "unit": "DAYS",
+                "pause_status": "UNPAUSED",
+            },
+        )
+        wf = prepare_workflow(pipeline)
+        write_bundle(wf, tmp_path)
+        resource_file = list((tmp_path / "resources").glob("*.yml"))[0]
+        content = yaml.safe_load(resource_file.read_text())
+        job_key = list(content["resources"]["jobs"].keys())[0]
+        job = content["resources"]["jobs"][job_key]
+        assert job["trigger"]["periodic"]["interval"] == 3
+        assert job["trigger"]["periodic"]["unit"] == "DAYS"
+        # The cron-style schedule block must NOT appear for periodic specs.
+        assert "schedule" not in job
+
+    def test_trigger_parameter_overrides_mutate_job_parameter_defaults(self, tmp_path):
+        """SCHED3-003: schedule.parameter_overrides mutates matching
+        job.parameters entries' default values."""
+        pipeline = Pipeline(
+            name="trg_override_job",
+            tasks=[
+                WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10),
+            ],
+            schedule={
+                "kind": "schedule",
+                "quartz_cron_expression": "0 0 2 * * ?",
+                "timezone_id": "UTC",
+                "pause_status": "UNPAUSED",
+                "parameter_overrides": {
+                    "negocio": "GLP",
+                    "applicationName": "cli0010",
+                },
+            },
+        )
+        wf = prepare_workflow(pipeline)
+        # Pipeline parameters land on PreparedWorkflow via the report
+        # round-trip; emulate that here so the bundler has parameters to
+        # mutate.
+        wf.parameters = [
+            {"name": "negocio", "default": "DEFAULT"},
+            {"name": "applicationName", "default": "DEFAULT"},
+        ]
+        write_bundle(wf, tmp_path)
+        resource_file = list((tmp_path / "resources").glob("*.yml"))[0]
+        content = yaml.safe_load(resource_file.read_text())
+        job_key = list(content["resources"]["jobs"].keys())[0]
+        job = content["resources"]["jobs"][job_key]
+        params = {p["name"]: p["default"] for p in job["parameters"]}
+        assert params["negocio"] == "GLP"
+        assert params["applicationName"] == "cli0010"
+
+    def test_file_arrival_trigger_emitted(self, tmp_path):
+        pipeline = Pipeline(
+            name="blob_triggered_job",
+            tasks=[
+                WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10),
+            ],
+            schedule={
+                "kind": "file_arrival",
+                "url": "/subscriptions/x/y",
+                "pause_status": "UNPAUSED",
+            },
+        )
+        wf = prepare_workflow(pipeline)
+        write_bundle(wf, tmp_path)
+        resource_file = list((tmp_path / "resources").glob("*.yml"))[0]
+        content = yaml.safe_load(resource_file.read_text())
+        job_key = list(content["resources"]["jobs"].keys())[0]
+        job = content["resources"]["jobs"][job_key]
+        assert job["trigger"]["file_arrival"]["url"] == "/subscriptions/x/y"
+
+
+class TestStripDanglingTaskValueRefs:
+    """C-12 (VAREX-005): safety net widens to job_parameters and condition operands."""
+
+    def test_strips_dangling_run_job_task_job_parameters(self):
+        from orchestra.bundler.dab_writer import _strip_dangling_task_value_refs
+
+        tasks = [
+            {
+                "task_key": "outer",
+                "run_job_task": {
+                    "job_id": "${resources.jobs.inner.id}",
+                    "job_parameters": {
+                        "valid": "{{tasks.outer.values.something}}",
+                        "dangling": "{{tasks.gone.values.x}}",
+                    },
+                },
+            },
+        ]
+        _strip_dangling_task_value_refs(tasks, {"outer"})
+        assert tasks[0]["run_job_task"]["job_parameters"]["valid"] == "{{tasks.outer.values.something}}"
+        assert tasks[0]["run_job_task"]["job_parameters"]["dangling"] == ""
+
+    def test_strips_dangling_condition_task_operands(self):
+        from orchestra.bundler.dab_writer import _strip_dangling_task_value_refs
+
+        tasks = [
+            {
+                "task_key": "branch",
+                "condition_task": {
+                    "op": "EQUAL_TO",
+                    "left": "{{tasks.missing.values.x}}",
+                    "right": "1",
+                },
+            },
+        ]
+        neutralized = _strip_dangling_task_value_refs(tasks, {"branch"})
+        # Dangling ref blanked; right operand untouched.
+        assert tasks[0]["condition_task"]["left"] == ""
+        assert tasks[0]["condition_task"]["right"] == "1"
+        # C-43 (CF5-001 / CF5-002): the blanked condition operand is
+        # recorded so SETUP.md can flag the always-true predicate.
+        assert neutralized == [
+            {
+                "task_key": "branch",
+                "field": "left",
+                "original_ref": "{{tasks.missing.values.x}}",
+            }
+        ]
+
+    def test_neutralized_condition_renders_setup_section(self):
+        """C-43 (CF5-001 / CF5-002): a blanked condition operand surfaces a
+        'Conditions neutralized to always-true' section in SETUP.md so the
+        always-true predicate is never silent."""
+        from orchestra.bundler.prereqs_writer import build_prereqs, render_setup_md
+
+        prereqs = build_prereqs(
+            notebooks=[],
+            tasks=[],
+            known_bundle_jobs=set(),
+            neutralized_conditions=[
+                {
+                    "task_key": "branch",
+                    "field": "left",
+                    "original_ref": "{{tasks._init_continue.values.continue}}",
+                }
+            ],
+        )
+        assert not prereqs.is_empty()
+        md = render_setup_md(prereqs, bundle_name="b")
+        assert "Conditions neutralized to always-true" in md
+        assert "{{tasks._init_continue.values.continue}}" in md
+        assert "`branch`" in md
+
+    def test_recurses_into_for_each_task_body(self):
+        from orchestra.bundler.dab_writer import _strip_dangling_task_value_refs
+
+        tasks = [
+            {
+                "task_key": "loop",
+                "for_each_task": {
+                    "inputs": "[1, 2, 3]",
+                    "task": {
+                        "task_key": "loop_body",
+                        "run_job_task": {
+                            "job_id": "inner",
+                            "job_parameters": {"x": "{{tasks.absent.values.x}}"},
+                        },
+                    },
+                },
+            },
+        ]
+        _strip_dangling_task_value_refs(tasks, {"loop", "loop_body"})
+        assert tasks[0]["for_each_task"]["task"]["run_job_task"]["job_parameters"]["x"] == ""
+
+
+class TestAggregatedReportPipelineParameters:
+    """Change pipeline-parameters-and-variables-round-trip (P0): VAR-001."""
+
+    def test_load_report_carries_pipeline_parameters(self, tmp_path):
+        import json
+
+        from orchestra.bundler.dab_writer import _load_report
+
+        report = {
+            "translations": [
+                {
+                    "pipeline": "p1",
+                    "status": "translated",
+                    "parameters": [{"name": "env", "default": "dev"}],
+                    "ir": {
+                        "type": "WaitActivity",
+                        "name": "Pause",
+                        "task_key": "pause",
+                        "wait_time_seconds": 5,
+                    },
+                },
+            ]
+        }
+        report_path = tmp_path / "translation_report.json"
+        report_path.write_text(json.dumps(report))
+
+        workflows = _load_report(report_path)
+        assert len(workflows) == 1
+        wf = workflows[0]
+        # Pipeline-level parameters must survive round-trip.
+        assert wf.parameters
+        env_param = next(p for p in wf.parameters if p["name"] == "env")
+        assert env_param["default"] == "dev"
+
+
+class TestAggregatedReportSchedule:
+    """Change fix-aggregated-report-propagates-schedule (P0): SCHED3-001."""
+
+    def test_load_report_carries_pipeline_schedule(self, tmp_path):
+        import json
+
+        from orchestra.bundler.dab_writer import _load_report
+
+        schedule_spec = {
+            "kind": "cron",
+            "quartz_cron_expression": "0 0 2 ? * * *",
+            "timezone_id": "UTC",
+            "pause_status": "UNPAUSED",
+        }
+        report = {
+            "translations": [
+                {
+                    "pipeline": "p_with_schedule",
+                    "status": "translated",
+                    "schedule": schedule_spec,
+                    "ir": {
+                        "type": "WaitActivity",
+                        "name": "Pause",
+                        "task_key": "pause",
+                        "wait_time_seconds": 5,
+                    },
+                },
+            ]
+        }
+        report_path = tmp_path / "translation_report.json"
+        report_path.write_text(json.dumps(report))
+
+        workflows = _load_report(report_path)
+        assert len(workflows) == 1
+        wf = workflows[0]
+        assert wf.schedule is not None
+        assert wf.schedule["kind"] == "cron"
+        assert wf.schedule["quartz_cron_expression"] == "0 0 2 ? * * *"
+
+    def test_load_report_carries_pipeline_schedule_from_ir(self, tmp_path):
+        """Older single-pipeline reports nest schedule under ``ir.schedule``."""
+        import json
+
+        from orchestra.bundler.dab_writer import _load_report
+
+        schedule_spec = {
+            "kind": "cron",
+            "quartz_cron_expression": "0 0 4 ? * MON,TUE,WED,THU,FRI *",
+            "timezone_id": "Europe/Madrid",
+            "pause_status": "UNPAUSED",
+        }
+        report = {
+            "translations": [
+                {
+                    "pipeline": "p_with_ir_schedule",
+                    "status": "translated",
+                    "ir": {
+                        "type": "WaitActivity",
+                        "name": "Pause",
+                        "task_key": "pause",
+                        "wait_time_seconds": 5,
+                        "schedule": schedule_spec,
+                    },
+                },
+            ]
+        }
+        report_path = tmp_path / "translation_report.json"
+        report_path.write_text(json.dumps(report))
+
+        workflows = _load_report(report_path)
+        assert len(workflows) == 1
+        assert workflows[0].schedule is not None
+        assert workflows[0].schedule["quartz_cron_expression"].startswith("0 0 4")
+
+
+class TestStubBaseParameterCleanup:
+    """Change base-parameters-cleanup-and-stub-widgets (P1): NB-5."""
+
+    def test_stub_notebook_strips_unresolvable_adf_expression(self):
+        from orchestra.bundler.dab_writer import (
+            _extract_manual_parameters_from_existing_notebook_tasks,
+        )
+
+        tasks = [
+            {
+                "task_key": "lakeh_custom_notebook",
+                "notebook_task": {
+                    "notebook_path": "../src/notebooks/x.py",
+                    "base_parameters": {
+                        "appName": "@string(coalesce(json(activity('X').output).mail_app_name, ''))",
+                        "kept": "literal-value",
+                    },
+                },
+            }
+        ]
+        manual = _extract_manual_parameters_from_existing_notebook_tasks(tasks)
+        assert len(manual) == 1
+        assert manual[0].task_key == "lakeh_custom_notebook"
+        assert manual[0].widget_name == "appName"
+        assert "@string" in manual[0].raw_expression
+        # The ADF expression value must be dropped from base_parameters.
+        bp = tasks[0]["notebook_task"]["base_parameters"]
+        assert "appName" not in bp
+        assert bp["kept"] == "literal-value"
+
+
+class TestStubLibraryBinding:
+    """Change library-resolution-and-stub-binding (P0): NB-2."""
+
+    def test_stub_notebook_with_jar_library_binds_to_default_cluster(self):
+        from orchestra.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
+        from orchestra.bundler.dab_writer import _bind_cluster_to_notebook_tasks
+
+        tasks = [
+            {
+                "task_key": "lakeh_custom_notebook",
+                "notebook_task": {"notebook_path": "../src/notebooks/x.py"},
+                "libraries": [{"jar": "/Volumes/x/my.jar"}],
+            }
+        ]
+        _bind_cluster_to_notebook_tasks(tasks)
+        # Stub path that ships libraries must bind to the default cluster.
+        assert tasks[0]["job_cluster_key"] == DEFAULT_JOB_CLUSTER_KEY
+
+    def test_stub_notebook_no_libraries_stays_unbound(self):
+        from orchestra.bundler.dab_writer import _bind_cluster_to_notebook_tasks
+
+        tasks = [
+            {
+                "task_key": "k",
+                "notebook_task": {"notebook_path": "../src/notebooks/x.py"},
+            }
+        ]
+        _bind_cluster_to_notebook_tasks(tasks)
+        assert "job_cluster_key" not in tasks[0]
+
+    def test_serverless_compute_mode_with_jar_library_binds_classic(self):
+        from orchestra.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
+        from orchestra.bundler.dab_writer import _bind_cluster_to_notebook_tasks
+
+        tasks = [
+            {
+                "task_key": "k",
+                "notebook_task": {"notebook_path": "/Shared/nb"},
+                "libraries": [{"whl": "/Volumes/x/wheel.whl"}],
+                "_compute_mode": "serverless",
+            }
+        ]
+        _bind_cluster_to_notebook_tasks(tasks)
+        # Serverless can't host whl libraries -> classic cluster bind.
+        assert tasks[0]["job_cluster_key"] == DEFAULT_JOB_CLUSTER_KEY
+
+
+class TestClusterExtrasPropagation:
+    """Change linked-service-cluster-field-coverage (P1): NB-3, LSC-003."""
+
+    def test_extras_merged_into_default_cluster(self, tmp_path):
+        from orchestra.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
+        from orchestra.bundler.dab_writer import (
+            _build_default_cluster,
+            _build_default_job_clusters,
+            _infer_bundle_cluster_extras,
+        )
+
+        # Hint set with consistent extras.
+        wf = _simple_workflow()
+        wf.cluster_hints = [
+            {
+                "spark_version": "16.4.x-scala2.12",
+                "node_type_id": "Standard_D4s_v3",
+                "driver_node_type_id": "Standard_D8s_v3",
+                "spark_env_vars": {"PYSPARK_PYTHON": "/databricks/python3/bin/python3"},
+                "custom_tags": {"DigitalCase": "X"},
+                "data_security_mode": "SINGLE_USER",
+            }
+        ]
+        extras = _infer_bundle_cluster_extras(wf)
+        assert extras["driver_node_type_id"] == "Standard_D8s_v3"
+        assert extras["spark_env_vars"]["PYSPARK_PYTHON"] == "/databricks/python3/bin/python3"
+        assert extras["custom_tags"]["DigitalCase"] == "X"
+
+        clusters = _build_default_job_clusters({DEFAULT_JOB_CLUSTER_KEY}, extras=extras)
+        assert len(clusters) == 1
+        new_cluster = clusters[0]["new_cluster"]
+        assert new_cluster["driver_node_type_id"] == "Standard_D8s_v3"
+        assert new_cluster["spark_env_vars"]["PYSPARK_PYTHON"] == "/databricks/python3/bin/python3"
+        assert new_cluster["custom_tags"]["DigitalCase"] == "X"
+
+        # _build_default_cluster() with no extras keeps the legacy shape.
+        baseline = _build_default_cluster()
+        assert "driver_node_type_id" not in baseline["new_cluster"]
+
+    def test_num_workers_mined_into_default_cluster(self):
+        """C-40 (NB-ITER5-001): cluster_hints carrying num_workers!=1 must
+        flow into the default job_cluster instead of the hardcoded 1."""
+        from orchestra.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
+        from orchestra.bundler.dab_writer import (
+            _build_default_cluster,
+            _build_default_job_clusters,
+            _infer_bundle_cluster_extras,
+        )
+
+        wf = _simple_workflow()
+        wf.cluster_hints = [
+            {
+                "spark_version": "16.4.x-scala2.12",
+                "node_type_id": "Standard_D4s_v3",
+                "num_workers": 2,
+            }
+        ]
+        extras = _infer_bundle_cluster_extras(wf)
+        assert extras["num_workers"] == 2
+
+        clusters = _build_default_job_clusters({DEFAULT_JOB_CLUSTER_KEY}, extras=extras)
+        assert clusters[0]["new_cluster"]["num_workers"] == 2
+
+        # No hint -> legacy single-worker default preserved.
+        baseline = _build_default_cluster()
+        assert baseline["new_cluster"]["num_workers"] == 1
+
+
+class TestManualCredentialFromMsiLinkedService:
+    """C-39 (LSC4-004): when an ADF linked service authenticates via MSI
+    (or a CredentialReference), the bundle's default_cluster silently
+    uses ``single_user_name: ${workspace.current_user.userName}``.  The
+    workflow_preparer must surface a manual_credential SetupTask so
+    SETUP.md flags the substitution."""
+
+    def test_msi_authentication_emits_manual_credential_setup_task(self):
+        from orchestra.models.ir import NotebookActivity, Pipeline
+        from orchestra.preparer.workflow_preparer import prepare_workflow
+
+        activity = NotebookActivity(
+            name="Notebook1",
+            task_key="notebook1",
+            notebook_path="/Shared/x",
+            cluster={
+                "spark_version": "15.4.x-scala2.12",
+                "node_type_id": "Standard_D4s_v3",
+                "data_security_mode": "SINGLE_USER",
+                "_adf_authentication": "MSI",
+            },
+        )
+        pipeline = Pipeline(name="msi_pipe", tasks=[activity])
+        wf = prepare_workflow(pipeline)
+        manual = [st for st in wf.setup_tasks if st.type == "manual_credential"]
+        assert len(manual) == 1
+        config = manual[0].config
+        assert config["authentication"] == "MSI"
+        assert "service principal" in config["note"].lower()
+
+
+class TestUnparseableClusterHintsFiltered:
+    """C-29 (NB-ITER4-002): unparseable spark_version / node_type_id values
+    are filtered before Counter so the bundle default stays deployable."""
+
+    def test_unparseable_spark_version_falls_back_to_default(self):
+        from orchestra.bundler.dab_writer import (
+            _DEFAULT_SPARK_VERSION,
+            _infer_bundle_cluster_defaults,
+        )
+
+        wf = _simple_workflow()
+        wf.cluster_hints = [
+            {
+                "spark_version": "@if(equals(item()?.photon,true),'15.4.x-photon-scala2.12','15.4.x-scala2.12')",
+                "node_type_id": "Standard_DS3_v2",
+            },
+        ]
+        spark_version, node_type_id = _infer_bundle_cluster_defaults(wf)
+        assert spark_version == _DEFAULT_SPARK_VERSION
+        assert node_type_id == "Standard_DS3_v2"
+
+    def test_unparseable_node_type_falls_back_to_default(self):
+        from orchestra.bundler.dab_writer import (
+            _DEFAULT_NODE_TYPE_ID,
+            _infer_bundle_cluster_defaults,
+        )
+
+        wf = _simple_workflow()
+        wf.cluster_hints = [
+            {
+                "spark_version": "15.4.x-scala2.12",
+                "node_type_id": "@pipeline().parameters.unresolved",
+            },
+        ]
+        spark_version, node_type_id = _infer_bundle_cluster_defaults(wf)
+        assert spark_version == "15.4.x-scala2.12"
+        assert node_type_id == _DEFAULT_NODE_TYPE_ID
+
+    def test_real_spark_version_still_wins(self):
+        from orchestra.bundler.dab_writer import _infer_bundle_cluster_defaults
+
+        wf = _simple_workflow()
+        wf.cluster_hints = [
+            {"spark_version": "15.4.x-photon-scala2.12", "node_type_id": "Standard_D4s_v3"},
+            {"spark_version": "15.4.x-photon-scala2.12", "node_type_id": "Standard_D4s_v3"},
+            {"spark_version": "@if(equals(item()?.photon,true),X,Y)", "node_type_id": "Standard_D4s_v3"},
+        ]
+        spark_version, _ = _infer_bundle_cluster_defaults(wf)
+        assert spark_version == "15.4.x-photon-scala2.12"
+
+
+class TestSingleUserNameOnSingleUserClusters:
+    """Change fix-single-user-cluster-requires-single-user-name (P0): NB-ITER3-003."""
+
+    def test_default_cluster_includes_single_user_name(self):
+        from orchestra.bundler.dab_writer import _build_default_cluster
+
+        cluster = _build_default_cluster()["new_cluster"]
+        assert cluster["data_security_mode"] == "SINGLE_USER"
+        assert cluster["single_user_name"] == "${workspace.current_user.userName}"
+
+    def test_single_node_cluster_includes_single_user_name(self):
+        from orchestra.bundler.dab_writer import _build_single_node_cluster
+
+        cluster = _build_single_node_cluster()["new_cluster"]
+        assert cluster["data_security_mode"] == "SINGLE_USER"
+        assert cluster["single_user_name"] == "${workspace.current_user.userName}"
+
+    def test_multi_node_cluster_includes_single_user_name(self):
+        from orchestra.bundler.dab_writer import _build_multi_node_cluster
+
+        cluster = _build_multi_node_cluster()["new_cluster"]
+        assert cluster["data_security_mode"] == "SINGLE_USER"
+        assert cluster["single_user_name"] == "${workspace.current_user.userName}"
+
+
+class TestSetupMd:
+    def test_parameter_approximations_render_to_setup_md(self, tmp_path):
+        pipeline = Pipeline(
+            name="approx_pipeline",
+            tasks=[
+                NotebookActivity(
+                    name="Score",
+                    task_key="score",
+                    notebook_path="/Shared/score",
+                    base_parameters={"scoring_date": "{{job.start_time.iso_date}}"},
+                    parameter_approximations=[
+                        {
+                            "widget_name": "scoring_date",
+                            "raw_expression": "@formatDateTime(utcnow(), 'yyyy-MM-dd')",
+                            "replacement": "{{job.start_time.iso_date}}",
+                            "note": "Mapped ADF `utcnow()` to the Databricks job start time.",
+                        }
+                    ],
+                ),
+            ],
+        )
+        wf = prepare_workflow(pipeline)
+        write_bundle(wf, tmp_path)
+        setup_md = (tmp_path / "SETUP.md").read_text()
+        assert "## Parameter substitutions" in setup_md
+        assert "`score`" in setup_md
+        assert "`scoring_date`" in setup_md
+        assert "@formatDateTime(utcnow(), 'yyyy-MM-dd')" in setup_md
+        assert "{{job.start_time.iso_date}}" in setup_md
+        assert "Mapped ADF `utcnow()`" in setup_md
+
+
+class TestManualVariableRollupSetupMd:
+    """Change fix-cross-foreach-variable-read-warning (P1): VAREX3-003."""
+
+    def test_setup_md_surfaces_manual_variable_rollup(self, tmp_path):
+        from orchestra.models.ir import ForEachActivity, IfConditionActivity, SetVariableActivity
+
+        # Mirror the preparer-side detection by building the same pipeline.
+        inner_set = SetVariableActivity(
+            name="MarkStop",
+            task_key="mark_stop",
+            variable_name="continue",
+            variable_value="false",
+        )
+        loop = ForEachActivity(
+            name="Loop",
+            task_key="loop",
+            items_expression="@output.value",
+            inner_activities=[inner_set],
+            concurrency=2,
+        )
+        sibling = IfConditionActivity(
+            name="CheckCont",
+            task_key="check_cont",
+            op="EQUAL_TO",
+            left="@variables('continue')",
+            right="true",
+            if_true_activities=[],
+            if_false_activities=[],
+        )
+        pipeline = Pipeline(
+            name="rollup_pipeline",
+            tasks=[loop, sibling],
+        )
+        wf = prepare_workflow(pipeline)
+        write_bundle(wf, tmp_path)
+        setup_md = (tmp_path / "SETUP.md").read_text()
+        assert "## Manual variable roll-ups" in setup_md
+        assert "`continue`" in setup_md
+        assert "`loop`" in setup_md
+
+
 class TestSetupGenerator:
     def test_secrets_setup_notebook_content(self):
         from orchestra.bundler.setup_generator import generate_setup_tasks
@@ -273,7 +914,13 @@ class TestSetupGenerator:
         assert len(notebooks) == 1
         nb = notebooks[0]
         assert nb.relative_path == "setup/create_secrets.py"
-        assert "createScope" in nb.content
+        # C-46 (LSC5-002): generated against the SDK WorkspaceClient, since
+        # dbutils.secrets is read-only (no createScope / put).
+        assert "w.secrets.create_scope" in nb.content
+        assert "w.secrets.put_secret" in nb.content
+        assert "WorkspaceClient" in nb.content
+        assert "dbutils.secrets.createScope" not in nb.content
+        assert "dbutils.secrets.put" not in nb.content
         assert "my-scope" in nb.content
         assert "jdbc-url" in nb.content
         assert "jdbc-password" in nb.content
@@ -310,3 +957,64 @@ class TestSetupGenerator:
 
         notebooks = generate_setup_tasks(secrets=[], setup_tasks=[], catalog="main", schema="default")
         assert len(notebooks) == 0
+
+
+class TestPipelineDictToIrBridgeFields:
+    """C-14 (CF3-001 / VAREX3-001): bridge fields survive JSON roundtrip."""
+
+    def test_if_condition_bridge_fields_preserved(self):
+        from orchestra.bundler.dab_writer import pipeline_dict_to_ir
+        from orchestra.models.ir import IfConditionActivity
+
+        pipeline_dict = {
+            "name": "p",
+            "parameters": [],
+            "tasks": [
+                {
+                    "type": "IfConditionActivity",
+                    "name": "Branch",
+                    "task_key": "branch",
+                    "op": "EQUAL_TO",
+                    "left": "__BRIDGE__::result",
+                    "right": "True",
+                    "if_true_activities": [],
+                    "if_false_activities": [],
+                    "bridge_notebook_code": "result = not bool(some_param)",
+                    "bridge_notebook_imports": ["import os"],
+                    "bridge_required_parameters": {"some_param": "{{job.parameters.x}}"},
+                }
+            ],
+        }
+        pipeline, _ = pipeline_dict_to_ir(pipeline_dict)
+        task = pipeline.tasks[0]
+        assert isinstance(task, IfConditionActivity)
+        assert task.bridge_notebook_code == "result = not bool(some_param)"
+        assert task.bridge_notebook_imports == ["import os"]
+        assert task.bridge_required_parameters == {"some_param": "{{job.parameters.x}}"}
+
+    def test_switch_bridge_fields_preserved(self):
+        from orchestra.bundler.dab_writer import pipeline_dict_to_ir
+        from orchestra.models.ir import SwitchActivity
+
+        pipeline_dict = {
+            "name": "p",
+            "parameters": [],
+            "tasks": [
+                {
+                    "type": "SwitchActivity",
+                    "name": "Sw",
+                    "task_key": "sw",
+                    "on_expression": "__BRIDGE__::result",
+                    "cases": [],
+                    "default_activities": [],
+                    "bridge_notebook_code": "result = item.get('type', 'default').upper()",
+                    "bridge_notebook_imports": [],
+                    "bridge_required_parameters": {"item": "{{tasks.upstream.values.row}}"},
+                }
+            ],
+        }
+        pipeline, _ = pipeline_dict_to_ir(pipeline_dict)
+        task = pipeline.tasks[0]
+        assert isinstance(task, SwitchActivity)
+        assert task.bridge_notebook_code == "result = item.get('type', 'default').upper()"
+        assert task.bridge_required_parameters == {"item": "{{tasks.upstream.values.row}}"}

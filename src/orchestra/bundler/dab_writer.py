@@ -71,6 +71,12 @@ _bundle_warnings: list[str] = []
 # bundle's ``variables`` block + SETUP.md.
 _cross_bundle_variables: dict[str, str] = {}
 
+# C-43 (CF5-001 / CF5-002): condition_task operands the dangling-ref safety
+# net had to blank.  Each entry is {task_key, field, original_ref}.  Reset
+# per write_bundle call and surfaced as a SETUP.md section so a neutralised
+# branch predicate (always-true) is never silent.
+_neutralized_conditions: list[dict[str, str]] = []
+
 _WIDGET_REFERENCE = re.compile(r"""dbutils\.widgets\.get\(\s*["']([^"']+)["']\s*\)""")
 
 
@@ -98,6 +104,7 @@ def write_bundle(
     # cross-bundle variables from one bundle into the next.
     _bundle_warnings.clear()
     _cross_bundle_variables.clear()
+    _neutralized_conditions.clear()
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -244,15 +251,54 @@ def write_bundle(
     all_tasks = list(workflow.tasks)
     for inner in workflow.inner_workflows:
         all_tasks.extend(inner.tasks)
+    parameter_approximations = list(workflow.parameter_approximations)
+    for inner in workflow.inner_workflows:
+        parameter_approximations.extend(inner.parameter_approximations)
     known_bundle_jobs = {resource_key} | {normalize_task_key(inner.name) for inner in workflow.inner_workflows}
     # ``manual_parameters`` was collected above (before YAML emission) so
     # the broken values are also stripped from the on-disk YAML.
+    # VAREX3-003: manual_variable_rollup SetupTasks emitted by
+    # workflow_preparer surface in SETUP.md so the user knows where to add
+    # a roll-up notebook.
+    rollup_configs = [st.config for st in workflow.setup_tasks if st.type == "manual_variable_rollup"]
+    for inner in workflow.inner_workflows:
+        rollup_configs.extend(st.config for st in inner.setup_tasks if st.type == "manual_variable_rollup")
+    dynamic_dispatch_configs = [st.config for st in workflow.setup_tasks if st.type == "dynamic_notebook_dispatch"]
+    unresolved_library_configs = [st.config for st in workflow.setup_tasks if st.type == "unresolved_library"]
+    manual_variable_init_configs = [st.config for st in workflow.setup_tasks if st.type == "manual_variable_init"]
+    manual_schedule_time_of_day_configs = [
+        st.config for st in workflow.setup_tasks if st.type == "manual_schedule_time_of_day"
+    ]
+    manual_credential_configs = [st.config for st in workflow.setup_tasks if st.type == "manual_credential"]
+    for inner in workflow.inner_workflows:
+        dynamic_dispatch_configs.extend(st.config for st in inner.setup_tasks if st.type == "dynamic_notebook_dispatch")
+        unresolved_library_configs.extend(st.config for st in inner.setup_tasks if st.type == "unresolved_library")
+        manual_variable_init_configs.extend(st.config for st in inner.setup_tasks if st.type == "manual_variable_init")
+        manual_schedule_time_of_day_configs.extend(
+            st.config for st in inner.setup_tasks if st.type == "manual_schedule_time_of_day"
+        )
+        manual_credential_configs.extend(st.config for st in inner.setup_tasks if st.type == "manual_credential")
+    # LSC3-006: union typed SecretInstructions from the workflow (and
+    # inner workflows) with the notebook-scanned scopes so SETUP.md and
+    # create_secrets.py reference the same set of (scope, key) pairs.
+    all_secret_instructions = list(workflow.secrets)
+    for inner in workflow.inner_workflows:
+        all_secret_instructions.extend(inner.secrets)
     prereqs = build_prereqs(
         notebooks=all_notebooks,
         tasks=all_tasks,
         known_bundle_jobs=known_bundle_jobs,
         cross_bundle_variables=dict(_cross_bundle_variables),
         manual_parameters=manual_parameters,
+        parameter_approximations=parameter_approximations,
+        manual_variable_rollups=rollup_configs,
+        secret_instructions=all_secret_instructions,
+        dynamic_notebook_dispatches=dynamic_dispatch_configs,
+        unresolved_libraries=unresolved_library_configs,
+        manual_variable_inits=manual_variable_init_configs,
+        manual_schedule_time_of_day=manual_schedule_time_of_day_configs,
+        manual_credentials=manual_credential_configs,
+        neutralized_conditions=list(_neutralized_conditions),
     )
     setup_path = output_dir / "SETUP.md"
     setup_path.write_text(render_setup_md(prereqs, bundle_name=effective_name), encoding="utf-8")
@@ -385,6 +431,38 @@ def _warn(task_key: str, message: str) -> None:
 _DEFAULT_SPARK_VERSION = "15.4.x-scala2.12"
 _DEFAULT_NODE_TYPE_ID = "Standard_DS3_v2"
 
+# C-29 (NB-ITER4-002): a real DBR version string matches e.g.
+# "15.4.x-scala2.12" / "15.4.x-photon-scala2.12".  ADF expressions like
+# ``@if(equals(item()?.photon,true),...)`` slip through unfiltered today
+# and land in ``databricks.yml`` as the spark_version variable default,
+# which bundle deploy rejects.  The regex anchors on the canonical
+# Databricks Runtime shape so unrecognised strings fall through to the
+# safe default.
+_DBR_VERSION_RE = re.compile(r"^\d+\.\d+\.x(-[a-z0-9.]+)*$")
+
+
+def _is_valid_spark_version(value: Any) -> bool:
+    """Return True when *value* parses as a real DBR runtime version string."""
+    if not isinstance(value, str) or not value:
+        return False
+    return _DBR_VERSION_RE.match(value) is not None
+
+
+def _is_valid_node_type_id(value: Any) -> bool:
+    """Return True when *value* looks like a real cloud instance type.
+
+    Conservatively rejects anything that starts with ``@`` (an unresolved
+    ADF expression) or contains spaces; otherwise accepts the value
+    verbatim so we don't gate out cloud-specific instance families.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    if value.startswith("@"):
+        return False
+    if any(ch.isspace() for ch in value):
+        return False
+    return True
+
 
 def _infer_bundle_cluster_defaults(workflow: PreparedWorkflow) -> tuple[str, str]:
     """Derive ``spark_version`` and ``node_type_id`` defaults from task clusters.
@@ -397,12 +475,66 @@ def _infer_bundle_cluster_defaults(workflow: PreparedWorkflow) -> tuple[str, str
     """
     from collections import Counter
 
-    spark_versions = [hint["spark_version"] for hint in workflow.cluster_hints if hint.get("spark_version")]
-    node_types = [hint["node_type_id"] for hint in workflow.cluster_hints if hint.get("node_type_id")]
+    # C-29 (NB-ITER4-002): filter out unparseable spark_version /
+    # node_type_id hints before Counter so unresolved ADF expressions
+    # (e.g. ``@if(equals(item()?.photon,true),...)``) don't land as the
+    # bundle's default and break ``databricks bundle deploy``.
+    spark_versions = [
+        hint["spark_version"] for hint in workflow.cluster_hints if _is_valid_spark_version(hint.get("spark_version"))
+    ]
+    node_types = [
+        hint["node_type_id"] for hint in workflow.cluster_hints if _is_valid_node_type_id(hint.get("node_type_id"))
+    ]
 
     spark_version = Counter(spark_versions).most_common(1)[0][0] if spark_versions else _DEFAULT_SPARK_VERSION
     node_type_id = Counter(node_types).most_common(1)[0][0] if node_types else _DEFAULT_NODE_TYPE_ID
     return spark_version, node_type_id
+
+
+def _infer_bundle_cluster_extras(workflow: PreparedWorkflow) -> dict[str, Any]:
+    """Surface non-default cluster fields shared across the workflow's tasks.
+
+    Mines :attr:`PreparedWorkflow.cluster_hints` for cluster fields beyond
+    spark_version / node_type_id (including num_workers) and returns the
+    consensus values so the default job_cluster reflects ADF settings
+    end-to-end.
+
+    Args:
+        workflow: The prepared workflow being written.
+
+    Returns:
+        Dict of cluster fields ready to merge under ``new_cluster``.  Only
+        the most common value across hints is propagated for each field;
+        ties are broken by first occurrence.
+    """
+    from collections import Counter
+
+    extras: dict[str, Any] = {}
+    extra_keys = (
+        "num_workers",
+        "driver_node_type_id",
+        "data_security_mode",
+        "spark_env_vars",
+        "custom_tags",
+        "init_scripts",
+        "cluster_log_conf",
+        "spark_conf",
+    )
+    for key in extra_keys:
+        values = [hint[key] for hint in workflow.cluster_hints if hint.get(key)]
+        if not values:
+            continue
+        # Use string repr to dedupe non-hashable dict entries while still
+        # picking the most common.
+        rep_counter: Counter[str] = Counter()
+        rep_to_value: dict[str, Any] = {}
+        for value in values:
+            rep = repr(value)
+            rep_counter[rep] += 1
+            rep_to_value.setdefault(rep, value)
+        top_rep, _count = rep_counter.most_common(1)[0]
+        extras[key] = rep_to_value[top_rep]
+    return extras
 
 
 def _build_databricks_yml(
@@ -487,40 +619,63 @@ def _build_databricks_yml(
     }
 
 
-def _build_default_job_clusters(needed_keys: set[str]) -> list[dict[str, Any]]:
+def _build_default_job_clusters(
+    needed_keys: set[str],
+    *,
+    extras: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Builds the job_clusters stanza, emitting only the clusters in use.
 
     Args:
         needed_keys: Set of job_cluster_key strings referenced by any task
             in the workflow.
+        extras: Optional cluster fields surfaced from per-task hints
+            (driver_node_type_id, spark_env_vars, custom_tags, ...).  When
+            present these override the corresponding fields of the
+            multi-purpose default cluster so ADF-derived settings flow
+            into the emitted YAML.
 
     Returns:
         Ordered list of cluster definitions for inclusion under the job's
         ``job_clusters`` block.
     """
-    builders = (
-        (DEFAULT_JOB_CLUSTER_KEY, _build_default_cluster),
+    builders: tuple[tuple[str, Any], ...] = (
+        (DEFAULT_JOB_CLUSTER_KEY, lambda: _build_default_cluster(extras)),
         (SINGLE_NODE_JOB_CLUSTER_KEY, _build_single_node_cluster),
         (MULTI_NODE_JOB_CLUSTER_KEY, _build_multi_node_cluster),
     )
     return [builder() for key, builder in builders if key in needed_keys]
 
 
-def _build_default_cluster() -> dict[str, Any]:
+def _build_default_cluster(extras: dict[str, Any] | None = None) -> dict[str, Any]:
     """Builds the multi-purpose default job_cluster used for legacy bindings.
 
+    Args:
+        extras: Optional cluster fields lifted from per-task hints to
+            merge into ``new_cluster`` (num_workers, driver_node_type_id,
+            spark_env_vars, custom_tags, init_scripts, cluster_log_conf,
+            spark_conf, data_security_mode).  ``num_workers`` overrides the
+            default single-worker value and ``data_security_mode`` overrides
+            the default ``SINGLE_USER`` value when supplied.
+
     Returns:
-        Cluster definition with one worker and bundle-variable knobs for
-        spark_version and node_type_id.
+        Cluster definition with the mined (or default single) worker count
+        and bundle-variable knobs for spark_version and node_type_id, plus
+        any merged extras.
     """
+    new_cluster: dict[str, Any] = {
+        "spark_version": "${var.spark_version}",
+        "node_type_id": "${var.node_type_id}",
+        "num_workers": 1,
+        "data_security_mode": "SINGLE_USER",
+        "single_user_name": "${workspace.current_user.userName}",
+    }
+    if extras:
+        for key, value in extras.items():
+            new_cluster[key] = value
     return {
         "job_cluster_key": DEFAULT_JOB_CLUSTER_KEY,
-        "new_cluster": {
-            "spark_version": "${var.spark_version}",
-            "node_type_id": "${var.node_type_id}",
-            "num_workers": 1,
-            "data_security_mode": "SINGLE_USER",
-        },
+        "new_cluster": new_cluster,
     }
 
 
@@ -539,6 +694,7 @@ def _build_single_node_cluster() -> dict[str, Any]:
             "node_type_id": "${var.node_type_id}",
             "is_single_node": True,
             "data_security_mode": "SINGLE_USER",
+            "single_user_name": "${workspace.current_user.userName}",
         },
     }
 
@@ -557,6 +713,7 @@ def _build_multi_node_cluster() -> dict[str, Any]:
             "node_type_id": MULTI_NODE_CLUSTER_NODE_TYPE_ID,
             "num_workers": 2,
             "data_security_mode": "SINGLE_USER",
+            "single_user_name": "${workspace.current_user.userName}",
         },
     }
 
@@ -634,16 +791,22 @@ def _value_needs_manual_handling(value: Any) -> bool:
 def _extract_manual_parameters_from_existing_notebook_tasks(
     tasks: list[dict[str, Any]],
 ) -> list[ManualParameter]:
-    """Finds base_parameters orchestra couldn't evaluate for existing-notebook tasks."""
+    """Finds base_parameters orchestra couldn't evaluate for notebook tasks.
+
+    Previously this scan skipped stub notebooks under ``../src/`` because
+    their bodies could (in principle) be patched to inline the runtime
+    computation.  In practice stub tasks for activities that have no
+    deterministic translation are emitted with raw ADF expression values
+    that ``dbutils.widgets.get`` returns verbatim, which fails at runtime.
+    Walking both the absolute-path and bundle-relative cases drops the
+    broken values and surfaces them as a SETUP.md row instead.
+    """
     manual_parameters: list[ManualParameter] = []
     for task in _iter_tasks_recursively(tasks):
         notebook_task = task.get("notebook_task") or {}
         notebook_path = notebook_task.get("notebook_path", "")
         base_params = notebook_task.get("base_parameters")
-        # Bundle-relative paths (``../src/...``) can have their notebook
-        # bodies patched to inline the runtime computation; absolute paths
-        # belong to the user's existing notebooks and must be surfaced.
-        if not notebook_path.startswith("/") or not isinstance(base_params, dict):
+        if not isinstance(base_params, dict):
             continue
         keys_to_drop: list[str] = []
         for key, value in base_params.items():
@@ -704,15 +867,43 @@ def _bind_cluster_to_notebook_tasks(tasks: list[dict[str, Any]]) -> None:
             continue
         compute_mode = task.get("_compute_mode")
         if compute_mode == "serverless":
+            # Serverless cannot host jar/whl libraries.  When the task
+            # ships libraries we must still bind a classic cluster so the
+            # Jobs API accepts the libraries block.
+            if _task_has_jar_or_whl_libraries(task):
+                task["job_cluster_key"] = DEFAULT_JOB_CLUSTER_KEY
             continue
         cluster_key = COMPUTE_MODE_TO_CLUSTER_KEY.get(compute_mode or "")
         if cluster_key is not None:
             task["job_cluster_key"] = cluster_key
             continue
         notebook_path = notebook_task.get("notebook_path", "")
+        # Stub notebooks (../src/...) are normally left unbound for
+        # serverless compute.  But when libraries are attached we must
+        # bind to a real cluster (NB-2) -- serverless cannot install
+        # jar / whl libraries.
         if notebook_path.startswith("../src/"):
+            if _task_has_jar_or_whl_libraries(task):
+                task["job_cluster_key"] = DEFAULT_JOB_CLUSTER_KEY
             continue
         task["job_cluster_key"] = DEFAULT_JOB_CLUSTER_KEY
+
+
+def _task_has_jar_or_whl_libraries(task: dict[str, Any]) -> bool:
+    """Return True when *task* references a library shape that needs a cluster.
+
+    JAR / EGG / whl / PyPI / Maven / CRAN entries all require a classic
+    cluster — they cannot be installed on serverless.  Requirements files
+    are treated the same way to be safe.
+    """
+    libs = task.get("libraries")
+    if not isinstance(libs, list):
+        return False
+    cluster_required = {"jar", "egg", "whl", "maven", "pypi", "cran", "requirements"}
+    for entry in libs:
+        if isinstance(entry, dict) and any(key in entry for key in cluster_required):
+            return True
+    return False
 
 
 def _rewrite_post_branch_dependencies(tasks: list[dict[str, Any]]) -> None:
@@ -779,30 +970,136 @@ def _rewrite_post_branch_dependencies(tasks: list[dict[str, Any]]) -> None:
 _TASK_VALUE_REF = re.compile(r"\{\{tasks\.([^.]+)\.values\.[^}]+\}\}")
 
 
-def _strip_dangling_task_value_refs(tasks: list[dict[str, Any]], all_task_keys: set[str]) -> None:
+def _apply_schedule_to_job(job_def: dict[str, Any], spec: dict[str, Any]) -> None:
+    """Renders a workflow schedule spec onto a DAB job definition.
+
+    C-10 (SCHED-001): translates the structured schedule dict produced by
+    ``engine._adf_trigger_to_schedule`` into either ``schedule:`` or
+    ``trigger:`` keys on the job YAML.  Best-effort schedule shapes
+    (Tumbling / CustomEvents) fall back to a comment-style placeholder
+    so SETUP.md can capture them.
+    """
+    kind = spec.get("kind")
+    if kind == "schedule":
+        if "quartz_cron_expression" in spec:
+            schedule_block: dict[str, Any] = {
+                "quartz_cron_expression": spec["quartz_cron_expression"],
+                "timezone_id": spec.get("timezone_id", "UTC"),
+            }
+            if spec.get("pause_status"):
+                schedule_block["pause_status"] = spec["pause_status"]
+            job_def["schedule"] = schedule_block
+            return
+        # Tumbling fallback -- attach a hint rather than emitting a
+        # malformed schedule.  SETUP.md picks it up downstream.
+        job_def["schedule_setup_note"] = spec
+        return
+    if kind == "periodic":
+        # SCHED3-002: Day/Week/Month with interval > 1 maps to trigger.periodic.
+        trigger_block: dict[str, Any] = {
+            "periodic": {
+                "interval": spec.get("interval", 1),
+                "unit": spec.get("unit", "DAYS"),
+            }
+        }
+        if spec.get("pause_status"):
+            trigger_block["pause_status"] = spec["pause_status"]
+        job_def["trigger"] = trigger_block
+        return
+    if kind == "file_arrival":
+        trigger_block = {
+            "file_arrival": {"url": spec.get("url", "")},
+        }
+        if spec.get("pause_status"):
+            trigger_block["pause_status"] = spec["pause_status"]
+        job_def["trigger"] = trigger_block
+        return
+    if kind == "manual_setup":
+        # No DAB primitive -- surface the raw spec so SETUP.md can flag it.
+        job_def["schedule_setup_note"] = spec
+        return
+
+
+def _strip_dangling_task_value_refs(
+    tasks: list[dict[str, Any]],
+    all_task_keys: set[str],
+) -> list[dict[str, str]]:
     """Replaces ``{{tasks.X.values.Y}}`` refs whose ``X`` is not in the bundle.
+
+    C-12 (VAREX-005): in addition to ``notebook_task.base_parameters``,
+    walk ``run_job_task.job_parameters``, ``condition_task.left`` and
+    ``condition_task.right``, plus the nested for_each body so cross-job
+    parameter passing surfaces are caught.  C-05 fixes most variable
+    defaults; this safety net catches the residual cases (renames,
+    scoped-out variables) by emitting an empty string in place of the
+    dangling ref so SETUP.md §4 can flag it.
+
+    C-43 (CF5-001 / CF5-002): blanking a *condition_task* operand silently
+    turns ``NOT_EQUAL('', '0')`` into an always-true predicate, so the
+    branch runs unconditionally with no signal.  This function now records
+    each condition operand it neutralises and returns them so the caller
+    can surface a 'conditions neutralized — manual re-wiring required'
+    section in SETUP.md instead of failing silently.
 
     Args:
         tasks: Top-level tasks for one job (mutated in place).
         all_task_keys: Task keys that do exist in this job (including those
             inside ``for_each_task.task`` bodies).
+
+    Returns:
+        List of ``{task_key, field, original_ref}`` dicts for every
+        condition operand that was blanked.
     """
+    neutralized: list[dict[str, str]] = []
+
+    def _is_dangling(value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        match = _TASK_VALUE_REF.search(value)
+        return bool(match and match.group(1) not in all_task_keys)
 
     def visit(task: dict[str, Any]) -> None:
         notebook_task = task.get("notebook_task") or {}
         base_parameters = notebook_task.get("base_parameters") or {}
         for widget_name, value in list(base_parameters.items()):
-            if not isinstance(value, str):
-                continue
-            match = _TASK_VALUE_REF.search(value)
-            if match and match.group(1) not in all_task_keys:
+            if _is_dangling(value):
                 base_parameters[widget_name] = ""
+
+        # C-12: run_job_task.job_parameters references the parent's task
+        # values when crossing into an inner job.  Strip dangling refs.
+        run_job_task = task.get("run_job_task") or {}
+        job_parameters = run_job_task.get("job_parameters") or {}
+        if isinstance(job_parameters, dict):
+            for param_name, value in list(job_parameters.items()):
+                if _is_dangling(value):
+                    job_parameters[param_name] = ""
+
+        # C-12: condition_task operands can also carry dangling refs
+        # when an upstream renamed task disappeared between rewrite
+        # passes.  C-43: record each neutralised operand for SETUP.md.
+        condition_task = task.get("condition_task") or {}
+        if condition_task:
+            task_key = task.get("task_key", "")
+            for field_name in ("left", "right"):
+                operand = condition_task.get(field_name)
+                if _is_dangling(operand):
+                    neutralized.append(
+                        {
+                            "task_key": str(task_key),
+                            "field": field_name,
+                            "original_ref": str(operand),
+                        }
+                    )
+                    condition_task[field_name] = ""
+
         for_each = task.get("for_each_task")
         if for_each and isinstance(for_each.get("task"), dict):
             visit(for_each["task"])
 
     for task in tasks:
         visit(task)
+
+    return neutralized
 
 
 def _collect_all_task_keys(tasks: list[dict[str, Any]]) -> set[str]:
@@ -873,8 +1170,12 @@ def _build_job_resource(
     _augment_base_parameters(workflow.tasks, augment_scope)
     # Task values don't cross ``run_job_task`` boundaries; any such
     # reference in this job resolves to an empty string at runtime.  Emit
-    # the empty string now so SETUP.md §4 flags it.
-    _strip_dangling_task_value_refs(workflow.tasks, _collect_all_task_keys(workflow.tasks))
+    # the empty string now so SETUP.md §4 flags it.  C-43: a blanked
+    # condition operand silently makes the predicate always-true, so record
+    # each neutralised condition for the SETUP.md re-wiring section.
+    _neutralized_conditions.extend(
+        _strip_dangling_task_value_refs(workflow.tasks, _collect_all_task_keys(workflow.tasks))
+    )
 
     job_def: dict[str, Any] = {
         "name": workflow.name,
@@ -885,12 +1186,31 @@ def _build_job_resource(
         _bind_cluster_to_notebook_tasks(workflow.tasks)
         needed_keys = _collect_required_cluster_keys(workflow.tasks)
         if needed_keys:
-            job_def["job_clusters"] = _build_default_job_clusters(needed_keys)
+            cluster_extras = _infer_bundle_cluster_extras(workflow)
+            job_def["job_clusters"] = _build_default_job_clusters(
+                needed_keys,
+                extras=cluster_extras or None,
+            )
 
     _strip_compute_mode_markers(workflow.tasks)
 
     if workflow.parameters:
         job_def["parameters"] = workflow.parameters
+
+    # C-10 (SCHED-001): render the workflow schedule / trigger spec.
+    schedule_spec = getattr(workflow, "schedule", None)
+    if schedule_spec:
+        _apply_schedule_to_job(job_def, schedule_spec)
+        # SCHED3-003: trigger-supplied per-pipeline parameter overrides
+        # update the matching job.parameter defaults so scheduled runs
+        # receive the trigger's pinned values instead of the bare pipeline
+        # default.  Overrides only mutate existing declared parameters;
+        # unknown names are silently ignored to keep job_def well-formed.
+        overrides = schedule_spec.get("parameter_overrides") or {}
+        if overrides and job_def.get("parameters"):
+            for entry in job_def["parameters"]:
+                if entry.get("name") in overrides:
+                    entry["default"] = overrides[entry["name"]]
 
     return {
         "resources": {
@@ -957,6 +1277,8 @@ def _load_report(report_path: Path) -> list[PreparedWorkflow]:
         # format, so secret discovery / setup tasks / control-flow handling
         # all match.
         pipelines: dict[str, list[dict]] = {}
+        pipeline_params: dict[str, list[dict[str, Any]]] = {}
+        pipeline_schedules: dict[str, dict[str, Any]] = {}
         for translation in report.get("translations", []):
             pipeline_name = translation.get("pipeline", "unknown")
             if translation.get("status") != "translated":
@@ -965,9 +1287,27 @@ def _load_report(report_path: Path) -> list[PreparedWorkflow]:
             if not ir:
                 continue
             pipelines.setdefault(pipeline_name, []).append(ir)
+            # Round-trip pipeline-level parameters either supplied per-
+            # translation (newer report shape) or alongside the ir under
+            # an ``ir.parameters`` key (older single-pipeline serialisations
+            # roundtripped through this aggregator).
+            params = translation.get("parameters") or ir.get("parameters")
+            if params and pipeline_name not in pipeline_params:
+                pipeline_params[pipeline_name] = list(params)
+            # Likewise carry pipeline-level ``schedule`` through to the
+            # rehydrated pipeline_dict so trigger-derived schedule / trigger
+            # blocks survive the aggregated report shape.
+            schedule = translation.get("schedule") or ir.get("schedule")
+            if schedule and pipeline_name not in pipeline_schedules:
+                pipeline_schedules[pipeline_name] = dict(schedule)
 
         for pipeline_name, task_irs in pipelines.items():
-            workflow = _pipeline_dict_to_workflow({"name": pipeline_name, "tasks": task_irs})
+            pipeline_dict: dict[str, Any] = {"name": pipeline_name, "tasks": task_irs}
+            if pipeline_params.get(pipeline_name):
+                pipeline_dict["parameters"] = pipeline_params[pipeline_name]
+            if pipeline_schedules.get(pipeline_name):
+                pipeline_dict["schedule"] = pipeline_schedules[pipeline_name]
+            workflow = _pipeline_dict_to_workflow(pipeline_dict)
             workflows.append(workflow)
         return workflows
 
@@ -1010,13 +1350,24 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
     for param in pipeline_dict.get("parameters") or []:
         entry: dict[str, Any] = {"name": param["name"]}
         if "default" in param and param["default"] is not None:
-            entry["default"] = normalize_value(str(param["default"]))
+            default_value = param["default"]
+            # Bool / int / float defaults must survive the JSON round-trip
+            # as their declared type so the emitted YAML carries a real
+            # boolean / number, not a quoted string.  String defaults go
+            # through normalize_value to resolve embedded ADF refs.
+            if isinstance(default_value, bool):
+                entry["default"] = default_value
+            elif isinstance(default_value, (int, float)):
+                entry["default"] = default_value
+            else:
+                entry["default"] = normalize_value(str(default_value))
         parameters.append(entry)
     pipeline = Pipeline(
         name=pipeline_dict.get("name", "unknown"),
         tasks=activities,
         parameters=parameters or None,
         translation_preferences=_reconstruct_preferences(pipeline_dict.get("translation_preferences")),
+        schedule=pipeline_dict.get("schedule"),
     )
     return pipeline, parameters
 
@@ -1036,12 +1387,15 @@ def _reconstruct_preferences(raw: dict[str, Any] | None) -> Any:
         return None
     from orchestra.adapter.models import TranslationPreferences
 
+    # Reports authored before the databricks_task_compute option was
+    # removed may still carry that key; drop it silently so old reports
+    # remain rehydratable.
     return TranslationPreferences(
         copy_activity_paradigm=raw.get("copy_activity_paradigm", "notebook"),
         non_databricks_task_compute=raw.get("non_databricks_task_compute", "serverless"),
         use_lakeflow_connectors=raw.get("use_lakeflow_connectors", "existing"),
-        databricks_task_compute=raw.get("databricks_task_compute", "existing"),
         lakeflow_connector_type=raw.get("lakeflow_connector_type", "cdc"),
+        motif_consolidations=dict(raw.get("motif_consolidations") or {}),
         per_task=dict(raw.get("per_task") or {}),
     )
 
@@ -1096,6 +1450,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             value_kind=task_ir.get("value_kind", "literal"),
             notebook_code=task_ir.get("notebook_code"),
             notebook_imports=task_ir.get("notebook_imports", []),
+            raw_expression=task_ir.get("raw_expression"),
         )
     if task_type == "WaitActivity":
         return WaitActivity(
@@ -1131,13 +1486,15 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             **base,
             notebook_path=task_ir.get("notebook_path", ""),
             base_parameters=task_ir.get("base_parameters"),
+            notebook_path_unresolved=bool(task_ir.get("notebook_path_unresolved", False)),
+            notebook_path_expression=task_ir.get("notebook_path_expression"),
+            unresolved_libraries=list(task_ir.get("unresolved_libraries") or []),
         )
     if task_type == "SparkJarActivity":
         return SparkJarActivity(
             **base,
             main_class_name=task_ir.get("main_class_name", ""),
             parameters=task_ir.get("parameters"),
-            libraries=task_ir.get("libraries"),
         )
     if task_type == "SparkPythonActivity":
         return SparkPythonActivity(
@@ -1165,6 +1522,11 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             items_expression=task_ir.get("items_expression", ""),
             inner_activities=[_reconstruct_ir(child) for child in task_ir.get("inner_activities") or []],
             concurrency=task_ir.get("concurrency"),
+            # C-31 (CF4-001): preserve bridge fields so the preparer can
+            # synthesise the inputs bridge after a JSON roundtrip.
+            inputs_bridge_notebook_code=task_ir.get("inputs_bridge_notebook_code"),
+            inputs_bridge_notebook_imports=list(task_ir.get("inputs_bridge_notebook_imports") or []),
+            inputs_bridge_required_parameters=dict(task_ir.get("inputs_bridge_required_parameters") or {}),
         )
     if task_type == "IfConditionActivity":
         return IfConditionActivity(
@@ -1174,6 +1536,12 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             right=task_ir.get("right", ""),
             if_true_activities=[_reconstruct_ir(child) for child in task_ir.get("if_true_activities") or []],
             if_false_activities=[_reconstruct_ir(child) for child in task_ir.get("if_false_activities") or []],
+            # C-14 (CF3-001 / VAREX3-001): preserve bridge fields so the
+            # preparer can re-synthesise the hidden _bridge SetVariable task
+            # after a JSON roundtrip.
+            bridge_notebook_code=task_ir.get("bridge_notebook_code"),
+            bridge_notebook_imports=list(task_ir.get("bridge_notebook_imports") or []),
+            bridge_required_parameters=dict(task_ir.get("bridge_required_parameters") or {}),
         )
     if task_type == "SwitchActivity":
         return SwitchActivity(
@@ -1187,6 +1555,12 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
                 for case in task_ir.get("cases") or []
             ],
             default_activities=[_reconstruct_ir(child) for child in task_ir.get("default_activities") or []],
+            # C-14 (CF3-001 / VAREX3-001): preserve bridge fields for Switch
+            # so the preparer can re-synthesise the bridge task after a
+            # JSON roundtrip.
+            bridge_notebook_code=task_ir.get("bridge_notebook_code"),
+            bridge_notebook_imports=list(task_ir.get("bridge_notebook_imports") or []),
+            bridge_required_parameters=dict(task_ir.get("bridge_required_parameters") or {}),
         )
     if task_type == "MotifActivity":
         return MotifActivity(
@@ -1235,6 +1609,9 @@ def _common_activity_kwargs(task_ir: dict[str, Any]) -> dict[str, Any]:
         "min_retry_interval_millis": task_ir.get("min_retry_interval_millis"),
         "depends_on": _reconstruct_dependencies(task_ir.get("depends_on")),
         "cluster": task_ir.get("cluster"),
+        "existing_cluster_id": task_ir.get("existing_cluster_id"),
+        "libraries": task_ir.get("libraries"),
+        "parameter_approximations": list(task_ir.get("parameter_approximations") or []),
         "required_parameters": dict(task_ir.get("required_parameters") or {}),
         "compute_mode": task_ir.get("compute_mode"),
     }

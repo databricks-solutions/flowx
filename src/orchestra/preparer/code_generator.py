@@ -88,6 +88,8 @@ def generate_lookup_notebook(activity: LookupActivity, *, scope: str = "") -> st
                 for col_name, col_value in output.items():
                     dbutils.jobs.taskValues.set(key=col_name, value=col_value)
         """)
+    elif _is_file_lookup(activity):
+        body = _file_lookup_body(activity)
     else:
         body = textwrap.dedent(f"""\
             import json
@@ -116,12 +118,189 @@ def generate_lookup_notebook(activity: LookupActivity, *, scope: str = "") -> st
     return header + _command_separator() + body
 
 
-def generate_web_activity_notebook(activity: WebActivity, *, scope: str = "") -> str:
+_DATASET_TYPE_TO_SPARK_FORMAT: dict[str, str] = {
+    "Json": "json",
+    "Parquet": "parquet",
+    "DelimitedText": "csv",
+    "Avro": "avro",
+    "Orc": "orc",
+    "Excel": "com.crealytics.spark.excel",
+    "Xml": "xml",
+    "Binary": "binaryFile",
+}
+
+
+def _is_file_lookup(activity: LookupActivity) -> bool:
+    """Return True when the LookupActivity carries a file-source dataset."""
+    props = activity.source_properties or {}
+    dataset_type = props.get("dataset_type")
+    return bool(dataset_type) and dataset_type in _DATASET_TYPE_TO_SPARK_FORMAT
+
+
+def _coerce_to_str(value: Any) -> str:
+    """Defensive coercion for file-Lookup path components.
+
+    C-37 (LSC4-001): folder_path / file_name occasionally arrive as ADF
+    expression dicts (``{"value": ..., "type": "Expression"}``) when the
+    translator's unwrap pass missed them.  ``.strip('/')`` on a dict
+    crashes the bundler.  Coerce to a string so the worst-case outcome
+    is a missing path component instead of a stack trace that aborts
+    bundle generation.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and "value" in value:
+        inner = value["value"]
+        return str(inner) if inner is not None else ""
+    return str(value)
+
+
+_ADLS_HTTPS_RE = re.compile(
+    r"^https?://(?P<account>[A-Za-z0-9\-]+)\.(?:dfs|blob)\.core\.windows\.net(?P<path>/.*)?$",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_abfss(url: str, container: str) -> str:
+    """Rewrites an ``https://<account>.dfs.core.windows.net`` URL to abfss://.
+
+    C-37 (LSC4-003): AzureBlobFS linked services often surface the
+    HTTPS endpoint instead of the abfss:// form Databricks expects on a
+    cluster.  When the container is known, rewrite to
+    ``abfss://<container>@<account>.dfs.core.windows.net`` so the
+    generated lookup notebook can actually read the path.
+    """
+    if not container:
+        return url
+    match = _ADLS_HTTPS_RE.match(url)
+    if match is None:
+        return url
+    account = match.group("account")
+    rest = (match.group("path") or "").lstrip("/")
+    suffix = f"/{rest}" if rest else ""
+    return f"abfss://{container}@{account}.dfs.core.windows.net{suffix}"
+
+
+def _assemble_file_lookup_source_path(props: dict[str, Any]) -> str:
+    """Compose a fully-qualified default source path for a file-source Lookup.
+
+    LSC3-005: when the bound linked service exposes a URL like
+    ``abfss://container@account.dfs.core.windows.net``, append the dataset's
+    folder + filename onto the URL so the lookup notebook ships a real
+    default rather than ``''``.  Returns an empty string when no URL is
+    available -- callers can still override via the widget at runtime.
+
+    C-37 (LSC4-001 + LSC4-003): defensively coerce expression-dict values
+    to strings before ``.strip('/')`` so 4 pipelines that previously
+    crashed with AttributeError now emit bundles.  Also rewrites
+    ``https://<account>.dfs.core.windows.net`` URLs to ``abfss://`` when
+    a container is known so the lookup notebook reads the real ADLS
+    path rather than the HTTPS REST endpoint.
+    """
+    url = _coerce_to_str(props.get("linked_service_url"))
+    folder = _coerce_to_str(props.get("folder_path"))
+    filename = _coerce_to_str(props.get("file_name"))
+    container = _coerce_to_str(props.get("container"))
+    # C-47 (LSC5-001): never join a raw ``dataset()`` reference into the
+    # baked default path.  lookup.translate substitutes these from the
+    # dataset reference's parameter bindings; if one still leaks through
+    # (e.g. an unbound dataset parameter) drop it so spark.read does not get
+    # a literal broken ``abfss://.../@dataset().fileName`` path.
+    if "dataset(" in folder:
+        folder = ""
+    if "dataset(" in filename:
+        filename = ""
+    if url:
+        url = _rewrite_abfss(url, container)
+    if not (url or folder or filename):
+        return ""
+    parts: list[str] = []
+    if url:
+        parts.append(url.rstrip("/"))
+    if folder:
+        parts.append(folder.strip("/"))
+    if filename:
+        parts.append(filename.strip("/"))
+    return "/".join(p for p in parts if p)
+
+
+def _file_lookup_body(activity: LookupActivity) -> str:
+    """Render the notebook body for a file-source Lookup.
+
+    Builds a ``spark.read.format(...).option(...).load(<source_path>)`` call
+    with multiline JSON handling for ``firstRowOnly=False`` over arrayOfObjects.
+    The source_path is read from a widget so callers can override per run.
+
+    LSC3-005: when the bound linked service supplies a URL (e.g. abfss://
+    container@account.dfs.core.windows.net), the default widget value is
+    pre-populated with the fully-assembled URI so the notebook reads from
+    the right place without manual SETUP.md fixups.
+    """
+    props = activity.source_properties or {}
+    dataset_type = props.get("dataset_type", "Json")
+    spark_format = _DATASET_TYPE_TO_SPARK_FORMAT.get(dataset_type, "json")
+
+    options: list[str] = []
+    if dataset_type == "Json":
+        # ADF Lookup with firstRowOnly=False over a JSON file typically
+        # walks an array-of-objects, which requires multiline.
+        if not activity.first_row_only or props.get("multiLineJson"):
+            options.append('.option("multiline", "true")')
+    options_block = "\n    ".join(options)
+    options_section = ("\n    " + options_block) if options_block else ""
+
+    default_source_path = _assemble_file_lookup_source_path(props)
+    default_path_literal = repr(default_source_path) if default_source_path else "''"
+
+    body = textwrap.dedent(f"""\
+        import json
+
+        # Parameters
+        first_row_only = dbutils.widgets.get("first_row_only") == "true"
+        source_path = dbutils.widgets.get("source_path") or {default_path_literal}
+
+        # File-source Lookup
+        df = (
+            spark.read.format({spark_format!r})__OPTIONS__
+            .load(source_path)
+        )
+
+        if first_row_only:
+            result = df.first()
+            output = result.asDict() if result else {{}}
+        else:
+            output = [row.asDict() for row in df.collect()]
+
+        dbutils.jobs.taskValues.set(key="result", value=json.dumps(output))
+        if first_row_only and isinstance(output, dict):
+            for col_name, col_value in output.items():
+                dbutils.jobs.taskValues.set(key=col_name, value=col_value)
+    """)
+    return body.replace("__OPTIONS__", options_section)
+
+
+def generate_web_activity_notebook(
+    activity: WebActivity,
+    *,
+    scope: str = "",
+    credential_scope: str | None = None,
+    credential_key: str | None = None,
+) -> str:
     """Generates a Python notebook that makes an HTTP request.
 
     Args:
         activity: The WebActivity IR node.
         scope: Secret scope name (defaults to task_key if empty).
+        credential_scope: C-38 (LSC4-002): when the preparer resolved the
+            auth payload to a real (scope, key) pair (e.g. an
+            AzureKeyVaultSecret with ``lakeh_ls_keyvault`` /
+            ``adapp-...-secret``), pass them through so the rendered
+            ``dbutils.secrets.get`` call references the real values
+            rather than the hard-coded ``scope=task_key,
+            key='auth-credential'`` fallback that never matches.
+        credential_key: See ``credential_scope``.
 
     Returns:
         Complete notebook source code as a string.
@@ -137,10 +316,32 @@ def generate_web_activity_notebook(activity: WebActivity, *, scope: str = "") ->
     if auth:
         scope = scope or activity.task_key
         auth_type = auth.get("type", "")
-        if auth_type in ("ServicePrincipal", "MSI", "ManagedServiceIdentity"):
+        # C-38 (LSC4-002): prefer the resolved (scope, key) tuple from the
+        # preparer when supplied.  Fall back to the legacy
+        # ``(task_key, 'auth-credential')`` shape only when the preparer
+        # didn't (or couldn't) compute one.
+        resolved_scope = credential_scope or scope
+        resolved_key = credential_key or "auth-credential"
+        if auth_type in ("MSI", "ManagedServiceIdentity"):
+            # LSC3-002: MSI / Managed Identity auth carries no static secret,
+            # so reading ``auth-credential`` from a secret scope is a fake
+            # placeholder that fails at runtime.  Surface a NotImplementedError
+            # so the user can implement the credential exchange manually --
+            # the manual_credential SetupTask emitted by web_activity preparer
+            # already flags this in SETUP.md.
             auth_block = textwrap.dedent(f"""\
-                # Authentication ({auth_type})
-                auth_token = dbutils.secrets.get(scope="{scope}", key="auth-credential")
+                # Authentication ({auth_type}) - manual implementation required
+                raise NotImplementedError(
+                    "WebActivity authentication type '{auth_type}' has no static "
+                    "secret to read.  See SETUP.md (Manual credential setup) for "
+                    "the Databricks equivalent (e.g. workspace OAuth M2M, "
+                    "service principal token exchange)."
+                )
+            """)
+        elif auth_type == "ServicePrincipal":
+            auth_block = textwrap.dedent(f"""\
+                # Authentication (ServicePrincipal)
+                auth_token = dbutils.secrets.get(scope="{resolved_scope}", key="{resolved_key}")
                 headers["Authorization"] = f"Bearer {{auth_token}}"
             """)
         elif auth_type == "Basic":
@@ -148,14 +349,14 @@ def generate_web_activity_notebook(activity: WebActivity, *, scope: str = "") ->
                 # Authentication (Basic)
                 import base64
                 username = dbutils.secrets.get(scope="{scope}", key="auth-username")
-                password = dbutils.secrets.get(scope="{scope}", key="auth-credential")
+                password = dbutils.secrets.get(scope="{resolved_scope}", key="{resolved_key}")
                 token = base64.b64encode(f"{{username}}:{{password}}".encode()).decode()
                 headers["Authorization"] = f"Basic {{token}}"
             """)
         else:
             auth_block = textwrap.dedent(f"""\
                 # Authentication
-                auth_credential = dbutils.secrets.get(scope="{scope}", key="auth-credential")
+                auth_credential = dbutils.secrets.get(scope="{resolved_scope}", key="{resolved_key}")
                 headers["Authorization"] = f"Bearer {{auth_credential}}"
             """)
 

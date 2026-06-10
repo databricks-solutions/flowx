@@ -38,10 +38,16 @@ class TestLiterals:
         assert result.value == "3.14"
 
     def test_boolean(self):
-        result = resolve_expression(True, _context())
-        assert result is not None
-        assert result.kind == "literal"
-        assert result.value == "True"
+        # VAREX3-002: Python bool renders lowercase to match ADF semantics.
+        result_t = resolve_expression(True, _context())
+        assert result_t is not None
+        assert result_t.kind == "literal"
+        assert result_t.value == "true"
+
+        result_f = resolve_expression(False, _context())
+        assert result_f is not None
+        assert result_f.kind == "literal"
+        assert result_f.value == "false"
 
     def test_expression_dict_wrapping(self):
         result = resolve_expression({"type": "Expression", "value": "hello"}, _context())
@@ -136,11 +142,12 @@ class TestVariables:
         assert result.kind == "dab_ref"
         assert result.value == "{{tasks.SetRunDate.values.runDate}}"
 
-    def test_variable_fallback_to_name(self):
+    def test_variable_returns_none_when_no_setter(self):
+        """C-05 (VAREX-002): unknown variables resolve to ``None`` instead of
+        a self-referential dangling ``{{tasks.X.values.X}}`` placeholder
+        that never gets satisfied at runtime."""
         result = resolve_expression("@variables('unknown')", _context())
-        assert result is not None
-        assert result.kind == "dab_ref"
-        assert result.value == "{{tasks.unknown.values.unknown}}"
+        assert result is None
 
 
 class TestItem:
@@ -150,25 +157,72 @@ class TestItem:
         assert result.kind == "dab_ref"
         assert result.value == "{{input}}"
 
+    def test_item_safe_nav_single_segment(self):
+        """C-16 (CF3-005 / VAREX3-005): single-segment item()?.X must lower to
+        notebook_code so bridge lowering can fire downstream (Switch on-expr,
+        SetVariable expressions wrapping the safe-nav)."""
+        result = resolve_expression("@item()?.foo", _context())
+        assert result is not None
+        assert result.kind == "notebook_code"
+        assert "json" in result.value
+        assert "get('foo')" in result.value
+
+    def test_item_safe_nav_multi_segment_unchanged(self):
+        """Two-segment item()?.a?.b continues to lower to notebook_code."""
+        result = resolve_expression("@item()?.foo?.bar", _context())
+        assert result is not None
+        assert result.kind == "notebook_code"
+        assert "get('foo')" in result.value
+        assert "get('bar')" in result.value
+
+    def test_item_field_no_safe_nav_remains_dab_ref(self):
+        """Plain item().foo with no safe-nav operator stays a dab_ref."""
+        result = resolve_expression("@item().foo", _context())
+        assert result is not None
+        assert result.kind == "dab_ref"
+        assert result.value == "{{input.foo}}"
+
+    def test_item_field_multi_segment_lowers_to_notebook_code(self):
+        """C-35 (CF4-004): ``item().condition.name`` must walk both
+        ``.condition`` and ``.name`` instead of truncating to
+        ``{{input.condition}}``.  Previously ``_ITEM_FIELD_RE`` matched the
+        first segment without an end-anchor so the trailing ``.name``
+        was silently dropped."""
+        result = resolve_expression("@item().condition.name", _context())
+        assert result is not None
+        assert result.kind == "notebook_code"
+        assert "get('condition')" in result.value
+        assert "get('name')" in result.value
+
 
 class TestUtcNow:
     def test_utcnow_no_format(self):
-        # ``@utcNow()`` resolves to Python ``datetime.now(...).isoformat()``
-        # rather than the DAB ref ``{{job.start_time.iso_datetime}}`` so
-        # compositions like ``@formatDateTime(utcNow(), '...')`` chain
-        # correctly.  DAB does not evaluate ADF expressions, so wrapping a
-        # DAB ref in another ADF function would emit broken YAML.
+        # ``@utcNow()`` maps to the Databricks job start time so the result
+        # lands directly in DAB YAML.  The translator attaches a note so
+        # the bundler can surface the activity-vs-job-start skew caveat in
+        # SETUP.md.
         result = resolve_expression("@utcNow()", _context())
         assert result is not None
-        assert result.kind == "notebook_code"
-        assert result.value == "datetime.now(timezone.utc).isoformat()"
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.start_time.iso_datetime}}"
+        assert any("utcnow" in note.lower() for note in result.notes)
 
-    def test_utcnow_with_format(self):
+    def test_utcnow_with_known_iso_format(self):
         result = resolve_expression("@utcNow('yyyy-MM-dd')", _context())
+        assert result is not None
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.start_time.iso_date}}"
+        assert any("utcnow" in note.lower() for note in result.notes)
+
+    def test_utcnow_with_unknown_format_falls_back_to_notebook_code(self):
+        # ``yyyyMMdd`` (no separators) is not in the DAB dynamic-value
+        # vocabulary, so orchestra keeps the legacy Python strftime path.
+        result = resolve_expression("@utcNow('yyyyMMdd')", _context())
         assert result is not None
         assert result.kind == "notebook_code"
         assert "strftime" in result.value
-        assert "%Y-%m-%d" in result.value
+        assert "%Y%m%d" in result.value
+        assert result.notes == []
 
     def test_utcnow_expression_dict(self):
         result = resolve_expression(
@@ -176,16 +230,34 @@ class TestUtcNow:
             _context(),
         )
         assert result is not None
-        assert result.kind == "notebook_code"
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.start_time.iso_date}}"
 
 
 class TestConcat:
     def test_concat_literals(self):
+        # C-01: when every part is a literal, the whole concat collapses to
+        # a single literal so consumers (cluster fields, library jar paths,
+        # ...) receive a plain string instead of Python source.
         result = resolve_expression("@concat('hello', ' ', 'world')", _context())
         assert result is not None
-        assert result.kind == "notebook_code"
-        # Should produce a Python concatenation
-        assert "+" in result.value
+        assert result.kind == "literal"
+        assert result.value == "hello world"
+
+    def test_concat_collapses_when_all_parts_resolve_to_literals(self):
+        # C-01: factory globals collapse @concat parts to literal kinds,
+        # so the whole concat should likewise be a literal string.
+        ctx = TranslationContext(
+            global_parameters=MappingProxyType({"env_variable": "t", "deequLibFileName": "deequ-3.5.6.jar"}),
+        )
+        result = resolve_expression(
+            "@concat('/Volumes/datahub01', pipeline().globalParameters.env_variable, "
+            "'/lib/', pipeline().globalParameters.deequLibFileName)",
+            ctx,
+        )
+        assert result is not None
+        assert result.kind == "literal"
+        assert result.value == "/Volumes/datahub01t/lib/deequ-3.5.6.jar"
 
     def test_concat_with_variable(self):
         result = resolve_expression(
@@ -197,10 +269,13 @@ class TestConcat:
         assert "runDate" in result.value
 
     def test_concat_with_utcnow(self):
+        # ``utcNow('yyyy-MM-dd')`` is now a DAB ref, so concat wraps it as a
+        # widget read.  The result is still notebook_code because concat
+        # composes Python strings.
         result = resolve_expression("@concat('date_', utcNow('yyyy-MM-dd'))", _context())
         assert result is not None
         assert result.kind == "notebook_code"
-        assert "strftime" in result.value
+        assert "dbutils.widgets.get('iso_date')" in result.value
 
     def test_concat_with_pipeline_param(self):
         result = resolve_expression(
@@ -296,6 +371,61 @@ class TestStringFunctions:
         assert result.kind == "notebook_code"
         # Should produce a slice expression
         assert "[" in result.value
+
+    def test_equals_quoted_string_emits_repr(self):
+        """C-34 (VAREX4-002): a quoted ``'12'`` argument must keep its
+        quotedness through codegen so the comparison emits ``... == '12'``
+        rather than the bare token ``12`` (which silently compares against
+        a numeric value)."""
+        result = resolve_expression(
+            "@equals(variables('month'), '12')",
+            _context(month="set_month"),
+        )
+        assert result is not None
+        assert "== '12'" in result.value
+
+    def test_less_quoted_leading_zero_is_valid_python(self):
+        """C-34 (VAREX4-002): a leading-zero quoted argument like ``'09'``
+        must round-trip as a Python string literal, not the bare token
+        ``09`` (which is a SyntaxError in modern Python)."""
+        result = resolve_expression(
+            "@less(variables('month'), '09')",
+            _context(month="set_month"),
+        )
+        assert result is not None
+        # Result must parse as valid Python.
+        compile(result.value, "<test>", "eval")
+        assert "< '09'" in result.value
+
+    def test_equals_bool_literal_emits_lowercase_string(self):
+        """C-34 (VAREX4-003): an ADF Boolean ``true`` argument lowers to
+        the lowercase string literal ``'true'`` so the comparison matches
+        what C-21 SetVariable writes on the consumer side."""
+        result = resolve_expression(
+            "@equals(variables('X'), true)",
+            _context(X="set_x"),
+        )
+        assert result is not None
+        assert "== 'true'" in result.value
+
+    def test_substring_two_arg_form(self):
+        """C-33 (VAREX4-001): ADF accepts substring(text, start) without an
+        explicit length argument."""
+        result = resolve_expression("@substring(string(pipeline().parameters.params), 1)", _context())
+        assert result is not None
+        assert result.kind == "notebook_code"
+        assert "[int(" in result.value
+        assert "):]" in result.value
+
+    def test_split_with_subscript(self):
+        """C-33 (VAREX4-001): a trailing ``[N]`` on a function call lowers
+        to notebook_code Python source so SetVariable activities wrapping
+        ``@split(...)[0]`` actually resolve."""
+        result = resolve_expression("@split(pipeline().parameters.referenceDate,'/')[0]", _context())
+        assert result is not None
+        assert result.kind == "notebook_code"
+        assert ".split(str('/'))" in result.value
+        assert ")[0]" in result.value
 
     def test_to_lower(self):
         result = resolve_expression("@toLower('HELLO')", _context())
@@ -743,14 +873,162 @@ class TestBackwardCompat:
         result = parse_expression_for_dab("@pipeline().RunId")
         assert result == "{{job.run_id}}"
 
-    def test_parse_expression_for_dab_returns_none_for_utcnow(self):
-        # ``@utcNow()`` now resolves to notebook_code so it composes correctly
-        # with other ADF time functions.  ``parse_expression_for_dab`` only
-        # returns dab_ref kinds, so utcNow now yields ``None`` (the caller
-        # routes through the notebook_code path instead).
+    def test_parse_expression_for_dab_returns_ref_for_utcnow(self):
+        # ``@utcNow()`` maps to the Databricks job start time dynamic value
+        # so it can land in DAB YAML directly.
         result = parse_expression_for_dab("@utcNow()")
-        assert result is None
+        assert result == "{{job.start_time.iso_datetime}}"
 
     def test_parse_expression_for_dab_returns_none_for_non_expression(self):
         result = parse_expression_for_dab("plain_string")
         assert result is None
+
+
+class TestGlobalParameters:
+    """Change expr-resolver-globalparams-and-wrappers (P0)."""
+
+    def _ctx_with_globals(self, **globals_) -> TranslationContext:
+        return TranslationContext(
+            global_parameters=MappingProxyType(dict(globals_)),
+        )
+
+    def test_global_parameter_resolves_to_literal(self):
+        ctx = self._ctx_with_globals(env_variable="t")
+        result = resolve_expression("@pipeline().globalParameters.env_variable", ctx)
+        assert result is not None
+        assert result.kind == "literal"
+        assert result.value == "t"
+
+    def test_global_parameter_value_dict(self):
+        ctx = self._ctx_with_globals(
+            env_variable={"type": "string", "value": "t"},
+        )
+        result = resolve_expression("@pipeline().globalParameters.env_variable", ctx)
+        assert result is not None
+        assert result.kind == "literal"
+        assert result.value == "t"
+
+    def test_global_parameter_missing_falls_back_to_dab_ref(self):
+        ctx = TranslationContext()
+        result = resolve_expression("@pipeline().globalParameters.something", ctx)
+        assert result is not None
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.parameters.something}}"
+
+    def test_concat_with_globals_resolves_fully(self):
+        # C-01: when every part collapses to a literal, the whole concat
+        # is itself a literal so downstream consumers don't have to eval.
+        ctx = self._ctx_with_globals(env_variable="t", libFileName="myjar.jar")
+        expr = (
+            "@concat('/Volumes/datahub01', pipeline().globalParameters.env_variable, "
+            "'/x/', pipeline().globalParameters.libFileName)"
+        )
+        result = resolve_expression(expr, ctx)
+        assert result is not None
+        assert result.kind == "literal"
+        assert result.value == "/Volumes/datahub01t/x/myjar.jar"
+
+
+class TestNoopWrappers:
+    """Change expr-resolver-globalparams-and-wrappers (P0): @json/@string/@array."""
+
+    def test_json_wrapper_around_pipeline_param(self):
+        ctx = TranslationContext()
+        result = resolve_expression("@json(pipeline().parameters.items)", ctx)
+        assert result is not None
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.parameters.items}}"
+
+    def test_string_wrapper_around_pipeline_param(self):
+        ctx = TranslationContext()
+        result = resolve_expression("@string(pipeline().parameters.value)", ctx)
+        assert result is not None
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.parameters.value}}"
+
+    def test_array_wrapper_around_pipeline_param(self):
+        ctx = TranslationContext()
+        result = resolve_expression("@array(pipeline().parameters.lst)", ctx)
+        assert result is not None
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.parameters.lst}}"
+
+
+class TestTrailingWhitespaceFunctionCall:
+    """Change expr-resolver-globalparams-and-wrappers (P0): VAR-003 regex anchor bug."""
+
+    def test_string_wrapper_with_trailing_newlines(self):
+        ctx = TranslationContext()
+        # Previously the regex anchor at end refused trailing whitespace.
+        result = resolve_expression(
+            "@string(activity('X').output.runOutput.year)\n\n",
+            ctx,
+        )
+        assert result is not None
+        # Should hit the function-call branch (string wraps activity output).
+        assert result.kind == "dab_ref"
+        assert "tasks.X.values" in result.value
+
+
+class TestItemSafeNav:
+    """Change expr-resolver-globalparams-and-wrappers (P0): VAR-005."""
+
+    def test_item_safe_nav_chain_resolves(self):
+        ctx = TranslationContext()
+        result = resolve_expression(
+            "@coalesce(item()?.condition?.name, 'fallback')",
+            ctx,
+        )
+        assert result is not None
+        assert result.kind == "notebook_code"
+        # The chain walk should emit nested .get() calls
+        assert ".get('condition')" in result.value
+        assert ".get('name')" in result.value
+        assert "'fallback'" in result.value
+
+
+class TestLinkedServiceParameter:
+    """Change linked-service-parameter-resolution (P0): NB-4, LSC-001."""
+
+    def test_linked_service_param_resolves_with_supplied_value(self):
+        ctx = TranslationContext(
+            linked_service_parameters=MappingProxyType({"clusterVersion": "16.4.x-scala2.12"}),
+        )
+        result = resolve_expression("@linkedService().clusterVersion", ctx)
+        assert result is not None
+        assert result.kind == "literal"
+        assert result.value == "16.4.x-scala2.12"
+
+    def test_linked_service_param_missing_returns_none(self):
+        ctx = TranslationContext()
+        result = resolve_expression("@linkedService().clusterVersion", ctx)
+        # Without a value, we can't deterministically resolve; caller must
+        # supply via with_linked_service_parameters or accept None.
+        assert result is None
+
+
+class TestFunctionCallWithAttribute:
+    """Change fix-attribute-access-on-function-results (P1): CF3-004."""
+
+    def test_json_call_with_trailing_attribute_lowers_to_notebook_code(self):
+        ctx = TranslationContext()
+        result = resolve_expression(
+            "@toUpper(json(pipeline().parameters.items).type)",
+            ctx,
+        )
+        assert result is not None
+        # toUpper wraps the json(...).type expression; the inner
+        # json(...).type chain must resolve to notebook_code so the bridge
+        # can pick it up.
+        assert result.kind == "notebook_code"
+
+    def test_function_call_with_attribute_alone_lowers_to_notebook_code(self):
+        ctx = TranslationContext()
+        result = resolve_expression(
+            "@json(pipeline().parameters.items).type",
+            ctx,
+        )
+        assert result is not None
+        assert result.kind == "notebook_code"
+        # The lowered code chains .get('type') onto a json-loaded widget.
+        assert ".get('type')" in result.value

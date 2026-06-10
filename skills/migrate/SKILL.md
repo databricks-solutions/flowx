@@ -27,6 +27,28 @@ This is the top-level orchestration skill. It runs the full migration pipeline:
 
 Each phase builds on the output of the previous phase. The user is shown a summary and asked to confirm before proceeding to the next phase.
 
+## Prerequisite — Python environment
+
+This skill runs the plugin's Python code, which depends on third-party packages. Before running
+any Python commands, ensure the plugin's virtual environment is bootstrapped. Run the
+**`setup`** skill, or directly:
+
+```bash
+bash <plugin_dir>/scripts/bootstrap.sh
+```
+
+This creates `<plugin_dir>/.venv` and installs dependencies from `requirements.txt`. If Python or 
+pip is missing, the script prints a warning telling the user what to install — relay it and stop
+until they have installed Python 3.12+ and pip.
+
+Run **every** Python command in this skill with the venv interpreter and `src/` on `PYTHONPATH` 
+(use it anywhere a command below shows `python3`):
+
+```bash
+export PYTHONPATH="<plugin_dir>/src"
+"<plugin_dir>/.venv/bin/python" <plugin_dir>/src/orchestra/parser/adf_loader.py ...
+```
+
 ## Workflow
 
 Follow these steps in order:
@@ -170,14 +192,22 @@ Use the stamped report (when produced) as the input to the prepare phase.
 When inspect emits no questions for any pipeline, skip modify and use the
 original report.
 
-The four questions the adapter raises:
+The questions the adapter raises:
 
 | `question_id` | Allowed values | Default |
 |---|---|---|
 | `copy_activity_paradigm` | `notebook`, `sdp` | `notebook` |
 | `non_databricks_task_compute` | `serverless`, `classic` | `serverless` |
 | `use_lakeflow_connectors` | `existing`, `lakeflow_connect` | `existing` |
-| `databricks_task_compute` | `existing`, `serverless` | `existing` |
+| `consolidate_motif:<motif_id>` | `keep`, `consolidate` | `keep` |
+
+DatabricksNotebook and DatabricksSparkPython tasks always inherit the cluster binding derived from
+their source linked service.
+
+For each multi-activity motif the detector matches (rest_api_pagination,
+incremental_load_watermark, metadata_driven_bulk_copy, ...) the adapter emits one
+`consolidate_motif:<motif_id>` question. The user must explicitly opt in to `consolidate` 
+for each detected pattern.
 
 ### Step 6 — Checkpoint: confirm proceed to bundle generation
 

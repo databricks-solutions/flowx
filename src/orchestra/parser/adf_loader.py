@@ -93,6 +93,17 @@ def load_adf_definitions(source_dir: Path) -> AdfDefinitions:
     datasets: dict[str, AdfDataset] = {}
     linked_services: dict[str, AdfLinkedService] = {}
     triggers: list[AdfTrigger] = []
+    global_parameters: dict[str, Any] = {}
+
+    factory_dir = _find_json_dir(source_dir, "factory", "factories")
+    if factory_dir is not None:
+        for json_file in sorted(factory_dir.glob("*.json")):
+            try:
+                data = json.loads(json_file.read_text(encoding="utf-8"))
+                factory_params = _parse_factory_global_parameters(data)
+                global_parameters.update(factory_params)
+            except Exception:
+                logger.exception("Failed to parse factory file %s", json_file)
 
     pipeline_dir = _find_json_dir(source_dir, "pipelines", "pipeline")
     if pipeline_dir is not None:
@@ -137,7 +148,34 @@ def load_adf_definitions(source_dir: Path) -> AdfDefinitions:
         datasets=datasets,
         linked_services=linked_services,
         triggers=triggers,
+        global_parameters=global_parameters,
     )
+
+
+def _parse_factory_global_parameters(data: dict[str, Any]) -> dict[str, Any]:
+    """Extracts ``globalParameters`` from a factory JSON payload.
+
+    Args:
+        data: Raw JSON dictionary loaded from ``factory/<name>.json``.
+
+    Returns:
+        Mapping of global parameter name -> value.  Each value is either
+        the scalar default (when ADF stores it bare) or the original
+        ``{"type": ..., "value": ...}`` dict.
+    """
+    data = _normalize_arm(data)
+    props = data.get("properties", data)
+    raw = props.get("globalParameters") or {}
+    if not isinstance(raw, dict):
+        return {}
+
+    result: dict[str, Any] = {}
+    for name, value in raw.items():
+        if isinstance(value, dict) and "value" in value:
+            result[name] = value
+        else:
+            result[name] = value
+    return result
 
 
 def classify_activity(activity_type: str) -> tuple[TranslationStrategy, str | None]:
@@ -324,6 +362,7 @@ def parse_activity(data: dict[str, Any]) -> AdfActivity:
         linked_service_name = AdfLinkedServiceReference(
             reference_name=raw_ls.get("referenceName", ""),
             type=raw_ls.get("type", "LinkedServiceReference"),
+            parameters=raw_ls.get("parameters"),
         )
 
     if_true_activities: list[AdfActivity] | None = None
@@ -527,6 +566,7 @@ def _load_arm_template(template_path: Path) -> AdfDefinitions:
     datasets: dict[str, AdfDataset] = {}
     linked_services: dict[str, AdfLinkedService] = {}
     triggers: list[AdfTrigger] = []
+    global_parameters: dict[str, Any] = {}
 
     for resource in resources:
         rtype = resource.get("type", "")
@@ -561,12 +601,18 @@ def _load_arm_template(template_path: Path) -> AdfDefinitions:
                 triggers.append(_parse_trigger_json(wrapped, fallback_name=name))
             except Exception:
                 logger.exception("Failed to parse ARM trigger resource %s", name)
+        elif rtype.endswith("/factories"):
+            try:
+                global_parameters.update(_parse_factory_global_parameters(wrapped))
+            except Exception:
+                logger.exception("Failed to parse ARM factory resource %s", name)
 
     return AdfDefinitions(
         pipelines=pipelines,
         datasets=datasets,
         linked_services=linked_services,
         triggers=triggers,
+        global_parameters=global_parameters,
     )
 
 
