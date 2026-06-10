@@ -27,6 +27,7 @@ ENV/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+fixlog/
 
 # OS
 .DS_Store
@@ -45,3 +46,4 @@ tmp_adf_ingest_*/
 *.pem
 *.key
 credentials.json
+/fixlog/
