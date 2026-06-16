@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from orchestra.models.ir import (
+from flowx.models.ir import (
     AppendVariableActivity,
     CopyActivity,
     DeleteActivity,
@@ -20,7 +20,7 @@ from orchestra.models.ir import (
     WaitActivity,
     WebActivity,
 )
-from orchestra.preparer.code_generator import (
+from flowx.preparer.code_generator import (
     generate_append_variable_notebook,
     generate_copy_notebook,
     generate_delete_notebook,

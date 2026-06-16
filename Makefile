@@ -20,7 +20,7 @@ integration:
 fmt:
 	uv run ruff format src/ tests/
 	uv run ruff check src/ tests/ --fix
-	uv run mypy src/orchestra/
+	uv run mypy src/flowx/
 
 docs-install:
 	cd docs && bun install --frozen-lockfile
@@ -47,7 +47,7 @@ lock-dependencies:
 requirements:
 	uv export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt -o requirements.txt
 
-precommit: fmt requirements
+precommit: fmt lock-dependencies requirements
 
 help:
 	@echo "Available targets:"

@@ -1,7 +1,7 @@
 """Integration tests against a live Azure Data Factory.
 
 These tests export pipeline definitions from a real ADF factory, run
-them through the orchestra translation pipeline, and validate that
+them through the flowx translation pipeline, and validate that
 the output is correct.
 
 Requires:
@@ -19,13 +19,13 @@ import subprocess
 import pytest
 import yaml
 
-from orchestra.bundler.dab_writer import write_bundle
-from orchestra.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
-from orchestra.translator.engine import translate_pipeline
+from flowx.bundler.dab_writer import write_bundle
+from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
+from flowx.translator.engine import translate_pipeline
 
 SUBSCRIPTION = "edd4cc45-85c7-4aec-8bf5-648062d519bf"
-RESOURCE_GROUP = "ghansen-orchestra-rg"
-FACTORY_NAME = "ghansen-orchestra-adf"
+RESOURCE_GROUP = "ghansen-flowx-rg"
+FACTORY_NAME = "ghansen-flowx-adf"
 API_VERSION = "2018-06-01"
 
 
@@ -138,7 +138,7 @@ def adf_export_dir(tmp_path_factory):
 @pytest.fixture(scope="module")
 def live_definitions(adf_export_dir):
     """Load all exported ADF definitions."""
-    from orchestra.parser.adf_loader import load_adf_definitions
+    from flowx.parser.adf_loader import load_adf_definitions
 
     return load_adf_definitions(adf_export_dir)
 

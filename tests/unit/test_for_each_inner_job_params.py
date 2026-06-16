@@ -1,4 +1,4 @@
-"""Unit tests for orchestra.bundler.inner_job_params.
+"""Unit tests for flowx.bundler.inner_job_params.
 
 Covers C-06 (VAREX-004): variable references in a ForEach inner-job body
 must not produce undeclared inner-job parameters.  When the parent job has
@@ -10,7 +10,7 @@ flows that omit the mapping continue to work).
 
 from __future__ import annotations
 
-from orchestra.bundler.inner_job_params import collect_inner_job_params
+from flowx.bundler.inner_job_params import collect_inner_job_params
 
 
 def _notebook_task(base_parameters: dict[str, str]) -> dict[str, object]:
@@ -68,9 +68,9 @@ class TestVariableTaskKeysRouting:
 
         Asserts the kwarg is forwarded by intercepting collect_inner_job_params.
         """
-        from orchestra.models.ir import ForEachActivity, NotebookActivity
-        from orchestra.preparer.activity_preparers import for_each as for_each_module
-        from orchestra.preparer.workflow_preparer import prepare_activity
+        from flowx.models.ir import ForEachActivity, NotebookActivity
+        from flowx.preparer.activity_preparers import for_each as for_each_module
+        from flowx.preparer.workflow_preparer import prepare_activity
 
         def _base(name: str, key: str) -> dict[str, object]:
             return {
@@ -85,7 +85,7 @@ class TestVariableTaskKeysRouting:
             }
 
         captured: list[dict[str, str] | None] = []
-        from orchestra.bundler import inner_job_params as ijp_module
+        from flowx.bundler import inner_job_params as ijp_module
 
         original = ijp_module.collect_inner_job_params
 

@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from orchestra.models.adf_ast import (
+from flowx.models.adf_ast import (
     AdfDefinitions,
     TranslationStrategy,
 )
-from orchestra.parser.adf_loader import (
+from flowx.parser.adf_loader import (
     AGENTIC_TYPES,
     DETERMINISTIC_TYPES,
     _normalize_arm,
     _parse_pipeline_json,
     build_inventory,
     classify_activity,
+    clear_stale_outputs,
     load_adf_definitions,
 )
 
@@ -302,3 +303,52 @@ class TestNormalizeArm:
         data = {"name": "simple", "properties": {"activities": []}}
         result = _normalize_arm(data)
         assert result is data
+
+
+# ---------------------------------------------------------------------------
+# clear_stale_outputs
+# ---------------------------------------------------------------------------
+
+
+class TestClearStaleOutputs:
+    """Discover must reset a reused output_dir so prior runs don't leak into the bundle."""
+
+    def test_removes_prior_run_artifacts(self, tmp_path):
+        """Stale per-pipeline metadata and a prior generated bundle are removed."""
+        (tmp_path / "metadata").mkdir()
+        (tmp_path / "metadata" / "OldPipeline.arm.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "resources").mkdir()
+        (tmp_path / "resources" / "old_pipeline.yml").write_text("name: old", encoding="utf-8")
+        (tmp_path / "src" / "notebooks").mkdir(parents=True)
+        (tmp_path / "src" / "notebooks" / "old.py").write_text("print('old')", encoding="utf-8")
+        (tmp_path / ".work").mkdir()
+        (tmp_path / ".work" / "translation_report.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "databricks.yml").write_text("bundle: old", encoding="utf-8")
+        (tmp_path / "SETUP.md").write_text("# old", encoding="utf-8")
+        (tmp_path / "WARNINGS.md").write_text("# old", encoding="utf-8")
+
+        clear_stale_outputs(tmp_path)
+
+        assert not (tmp_path / "metadata").exists()
+        assert not (tmp_path / "resources").exists()
+        assert not (tmp_path / "src").exists()
+        assert not (tmp_path / ".work").exists()
+        assert not (tmp_path / "databricks.yml").exists()
+        assert not (tmp_path / "SETUP.md").exists()
+        assert not (tmp_path / "WARNINGS.md").exists()
+
+    def test_preserves_unrelated_files(self, tmp_path):
+        """Only orchestra-managed entries are removed; unrelated files stay put."""
+        (tmp_path / "notes.txt").write_text("keep me", encoding="utf-8")
+        (tmp_path / "user_data").mkdir()
+        (tmp_path / "user_data" / "keep.csv").write_text("a,b", encoding="utf-8")
+
+        clear_stale_outputs(tmp_path)
+
+        assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "keep me"
+        assert (tmp_path / "user_data" / "keep.csv").exists()
+
+    def test_idempotent_on_empty_dir(self, tmp_path):
+        """Clearing a directory with no orchestra artifacts is a no-op (no error)."""
+        clear_stale_outputs(tmp_path)
+        assert list(tmp_path.iterdir()) == []

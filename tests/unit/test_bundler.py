@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import yaml
 
-from orchestra.bundler.dab_writer import write_bundle
-from orchestra.models.dab import SecretInstruction, SetupTask
-from orchestra.models.ir import (
+from flowx.bundler.dab_writer import write_bundle
+from flowx.models.dab import SecretInstruction, SetupTask
+from flowx.models.ir import (
     CopyActivity,
     NotebookActivity,
     Pipeline,
     WaitActivity,
 )
-from orchestra.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
+from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -191,7 +191,7 @@ class TestWriteBundle:
         be cleared only by ``main()`` (the CLI), so library callers iterating
         over multiple workflows leaked state from one bundle into the next.
         """
-        from orchestra.bundler.dab_writer import _bundle_warnings, _cross_bundle_variables
+        from flowx.bundler.dab_writer import _bundle_warnings, _cross_bundle_variables
 
         first_dir = tmp_path / "first"
         second_dir = tmp_path / "second"
@@ -222,7 +222,7 @@ class TestWriteBundle:
         """
         import json
 
-        from orchestra.bundler.dab_writer import _load_report
+        from flowx.bundler.dab_writer import _load_report
 
         report = {
             "translations": [
@@ -375,7 +375,7 @@ class TestStripDanglingTaskValueRefs:
     """C-12 (VAREX-005): safety net widens to job_parameters and condition operands."""
 
     def test_strips_dangling_run_job_task_job_parameters(self):
-        from orchestra.bundler.dab_writer import _strip_dangling_task_value_refs
+        from flowx.bundler.dab_writer import _strip_dangling_task_value_refs
 
         tasks = [
             {
@@ -394,7 +394,7 @@ class TestStripDanglingTaskValueRefs:
         assert tasks[0]["run_job_task"]["job_parameters"]["dangling"] == ""
 
     def test_strips_dangling_condition_task_operands(self):
-        from orchestra.bundler.dab_writer import _strip_dangling_task_value_refs
+        from flowx.bundler.dab_writer import _strip_dangling_task_value_refs
 
         tasks = [
             {
@@ -424,7 +424,7 @@ class TestStripDanglingTaskValueRefs:
         """C-43 (CF5-001 / CF5-002): a blanked condition operand surfaces a
         'Conditions neutralized to always-true' section in SETUP.md so the
         always-true predicate is never silent."""
-        from orchestra.bundler.prereqs_writer import build_prereqs, render_setup_md
+        from flowx.bundler.prereqs_writer import build_prereqs, render_setup_md
 
         prereqs = build_prereqs(
             notebooks=[],
@@ -445,7 +445,7 @@ class TestStripDanglingTaskValueRefs:
         assert "`branch`" in md
 
     def test_recurses_into_for_each_task_body(self):
-        from orchestra.bundler.dab_writer import _strip_dangling_task_value_refs
+        from flowx.bundler.dab_writer import _strip_dangling_task_value_refs
 
         tasks = [
             {
@@ -472,7 +472,7 @@ class TestAggregatedReportPipelineParameters:
     def test_load_report_carries_pipeline_parameters(self, tmp_path):
         import json
 
-        from orchestra.bundler.dab_writer import _load_report
+        from flowx.bundler.dab_writer import _load_report
 
         report = {
             "translations": [
@@ -507,7 +507,7 @@ class TestAggregatedReportSchedule:
     def test_load_report_carries_pipeline_schedule(self, tmp_path):
         import json
 
-        from orchestra.bundler.dab_writer import _load_report
+        from flowx.bundler.dab_writer import _load_report
 
         schedule_spec = {
             "kind": "cron",
@@ -544,7 +544,7 @@ class TestAggregatedReportSchedule:
         """Older single-pipeline reports nest schedule under ``ir.schedule``."""
         import json
 
-        from orchestra.bundler.dab_writer import _load_report
+        from flowx.bundler.dab_writer import _load_report
 
         schedule_spec = {
             "kind": "cron",
@@ -580,7 +580,7 @@ class TestStubBaseParameterCleanup:
     """Change base-parameters-cleanup-and-stub-widgets (P1): NB-5."""
 
     def test_stub_notebook_strips_unresolvable_adf_expression(self):
-        from orchestra.bundler.dab_writer import (
+        from flowx.bundler.dab_writer import (
             _extract_manual_parameters_from_existing_notebook_tasks,
         )
 
@@ -611,8 +611,8 @@ class TestStubLibraryBinding:
     """Change library-resolution-and-stub-binding (P0): NB-2."""
 
     def test_stub_notebook_with_jar_library_binds_to_default_cluster(self):
-        from orchestra.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
-        from orchestra.bundler.dab_writer import _bind_cluster_to_notebook_tasks
+        from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
+        from flowx.bundler.dab_writer import _bind_cluster_to_notebook_tasks
 
         tasks = [
             {
@@ -626,7 +626,7 @@ class TestStubLibraryBinding:
         assert tasks[0]["job_cluster_key"] == DEFAULT_JOB_CLUSTER_KEY
 
     def test_stub_notebook_no_libraries_stays_unbound(self):
-        from orchestra.bundler.dab_writer import _bind_cluster_to_notebook_tasks
+        from flowx.bundler.dab_writer import _bind_cluster_to_notebook_tasks
 
         tasks = [
             {
@@ -638,8 +638,8 @@ class TestStubLibraryBinding:
         assert "job_cluster_key" not in tasks[0]
 
     def test_serverless_compute_mode_with_jar_library_binds_classic(self):
-        from orchestra.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
-        from orchestra.bundler.dab_writer import _bind_cluster_to_notebook_tasks
+        from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
+        from flowx.bundler.dab_writer import _bind_cluster_to_notebook_tasks
 
         tasks = [
             {
@@ -658,8 +658,8 @@ class TestClusterExtrasPropagation:
     """Change linked-service-cluster-field-coverage (P1): NB-3, LSC-003."""
 
     def test_extras_merged_into_default_cluster(self, tmp_path):
-        from orchestra.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
-        from orchestra.bundler.dab_writer import (
+        from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
+        from flowx.bundler.dab_writer import (
             _build_default_cluster,
             _build_default_job_clusters,
             _infer_bundle_cluster_extras,
@@ -696,8 +696,8 @@ class TestClusterExtrasPropagation:
     def test_num_workers_mined_into_default_cluster(self):
         """C-40 (NB-ITER5-001): cluster_hints carrying num_workers!=1 must
         flow into the default job_cluster instead of the hardcoded 1."""
-        from orchestra.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
-        from orchestra.bundler.dab_writer import (
+        from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
+        from flowx.bundler.dab_writer import (
             _build_default_cluster,
             _build_default_job_clusters,
             _infer_bundle_cluster_extras,
@@ -730,8 +730,8 @@ class TestManualCredentialFromMsiLinkedService:
     SETUP.md flags the substitution."""
 
     def test_msi_authentication_emits_manual_credential_setup_task(self):
-        from orchestra.models.ir import NotebookActivity, Pipeline
-        from orchestra.preparer.workflow_preparer import prepare_workflow
+        from flowx.models.ir import NotebookActivity, Pipeline
+        from flowx.preparer.workflow_preparer import prepare_workflow
 
         activity = NotebookActivity(
             name="Notebook1",
@@ -758,7 +758,7 @@ class TestUnparseableClusterHintsFiltered:
     are filtered before Counter so the bundle default stays deployable."""
 
     def test_unparseable_spark_version_falls_back_to_default(self):
-        from orchestra.bundler.dab_writer import (
+        from flowx.bundler.dab_writer import (
             _DEFAULT_SPARK_VERSION,
             _infer_bundle_cluster_defaults,
         )
@@ -775,7 +775,7 @@ class TestUnparseableClusterHintsFiltered:
         assert node_type_id == "Standard_DS3_v2"
 
     def test_unparseable_node_type_falls_back_to_default(self):
-        from orchestra.bundler.dab_writer import (
+        from flowx.bundler.dab_writer import (
             _DEFAULT_NODE_TYPE_ID,
             _infer_bundle_cluster_defaults,
         )
@@ -792,7 +792,7 @@ class TestUnparseableClusterHintsFiltered:
         assert node_type_id == _DEFAULT_NODE_TYPE_ID
 
     def test_real_spark_version_still_wins(self):
-        from orchestra.bundler.dab_writer import _infer_bundle_cluster_defaults
+        from flowx.bundler.dab_writer import _infer_bundle_cluster_defaults
 
         wf = _simple_workflow()
         wf.cluster_hints = [
@@ -808,21 +808,21 @@ class TestSingleUserNameOnSingleUserClusters:
     """Change fix-single-user-cluster-requires-single-user-name (P0): NB-ITER3-003."""
 
     def test_default_cluster_includes_single_user_name(self):
-        from orchestra.bundler.dab_writer import _build_default_cluster
+        from flowx.bundler.dab_writer import _build_default_cluster
 
         cluster = _build_default_cluster()["new_cluster"]
         assert cluster["data_security_mode"] == "SINGLE_USER"
         assert cluster["single_user_name"] == "${workspace.current_user.userName}"
 
     def test_single_node_cluster_includes_single_user_name(self):
-        from orchestra.bundler.dab_writer import _build_single_node_cluster
+        from flowx.bundler.dab_writer import _build_single_node_cluster
 
         cluster = _build_single_node_cluster()["new_cluster"]
         assert cluster["data_security_mode"] == "SINGLE_USER"
         assert cluster["single_user_name"] == "${workspace.current_user.userName}"
 
     def test_multi_node_cluster_includes_single_user_name(self):
-        from orchestra.bundler.dab_writer import _build_multi_node_cluster
+        from flowx.bundler.dab_writer import _build_multi_node_cluster
 
         cluster = _build_multi_node_cluster()["new_cluster"]
         assert cluster["data_security_mode"] == "SINGLE_USER"
@@ -865,7 +865,7 @@ class TestManualVariableRollupSetupMd:
     """Change fix-cross-foreach-variable-read-warning (P1): VAREX3-003."""
 
     def test_setup_md_surfaces_manual_variable_rollup(self, tmp_path):
-        from orchestra.models.ir import ForEachActivity, IfConditionActivity, SetVariableActivity
+        from flowx.models.ir import ForEachActivity, IfConditionActivity, SetVariableActivity
 
         # Mirror the preparer-side detection by building the same pipeline.
         inner_set = SetVariableActivity(
@@ -904,7 +904,7 @@ class TestManualVariableRollupSetupMd:
 
 class TestSetupGenerator:
     def test_secrets_setup_notebook_content(self):
-        from orchestra.bundler.setup_generator import generate_setup_tasks
+        from flowx.bundler.setup_generator import generate_setup_tasks
 
         secrets = [
             SecretInstruction(scope="my-scope", key="jdbc-url", value_source="JDBC URL for source"),
@@ -926,7 +926,7 @@ class TestSetupGenerator:
         assert "jdbc-password" in nb.content
 
     def test_volume_setup_notebook(self):
-        from orchestra.bundler.setup_generator import generate_setup_tasks
+        from flowx.bundler.setup_generator import generate_setup_tasks
 
         setup_tasks = [
             SetupTask(type="volume", config={"volume_name": "raw_data", "volume_type": "MANAGED"}),
@@ -938,7 +938,7 @@ class TestSetupGenerator:
         assert "prod.ingest.raw_data" in nb.content
 
     def test_connection_setup_notebook(self):
-        from orchestra.bundler.setup_generator import generate_setup_tasks
+        from flowx.bundler.setup_generator import generate_setup_tasks
 
         setup_tasks = [
             SetupTask(
@@ -953,7 +953,7 @@ class TestSetupGenerator:
         assert "sql_conn" in nb.content
 
     def test_no_setup_when_empty(self):
-        from orchestra.bundler.setup_generator import generate_setup_tasks
+        from flowx.bundler.setup_generator import generate_setup_tasks
 
         notebooks = generate_setup_tasks(secrets=[], setup_tasks=[], catalog="main", schema="default")
         assert len(notebooks) == 0
@@ -963,8 +963,8 @@ class TestPipelineDictToIrBridgeFields:
     """C-14 (CF3-001 / VAREX3-001): bridge fields survive JSON roundtrip."""
 
     def test_if_condition_bridge_fields_preserved(self):
-        from orchestra.bundler.dab_writer import pipeline_dict_to_ir
-        from orchestra.models.ir import IfConditionActivity
+        from flowx.bundler.dab_writer import pipeline_dict_to_ir
+        from flowx.models.ir import IfConditionActivity
 
         pipeline_dict = {
             "name": "p",
@@ -993,8 +993,8 @@ class TestPipelineDictToIrBridgeFields:
         assert task.bridge_required_parameters == {"some_param": "{{job.parameters.x}}"}
 
     def test_switch_bridge_fields_preserved(self):
-        from orchestra.bundler.dab_writer import pipeline_dict_to_ir
-        from orchestra.models.ir import SwitchActivity
+        from flowx.bundler.dab_writer import pipeline_dict_to_ir
+        from flowx.models.ir import SwitchActivity
 
         pipeline_dict = {
             "name": "p",

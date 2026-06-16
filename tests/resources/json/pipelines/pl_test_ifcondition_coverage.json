@@ -1,6 +1,6 @@
 {
   "etag": "09028ce8-0000-0100-0000-69d82e820000",
-  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-orchestra-rg/providers/Microsoft.DataFactory/factories/ghansen-orchestra-adf/pipelines/pl_test_ifcondition_coverage",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_ifcondition_coverage",
   "name": "pl_test_ifcondition_coverage",
   "properties": {
     "activities": [

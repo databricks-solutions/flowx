@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from types import MappingProxyType
 
-from orchestra.models.ir import TranslationContext
-from orchestra.parser.expression_parser import (
+from flowx.models.ir import TranslationContext
+from flowx.parser.expression_parser import (
     parse_expression,
     parse_expression_for_dab,
     resolve_expression,
@@ -216,7 +216,7 @@ class TestUtcNow:
 
     def test_utcnow_with_unknown_format_falls_back_to_notebook_code(self):
         # ``yyyyMMdd`` (no separators) is not in the DAB dynamic-value
-        # vocabulary, so orchestra keeps the legacy Python strftime path.
+        # vocabulary, so flowx keeps the legacy Python strftime path.
         result = resolve_expression("@utcNow('yyyyMMdd')", _context())
         assert result is not None
         assert result.kind == "notebook_code"

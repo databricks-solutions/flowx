@@ -1,8 +1,9 @@
 {
-  "title": "Orchestra",
+  "title": "flowx",
   "pages": [
     "index",
     "how-it-works",
+    "architecture",
     "installation",
     "guide",
     "options",

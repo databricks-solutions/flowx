@@ -1,0 +1,5 @@
+# Databricks App manifest for the flowx MCP server.
+# The app serves the MCP streamable-HTTP transport at /mcp and a health check at /.
+command:
+  - python
+  - app.py

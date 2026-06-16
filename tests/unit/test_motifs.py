@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-from orchestra.models.adf_ast import (
+from flowx.models.adf_ast import (
     AdfActivity,
     AdfDefinitions,
     AdfDependency,
     AdfPipeline,
 )
-from orchestra.models.ir import (
+from flowx.models.ir import (
     Activity,
     Dependency,
     MotifActivity,
     Pipeline,
 )
-from orchestra.models.motifs import MOTIF_METADATA_DRIVEN_BULK_COPY
-from orchestra.motifs.collapser import collapse_motifs
-from orchestra.motifs.detector import detect_motifs
+from flowx.models.motifs import MOTIF_METADATA_DRIVEN_BULK_COPY
+from flowx.motifs.collapser import collapse_motifs
+from flowx.motifs.detector import detect_motifs
 
 _EMPTY_DEFS = AdfDefinitions(pipelines=[], datasets={}, linked_services={}, triggers=[])
 
@@ -110,7 +110,7 @@ class TestDetectorCopyAndNotify:
         )
         motifs = detect_motifs(pipeline, _EMPTY_DEFS)
         assert len(motifs) == 1
-        assert motifs[0].definition.motif_id == "copy_and_notify"
+        assert motifs[0].definition.motif_id == "activity_and_notify"
 
 
 class TestDetectorParentChild:
@@ -144,7 +144,7 @@ class TestCollapser:
             ],
         )
         motif = MOTIF_METADATA_DRIVEN_BULK_COPY
-        from orchestra.models.motifs import DetectedMotif
+        from flowx.models.motifs import DetectedMotif
 
         detected = DetectedMotif(
             definition=motif,
@@ -185,7 +185,7 @@ class TestCollapser:
                 _ir_activity("Unclaimed2", depends_on=["Loop"]),
             ],
         )
-        from orchestra.models.motifs import DetectedMotif
+        from flowx.models.motifs import DetectedMotif
 
         detected = DetectedMotif(
             definition=MOTIF_METADATA_DRIVEN_BULK_COPY,
@@ -209,7 +209,7 @@ class TestCollapser:
         internal motif edges leaked through as "external" deps and
         downstream rewires never matched.
         """
-        from orchestra.models.motifs import DetectedMotif
+        from flowx.models.motifs import DetectedMotif
 
         pipeline = Pipeline(
             name="test",

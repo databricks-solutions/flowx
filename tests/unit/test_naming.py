@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from orchestra.preparer.activity_preparers.naming import (
+from flowx.preparer.activity_preparers.naming import (
     notebook_filename,
     to_snake_case,
     workspace_notebook_filename,

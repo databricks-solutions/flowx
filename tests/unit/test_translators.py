@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Any
 
-from orchestra.models.adf_ast import (
+from flowx.models.adf_ast import (
     AdfActivity,
     AdfDatasetReference,
     AdfDefinitions,
@@ -13,7 +13,7 @@ from orchestra.models.adf_ast import (
     AdfLinkedServiceReference,
     AdfPolicy,
 )
-from orchestra.models.ir import (
+from flowx.models.ir import (
     AppendVariableActivity,
     CopyActivity,
     DeleteActivity,
@@ -34,7 +34,7 @@ from orchestra.models.ir import (
     WaitActivity,
     WebActivity,
 )
-from orchestra.translator.engine import translate_pipeline
+from flowx.translator.engine import translate_pipeline
 
 _EMPTY_DEFS = AdfDefinitions(pipelines=[], datasets={}, linked_services={}, triggers=[])
 
@@ -93,7 +93,7 @@ def _make_activity(
 
 class TestCopyTranslator:
     def test_translate_copy_basic(self):
-        from orchestra.translator.activity_translators.copy import translate
+        from flowx.translator.activity_translators.copy import translate
 
         activity = _make_activity(
             "Copy Data",
@@ -111,7 +111,7 @@ class TestCopyTranslator:
         assert result.sink_properties["writeBatchSize"] == 10000
 
     def test_translate_copy_with_column_mapping(self):
-        from orchestra.translator.activity_translators.copy import translate
+        from flowx.translator.activity_translators.copy import translate
 
         activity = _make_activity(
             "Copy Mapped",
@@ -142,7 +142,7 @@ class TestCopyTranslator:
         assert result.column_mapping[1]["sink_name"] == "full_name"
 
     def test_translate_copy_empty_type_properties(self):
-        from orchestra.translator.activity_translators.copy import translate
+        from flowx.translator.activity_translators.copy import translate
 
         activity = _make_activity("Empty Copy", "Copy", {})
         result = translate(activity, _base_kwargs(), _context(), _EMPTY_DEFS)
@@ -153,7 +153,7 @@ class TestCopyTranslator:
 
 class TestNotebookTranslator:
     def test_translate_notebook_basic(self):
-        from orchestra.translator.activity_translators.notebook import translate
+        from flowx.translator.activity_translators.notebook import translate
 
         activity = _make_activity(
             "Run Notebook",
@@ -166,7 +166,7 @@ class TestNotebookTranslator:
         assert result.base_parameters == {"env": "dev"}
 
     def test_translate_notebook_no_params(self):
-        from orchestra.translator.activity_translators.notebook import translate
+        from flowx.translator.activity_translators.notebook import translate
 
         activity = _make_activity(
             "Run Notebook",
@@ -180,7 +180,7 @@ class TestNotebookTranslator:
     def test_translate_notebook_resolves_library_with_globals(self):
         """C-01 (NB-ITER2-1, LSC2-004): @concat of literals collapses to a
         literal jar path so the library install succeeds."""
-        from orchestra.translator.activity_translators.notebook import translate
+        from flowx.translator.activity_translators.notebook import translate
 
         activity = _make_activity(
             "Run NB",
@@ -203,7 +203,7 @@ class TestNotebookTranslator:
 
     def test_translate_notebook_resolves_pipeline_param_in_library(self):
         """Library entry referencing a single pipeline parameter resolves to a literal."""
-        from orchestra.translator.activity_translators.notebook import translate
+        from flowx.translator.activity_translators.notebook import translate
 
         activity = _make_activity(
             "Run NB",
@@ -223,7 +223,7 @@ class TestNotebookTranslator:
         assert result.libraries == [{"jar": "/Volumes/my.jar"}]
 
     def test_translate_notebook_passes_libraries_through(self):
-        from orchestra.translator.activity_translators.notebook import translate
+        from flowx.translator.activity_translators.notebook import translate
 
         libraries = [
             {"jar": "dbfs:/libs/util.jar"},
@@ -244,7 +244,7 @@ class TestNotebookTranslator:
     def test_translate_notebook_dynamic_path_marks_unresolved(self):
         """C-28 (NB-ITER4-001): an expression notebookPath is captured as
         ``notebook_path_unresolved`` so the preparer emits a dispatch stub."""
-        from orchestra.translator.activity_translators.notebook import translate
+        from flowx.translator.activity_translators.notebook import translate
 
         activity = _make_activity(
             "Dispatch",
@@ -267,7 +267,7 @@ class TestNotebookTranslator:
         """C-30 (NB-ITER4-003): library jar/whl entries whose @concat
         references a missing globalParameter surface as
         ``unresolved_libraries`` so SETUP.md can flag them."""
-        from orchestra.translator.activity_translators.notebook import translate
+        from flowx.translator.activity_translators.notebook import translate
 
         activity = _make_activity(
             "Run NB",
@@ -288,7 +288,7 @@ class TestNotebookTranslator:
         assert "proj4jLibFileName" in entry["missing"]
 
     def test_translate_notebook_captures_utcnow_approximation(self):
-        from orchestra.translator.activity_translators.notebook import translate
+        from flowx.translator.activity_translators.notebook import translate
 
         activity = _make_activity(
             "Score",
@@ -315,8 +315,8 @@ class TestNotebookTranslator:
 
 class TestCommonAttributes:
     def test_existing_cluster_id_extracted_from_linked_service(self):
-        from orchestra.models.adf_ast import AdfLinkedService
-        from orchestra.translator.engine import _build_base_kwargs
+        from flowx.models.adf_ast import AdfLinkedService
+        from flowx.translator.engine import _build_base_kwargs
 
         linked_service = AdfLinkedService(
             name="AzureDatabricks_LS",
@@ -344,8 +344,8 @@ class TestCommonAttributes:
         assert kwargs["cluster"] == {"existing_cluster_id": "1234-567890-abcde123"}
 
     def test_existing_cluster_id_none_when_linked_service_uses_new_cluster(self):
-        from orchestra.models.adf_ast import AdfLinkedService
-        from orchestra.translator.engine import _build_base_kwargs
+        from flowx.models.adf_ast import AdfLinkedService
+        from flowx.translator.engine import _build_base_kwargs
 
         linked_service = AdfLinkedService(
             name="AzureDatabricks_LS",
@@ -374,8 +374,8 @@ class TestCommonAttributes:
 
     def test_linked_service_parameter_overrides_cluster_version(self):
         """Change linked-service-parameter-resolution (P0): NB-4, LSC-001."""
-        from orchestra.models.adf_ast import AdfLinkedService
-        from orchestra.translator.engine import _build_base_kwargs
+        from flowx.models.adf_ast import AdfLinkedService
+        from flowx.translator.engine import _build_base_kwargs
 
         linked_service = AdfLinkedService(
             name="CLI0010_ls_databricks",
@@ -419,26 +419,26 @@ class TestCommonAttributes:
 
     def test_parameter_default_coerces_bool_string_to_real_bool(self):
         """Change expression-resolver-bool-and-numeric-coercion (P1): VAR-006."""
-        from orchestra.translator.engine import _coerce_parameter_default
+        from flowx.translator.engine import _coerce_parameter_default
 
         assert _coerce_parameter_default("false", "Bool") is False
         assert _coerce_parameter_default("True", "Bool") is True
         assert _coerce_parameter_default("FALSE", "boolean") is False
 
     def test_parameter_default_coerces_int_string_to_int(self):
-        from orchestra.translator.engine import _coerce_parameter_default
+        from flowx.translator.engine import _coerce_parameter_default
 
         assert _coerce_parameter_default("42", "Int") == 42
         assert _coerce_parameter_default(42, "Int") == 42
 
     def test_parameter_default_string_left_alone(self):
-        from orchestra.translator.engine import _coerce_parameter_default
+        from flowx.translator.engine import _coerce_parameter_default
 
         assert _coerce_parameter_default("hello", "String") == "hello"
 
     def test_dependency_multi_condition_succeeded_and_failed_maps_to_completed(self):
         """Change dependency-multi-condition-mapping (P1): CF-004."""
-        from orchestra.translator.engine import _map_dependency_conditions
+        from flowx.translator.engine import _map_dependency_conditions
 
         assert _map_dependency_conditions(["Succeeded"]) == "Succeeded"
         assert _map_dependency_conditions(["Failed"]) == "Failed"
@@ -455,8 +455,8 @@ class TestCommonAttributes:
     def test_ls_param_expression_wrapper_unwrapped_in_custom_tags(self):
         """C-02 (NB-ITER2-2 / LSC2-003): Expression-dict-wrapped LS params
         must collapse to plain scalars in cluster fields like custom_tags."""
-        from orchestra.models.adf_ast import AdfLinkedService
-        from orchestra.translator.engine import _build_base_kwargs
+        from flowx.models.adf_ast import AdfLinkedService
+        from flowx.translator.engine import _build_base_kwargs
 
         linked_service = AdfLinkedService(
             name="LS",
@@ -504,8 +504,8 @@ class TestCommonAttributes:
         """C-03 (NB-ITER2-3 / LSC2-002): activity-supplied LS param values
         that reference @pipeline().globalParameters.X must collapse to the
         factory-provided literal so cluster.spark_version is a real DBR."""
-        from orchestra.models.adf_ast import AdfLinkedService
-        from orchestra.translator.engine import _build_base_kwargs
+        from flowx.models.adf_ast import AdfLinkedService
+        from flowx.translator.engine import _build_base_kwargs
 
         linked_service = AdfLinkedService(
             name="LS",
@@ -554,8 +554,8 @@ class TestCommonAttributes:
         """C-13 (NB-ITER3-002 / LSC3-003 / VAREX3-006): activity-supplied LS
         param values that reference @pipeline().parameters.X must collapse to
         {{job.parameters.X}} (a dab_ref), valid in custom_tags map values."""
-        from orchestra.models.adf_ast import AdfLinkedService
-        from orchestra.translator.engine import _build_base_kwargs
+        from flowx.models.adf_ast import AdfLinkedService
+        from flowx.translator.engine import _build_base_kwargs
 
         linked_service = AdfLinkedService(
             name="LS",
@@ -606,7 +606,7 @@ class TestCommonAttributes:
     def test_notebook_library_resolves_pipeline_param_dab_ref(self):
         """C-13 (NB-ITER3-004): a jar path referencing @pipeline().parameters.X
         collapses to {{job.parameters.X}} in the emitted library entry."""
-        from orchestra.translator.activity_translators.notebook import translate
+        from flowx.translator.activity_translators.notebook import translate
 
         activity = _make_activity(
             "Run NB",
@@ -625,8 +625,8 @@ class TestCommonAttributes:
 
     def test_extended_cluster_fields_propagated(self):
         """Change linked-service-cluster-field-coverage (P1): NB-3, LSC-003."""
-        from orchestra.models.adf_ast import AdfLinkedService
-        from orchestra.translator.engine import _build_base_kwargs
+        from flowx.models.adf_ast import AdfLinkedService
+        from flowx.translator.engine import _build_base_kwargs
 
         linked_service = AdfLinkedService(
             name="LS",
@@ -669,7 +669,7 @@ class TestCommonAttributes:
 
 class TestSparkJarTranslator:
     def test_translate_spark_jar(self):
-        from orchestra.translator.activity_translators.spark_jar import translate
+        from flowx.translator.activity_translators.spark_jar import translate
 
         activity = _make_activity(
             "Run Jar",
@@ -689,7 +689,7 @@ class TestSparkJarTranslator:
 
 class TestSparkPythonTranslator:
     def test_translate_spark_python(self):
-        from orchestra.translator.activity_translators.spark_python import translate
+        from flowx.translator.activity_translators.spark_python import translate
 
         activity = _make_activity(
             "Run Python",
@@ -702,7 +702,7 @@ class TestSparkPythonTranslator:
         assert result.parameters == ["--mode", "batch"]
 
     def test_translate_spark_python_passes_libraries_through(self):
-        from orchestra.translator.activity_translators.spark_python import translate
+        from flowx.translator.activity_translators.spark_python import translate
 
         libraries = [
             {"egg": "dbfs:/libs/util.egg"},
@@ -720,7 +720,7 @@ class TestSparkPythonTranslator:
 
 class TestLookupTranslator:
     def test_translate_lookup_first_row(self):
-        from orchestra.translator.activity_translators.lookup import translate
+        from flowx.translator.activity_translators.lookup import translate
 
         activity = _make_activity(
             "Lookup Config",
@@ -737,7 +737,7 @@ class TestLookupTranslator:
         assert result.source_query == "SELECT TOP 1 * FROM config"
 
     def test_translate_lookup_all_rows(self):
-        from orchestra.translator.activity_translators.lookup import translate
+        from flowx.translator.activity_translators.lookup import translate
 
         activity = _make_activity(
             "Lookup All",
@@ -753,8 +753,8 @@ class TestLookupTranslator:
 
     def test_translate_lookup_resolves_json_file_dataset(self):
         """Change lookup-file-dataset-support (P0)."""
-        from orchestra.models.adf_ast import AdfDataset
-        from orchestra.translator.activity_translators.lookup import translate
+        from flowx.models.adf_ast import AdfDataset
+        from flowx.translator.activity_translators.lookup import translate
 
         json_dataset = AdfDataset(
             name="ConfigDataset",
@@ -805,8 +805,8 @@ class TestLookupTranslator:
         """C-47 (LSC5-001): a file Lookup whose dataset folderPath references
         ``dataset().X`` substitutes the dataset reference's parameter bindings
         so the baked path carries no literal ``dataset(`` expression."""
-        from orchestra.models.adf_ast import AdfDataset
-        from orchestra.translator.activity_translators.lookup import translate
+        from flowx.models.adf_ast import AdfDataset
+        from flowx.translator.activity_translators.lookup import translate
 
         ds = AdfDataset(
             name="arq_ds",
@@ -865,8 +865,8 @@ class TestLookupCaseInsensitiveAndLinkedService:
     def test_lookup_resolves_dataset_case_insensitively(self):
         """ADF identifiers are case-insensitive; a pipeline referencing
         'cli0010_a_ds_conf_json' must resolve dataset 'CLI0010_a_ds_conf_json'."""
-        from orchestra.models.adf_ast import AdfDataset, AdfLinkedService
-        from orchestra.translator.activity_translators.lookup import translate
+        from flowx.models.adf_ast import AdfDataset, AdfLinkedService
+        from flowx.translator.activity_translators.lookup import translate
 
         ds = AdfDataset(
             name="CLI0010_a_ds_conf_json",
@@ -922,7 +922,7 @@ class TestLookupCaseInsensitiveAndLinkedService:
     def test_generated_file_lookup_notebook_uses_abfss_path(self):
         """LSC3-005 end-to-end: generated file-lookup notebook ships a real
         abfss:// default path instead of an empty widget fallback."""
-        from orchestra.preparer.code_generator import generate_lookup_notebook
+        from flowx.preparer.code_generator import generate_lookup_notebook
 
         base = _base_kwargs("Read_Conf")
         base.pop("existing_cluster_id", None)
@@ -947,7 +947,7 @@ class TestLookupCaseInsensitiveAndLinkedService:
 
 class TestWebActivityTranslator:
     def test_translate_web_activity_get(self):
-        from orchestra.translator.activity_translators.web_activity import translate
+        from flowx.translator.activity_translators.web_activity import translate
 
         activity = _make_activity(
             "Call API",
@@ -960,7 +960,7 @@ class TestWebActivityTranslator:
         assert result.method == "GET"
 
     def test_translate_web_activity_post(self):
-        from orchestra.translator.activity_translators.web_activity import translate
+        from flowx.translator.activity_translators.web_activity import translate
 
         activity = _make_activity(
             "Post Data",
@@ -983,7 +983,7 @@ class TestWebActivityTranslator:
 
 class TestDeleteTranslator:
     def test_translate_delete(self):
-        from orchestra.translator.activity_translators.delete import translate
+        from flowx.translator.activity_translators.delete import translate
 
         activity = _make_activity(
             "Delete Files",
@@ -999,7 +999,7 @@ class TestDeleteTranslator:
 
 class TestExecutePipelineTranslator:
     def test_translate_execute_pipeline(self):
-        from orchestra.translator.activity_translators.execute_pipeline import translate
+        from flowx.translator.activity_translators.execute_pipeline import translate
 
         activity = _make_activity(
             "Run Child",
@@ -1021,7 +1021,7 @@ class TestExecutePipelineTranslator:
         to notebook_code (e.g. @concat('x', pipeline().parameters.Y)) must NOT
         ride through as a literal Python source string -- it's dropped from
         the parameters dict and surfaced via parameter_approximations."""
-        from orchestra.translator.activity_translators.execute_pipeline import translate
+        from flowx.translator.activity_translators.execute_pipeline import translate
 
         activity = _make_activity(
             "Run Child",
@@ -1050,7 +1050,7 @@ class TestExecutePipelineTranslator:
 
 class TestDatabricksJobTranslator:
     def test_translate_databricks_job(self):
-        from orchestra.translator.activity_translators.databricks_job import translate
+        from flowx.translator.activity_translators.databricks_job import translate
 
         activity = _make_activity(
             "Run Job",
@@ -1065,7 +1065,7 @@ class TestDatabricksJobTranslator:
 
 class TestWaitTranslator:
     def test_translate_wait(self):
-        from orchestra.translator.activity_translators.wait import translate
+        from flowx.translator.activity_translators.wait import translate
 
         activity = _make_activity(
             "Pause",
@@ -1077,7 +1077,7 @@ class TestWaitTranslator:
         assert result.wait_time_seconds == 60
 
     def test_translate_wait_defaults_to_zero(self):
-        from orchestra.translator.activity_translators.wait import translate
+        from flowx.translator.activity_translators.wait import translate
 
         activity = _make_activity("Pause", "Wait", {})
         result = translate(activity, _base_kwargs(), _context(), _EMPTY_DEFS)
@@ -1087,7 +1087,7 @@ class TestWaitTranslator:
 
 class TestFilterTranslator:
     def test_translate_filter(self):
-        from orchestra.translator.activity_translators.filter import translate
+        from flowx.translator.activity_translators.filter import translate
 
         activity = _make_activity(
             "Filter Items",
@@ -1104,7 +1104,7 @@ class TestFilterTranslator:
 
     def test_translate_filter_lowers_simple_condition(self):
         """``@equals(item().X, 'Y')`` lowers to a Python expression with item.get(X)."""
-        from orchestra.translator.activity_translators.filter import translate
+        from flowx.translator.activity_translators.filter import translate
 
         activity = _make_activity(
             "Filter Active",
@@ -1121,7 +1121,7 @@ class TestFilterTranslator:
 
     def test_translate_filter_falls_back_to_placeholder_for_unresolvable(self):
         """A condition that doesn't lower cleanly leaves condition_code=None."""
-        from orchestra.translator.activity_translators.filter import translate
+        from flowx.translator.activity_translators.filter import translate
 
         activity = _make_activity(
             "Filter Mystery",
@@ -1137,7 +1137,7 @@ class TestFilterTranslator:
 
 class TestForEachTranslator:
     def test_translate_foreach_basic(self):
-        from orchestra.translator.activity_translators.for_each import translate
+        from flowx.translator.activity_translators.for_each import translate
 
         inner_activity = _make_activity(
             "InnerCopy", "Copy", {"source": {"type": "BlobSource"}, "sink": {"type": "DeltaSink"}}
@@ -1159,7 +1159,7 @@ class TestForEachTranslator:
         assert result.concurrency == 5
 
     def test_translate_foreach_sequential(self):
-        from orchestra.translator.activity_translators.for_each import translate
+        from flowx.translator.activity_translators.for_each import translate
 
         inner_activity = _make_activity("InnerWait", "Wait", {"waitTimeInSeconds": 1})
         activity = _make_activity(
@@ -1176,7 +1176,7 @@ class TestForEachTranslator:
         """C-13 (NB-ITER3-001 / CF3-002 / LSC3-004): ForEach child context
         must carry global_parameters and linked_service_parameters so inner
         notebooks resolve @pipeline().globalParameters.X to literals."""
-        from orchestra.translator.activity_translators.for_each import translate
+        from flowx.translator.activity_translators.for_each import translate
 
         # Inner notebook whose library jar references a global parameter.
         inner_activity = _make_activity(
@@ -1197,7 +1197,7 @@ class TestForEachTranslator:
         # The parent context carries the global parameter the inner notebook
         # needs.  We use the real notebook translator inside our mock callback
         # so the inner activity is processed exactly as the engine would.
-        from orchestra.translator.activity_translators.notebook import translate as translate_nb
+        from flowx.translator.activity_translators.notebook import translate as translate_nb
 
         def _mock_translate(activities, ctx, defs):
             results: list[Any] = []
@@ -1225,7 +1225,7 @@ class TestForEachTranslator:
 
 class TestIfConditionTranslator:
     def test_translate_if_condition_equals(self):
-        from orchestra.translator.activity_translators.if_condition import translate
+        from flowx.translator.activity_translators.if_condition import translate
 
         true_act = _make_activity("TrueAct", "Wait", {"waitTimeInSeconds": 1})
         false_act = _make_activity("FalseAct", "Wait", {"waitTimeInSeconds": 2})
@@ -1257,7 +1257,7 @@ class TestIfConditionTranslator:
         assert len(result.if_false_activities) == 1
 
     def test_translate_if_condition_greater(self):
-        from orchestra.translator.activity_translators.if_condition import translate
+        from flowx.translator.activity_translators.if_condition import translate
 
         activity = _make_activity(
             "Check Count",
@@ -1273,7 +1273,7 @@ class TestIfConditionTranslator:
     def test_translate_if_condition_empty_bridges_via_notebook(self):
         """C-07 (CF-iter2-001 / VAREX-003): @empty(...) operand routes through
         a bridge SetVariable task rather than shipping as a raw ADF expression."""
-        from orchestra.translator.activity_translators.if_condition import translate
+        from flowx.translator.activity_translators.if_condition import translate
 
         activity = _make_activity(
             "Branch",
@@ -1299,7 +1299,7 @@ class TestIfConditionTranslator:
         """C-32 (CF4-002): the truthy fallback path emits ``right='false'`` (not
         ``'0'``) when the operand is a known-Boolean variable, since C-21
         SetVariable now writes lowercase ``'true'/'false'`` strings."""
-        from orchestra.translator.activity_translators.if_condition import translate
+        from flowx.translator.activity_translators.if_condition import translate
 
         # Seed the context with a Boolean default-valued variable so the
         # truthy fallback knows the operand renders as 'true'/'false'.
@@ -1321,7 +1321,7 @@ class TestIfConditionTranslator:
         init task never populates variable_value_cache as a dab_ref, so the
         IfCondition fallback must fall back to the declared type and still emit
         ``right='false'`` (not the always-true ``'0'``)."""
-        from orchestra.translator.activity_translators.if_condition import translate
+        from flowx.translator.activity_translators.if_condition import translate
 
         # No dab_ref value cached — only the declared Boolean type is known.
         ctx = _context().with_variable_types({"continue": "Boolean"})
@@ -1342,7 +1342,7 @@ class TestIfConditionTranslator:
         rather than left as a parent-job task-value ref the bundler would
         blank.  This keeps the operand local so an inner-ForEach condition
         survives the dangling-ref safety net."""
-        from orchestra.translator.activity_translators.if_condition import translate
+        from flowx.translator.activity_translators.if_condition import translate
 
         # Declared Boolean type AND a seeded literal default -> bridge.
         ctx = _context().with_variable_types({"continue": "Boolean"}, default_literals={"continue": "true"})
@@ -1362,7 +1362,7 @@ class TestIfConditionTranslator:
         """C-15 (CF3-003 / VAREX3-004): @not(<function-call>) produces a bridge
         task value compared against 'False', not '' or '0', so the condition
         can actually evaluate to FALSE against the Python bool the bridge writes."""
-        from orchestra.translator.activity_translators.if_condition import translate
+        from flowx.translator.activity_translators.if_condition import translate
 
         activity = _make_activity(
             "Branch",
@@ -1388,7 +1388,7 @@ class TestIfConditionTranslator:
         right='False' when the resolved operand is a bridge placeholder.
         Previously emitted right='0', which the bridge's Python bool output
         can never satisfy."""
-        from orchestra.translator.activity_translators.if_condition import translate
+        from flowx.translator.activity_translators.if_condition import translate
 
         # An expression with a function call that bridges (e.g. @toUpper).
         activity = _make_activity(
@@ -1413,7 +1413,7 @@ class TestIfConditionPreparer:
     """C-07: preparer rewrites bridge placeholder to the real task value."""
 
     def test_prepare_if_condition_emits_bridge_task(self):
-        from orchestra.preparer.activity_preparers.if_condition import prepare
+        from flowx.preparer.activity_preparers.if_condition import prepare
 
         if_act = IfConditionActivity(
             name="Branch",
@@ -1441,7 +1441,7 @@ class TestIfConditionPreparer:
 
 class TestSetVariableTranslator:
     def test_translate_set_variable_literal(self):
-        from orchestra.translator.activity_translators.set_variable import translate
+        from flowx.translator.activity_translators.set_variable import translate
 
         activity = _make_activity(
             "Set Status",
@@ -1461,7 +1461,7 @@ class TestSetVariableTranslator:
         """C-42 (VAREX5-001): a Set Pipeline Return Value list-of-pairs value
         whose inner expression references a resolvable variable lowers to a
         dab_ref task-value reference instead of being stringified and blanked."""
-        from orchestra.translator.activity_translators.set_variable import translate
+        from flowx.translator.activity_translators.set_variable import translate
 
         # Seed the referenced variable so @variables('executionOutputs')
         # resolves to its setter task value.
@@ -1488,7 +1488,7 @@ class TestSetVariableTranslator:
         assert "{{tasks." in result.variable_value
 
     def test_translate_set_variable_utcnow(self):
-        from orchestra.translator.activity_translators.set_variable import translate
+        from flowx.translator.activity_translators.set_variable import translate
 
         # ``utcNow('yyyy-MM-dd')`` now maps to a DAB dynamic value, so the
         # SetVariable result is dab_ref rather than notebook_code.
@@ -1506,7 +1506,7 @@ class TestSetVariableTranslator:
         """C-33 (VAREX4-001): ``split(...)[N]`` previously left value_kind
         stamped as 'literal' with the raw @concat text; now it lowers to
         notebook_code so the SetVariable notebook computes the value."""
-        from orchestra.translator.activity_translators.set_variable import translate
+        from flowx.translator.activity_translators.set_variable import translate
 
         activity = _make_activity(
             "SetPart",
@@ -1530,7 +1530,7 @@ class TestSetVariableTranslator:
         cannot lower no longer ships as value_kind='literal' with the raw
         @-expression.  The value is blanked, value_kind='unresolved', and
         raw_expression captures the original text for SETUP.md."""
-        from orchestra.translator.activity_translators.set_variable import translate
+        from flowx.translator.activity_translators.set_variable import translate
 
         activity = _make_activity(
             "SetX",
@@ -1551,7 +1551,7 @@ class TestSetVariableTranslator:
         assert result.raw_expression == "@foo(pipeline().parameters.bar)"
 
     def test_translate_set_variable_utcnow_unknown_format(self):
-        from orchestra.translator.activity_translators.set_variable import translate
+        from flowx.translator.activity_translators.set_variable import translate
 
         # Unrecognised format falls back to the legacy notebook_code path.
         activity = _make_activity(
@@ -1567,7 +1567,7 @@ class TestSetVariableTranslator:
         assert "datetime" in result.notebook_imports[0]
 
     def test_translate_set_variable_pipeline_param(self):
-        from orchestra.translator.activity_translators.set_variable import translate
+        from flowx.translator.activity_translators.set_variable import translate
 
         activity = _make_activity(
             "Set Env",
@@ -1583,7 +1583,7 @@ class TestSetVariableTranslator:
 
 class TestAppendVariableTranslator:
     def test_translate_append_variable(self):
-        from orchestra.translator.activity_translators.append_variable import translate
+        from flowx.translator.activity_translators.append_variable import translate
 
         activity = _make_activity(
             "Append Log",
@@ -1600,7 +1600,7 @@ class TestAppendVariableTranslator:
 
 class TestSwitchTranslator:
     def test_translate_switch_with_cases(self):
-        from orchestra.translator.activity_translators.switch import translate
+        from flowx.translator.activity_translators.switch import translate
 
         case_act = _make_activity("CaseWait", "Wait", {"waitTimeInSeconds": 1})
         default_act = _make_activity("DefaultWait", "Wait", {"waitTimeInSeconds": 2})
@@ -1641,7 +1641,7 @@ class TestSwitchTranslator:
         """C-07 (CF-iter2-001 / CF-iter2-003): @toUpper(coalesce(...)) on the
         Switch on-expression lowers to a bridge SetVariable task rather than
         shipping as a raw ADF expression."""
-        from orchestra.translator.activity_translators.switch import translate
+        from flowx.translator.activity_translators.switch import translate
 
         activity = _make_activity(
             "Route",
@@ -1668,7 +1668,7 @@ class TestVariableInitTasks:
     """C-05 (VAREX-002): init SetVariable tasks for default-valued variables."""
 
     def test_default_valued_variable_yields_init_task(self):
-        from orchestra.models.adf_ast import AdfPipeline, AdfVariable
+        from flowx.models.adf_ast import AdfPipeline, AdfVariable
 
         pipeline = AdfPipeline(
             name="pl_with_var_default",
@@ -1704,7 +1704,7 @@ class TestVariableInitTasks:
         the lowercase string 'true' so downstream ADF
         ``@equals(variables('continue'), true)`` evaluates consistently.
         Python's title-case ``'True'`` silently inverted comparisons."""
-        from orchestra.models.adf_ast import AdfPipeline, AdfVariable
+        from flowx.models.adf_ast import AdfPipeline, AdfVariable
 
         pipeline = AdfPipeline(
             name="pl_bool_var",
@@ -1727,7 +1727,7 @@ class TestVariableInitTasks:
         """VAREX3-002: a SetVariable activity carrying a raw Python ``False``
         as its typeProperties.value must serialise as 'false' (lowercase),
         not 'False' (title-case)."""
-        from orchestra.models.adf_ast import AdfPipeline
+        from flowx.models.adf_ast import AdfPipeline
 
         pipeline = AdfPipeline(
             name="pl_set_var_bool",
@@ -1747,7 +1747,7 @@ class TestVariableInitTasks:
 
     def test_default_valued_variable_with_concat_expression(self):
         """An @concat defaultValue resolves like a SetVariable value would."""
-        from orchestra.models.adf_ast import AdfPipeline, AdfVariable
+        from flowx.models.adf_ast import AdfPipeline, AdfVariable
 
         pipeline = AdfPipeline(
             name="pl_var_default_concat",
@@ -1778,7 +1778,7 @@ class TestScheduleCompilation:
     """C-10 (SCHED-001): map AdfTrigger objects onto Pipeline.schedule."""
 
     def _build_definitions(self, trigger_props, *, runtime_state="Started", trigger_type="ScheduleTrigger"):
-        from orchestra.models.adf_ast import AdfPipeline, AdfTrigger
+        from flowx.models.adf_ast import AdfPipeline, AdfTrigger
 
         pipeline = AdfPipeline(name="pl_with_trigger", activities=[])
         props = dict(trigger_props)
@@ -1898,7 +1898,7 @@ class TestScheduleCompilation:
         """SCHED3-003: parameters on the trigger's pipelineReference entry
         must surface on the schedule spec so the bundler can mutate the
         matching job.parameter defaults for scheduled runs."""
-        from orchestra.models.adf_ast import AdfParameter, AdfPipeline, AdfTrigger
+        from flowx.models.adf_ast import AdfParameter, AdfPipeline, AdfTrigger
 
         pipeline = AdfPipeline(
             name="pl_with_overrides",

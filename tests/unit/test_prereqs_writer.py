@@ -1,9 +1,9 @@
-"""Unit tests for orchestra.bundler.prereqs_writer."""
+"""Unit tests for flowx.bundler.prereqs_writer."""
 
 from __future__ import annotations
 
-from orchestra.bundler.prereqs_writer import build_prereqs, render_setup_md
-from orchestra.models.dab import DabNotebook, SecretInstruction
+from flowx.bundler.prereqs_writer import build_prereqs, render_setup_md
+from flowx.models.dab import DabNotebook, SecretInstruction
 
 
 class TestSecretsUnion:

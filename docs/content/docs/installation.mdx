@@ -1,76 +1,179 @@
 ---
 title: Installation
-description: Install orchestra in Databricks Genie Code, Claude Code, or other agentic tools.
+description: Install flowx in Databricks Genie Code, Claude Code, or other agentic tools.
 ---
 
 import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
 import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
 
-Orchestra is a set of [agent skills](https://github.com/ghanse/orchestra/tree/main/skills) that can be installed and used with AI coding assistants.
-To use these skills, install orchestra as a plugin using your AI assistant's preferred installation method.
+flowx is a set of [agent skills](https://github.com/ghanse/flowx/tree/main/skills) that can be installed and used with AI coding assistants.
+To use these skills, install flowx as a plugin using your AI assistant's preferred installation method.
 
 <Tabs items={['Databricks Genie Code', 'Claude Code', 'Other AI tools']}>
 <Tab value="Databricks Genie Code">
-Clone the orchestra repo into your workspace using a [Git folder](https://docs.databricks.com/aws/en/repos/git-operations-with-repos), then copy the `skills/` directory into a user-level skills folder:
+Clone the flowx repo into your workspace using a [Git folder](https://docs.databricks.com/aws/en/repos/git-operations-with-repos). Clone it under **`/Workspace/Shared`** (e.g. `/Workspace/Shared/flowx`) rather than your private `/Workspace/Users/<you>` home — when you later deploy the MCP server, the app's service principal must be able to read the source, and it has no access to private user folders by default. Then copy the `skills/` directory into a user-level skills folder:
 
 ```bash
 databricks workspace import-dir skills /Users/<your-email>/.assistant/skills
 ```
 
-To make orchestra available for other workspace users, copy `skills/` into a workspace-level skills folder:
+To make flowx available for other workspace users, copy `skills/` into a workspace-level skills folder:
 
 ```bash
 databricks workspace import-dir skills /Workspace/.assistant/skills
 ```
 
 Genie Code picks up skills from these directories automatically. Skills fire automatically when their description matches your request. 
-To invoke a specific skill, use the `@` prefix (e.g. `@migrate translate the ADF pipelines I exported to /Volumes/main/default/adf_export`).
+To invoke a specific skill, use the `@` prefix (e.g. `@flowx-migrate translate the ADF pipelines I exported to /Volumes/main/default/adf_export`).
 
 See the [Databricks Genie Code Skills documentation](https://docs.databricks.com/aws/en/genie-code/skills) for more details.
 </Tab>
 
 <Tab value="Claude Code">
-Orchestra is packaged as a Claude Code plugin. The plugin manifest lives at [`.claude-plugin/plugin.json`](https://github.com/ghanse/orchestra/blob/main/.claude-plugin/plugin.json).  To install 
-orchestra, run the following command from a Claude Code session:
+flowx is packaged as a Claude Code plugin. The plugin manifest lives at [`.claude-plugin/plugin.json`](https://github.com/ghanse/flowx/blob/main/.claude-plugin/plugin.json).  To install 
+flowx, run the following command from a Claude Code session:
 
 ```bash
-/plugin marketplace add ghanse/orchestra
-/plugin install orchestra
+/plugin marketplace add ghanse/flowx
+/plugin install flowx
 ```
 
 You can also copy the skill folders into your local `/.claude/skills` folder:
 
 ```bash
-cp -R skills/{setup,ingest,translate,prepare,migrate} ~/.claude/skills/
+cp -R skills/{flowx-setup,flowx-discover,flowx-convert,flowx-package,flowx-migrate} ~/.claude/skills/
 ```
 
-Once installed, the skills can be invoked using `/orchestra:migrate`, `/orchestra:ingest`, etc. Claude Code can also invoke the skills when prompted.  See the [Claude Code Plugins documentation](https://docs.claude.com/en/docs/claude-code/plugins) for more details.
+Once installed, the skills can be invoked using `/flowx:flowx-migrate`, `/flowx:flowx-discover`, etc. Claude Code can also invoke the skills when prompted.  See the [Claude Code Plugins documentation](https://docs.claude.com/en/docs/claude-code/plugins) for more details.
 </Tab>
 
 <Tab value="Other AI tools">
-Any tool that supports the [Agent Skills](https://agentskills.io/) open standard can install the orchestra skills. The general pattern:
+Any tool that supports the [Agent Skills](https://agentskills.io/) open standard can install the flowx skills. The general pattern:
 
-1. Copy each skill folder (`skills/setup`, `skills/ingest`, `skills/translate`, `skills/prepare`, `skills/migrate`) into the tool's configured skills directory.
+1. Copy each skill folder (`skills/flowx-setup`, `skills/flowx-discover`, `skills/flowx-convert`, `skills/flowx-package`, `skills/flowx-migrate`) into the tool's configured skills directory.
 2. Make sure the path contains `SKILL.md` directly,
 3. Restart the tool if it caches skill metadata at startup.
 
 <Callout type="info" title="Flattening skills files">
-If your tool expects a single Markdown file instead of a directory tree, use the following command to flatten Orchestra's skills files:
+If your tool expects a single Markdown file instead of a directory tree, use the following command to flatten flowx's skills files:
 
 ```bash
-cat skills/*/SKILL.md > orchestra-skills.md
+cat skills/*/SKILL.md > flowx-skills.md
 ```
 </Callout>
 </Tab>
 </Tabs>
 
-## Setting up the Python environment
+## Running flowx as an MCP server
 
-Orchestra's skills invoke Python modules that may depend on third-party packages. The `setup` skill provisions an isolated virtual environment with the required dependencies.
+flowx's phases are also packaged as [Model Context Protocol](https://modelcontextprotocol.io) tools (in [`src/flowx/mcp/`](https://github.com/ghanse/flowx/tree/main/src/flowx/mcp)) so an agent can invoke them directly instead of shelling out to the CLI. The `setup` skill wires this up automatically based on your environment; you can also do it manually. See [Architecture](/docs/architecture) for how the tool layer maps onto the phases.
 
-Run it **once** after installing the skills, before `ingest`, `translate`, `prepare`, or `migrate`. Just ask your agent:
+### Configuring the MCP server for Databricks Genie Code
 
-> Set up the orchestra environment
+Genie Code connects to a **hosted** MCP endpoint, so the flowx tools run as a Databricks App that you add in Genie Code's **Custom MCP server** picker. End to end:
+
+<Steps>
+<Step>
+#### Clone flowx
+
+Follow the **Databricks Genie Code** install steps above to clone the repo and copy `skills/` into your skills folder.
+
+<Callout type="warn" title="Use a shared location, not your user home">
+The MCP app's service principal cannot read private `/Workspace/Users/<you>` folders by default, and `deploy.sh` deploys the source from `/Workspace/Shared/<app-name>`. Cloning into `/Workspace/Shared` keeps the repo, the deployed source, and team access all in a location every user and the app's service principal can reach. If your workspace restricts `/Workspace/Shared`, use any other folder all users (and the app service principal) can read and pass it via `APP_SOURCE_PATH`.
+</Callout>
+</Step>
+
+<Step>
+#### Run the setup skill
+
+Ask your agent to *"set up the flowx environment"* (or run `bash <plugin_dir>/scripts/bootstrap.sh`). On Databricks the `setup` skill detects the environment and, after creating the venv, runs the app deployment in the next step for you. Run it from a workspace web terminal if your Genie session can't shell out to the Databricks CLI.
+</Step>
+
+<Step>
+#### Deploy the MCP server
+
+```bash
+bash <plugin_dir>/app/deploy.sh
+```
+
+`deploy.sh` stages a self-contained bundle (the app entrypoint plus a vendored copy of the flowx source), syncs it to **`/Workspace/Shared/mcp-flowx`** (a location the app's service principal can read — override with `APP_SOURCE_PATH`), and creates/deploys the **`mcp-flowx`** app. The script prints the app URL; the MCP endpoint is **`<app-url>/mcp`**.
+
+<Callout type="warn" title="Deploy from a CLI session">
+`databricks apps` deploy commands require a Databricks CLI session and must be run from the workspace web terminal or a local machine.
+</Callout>
+</Step>
+
+<Step>
+#### Grant access
+
+- **App access:** grant **Can use** on the `mcp-flowx` app to the users or service principals that will call it (Apps UI → *Permissions*, or `databricks apps set-permissions`).
+- **Data access:** grant the app's own service principal access to the catalogs, schemas, and Unity Catalog volumes the migration reads from and writes to, plus any SQL warehouse used by the reporting commands (`flowx(command="record_results")` / `flowx(command="install_dashboard")`).
+</Step>
+
+<Step>
+#### Register the MCP server
+
+MCP servers are available in Genie Code [Agent mode](https://learn.microsoft.com/en-us/azure/databricks/genie-code/use-genie-code#modes). To add the flowx MCP server:
+
+1. In the Genie Code panel, click **⚙ Settings**.
+2. Under **MCP Servers**, click **+ Add Server**.
+3. Choose **Custom MCP server** and select the **`mcp-flowx`** Databricks App.
+4. Click **Save**.
+
+The single `flowx` tool will be available when you use Genie Code in Agent mode.
+
+<Callout type="info" title="Genie Code custom MCP requirements">
+Databricks requires a custom MCP app to be:
+* Deployed in the same workspace
+* Reachable at `https://<app-url>/mcp`
+
+If Genie Code cannot connect to the flowx MCP server, set the app's `FLOWX_ALLOWED_ORIGINS` environment variable to your workspace URL and redeploy. See [Connect Genie Code to MCP servers](https://learn.microsoft.com/en-us/azure/databricks/genie-code/mcp).
+</Callout>
+</Step>
+
+<Step>
+#### Verify the MCP Server
+
+Open the health endpoint `<app-url>/` (returns `{"status":"ok"}`), or ask Genie Code *"what flowx MCP tools are available?"*. You should see the single `flowx` tool.
+</Step>
+</Steps>
+
+### Configuring the MCP server for other agent tools
+
+Deploy the MCP server locally to use flowx with other agent tools. Install the MCP server stack into a local Python virtual environment and run it over stdio:
+
+```bash
+PY="$(cat <plugin_dir>/.migration-venv)"
+"$PY" -m pip install "mcp>=1.12" "uvicorn>=0.30" "starlette>=0.40"
+PYTHONPATH="<plugin_dir>/src" "$PY" -m flowx.mcp
+```
+
+Register the server with your MCP client (use the interpreter path from the marker file for `command`):
+
+```json
+{
+  "mcpServers": {
+    "flowx": {
+      "command": "<plugin_dir>/.venv/bin/python",
+      "args": ["-m", "flowx.mcp"],
+      "env": { "PYTHONPATH": "<plugin_dir>/src" }
+    }
+  }
+}
+```
+
+<Callout type="info" title="Editable install alternative">
+If you prefer an installed package over `PYTHONPATH`, run `pip install -e ".[mcp]"` from the plugin root; then `python -m flowx.mcp` works without setting `PYTHONPATH`.
+</Callout>
+
+## Running flowx as a Python process
+
+flowx's skills invoke Python modules that may depend on third-party packages. The `setup` skill provisions an isolated virtual environment with the required dependencies.
+
+Run it **once** after installing the skills, before `discover`, `convert`, `package`, or `migrate`. Just ask your agent:
+
+> Set up the flowx environment
 
 The setup script can also be run directly from the plugin root:
 
@@ -81,8 +184,9 @@ bash <plugin_dir>/scripts/bootstrap.sh
 Running the setup process will:
 
 1. Check that `python3`, `pip`, and `venv` are available.
-2. Create `<plugin_dir>/.venv` if it doesn't already exist.
+2. Create the virtual environment if it doesn't already exist. When running under Databricks (Genie Code or notebooks, detected via `DATABRICKS_RUNTIME_VERSION`), the venv is created at `/Workspace/Users/<current user>/.migration-skills`; everywhere else it is created at `<plugin_dir>/.venv`.
 3. Install the `requirements.txt` dependencies into your virtual environment using `pip`.
+4. Write the resolved interpreter path to the marker file `<plugin_dir>/.migration-venv`.
 
 The environment is created once and reused. Re-running the script simply confirms the venv exists and its dependencies are satisfied.
 
@@ -95,19 +199,20 @@ To install Python in your environment, run one of the following commands:
 * **Windows:** [python.org/downloads](https://www.python.org/downloads/) (enable "Add python.exe to PATH")
 </Callout>
 
-After the venv exists, every Python command the skills run uses the venv interpreter with `src/` on `PYTHONPATH`:
+After the venv exists, every Python command the skills run uses the interpreter recorded in the marker file, with `src/` on `PYTHONPATH`. Read the interpreter path from `<plugin_dir>/.migration-venv` rather than hardcoding it:
 
 ```bash
 export PYTHONPATH="<plugin_dir>/src"
-"<plugin_dir>/.venv/bin/python" -m orchestra.adapter inputs ingest
+PY="$(cat <plugin_dir>/.migration-venv)"
+"$PY" -m flowx.adapter inputs discover
 ```
 
-On Windows, the interpreter is `<plugin_dir>\.venv\Scripts\python.exe`. The agent normally runs these commands for you; they are handy for troubleshooting a `ModuleNotFoundError`.
+The marker file points at `<plugin_dir>/.venv` locally or `/Workspace/Users/<user>/.migration-skills` on Databricks. The agent normally runs these commands for you; they are handy for troubleshooting a `ModuleNotFoundError`.
 
 ## Verifying the installation
 
 Open your agent and ask:
 
-> What orchestra skills do you have available?
+> What flowx skills do you have available?
 
 You should see all five skills listed with their descriptions. If only some appear, double-check the install path your tool watches for skills.
