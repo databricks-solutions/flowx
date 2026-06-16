@@ -1,0 +1,73 @@
+{
+  "name": "ds_azure_sql_orders",
+  "properties": {
+    "type": "AzureSqlTable",
+    "linkedServiceName": {
+      "referenceName": "ls_azure_sql",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "schema": "dbo",
+      "table": "orders"
+    },
+    "parameters": {},
+    "schema": [
+      {
+        "name": "order_id",
+        "type": "int",
+        "precision": 10,
+        "scale": 0
+      },
+      {
+        "name": "customer_id",
+        "type": "int",
+        "precision": 10,
+        "scale": 0
+      },
+      {
+        "name": "order_date",
+        "type": "datetime2",
+        "precision": 27,
+        "scale": 7
+      },
+      {
+        "name": "total_amount",
+        "type": "decimal",
+        "precision": 18,
+        "scale": 2
+      },
+      {
+        "name": "status",
+        "type": "nvarchar",
+        "precision": 0,
+        "scale": 0
+      },
+      {
+        "name": "shipping_address",
+        "type": "nvarchar",
+        "precision": 0,
+        "scale": 0
+      },
+      {
+        "name": "created_at",
+        "type": "datetime2",
+        "precision": 27,
+        "scale": 7
+      },
+      {
+        "name": "updated_at",
+        "type": "datetime2",
+        "precision": 27,
+        "scale": 7
+      }
+    ],
+    "annotations": [
+      "sql",
+      "orders",
+      "source"
+    ],
+    "folder": {
+      "name": "Source/SQL"
+    }
+  }
+}

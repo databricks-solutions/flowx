@@ -1,0 +1,261 @@
+{
+  "name": "pipeline_all_activity_types",
+  "properties": {
+    "activities": [
+      {
+        "name": "Wait for Upstream",
+        "type": "Wait",
+        "dependsOn": [],
+        "typeProperties": {
+          "waitTimeInSeconds": 30
+        }
+      },
+      {
+        "name": "Lookup Config",
+        "type": "Lookup",
+        "dependsOn": [
+          {
+            "activity": "Wait for Upstream",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT * FROM dbo.config"
+          },
+          "firstRowOnly": true
+        }
+      },
+      {
+        "name": "Copy CSV Data",
+        "type": "Copy",
+        "dependsOn": [
+          {
+            "activity": "Lookup Config",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.06:00:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 30
+        },
+        "typeProperties": {
+          "source": {
+            "type": "BlobSource"
+          },
+          "sink": {
+            "type": "DeltaSink"
+          }
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_blob_source",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "ds_delta_target",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+      {
+        "name": "Run Notebook",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          {
+            "activity": "Copy CSV Data",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "notebookPath": "/Shared/ETL/transform",
+          "baseParameters": {
+            "env": "dev"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Run Spark Jar",
+        "type": "DatabricksSparkJar",
+        "dependsOn": [
+          {
+            "activity": "Run Notebook",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "mainClassName": "com.example.MainJob",
+          "parameters": ["--input", "/mnt/data"],
+          "libraries": [
+            {"jar": "dbfs:/libs/my-job.jar"}
+          ]
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Run Spark Python",
+        "type": "DatabricksSparkPython",
+        "dependsOn": [
+          {
+            "activity": "Run Spark Jar",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "pythonFile": "dbfs:/scripts/etl.py",
+          "parameters": ["--mode", "batch"]
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Run Databricks Job",
+        "type": "DatabricksJob",
+        "dependsOn": [
+          {
+            "activity": "Run Spark Python",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "jobName": "nightly-aggregation",
+          "jobId": "12345"
+        }
+      },
+      {
+        "name": "Call Web API",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "Run Databricks Job",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "url": "https://api.example.com/status",
+          "method": "GET"
+        }
+      },
+      {
+        "name": "Delete Staging Files",
+        "type": "Delete",
+        "dependsOn": [
+          {
+            "activity": "Call Web API",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "recursive": true
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_staging_folder",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+      {
+        "name": "Set Status Variable",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "Delete Staging Files",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "status",
+          "value": "completed"
+        }
+      },
+      {
+        "name": "Append Log Entry",
+        "type": "AppendVariable",
+        "dependsOn": [
+          {
+            "activity": "Set Status Variable",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "logEntries",
+          "value": "Pipeline completed successfully"
+        }
+      },
+      {
+        "name": "Filter Active Items",
+        "type": "Filter",
+        "dependsOn": [
+          {
+            "activity": "Append Log Entry",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "type": "Expression",
+            "value": "@variables('logEntries')"
+          },
+          "condition": {
+            "type": "Expression",
+            "value": "@not(empty(item()))"
+          }
+        }
+      },
+      {
+        "name": "Execute Child Pipeline",
+        "type": "ExecutePipeline",
+        "dependsOn": [
+          {
+            "activity": "Filter Active Items",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "pipeline": {
+            "referenceName": "child_pipeline_cleanup",
+            "type": "PipelineReference"
+          },
+          "parameters": {
+            "targetDate": "2024-01-15"
+          },
+          "waitOnCompletion": true
+        }
+      }
+    ],
+    "parameters": {
+      "env": {
+        "type": "String",
+        "defaultValue": "dev"
+      }
+    },
+    "variables": {
+      "status": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "logEntries": {
+        "type": "Array",
+        "defaultValue": []
+      }
+    },
+    "annotations": ["integration-test"],
+    "folder": {
+      "name": "Tests"
+    }
+  }
+}

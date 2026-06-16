@@ -1,0 +1,55 @@
+{
+  "name": "ds_postgresql_users",
+  "properties": {
+    "type": "AzurePostgreSqlTable",
+    "linkedServiceName": {
+      "referenceName": "ls_postgresql",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "schema": "public",
+      "table": "users"
+    },
+    "parameters": {},
+    "schema": [
+      {
+        "name": "user_id",
+        "type": "uuid"
+      },
+      {
+        "name": "username",
+        "type": "varchar",
+        "precision": 255
+      },
+      {
+        "name": "email",
+        "type": "varchar",
+        "precision": 255
+      },
+      {
+        "name": "created_at",
+        "type": "timestamptz"
+      },
+      {
+        "name": "last_login",
+        "type": "timestamptz"
+      },
+      {
+        "name": "is_active",
+        "type": "boolean"
+      },
+      {
+        "name": "metadata",
+        "type": "jsonb"
+      }
+    ],
+    "annotations": [
+      "postgresql",
+      "users",
+      "source"
+    ],
+    "folder": {
+      "name": "Source/PostgreSQL"
+    }
+  }
+}

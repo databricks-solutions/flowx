@@ -1,0 +1,37 @@
+---
+title: Introduction
+description: What flowx is and where to start.
+---
+
+## Motivation
+
+Orchestration should be treated as a first class citizen during migrations. Because orchestrators drive the execution of data pipelines, 
+their configuration can impact data processing results as much as the logic being orchestrated. While significant tooling exists for code 
+conversion and data reconciliation, migrating from legacy orchestration systems is often manual, time-consuming, and prone to risk.
+
+flowx was created to automate migrations of data pipelines between various orchestrators. It provides a robust, tested set of capabilities 
+to parse existing data pipeline definitions, create migration artifacts, and convert data pipeline definitions to Databricks' [Lakeflow jobs framework](https://docs.databricks.com/aws/en/jobs/).
+
+## How flowx works
+
+flowx is a set of agent skills and deterministic translators. Skills tell agentic tools (e.g. Databricks Genie Code, Claude Code, or any
+agent that supports the open [Agent Skills](https://agentskills.io/) format) how to call deterministic translators that parse, translate, and generate Databricks resources.
+
+Translation runs in three phases:
+
+1. `discover` parses Azure Resource Manager templates (e.g. for Data Factory pipelines, datasets, linked services, and triggers) into an execution 
+tree, builds an inventory, and emits a per-pipeline complexity report (`metadata/profile_report.csv`).
+2. `convert` processes the inventory and converts each activity into a Databricks-compatible intermediate representation. *Deterministic 
+activities* are translated by Python handlers while *agentic activities* are handed off to an LLM-assisted translator with the right context. 
+*Unsupported activities* are flagged as explicit gaps.
+3. `package` converts each translated pipeline into a [Declarative Automation Bundle](https://docs.databricks.com/aws/en/dev-tools/bundles/resources) that 
+can be deployed to a Databricks workspace. Bundles include job configuration files, code, and setup scripts (e.g. to create Databricks Secret Scopes or Unity Catalog connections).
+
+All three phases write into one shared output directory (default `./flowx_output`): the DAB bundle at the top level, kept artifacts under `metadata/`, and transient intermediates under `.work/` (pruned by `package`). Each phase can be run independently, maintains its own input/output contract, and produces artifacts you can inspect before moving to the next phase.
+
+## Next steps
+
+- **[Architecture](/flowx/docs/architecture)** &mdash; understand how flowx is deployed and how it translates
+- **[Installation](/flowx/docs/installation)** &mdash; install the flowx plugin in your agentic tool of choice.
+- **[Usage Guide](/flowx/docs/guide)** &mdash; an end-to-end walkthrough from raw ADF JSON to a deployable bundle.
+- **[Options](/flowx/docs/options)** &mdash; reference documenting options for customizing output when translating pipelines with flowx.

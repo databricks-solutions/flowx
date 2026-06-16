@@ -1,0 +1,33 @@
+{
+  "name": "tr_blob_arrival_event",
+  "properties": {
+    "type": "BlobEventsTrigger",
+    "typeProperties": {
+      "blobPathBeginsWith": "/raw/inbound/",
+      "blobPathEndsWith": ".csv",
+      "ignoreEmptyBlobs": true,
+      "events": [
+        "Microsoft.Storage.BlobCreated"
+      ],
+      "scope": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-data-platform/providers/Microsoft.Storage/storageAccounts/contosodatalake"
+    },
+    "pipelines": [
+      {
+        "pipelineReference": {
+          "referenceName": "pipeline_copy_csv_to_delta",
+          "type": "PipelineReference"
+        },
+        "parameters": {
+          "sourceFolderPath": "@triggerBody().folderPath",
+          "triggerDate": "@trigger().startTime"
+        }
+      }
+    ],
+    "runtimeState": "Started",
+    "annotations": [
+      "blob-event",
+      "file-arrival",
+      "event-driven"
+    ]
+  }
+}

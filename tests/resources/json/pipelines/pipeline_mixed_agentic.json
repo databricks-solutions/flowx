@@ -1,0 +1,108 @@
+{
+  "name": "pipeline_mixed_agentic",
+  "properties": {
+    "activities": [
+      {
+        "name": "Copy Source Data",
+        "type": "Copy",
+        "dependsOn": [],
+        "typeProperties": {
+          "source": {
+            "type": "BlobSource"
+          },
+          "sink": {
+            "type": "DeltaSink"
+          }
+        }
+      },
+      {
+        "name": "Run Data Flow",
+        "type": "ExecuteDataFlow",
+        "dependsOn": [
+          {
+            "activity": "Copy Source Data",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "dataFlow": {
+            "referenceName": "df_transform_customers",
+            "type": "DataFlowReference"
+          },
+          "compute": {
+            "coreCount": 8,
+            "computeType": "General"
+          }
+        }
+      },
+      {
+        "name": "Run Stored Proc",
+        "type": "SqlServerStoredProcedure",
+        "dependsOn": [
+          {
+            "activity": "Run Data Flow",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "storedProcedureName": "dbo.sp_process_data",
+          "storedProcedureParameters": {
+            "date": {
+              "type": "DateTime",
+              "value": "@utcnow()"
+            }
+          }
+        }
+      },
+      {
+        "name": "Get File Metadata",
+        "type": "GetMetadata",
+        "dependsOn": [
+          {
+            "activity": "Run Stored Proc",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "fieldList": ["itemName", "itemType", "lastModified", "size"],
+          "dataset": {
+            "referenceName": "ds_source_files",
+            "type": "DatasetReference"
+          }
+        }
+      },
+      {
+        "name": "Validate Output",
+        "type": "Validation",
+        "dependsOn": [
+          {
+            "activity": "Get File Metadata",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "timeout": "7.00:00:00",
+          "sleep": 10,
+          "minimumSize": 1024
+        }
+      },
+      {
+        "name": "FancyUnknownType",
+        "type": "SomeFutureActivity",
+        "dependsOn": [
+          {
+            "activity": "Validate Output",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {}
+      }
+    ],
+    "parameters": {},
+    "variables": {},
+    "annotations": ["mixed", "agentic"],
+    "folder": {
+      "name": "ETL/Mixed"
+    }
+  }
+}

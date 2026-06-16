@@ -1,0 +1,127 @@
+---
+title: Translation options
+description: Control flowx's translation behavior and outputs
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+flowx defers some architectural choices to allow users to specify properties of the output jobs. When options are available for controlling
+translation, the agent session prompts the user for their configuration.
+
+## copy_activity_paradigm
+
+Controls how Copy Data activities whose sink resolves to a Delta table are translated.
+
+| Value        | Default | Behavior                                                                                   |
+|--------------|---------|--------------------------------------------------------------------------------------------|
+| `notebook`   | True    | Generates a Notebook task that copies data using PySpark `read` and `write` methods.       |
+| `sdp`        | False   | Generates a Run Pipeline task that copies data using Lakeflow Spark Declarative Pipelines. |
+
+## non_databricks_task_compute
+
+Controls compute for non-Databricks tasks (e.g. Lookup, Web, Delete, Wait, Filter, and Set Variable activities).
+
+| Value         | Default | Behavior                                                                                                                                                                                                                |
+|---------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `serverless`  | True    | Translated tasks run on serverless compute.                                                                                                                                                                             |
+| `classic`     | False   | Most tasks run on a single-node classic compute cluster; Translated Copy Data tasks run on a fixed-size multi-node cluster.  Clusters referenced by tasks are included in the output bundle resources' `job_clusters`.  |
+
+## use_lakeflow_connectors
+
+Controls whether eligible Copy Data activities are replaced with a managed Lakeflow Connect pipeline.
+
+| Value              | Default | Behavior                                                                                                               |
+|--------------------|---------|------------------------------------------------------------------------------------------------------------------------|
+| `existing`         | True    | Translates the Copy Data activity as a Notebook or Run Pipeline task using PySpark `read` and `write` methods.         |
+| `lakeflow_connect` | False   | Translates the Copy Data activity as a Run Pipeline task that triggers a Lakeflow Connect managed ingestion pipeline.  |
+
+## lakeflow_connector_type
+
+Controls how Lakeflow Connect reads from a database when copying data.
+
+| Value         | Default   | Behavior                                                                                                                                          |
+|---------------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| `cdc`         | True      | Creates an ingestion pipeline using a [CDC-based connector](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/cdc-overview)           |
+| `query_based` | False     | Creates an ingestion pipeline using a [query-based connector](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/query-based-overview) |
+
+<Callout type="info" title="Query-based copying">
+Copy activities that carry an explicit SQL query (`sqlReaderQuery`, `query`, or `sql_query` on `source_properties`) 
+must use a [query-based connector](https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/query-based-overview).
+</Callout>
+
+## consolidate_motif:&lt;motif_id&gt;
+
+For every multi-activity motif the detector matches in a pipeline (`incremental_load_watermark`,
+`rest_api_pagination`, `metadata_driven_bulk_copy`, ...), flowx raises a per-motif
+option with id `consolidate_motif:<motif_id>` so each detected pattern can be approved
+or rejected independently.
+
+| Value         | Default | Behavior                                                                                                                                 |
+|---------------|---------|------------------------------------------------------------------------------------------------------------------------------------------|
+| `keep`        | True    | Preserves the activity-by-activity translation; the motif detection result is informational only.                                        |
+| `consolidate` | False   | Collapses the matched activities into a single `MotifActivity` whose target is the motif's `databricks_replacement` (e.g. `auto_loader`).  |
+
+<Callout type="info" title="Why opt-in?">
+Motif detection is heuristic. Defaulting to `keep` means a false-positive match (e.g. classifying
+a submit-and-poll Web/Until/SetVariable chain as REST pagination) cannot silently rewrite the
+pipeline; the activities continue to translate one-for-one until the user explicitly confirms the
+pattern.
+</Callout>
+
+## metadata_driven_consolidate
+
+Configures flowx to detect and consolidate ingestion pipelines that read from configuration and run parameterized data copying. Allows users to create a consolidated pipeline.
+
+| Value         | Default | Behavior                                                                                                                                                           |
+|---------------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `keep`        | True    | Preserves the source pipeline's metadata-driven patterns.                                                                                                          |
+| `consolidate` | False   | Replaces metadata-driven patterns with a consolidated Lakeflow Connect ingestion pipeline whose `objects` list has one entry per row in the source configuration.  |
+
+<Callout type="info" title="Consolidation-requirements">
+The following are required to consolidate into a single ingestion pipeline:
+- Access to query the file or database where metadata is stored or a CSV file containing the exported metadata
+- The number of metadata rows or objects must be less than 250
+</Callout>
+
+## Discover complexity report
+
+The `discover` phase emits `<output_dir>/metadata/profile_report.csv` (default `./flowx_output/metadata/profile_report.csv`), one row per pipeline with the following columns:
+
+| Column | Description |
+|--------|-------------|
+| `pipeline` | Pipeline name |
+| `activities` | Total activity count |
+| `datasets` | Number of referenced datasets |
+| `linked_services` | Number of referenced linked services |
+| `collapsible_patterns` | Number of detected collapsible (motif) patterns |
+| `databricks_native_activities` | Count of Databricks-native activities (notebook/jar/python/job) |
+| `control_flow_activities` | Count of control-flow / parameter-setting activities (ForEach/If/Switch/SetVariable/AppendVariable/Filter/Wait/Until) |
+| `other_activities` | Count of all other activities (Copy/Web/Lookup/etc.) |
+| `complexity_score` | Weighted score (see below) |
+| `complexity_size` | T-shirt size (`S`/`M`/`L`/`XL`) derived from `complexity_score` |
+
+The weighted score is `sum(activity weights) + #datasets + #linked_services + #collapsible_patterns`, where activity weights are:
+
+- Databricks-native (notebook/jar/python/job) = **1** (simplest)
+- control-flow / parameter-setting (ForEach/If/Switch/SetVariable/AppendVariable/Filter/Wait/Until) = **2**
+- all other activities (Copy/Web/Lookup/etc.) = **3** (hardest)
+
+## Coverage results table & dashboard (Genie Code)
+
+When running with workspace auth (Genie Code, or a configured Databricks profile) the `package`
+phase surfaces three optional inputs — `results_table`, `results_warehouse_id`, and
+`install_dashboard` — to persist coverage and visualize it:
+
+- **`record-results`** writes one row **per pipeline per run** to the supplied Unity Catalog
+  table (`catalog.schema.table`), combining the complexity columns above with the
+  deterministic/agentic/unsupported coverage breakdown. Every row is stamped with a shared
+  **`run_id`** (UUID), **`run_date`** (`CURRENT_TIMESTAMP()`), and **`run_by`**
+  (`CURRENT_USER()`), so coverage is trackable across runs and users.
+- **`install-dashboard`** creates and publishes an AI/BI (Lakeview) dashboard over that table —
+  KPI counters (pipelines, coverage %, deterministic/agentic/unsupported activity totals), a
+  pipelines-by-complexity bar chart, a coverage-over-runs line, and a per-pipeline coverage
+  table.
+
+The SQL warehouse is auto-detected (preferring a running serverless warehouse) when
+`results_warehouse_id` is left blank. Both run via the Databricks SDK and degrade gracefully
+when workspace auth or a warehouse is unavailable.

@@ -1,0 +1,68 @@
+{
+  "name": "ds_mysql_products",
+  "properties": {
+    "type": "AzureMySqlTable",
+    "linkedServiceName": {
+      "referenceName": "ls_mysql",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "tableName": "products"
+    },
+    "parameters": {},
+    "schema": [
+      {
+        "name": "product_id",
+        "type": "int",
+        "precision": 11
+      },
+      {
+        "name": "product_name",
+        "type": "varchar",
+        "precision": 200
+      },
+      {
+        "name": "category",
+        "type": "varchar",
+        "precision": 100
+      },
+      {
+        "name": "price",
+        "type": "decimal",
+        "precision": 10,
+        "scale": 2
+      },
+      {
+        "name": "stock_quantity",
+        "type": "int",
+        "precision": 11
+      },
+      {
+        "name": "sku",
+        "type": "varchar",
+        "precision": 50
+      },
+      {
+        "name": "is_active",
+        "type": "tinyint",
+        "precision": 1
+      },
+      {
+        "name": "created_at",
+        "type": "datetime"
+      },
+      {
+        "name": "updated_at",
+        "type": "datetime"
+      }
+    ],
+    "annotations": [
+      "mysql",
+      "products",
+      "source"
+    ],
+    "folder": {
+      "name": "Source/MySQL"
+    }
+  }
+}

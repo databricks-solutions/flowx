@@ -1,0 +1,243 @@
+{
+  "name": "pipeline_switch_multi_case",
+  "properties": {
+    "activities": [
+      {
+        "name": "Set Data Source Type",
+        "type": "SetVariable",
+        "dependsOn": [],
+        "typeProperties": {
+          "variableName": "sourceType",
+          "value": "@pipeline().parameters.dataSourceType"
+        }
+      },
+      {
+        "name": "Route By Source Type",
+        "type": "Switch",
+        "dependsOn": [
+          {
+            "activity": "Set Data Source Type",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "on": {
+            "value": "@variables('sourceType')",
+            "type": "Expression"
+          },
+          "cases": [
+            {
+              "value": "SQL",
+              "activities": [
+                {
+                  "name": "Copy From SQL",
+                  "type": "Copy",
+                  "dependsOn": [],
+                  "policy": {
+                    "timeout": "0.02:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30
+                  },
+                  "typeProperties": {
+                    "source": {
+                      "type": "AzureSqlSource",
+                      "sqlReaderQuery": "@pipeline().parameters.sourceQuery"
+                    },
+                    "sink": {
+                      "type": "DeltaSink",
+                      "writeBatchSize": 10000,
+                      "importSettings": {
+                        "type": "DeltaImportCommand"
+                      }
+                    },
+                    "enableStaging": false
+                  },
+                  "inputs": [
+                    {
+                      "referenceName": "ds_azure_sql_generic",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "outputs": [
+                    {
+                      "referenceName": "ds_delta_generic",
+                      "type": "DatasetReference"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "value": "CSV",
+              "activities": [
+                {
+                  "name": "Copy From CSV",
+                  "type": "Copy",
+                  "dependsOn": [],
+                  "policy": {
+                    "timeout": "0.01:00:00",
+                    "retry": 1,
+                    "retryIntervalInSeconds": 30
+                  },
+                  "typeProperties": {
+                    "source": {
+                      "type": "DelimitedTextSource",
+                      "storeSettings": {
+                        "type": "AzureBlobFSReadSettings",
+                        "recursive": true
+                      },
+                      "formatSettings": {
+                        "type": "DelimitedTextReadSettings"
+                      }
+                    },
+                    "sink": {
+                      "type": "DeltaSink",
+                      "importSettings": {
+                        "type": "DeltaImportCommand"
+                      }
+                    },
+                    "enableStaging": false
+                  },
+                  "inputs": [
+                    {
+                      "referenceName": "ds_csv_adls_generic",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "outputs": [
+                    {
+                      "referenceName": "ds_delta_generic",
+                      "type": "DatasetReference"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "value": "Parquet",
+              "activities": [
+                {
+                  "name": "Copy From Parquet",
+                  "type": "Copy",
+                  "dependsOn": [],
+                  "policy": {
+                    "timeout": "0.01:00:00",
+                    "retry": 1,
+                    "retryIntervalInSeconds": 30
+                  },
+                  "typeProperties": {
+                    "source": {
+                      "type": "ParquetSource",
+                      "storeSettings": {
+                        "type": "AzureBlobFSReadSettings",
+                        "recursive": true
+                      }
+                    },
+                    "sink": {
+                      "type": "DeltaSink",
+                      "importSettings": {
+                        "type": "DeltaImportCommand"
+                      }
+                    },
+                    "enableStaging": false
+                  },
+                  "inputs": [
+                    {
+                      "referenceName": "ds_parquet_adls_generic",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "outputs": [
+                    {
+                      "referenceName": "ds_delta_generic",
+                      "type": "DatasetReference"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "value": "API",
+              "activities": [
+                {
+                  "name": "Call REST API",
+                  "type": "WebActivity",
+                  "dependsOn": [],
+                  "policy": {
+                    "timeout": "0.00:30:00",
+                    "retry": 3,
+                    "retryIntervalInSeconds": 60
+                  },
+                  "typeProperties": {
+                    "url": "@pipeline().parameters.apiEndpoint",
+                    "method": "GET",
+                    "headers": {
+                      "Authorization": "@concat('Bearer ', pipeline().parameters.apiToken)",
+                      "Accept": "application/json"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "defaultActivities": [
+            {
+              "name": "Log Unknown Source Type",
+              "type": "WebActivity",
+              "dependsOn": [],
+              "policy": {
+                "timeout": "0.00:05:00",
+                "retry": 0,
+                "retryIntervalInSeconds": 30
+              },
+              "typeProperties": {
+                "url": "https://example.com/webhook/notify",
+                "method": "POST",
+                "headers": {
+                  "Content-Type": "application/json"
+                },
+                "body": {
+                  "text": "@concat('Unknown data source type: ', variables('sourceType'), ' in pipeline run: ', pipeline().RunId)"
+                }
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "parameters": {
+      "dataSourceType": {
+        "type": "String",
+        "defaultValue": "SQL"
+      },
+      "sourceQuery": {
+        "type": "String",
+        "defaultValue": "SELECT * FROM dbo.source_table"
+      },
+      "apiEndpoint": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "apiToken": {
+        "type": "String",
+        "defaultValue": ""
+      }
+    },
+    "variables": {
+      "sourceType": {
+        "type": "String",
+        "defaultValue": ""
+      }
+    },
+    "annotations": [
+      "routing",
+      "switch",
+      "multi-source"
+    ],
+    "folder": {
+      "name": "ETL/MultiSource"
+    }
+  }
+}

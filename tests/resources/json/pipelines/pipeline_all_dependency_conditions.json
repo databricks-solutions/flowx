@@ -1,0 +1,243 @@
+{
+  "name": "pipeline_all_dependency_conditions",
+  "properties": {
+    "activities": [
+      {
+        "name": "Primary Data Load",
+        "type": "Copy",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.02:00:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 60,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT * FROM dbo.primary_data WHERE load_date = '@{pipeline().parameters.loadDate}'"
+          },
+          "sink": {
+            "type": "DeltaSink",
+            "writeBatchSize": 25000,
+            "importSettings": {
+              "type": "DeltaImportCommand"
+            }
+          },
+          "enableStaging": false
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_azure_sql_primary",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "ds_delta_primary",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+      {
+        "name": "On Success - Run Transform",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          {
+            "activity": "Primary Data Load",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.01:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookPath": "/Shared/ETL/transform_primary",
+          "baseParameters": {
+            "loadDate": "@pipeline().parameters.loadDate"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_existing_cluster",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "On Failure - Send Alert",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "Primary Data Load",
+            "dependencyConditions": ["Failed"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 3,
+          "retryIntervalInSeconds": 5,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "https://example.com/webhook/notify",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "@concat('ALERT: Primary Data Load FAILED. Pipeline: ', pipeline().Pipeline, ', Run: ', pipeline().RunId, ', Error: ', activity('Primary Data Load').Error.message)"
+          }
+        }
+      },
+      {
+        "name": "On Failure - Log Error Details",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "Primary Data Load",
+            "dependencyConditions": ["Failed"]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "errorDetails",
+          "value": "@concat('Error in Primary Data Load: ', activity('Primary Data Load').Error.message, ' at ', utcNow())"
+        }
+      },
+      {
+        "name": "On Completion - Audit Log",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "Primary Data Load",
+            "dependencyConditions": ["Completed"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "https://api.contoso.com/v1/audit/log",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Authorization": "@concat('Bearer ', pipeline().parameters.auditToken)"
+          },
+          "body": {
+            "pipelineName": "@pipeline().Pipeline",
+            "runId": "@pipeline().RunId",
+            "activityName": "Primary Data Load",
+            "status": "@activity('Primary Data Load').Status",
+            "timestamp": "@utcNow()"
+          }
+        }
+      },
+      {
+        "name": "On Skipped - Mark Skipped",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "On Success - Run Transform",
+            "dependencyConditions": ["Skipped"]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "transformStatus",
+          "value": "skipped_due_to_upstream_failure"
+        }
+      },
+      {
+        "name": "Final Status Update",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "On Success - Run Transform",
+            "dependencyConditions": ["Succeeded"]
+          },
+          {
+            "activity": "On Completion - Audit Log",
+            "dependencyConditions": ["Completed"]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "finalStatus",
+          "value": "pipeline_complete"
+        }
+      },
+      {
+        "name": "Multi-Condition Dependent Step",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "On Failure - Send Alert",
+            "dependencyConditions": ["Succeeded"]
+          },
+          {
+            "activity": "On Failure - Log Error Details",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "https://api.contoso.com/v1/incidents/create",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "title": "@concat('Data Load Failure: ', pipeline().Pipeline)",
+            "description": "@variables('errorDetails')",
+            "severity": "P2",
+            "team": "data-engineering"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "loadDate": {
+        "type": "String",
+        "defaultValue": "@utcNow('yyyy-MM-dd')"
+      },
+      "auditToken": {
+        "type": "String",
+        "defaultValue": ""
+      }
+    },
+    "variables": {
+      "errorDetails": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "transformStatus": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "finalStatus": {
+        "type": "String",
+        "defaultValue": "pending"
+      }
+    },
+    "annotations": [
+      "dependency-conditions",
+      "error-handling",
+      "all-conditions"
+    ],
+    "folder": {
+      "name": "ErrorHandling"
+    }
+  }
+}
