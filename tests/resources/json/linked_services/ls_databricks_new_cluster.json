@@ -1,0 +1,52 @@
+{
+  "name": "ls_databricks_new_cluster",
+  "properties": {
+    "type": "AzureDatabricks",
+    "typeProperties": {
+      "domain": "https://adb-9876543210123456.7.azuredatabricks.net",
+      "accessToken": {
+        "type": "AzureKeyVaultSecret",
+        "store": {
+          "referenceName": "ls_key_vault",
+          "type": "LinkedServiceReference"
+        },
+        "secretName": "databricks-access-token-dev"
+      },
+      "authentication": "MSI",
+      "workspaceResourceId": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-data-platform-dev/providers/Microsoft.Databricks/workspaces/contoso-databricks-dev",
+      "newClusterVersion": "14.3.x-scala2.12",
+      "newClusterNumOfWorker": "4",
+      "newClusterNodeType": "Standard_DS4_v2",
+      "newClusterDriverNodeType": "Standard_DS5_v2",
+      "newClusterSparkConf": {
+        "spark.databricks.delta.preview.enabled": "true",
+        "spark.databricks.cluster.profile": "singleNode",
+        "spark.speculation": "true",
+        "spark.sql.adaptive.enabled": "true"
+      },
+      "newClusterSparkEnvVars": {
+        "PYSPARK_PYTHON": "/databricks/python3/bin/python3",
+        "ENV": "dev"
+      },
+      "newClusterCustomTags": {
+        "Team": "DataEngineering",
+        "CostCenter": "DE-001",
+        "Project": "contoso-etl"
+      },
+      "newClusterInitScripts": [
+        "dbfs:/init-scripts/install_deps.sh"
+      ],
+      "newClusterLogDestination": "dbfs:/cluster-logs",
+      "newClusterEnableElasticDisk": true
+    },
+    "annotations": [
+      "databricks",
+      "new-cluster",
+      "job-cluster"
+    ],
+    "connectVia": {
+      "referenceName": "AutoResolveIntegrationRuntime",
+      "type": "IntegrationRuntimeReference"
+    }
+  }
+}

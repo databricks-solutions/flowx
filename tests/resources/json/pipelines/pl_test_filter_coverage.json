@@ -1,0 +1,107 @@
+{
+  "etag": "09024aef-0000-0100-0000-69d82edf0000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_filter_coverage",
+  "name": "pl_test_filter_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "LookupAllTables",
+        "type": "Lookup",
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "ds_sql_customers",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": false,
+          "source": {
+            "sqlReaderQuery": "SELECT table_name, row_count, last_modified FROM sys.table_info",
+            "type": "AzureSqlSource"
+          }
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "LookupAllTables",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "FilterLargeTables",
+        "type": "Filter",
+        "typeProperties": {
+          "condition": {
+            "type": "Expression",
+            "value": "@greater(item().row_count, 10000)"
+          },
+          "items": {
+            "type": "Expression",
+            "value": "@activity('LookupAllTables').output.value"
+          }
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "LookupAllTables",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "FilterByName",
+        "type": "Filter",
+        "typeProperties": {
+          "condition": {
+            "type": "Expression",
+            "value": "@contains(item().table_name, pipeline().parameters.NameFilter)"
+          },
+          "items": {
+            "type": "Expression",
+            "value": "@activity('LookupAllTables').output.value"
+          }
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "LookupAllTables",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "FilterEquals",
+        "type": "Filter",
+        "typeProperties": {
+          "condition": {
+            "type": "Expression",
+            "value": "@equals(item().status, 'active')"
+          },
+          "items": {
+            "type": "Expression",
+            "value": "@activity('LookupAllTables').output.value"
+          }
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "filter",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:57:35Z",
+    "parameters": {
+      "NameFilter": {
+        "defaultValue": "customer",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

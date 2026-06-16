@@ -1,0 +1,205 @@
+{
+  "etag": "09028ce8-0000-0100-0000-69d82e820000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_ifcondition_coverage",
+  "name": "pl_test_ifcondition_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "CheckEquality",
+        "type": "IfCondition",
+        "typeProperties": {
+          "expression": {
+            "type": "Expression",
+            "value": "@equals(pipeline().parameters.Mode, 'full')"
+          },
+          "ifFalseActivities": [
+            {
+              "dependsOn": [],
+              "inputs": [
+                {
+                  "referenceName": "ds_sql_customers",
+                  "type": "DatasetReference"
+                }
+              ],
+              "name": "IncrementalCopy",
+              "outputs": [
+                {
+                  "referenceName": "ds_parquet_orders",
+                  "type": "DatasetReference"
+                }
+              ],
+              "policy": {
+                "retry": 2,
+                "timeout": "0.02:00:00"
+              },
+              "type": "Copy",
+              "typeProperties": {
+                "enableStaging": false,
+                "sink": {
+                  "storeSettings": {
+                    "type": "AzureBlobFSWriteSettings"
+                  },
+                  "type": "ParquetSink"
+                },
+                "source": {
+                  "sqlReaderQuery": {
+                    "type": "Expression",
+                    "value": "@concat('SELECT * FROM dbo.customers WHERE modified > ''', pipeline().parameters.WatermarkDate, '''')"
+                  },
+                  "type": "AzureSqlSource"
+                }
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "IncrementalCopy",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "name": "LogIncremental",
+              "policy": {
+                "timeout": "0.00:10:00"
+              },
+              "type": "WebActivity",
+              "typeProperties": {
+                "body": "{\"event\": \"incremental_complete\"}",
+                "method": "POST",
+                "url": "https://api.example.com/log"
+              }
+            }
+          ],
+          "ifTrueActivities": [
+            {
+              "dependsOn": [],
+              "inputs": [
+                {
+                  "referenceName": "ds_sql_customers",
+                  "type": "DatasetReference"
+                }
+              ],
+              "name": "FullLoadCopy",
+              "outputs": [
+                {
+                  "referenceName": "ds_parquet_orders",
+                  "type": "DatasetReference"
+                }
+              ],
+              "policy": {
+                "retry": 1,
+                "timeout": "0.06:00:00"
+              },
+              "type": "Copy",
+              "typeProperties": {
+                "enableStaging": false,
+                "sink": {
+                  "storeSettings": {
+                    "type": "AzureBlobFSWriteSettings"
+                  },
+                  "type": "ParquetSink"
+                },
+                "source": {
+                  "sqlReaderQuery": "SELECT * FROM dbo.customers",
+                  "type": "AzureSqlSource"
+                }
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "FullLoadCopy",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "name": "LogFullLoad",
+              "policy": {
+                "timeout": "0.00:10:00"
+              },
+              "type": "WebActivity",
+              "typeProperties": {
+                "body": "{\"event\": \"full_load_complete\"}",
+                "method": "POST",
+                "url": "https://api.example.com/log"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "CheckEquality",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "CheckGreaterThan",
+        "type": "IfCondition",
+        "typeProperties": {
+          "expression": {
+            "type": "Expression",
+            "value": "@greater(int(pipeline().parameters.RecordCount), 1000)"
+          },
+          "ifFalseActivities": [
+            {
+              "dependsOn": [],
+              "linkedServiceName": {
+                "referenceName": "ls_databricks",
+                "type": "LinkedServiceReference"
+              },
+              "name": "SmallDatasetNotebook",
+              "type": "DatabricksNotebook",
+              "typeProperties": {
+                "notebookPath": "/etl/small_dataset_handler"
+              }
+            }
+          ],
+          "ifTrueActivities": [
+            {
+              "dependsOn": [],
+              "linkedServiceName": {
+                "referenceName": "ls_databricks",
+                "type": "LinkedServiceReference"
+              },
+              "name": "LargeDatasetNotebook",
+              "type": "DatabricksNotebook",
+              "typeProperties": {
+                "notebookPath": "/etl/large_dataset_handler"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "ifcondition",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:56:02Z",
+    "parameters": {
+      "Mode": {
+        "defaultValue": "incremental",
+        "type": "String"
+      },
+      "RecordCount": {
+        "defaultValue": "500",
+        "type": "String"
+      },
+      "WatermarkDate": {
+        "defaultValue": "2024-01-01",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

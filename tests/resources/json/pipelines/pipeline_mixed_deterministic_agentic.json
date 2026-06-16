@@ -1,0 +1,210 @@
+{
+  "name": "pipeline_mixed_deterministic_agentic",
+  "properties": {
+    "activities": [
+      {
+        "name": "Lookup Source Config",
+        "type": "Lookup",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:10:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 15,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT source_name, connection_string, table_list FROM dbo.integration_config WHERE is_active = 1",
+            "queryTimeout": "00:05:00"
+          },
+          "dataset": {
+            "referenceName": "ds_azure_sql_config",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": true
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_azure_sql_config",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+      {
+        "name": "Copy Raw Data",
+        "type": "Copy",
+        "dependsOn": [
+          {
+            "activity": "Lookup Source Config",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.04:00:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 60,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "@concat('SELECT * FROM ', activity('Lookup Source Config').output.firstRow.table_list)"
+          },
+          "sink": {
+            "type": "DeltaSink",
+            "writeBatchSize": 50000,
+            "importSettings": {
+              "type": "DeltaImportCommand"
+            }
+          },
+          "enableStaging": false
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_azure_sql_generic",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "ds_delta_raw",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+      {
+        "name": "Execute Data Flow Transform",
+        "type": "ExecuteDataFlow",
+        "dependsOn": [
+          {
+            "activity": "Copy Raw Data",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.02:00:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 120,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "dataFlow": {
+            "referenceName": "df_transform_and_cleanse",
+            "type": "DataFlowReference",
+            "parameters": {
+              "sourceSchema": "@activity('Lookup Source Config').output.firstRow.source_name",
+              "targetSchema": "curated"
+            }
+          },
+          "compute": {
+            "coreCount": 16,
+            "computeType": "MemoryOptimized"
+          },
+          "staging": {
+            "linkedService": {
+              "referenceName": "ls_azure_blob",
+              "type": "LinkedServiceReference"
+            },
+            "folderPath": "staging/dataflow"
+          },
+          "traceLevel": "Fine",
+          "runConcurrently": true,
+          "continueOnError": false
+        }
+      },
+      {
+        "name": "Run Quality Notebook",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          {
+            "activity": "Execute Data Flow Transform",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.01:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookPath": "/Repos/data-engineering/notebooks/quality_validation",
+          "baseParameters": {
+            "sourceTable": "curated.transformed_data",
+            "thresholdPct": "99.5"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_existing_cluster",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Set Pipeline Result",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "Run Quality Notebook",
+            "dependencyConditions": ["Completed"]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "pipelineResult",
+          "value": "@if(equals(activity('Run Quality Notebook').Status, 'Succeeded'), 'PASS', 'FAIL')"
+        }
+      },
+      {
+        "name": "Notify Completion",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "Set Pipeline Result",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "https://example.com/webhook/notify",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "@concat('Mixed pipeline completed. Result: ', variables('pipelineResult'), ', Run: ', pipeline().RunId)"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "environment": {
+        "type": "String",
+        "defaultValue": "prod"
+      }
+    },
+    "variables": {
+      "pipelineResult": {
+        "type": "String",
+        "defaultValue": "UNKNOWN"
+      }
+    },
+    "annotations": [
+      "mixed",
+      "deterministic-agentic",
+      "dataflow"
+    ],
+    "folder": {
+      "name": "ETL/Mixed"
+    }
+  }
+}

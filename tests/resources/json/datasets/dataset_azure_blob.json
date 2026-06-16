@@ -1,0 +1,47 @@
+{
+  "name": "ds_azure_blob_staging",
+  "properties": {
+    "type": "Binary",
+    "linkedServiceName": {
+      "referenceName": "ls_azure_blob",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobStorageLocation",
+        "container": "staging",
+        "folderPath": {
+          "value": "@dataset().folderPath",
+          "type": "Expression"
+        },
+        "fileName": {
+          "value": "@dataset().fileName",
+          "type": "Expression"
+        }
+      },
+      "compression": {
+        "type": "ZipDeflate",
+        "level": "Optimal"
+      }
+    },
+    "parameters": {
+      "folderPath": {
+        "type": "String",
+        "defaultValue": "uploads/daily"
+      },
+      "fileName": {
+        "type": "String",
+        "defaultValue": "*"
+      }
+    },
+    "schema": [],
+    "annotations": [
+      "blob",
+      "staging",
+      "binary"
+    ],
+    "folder": {
+      "name": "Staging/Blob"
+    }
+  }
+}

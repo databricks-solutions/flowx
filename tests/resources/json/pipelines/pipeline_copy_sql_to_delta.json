@@ -1,0 +1,114 @@
+{
+  "name": "pipeline_copy_sql_to_delta",
+  "properties": {
+    "activities": [
+      {
+        "name": "Copy SQL Server to Delta",
+        "type": "Copy",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "1.00:00:00",
+          "retry": 3,
+          "retryIntervalInSeconds": 60,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT o.order_id, o.customer_id, o.order_date, o.total_amount, o.status, c.region FROM dbo.orders o INNER JOIN dbo.customers c ON o.customer_id = c.customer_id WHERE o.order_date >= '@{pipeline().parameters.watermarkDate}'",
+            "queryTimeout": "00:30:00",
+            "isolationLevel": "ReadCommitted",
+            "partitionOption": "DynamicRange",
+            "partitionSettings": {
+              "partitionColumnName": "order_id",
+              "partitionUpperBound": "@{pipeline().parameters.partitionUpperBound}",
+              "partitionLowerBound": "1"
+            }
+          },
+          "sink": {
+            "type": "DeltaSink",
+            "writeBatchSize": 50000,
+            "importSettings": {
+              "type": "DeltaImportCommand",
+              "dateFormat": "yyyy-MM-dd",
+              "timestampFormat": "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
+            },
+            "tableActionOption": "Append"
+          },
+          "enableStaging": true,
+          "stagingSettings": {
+            "linkedServiceName": {
+              "referenceName": "ls_staging_blob",
+              "type": "LinkedServiceReference"
+            },
+            "path": "staging/orders"
+          },
+          "translator": {
+            "type": "TabularTranslator",
+            "mappings": [
+              {
+                "source": { "name": "order_id", "type": "Int32" },
+                "sink": { "name": "order_id", "type": "Int64" }
+              },
+              {
+                "source": { "name": "customer_id", "type": "Int32" },
+                "sink": { "name": "customer_id", "type": "Int64" }
+              },
+              {
+                "source": { "name": "order_date", "type": "DateTime" },
+                "sink": { "name": "order_date", "type": "Timestamp" }
+              },
+              {
+                "source": { "name": "total_amount", "type": "Decimal" },
+                "sink": { "name": "total_amount", "type": "Double" }
+              },
+              {
+                "source": { "name": "status", "type": "String" },
+                "sink": { "name": "status", "type": "String" }
+              },
+              {
+                "source": { "name": "region", "type": "String" },
+                "sink": { "name": "region", "type": "String" }
+              }
+            ]
+          },
+          "parallelCopies": 8,
+          "dataIntegrationUnits": 16
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_azure_sql_orders",
+            "type": "DatasetReference"
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "ds_delta_orders",
+            "type": "DatasetReference"
+          }
+        ]
+      }
+    ],
+    "parameters": {
+      "watermarkDate": {
+        "type": "String",
+        "defaultValue": "2024-01-01"
+      },
+      "partitionUpperBound": {
+        "type": "Int",
+        "defaultValue": 1000000
+      }
+    },
+    "variables": {},
+    "annotations": [
+      "etl",
+      "orders",
+      "sql-to-delta",
+      "incremental"
+    ],
+    "folder": {
+      "name": "ETL/Ingestion"
+    }
+  }
+}

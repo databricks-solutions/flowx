@@ -1,0 +1,129 @@
+{
+  "name": "pipeline_foreach_switch",
+  "properties": {
+    "activities": [
+      {
+        "name": "Get Table List",
+        "type": "Lookup",
+        "dependsOn": [],
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT table_name, load_type FROM dbo.config_tables WHERE is_active = 1"
+          },
+          "firstRowOnly": false
+        }
+      },
+      {
+        "name": "Process Each Table",
+        "type": "ForEach",
+        "dependsOn": [
+          {
+            "activity": "Get Table List",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "type": "Expression",
+            "value": "@activity('Get Table List').output.value"
+          },
+          "isSequential": false,
+          "batchCount": 10,
+          "activities": [
+            {
+              "name": "Route By Load Type",
+              "type": "Switch",
+              "dependsOn": [],
+              "typeProperties": {
+                "on": {
+                  "type": "Expression",
+                  "value": "@item().load_type"
+                },
+                "cases": [
+                  {
+                    "value": "full",
+                    "activities": [
+                      {
+                        "name": "Full Load Copy",
+                        "type": "Copy",
+                        "dependsOn": [],
+                        "typeProperties": {
+                          "source": {
+                            "type": "AzureSqlSource",
+                            "sqlReaderQuery": "SELECT * FROM @{item().table_name}"
+                          },
+                          "sink": {
+                            "type": "DeltaSink"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "value": "incremental",
+                    "activities": [
+                      {
+                        "name": "Incremental Load Copy",
+                        "type": "Copy",
+                        "dependsOn": [],
+                        "typeProperties": {
+                          "source": {
+                            "type": "AzureSqlSource",
+                            "sqlReaderQuery": "SELECT * FROM @{item().table_name} WHERE updated_at > '@{item().last_watermark}'"
+                          },
+                          "sink": {
+                            "type": "DeltaSink"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "defaultActivities": [
+                  {
+                    "name": "Log Unknown Load Type",
+                    "type": "WebActivity",
+                    "dependsOn": [],
+                    "typeProperties": {
+                      "url": "https://api.internal.com/log",
+                      "method": "POST",
+                      "body": {
+                        "message": "Unknown load type"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Set Completion Status",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "Process Each Table",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "completionStatus",
+          "value": "completed"
+        }
+      }
+    ],
+    "parameters": {},
+    "variables": {
+      "completionStatus": {
+        "type": "String",
+        "defaultValue": "pending"
+      }
+    },
+    "annotations": ["etl", "dynamic-tables"],
+    "folder": {
+      "name": "ETL/Dynamic"
+    }
+  }
+}

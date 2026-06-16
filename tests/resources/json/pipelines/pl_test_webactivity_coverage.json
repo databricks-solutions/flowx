@@ -1,0 +1,131 @@
+{
+  "etag": "09026bed-0000-0100-0000-69d82ec30000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_webactivity_coverage",
+  "name": "pl_test_webactivity_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "GetApiData",
+        "policy": {
+          "retry": 3,
+          "retryIntervalInSeconds": 10,
+          "timeout": "0.00:30:00"
+        },
+        "type": "WebActivity",
+        "typeProperties": {
+          "authentication": {
+            "password": {
+              "type": "SecureString",
+              "value": "**********"
+            },
+            "type": "Basic",
+            "username": "api_user"
+          },
+          "disableCertValidation": false,
+          "headers": {
+            "Accept": "application/json",
+            "X-Environment": {
+              "type": "Expression",
+              "value": "@pipeline().parameters.Env"
+            },
+            "X-Request-Id": {
+              "type": "Expression",
+              "value": "@pipeline().RunId"
+            }
+          },
+          "httpRequestTimeout": "00:05:00",
+          "method": "GET",
+          "url": {
+            "type": "Expression",
+            "value": "@concat('https://api.example.com/v1/', pipeline().parameters.Endpoint, '?date=', formatDateTime(utcNow(), 'yyyy-MM-dd'))"
+          }
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "GetApiData",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "PostResults",
+        "policy": {
+          "retry": 2,
+          "timeout": "0.00:10:00"
+        },
+        "type": "WebActivity",
+        "typeProperties": {
+          "body": {
+            "type": "Expression",
+            "value": "@json(concat('{\"runId\": \"', pipeline().RunId, '\", \"status\": \"complete\", \"timestamp\": \"', utcNow(), '\"}'))"
+          },
+          "headers": {
+            "Authorization": {
+              "type": "Expression",
+              "value": "@concat('Bearer ', pipeline().parameters.ApiToken)"
+            },
+            "Content-Type": "application/json"
+          },
+          "method": "POST",
+          "url": "https://api.example.com/v1/results"
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "PostResults",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "UpdateStatus",
+        "policy": {
+          "timeout": "0.00:05:00"
+        },
+        "type": "WebActivity",
+        "typeProperties": {
+          "body": {
+            "completedAt": "2024-01-01T00:00:00Z",
+            "status": "completed"
+          },
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "method": "PUT",
+          "url": {
+            "type": "Expression",
+            "value": "@concat('https://api.example.com/v1/status/', pipeline().RunId)"
+          }
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "webactivity",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:57:07Z",
+    "parameters": {
+      "ApiToken": {
+        "defaultValue": "",
+        "type": "String"
+      },
+      "Endpoint": {
+        "defaultValue": "data",
+        "type": "String"
+      },
+      "Env": {
+        "defaultValue": "dev",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

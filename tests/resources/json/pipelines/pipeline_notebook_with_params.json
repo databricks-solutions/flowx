@@ -1,0 +1,68 @@
+{
+  "name": "pipeline_notebook_with_params",
+  "properties": {
+    "activities": [
+      {
+        "name": "Run Parameterized Notebook",
+        "type": "DatabricksNotebook",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.04:00:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 60,
+          "secureOutput": false,
+          "secureInput": true
+        },
+        "typeProperties": {
+          "notebookPath": "/Repos/data-engineering/notebooks/process_transactions",
+          "baseParameters": {
+            "environment": "@pipeline().parameters.env",
+            "processDate": "@pipeline().parameters.processDate",
+            "catalogName": "@concat(pipeline().parameters.env, '_catalog')",
+            "schemaName": "transactions",
+            "batchSize": "50000",
+            "enableCDC": "true",
+            "sourceTable": "@pipeline().parameters.sourceTable",
+            "targetTable": "@pipeline().parameters.targetTable"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_new_cluster",
+          "type": "LinkedServiceReference"
+        }
+      }
+    ],
+    "parameters": {
+      "env": {
+        "type": "String",
+        "defaultValue": "dev"
+      },
+      "processDate": {
+        "type": "String",
+        "defaultValue": "@utcNow('yyyy-MM-dd')"
+      },
+      "sourceTable": {
+        "type": "String",
+        "defaultValue": "raw.transactions"
+      },
+      "targetTable": {
+        "type": "String",
+        "defaultValue": "curated.transactions"
+      }
+    },
+    "variables": {
+      "notebookOutput": {
+        "type": "String",
+        "defaultValue": ""
+      }
+    },
+    "annotations": [
+      "notebook",
+      "parameterized",
+      "transactions"
+    ],
+    "folder": {
+      "name": "Transform/Transactions"
+    }
+  }
+}

@@ -1,0 +1,196 @@
+{
+  "etag": "0902dae1-0000-0100-0000-69d82e340000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_copy_coverage",
+  "name": "pl_test_copy_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "inputs": [
+          {
+            "referenceName": "ds_csv_customers",
+            "type": "DatasetReference"
+          }
+        ],
+        "name": "CopyBlobToSql",
+        "outputs": [
+          {
+            "referenceName": "ds_sql_customers",
+            "type": "DatasetReference"
+          }
+        ],
+        "policy": {
+          "retry": 3,
+          "retryIntervalInSeconds": 30,
+          "secureInput": false,
+          "secureOutput": false,
+          "timeout": "1.00:00:00"
+        },
+        "type": "Copy",
+        "typeProperties": {
+          "dataIntegrationUnits": 16,
+          "enableStaging": true,
+          "logSettings": {
+            "copyActivityLogSettings": {
+              "enableReliableLogging": true,
+              "logLevel": "Warning"
+            },
+            "enableCopyActivityLog": true,
+            "logLocationSettings": {
+              "linkedServiceName": {
+                "referenceName": "ls_blob_storage",
+                "type": "LinkedServiceReference"
+              },
+              "path": "logs/copy"
+            }
+          },
+          "parallelCopies": 8,
+          "sink": {
+            "disableMetricsCollection": false,
+            "sqlWriterUseTableLock": false,
+            "tableOption": "autoCreate",
+            "type": "AzureSqlSink",
+            "writeBehavior": "insert"
+          },
+          "source": {
+            "formatSettings": {
+              "type": "DelimitedTextReadSettings"
+            },
+            "storeSettings": {
+              "enablePartitionDiscovery": false,
+              "recursive": true,
+              "type": "AzureBlobFSReadSettings",
+              "wildcardFileName": "*.csv",
+              "wildcardFolderPath": "data/*"
+            },
+            "type": "DelimitedTextSource"
+          },
+          "stagingSettings": {
+            "linkedServiceName": {
+              "referenceName": "ls_blob_storage",
+              "type": "LinkedServiceReference"
+            },
+            "path": "staging/copy"
+          },
+          "translator": {
+            "mappings": [
+              {
+                "sink": {
+                  "name": "customer_id",
+                  "type": "Int64"
+                },
+                "source": {
+                  "name": "id",
+                  "type": "Int32"
+                }
+              },
+              {
+                "sink": {
+                  "name": "customer_name",
+                  "type": "String"
+                },
+                "source": {
+                  "name": "name",
+                  "type": "String"
+                }
+              },
+              {
+                "sink": {
+                  "name": "email_address",
+                  "type": "String"
+                },
+                "source": {
+                  "name": "email",
+                  "type": "String"
+                }
+              }
+            ],
+            "type": "TabularTranslator"
+          },
+          "validateDataConsistency": true
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "CopyBlobToSql",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "inputs": [
+          {
+            "referenceName": "ds_sql_orders",
+            "type": "DatasetReference"
+          }
+        ],
+        "name": "CopySqlToParquet",
+        "outputs": [
+          {
+            "referenceName": "ds_parquet_orders",
+            "type": "DatasetReference"
+          }
+        ],
+        "policy": {
+          "retry": 2,
+          "retryIntervalInSeconds": 60,
+          "timeout": "0.12:00:00"
+        },
+        "type": "Copy",
+        "typeProperties": {
+          "dataIntegrationUnits": 8,
+          "enableStaging": false,
+          "parallelCopies": 4,
+          "sink": {
+            "formatSettings": {
+              "fileNamePrefix": "orders_",
+              "maxRowsPerFile": 100000,
+              "type": "ParquetWriteSettings"
+            },
+            "storeSettings": {
+              "copyBehavior": "PreserveHierarchy",
+              "maxConcurrentConnections": 10,
+              "type": "AzureBlobFSWriteSettings"
+            },
+            "type": "ParquetSink"
+          },
+          "source": {
+            "partitionOption": "DynamicRange",
+            "partitionSettings": {
+              "partitionColumnName": "customer_id",
+              "partitionLowerBound": "1",
+              "partitionUpperBound": "1000000"
+            },
+            "queryTimeout": "02:00:00",
+            "sqlReaderQuery": {
+              "type": "Expression",
+              "value": "@concat('SELECT * FROM customers WHERE created_date >= ', pipeline().parameters.StartDate, ' AND status = ', pipeline().parameters.FilterStatus, '')"
+            },
+            "type": "AzureSqlSource"
+          }
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "copy",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:54:44Z",
+    "parameters": {
+      "FilterStatus": {
+        "defaultValue": "active",
+        "type": "String"
+      },
+      "StartDate": {
+        "defaultValue": "2024-01-01",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

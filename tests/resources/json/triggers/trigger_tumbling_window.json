@@ -1,0 +1,66 @@
+{
+  "name": "tr_hourly_tumbling_window",
+  "properties": {
+    "type": "TumblingWindowTrigger",
+    "typeProperties": {
+      "frequency": "Hour",
+      "interval": 1,
+      "startTime": "2024-01-01T00:00:00Z",
+      "endTime": "2025-12-31T23:59:59Z",
+      "delay": "00:15:00",
+      "maxConcurrency": 5,
+      "retryPolicy": {
+        "count": 3,
+        "intervalInSeconds": 300
+      },
+      "dependsOn": [
+        {
+          "type": "TumblingWindowTriggerDependencyReference",
+          "referenceTrigger": {
+            "referenceName": "tr_upstream_data_ready",
+            "type": "TriggerReference"
+          },
+          "offset": "-01:00:00",
+          "size": "01:00:00"
+        },
+        {
+          "type": "SelfDependencyTumblingWindowTriggerReference",
+          "offset": "-01:00:00",
+          "size": "01:00:00"
+        }
+      ]
+    },
+    "pipeline": {
+      "pipelineReference": {
+        "referenceName": "pipeline_copy_parquet_to_delta",
+        "type": "PipelineReference"
+      },
+      "parameters": {
+        "windowStart": "@trigger().outputs.windowStartTime",
+        "windowEnd": "@trigger().outputs.windowEndTime",
+        "sourcePath": "@concat('events/', formatDateTime(trigger().outputs.windowStartTime, 'yyyy/MM/dd/HH'))",
+        "eventDate": "@formatDateTime(trigger().outputs.windowStartTime, 'yyyy-MM-dd')"
+      }
+    },
+    "pipelines": [
+      {
+        "pipelineReference": {
+          "referenceName": "pipeline_copy_parquet_to_delta",
+          "type": "PipelineReference"
+        },
+        "parameters": {
+          "windowStart": "@trigger().outputs.windowStartTime",
+          "windowEnd": "@trigger().outputs.windowEndTime",
+          "sourcePath": "@concat('events/', formatDateTime(trigger().outputs.windowStartTime, 'yyyy/MM/dd/HH'))",
+          "eventDate": "@formatDateTime(trigger().outputs.windowStartTime, 'yyyy-MM-dd')"
+        }
+      }
+    ],
+    "runtimeState": "Started",
+    "annotations": [
+      "tumbling-window",
+      "hourly",
+      "incremental"
+    ]
+  }
+}

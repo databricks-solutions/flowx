@@ -1,0 +1,51 @@
+{
+  "etag": "0902e7ed-0000-0100-0000-69d82ec80000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_delete_coverage",
+  "name": "pl_test_delete_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "DeleteStagingFiles",
+        "policy": {
+          "retry": 2,
+          "retryIntervalInSeconds": 30,
+          "timeout": "0.01:00:00"
+        },
+        "type": "Delete",
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "ds_blob_staging",
+            "type": "DatasetReference"
+          },
+          "enableLogging": true,
+          "logStorageSettings": {
+            "linkedServiceName": {
+              "referenceName": "ls_blob_storage",
+              "type": "LinkedServiceReference"
+            },
+            "path": "logs/delete"
+          },
+          "maxConcurrentConnections": 10,
+          "recursive": true,
+          "storeSettings": {
+            "recursive": true,
+            "type": "AzureBlobFSReadSettings",
+            "wildcardFileName": "*.tmp",
+            "wildcardFolderPath": "staging/*"
+          }
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "delete",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:57:12Z"
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

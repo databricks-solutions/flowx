@@ -1,0 +1,43 @@
+{
+  "name": "ds_avro_adls_kafka_events",
+  "properties": {
+    "type": "Avro",
+    "linkedServiceName": {
+      "referenceName": "ls_adls_gen2",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "folderPath": {
+          "value": "@dataset().folderPath",
+          "type": "Expression"
+        },
+        "fileSystem": "landing"
+      },
+      "avroCompressionCodec": "snappy"
+    },
+    "parameters": {
+      "folderPath": {
+        "type": "String",
+        "defaultValue": "kafka-events/topic-orders"
+      }
+    },
+    "schema": [
+      { "name": "key", "type": "bytes" },
+      { "name": "value", "type": "bytes" },
+      { "name": "topic", "type": "string" },
+      { "name": "partition", "type": "int" },
+      { "name": "offset", "type": "long" },
+      { "name": "timestamp", "type": "long" }
+    ],
+    "annotations": [
+      "avro",
+      "kafka",
+      "events"
+    ],
+    "folder": {
+      "name": "Landing/Avro"
+    }
+  }
+}

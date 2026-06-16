@@ -1,0 +1,51 @@
+{
+  "etag": "090240ef-0000-0100-0000-69d82edf0000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_wait_coverage",
+  "name": "pl_test_wait_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "WaitLiteral",
+        "type": "Wait",
+        "typeProperties": {
+          "waitTimeInSeconds": 60
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "WaitLiteral",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "WaitExpression",
+        "type": "Wait",
+        "typeProperties": {
+          "waitTimeInSeconds": {
+            "type": "Expression",
+            "value": "@int(pipeline().parameters.WaitSeconds)"
+          }
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "wait",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:57:35Z",
+    "parameters": {
+      "WaitSeconds": {
+        "defaultValue": "30",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

@@ -1,0 +1,82 @@
+{
+  "etag": "09027fe9-0000-0100-0000-69d82e910000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_appendvariable_coverage",
+  "name": "pl_test_appendvariable_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "AppendLiteral",
+        "type": "AppendVariable",
+        "typeProperties": {
+          "value": "customers",
+          "variableName": "tableList"
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "AppendLiteral",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "AppendExpression",
+        "type": "AppendVariable",
+        "typeProperties": {
+          "value": {
+            "type": "Expression",
+            "value": "@concat('dbo.', pipeline().parameters.TableName)"
+          },
+          "variableName": "tableList"
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "AppendExpression",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "AppendTimestamp",
+        "type": "AppendVariable",
+        "typeProperties": {
+          "value": {
+            "type": "Expression",
+            "value": "@concat('Processed at: ', utcNow())"
+          },
+          "variableName": "auditLog"
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "appendvariable",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:56:17Z",
+    "parameters": {
+      "TableName": {
+        "defaultValue": "orders",
+        "type": "String"
+      }
+    },
+    "variables": {
+      "auditLog": {
+        "defaultValue": [],
+        "type": "Array"
+      },
+      "tableList": {
+        "defaultValue": [],
+        "type": "Array"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "ds_delta_customers",
+  "properties": {
+    "type": "AzureDatabricksDeltaLakeDataset",
+    "linkedServiceName": {
+      "referenceName": "ls_databricks_existing_cluster",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "table": "main.default.customers"
+    }
+  }
+}

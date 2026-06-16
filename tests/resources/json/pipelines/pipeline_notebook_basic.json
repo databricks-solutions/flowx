@@ -1,0 +1,35 @@
+{
+  "name": "pipeline_notebook_basic",
+  "properties": {
+    "activities": [
+      {
+        "name": "Run Transform Notebook",
+        "type": "DatabricksNotebook",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.02:00:00",
+          "retry": 0,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookPath": "/Shared/ETL/transform_customers"
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_existing_cluster",
+          "type": "LinkedServiceReference"
+        }
+      }
+    ],
+    "parameters": {},
+    "variables": {},
+    "annotations": [
+      "notebook",
+      "transform"
+    ],
+    "folder": {
+      "name": "Transform"
+    }
+  }
+}

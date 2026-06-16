@@ -1,0 +1,336 @@
+{
+  "name": "pipeline_complex_orchestration",
+  "properties": {
+    "activities": [
+      {
+        "name": "Set Run Mode",
+        "type": "SetVariable",
+        "dependsOn": [],
+        "typeProperties": {
+          "variableName": "runMode",
+          "value": "@pipeline().parameters.mode"
+        }
+      },
+      {
+        "name": "Route By Mode",
+        "type": "Switch",
+        "dependsOn": [
+          {
+            "activity": "Set Run Mode",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "on": {
+            "value": "@variables('runMode')",
+            "type": "Expression"
+          },
+          "cases": [
+            {
+              "value": "full",
+              "activities": [
+                {
+                  "name": "Check Source Readiness",
+                  "type": "IfCondition",
+                  "dependsOn": [],
+                  "typeProperties": {
+                    "expression": {
+                      "value": "@equals(pipeline().parameters.sourceReady, true)",
+                      "type": "Expression"
+                    },
+                    "ifTrueActivities": [
+                      {
+                        "name": "Run Full Ingestion Pipeline",
+                        "type": "ExecutePipeline",
+                        "dependsOn": [],
+                        "typeProperties": {
+                          "pipeline": {
+                            "referenceName": "pipeline_copy_sql_to_delta",
+                            "type": "PipelineReference"
+                          },
+                          "waitOnCompletion": true,
+                          "parameters": {
+                            "watermarkDate": "1900-01-01",
+                            "partitionUpperBound": "@pipeline().parameters.maxPartition"
+                          }
+                        }
+                      },
+                      {
+                        "name": "Run Full Transform Pipeline",
+                        "type": "ExecutePipeline",
+                        "dependsOn": [
+                          {
+                            "activity": "Run Full Ingestion Pipeline",
+                            "dependencyConditions": ["Succeeded"]
+                          }
+                        ],
+                        "typeProperties": {
+                          "pipeline": {
+                            "referenceName": "pipeline_notebook_with_params",
+                            "type": "PipelineReference"
+                          },
+                          "waitOnCompletion": true,
+                          "parameters": {
+                            "env": "@pipeline().parameters.environment",
+                            "processDate": "@pipeline().parameters.processDate",
+                            "sourceTable": "raw.all_data",
+                            "targetTable": "curated.all_data"
+                          }
+                        }
+                      }
+                    ],
+                    "ifFalseActivities": [
+                      {
+                        "name": "Wait For Source",
+                        "type": "Wait",
+                        "dependsOn": [],
+                        "typeProperties": {
+                          "waitTimeInSeconds": 600
+                        }
+                      },
+                      {
+                        "name": "Notify Source Not Ready",
+                        "type": "WebActivity",
+                        "dependsOn": [
+                          {
+                            "activity": "Wait For Source",
+                            "dependencyConditions": ["Succeeded"]
+                          }
+                        ],
+                        "policy": {
+                          "timeout": "0.00:05:00",
+                          "retry": 1,
+                          "retryIntervalInSeconds": 10
+                        },
+                        "typeProperties": {
+                          "url": "https://example.com/webhook/notify",
+                          "method": "POST",
+                          "headers": {
+                            "Content-Type": "application/json"
+                          },
+                          "body": {
+                            "text": "@concat('Source system not ready for full load. Pipeline: ', pipeline().Pipeline, ', Run ID: ', pipeline().RunId)"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "value": "incremental",
+              "activities": [
+                {
+                  "name": "Run Incremental Ingestion",
+                  "type": "ExecutePipeline",
+                  "dependsOn": [],
+                  "typeProperties": {
+                    "pipeline": {
+                      "referenceName": "pipeline_copy_sql_to_delta",
+                      "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                      "watermarkDate": "@pipeline().parameters.lastWatermark",
+                      "partitionUpperBound": "@pipeline().parameters.maxPartition"
+                    }
+                  }
+                },
+                {
+                  "name": "Wait Between Steps",
+                  "type": "Wait",
+                  "dependsOn": [
+                    {
+                      "activity": "Run Incremental Ingestion",
+                      "dependencyConditions": ["Succeeded"]
+                    }
+                  ],
+                  "typeProperties": {
+                    "waitTimeInSeconds": 30
+                  }
+                },
+                {
+                  "name": "Run Incremental Transform",
+                  "type": "ExecutePipeline",
+                  "dependsOn": [
+                    {
+                      "activity": "Wait Between Steps",
+                      "dependencyConditions": ["Succeeded"]
+                    }
+                  ],
+                  "typeProperties": {
+                    "pipeline": {
+                      "referenceName": "pipeline_notebook_with_params",
+                      "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                      "env": "@pipeline().parameters.environment",
+                      "processDate": "@pipeline().parameters.processDate",
+                      "sourceTable": "raw.incremental_data",
+                      "targetTable": "curated.incremental_data"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "value": "reprocess",
+              "activities": [
+                {
+                  "name": "Set Reprocess Date Range",
+                  "type": "SetVariable",
+                  "dependsOn": [],
+                  "typeProperties": {
+                    "variableName": "dateRange",
+                    "value": "@concat(pipeline().parameters.reprocessStart, '|', pipeline().parameters.reprocessEnd)"
+                  }
+                },
+                {
+                  "name": "Run Reprocess Pipeline",
+                  "type": "ExecutePipeline",
+                  "dependsOn": [
+                    {
+                      "activity": "Set Reprocess Date Range",
+                      "dependencyConditions": ["Succeeded"]
+                    }
+                  ],
+                  "typeProperties": {
+                    "pipeline": {
+                      "referenceName": "pipeline_foreach_with_copy",
+                      "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                      "watermarkDate": "@pipeline().parameters.reprocessStart"
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "defaultActivities": [
+            {
+              "name": "Log Unknown Mode",
+              "type": "WebActivity",
+              "dependsOn": [],
+              "policy": {
+                "timeout": "0.00:05:00",
+                "retry": 0,
+                "retryIntervalInSeconds": 30
+              },
+              "typeProperties": {
+                "url": "https://example.com/webhook/notify",
+                "method": "POST",
+                "headers": {
+                  "Content-Type": "application/json"
+                },
+                "body": {
+                  "text": "@concat('Unknown pipeline mode: ', variables('runMode'))"
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Set Completion Status",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "Route By Mode",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "completionStatus",
+          "value": "completed"
+        }
+      },
+      {
+        "name": "Send Final Notification",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "Set Completion Status",
+            "dependencyConditions": ["Completed"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "https://example.com/webhook/notify",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "@concat('Orchestration pipeline completed. Mode: ', variables('runMode'), ', Status: ', variables('completionStatus'), ', Run: ', pipeline().RunId)"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "mode": {
+        "type": "String",
+        "defaultValue": "incremental"
+      },
+      "environment": {
+        "type": "String",
+        "defaultValue": "prod"
+      },
+      "processDate": {
+        "type": "String",
+        "defaultValue": "@utcNow('yyyy-MM-dd')"
+      },
+      "lastWatermark": {
+        "type": "String",
+        "defaultValue": "2024-01-01"
+      },
+      "maxPartition": {
+        "type": "Int",
+        "defaultValue": 1000000
+      },
+      "sourceReady": {
+        "type": "Bool",
+        "defaultValue": true
+      },
+      "reprocessStart": {
+        "type": "String",
+        "defaultValue": "2024-01-01"
+      },
+      "reprocessEnd": {
+        "type": "String",
+        "defaultValue": "2024-01-31"
+      }
+    },
+    "variables": {
+      "runMode": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "completionStatus": {
+        "type": "String",
+        "defaultValue": "pending"
+      },
+      "dateRange": {
+        "type": "String",
+        "defaultValue": ""
+      }
+    },
+    "annotations": [
+      "orchestration",
+      "complex",
+      "multi-mode"
+    ],
+    "folder": {
+      "name": "Orchestration/Master"
+    }
+  }
+}

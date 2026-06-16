@@ -1,0 +1,538 @@
+{
+  "datasets": [
+    {
+      "name": "latest_summary",
+      "displayName": "Latest run summary",
+      "queryLines": [
+        "SELECT COUNT(*) AS pipelines, ",
+        "SUM(activities) AS activities, ",
+        "SUM(deterministic_activities) AS deterministic_activities, ",
+        "SUM(agentic_activities) AS agentic_activities, ",
+        "SUM(unsupported_activities) AS unsupported_activities, ",
+        "ROUND(100.0*(SUM(deterministic_activities)+SUM(agentic_activities))/NULLIF(SUM(activities),0),1) AS coverage_pct ",
+        "FROM {{RESULTS_TABLE}} ",
+        "WHERE run_id = (SELECT run_id FROM {{RESULTS_TABLE}} ORDER BY run_date DESC LIMIT 1)"
+      ]
+    },
+    {
+      "name": "latest_by_size",
+      "displayName": "Pipelines by complexity (latest run)",
+      "queryLines": [
+        "SELECT complexity_size, COUNT(*) AS pipelines ",
+        "FROM {{RESULTS_TABLE}} ",
+        "WHERE run_id = (SELECT run_id FROM {{RESULTS_TABLE}} ORDER BY run_date DESC LIMIT 1) ",
+        "GROUP BY complexity_size"
+      ]
+    },
+    {
+      "name": "latest_pipelines",
+      "displayName": "Pipeline coverage (latest run)",
+      "queryLines": [
+        "SELECT pipeline, activities, deterministic_activities, agentic_activities, ",
+        "unsupported_activities, coverage_pct, collapsible_patterns, complexity_size ",
+        "FROM {{RESULTS_TABLE}} ",
+        "WHERE run_id = (SELECT run_id FROM {{RESULTS_TABLE}} ORDER BY run_date DESC LIMIT 1) ",
+        "ORDER BY coverage_pct ASC, activities DESC"
+      ]
+    },
+    {
+      "name": "runs_over_time",
+      "displayName": "Coverage over runs",
+      "queryLines": [
+        "SELECT DATE_TRUNC('SECOND', run_date) AS run_ts, ",
+        "ROUND(100.0*(SUM(deterministic_activities)+SUM(agentic_activities))/NULLIF(SUM(activities),0),1) AS coverage_pct, ",
+        "SUM(activities) AS activities ",
+        "FROM {{RESULTS_TABLE}} ",
+        "GROUP BY DATE_TRUNC('SECOND', run_date) ",
+        "ORDER BY run_ts"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "coverage",
+      "displayName": "Migration Coverage",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## ADF \u2192 Databricks Migration Coverage"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "subtitle",
+            "multilineTextboxSpec": {
+              "lines": [
+                "Per-pipeline translation coverage from the latest flowx run. Coverage % = (deterministic + agentic) / total activities."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-pipelines",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "latest_summary",
+                  "fields": [
+                    {
+                      "name": "pipelines",
+                      "expression": "`pipelines`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "pipelines",
+                  "displayName": "Pipelines"
+                }
+              },
+              "frame": {
+                "title": "Pipelines",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-coverage",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "latest_summary",
+                  "fields": [
+                    {
+                      "name": "coverage_pct",
+                      "expression": "`coverage_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "coverage_pct",
+                  "displayName": "Coverage %"
+                }
+              },
+              "frame": {
+                "title": "Coverage %",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-activities",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "latest_summary",
+                  "fields": [
+                    {
+                      "name": "activities",
+                      "expression": "`activities`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "activities",
+                  "displayName": "Activities"
+                }
+              },
+              "frame": {
+                "title": "Activities",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-det",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "latest_summary",
+                  "fields": [
+                    {
+                      "name": "deterministic_activities",
+                      "expression": "`deterministic_activities`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "deterministic_activities",
+                  "displayName": "Deterministic"
+                }
+              },
+              "frame": {
+                "title": "Deterministic",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-agentic",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "latest_summary",
+                  "fields": [
+                    {
+                      "name": "agentic_activities",
+                      "expression": "`agentic_activities`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "agentic_activities",
+                  "displayName": "Agentic"
+                }
+              },
+              "frame": {
+                "title": "Agentic",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 5,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-unsup",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "latest_summary",
+                  "fields": [
+                    {
+                      "name": "unsupported_activities",
+                      "expression": "`unsupported_activities`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "unsupported_activities",
+                  "displayName": "Unsupported"
+                }
+              },
+              "frame": {
+                "title": "Unsupported",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 5,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "by-size",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "latest_by_size",
+                  "fields": [
+                    {
+                      "name": "complexity_size",
+                      "expression": "`complexity_size`"
+                    },
+                    {
+                      "name": "pipelines",
+                      "expression": "`pipelines`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "complexity_size",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Complexity"
+                },
+                "y": {
+                  "fieldName": "pipelines",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Pipelines"
+                }
+              },
+              "frame": {
+                "title": "Pipelines by complexity size",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "coverage-trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "runs_over_time",
+                  "fields": [
+                    {
+                      "name": "run_ts",
+                      "expression": "`run_ts`"
+                    },
+                    {
+                      "name": "coverage_pct",
+                      "expression": "`coverage_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "run_ts",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Run"
+                },
+                "y": {
+                  "fieldName": "coverage_pct",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Coverage %"
+                }
+              },
+              "frame": {
+                "title": "Coverage over runs",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 8,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "pipeline-table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "latest_pipelines",
+                  "fields": [
+                    {
+                      "name": "pipeline",
+                      "expression": "`pipeline`"
+                    },
+                    {
+                      "name": "activities",
+                      "expression": "`activities`"
+                    },
+                    {
+                      "name": "deterministic_activities",
+                      "expression": "`deterministic_activities`"
+                    },
+                    {
+                      "name": "agentic_activities",
+                      "expression": "`agentic_activities`"
+                    },
+                    {
+                      "name": "unsupported_activities",
+                      "expression": "`unsupported_activities`"
+                    },
+                    {
+                      "name": "coverage_pct",
+                      "expression": "`coverage_pct`"
+                    },
+                    {
+                      "name": "collapsible_patterns",
+                      "expression": "`collapsible_patterns`"
+                    },
+                    {
+                      "name": "complexity_size",
+                      "expression": "`complexity_size`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "pipeline",
+                    "displayName": "Pipeline"
+                  },
+                  {
+                    "fieldName": "activities",
+                    "displayName": "Activities"
+                  },
+                  {
+                    "fieldName": "deterministic_activities",
+                    "displayName": "Deterministic"
+                  },
+                  {
+                    "fieldName": "agentic_activities",
+                    "displayName": "Agentic"
+                  },
+                  {
+                    "fieldName": "unsupported_activities",
+                    "displayName": "Unsupported"
+                  },
+                  {
+                    "fieldName": "coverage_pct",
+                    "displayName": "Coverage %"
+                  },
+                  {
+                    "fieldName": "collapsible_patterns",
+                    "displayName": "Collapsible patterns"
+                  },
+                  {
+                    "fieldName": "complexity_size",
+                    "displayName": "Complexity"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Pipeline coverage detail",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 6,
+            "height": 7
+          }
+        }
+      ]
+    }
+  ]
+}

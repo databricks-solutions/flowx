@@ -1,0 +1,126 @@
+{
+  "etag": "0902cfea-0000-0100-0000-69d82e9d0000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_switch_coverage",
+  "name": "pl_test_switch_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "RouteByEnvironment",
+        "type": "Switch",
+        "typeProperties": {
+          "cases": [
+            {
+              "activities": [
+                {
+                  "dependsOn": [],
+                  "linkedServiceName": {
+                    "referenceName": "ls_databricks",
+                    "type": "LinkedServiceReference"
+                  },
+                  "name": "DevNotebook",
+                  "type": "DatabricksNotebook",
+                  "typeProperties": {
+                    "notebookPath": "/etl/dev_handler"
+                  }
+                }
+              ],
+              "value": "dev"
+            },
+            {
+              "activities": [
+                {
+                  "dependsOn": [],
+                  "linkedServiceName": {
+                    "referenceName": "ls_databricks",
+                    "type": "LinkedServiceReference"
+                  },
+                  "name": "StagingNotebook",
+                  "type": "DatabricksNotebook",
+                  "typeProperties": {
+                    "notebookPath": "/etl/staging_handler"
+                  }
+                }
+              ],
+              "value": "staging"
+            },
+            {
+              "activities": [
+                {
+                  "dependsOn": [],
+                  "linkedServiceName": {
+                    "referenceName": "ls_databricks",
+                    "type": "LinkedServiceReference"
+                  },
+                  "name": "ProdNotebook",
+                  "type": "DatabricksNotebook",
+                  "typeProperties": {
+                    "notebookPath": "/etl/prod_handler"
+                  }
+                },
+                {
+                  "dependsOn": [
+                    {
+                      "activity": "ProdNotebook",
+                      "dependencyConditions": [
+                        "Succeeded"
+                      ]
+                    }
+                  ],
+                  "name": "ProdAuditLog",
+                  "type": "WebActivity",
+                  "typeProperties": {
+                    "body": "{\"env\": \"prod\"}",
+                    "method": "POST",
+                    "url": "https://audit.example.com/log"
+                  }
+                }
+              ],
+              "value": "prod"
+            }
+          ],
+          "defaultActivities": [
+            {
+              "dependsOn": [],
+              "linkedServiceName": {
+                "referenceName": "ls_databricks",
+                "type": "LinkedServiceReference"
+              },
+              "name": "UnknownEnvNotebook",
+              "type": "DatabricksNotebook",
+              "typeProperties": {
+                "notebookPath": "/etl/unknown_handler"
+              }
+            }
+          ],
+          "on": {
+            "type": "Expression",
+            "value": "@variables('targetEnv')"
+          }
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "switch",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:56:29Z",
+    "parameters": {
+      "Environment": {
+        "defaultValue": "dev",
+        "type": "String"
+      }
+    },
+    "variables": {
+      "targetEnv": {
+        "defaultValue": "dev",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

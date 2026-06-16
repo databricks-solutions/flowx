@@ -1,0 +1,75 @@
+{
+  "etag": "090256ee-0000-0100-0000-69d82ed00000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_executepipeline_coverage",
+  "name": "pl_test_executepipeline_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "RunChildSync",
+        "type": "ExecutePipeline",
+        "typeProperties": {
+          "parameters": {
+            "InputPath": {
+              "type": "Expression",
+              "value": "@concat('/mnt/data/', pipeline().parameters.DataSource)"
+            },
+            "Mode": {
+              "type": "Expression",
+              "value": "@pipeline().parameters.ProcessMode"
+            },
+            "OutputPath": "/mnt/output/processed"
+          },
+          "pipeline": {
+            "referenceName": "pl_notebook_basic",
+            "type": "PipelineReference"
+          },
+          "waitOnCompletion": true
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "RunChildSync",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "RunChildAsync",
+        "type": "ExecutePipeline",
+        "typeProperties": {
+          "parameters": {
+            "Catalog": "main",
+            "NotebookPath": "/etl/async_handler"
+          },
+          "pipeline": {
+            "referenceName": "pl_notebook_with_params",
+            "type": "PipelineReference"
+          },
+          "waitOnCompletion": false
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "executepipeline",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:57:20Z",
+    "parameters": {
+      "DataSource": {
+        "defaultValue": "customers",
+        "type": "String"
+      },
+      "ProcessMode": {
+        "defaultValue": "incremental",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

@@ -1,0 +1,44 @@
+{
+  "name": "ds_parquet_adls_events",
+  "properties": {
+    "type": "Parquet",
+    "linkedServiceName": {
+      "referenceName": "ls_adls_gen2",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "folderPath": {
+          "value": "@dataset().folderPath",
+          "type": "Expression"
+        },
+        "fileSystem": "raw"
+      },
+      "compressionCodec": "snappy"
+    },
+    "parameters": {
+      "folderPath": {
+        "type": "String",
+        "defaultValue": "events/2024"
+      }
+    },
+    "schema": [
+      { "name": "event_id", "type": "UTF8", "physicalType": "UTF8" },
+      { "name": "event_type", "type": "UTF8", "physicalType": "UTF8" },
+      { "name": "user_id", "type": "UTF8", "physicalType": "UTF8" },
+      { "name": "event_timestamp", "type": "INT96", "physicalType": "INT96" },
+      { "name": "payload", "type": "UTF8", "physicalType": "UTF8" },
+      { "name": "source_system", "type": "UTF8", "physicalType": "UTF8" },
+      { "name": "partition_date", "type": "UTF8", "physicalType": "UTF8" }
+    ],
+    "annotations": [
+      "parquet",
+      "events",
+      "raw"
+    ],
+    "folder": {
+      "name": "Raw/Parquet"
+    }
+  }
+}

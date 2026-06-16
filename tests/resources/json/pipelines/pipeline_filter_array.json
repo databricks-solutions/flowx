@@ -1,0 +1,115 @@
+{
+  "name": "pipeline_filter_array",
+  "properties": {
+    "activities": [
+      {
+        "name": "Lookup All Tables",
+        "type": "Lookup",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:10:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT table_name, table_schema, row_count, last_updated, is_priority FROM dbo.table_inventory",
+            "queryTimeout": "00:05:00"
+          },
+          "dataset": {
+            "referenceName": "ds_azure_sql_config",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": false
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_azure_sql_config",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+      {
+        "name": "Filter Priority Tables",
+        "type": "Filter",
+        "dependsOn": [
+          {
+            "activity": "Lookup All Tables",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "value": "@activity('Lookup All Tables').output.value",
+            "type": "Expression"
+          },
+          "condition": {
+            "value": "@and(equals(item().is_priority, true), greater(item().row_count, 0))",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "ForEach Priority Table",
+        "type": "ForEach",
+        "dependsOn": [
+          {
+            "activity": "Filter Priority Tables",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "value": "@activity('Filter Priority Tables').output.Value",
+            "type": "Expression"
+          },
+          "isSequential": false,
+          "batchCount": 5,
+          "activities": [
+            {
+              "name": "Run Priority Table ETL",
+              "type": "DatabricksNotebook",
+              "dependsOn": [],
+              "policy": {
+                "timeout": "0.01:00:00",
+                "retry": 1,
+                "retryIntervalInSeconds": 30,
+                "secureOutput": false,
+                "secureInput": false
+              },
+              "typeProperties": {
+                "notebookPath": "/Shared/ETL/process_priority_table",
+                "baseParameters": {
+                  "tableName": "@item().table_name",
+                  "schemaName": "@item().table_schema",
+                  "rowCount": "@string(item().row_count)"
+                }
+              },
+              "linkedServiceName": {
+                "referenceName": "ls_databricks_existing_cluster",
+                "type": "LinkedServiceReference"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "parameters": {},
+    "variables": {},
+    "annotations": [
+      "filter",
+      "priority",
+      "dynamic"
+    ],
+    "folder": {
+      "name": "ETL/Dynamic"
+    }
+  }
+}

@@ -1,0 +1,138 @@
+{
+  "name": "pipeline_wait_between_steps",
+  "properties": {
+    "activities": [
+      {
+        "name": "Trigger External System",
+        "type": "WebActivity",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:10:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 15,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "https://api.contoso.com/v1/jobs/trigger",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Authorization": "@concat('Bearer ', pipeline().parameters.apiToken)"
+          },
+          "body": {
+            "jobName": "data-refresh",
+            "parameters": {
+              "date": "@pipeline().parameters.processDate"
+            }
+          }
+        }
+      },
+      {
+        "name": "Wait For External Processing",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "Trigger External System",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 300
+        }
+      },
+      {
+        "name": "Check External System Status",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "Wait For External Processing",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 3,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "@concat('https://api.contoso.com/v1/jobs/', activity('Trigger External System').output.jobId, '/status')",
+          "method": "GET",
+          "headers": {
+            "Authorization": "@concat('Bearer ', pipeline().parameters.apiToken)"
+          }
+        }
+      },
+      {
+        "name": "Wait Before Retry",
+        "type": "Wait",
+        "dependsOn": [
+          {
+            "activity": "Check External System Status",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "waitTimeInSeconds": 60
+        }
+      },
+      {
+        "name": "Run Post Processing Notebook",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          {
+            "activity": "Wait Before Retry",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "timeout": "0.01:00:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookPath": "/Shared/PostProcessing/reconcile_external_data",
+          "baseParameters": {
+            "jobId": "@activity('Trigger External System').output.jobId",
+            "processDate": "@pipeline().parameters.processDate"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_existing_cluster",
+          "type": "LinkedServiceReference"
+        }
+      }
+    ],
+    "parameters": {
+      "processDate": {
+        "type": "String",
+        "defaultValue": "@utcNow('yyyy-MM-dd')"
+      },
+      "apiToken": {
+        "type": "String",
+        "defaultValue": ""
+      }
+    },
+    "variables": {},
+    "annotations": [
+      "wait",
+      "external-system",
+      "polling"
+    ],
+    "folder": {
+      "name": "Integration/External"
+    }
+  }
+}

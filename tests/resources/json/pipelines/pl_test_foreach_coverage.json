@@ -1,0 +1,87 @@
+{
+  "etag": "090242e7-0000-0100-0000-69d82e720000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_foreach_coverage",
+  "name": "pl_test_foreach_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "ForEachTable",
+        "type": "ForEach",
+        "typeProperties": {
+          "activities": [
+            {
+              "dependsOn": [],
+              "inputs": [
+                {
+                  "parameters": {
+                    "TableName": {
+                      "type": "Expression",
+                      "value": "@item().tableName"
+                    }
+                  },
+                  "referenceName": "ds_sql_orders",
+                  "type": "DatasetReference"
+                }
+              ],
+              "name": "CopyTableData",
+              "outputs": [
+                {
+                  "referenceName": "ds_parquet_orders",
+                  "type": "DatasetReference"
+                }
+              ],
+              "policy": {
+                "retry": 2,
+                "retryIntervalInSeconds": 30,
+                "timeout": "0.04:00:00"
+              },
+              "type": "Copy",
+              "typeProperties": {
+                "enableStaging": false,
+                "sink": {
+                  "storeSettings": {
+                    "type": "AzureBlobFSWriteSettings"
+                  },
+                  "type": "ParquetSink"
+                },
+                "source": {
+                  "sqlReaderQuery": {
+                    "type": "Expression",
+                    "value": "@concat('SELECT * FROM ', item().schema, '.', item().tableName, ' WHERE modified_date >= ''', pipeline().parameters.StartDate, '''')"
+                  },
+                  "type": "AzureSqlSource"
+                }
+              }
+            }
+          ],
+          "batchCount": 5,
+          "isSequential": true,
+          "items": {
+            "type": "Expression",
+            "value": "@pipeline().parameters.TableList"
+          }
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "foreach",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:55:46Z",
+    "parameters": {
+      "StartDate": {
+        "defaultValue": "2024-01-01",
+        "type": "String"
+      },
+      "TableList": {
+        "type": "Array"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

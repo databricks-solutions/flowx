@@ -1,0 +1,71 @@
+{
+  "etag": "090239e3-0000-0100-0000-69d82e450000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_sparkjar_coverage",
+  "name": "pl_test_sparkjar_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "linkedServiceName": {
+          "referenceName": "ls_databricks",
+          "type": "LinkedServiceReference"
+        },
+        "name": "RunSparkJarJob",
+        "policy": {
+          "retry": 1,
+          "retryIntervalInSeconds": 300,
+          "timeout": "3.00:00:00"
+        },
+        "type": "DatabricksSparkJar",
+        "typeProperties": {
+          "libraries": [
+            {
+              "jar": "dbfs:/jars/etl-core-2.0.jar"
+            },
+            {
+              "jar": "dbfs:/jars/etl-utils-1.5.jar"
+            },
+            {
+              "maven": {
+                "coordinates": "org.apache.spark:spark-avro_2.12:3.5.0"
+              }
+            }
+          ],
+          "mainClassName": {
+            "type": "Expression",
+            "value": "@concat('com.company.etl.', pipeline().parameters.MainClass)"
+          },
+          "parameters": [
+            "--input",
+            "/mnt/raw/data.parquet",
+            "--output",
+            "/mnt/processed/output",
+            "--date",
+            {
+              "type": "Expression",
+              "value": "@formatDateTime(utcNow(), 'yyyy-MM-dd')"
+            },
+            "--mode",
+            "overwrite"
+          ]
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "sparkjar",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:55:01Z",
+    "parameters": {
+      "MainClass": {
+        "defaultValue": "CustomerProcessor",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

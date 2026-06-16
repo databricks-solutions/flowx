@@ -1,0 +1,107 @@
+{
+  "etag": "090242eb-0000-0100-0000-69d82ea50000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_lookup_coverage",
+  "name": "pl_test_lookup_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "LookupWithQuery",
+        "policy": {
+          "retry": 2,
+          "retryIntervalInSeconds": 30,
+          "timeout": "0.00:30:00"
+        },
+        "type": "Lookup",
+        "typeProperties": {
+          "dataset": {
+            "parameters": {
+              "SchemaName": {
+                "type": "Expression",
+                "value": "@pipeline().parameters.SchemaName"
+              }
+            },
+            "referenceName": "ds_sql_customers",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": true,
+          "source": {
+            "queryTimeout": "00:10:00",
+            "sqlReaderQuery": {
+              "type": "Expression",
+              "value": "@concat('SELECT MAX(modified_date) as watermark FROM ', pipeline().parameters.TableName)"
+            },
+            "type": "AzureSqlSource"
+          }
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "LookupWithQuery",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "LookupStoredProc",
+        "policy": {
+          "retry": 1,
+          "timeout": "0.00:15:00"
+        },
+        "type": "Lookup",
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "ds_sql_customers",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": false,
+          "source": {
+            "sqlReaderStoredProcedureName": "sp_GetTableConfig",
+            "storedProcedureParameters": {
+              "environment": {
+                "type": "String",
+                "value": {
+                  "type": "Expression",
+                  "value": "@pipeline().parameters.Env"
+                }
+              },
+              "tableName": {
+                "type": "String",
+                "value": {
+                  "type": "Expression",
+                  "value": "@pipeline().parameters.TableName"
+                }
+              }
+            },
+            "type": "AzureSqlSource"
+          }
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "lookup",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:56:37Z",
+    "parameters": {
+      "Env": {
+        "defaultValue": "dev",
+        "type": "String"
+      },
+      "SchemaName": {
+        "defaultValue": "dbo",
+        "type": "String"
+      },
+      "TableName": {
+        "defaultValue": "dbo.customers",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

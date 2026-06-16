@@ -1,0 +1,93 @@
+{
+  "name": "pipeline_execute_pipeline_nested",
+  "properties": {
+    "activities": [
+      {
+        "name": "Run Ingestion Pipeline",
+        "type": "ExecutePipeline",
+        "dependsOn": [],
+        "typeProperties": {
+          "pipeline": {
+            "referenceName": "pipeline_copy_sql_to_delta",
+            "type": "PipelineReference"
+          },
+          "waitOnCompletion": true,
+          "parameters": {
+            "watermarkDate": "@pipeline().parameters.startDate",
+            "partitionUpperBound": "@pipeline().parameters.maxPartition"
+          }
+        }
+      },
+      {
+        "name": "Run Transform Pipeline",
+        "type": "ExecutePipeline",
+        "dependsOn": [
+          {
+            "activity": "Run Ingestion Pipeline",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "pipeline": {
+            "referenceName": "pipeline_notebook_with_params",
+            "type": "PipelineReference"
+          },
+          "waitOnCompletion": true,
+          "parameters": {
+            "env": "@pipeline().parameters.environment",
+            "processDate": "@pipeline().parameters.startDate",
+            "sourceTable": "raw.orders",
+            "targetTable": "curated.orders"
+          }
+        }
+      },
+      {
+        "name": "Run Cleanup Pipeline",
+        "type": "ExecutePipeline",
+        "dependsOn": [
+          {
+            "activity": "Run Transform Pipeline",
+            "dependencyConditions": [
+              "Completed"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "pipeline": {
+            "referenceName": "pipeline_delete_recursive",
+            "type": "PipelineReference"
+          },
+          "waitOnCompletion": false,
+          "parameters": {
+            "stagingPath": "@concat('staging/', pipeline().parameters.startDate)"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "environment": {
+        "type": "String",
+        "defaultValue": "prod"
+      },
+      "startDate": {
+        "type": "String",
+        "defaultValue": "@utcNow('yyyy-MM-dd')"
+      },
+      "maxPartition": {
+        "type": "Int",
+        "defaultValue": 500000
+      }
+    },
+    "variables": {},
+    "annotations": [
+      "orchestration",
+      "nested",
+      "execute-pipeline"
+    ],
+    "folder": {
+      "name": "Orchestration"
+    }
+  }
+}

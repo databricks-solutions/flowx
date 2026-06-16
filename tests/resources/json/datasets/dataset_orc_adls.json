@@ -1,0 +1,43 @@
+{
+  "name": "ds_orc_adls_hive_tables",
+  "properties": {
+    "type": "Orc",
+    "linkedServiceName": {
+      "referenceName": "ls_adls_gen2",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "folderPath": {
+          "value": "@dataset().folderPath",
+          "type": "Expression"
+        },
+        "fileSystem": "warehouse"
+      },
+      "orcCompressionCodec": "zlib"
+    },
+    "parameters": {
+      "folderPath": {
+        "type": "String",
+        "defaultValue": "hive/warehouse/sales_db/transactions"
+      }
+    },
+    "schema": [
+      { "name": "transaction_id", "type": "bigint" },
+      { "name": "customer_id", "type": "bigint" },
+      { "name": "amount", "type": "decimal(18,2)" },
+      { "name": "currency", "type": "string" },
+      { "name": "transaction_date", "type": "timestamp" },
+      { "name": "category", "type": "string" }
+    ],
+    "annotations": [
+      "orc",
+      "hive",
+      "warehouse"
+    ],
+    "folder": {
+      "name": "Warehouse/ORC"
+    }
+  }
+}

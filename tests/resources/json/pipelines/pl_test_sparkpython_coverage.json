@@ -1,0 +1,78 @@
+{
+  "etag": "090277e4-0000-0100-0000-69d82e500000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_sparkpython_coverage",
+  "name": "pl_test_sparkpython_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "linkedServiceName": {
+          "referenceName": "ls_databricks",
+          "type": "LinkedServiceReference"
+        },
+        "name": "RunSparkPythonScript",
+        "policy": {
+          "retry": 2,
+          "retryIntervalInSeconds": 60,
+          "timeout": "1.12:00:00"
+        },
+        "type": "DatabricksSparkPython",
+        "typeProperties": {
+          "libraries": [
+            {
+              "pypi": {
+                "package": "pandas==2.0.0"
+              }
+            },
+            {
+              "pypi": {
+                "package": "numpy==1.24.0"
+              }
+            },
+            {
+              "jar": "dbfs:/jars/custom-udf-1.0.jar"
+            }
+          ],
+          "parameters": [
+            "--config",
+            {
+              "type": "Expression",
+              "value": "@concat('/mnt/config/', pipeline().parameters.Environment, '.json')"
+            },
+            "--date",
+            {
+              "type": "Expression",
+              "value": "@formatDateTime(utcNow(), 'yyyy-MM-dd')"
+            },
+            "--verbose",
+            "true"
+          ],
+          "pythonFile": {
+            "type": "Expression",
+            "value": "@concat('dbfs:/scripts/', pipeline().parameters.ScriptName, '.py')"
+          }
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "sparkpython",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:55:12Z",
+    "parameters": {
+      "Environment": {
+        "defaultValue": "dev",
+        "type": "String"
+      },
+      "ScriptName": {
+        "defaultValue": "data_processor",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

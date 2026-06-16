@@ -1,0 +1,104 @@
+---
+title: Usage Guide
+description: Translate a pipeline from Azure Data Factory to Lakeflow Jobs.
+---
+
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+This guide walks through a complete migration: install the flowx skills in your agentic tool, hand it a directory of Azure Data Factory JSON exports, and end up with a Databricks Asset Bundle you can deploy.
+
+<Steps>
+<Step>
+
+## Export pipeline templates as JSON
+
+In the Azure Data Factory portal, open *Manage* &rarr; *ARM template* &rarr; *Export ARM template*, or use the `Get-AzDataFactoryV2Pipeline` PowerShell cmdlet to dump each pipeline definition as JSON. You'll end up with a directory tree like:
+
+```text
+adf-export/
+├── pipeline/        # one JSON file per pipeline
+├── dataset/         # one JSON file per dataset
+├── linkedService/   # one JSON file per linked service
+└── trigger/         # one JSON file per trigger (optional)
+```
+
+Upload the directory to a Unity Catalog volume (recommended) or a local path the agent can read:
+
+```bash
+databricks fs cp -r ./adf-export dbfs:/Volumes/main/default/adf_export
+```
+</Step>
+
+<Step>
+
+## Run the end-to-end migration
+
+Open a fresh conversation and prompt your agent with the path to your JSON templates and a target output directory:
+
+> Use flowx to migrate the ADF pipelines at `/Volumes/main/default/adf_export` into a Databricks Asset Bundle at `./flowx_output/`.
+
+flowx will use the `migrate` skill to chain 3 other skills. All three phases write into one shared output directory (default `./flowx_output`):
+
+1. `discover` parses every JSON file, builds an inventory, assigns a translation strategy for each resource (deterministic, agentic, or unsupported), and emits a `metadata/profile_report.csv` complexity report (one row per pipeline).
+2. `convert` converts each activity to an intermediate representation. The agent will ask for confirmation before running any LLM-based translation.
+3. `package` creates a [Declarative Automation Bundle](https://docs.databricks.com/aws/en/dev-tools/bundles/resources) with job configuration files, code, and setup scripts (e.g. to create Databricks Secret Scopes or Unity Catalog connections).
+
+</Step>
+
+<Step>
+
+## Review the output
+
+flowx writes everything into a single shared output directory (default `./flowx_output`). The generated bundle can be reviewed and modified before deployment. The layout is:
+
+```text
+flowx_output/
+├── databricks.yml          # Bundle configuration (from package)
+├── resources/              # Job configuration (from package)
+├── src/                    # Code required to run the pipeline (from package)
+├── SETUP.md                # Setup instructions (from package)
+├── metadata/
+│   ├── inventory.json      # discover: activity inventory
+│   ├── profile_report.csv  # profile: per-pipeline complexity report
+│   ├── <pipeline>.arm.json # discover: verbatim original ADF/ARM pipeline source
+│   └── configuration.json  # modify: the collected configuration answers
+└── .work/                  # transient intermediates (translation report, IR, gaps.json); pruned by prepare
+```
+
+The bundle itself contains a top-level `databricks.yml` file with deployment targets and other variables, a `resources/` folder with job configuration,
+a `src/` folder with code required to run the pipeline, and a `SETUP.md` file describing supporting resources to create.
+
+During translation, a transient `translation_report.json` is written under `flowx_output/.work/`. It lists every activity, its translation strategy, warnings raised during translation, and the location of any
+generated artifacts. Review the translation report for any warnings, unsupported resources, or to-do items before deploying to your Databricks workspace. The `package` phase prunes `.work/` after building the bundle (pass `--keep-intermediates` to retain it).
+
+<Callout type="warn" title="Secret handling">
+Connection strings, credentials, and other protected configuration parameters are emitted as `SecretInstruction` setup steps that require [Databricks Secrets](https://docs.databricks.com/aws/en/security/secrets/). 
+Run the setup scripts and populate secret values before deploying and running pipelines in your Databricks workspace.
+</Callout>
+
+When running with workspace auth (e.g. Genie Code), `package` can optionally persist this run's
+coverage to a Unity Catalog table — one row per pipeline stamped with a UUID `run_id`, `run_date`,
+and `run_by` (`record-results`) — and install a published AI/BI coverage dashboard over that table
+(`install-dashboard`). See [Configuration options](/docs/options) for details.
+</Step>
+
+<Step>
+
+## Deploy the bundle
+
+To deploy translated pipelines to your Databricks workspace, run the following command from the root of the bundle directory:
+
+```bash
+databricks bundle validate
+databricks bundle deploy --target <your deployment target>
+```
+
+<Callout type="tip" title="Deploying jobs across environments">
+Bundles created by flowx are standard Databricks Asset Bundles. You can target different environments, integrate with CI/CD, 
+or further customize the YAML before deploying. See the [Databricks Asset Bundles documentation](https://docs.databricks.com/aws/en/dev-tools/bundles/) for more information.
+</Callout>
+</Step>
+
+</Steps>

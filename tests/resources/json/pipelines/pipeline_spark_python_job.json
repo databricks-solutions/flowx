@@ -1,0 +1,98 @@
+{
+  "name": "pipeline_spark_python_job",
+  "properties": {
+    "activities": [
+      {
+        "name": "Run PySpark Data Quality",
+        "type": "DatabricksSparkPython",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.02:00:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 60,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "pythonFile": "dbfs:/scripts/data_quality_checks.py",
+          "parameters": [
+            "@pipeline().parameters.catalogName",
+            "@pipeline().parameters.schemaName",
+            "@pipeline().parameters.tableName",
+            "--threshold",
+            "0.95",
+            "--output-format",
+            "json",
+            "--alert-on-failure",
+            "true"
+          ]
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_new_cluster",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "Run PySpark Aggregation",
+        "type": "DatabricksSparkPython",
+        "dependsOn": [
+          {
+            "activity": "Run PySpark Data Quality",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "timeout": "0.03:00:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 120,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "pythonFile": "dbfs:/scripts/aggregate_daily_metrics.py",
+          "parameters": [
+            "--source-table",
+            "@concat(pipeline().parameters.catalogName, '.', pipeline().parameters.schemaName, '.', pipeline().parameters.tableName)",
+            "--target-table",
+            "@concat(pipeline().parameters.catalogName, '.metrics.daily_', pipeline().parameters.tableName)",
+            "--process-date",
+            "@pipeline().parameters.processDate"
+          ]
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_existing_cluster",
+          "type": "LinkedServiceReference"
+        }
+      }
+    ],
+    "parameters": {
+      "catalogName": {
+        "type": "String",
+        "defaultValue": "prod_catalog"
+      },
+      "schemaName": {
+        "type": "String",
+        "defaultValue": "sales"
+      },
+      "tableName": {
+        "type": "String",
+        "defaultValue": "transactions"
+      },
+      "processDate": {
+        "type": "String",
+        "defaultValue": "@utcNow('yyyy-MM-dd')"
+      }
+    },
+    "variables": {},
+    "annotations": [
+      "spark-python",
+      "data-quality",
+      "aggregation"
+    ],
+    "folder": {
+      "name": "Spark/Python"
+    }
+  }
+}

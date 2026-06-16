@@ -1,0 +1,132 @@
+{
+  "etag": "090236e9-0000-0100-0000-69d82e8b0000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_setvariable_coverage",
+  "name": "pl_test_setvariable_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "name": "SetLiteralVar",
+        "type": "SetVariable",
+        "typeProperties": {
+          "value": "started",
+          "variableName": "processStatus"
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "SetLiteralVar",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "SetUtcNowVar",
+        "type": "SetVariable",
+        "typeProperties": {
+          "value": {
+            "type": "Expression",
+            "value": "@utcNow()"
+          },
+          "variableName": "runTimestamp"
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "SetUtcNowVar",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "SetParamVar",
+        "type": "SetVariable",
+        "typeProperties": {
+          "value": {
+            "type": "Expression",
+            "value": "@pipeline().parameters.Env"
+          },
+          "variableName": "environment"
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "SetParamVar",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "SetConcatVar",
+        "type": "SetVariable",
+        "typeProperties": {
+          "value": {
+            "type": "Expression",
+            "value": "@concat('/mnt/output/', variables('environment'), '/', formatDateTime(utcNow(), 'yyyy/MM/dd'))"
+          },
+          "variableName": "outputPath"
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "SetConcatVar",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "SetBoolVar",
+        "type": "SetVariable",
+        "typeProperties": {
+          "value": {
+            "type": "Expression",
+            "value": "@equals(pipeline().parameters.Env, 'prod')"
+          },
+          "variableName": "isProduction"
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "setvariable",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:56:11Z",
+    "parameters": {
+      "Env": {
+        "defaultValue": "dev",
+        "type": "String"
+      }
+    },
+    "variables": {
+      "environment": {
+        "defaultValue": "",
+        "type": "String"
+      },
+      "isProduction": {
+        "defaultValue": "false",
+        "type": "String"
+      },
+      "outputPath": {
+        "defaultValue": "",
+        "type": "String"
+      },
+      "processStatus": {
+        "defaultValue": "",
+        "type": "String"
+      },
+      "runTimestamp": {
+        "defaultValue": "",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

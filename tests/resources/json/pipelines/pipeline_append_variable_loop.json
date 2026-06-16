@@ -1,0 +1,136 @@
+{
+  "name": "pipeline_append_variable_loop",
+  "properties": {
+    "activities": [
+      {
+        "name": "Lookup Source Files",
+        "type": "Lookup",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:10:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": "SELECT file_name, file_path, file_size_mb, expected_row_count FROM dbo.file_manifest WHERE process_date = '@{pipeline().parameters.processDate}'",
+            "queryTimeout": "00:05:00"
+          },
+          "dataset": {
+            "referenceName": "ds_azure_sql_config",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": false
+        },
+        "inputs": [
+          {
+            "referenceName": "ds_azure_sql_config",
+            "type": "DatasetReference"
+          }
+        ]
+      },
+      {
+        "name": "ForEach File To Process",
+        "type": "ForEach",
+        "dependsOn": [
+          {
+            "activity": "Lookup Source Files",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "items": {
+            "value": "@activity('Lookup Source Files').output.value",
+            "type": "Expression"
+          },
+          "isSequential": true,
+          "activities": [
+            {
+              "name": "Append Processed File Name",
+              "type": "AppendVariable",
+              "dependsOn": [],
+              "typeProperties": {
+                "variableName": "processedFiles",
+                "value": "@item().file_name"
+              }
+            },
+            {
+              "name": "Append File Size",
+              "type": "AppendVariable",
+              "dependsOn": [
+                {
+                  "activity": "Append Processed File Name",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "typeProperties": {
+                "variableName": "fileSizes",
+                "value": "@string(item().file_size_mb)"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Log Processed Files",
+        "type": "WebActivity",
+        "dependsOn": [
+          {
+            "activity": "ForEach File To Process",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 10,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "url": "https://example.com/webhook/notify",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "@concat('Processed files: ', join(variables('processedFiles'), ', '), '. Total files: ', string(length(variables('processedFiles'))))"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "processDate": {
+        "type": "String",
+        "defaultValue": "@utcNow('yyyy-MM-dd')"
+      }
+    },
+    "variables": {
+      "processedFiles": {
+        "type": "Array",
+        "defaultValue": []
+      },
+      "fileSizes": {
+        "type": "Array",
+        "defaultValue": []
+      }
+    },
+    "annotations": [
+      "append-variable",
+      "accumulator",
+      "file-processing"
+    ],
+    "folder": {
+      "name": "ETL/FileProcessing"
+    }
+  }
+}

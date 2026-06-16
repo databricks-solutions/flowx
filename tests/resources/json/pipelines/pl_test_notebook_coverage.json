@@ -1,0 +1,103 @@
+{
+  "etag": "0902bae2-0000-0100-0000-69d82e3e0000",
+  "id": "/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ghansen-flowx-rg/providers/Microsoft.DataFactory/factories/ghansen-flowx-adf/pipelines/pl_test_notebook_coverage",
+  "name": "pl_test_notebook_coverage",
+  "properties": {
+    "activities": [
+      {
+        "dependsOn": [],
+        "linkedServiceName": {
+          "referenceName": "ls_databricks",
+          "type": "LinkedServiceReference"
+        },
+        "name": "RunNotebookWithAllParams",
+        "policy": {
+          "retry": 2,
+          "retryIntervalInSeconds": 120,
+          "secureInput": false,
+          "secureOutput": true,
+          "timeout": "2.00:00:00"
+        },
+        "type": "DatabricksNotebook",
+        "typeProperties": {
+          "baseParameters": {
+            "batch_size": "10000",
+            "catalog": {
+              "type": "Expression",
+              "value": "@pipeline().parameters.Catalog"
+            },
+            "mode": {
+              "type": "Expression",
+              "value": "@if(equals(pipeline().parameters.IsFullLoad, 'true'), 'overwrite', 'append')"
+            },
+            "run_date": {
+              "type": "Expression",
+              "value": "@utcNow('yyyy-MM-dd')"
+            },
+            "schema": {
+              "type": "Expression",
+              "value": "@pipeline().parameters.Schema"
+            },
+            "table_name": "customers"
+          },
+          "libraries": [
+            {
+              "jar": "dbfs:/jars/my-udf-1.0.jar"
+            },
+            {
+              "pypi": {
+                "package": "great-expectations==0.18.0"
+              }
+            },
+            {
+              "maven": {
+                "coordinates": "com.databricks:spark-xml_2.12:0.16.0"
+              }
+            },
+            {
+              "pypi": {
+                "package": "delta-spark==3.0.0"
+              }
+            }
+          ],
+          "notebookPath": {
+            "type": "Expression",
+            "value": "@concat('/Repos/', pipeline().parameters.Environment, '/etl/notebooks/', pipeline().parameters.NotebookName)"
+          }
+        }
+      }
+    ],
+    "annotations": [
+      "test",
+      "notebook",
+      "coverage"
+    ],
+    "folder": {
+      "name": "test_coverage"
+    },
+    "lastPublishTime": "2026-04-09T22:54:54Z",
+    "parameters": {
+      "Catalog": {
+        "defaultValue": "main",
+        "type": "String"
+      },
+      "Environment": {
+        "defaultValue": "dev",
+        "type": "String"
+      },
+      "IsFullLoad": {
+        "defaultValue": "false",
+        "type": "String"
+      },
+      "NotebookName": {
+        "defaultValue": "process_customers",
+        "type": "String"
+      },
+      "Schema": {
+        "defaultValue": "default",
+        "type": "String"
+      }
+    }
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}

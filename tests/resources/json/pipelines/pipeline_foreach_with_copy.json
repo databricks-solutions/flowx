@@ -1,0 +1,93 @@
+{
+  "name": "pipeline_foreach_with_copy",
+  "properties": {
+    "activities": [
+      {
+        "name": "ForEach Table Copy",
+        "type": "ForEach",
+        "dependsOn": [],
+        "typeProperties": {
+          "items": {
+            "value": "@pipeline().parameters.tableList",
+            "type": "Expression"
+          },
+          "isSequential": false,
+          "batchCount": 10,
+          "activities": [
+            {
+              "name": "Copy Table Data",
+              "type": "Copy",
+              "dependsOn": [],
+              "policy": {
+                "timeout": "0.01:00:00",
+                "retry": 2,
+                "retryIntervalInSeconds": 30,
+                "secureOutput": false,
+                "secureInput": false
+              },
+              "typeProperties": {
+                "source": {
+                  "type": "AzureSqlSource",
+                  "sqlReaderQuery": "@concat('SELECT * FROM ', item().schemaName, '.', item().tableName, ' WHERE modified_date >= ''', pipeline().parameters.watermarkDate, '''')",
+                  "queryTimeout": "00:10:00"
+                },
+                "sink": {
+                  "type": "DeltaSink",
+                  "writeBatchSize": 10000,
+                  "importSettings": {
+                    "type": "DeltaImportCommand"
+                  }
+                },
+                "enableStaging": false
+              },
+              "inputs": [
+                {
+                  "referenceName": "ds_azure_sql_generic",
+                  "type": "DatasetReference",
+                  "parameters": {
+                    "tableName": "@item().tableName",
+                    "schemaName": "@item().schemaName"
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "referenceName": "ds_delta_generic",
+                  "type": "DatasetReference",
+                  "parameters": {
+                    "tableName": "@item().tableName"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "parameters": {
+      "tableList": {
+        "type": "Array",
+        "defaultValue": [
+          { "schemaName": "dbo", "tableName": "customers" },
+          { "schemaName": "dbo", "tableName": "orders" },
+          { "schemaName": "dbo", "tableName": "products" },
+          { "schemaName": "dbo", "tableName": "order_items" },
+          { "schemaName": "sales", "tableName": "regions" }
+        ]
+      },
+      "watermarkDate": {
+        "type": "String",
+        "defaultValue": "2024-01-01"
+      }
+    },
+    "variables": {},
+    "annotations": [
+      "etl",
+      "foreach",
+      "multi-table"
+    ],
+    "folder": {
+      "name": "ETL/Ingestion"
+    }
+  }
+}

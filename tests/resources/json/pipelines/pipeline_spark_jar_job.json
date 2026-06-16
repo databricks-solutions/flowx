@@ -1,0 +1,74 @@
+{
+  "name": "pipeline_spark_jar_job",
+  "properties": {
+    "activities": [
+      {
+        "name": "Run Spark JAR ETL",
+        "type": "DatabricksSparkJar",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.04:00:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 120,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "mainClassName": "com.contoso.etl.DataLakeProcessor",
+          "parameters": [
+            "--input-path",
+            "@pipeline().parameters.inputPath",
+            "--output-path",
+            "@pipeline().parameters.outputPath",
+            "--process-date",
+            "@pipeline().parameters.processDate",
+            "--partition-count",
+            "200",
+            "--mode",
+            "overwrite"
+          ],
+          "libraries": [
+            {
+              "jar": "dbfs:/jars/contoso-etl-1.2.3.jar"
+            },
+            {
+              "jar": "dbfs:/jars/contoso-common-utils-0.9.1.jar"
+            },
+            {
+              "maven": {
+                "coordinates": "com.databricks:spark-xml_2.12:0.14.0"
+              }
+            }
+          ]
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_new_cluster",
+          "type": "LinkedServiceReference"
+        }
+      }
+    ],
+    "parameters": {
+      "inputPath": {
+        "type": "String",
+        "defaultValue": "abfss://raw@contosodatalake.dfs.core.windows.net/events"
+      },
+      "outputPath": {
+        "type": "String",
+        "defaultValue": "abfss://curated@contosodatalake.dfs.core.windows.net/events"
+      },
+      "processDate": {
+        "type": "String",
+        "defaultValue": "@utcNow('yyyy-MM-dd')"
+      }
+    },
+    "variables": {},
+    "annotations": [
+      "spark-jar",
+      "etl",
+      "java"
+    ],
+    "folder": {
+      "name": "Spark/JAR"
+    }
+  }
+}

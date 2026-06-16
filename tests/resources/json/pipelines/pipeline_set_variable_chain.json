@@ -1,0 +1,151 @@
+{
+  "name": "pipeline_set_variable_chain",
+  "properties": {
+    "activities": [
+      {
+        "name": "Set Environment",
+        "type": "SetVariable",
+        "dependsOn": [],
+        "policy": {
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "variableName": "currentEnv",
+          "value": "@pipeline().parameters.environment"
+        }
+      },
+      {
+        "name": "Set Catalog Name",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "Set Environment",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "variableName": "catalogName",
+          "value": "@concat(variables('currentEnv'), '_catalog')"
+        }
+      },
+      {
+        "name": "Set Schema Name",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "Set Catalog Name",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "variableName": "schemaName",
+          "value": "@concat(variables('catalogName'), '.', pipeline().parameters.schemaPrefix, '_data')"
+        }
+      },
+      {
+        "name": "Set Full Table Path",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "Set Schema Name",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "variableName": "fullTablePath",
+          "value": "@concat(variables('schemaName'), '.', pipeline().parameters.tableName)"
+        }
+      },
+      {
+        "name": "Run Notebook With Resolved Vars",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          {
+            "activity": "Set Full Table Path",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "policy": {
+          "timeout": "0.02:00:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "notebookPath": "/Shared/ETL/generic_table_processor",
+          "baseParameters": {
+            "fullTablePath": "@variables('fullTablePath')",
+            "catalogName": "@variables('catalogName')",
+            "schemaName": "@variables('schemaName')"
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "ls_databricks_existing_cluster",
+          "type": "LinkedServiceReference"
+        }
+      }
+    ],
+    "parameters": {
+      "environment": {
+        "type": "String",
+        "defaultValue": "dev"
+      },
+      "schemaPrefix": {
+        "type": "String",
+        "defaultValue": "sales"
+      },
+      "tableName": {
+        "type": "String",
+        "defaultValue": "orders"
+      }
+    },
+    "variables": {
+      "currentEnv": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "catalogName": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "schemaName": {
+        "type": "String",
+        "defaultValue": ""
+      },
+      "fullTablePath": {
+        "type": "String",
+        "defaultValue": ""
+      }
+    },
+    "annotations": [
+      "variables",
+      "chain",
+      "dynamic-path"
+    ],
+    "folder": {
+      "name": "Utilities"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "ds_csv_adls_customers",
+  "properties": {
+    "type": "DelimitedText",
+    "linkedServiceName": {
+      "referenceName": "ls_adls_gen2",
+      "type": "LinkedServiceReference"
+    },
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "folderPath": "raw/customers",
+        "fileSystem": "data"
+      },
+      "columnDelimiter": ",",
+      "rowDelimiter": "\n",
+      "quoteChar": "\"",
+      "escapeChar": "\\",
+      "firstRowAsHeader": true
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "ls_key_vault",
+  "properties": {
+    "type": "AzureKeyVault",
+    "typeProperties": {
+      "baseUrl": "https://contoso-data-kv.vault.azure.net/"
+    },
+    "annotations": [
+      "key-vault",
+      "secrets",
+      "security"
+    ]
+  }
+}
