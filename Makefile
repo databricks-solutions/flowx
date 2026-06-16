@@ -47,7 +47,7 @@ lock-dependencies:
 requirements:
 	uv export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt -o requirements.txt
 
-precommit: fmt requirements
+precommit: fmt lock-dependencies requirements
 
 help:
 	@echo "Available targets:"

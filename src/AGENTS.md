@@ -25,13 +25,15 @@ neighbouring module. This is a companion to the top-level [AGENTS.md](../AGENTS.
 - First line is **third-person present indicative** describing what the
   function does: ``"""Converts X to Y."""`` rather than ``"""Convert
   X..."""`` or ``"""This function converts..."""``.
-- Keep docstrings **brief** -- usually one sentence.  Add extra detail
-  only when behaviour is non-obvious (edge cases, surprising
-  invariants).  Don't restate the type signature or repeat parameter
-  names; ``Args:`` / ``Returns:`` / ``Raises:`` blocks are optional and
-  should appear only when the type is genuinely ambiguous.
-- Don't write multi-paragraph design rationale in docstrings; that
-  belongs in commit messages or pull-request descriptions.
+- **Public** classes and functions use the **Google docstring format**:
+  a one-line summary, then ``Attributes:`` (classes), ``Args:``,
+  ``Returns:``, ``Raises:``, and ``Notes:`` sections as applicable.
+- Private helpers keep a brief one-line summary; add ``Args:`` /
+  ``Returns:`` only when the types are genuinely ambiguous.
+- Non-obvious design rationale (a constraint, a prior bug, an external
+  spec) goes in a ``Notes:`` section or a one-line comment that points to
+  the relevant ``AGENTS.md`` design-notes entry -- never as a
+  multi-paragraph comment block.
 
 ## Comments
 

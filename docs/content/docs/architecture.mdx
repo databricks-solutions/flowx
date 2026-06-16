@@ -1,0 +1,90 @@
+---
+title: Architecture
+description: How flowx is structured as a set of agent skills and MCP tools.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+flowx translates data pipelines into Databricks Lakeflow Jobs packaged as Declarative Automation Bundles (DABs). A set of Python functions is exposed through two surfaces: **agent skills** invoked through a CLI and **MCP tools** called by an agent session.
+
+## Three-phase pipeline
+
+```text
+ADF JSON ──▶ discover ──▶ convert ──▶ package ──▶ databricks.yml (DAB)
+            (parse +     (activities    (IR → jobs,
+             classify)    → IR)          notebooks, setup)
+```
+
+All three phases share one `output_dir` (default `./flowx_output`):
+
+| Phase         | Module                  | Reads                  | Writes                                                                                   |
+|---------------|-------------------------|------------------------|------------------------------------------------------------------------------------------|
+| **profile**   | `parser/adf_loader.py`  | ADF JSON exports       | `metadata/inventory.json`, `metadata/profile_report.csv`, `metadata/<pipeline>.arm.json` |
+| **translate** | `translator/engine.py`  | inventory + ADF source | `.work/translation_report.json` (transient IR)                                           |
+| **prepare**   | `bundler/dab_writer.py` | translation report     | `databricks.yml`, `resources/`, `src/`, `setup/` (and prunes `.work/`)                   |
+
+Each activity is classified with a `TranslationStrategy`:
+* `DETERMINISTIC` (in-process translators)
+* `AGENTIC` (LLM-assisted gaps)
+* `UNSUPPORTED`
+
+The reporting layer (`reporting/`) can write per-run coverage to a Unity Catalog table and publish an AI/BI dashboard.
+
+## Two surfaces over one core
+
+```text
+                    ┌─────────────────────────────┐
+   Agent skills ───▶│  python -m flowx.adapter │───▶ phase modules (discover/
+   (discover/...,   │  (unified CLI entry point)   │     convert/package) +
+    setup, migrate) └─────────────────────────────┘     adapter operations
+                                  ▲
+                                  │ subprocess (same contract)
+                    ┌─────────────────────────────┐
+   MCP tool  ──────▶│  flowx.mcp (FastMCP)     │
+   (Claude / Genie) │  1 tool, 12 commands →       │
+                    │  adapter bridge              │
+                    └─────────────────────────────┘
+```
+
+The unified `flowx.adapter` CLI is the single contract. Both surfaces go through it:
+
+- **Agent skills** (`skills/`) shell out to `python -m flowx.adapter <phase|op> …` directly.
+- **MCP tool** (`src/flowx/mcp/`) is a thin bridge: the single `flowx(command, parameters)` tool builds the same adapter arguments for the chosen `command`, runs them as a subprocess via `flowx.mcp.runner`, then reads back the JSON/CSV artifacts and returns a structured result. No phase logic is duplicated, so the tool surface can't drift from the tested CLI. A single tool also keeps flowx to **one** of the host's tool slots (e.g. Genie Code's 20-tool cap).
+
+### MCP tool layer
+
+| Module            | Purpose                                                                                                                   |
+|-------------------|---------------------------------------------------------------------------------------------------------------------------|
+| `mcp/server.py`   | `FastMCP` server; registers tools and builds the stdio / streamable-HTTP apps                                             |
+| `mcp/runner.py`   | Subprocess bridge to `flowx.adapter` with artifact summarizers (for running translation without the `mcp` dependency) |
+| `mcp/__main__.py` | `python -m flowx.mcp` entry point (stdio default, `--http` for hosting)                                               |
+
+The `flowx` tool's `command` selects the adapter operation: `inputs`, `discover`, `convert`, `merge_agentic`, `inspect`, `apply_answers`, `materialize_lookup`, `workspace_paths`, `package`, `migrate`, `record_results`, and `install_dashboard` (with `parameters` carrying that command's arguments).
+
+## Deployment topology
+
+The MCP server runs in whichever transport fits the calling tool. This is chosen when the `setup` skill is invoked:
+
+- **Local / Claude Code:** `setup` installs `mcp` + `uvicorn` + `starlette` into the venv; the server runs over **stdio** and is registered with the MCP client.
+- **Databricks Genie Code:** `setup` runs `app/deploy.sh`, which stages a self-contained bundle (app entrypoint + a vendored copy of the pure-Python flowx source), syncs it to the workspace, and creates/deploys the **`mcp-flowx` Databricks App**. The app serves the MCP streamable-HTTP transport at `<app-url>/mcp` (health at `/`) via `uvicorn` → `Starlette` → `FastMCP`. To meet Genie Code's requirements the server runs **stateless** (`stateless_http=True`) and enables CORS (origins via `FLOWX_ALLOWED_ORIGINS`). You add it in Genie Code under **Settings → MCP Servers → Add Server → Custom MCP server**; Genie connects over OAuth, access is governed by the app's Databricks Apps permissions, and the app authenticates to the workspace as its own service principal.
+
+```text
+  Local (Claude Code / other agents)        Databricks Genie Code
+  ───────────────────────────────────       ─────────────────────────────────
+  agent ◀── stdio ──▶ python -m              Genie ◀── HTTPS /mcp ──▶ Databricks App
+                      flowx.mcp                                   (uvicorn → Starlette
+                      (in the venv)                                    → FastMCP streamable-HTTP)
+                                                                       app authenticates as its
+                                                                       own service principal
+```
+
+See [Installation](/docs/installation#running-flowx-as-an-mcp-server) for the exact commands and the [app README](https://github.com/ghanse/flowx/tree/main/app) for deployment details.
+
+<Callout type="info" title="Inputs and outputs on a hosted app">
+A Databricks App can't read the user's workspace / UC Volume files (`/Volumes/...` is **not** auto-mounted). Two ways to get data in/out of the `flowx` tool:
+
+- **Small jobs — inline.** `command="discover"`/`"migrate"` accept `adf_definitions` (a mapping of relative path → ARM JSON, Git-export layout), supplied by the agent and materialized to a temp dir; `package`/`migrate` return the DAB inline as `bundle = {"files": {relpath: text, …}}`. Inline data flows through the agent's context, so it's capped (~5 MB in).
+- **Large factories — by reference (recommended).** Point the server at the source: `adf_volume_path` (a UC Volume read via the SDK Files API) or `adf_workspace_path` (a `/Workspace` directory — e.g. an ADF Git folder — read via the SDK Workspace API). Write the DAB to `output_volume_path` (UC Volume, SDK Files API) or `output_workspace_path` (`/Workspace` directory, SDK Workspace API with `ImportFormat.RAW`), returned as `bundle_uploaded`. The bytes bypass the agent entirely, so it scales to thousands of pipelines; grant the app's service principal read on the source and write on the output target.
+
+Locally hosted, ordinary `adf_source_path` / `output_dir` paths and mounted volumes work as-is.
+</Callout>

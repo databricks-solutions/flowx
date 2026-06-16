@@ -110,7 +110,7 @@ class TestDetectorCopyAndNotify:
         )
         motifs = detect_motifs(pipeline, _EMPTY_DEFS)
         assert len(motifs) == 1
-        assert motifs[0].definition.motif_id == "copy_and_notify"
+        assert motifs[0].definition.motif_id == "activity_and_notify"
 
 
 class TestDetectorParentChild:

@@ -9,8 +9,8 @@ const inter = Inter({
 
 export const metadata = {
   title: {
-    default: 'Flowx',
-    template: '%s | Flowx',
+    default: 'flowx',
+    template: '%s | flowx',
   },
   description:
     'Translate Azure Data Factory pipelines to Databricks Lakeflow Jobs.',

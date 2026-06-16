@@ -1,21 +1,21 @@
-# Flowx
+# flowx
 
 ADF to Databricks Lakeflow Jobs translator via Declarative Automation Bundles.
 
-Flowx is a Claude Code plugin that converts Azure Data Factory (ADF) pipeline definitions into Databricks Lakeflow Jobs packaged as Declarative Automation Bundles (DABs). It deterministically translates known activity types and falls back to agentic LLM-assisted translation for complex or rare types.
+flowx is a Claude Code plugin that converts Azure Data Factory (ADF) pipeline definitions into Databricks Lakeflow Jobs packaged as Declarative Automation Bundles (DABs). It deterministically translates known activity types and falls back to agentic LLM-assisted translation for complex or rare types.
 
 ## Architecture
 
 ```
-                         Flowx Pipeline
+                         flowx Pipeline
                          ==================
 
   ADF JSON (UC Volumes)
         |
         v
   +------------------+
-  |  1. INGEST       |    Parse ADF ARM/JSON exports
-  |  adf_loader.py   | -> Typed AST -> inventory.json
+  |  1. PROFILE      |    Parse ADF ARM/JSON exports
+  |  adf_loader.py   | -> Typed AST -> metadata/inventory.json
   +------------------+
         |
         v
@@ -43,14 +43,14 @@ Flowx is a Claude Code plugin that converts Azure Data Factory (ADF) pipeline de
 
 2. Run the end-to-end migration:
    ```
-   /flowx:migrate
+   /flowx:flowx-migrate
    ```
 
    Or run individual phases:
    ```
-   /flowx:ingest      # Parse ADF JSON, produce inventory
-   /flowx:translate   # Deterministic + agentic translation
-   /flowx:prepare     # Generate DABs project
+   /flowx:flowx-discover     # Parse ADF JSON, produce inventory + complexity report
+   /flowx:flowx-convert   # Deterministic + agentic translation
+   /flowx:flowx-package     # Generate DABs project
    ```
 
 ## Supported ADF Activity Types
@@ -95,20 +95,22 @@ Flowx is a Claude Code plugin that converts Azure Data Factory (ADF) pipeline de
 
 ## How It Works
 
-### Phase 1: Ingest
-Reads ADF JSON definitions from Unity Catalog volumes, normalizes ARM template format, parses into typed AST nodes, and classifies each activity as deterministic, agentic, or unsupported. Produces `inventory.json`.
+### Phase 1: Discover
+Reads ADF JSON definitions from Unity Catalog volumes, normalizes ARM template format, parses into typed AST nodes, and classifies each activity as deterministic, agentic, or unsupported. Produces `metadata/inventory.json` and a per-pipeline complexity report at `metadata/profile_report.csv`.
 
-### Phase 2: Translate
+### Phase 2: Convert
 Applies deterministic translators via registry dispatch, resolves dependencies through topological sort, and threads immutable `TranslationContext` through control-flow visitors. Agentic gaps are flagged for LLM-assisted translation. Produces Pipeline IR.
 
-### Phase 3: Prepare
+### Phase 3: Package
 Converts Pipeline IR into a deployable DABs project: `databricks.yml`, per-job YAML resource files, generated Python notebooks, and setup scripts for UC volumes, secrets, and connections.
 
 ## Output Format
 
+All three phases write into one shared output directory (default `./flowx_output`):
+
 ```
-dab_output/
-  databricks.yml              # Bundle configuration
+flowx_output/
+  databricks.yml              # Bundle configuration (package)
   resources/
     jobs/
       <pipeline_name>.yml     # One job per ADF pipeline
@@ -120,6 +122,13 @@ dab_output/
       create_volumes.py       # UC volume setup
       create_secrets.py       # Secret scope setup
       create_connections.py   # Connection setup
+  SETUP.md                    # Setup instructions (package)
+  metadata/
+    inventory.json            # discover: activity inventory
+    profile_report.csv        # profile: per-pipeline complexity report
+    <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
+    configuration.json        # modify: collected configuration answers
+  .work/                      # transient intermediates (translation report, IR, gaps.json); pruned by prepare
 ```
 
 ## Development
