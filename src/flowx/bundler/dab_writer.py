@@ -119,6 +119,9 @@ def write_bundle(
         _any_task_uses_classic_cluster(inner.tasks) for inner in workflow.inner_workflows
     )
 
+    pipeline_resources = _collect_pipeline_resources(workflow)
+    pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
+
     # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id
     #    defaults come from the ADF linked-service configs; when every task is serverless, they're omitted.
     databricks_yml_path = output_dir / "databricks.yml"
@@ -130,6 +133,7 @@ def write_bundle(
         spark_version=inferred_spark_version,
         node_type_id=inferred_node_type_id,
         include_cluster_variables=bundle_uses_classic_cluster,
+        extra_variables=pipeline_variable_declarations,
     )
     databricks_yml_path.write_text(
         yaml.dump(
@@ -181,10 +185,8 @@ def write_bundle(
 
     # 2b. Write Lakeflow pipeline resources (Lakeflow Connect ingestion defs from the Copy preparer's LFC
     #     branch). Each lives in its own YAML so the bundle parser merges them via the ``include`` glob.
-    pipelines_dir = resources_dir / "pipelines"
-    for resource in _collect_pipeline_resources(workflow):
-        pipelines_dir.mkdir(parents=True, exist_ok=True)
-        resource_yml_path = pipelines_dir / f"{resource['resource_key']}.yml"
+    for resource in pipeline_resources:
+        resource_yml_path = resources_dir / f"{resource['resource_key']}.yml"
         resource_yml_path.write_text(
             yaml.dump(
                 _wrap_pipeline_resource(resource),
@@ -568,6 +570,7 @@ def _build_databricks_yml(
     spark_version: str = _DEFAULT_SPARK_VERSION,
     node_type_id: str = _DEFAULT_NODE_TYPE_ID,
     include_cluster_variables: bool = True,
+    extra_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Builds the root ``databricks.yml`` configuration as a dict.
 
@@ -583,6 +586,9 @@ def _build_databricks_yml(
             False when no task in the bundle uses classic compute (every
             generated notebook runs on serverless), so the bundle stays
             free of unused tunables.
+        extra_variables: Additional variable declarations (name -> DAB
+            declaration dict) to merge into the ``variables`` block, e.g.
+            the source-side variables a Lakeflow Connect pipeline references.
 
     Returns:
         Dict ready for YAML serialization.
@@ -609,6 +615,8 @@ def _build_databricks_yml(
             "description": "Databricks Runtime for the default job_cluster.",
             "default": spark_version,
         }
+    for name, declaration in (extra_variables or {}).items():
+        variables.setdefault(name, declaration)
     # Declare a variable for each cross-bundle ExecutePipeline reference so `${var.X_job_id}` resolves and
     # `bundle validate` passes. Users fill in the numeric job ID per SETUP.md.
     for variable_name, target_pipeline in sorted(_cross_bundle_variables.items()):
@@ -768,6 +776,71 @@ def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
         resource file.
     """
     return {"resources": {"pipelines": {resource["resource_key"]: resource["definition"]}}}
+
+
+_VAR_REFERENCE_RE = re.compile(r"\$\{var\.([A-Za-z_][A-Za-z0-9_]*)\}")
+
+_BUILTIN_BUNDLE_VARIABLES = frozenset({"catalog", "schema", "node_type_id", "spark_version"})
+
+
+def _collect_variable_references(value: Any) -> set[str]:
+    """Returns every ``${var.NAME}`` variable name referenced anywhere within *value*."""
+    refs: set[str] = set()
+    if isinstance(value, str):
+        refs.update(_VAR_REFERENCE_RE.findall(value))
+    elif isinstance(value, dict):
+        for item in value.values():
+            refs |= _collect_variable_references(item)
+    elif isinstance(value, list):
+        for item in value:
+            refs |= _collect_variable_references(item)
+    return refs
+
+
+def _build_pipeline_variable_declarations(
+    pipeline_resources: list[dict[str, Any]],
+    catalog: str,
+    schema: str,
+) -> dict[str, Any]:
+    """Returns ``variables:`` declarations for every ``${var.…}`` a pipeline resource references.
+
+    Lakeflow Connect ingestion definitions fall back to ``${var.source_catalog}`` /
+    ``${var.source_schema}`` (and could reference further variables) when the translator
+    couldn't resolve a literal. Each such variable must appear in the root ``variables:``
+    block or ``databricks bundle validate`` fails on an undefined reference.
+
+    Args:
+        pipeline_resources: The pipeline-resource dicts collected for the bundle.
+        catalog: The migration target catalog (used as the source_catalog default).
+        schema: The migration target schema (used as the source_schema default).
+
+    Returns:
+        Mapping of variable name to its DAB declaration dict. ``source_catalog`` and
+        ``source_schema`` get a sensible default so validation passes out of the box;
+        any other referenced variable is declared without a default (user fills it in).
+    """
+    referenced: set[str] = set()
+    for resource in pipeline_resources:
+        referenced |= _collect_variable_references(resource.get("definition"))
+    referenced -= _BUILTIN_BUNDLE_VARIABLES
+
+    source_defaults = {"source_catalog": catalog, "source_schema": schema}
+    declarations: dict[str, Any] = {}
+    for name in sorted(referenced):
+        if name in source_defaults:
+            kind = name.removeprefix("source_")
+            declarations[name] = {
+                "description": (
+                    f"Source-side {kind} the Lakeflow Connect ingestion reads from. "
+                    f"Defaults to the migration {kind}; override with the real source {kind}."
+                ),
+                "default": source_defaults[name],
+            }
+        else:
+            declarations[name] = {
+                "description": f"Value for ${{var.{name}}} referenced by a generated pipeline resource.",
+            }
+    return declarations
 
 
 def _collect_required_cluster_keys(tasks: list[dict[str, Any]]) -> set[str]:
