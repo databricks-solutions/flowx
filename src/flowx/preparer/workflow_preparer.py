@@ -44,7 +44,7 @@ class PreparedActivity:
     inner_workflows: list[PreparedWorkflow] = field(default_factory=list)
     # Switch renames its first case key; prepare_workflow reads this map to rewrite depends_on edges.
     task_key_remap: dict[str, str] = field(default_factory=dict)
-    # Lakeflow pipeline resources emitted under resources/pipelines/<resource_key>.yml ({resource_key, definition}).
+    # Lakeflow pipeline resources emitted under resources/<resource_key>.yml ({resource_key, definition}).
     pipeline_resources: list[dict[str, Any]] = field(default_factory=list)
     parameter_approximations: list[ParameterApproximation] = field(default_factory=list)
 

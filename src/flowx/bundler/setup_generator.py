@@ -300,11 +300,16 @@ def _generate_connection_setup_notebook(
         host = config.get("host", "PLACEHOLDER_HOST")
         port = config.get("port", "3306")
 
+        options = [f"host '{host}'", f"port '{port}'"]
+        if conn_type == "SQLSERVER":
+            options.append(f"user '{config.get('user', 'PLACEHOLDER_USER')}'")
+            options.append(f"password '{config.get('password', 'PLACEHOLDER_PASSWORD')}'")
+
         lines: list[str] = [f"# Create connection: {conn_name}"]
         lines.append('spark.sql("""')
         lines.append(f"    CREATE CONNECTION IF NOT EXISTS {conn_name}")
         lines.append(f"    TYPE {conn_type}")
-        lines.append(f"    OPTIONS (host '{host}', port '{port}')")
+        lines.append(f"    OPTIONS ({', '.join(options)})")
         lines.append('""")')
         lines.append(f'print("Created connection: {conn_name}")')
         body_parts.append("\n".join(lines))

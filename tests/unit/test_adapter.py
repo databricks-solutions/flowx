@@ -957,7 +957,7 @@ class TestBundleOutput:
         workflow = prepare_workflow(stamped)
         write_bundle(workflow, tmp_path)
         assert not (tmp_path / "src" / "notebooks" / "copy_a.py").exists()
-        pipeline_yml = tmp_path / "resources" / "pipelines" / "copy_a_lfc.yml"
+        pipeline_yml = tmp_path / "resources" / "copy_a_lfc.yml"
         assert pipeline_yml.exists()
         resource = yaml.safe_load(pipeline_yml.read_text())
         lfc = resource["resources"]["pipelines"]["copy_a_lfc"]
@@ -965,6 +965,26 @@ class TestBundleOutput:
         assert lfc["ingestion_definition"]["connection_name"] == "flowx_copy_a_connection"
         objects = lfc["ingestion_definition"]["objects"]
         assert objects[0]["table"]["destination_table"] == "raw.events"
+
+    def test_lakeflow_connect_declares_referenced_source_variables(self, tmp_path: Path):
+        import yaml
+
+        from flowx.bundler.dab_writer import write_bundle
+        from flowx.preparer.workflow_preparer import prepare_workflow
+
+        pipeline = Pipeline(name="job", tasks=[_delta_copy("copy_a")])
+        stamped = apply_configuration(pipeline, TranslationConfiguration(use_lakeflow_connectors="lakeflow_connect"))
+        workflow = prepare_workflow(stamped)
+        write_bundle(workflow, tmp_path, catalog="migration_cat", schema="migration_schema")
+
+        resource = yaml.safe_load((tmp_path / "resources" / "copy_a_lfc.yml").read_text())
+        table = resource["resources"]["pipelines"]["copy_a_lfc"]["ingestion_definition"]["objects"][0]["table"]
+        assert table["source_catalog"] == "${var.source_catalog}"
+        assert table["source_schema"] == "${var.source_schema}"
+
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        assert variables["source_catalog"]["default"] == "migration_cat"
+        assert variables["source_schema"]["default"] == "migration_schema"
 
     def test_lakeflow_connect_job_task_references_pipeline(self, tmp_path: Path):
         import yaml
@@ -1076,7 +1096,7 @@ class TestBundleOutput:
         stamped = apply_configuration(pipeline, prefs)
         workflow = prepare_workflow(stamped)
         write_bundle(workflow, tmp_path)
-        resource = yaml.safe_load((tmp_path / "resources" / "pipelines" / "copy_q_lfc.yml").read_text())
+        resource = yaml.safe_load((tmp_path / "resources" / "copy_q_lfc.yml").read_text())
         objects = resource["resources"]["pipelines"]["copy_q_lfc"]["ingestion_definition"]["objects"]
         assert "table_configuration" in objects[0]
         table_config = objects[0]["table_configuration"]
@@ -1097,7 +1117,7 @@ class TestBundleOutput:
         stamped = apply_configuration(pipeline, prefs)
         workflow = prepare_workflow(stamped)
         write_bundle(workflow, tmp_path)
-        resource = yaml.safe_load((tmp_path / "resources" / "pipelines" / "copy_a_lfc.yml").read_text())
+        resource = yaml.safe_load((tmp_path / "resources" / "copy_a_lfc.yml").read_text())
         objects = resource["resources"]["pipelines"]["copy_a_lfc"]["ingestion_definition"]["objects"]
         assert "table" in objects[0]
         assert "table_configuration" not in objects[0]
@@ -1124,7 +1144,7 @@ class TestBundleOutput:
         stamped = apply_configuration(pipeline, prefs)
         workflow = prepare_workflow(stamped)
         write_bundle(workflow, tmp_path)
-        resource = yaml.safe_load((tmp_path / "resources" / "pipelines" / "copy_a_lfc.yml").read_text())
+        resource = yaml.safe_load((tmp_path / "resources" / "copy_a_lfc.yml").read_text())
         objects = resource["resources"]["pipelines"]["copy_a_lfc"]["ingestion_definition"]["objects"]
         assert "table" in objects[0]
         assert "table_configuration" not in objects[0]
@@ -1155,7 +1175,7 @@ class TestBundleOutput:
         stamped = dataclasses.replace(stamped, tasks=[consolidated_motif])
         workflow = prepare_workflow(stamped)
         write_bundle(workflow, tmp_path)
-        resource_path = tmp_path / "resources" / "pipelines" / "motif_metadata_driven_bulk_copy_consolidated.yml"
+        resource_path = tmp_path / "resources" / "motif_metadata_driven_bulk_copy_consolidated.yml"
         assert resource_path.exists()
         resource = yaml.safe_load(resource_path.read_text())
         pipeline_def = resource["resources"]["pipelines"]["motif_metadata_driven_bulk_copy_consolidated"]
@@ -1195,7 +1215,7 @@ class TestBundleOutput:
         )
         stamped = apply_configuration(Pipeline(name="job", tasks=[copy]), prefs)
         write_bundle(prepare_workflow(stamped), tmp_path)
-        resource = yaml.safe_load((tmp_path / "resources" / "pipelines" / "copy_customers_lfc.yml").read_text())
+        resource = yaml.safe_load((tmp_path / "resources" / "copy_customers_lfc.yml").read_text())
         obj = resource["resources"]["pipelines"]["copy_customers_lfc"]["ingestion_definition"]["objects"][0]
         assert "table" in obj
         assert obj["table"]["destination_table"] == "customers"
@@ -1257,7 +1277,7 @@ class TestBundleOutput:
         assert body.count("CREATE CONNECTION IF NOT EXISTS") == 1
         assert body.count("flowx_LS_AzureSqlDb_connection") >= 1
         for pipeline_file in ("copy_a_lfc.yml", "copy_b_lfc.yml"):
-            resource = yaml.safe_load((tmp_path / "resources" / "pipelines" / pipeline_file).read_text())
+            resource = yaml.safe_load((tmp_path / "resources" / pipeline_file).read_text())
             key = pipeline_file.replace(".yml", "")
             assert resource["resources"]["pipelines"][key]["ingestion_definition"]["connection_name"] == (
                 "flowx_LS_AzureSqlDb_connection"
