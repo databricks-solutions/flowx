@@ -951,6 +951,22 @@ class TestSetupGenerator:
         nb = notebooks[0]
         assert nb.relative_path == "setup/create_connections.py"
         assert "sql_conn" in nb.content
+        assert "user 'PLACEHOLDER_USER'" in nb.content
+        assert "password 'PLACEHOLDER_PASSWORD'" in nb.content
+
+    def test_connection_setup_notebook_non_sqlserver_omits_credentials(self):
+        from flowx.bundler.setup_generator import generate_setup_tasks
+
+        setup_tasks = [
+            SetupTask(
+                type="connection",
+                config={"connection_name": "my_conn", "connection_type": "MYSQL", "host": "mysql.example.com"},
+            ),
+        ]
+        notebooks = generate_setup_tasks(secrets=[], setup_tasks=setup_tasks, catalog="main", schema="default")
+        content = notebooks[0].content
+        assert "user '" not in content
+        assert "password '" not in content
 
     def test_no_setup_when_empty(self):
         from flowx.bundler.setup_generator import generate_setup_tasks
