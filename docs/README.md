@@ -1,4 +1,4 @@
-# Flowx docs
+# flowx docs
 
 Documentation site for [flowx](https://github.com/ghanse/flowx), built with [fumadocs](https://fumadocs.dev) and deployed to GitHub Pages.
 

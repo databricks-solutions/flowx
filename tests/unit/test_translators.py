@@ -187,14 +187,7 @@ class TestNotebookTranslator:
             "DatabricksNotebook",
             {
                 "notebookPath": "/Shared/x",
-                "libraries": [
-                    {
-                        "jar": (
-                            "@concat('/Volumes/x/', "
-                            "pipeline().globalParameters.libFileName)"
-                        )
-                    }
-                ],
+                "libraries": [{"jar": ("@concat('/Volumes/x/', pipeline().globalParameters.libFileName)")}],
             },
         )
         # Context with global parameter so the @concat resolves.
@@ -281,14 +274,7 @@ class TestNotebookTranslator:
             "DatabricksNotebook",
             {
                 "notebookPath": "/Shared/x",
-                "libraries": [
-                    {
-                        "jar": (
-                            "@concat('/Volumes/x/', "
-                            "pipeline().globalParameters.proj4jLibFileName)"
-                        )
-                    }
-                ],
+                "libraries": [{"jar": ("@concat('/Volumes/x/', pipeline().globalParameters.proj4jLibFileName)")}],
             },
         )
         ctx = TranslationContext()
@@ -815,7 +801,6 @@ class TestLookupTranslator:
         assert result.source_properties["file_name"] == "tables.json"
         assert result.source_properties.get("multiLineJson") is True
 
-
     def test_translate_lookup_substitutes_dataset_parameter_refs(self):
         """C-47 (LSC5-001): a file Lookup whose dataset folderPath references
         ``dataset().X`` substitutes the dataset reference's parameter bindings
@@ -932,9 +917,7 @@ class TestLookupCaseInsensitiveAndLinkedService:
         assert result.source_properties["dataset_type"] == "Json"
         assert result.source_properties["container"] == "configext"
         # Linked-service URL surfaces so the code generator can build abfss://...
-        assert result.source_properties["linked_service_url"] == (
-            "abfss://configext@myacct.dfs.core.windows.net"
-        )
+        assert result.source_properties["linked_service_url"] == ("abfss://configext@myacct.dfs.core.windows.net")
 
     def test_generated_file_lookup_notebook_uses_abfss_path(self):
         """LSC3-005 end-to-end: generated file-lookup notebook ships a real
@@ -1362,9 +1345,7 @@ class TestIfConditionTranslator:
         from flowx.translator.activity_translators.if_condition import translate
 
         # Declared Boolean type AND a seeded literal default -> bridge.
-        ctx = _context().with_variable_types(
-            {"continue": "Boolean"}, default_literals={"continue": "true"}
-        )
+        ctx = _context().with_variable_types({"continue": "Boolean"}, default_literals={"continue": "true"})
         activity = _make_activity(
             "Branch",
             "IfCondition",
@@ -1656,7 +1637,6 @@ class TestSwitchTranslator:
         assert result.cases[1].value == "incremental"
         assert len(result.default_activities) == 1
 
-
     def test_translate_switch_function_call_routes_through_bridge(self):
         """C-07 (CF-iter2-001 / CF-iter2-003): @toUpper(coalesce(...)) on the
         Switch on-expression lowers to a bridge SetVariable task rather than
@@ -1706,9 +1686,7 @@ class TestVariableInitTasks:
             ],
             variables={"uuid": AdfVariable(type="String", default_value="seed-value")},
         )
-        definitions = AdfDefinitions(
-            pipelines=[pipeline], datasets={}, linked_services={}, triggers=[]
-        )
+        definitions = AdfDefinitions(pipelines=[pipeline], datasets={}, linked_services={}, triggers=[])
         report = translate_pipeline(pipeline, definitions)
         # An init task is prepended before the regular activities.
         task_keys = [t.task_key for t in report.pipeline.tasks]
@@ -1736,9 +1714,7 @@ class TestVariableInitTasks:
                 "continue_f": AdfVariable(type="Boolean", default_value=False),
             },
         )
-        definitions = AdfDefinitions(
-            pipelines=[pipeline], datasets={}, linked_services={}, triggers=[]
-        )
+        definitions = AdfDefinitions(pipelines=[pipeline], datasets={}, linked_services={}, triggers=[])
         report = translate_pipeline(pipeline, definitions)
         init_true = next(t for t in report.pipeline.tasks if t.task_key == "_init_continue_t")
         init_false = next(t for t in report.pipeline.tasks if t.task_key == "_init_continue_f")
@@ -1763,9 +1739,7 @@ class TestVariableInitTasks:
                 ),
             ],
         )
-        definitions = AdfDefinitions(
-            pipelines=[pipeline], datasets={}, linked_services={}, triggers=[]
-        )
+        definitions = AdfDefinitions(pipelines=[pipeline], datasets={}, linked_services={}, triggers=[])
         report = translate_pipeline(pipeline, definitions)
         set_var = next(t for t in report.pipeline.tasks if t.name == "Reset")
         assert isinstance(set_var, SetVariableActivity)
@@ -1815,9 +1789,7 @@ class TestScheduleCompilation:
             properties=props,
             pipelines=[{"pipelineReference": {"referenceName": "pl_with_trigger"}}],
         )
-        definitions = AdfDefinitions(
-            pipelines=[pipeline], datasets={}, linked_services={}, triggers=[trigger]
-        )
+        definitions = AdfDefinitions(pipelines=[pipeline], datasets={}, linked_services={}, triggers=[trigger])
         return pipeline, definitions
 
     def test_schedule_trigger_daily_at_specific_time(self):
@@ -1959,9 +1931,7 @@ class TestScheduleCompilation:
                 }
             ],
         )
-        definitions = AdfDefinitions(
-            pipelines=[pipeline], datasets={}, linked_services={}, triggers=[trigger]
-        )
+        definitions = AdfDefinitions(pipelines=[pipeline], datasets={}, linked_services={}, triggers=[trigger])
         report = translate_pipeline(pipeline, definitions)
         assert report.pipeline.schedule is not None
         overrides = report.pipeline.schedule.get("parameter_overrides") or {}

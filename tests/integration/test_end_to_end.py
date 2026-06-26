@@ -1,6 +1,6 @@
 """End-to-end integration tests for the flowx translation pipeline.
 
-These tests exercise the full ingest -> translate -> prepare -> bundle pipeline
+These tests exercise the full profile -> translate -> prepare -> bundle pipeline
 against realistic ADF fixture files, simulating what happens when a user
 invokes the flowx skills.
 """

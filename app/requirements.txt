@@ -1,0 +1,10 @@
+# Databricks App dependencies for the flowx MCP server.
+# The flowx package itself is vendored next to app.py by deploy.sh, so only
+# third-party runtime dependencies are installed here (flowx's own deps plus
+# the MCP/HTTP server stack).
+mcp>=1.12
+uvicorn>=0.30
+starlette>=0.40
+databricks-sdk>=0.40
+pyyaml>=6.0
+sqlglot>=25.0

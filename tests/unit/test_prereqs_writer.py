@@ -18,7 +18,7 @@ class TestSecretsUnion:
                 content=(
                     "# Databricks notebook source\n"
                     "auth_token = dbutils.secrets.get("
-                    "scope=\"lakeh_a_pl_operational_sendMail\", key=\"auth-credential\")\n"
+                    'scope="lakeh_a_pl_operational_sendMail", key="auth-credential")\n'
                 ),
             )
         ]
@@ -52,10 +52,7 @@ class TestSecretsUnion:
         notebooks = [
             DabNotebook(
                 relative_path="notebooks/x.py",
-                content=(
-                    "auth_token = dbutils.secrets.get("
-                    "scope=\"scope_from_notebook\", key=\"key_from_notebook\")\n"
-                ),
+                content=('auth_token = dbutils.secrets.get(scope="scope_from_notebook", key="key_from_notebook")\n'),
             )
         ]
         secret_instructions = [

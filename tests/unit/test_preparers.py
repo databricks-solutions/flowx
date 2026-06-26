@@ -99,9 +99,7 @@ class TestNotebookPreparer:
         # SETUP.md SetupTask is emitted.
         kinds = [st.type for st in prepared.setup_tasks]
         assert "dynamic_notebook_dispatch" in kinds
-        config = next(
-            st.config for st in prepared.setup_tasks if st.type == "dynamic_notebook_dispatch"
-        )
+        config = next(st.config for st in prepared.setup_tasks if st.type == "dynamic_notebook_dispatch")
         assert config["task_key"] == "dispatch"
         assert "@trim" in config["expression"]
         # The notebook_path widget is registered with an empty default.
@@ -124,9 +122,7 @@ class TestNotebookPreparer:
         prepared = prepare_activity(activity)
         kinds = [st.type for st in prepared.setup_tasks]
         assert "unresolved_library" in kinds
-        config = next(
-            st.config for st in prepared.setup_tasks if st.type == "unresolved_library"
-        )
+        config = next(st.config for st in prepared.setup_tasks if st.type == "unresolved_library")
         assert config["task_key"] == "run_nb"
         assert config["library_type"] == "jar"
         assert "proj4jLibFileName" in config["missing"]
@@ -142,9 +138,9 @@ class TestNotebookPreparer:
         # No placeholder for an absolute workspace path.
         assert prepared.notebooks == []
 
-    def test_prepare_notebook_vendors_downloaded_workspace_notebook(self, monkeypatch):
+    def test_prepare_notebook_downloads_downloaded_workspace_notebook(self, monkeypatch):
         """When downloads are enabled and the SDK returns content, the workspace notebook
-        is vendored into src/notebooks/ under the workspace basename, and the task is
+        is downloaded into src/notebooks/ under the workspace basename, and the task is
         bound to the default cluster."""
         monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
         monkeypatch.setattr(
@@ -164,7 +160,7 @@ class TestNotebookPreparer:
         # skips ../src/ paths because flowx-generated notebooks are
         # serverless-only; downloaded notebooks need classic compute).
         assert prepared.task["job_cluster_key"] == "default_cluster"
-        # Notebook vendored under the workspace basename
+        # Notebook downloaded under the workspace basename
         assert len(prepared.notebooks) == 1
         assert prepared.notebooks[0].relative_path == "notebooks/transform.py"
         assert "from /Shared/ETL/transform" in prepared.notebooks[0].content
@@ -188,7 +184,7 @@ class TestNotebookPreparer:
 
     def test_prepare_notebook_falls_back_to_in_place_when_download_fails(self, monkeypatch):
         """If downloads are enabled but the SDK returns None, behavior matches the
-        legacy in-place reference (no vendor, no cluster bind in the preparer)."""
+        legacy in-place reference (no download, no cluster bind in the preparer)."""
         monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
         monkeypatch.setattr(
             "flowx.preparer.activity_preparers.notebook.download_notebook",
@@ -415,8 +411,7 @@ class TestWebActivityPreparer:
         )
         prepared = prepare_activity(activity)
         assert any(
-            s.scope == "lakeh_ls_keyvault" and s.key == "adapp-auccommonutilssp-secret"
-            for s in prepared.secrets
+            s.scope == "lakeh_ls_keyvault" and s.key == "adapp-auccommonutilssp-secret" for s in prepared.secrets
         )
         # The generic auth-credential placeholder is suppressed when a real
         # secret reference is available.
@@ -628,9 +623,7 @@ class TestForEachPreparer:
         # inputs now reference the bridge task value, not the @split string.
         assert prepared.task["for_each_task"]["inputs"] == "{{tasks.loop_inputs_bridge.values.items}}"
         # ForEach depends on the bridge so the value is materialised first.
-        assert any(
-            dep.get("task_key") == "loop_inputs_bridge" for dep in prepared.task.get("depends_on") or []
-        )
+        assert any(dep.get("task_key") == "loop_inputs_bridge" for dep in prepared.task.get("depends_on") or [])
 
     def test_for_each_with_inner_if_condition_carries_branches(self):
         """Change foreach-inner-extra-tasks (P0): CF-001.
@@ -794,9 +787,7 @@ class TestCrossForEachVariableReadDetection:
         )
         pipeline = Pipeline(name="cross_foreach_pipe", tasks=[loop, sibling])
         wf = prepare_workflow(pipeline)
-        rollups = [
-            st for st in wf.setup_tasks if st.type == "manual_variable_rollup"
-        ]
+        rollups = [st for st in wf.setup_tasks if st.type == "manual_variable_rollup"]
         assert len(rollups) == 1
         config = rollups[0].config
         assert config["variable_name"] == "continue"
@@ -833,9 +824,7 @@ class TestCrossForEachVariableReadDetection:
             tasks=[parent_setter, loop, sibling],
         )
         wf = prepare_workflow(pipeline)
-        rollups = [
-            st for st in wf.setup_tasks if st.type == "manual_variable_rollup"
-        ]
+        rollups = [st for st in wf.setup_tasks if st.type == "manual_variable_rollup"]
         assert rollups == []
 
 
@@ -954,10 +943,50 @@ class TestMotifPreparer:
             motif_config={"sink_table": "raw.{schema_name}_{table_name}"},
         )
         prepared = prepare_activity(activity)
-        assert "notebook_task" in prepared.task
-        assert prepared.task["notebook_task"]["notebook_path"].endswith("bulk_ingest.py")
-        assert len(prepared.notebooks) == 1
-        assert "metadata_driven_bulk_copy" in prepared.notebooks[0].content
+        # Default (non-consolidated) metadata-driven bulk copy now becomes a for_each_task that runs
+        # one Spark JDBC read per source table. With no resolved lookup_values, a runtime
+        # control-table lookup task seeds the iteration inputs.
+        assert "for_each_task" in prepared.task
+        for_each = prepared.task["for_each_task"]
+        assert for_each["inputs"] == "{{tasks.bulk_ingest_control_lookup.values.items}}"
+        assert for_each["task"]["notebook_task"]["base_parameters"]["item"] == "{{input}}"
+        assert prepared.task["depends_on"] == [{"task_key": "bulk_ingest_control_lookup"}]
+        assert [t["task_key"] for t in prepared.extra_tasks] == ["bulk_ingest_control_lookup"]
+        # inner per-item read notebook + the control-lookup seed notebook
+        assert {nb.relative_path for nb in prepared.notebooks} == {
+            "notebooks/bulk_ingest_ingest.py",
+            "notebooks/bulk_ingest_control_lookup.py",
+        }
+
+    def test_metadata_driven_for_each_uses_static_inputs_when_lookup_values_resolved(self):
+        """Resolved control rows are inlined as the for_each_task inputs -- no runtime lookup task."""
+        import json
+
+        from flowx.models.ir import MotifActivity
+
+        rows = [{"schema_name": "dbo", "table_name": "orders"}, {"schema_name": "dbo", "table_name": "customers"}]
+        activity = MotifActivity(
+            **_make_base("Bulk Ingest", "bulk_ingest"),
+            motif_id="metadata_driven_bulk_copy",
+            display_name="Metadata-driven bulk copy",
+            databricks_replacement="for_each_ingestion",
+            matched_activity_names=["GetTableList", "ForEachTable", "CopyTable"],
+            source_type_hint="database",
+            motif_config={"sink_table": "raw.{schema_name}_{table_name}", "copy_scope": "src_db"},
+            lookup_values=rows,
+        )
+        prepared = prepare_activity(activity)
+        for_each = prepared.task["for_each_task"]
+        assert json.loads(for_each["inputs"]) == rows  # inlined literal JSON array
+        assert prepared.extra_tasks == []  # no control-lookup seed task
+        assert "depends_on" not in prepared.task or all(
+            d["task_key"] != "bulk_ingest_control_lookup" for d in prepared.task.get("depends_on", [])
+        )
+        assert [nb.relative_path for nb in prepared.notebooks] == ["notebooks/bulk_ingest_ingest.py"]
+        # inner read notebook targets the configured sink + secret scope
+        body = prepared.notebooks[0].content
+        assert 'dbutils.secrets.get(scope="src_db"' in body
+        assert "raw.{schema_name}_{table_name}" in body
 
 
 class TestSwitchPreparer:

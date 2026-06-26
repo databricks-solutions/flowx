@@ -1,10 +1,10 @@
-# Flowx Changelog
+# flowx Changelog
 
-All notable changes to Flowx will be documented in this file.
+All notable changes to flowx will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.0.1]
+## [0.1.0]
 
 ### Added
-- Initial release of the Flowx library
+- Initial release of the flowx library

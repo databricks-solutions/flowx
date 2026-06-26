@@ -1,0 +1,17 @@
+{
+  "name": "flowx",
+  "owner": {
+    "name": "Greg Hansen",
+    "email": "gregory.hansen@databricks.com"
+  },
+  "plugins": [
+    {
+      "name": "flowx",
+      "source": "./",
+      "description": "Translate data pipelines to Databricks Lakeflow Jobs via Declarative Automation Bundles. Deterministic translation for known activity types with agentic fallback.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "keywords": ["adf", "databricks", "migration", "dabs", "lakeflow", "orchestration", "data-pipelines"]
+    }
+  ]
+}

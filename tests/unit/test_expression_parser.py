@@ -248,9 +248,7 @@ class TestConcat:
         # C-01: factory globals collapse @concat parts to literal kinds,
         # so the whole concat should likewise be a literal string.
         ctx = TranslationContext(
-            global_parameters=MappingProxyType(
-                {"env_variable": "t", "deequLibFileName": "deequ-3.5.6.jar"}
-            ),
+            global_parameters=MappingProxyType({"env_variable": "t", "deequLibFileName": "deequ-3.5.6.jar"}),
         )
         result = resolve_expression(
             "@concat('/Volumes/datahub01', pipeline().globalParameters.env_variable, "
@@ -413,9 +411,7 @@ class TestStringFunctions:
     def test_substring_two_arg_form(self):
         """C-33 (VAREX4-001): ADF accepts substring(text, start) without an
         explicit length argument."""
-        result = resolve_expression(
-            "@substring(string(pipeline().parameters.params), 1)", _context()
-        )
+        result = resolve_expression("@substring(string(pipeline().parameters.params), 1)", _context())
         assert result is not None
         assert result.kind == "notebook_code"
         assert "[int(" in result.value
@@ -425,9 +421,7 @@ class TestStringFunctions:
         """C-33 (VAREX4-001): a trailing ``[N]`` on a function call lowers
         to notebook_code Python source so SetVariable activities wrapping
         ``@split(...)[0]`` actually resolve."""
-        result = resolve_expression(
-            "@split(pipeline().parameters.referenceDate,'/')[0]", _context()
-        )
+        result = resolve_expression("@split(pipeline().parameters.referenceDate,'/')[0]", _context())
         assert result is not None
         assert result.kind == "notebook_code"
         assert ".split(str('/'))" in result.value
