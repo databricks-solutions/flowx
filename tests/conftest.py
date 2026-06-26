@@ -17,6 +17,6 @@ def fixtures_dir():
 @pytest.fixture
 def adf_definitions():
     """Load all ADF definitions from the test fixtures directory."""
-    from orchestra.parser.adf_loader import load_adf_definitions
+    from flowx.parser.adf_loader import load_adf_definitions
 
     return load_adf_definitions(FIXTURES_DIR)

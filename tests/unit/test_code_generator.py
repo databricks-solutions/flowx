@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from orchestra.models.ir import (
+from flowx.models.ir import (
     AppendVariableActivity,
     CopyActivity,
     DeleteActivity,
@@ -20,7 +20,7 @@ from orchestra.models.ir import (
     WaitActivity,
     WebActivity,
 )
-from orchestra.preparer.code_generator import (
+from flowx.preparer.code_generator import (
     generate_append_variable_notebook,
     generate_copy_notebook,
     generate_delete_notebook,
@@ -284,7 +284,7 @@ class TestGenerateLookupNotebook:
         # File-source branch: no spark.sql(''), uses spark.read.format().load().
         assert "spark.sql" not in content
         assert "spark.read.format('json')" in content
-        assert ".option(\"multiline\", \"true\")" in content
+        assert '.option("multiline", "true")' in content
         assert "source_path" in content
 
 
@@ -351,9 +351,7 @@ class TestGenerateWebActivityNotebook:
                 method="GET",
                 authentication={"type": auth_type, "resource": "https://management.azure.com"},
             )
-            content = generate_web_activity_notebook(
-                activity, scope=f"msi_api_{auth_type.lower()}"
-            )
+            content = generate_web_activity_notebook(activity, scope=f"msi_api_{auth_type.lower()}")
             _assert_valid_python(content, f"msi_api ({auth_type})")
             assert "auth-credential" not in content
             assert "NotImplementedError" in content

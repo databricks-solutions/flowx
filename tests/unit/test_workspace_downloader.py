@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from orchestra.preparer import workspace_downloader
-from orchestra.preparer.workspace_downloader import (
+from flowx.preparer import workspace_downloader
+from flowx.preparer.workspace_downloader import (
     auth_available,
     download_dbfs_file,
     download_notebook,
@@ -19,7 +19,7 @@ class TestDownloadNotebook:
     def test_returns_none_when_sdk_not_available(self):
         """download_notebook returns None when databricks-sdk is not installed."""
         with patch.dict("sys.modules", {"databricks": None, "databricks.sdk": None}):
-            result = download_notebook("/Shared/orchestra/transform")
+            result = download_notebook("/Shared/flowx/transform")
             assert result is None
 
     def test_returns_none_on_import_error(self):
@@ -34,7 +34,7 @@ class TestDownloadNotebook:
             return original(name, *args, **kwargs)
 
         with patch("builtins.__import__", side_effect=mock_import):
-            result = download_notebook("/Shared/orchestra/transform")
+            result = download_notebook("/Shared/flowx/transform")
             assert result is None
 
 
@@ -90,10 +90,38 @@ class TestAuthAvailable:
         monkeypatch.setenv("DATABRICKS_TOKEN", "dapi-abc")
         assert auth_available() is True
 
+    def test_returns_true_when_oauth_m2m_env_set(self, monkeypatch):
+        # The MCP path: flowx hosted as a Databricks App injects the service
+        # principal's OAuth client id/secret (no PAT, no profile).
+        monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+        monkeypatch.delenv("DATABRICKS_TOKEN", raising=False)
+        monkeypatch.setenv("DATABRICKS_HOST", "https://example.cloud.databricks.com")
+        monkeypatch.setenv("DATABRICKS_CLIENT_ID", "sp-client-id")
+        monkeypatch.setenv("DATABRICKS_CLIENT_SECRET", "sp-secret")
+        monkeypatch.setattr(workspace_downloader, "_local_workspace_accessible", lambda: False)
+        monkeypatch.setattr(workspace_downloader, "_list_profiles", lambda: [])
+        assert auth_available() is True
+
     def test_returns_false_when_no_env_and_no_profiles(self, monkeypatch):
         monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
         monkeypatch.delenv("DATABRICKS_HOST", raising=False)
         monkeypatch.delenv("DATABRICKS_TOKEN", raising=False)
+        monkeypatch.delenv("DATABRICKS_CLIENT_ID", raising=False)
+        monkeypatch.delenv("DATABRICKS_CLIENT_SECRET", raising=False)
+        monkeypatch.setattr(workspace_downloader, "_local_workspace_accessible", lambda: False)
+        monkeypatch.setattr(workspace_downloader, "_is_databricks_runtime", lambda: False)
+        monkeypatch.setattr(workspace_downloader, "_list_profiles", lambda: [])
+        assert auth_available() is False
+
+    def test_returns_false_when_host_set_without_token_or_client_creds(self, monkeypatch):
+        # HOST alone must not satisfy the check (incomplete credentials).
+        monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+        monkeypatch.delenv("DATABRICKS_TOKEN", raising=False)
+        monkeypatch.delenv("DATABRICKS_CLIENT_ID", raising=False)
+        monkeypatch.delenv("DATABRICKS_CLIENT_SECRET", raising=False)
+        monkeypatch.setenv("DATABRICKS_HOST", "https://example.cloud.databricks.com")
+        monkeypatch.setattr(workspace_downloader, "_local_workspace_accessible", lambda: False)
+        monkeypatch.setattr(workspace_downloader, "_is_databricks_runtime", lambda: False)
         monkeypatch.setattr(workspace_downloader, "_list_profiles", lambda: [])
         assert auth_available() is False
 

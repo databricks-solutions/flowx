@@ -14,14 +14,14 @@ import re
 import pytest
 import yaml
 
-from orchestra.bundler.dab_writer import write_bundle
-from orchestra.models.ir import (
+from flowx.bundler.dab_writer import write_bundle
+from flowx.models.ir import (
     CopyActivity,
     SetVariableActivity,
 )
-from orchestra.parser.adf_loader import load_adf_definitions
-from orchestra.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
-from orchestra.translator.engine import translate_pipeline
+from flowx.parser.adf_loader import load_adf_definitions
+from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
+from flowx.translator.engine import translate_pipeline
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -406,7 +406,7 @@ class TestLookupCoverage:
         report = translated_pipelines.get("pl_test_lookup_coverage")
         if report is None:
             pytest.skip("pl_test_lookup_coverage not in translated_pipelines")
-        from orchestra.models.ir import LookupActivity
+        from flowx.models.ir import LookupActivity
 
         lookups = [t for t in report.pipeline.tasks if isinstance(t, LookupActivity)]
         assert len(lookups) == 2
@@ -419,7 +419,7 @@ class TestDeleteCoverage:
         report = translated_pipelines.get("pl_test_delete_coverage")
         if report is None:
             pytest.skip("pl_test_delete_coverage not in translated_pipelines")
-        from orchestra.models.ir import DeleteActivity
+        from flowx.models.ir import DeleteActivity
 
         deletes = [t for t in report.pipeline.tasks if isinstance(t, DeleteActivity)]
         assert len(deletes) == 1
@@ -432,7 +432,7 @@ class TestWaitCoverage:
         report = translated_pipelines.get("pl_test_wait_coverage")
         if report is None:
             pytest.skip("pl_test_wait_coverage not in translated_pipelines")
-        from orchestra.models.ir import WaitActivity
+        from flowx.models.ir import WaitActivity
 
         waits = [t for t in report.pipeline.tasks if isinstance(t, WaitActivity)]
         assert len(waits) == 2
@@ -445,7 +445,7 @@ class TestFilterCoverage:
         report = translated_pipelines.get("pl_test_filter_coverage")
         if report is None:
             pytest.skip("pl_test_filter_coverage not in translated_pipelines")
-        from orchestra.models.ir import FilterActivity
+        from flowx.models.ir import FilterActivity
 
         filters = [t for t in report.pipeline.tasks if isinstance(t, FilterActivity)]
         assert len(filters) >= 1
@@ -458,7 +458,7 @@ class TestAppendVariableCoverage:
         report = translated_pipelines.get("pl_test_appendvariable_coverage")
         if report is None:
             pytest.skip("pl_test_appendvariable_coverage not in translated_pipelines")
-        from orchestra.models.ir import AppendVariableActivity
+        from flowx.models.ir import AppendVariableActivity
 
         appends = [t for t in report.pipeline.tasks if isinstance(t, AppendVariableActivity)]
         assert len(appends) == 3

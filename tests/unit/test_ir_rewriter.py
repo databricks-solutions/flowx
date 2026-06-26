@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from orchestra.models.ir import (
+from flowx.models.ir import (
     CopyActivity,
     Dependency,
     ForEachActivity,
@@ -15,7 +15,7 @@ from orchestra.models.ir import (
     SwitchCase,
     WebActivity,
 )
-from orchestra.parser.ir_rewriter import rewrite_pipeline_expressions
+from flowx.parser.ir_rewriter import rewrite_pipeline_expressions
 
 
 def _base(task_key: str, name: str | None = None) -> dict[str, object]:

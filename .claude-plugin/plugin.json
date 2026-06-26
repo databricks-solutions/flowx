@@ -1,6 +1,6 @@
 {
-  "name": "orchestra",
-  "version": "0.2.0",
+  "name": "flowx",
+  "version": "0.1.0",
   "description": "Translate Azure Data Factory pipelines to Databricks Lakeflow Jobs via Declarative Automation Bundles. Deterministic translation for known activity types with agentic fallback.",
   "author": {
     "name": "Greg Hansen",
@@ -9,10 +9,10 @@
   "license": "MIT",
   "keywords": ["adf", "databricks", "migration", "dabs", "lakeflow", "orchestration", "azure-data-factory"],
   "skills": [
-    "./skills/setup",
-    "./skills/ingest",
-    "./skills/translate",
-    "./skills/prepare",
-    "./skills/migrate"
+    "./skills/flowx-setup",
+    "./skills/flowx-discover",
+    "./skills/flowx-convert",
+    "./skills/flowx-package",
+    "./skills/flowx-migrate"
   ]
 }

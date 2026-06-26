@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from types import MappingProxyType
 
-from orchestra.models.ir import TranslationContext
-from orchestra.translator.activity_translators.resolve import (
+from flowx.models.ir import TranslationContext
+from flowx.translator.activity_translators.resolve import (
     resolve_dict_values,
     resolve_field,
     resolve_field_int,

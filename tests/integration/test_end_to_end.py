@@ -1,8 +1,8 @@
-"""End-to-end integration tests for the orchestra translation pipeline.
+"""End-to-end integration tests for the flowx translation pipeline.
 
-These tests exercise the full ingest -> translate -> prepare -> bundle pipeline
+These tests exercise the full profile -> translate -> prepare -> bundle pipeline
 against realistic ADF fixture files, simulating what happens when a user
-invokes the orchestra skills.
+invokes the flowx skills.
 """
 
 from __future__ import annotations
@@ -12,17 +12,17 @@ import ast
 import pytest
 import yaml
 
-from orchestra.bundler.dab_writer import write_bundle
-from orchestra.models.adf_ast import AdfDefinitions, TranslationStrategy
-from orchestra.models.ir import (
+from flowx.bundler.dab_writer import write_bundle
+from flowx.models.adf_ast import AdfDefinitions, TranslationStrategy
+from flowx.models.ir import (
     CopyActivity,
     ForEachActivity,
     PlaceholderActivity,
     SwitchActivity,
 )
-from orchestra.parser.adf_loader import build_inventory
-from orchestra.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
-from orchestra.translator.engine import translate_pipeline
+from flowx.parser.adf_loader import build_inventory
+from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
+from flowx.translator.engine import translate_pipeline
 
 # ---------------------------------------------------------------------------
 # TestTranslateAllPipelines — simulates "translate all pipelines"
@@ -107,7 +107,7 @@ class TestTranslateSpecificPipeline:
         pipeline = pipeline_by_name("pipeline_notebook_basic")
         report = translate_pipeline(pipeline, adf_definitions)
         assert report.deterministic_count == 1
-        from orchestra.models.ir import NotebookActivity
+        from flowx.models.ir import NotebookActivity
 
         nb = report.pipeline.tasks[0]
         assert isinstance(nb, NotebookActivity)

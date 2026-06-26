@@ -1,7 +1,7 @@
 # See https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-issue-forms
 # and https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-githubs-form-schema
 name: Bug Report
-description: Something is not working with Orchestra
+description: Something is not working with flowx
 title: "[BUG]: "
 labels: ["bug"]
 body:

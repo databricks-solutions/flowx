@@ -1,12 +1,12 @@
 ---
 title: Translation options
-description: Control orchestra's translation behavior and outputs
+description: Control flowx's translation behavior and outputs
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
-Orchestra defers some architectural choices to allow users to specify properties of the output jobs. When options are available for controlling
-translation, the agent session prompts the user for their preferences.
+flowx defers some architectural choices to allow users to specify properties of the output jobs. When options are available for controlling
+translation, the agent session prompts the user for their configuration.
 
 ## copy_activity_paradigm
 
@@ -52,8 +52,8 @@ must use a [query-based connector](https://docs.databricks.com/aws/en/ingestion/
 ## consolidate_motif:&lt;motif_id&gt;
 
 For every multi-activity motif the detector matches in a pipeline (`incremental_load_watermark`,
-`rest_api_pagination`, `metadata_driven_bulk_copy`, ...), orchestra raises a per-motif
-question with id `consolidate_motif:<motif_id>` so each detected pattern can be approved
+`rest_api_pagination`, `metadata_driven_bulk_copy`, ...), flowx raises a per-motif
+option with id `consolidate_motif:<motif_id>` so each detected pattern can be approved
 or rejected independently.
 
 | Value         | Default | Behavior                                                                                                                                 |
@@ -70,7 +70,7 @@ pattern.
 
 ## metadata_driven_consolidate
 
-Configures orchestra to detect and consolidate ingestion pipelines that read from configuration and run parameterized data copying. Allows users to create a consolidated pipeline.
+Configures flowx to detect and consolidate ingestion pipelines that read from configuration and run parameterized data copying. Allows users to create a consolidated pipeline.
 
 | Value         | Default | Behavior                                                                                                                                                           |
 |---------------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -82,3 +82,46 @@ The following are required to consolidate into a single ingestion pipeline:
 - Access to query the file or database where metadata is stored or a CSV file containing the exported metadata
 - The number of metadata rows or objects must be less than 250
 </Callout>
+
+## Discover complexity report
+
+The `discover` phase emits `<output_dir>/metadata/profile_report.csv` (default `./flowx_output/metadata/profile_report.csv`), one row per pipeline with the following columns:
+
+| Column | Description |
+|--------|-------------|
+| `pipeline` | Pipeline name |
+| `activities` | Total activity count |
+| `datasets` | Number of referenced datasets |
+| `linked_services` | Number of referenced linked services |
+| `collapsible_patterns` | Number of detected collapsible (motif) patterns |
+| `databricks_native_activities` | Count of Databricks-native activities (notebook/jar/python/job) |
+| `control_flow_activities` | Count of control-flow / parameter-setting activities (ForEach/If/Switch/SetVariable/AppendVariable/Filter/Wait/Until) |
+| `other_activities` | Count of all other activities (Copy/Web/Lookup/etc.) |
+| `complexity_score` | Weighted score (see below) |
+| `complexity_size` | T-shirt size (`S`/`M`/`L`/`XL`) derived from `complexity_score` |
+
+The weighted score is `sum(activity weights) + #datasets + #linked_services + #collapsible_patterns`, where activity weights are:
+
+- Databricks-native (notebook/jar/python/job) = **1** (simplest)
+- control-flow / parameter-setting (ForEach/If/Switch/SetVariable/AppendVariable/Filter/Wait/Until) = **2**
+- all other activities (Copy/Web/Lookup/etc.) = **3** (hardest)
+
+## Coverage results table & dashboard (Genie Code)
+
+When running with workspace auth (Genie Code, or a configured Databricks profile) the `package`
+phase surfaces three optional inputs — `results_table`, `results_warehouse_id`, and
+`install_dashboard` — to persist coverage and visualize it:
+
+- **`record-results`** writes one row **per pipeline per run** to the supplied Unity Catalog
+  table (`catalog.schema.table`), combining the complexity columns above with the
+  deterministic/agentic/unsupported coverage breakdown. Every row is stamped with a shared
+  **`run_id`** (UUID), **`run_date`** (`CURRENT_TIMESTAMP()`), and **`run_by`**
+  (`CURRENT_USER()`), so coverage is trackable across runs and users.
+- **`install-dashboard`** creates and publishes an AI/BI (Lakeview) dashboard over that table —
+  KPI counters (pipelines, coverage %, deterministic/agentic/unsupported activity totals), a
+  pipelines-by-complexity bar chart, a coverage-over-runs line, and a per-pipeline coverage
+  table.
+
+The SQL warehouse is auto-detected (preferring a running serverless warehouse) when
+`results_warehouse_id` is left blank. Both run via the Databricks SDK and degrade gracefully
+when workspace auth or a warehouse is unavailable.

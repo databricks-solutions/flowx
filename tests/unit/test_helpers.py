@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from orchestra.models.dab import DabNotebook
-from orchestra.models.ir import (
+from flowx.models.dab import DabNotebook
+from flowx.models.ir import (
     Dependency,
     SetVariableActivity,
 )
-from orchestra.models.source_types import (
+from flowx.models.source_types import (
     FILE_SOURCE_TYPES,
     JDBC_SOURCE_TYPES,
     REST_SOURCE_TYPES,
 )
-from orchestra.preparer.activity_preparers.helpers import (
+from flowx.preparer.activity_preparers.helpers import (
     build_notebook_activity_task,
     build_notebook_task_artifacts,
     make_jdbc_secrets,
     resolve_param_value,
 )
-from orchestra.preparer.workflow_preparer import (
+from flowx.preparer.workflow_preparer import (
     PreparedActivity,
     PreparedArtifacts,
     merge_prepared_artifacts,
@@ -181,7 +181,7 @@ class TestMergePreparedArtifacts:
         assert merged.notebooks[0].relative_path == "a.py"
 
     def test_extends_each_collection(self):
-        from orchestra.models.dab import SecretInstruction, SetupTask
+        from flowx.models.dab import SecretInstruction, SetupTask
 
         prepared = PreparedActivity(
             task={"task_key": "t"},
@@ -211,8 +211,8 @@ class TestExpressionParserHandlerFactories:
     ``getPastTime``.  Sanity-check each handler still resolves end-to-end."""
 
     def test_add_unit_handlers_emit_correct_timedelta_keyword(self):
-        from orchestra.models.ir import TranslationContext
-        from orchestra.parser.expression_parser import resolve_expression
+        from flowx.models.ir import TranslationContext
+        from flowx.parser.expression_parser import resolve_expression
 
         cases = [
             ("@addDays('2024-01-01', 7)", "timedelta(days=7)"),
@@ -227,8 +227,8 @@ class TestExpressionParserHandlerFactories:
             assert fragment in result.value
 
     def test_now_offset_handlers_emit_correct_sign(self):
-        from orchestra.models.ir import TranslationContext
-        from orchestra.parser.expression_parser import resolve_expression
+        from flowx.models.ir import TranslationContext
+        from flowx.parser.expression_parser import resolve_expression
 
         future = resolve_expression("@getFutureTime(1, 'Day')", TranslationContext())
         past = resolve_expression("@getPastTime(1, 'Day')", TranslationContext())

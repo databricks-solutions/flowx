@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from orchestra.bundler.notebook_writer import write_notebooks
-from orchestra.models.dab import DabNotebook
+from flowx.bundler.notebook_writer import write_notebooks
+from flowx.models.dab import DabNotebook
 
 
 class TestWriteNotebooks:
@@ -34,7 +34,7 @@ class TestWriteNotebooks:
             DabNotebook(relative_path="notebooks/run.py", content="print('first')"),
             DabNotebook(relative_path="notebooks/run.py", content="print('second')"),
         ]
-        with caplog.at_level(logging.WARNING, logger="orchestra.bundler.notebook_writer"):
+        with caplog.at_level(logging.WARNING, logger="flowx.bundler.notebook_writer"):
             out = write_notebooks(notebooks, tmp_path)
         assert len(out) == 2
         assert (tmp_path / "notebooks" / "run.py").read_text().rstrip() == "print('first')"
