@@ -36,22 +36,54 @@ flowx is a Claude Code plugin that converts Azure Data Factory (ADF) pipeline de
 
 ## Quick Start
 
-1. Install the plugin in Claude Code:
-   ```bash
-   claude plugin install ghanse/flowx
+1. Add the flowx marketplace and install the plugin in Claude Code:
    ```
+   /plugin marketplace add databricks-solutions/flowx
+   /plugin install flowx@flowx
+   ```
+   Then run `/reload-plugins` to activate it.
 
-2. Run the end-to-end migration:
+2. Set up the runtime (run once):
+   ```
+   /flowx:flowx-setup
+   ```
+   This auto-detects your environment and prepares the right execution path —
+   a local Python virtual environment for Claude Code, or a deployed MCP server
+   for Databricks Genie Code. See [Setup](#setup) for details.
+
+3. Run the end-to-end migration:
    ```
    /flowx:flowx-migrate
    ```
 
    Or run individual phases:
    ```
-   /flowx:flowx-discover     # Parse ADF JSON, produce inventory + complexity report
-   /flowx:flowx-convert   # Deterministic + agentic translation
+   /flowx:flowx-discover    # Parse ADF JSON, produce inventory + complexity report
+   /flowx:flowx-convert     # Deterministic + agentic translation
    /flowx:flowx-package     # Generate DABs project
    ```
+
+## Setup
+
+`/flowx:flowx-setup` keys off the `DATABRICKS_RUNTIME_VERSION` environment variable
+(the same signal the rest of the plugin uses to detect Databricks) and prepares one
+of two execution paths:
+
+- **Local / Claude Code (virtual environment).** The phases run from the plugin's
+  CLI. Setup runs `scripts/bootstrap.sh`, which creates a `.venv`, installs
+  `requirements.txt`, and writes the resolved interpreter path to a
+  `.migration-venv` marker file that the phase skills read. Optionally, a local
+  (stdio) MCP server can be registered to drive the phases through MCP tools
+  instead of the CLI.
+
+- **Databricks Genie Code (MCP server, no virtual environment).** The phases run as
+  a single `flowx` MCP tool hosted on a Databricks App. Setup runs `app/deploy.sh`,
+  which stages a self-contained bundle, syncs it to `/Workspace/Shared/mcp-flowx`,
+  and deploys the `mcp-flowx` app. You then grant app/data access and register the
+  app under Genie Code **Settings → MCP Servers**. No venv is created on this path.
+
+Run setup once before any other flowx skill, or again whenever the environment is
+missing.
 
 ## Supported ADF Activity Types
 
@@ -144,6 +176,10 @@ make clean        # Remove build artifacts
 ### Prerequisites
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) package manager
+
+These prerequisites are for contributing to the flowx project. Plugin *users* do not need
+`uv` — `/flowx:flowx-setup` provisions the runtime (a pip-based `.venv` locally, or
+the MCP server on Databricks).
 
 ## Contributing
 
