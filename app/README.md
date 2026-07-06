@@ -57,14 +57,25 @@ Register the stdio server with a local MCP client, e.g.:
 
 ## Deploy as a Databricks App (for Genie Code)
 
+**Recommended — the `deploy_app.py` notebook (SDK, runs on serverless).** Open `app/deploy_app.py`
+in the workspace and run it, setting the `repo_root` widget to the flowx checkout
+(e.g. `/Workspace/Shared/flowx`). It uses the Databricks SDK to stage a self-contained bundle (the
+app entrypoint plus a vendored copy of the pure-Python `flowx` package) to `/Workspace/Shared/mcp-flowx`
+and create/deploy the app (default name **`mcp-flowx`**). Because it uploads through the SDK Workspace
+API, it runs directly in a serverless Genie Code session — no CLI needed. The deployment logic lives in
+`app/deploy_helpers.py` (imported by the notebook, so it is also unit-testable).
+
+**CLI alternative — `deploy.sh`:**
+
 ```bash
-# Authenticated Databricks CLI (v0.230+) required.
+# Authenticated Databricks CLI (v0.230+) required — run from a web terminal or local machine.
 ./app/deploy.sh
 ```
 
-`deploy.sh` stages a self-contained bundle in a temporary directory outside the repo (the app entrypoint
-plus a vendored copy of the pure-Python `flowx` package), syncs it to your
-workspace, and creates/deploys the app (default name **`mcp-flowx`**).
+`deploy.sh` stages a self-contained bundle in a temporary directory outside the repo, syncs it to your
+workspace via `databricks sync`, and creates/deploys the app. `databricks apps deploy` / `sync` are
+not available from serverless notebook Python, which is why the notebook above is preferred inside
+Genie Code.
 
 > **Clone into `/Workspace/Shared`.** `deploy.sh` deploys the app source from
 > `/Workspace/Shared/<app-name>` because the app's service principal **cannot read
@@ -75,9 +86,9 @@ workspace, and creates/deploys the app (default name **`mcp-flowx`**).
 
 End-to-end, to use it from Genie Code:
 
-1. **Deploy** with `./app/deploy.sh`. The app is named `mcp-flowx` and deploys the
-   source from `/Workspace/Shared/mcp-flowx` (override with `APP_SOURCE_PATH`). The
-   script prints the app URL; the MCP endpoint is `<app-url>/mcp`.
+1. **Deploy** by running the `app/deploy_app.py` notebook (or `./app/deploy.sh` from a CLI session).
+   The app is named `mcp-flowx` and deploys the source from `/Workspace/Shared/mcp-flowx`. The
+   deployer prints the app URL; the MCP endpoint is `<app-url>/mcp`.
 2. **Grant app access:** give **Can use** on `mcp-flowx` to the users / service
    principals that will call it (Apps UI → *Permissions*, or
    `databricks apps set-permissions mcp-flowx ...`).
@@ -100,10 +111,11 @@ set the app env var `FLOWX_ALLOWED_ORIGINS` to your workspace URL and redeploy.
 MCP access is capped at **20 tools** across all servers; flowx exposes just **one** tool
 (`flowx`, with 12 commands), so it uses a single slot.
 
-> Run `./app/deploy.sh` from a Databricks CLI session (workspace web terminal or a
-> local machine) — `databricks apps` deploy is not available from serverless
-> notebook Python. See [Connect Genie Code to MCP servers](https://learn.microsoft.com/en-us/azure/databricks/genie-code/mcp)
-> and [host a custom MCP server](https://docs.databricks.com/aws/en/generative-ai/mcp/custom-mcp).
+> In serverless Genie Code, deploy with the `app/deploy_app.py` notebook (SDK-based). `./app/deploy.sh`
+> must run from a Databricks CLI session (workspace web terminal or a local machine), since
+> `databricks apps` deploy is not available from serverless notebook Python. See [Connect Genie Code
+> to MCP servers](https://learn.microsoft.com/en-us/azure/databricks/genie-code/mcp) and [host a
+> custom MCP server](https://docs.databricks.com/aws/en/generative-ai/mcp/custom-mcp).
 
 ## Troubleshooting
 

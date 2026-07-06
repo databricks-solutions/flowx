@@ -55,19 +55,19 @@ DETERMINISTIC_TYPES: set[str] = {
     "AppendVariable",
 }
 
-AGENTIC_TYPES: dict[str, str] = {
-    "ExecuteDataFlow": "adf-to-databricks:adf-dataflow-converter",
-    "Until": "adf-to-databricks:adf-pipeline-converter",
-    "SqlServerStoredProcedure": "adf-to-databricks:adf-pipeline-converter",
-    "AzureFunction": "adf-to-databricks:adf-pipeline-converter",
-    "WebHook": "adf-to-databricks:adf-pipeline-converter",
-    "Custom": "adf-to-databricks:adf-pipeline-converter",
-    "ExecuteSSISPackage": "adf-to-databricks:adf-pipeline-converter",
-    "AzureMLExecutePipeline": "adf-to-databricks:adf-pipeline-converter",
-    "GetMetadata": "adf-to-databricks:adf-pipeline-converter",
-    "Validation": "adf-to-databricks:adf-pipeline-converter",
-    "Fail": "adf-to-databricks:adf-pipeline-converter",
-    "Script": "adf-to-databricks:adf-pipeline-converter",
+AGENTIC_TYPES: set[str] = {
+    "ExecuteDataFlow",
+    "Until",
+    "SqlServerStoredProcedure",
+    "AzureFunction",
+    "WebHook",
+    "Custom",
+    "ExecuteSSISPackage",
+    "AzureMLExecutePipeline",
+    "GetMetadata",
+    "Validation",
+    "Fail",
+    "Script",
 }
 
 # Activity complexity weights (easiest first): Databricks-native ~1:1 tasks, then control-flow, then
@@ -195,21 +195,20 @@ def _parse_factory_global_parameters(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def classify_activity(activity_type: str) -> tuple[TranslationStrategy, str | None]:
+def classify_activity(activity_type: str) -> TranslationStrategy:
     """Classify an ADF activity type into a translation strategy.
 
     Args:
         activity_type: ADF activity type string (e.g. ``"Copy"``).
 
     Returns:
-        A ``(strategy, agentic_skill_name)`` tuple.  *agentic_skill_name* is
-        ``None`` for deterministic and unsupported strategies.
+        The :class:`TranslationStrategy` for the activity type.
     """
     if activity_type in DETERMINISTIC_TYPES:
-        return TranslationStrategy.DETERMINISTIC, None
+        return TranslationStrategy.DETERMINISTIC
     if activity_type in AGENTIC_TYPES:
-        return TranslationStrategy.AGENTIC, AGENTIC_TYPES[activity_type]
-    return TranslationStrategy.UNSUPPORTED, None
+        return TranslationStrategy.AGENTIC
+    return TranslationStrategy.UNSUPPORTED
 
 
 def build_inventory(definitions: AdfDefinitions) -> Inventory:
@@ -654,7 +653,7 @@ def _classify_activities(
         items: Accumulator list to append results to.
     """
     for activity in activities:
-        strategy, skill = classify_activity(activity.type)
+        strategy = classify_activity(activity.type)
         dep_names = [dependency.activity for dependency in activity.depends_on] if activity.depends_on else None
 
         items.append(
@@ -663,7 +662,6 @@ def _classify_activities(
                 activity_name=activity.name,
                 activity_type=activity.type,
                 strategy=strategy,
-                agentic_skill=skill,
                 depends_on=dep_names,
             )
         )
@@ -698,8 +696,6 @@ def _inventory_to_dict(inventory: Inventory, source_dir: str) -> dict[str, Any]:
             "type": item.activity_type,
             "strategy": item.strategy.value,
         }
-        if item.agentic_skill:
-            entry["skill"] = item.agentic_skill
         if item.depends_on:
             entry["depends_on"] = item.depends_on
         pipeline_map.setdefault(item.pipeline_name, []).append(entry)
@@ -901,7 +897,7 @@ def write_pipeline_arm(definitions: AdfDefinitions, metadata_dir: Path) -> list[
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-# Orchestra-managed entries under the shared output_dir, cleared at the start of each fresh run.
+# flowx-managed entries under the shared output_dir, cleared at the start of each fresh run.
 _MANAGED_OUTPUT_DIRS: tuple[str, ...] = ("metadata", ".work", "resources", "src", "setup")
 _MANAGED_OUTPUT_FILES: tuple[str, ...] = ("databricks.yml", "SETUP.md", "WARNINGS.md")
 
@@ -918,7 +914,7 @@ def clear_stale_outputs(output_dir: Path) -> None:
         output_dir: Migration output directory shared by all three phases.
 
     Notes:
-        Only orchestra-managed entries are removed (never the directory itself or unrelated
+        Only flowx-managed entries are removed (never the directory itself or unrelated
         files), so pointing ``output_dir`` at a populated directory stays safe.
     """
     for directory in _MANAGED_OUTPUT_DIRS:

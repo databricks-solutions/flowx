@@ -83,23 +83,20 @@ class TestClassifyActivity:
         assert DETERMINISTIC_TYPES == expected
 
         for atype in expected:
-            strategy, skill = classify_activity(atype)
+            strategy = classify_activity(atype)
             assert strategy is TranslationStrategy.DETERMINISTIC, f"{atype} should be DETERMINISTIC"
-            assert skill is None, f"{atype} should have no agentic skill"
 
     def test_classify_agentic_types(self):
-        """All agentic types are classified with correct skill names."""
-        for atype, expected_skill in AGENTIC_TYPES.items():
-            strategy, skill = classify_activity(atype)
+        """All agentic types are classified as AGENTIC."""
+        for atype in AGENTIC_TYPES:
+            strategy = classify_activity(atype)
             assert strategy is TranslationStrategy.AGENTIC, f"{atype} should be AGENTIC"
-            assert skill == expected_skill, f"{atype} skill should be {expected_skill}"
 
     def test_classify_unknown_types(self):
         """Unknown activity types are classified as UNSUPPORTED."""
         for unknown_type in ("Bogus", "SomeFutureActivity", "MagicTransform", ""):
-            strategy, skill = classify_activity(unknown_type)
+            strategy = classify_activity(unknown_type)
             assert strategy is TranslationStrategy.UNSUPPORTED
-            assert skill is None
 
 
 # ---------------------------------------------------------------------------
@@ -124,19 +121,11 @@ class TestBuildInventory:
         for item in inv.items:
             assert item.pipeline_name in pipeline_names
 
-    def test_build_inventory_agentic_items_have_skills(self, adf_definitions):
-        """Agentic inventory items have a non-None skill."""
+    def test_build_inventory_agentic_count_matches_items(self, adf_definitions):
+        """The agentic count matches the number of items classified AGENTIC."""
         inv = build_inventory(adf_definitions)
-        for item in inv.items:
-            if item.strategy is TranslationStrategy.AGENTIC:
-                assert item.agentic_skill is not None
-
-    def test_build_inventory_deterministic_items_no_skill(self, adf_definitions):
-        """Deterministic inventory items have no agentic skill."""
-        inv = build_inventory(adf_definitions)
-        for item in inv.items:
-            if item.strategy is TranslationStrategy.DETERMINISTIC:
-                assert item.agentic_skill is None
+        agentic_items = [i for i in inv.items if i.strategy is TranslationStrategy.AGENTIC]
+        assert len(agentic_items) == inv.agentic_count
 
 
 # ---------------------------------------------------------------------------

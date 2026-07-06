@@ -313,14 +313,10 @@ class TestInventoryAccuracy:
         assert len(det_items) == inv.deterministic_count
 
     def test_agentic_activities_identified(self, adf_definitions):
-        """Agentic activities are identified with correct skill mapping."""
+        """Agentic activities are identified and counted."""
         inv = build_inventory(adf_definitions)
         agentic_items = [i for i in inv.items if i.strategy is TranslationStrategy.AGENTIC]
         assert len(agentic_items) == inv.agentic_count
-        for item in agentic_items:
-            assert item.agentic_skill is not None
-            # All agentic skills should reference a known skill
-            assert "adf-to-databricks" in item.agentic_skill
 
     def test_mixed_pipeline_classification(self, adf_definitions):
         """Mixed pipeline has both deterministic and agentic items."""
