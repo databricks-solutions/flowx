@@ -137,9 +137,9 @@ if [ ! -x "$VENV_DIR/bin/python" ]; then
     rm -rf "$VENV_DIR"
     "$PYTHON_BIN" -m venv --without-pip "$VENV_DIR"
     echo "Bootstrapping pip via get-pip.py ..."
-    curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/_orchestra_get_pip.py
-    "$VENV_DIR/bin/python" /tmp/_orchestra_get_pip.py --quiet
-    rm -f /tmp/_orchestra_get_pip.py
+    curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/_flowx_get_pip.py
+    "$VENV_DIR/bin/python" /tmp/_flowx_get_pip.py --quiet
+    rm -f /tmp/_flowx_get_pip.py
   fi
 else
   echo "Using existing virtual environment at $VENV_DIR ..."

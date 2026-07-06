@@ -44,17 +44,18 @@ fi
 ## Path A — Databricks Genie Code (MCP, no virtual environment)
 
 In Genie Code the phases run on the deployed app, so **do not run `bootstrap.sh` and do not create a
-venv** — it isn't needed. Deploy the MCP server instead:
+venv** — it isn't needed. Deploy the MCP server instead.
 
-```bash
-bash <plugin_dir>/app/deploy.sh
-```
+**Recommended (works on serverless): run the `app/deploy_app.py` notebook.** It uses the Databricks
+SDK to stage a self-contained bundle (the app entrypoint plus a vendored copy of the flowx source)
+to **`/Workspace/Shared/mcp-flowx`** and create/deploy the **`mcp-flowx`** Databricks App. Set its
+`repo_root` widget to the flowx checkout (e.g. `/Workspace/Shared/flowx`). Because it uploads through
+the SDK Workspace API, it runs directly in a serverless Genie Code session. The notebook prints the
+app URL; the MCP endpoint is `<app-url>/mcp`.
 
-`app/deploy.sh` stages a self-contained bundle (the app entrypoint plus a vendored copy of the
-flowx source), syncs it to **`/Workspace/Shared/mcp-flowx`**, and creates/deploys the
-**`mcp-flowx`** Databricks App. The script prints the app URL; the MCP endpoint is
-`<app-url>/mcp`. It only needs the Databricks CLI and a system `python3` (for parsing CLI output) —
-**not** an flowx venv.
+**CLI alternative:** `bash <plugin_dir>/app/deploy.sh` does the same via the Databricks CLI
+(`apps deploy` / `sync`), but those commands require a CLI session — run it from a workspace web
+terminal or a local machine, **not** serverless notebook Python.
 
 > **Clone into a shared location.** The app's service principal cannot read private
 > `/Workspace/Users/<you>` folders by default, so `deploy.sh` deploys the source from
@@ -77,11 +78,11 @@ Once added, the `discover`, `convert`, `package`, and `migrate` skills run **ent
 `flowx` MCP tool** (`flowx(command="…", parameters={…})`) — there is no venv, no
 `bootstrap.sh`, and no `.migration-venv` marker on this path.
 
-> **Note:** `databricks apps` deploy commands require a Databricks CLI session (workspace web
-> terminal or a local machine), not serverless notebook Python. If the Genie session can't shell
-> out to the CLI, run `app/deploy.sh` from the web terminal. (Same constraint as `databricks bundle
-> deploy`.) If you see `Error: please specify target`, the CLI attached to a stray `databricks.yml`;
-> `deploy.sh` already isolates against this, so re-run it as-is.
+> **Note:** Prefer the `app/deploy_app.py` notebook in serverless Genie Code — the SDK works there,
+> whereas `databricks apps deploy` / `sync` (used by `deploy.sh`) need a CLI session (web terminal
+> or local machine). Only fall back to `deploy.sh` from a web terminal. If `deploy.sh` reports
+> `Error: please specify target`, the CLI attached to a stray `databricks.yml`; it already isolates
+> against this, so re-run it as-is.
 
 ---
 

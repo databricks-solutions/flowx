@@ -307,7 +307,6 @@ class InventoryItem:
         activity_name: Activity display name.
         activity_type: ADF activity type string.
         strategy: Determined translation strategy.
-        agentic_skill: Skill identifier when strategy is ``AGENTIC``.
         depends_on: Upstream activity names.
     """
 
@@ -315,7 +314,6 @@ class InventoryItem:
     activity_name: str
     activity_type: str
     strategy: TranslationStrategy
-    agentic_skill: str | None = None
     depends_on: list[str] | None = None
 
 

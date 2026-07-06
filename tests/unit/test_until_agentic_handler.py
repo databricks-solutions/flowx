@@ -48,7 +48,6 @@ def test_nested_until_gap_carries_full_arm_json():
     # full ARM JSON, not just typeProperties: name + nested loop body present
     assert raw.get("name") == "Poll Until Ready"
     assert raw["typeProperties"]["activities"][0]["name"] == "Wait A Bit"
-    assert until_gaps[0].recommended_skill == "adf-to-databricks:adf-pipeline-converter"
 
 
 def test_until_placeholder_ir_node_carries_arm_json():
@@ -68,4 +67,3 @@ def test_until_placeholder_ir_node_carries_arm_json():
     ph = _find(report.pipeline.tasks)
     assert ph is not None and ph.raw_definition is not None
     assert ph.raw_definition.get("type") == "Until"
-    assert ph.agentic_skill == "adf-to-databricks:adf-pipeline-converter"

@@ -5,7 +5,7 @@ This reference defines the mapping between Azure Data Factory activity types and
 ## Strategy Definitions
 
 - **Deterministic** — Handled by a built-in Python translator module. Fast, reliable, no LLM required. These mappings are well-defined and produce consistent output.
-- **Agentic** — Handled by an LLM-assisted skill from the `adf-to-databricks-plugin`. Required when the ADF activity has complex semantics, requires interpretation, or lacks a direct Databricks equivalent.
+- **Agentic** — Handled by agentic (LLM-assisted) translation performed by the agent. Required when the ADF activity has complex semantics, requires interpretation, or lacks a direct Databricks equivalent.
 - **Unsupported** — No automated translation path. Requires manual intervention.
 
 ## Activity Mapping Table
@@ -26,19 +26,19 @@ This reference defines the mapping between Azure Data Factory activity types and
 | DatabricksJob | Deterministic | `databricks_job.py` | `run_job_task` |
 | Switch | Deterministic | `switch.py` | chained `condition_task`s |
 | Wait | Deterministic | `wait.py` | `notebook_task` (`time.sleep`) |
-| ExecuteDataFlow | Agentic | `adf-to-databricks:adf-dataflow-converter` | DLT pipeline or PySpark notebook |
-| Until | Agentic | `adf-to-databricks:adf-pipeline-converter` | while-loop notebook |
+| ExecuteDataFlow | Agentic | Agentic (LLM-assisted) | DLT pipeline or PySpark notebook |
+| Until | Agentic | Agentic (LLM-assisted) | while-loop notebook |
 | Filter | Deterministic | `filter.py` | `notebook_task` (filter array + task values) |
 | AppendVariable | Deterministic | `append_variable.py` | `notebook_task` (append to array task value) |
-| SqlServerStoredProcedure | Agentic | `adf-to-databricks:adf-pipeline-converter` | SQL notebook |
-| AzureFunction | Agentic | `adf-to-databricks:adf-pipeline-converter` | webhook/REST notebook |
-| WebHook | Agentic | `adf-to-databricks:adf-pipeline-converter` | REST notebook |
-| Custom | Agentic | `adf-to-databricks:adf-pipeline-converter` | custom notebook |
-| ExecuteSSISPackage | Agentic | `adf-to-databricks:adf-pipeline-converter` | PySpark notebook |
-| AzureMLExecutePipeline | Agentic | `adf-to-databricks:adf-pipeline-converter` | MLflow notebook |
-| Triggers (Schedule) | Agentic | `adf-to-databricks:adf-trigger-converter` | `quartz_cron_expression` |
-| Triggers (Tumbling Window) | Agentic | `adf-to-databricks:adf-trigger-converter` | periodic schedule |
-| Triggers (Blob Event) | Agentic | `adf-to-databricks:adf-trigger-converter` | `file_arrival` trigger |
+| SqlServerStoredProcedure | Agentic | Agentic (LLM-assisted) | SQL notebook |
+| AzureFunction | Agentic | Agentic (LLM-assisted) | webhook/REST notebook |
+| WebHook | Agentic | Agentic (LLM-assisted) | REST notebook |
+| Custom | Agentic | Agentic (LLM-assisted) | custom notebook |
+| ExecuteSSISPackage | Agentic | Agentic (LLM-assisted) | PySpark notebook |
+| AzureMLExecutePipeline | Agentic | Agentic (LLM-assisted) | MLflow notebook |
+| Triggers (Schedule) | Agentic | Agentic (LLM-assisted) | `quartz_cron_expression` |
+| Triggers (Tumbling Window) | Agentic | Agentic (LLM-assisted) | periodic schedule |
+| Triggers (Blob Event) | Agentic | Agentic (LLM-assisted) | `file_arrival` trigger |
 
 ## Deterministic Translator Details
 
@@ -151,7 +151,7 @@ Maps to a `notebook_task` that appends a value to an array variable:
 
 ## Agentic Translation Notes
 
-Agentic translations are handled by skills from the `adf-to-databricks-plugin` (`birbalin25/adf-to-databricks-plugin`). These skills use LLM reasoning to:
+Agentic translations are performed by the agent, using LLM reasoning to:
 
 1. Interpret complex ADF semantics that lack direct Databricks equivalents
 2. Convert ADF expressions to Python/SQL equivalents
