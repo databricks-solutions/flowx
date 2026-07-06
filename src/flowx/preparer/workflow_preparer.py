@@ -214,12 +214,10 @@ def _prepare_placeholder(activity: Activity) -> PreparedActivity:
     """Returns a PreparedActivity with a stub notebook for an unsupported activity."""
     task = build_common_task_fields(activity)
 
-    agentic_skill: str | None = None
     raw_definition: dict[str, Any] | None = None
     if isinstance(activity, PlaceholderActivity):
         comment = activity.comment or "This activity requires manual implementation."
         original_type = activity.original_type
-        agentic_skill = activity.agentic_skill
         raw_definition = activity.raw_definition
     elif isinstance(activity, UnsupportedActivity):
         comment = activity.reason or "This activity type is not supported."
@@ -237,11 +235,10 @@ def _prepare_placeholder(activity: Activity) -> PreparedActivity:
     if raw_definition is not None:
         import json as _json
 
-        skill_hint = f" using `{agentic_skill}`" if agentic_skill else ""
         arm_lines = _json.dumps(raw_definition, indent=2).splitlines()
         arm_block = (
             "# MAGIC\n"
-            f"# MAGIC An agent should translate this activity{skill_hint} from the ADF/ARM JSON below,\n"
+            "# MAGIC An agent should translate this activity from the ADF/ARM JSON below,\n"
             "# MAGIC then replace the `raise NotImplementedError` cell with the generated code.\n"
             "# MAGIC\n"
             "# MAGIC ```json\n" + "".join(f"# MAGIC {line}\n" for line in arm_lines) + "# MAGIC ```\n"

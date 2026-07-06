@@ -14,9 +14,9 @@ export const baseOptions: BaseLayoutProps = {
     },
     {
       text: 'GitHub',
-      url: 'https://github.com/ghanse/flowx',
+      url: 'https://github.com/databricks-solutions/flowx',
       external: true,
     },
   ],
-  githubUrl: 'https://github.com/ghanse/flowx',
+  githubUrl: 'https://github.com/databricks-solutions/flowx',
 };

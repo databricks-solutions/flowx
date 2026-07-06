@@ -159,7 +159,7 @@ def translate_pipeline(
         activity_ir, context = _dispatch_activity(adf_activity, context, definitions)
         translated_activities.append(activity_ir)
 
-        strategy, skill = classify_activity(adf_activity.type)
+        strategy = classify_activity(adf_activity.type)
         if strategy is TranslationStrategy.DETERMINISTIC:
             deterministic_count += 1
         elif strategy is TranslationStrategy.AGENTIC:
@@ -267,14 +267,13 @@ def _collect_agentic_gaps(activities: list[AdfActivity], warnings: list[str]) ->
 
     def _walk(acts: list[AdfActivity] | None) -> None:
         for act in acts or []:
-            strategy, skill = classify_activity(act.type)
+            strategy = classify_activity(act.type)
             if strategy is not TranslationStrategy.DETERMINISTIC and act.name not in seen:
                 seen.add(act.name)
                 gaps.append(
                     AgenticGap(
                         activity_name=act.name,
                         activity_type=act.type,
-                        recommended_skill=skill,
                         raw_definition=act.raw if act.raw is not None else act.type_properties,
                     )
                 )
@@ -366,13 +365,16 @@ def _dispatch_activity(
             return result, context
 
         case _:
-            strategy, skill = classify_activity(activity.type)
-            reason = f"Agentic skill: {skill}" if skill else f"No translator for type '{activity.type}'"
+            strategy = classify_activity(activity.type)
+            reason = (
+                "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON"
+                if strategy is TranslationStrategy.AGENTIC
+                else f"No translator for type '{activity.type}'"
+            )
             placeholder = PlaceholderActivity(
                 **base_kwargs,
                 original_type=activity.type,
                 comment=reason,
-                agentic_skill=skill,
                 raw_definition=activity.raw,
             )
             context = context.with_activity(activity.name, placeholder)

@@ -482,8 +482,6 @@ class PlaceholderActivity(Activity):
     original_type: str
     notebook_path: str = "/UNSUPPORTED_ADF_ACTIVITY"
     comment: str | None = None
-    # For an agentic gap (e.g. Until): the recommended skill the agent should translate from.
-    agentic_skill: str | None = None
     raw_definition: dict[str, Any] | None = None
 
 
@@ -732,13 +730,11 @@ class AgenticGap:
     Attributes:
         activity_name: Display name of the activity.
         activity_type: ADF activity type string.
-        recommended_skill: Skill identifier to use for translation.
         raw_definition: Original ADF JSON definition for the activity.
     """
 
     activity_name: str
     activity_type: str
-    recommended_skill: str | None = None
     raw_definition: dict[str, Any] | None = None
 
 
