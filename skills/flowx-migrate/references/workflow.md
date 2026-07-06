@@ -68,11 +68,11 @@ ADF JSON Exports
 
 **Process:**
 1. Run deterministic translators for all activities classified as `deterministic`
-2. For each `agentic` activity, invoke the appropriate skill from the `adf-to-databricks-plugin`:
-   - `adf-dataflow-converter` for ExecuteDataFlow activities
-   - `adf-pipeline-converter` for control flow and external call activities
-   - `adf-expression-translator` for complex ADF expression conversion
-   - `adf-trigger-converter` for trigger schedule translation
+2. For each `agentic` activity, perform LLM-assisted translation from the activity's ARM JSON:
+   - ExecuteDataFlow activities → a purpose-built PySpark notebook
+   - control flow and external-call activities → a notebook implementing the activity's semantics
+   - complex ADF expressions → Python/SQL equivalents
+   - trigger schedules → Databricks schedule/trigger configuration
 3. Merge deterministic and agentic results into a unified translation report
 4. Generate Databricks IR (intermediate representation) for each activity
 

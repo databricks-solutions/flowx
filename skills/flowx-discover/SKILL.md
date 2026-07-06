@@ -22,7 +22,7 @@ Parse Azure Data Factory pipeline, dataset, linked service, and trigger JSON fil
 This is phase 1 of the flowx migration workflow. It takes raw ADF JSON exports and produces an `inventory.json` file that the `convert` skill consumes. The inventory classifies every ADF activity into one of three strategies:
 
 - **Deterministic** — a built-in translator exists (Copy, DatabricksNotebook, ForEach, IfCondition, etc.)
-- **Agentic** — requires LLM-assisted translation via the `adf-to-databricks-plugin` skills (ExecuteDataFlow, Switch, Until, StoredProc, etc.)
+- **Agentic** — requires agentic (LLM-assisted) translation by the agent (ExecuteDataFlow, Switch, Until, StoredProc, etc.)
 - **Unsupported** — no known translation path; requires manual intervention
 
 ## How to run this skill — MCP tool or venv CLI
@@ -174,8 +174,7 @@ Read the generated `<output_dir>/metadata/inventory.json` file. It has this stru
         {
           "name": "RunDataFlow",
           "type": "ExecuteDataFlow",
-          "strategy": "agentic",
-          "skill": "adf-to-databricks:adf-dataflow-converter"
+          "strategy": "agentic"
         }
       ]
     }
@@ -232,12 +231,12 @@ Coverage:             95.7%
 
 ### Step 6 — Detail agentic activities
 
-For activities classified as `agentic`, explain which skill from the `adf-to-databricks-plugin` will handle each:
+For activities classified as `agentic`, explain that each is translated by the agent using LLM-assisted reasoning from the activity's ARM JSON (no built-in deterministic translator exists for these types):
 
-| Activity | Type | Handling Skill |
+| Activity | Type | Handling |
 |---|---|---|
-| RunDataFlow | ExecuteDataFlow | `adf-to-databricks:adf-dataflow-converter` |
-| BranchLogic | Switch | `adf-to-databricks:adf-pipeline-converter` |
+| RunDataFlow | ExecuteDataFlow | Agentic (LLM-assisted) |
+| BranchLogic | Switch | Agentic (LLM-assisted) |
 | ... | ... | ... |
 
 ### Step 7 — Warn about unsupported activities

@@ -2,8 +2,8 @@
 name: flowx-convert
 description: >
   Translate parsed ADF pipeline AST into Databricks IR (intermediate representation).
-  Runs deterministic translators for known activity types, then invokes agentic skills
-  from adf-to-databricks-plugin for gaps.
+  Runs deterministic translators for known activity types, then performs agentic
+  (LLM-assisted) translation for the remaining gaps.
 triggers:
   - "translate ADF"
   - "convert ADF"
@@ -22,7 +22,7 @@ This is phase 2 of the flowx migration workflow. It consumes the ADF source (pro
 
 The translation follows a **deterministic-first** strategy:
 1. Activities with known, well-defined mappings are translated by built-in Python translators
-2. Activities that require interpretation, expression conversion, or lack a Python translator are handled by agent skills from the `adf-to-databricks-plugin`
+2. Activities that require interpretation, expression conversion, or lack a Python translator are handled by agentic (LLM-assisted) translation performed by the agent
 
 ## How to run this skill — MCP tools or venv CLI
 
@@ -136,8 +136,7 @@ Read `<output_dir>/.work/translation_report.json`. It has this structure:
       "type": "ExecuteDataFlow",
       "strategy": "agentic",
       "status": "pending",
-      "raw_activity_json": { "...": "..." },
-      "target_skill": "adf-to-databricks:adf-dataflow-converter"
+      "raw_activity_json": { "...": "..." }
     }
   ],
   "summary": {
@@ -151,7 +150,7 @@ Read `<output_dir>/.work/translation_report.json`. It has this structure:
 
 ### Step 4 — Handle agentic gaps
 
-For each translation with `"status": "pending"` and `"strategy": "agentic"`, invoke the appropriate skill from the `adf-to-databricks-plugin`. Route by activity type.
+For each translation with `"status": "pending"` and `"strategy": "agentic"`, perform LLM-assisted translation from the activity's ARM JSON, routing by activity type.
 
 Every agentic gap in the translation report carries the activity's **full ADF/ARM JSON** under `raw_activity_json` (engine field `raw_definition`), and the generated placeholder notebook embeds the same JSON in a fenced `json` block. This holds for nested activities too — an `Until` inside an `IfCondition` / `Switch` / `ForEach` is reported as its own gap. Always translate from this ARM JSON.
 
@@ -160,36 +159,36 @@ Databricks Lakeflow Jobs have no native repeat-until loop, so translate the `Unt
 - `typeProperties.expression` — the ADF exit condition (e.g. `@or(equals(variables('jobStatus'),'succeeded'), equals(variables('jobStatus'),'failed'))`); convert it into the Python `while not (<condition>):` guard.
 - `typeProperties.timeout` — wrap the loop in a wall-clock deadline (`time.monotonic()`), raising on timeout.
 - `typeProperties.activities` — the loop body (e.g. a `Wait`, a polling `WebActivity`, a `SetVariable` that captures the next status); translate each child inline so the whole loop runs in one notebook.
-Read the loop variables from `dbutils.widgets`, surface the final state as a task value, and write the result over the placeholder notebook's `raise NotImplementedError` cell. If the external `adf-to-databricks:adf-pipeline-converter` skill is installed you may delegate to it with the same ARM JSON; otherwise perform the translation directly.
+Read the loop variables from `dbutils.widgets`, surface the final state as a task value, and write the result over the placeholder notebook's `raise NotImplementedError` cell. Perform the translation directly from the same ARM JSON.
 
 **ExecuteDataFlow activities:**
-Invoke `adf-to-databricks:adf-dataflow-converter` with the raw activity JSON and associated data flow definition. Provide context:
+Translate the data flow directly from the raw activity JSON and associated data flow definition, using:
 - The raw `typeProperties` from the ADF activity
 - The data flow JSON definition (if available in the source directory under `dataflow/`)
 - The linked service configurations for source/sink connections
 - Target catalog and schema for the SDP pipeline or PySpark notebook output
 
 **Control flow activities (Switch, Until, Wait, Filter, AppendVariable):**
-Invoke `adf-to-databricks:adf-pipeline-converter` with the raw activity JSON. Provide context:
+Translate the control-flow activity directly from the raw activity JSON, using:
 - The full pipeline JSON containing the activity
 - Any nested activities within the control flow
 - Variable definitions from the pipeline
 - The desired Databricks task type mapping
 
 **Stored procedures and external calls (SqlServerStoredProcedure, AzureFunction, WebHook, Custom):**
-Invoke `adf-to-databricks:adf-pipeline-converter` with the raw activity JSON. Provide context:
+Translate the activity directly from the raw activity JSON, using:
 - The linked service configuration for the target system
 - Connection details and authentication method
 - Any parameters or request bodies
 
 **Complex expressions:**
-If any activity (deterministic or agentic) contains ADF expressions that the deterministic translator could not resolve, invoke `adf-to-databricks:adf-expression-translator` with:
+If any activity (deterministic or agentic) contains ADF expressions that the deterministic translator could not resolve, translate them directly, using:
 - The raw expression string (e.g., `@pipeline().parameters.inputPath`)
 - The expression context (pipeline parameters, variables, activity outputs)
 - The target format (Python f-string, Spark SQL, task parameter reference)
 
 **Trigger definitions:**
-Invoke `adf-to-databricks:adf-trigger-converter` with:
+Translate the trigger directly, using:
 - The trigger JSON definition
 - The associated pipeline references
 - Target: Databricks job schedule configuration (quartz_cron_expression, periodic, or file_arrival)

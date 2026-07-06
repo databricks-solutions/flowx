@@ -16,7 +16,7 @@ export default function HomePage() {
           Read the docs
         </Link>
         <Link
-          href="https://github.com/ghanse/flowx"
+          href="https://github.com/databricks-solutions/flowx"
           className="inline-flex items-center rounded-md border border-fd-border px-4 py-2 text-sm font-medium hover:bg-fd-muted"
         >
           View on GitHub
