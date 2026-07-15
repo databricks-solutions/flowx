@@ -26,7 +26,7 @@ pyyaml==6.0.3
     # via databricks-flowx
 requests==2.34.2
     # via databricks-sdk
-sqlglot==30.8.0
+sqlglot==30.12.0
     # via databricks-flowx
 urllib3==2.7.0
     # via requests

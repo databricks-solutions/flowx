@@ -7,4 +7,4 @@ uvicorn>=0.30
 starlette>=0.40
 databricks-sdk>=0.40
 pyyaml>=6.0
-sqlglot>=25.0
+sqlglot>=30.12.0
