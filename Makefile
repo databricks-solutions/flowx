@@ -41,7 +41,7 @@ lock-dependencies:
 	uv run --exact --all-extras --group yq tomlq -r '.["build-system"].requires[]' pyproject.toml | \
 	  uv pip compile --generate-hashes --universal --no-header - > build-constraints-new.txt
 	mv build-constraints-new.txt .build-constraints.txt
-	perl -pi -e 's|registry = "https://[^"]*"|registry = "https://pypi.org/simple"|g' uv.lock
+	perl -pi -e 's|registry = "https://[^"]*"|registry = "https://pypi.org/simple"|g; s|url = "https://[^/"]+/packages/|url = "https://files.pythonhosted.org/packages/|g; s|, size = \d+||g' uv.lock
 	$(MAKE) requirements
 
 requirements:
