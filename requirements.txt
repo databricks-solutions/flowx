@@ -2,7 +2,7 @@
 #    uv export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt -o requirements.txt
 certifi==2026.5.20
     # via requests
-cffi==2.0.0 ; platform_python_implementation != 'PyPy'
+cffi==2.1.0 ; platform_python_implementation != 'PyPy'
     # via cryptography
 charset-normalizer==3.4.7
     # via requests
