@@ -46,6 +46,20 @@ def test_explodes_each_runnable_resource_type():
     assert by_key["test_t"].command == "test"
 
 
+def test_explosion_can_limit_resource_types_to_airflow_command_scope():
+    manifest = _manifest(
+        {
+            "model.p.stg": _model("stg", ["p", "staging", "stg"]),
+            "seed.p.codes": _seed("codes", ["p", "codes"]),
+            "test.p.t": _test("t", ["p", "staging", "t"], deps=["model.p.stg"]),
+        }
+    )
+
+    nodes = explode_manifest(manifest, resource_types={"model"})
+
+    assert [(node.resource_type, node.name) for node in nodes] == [("model", "stg")]
+
+
 def test_fqn_selector_built_from_components():
     manifest = _manifest({"model.p.stg": _model("stg", ["p", "staging", "stg"])})
     (node,) = explode_manifest(manifest)
@@ -63,6 +77,20 @@ def test_dependency_edges_pruned_to_exploded_set():
     by_key = {n.task_key: n for n in explode_manifest(manifest)}
     assert by_key["model_stg"].depends_on == []  # source edge dropped
     assert by_key["model_fct"].depends_on == ["model_stg"]  # source edge dropped, model kept
+
+
+def test_downstream_model_waits_for_tests_on_its_upstream_model():
+    manifest = _manifest(
+        {
+            "model.p.stg": _model("stg", ["p", "stg"]),
+            "test.p.stg_not_null": _test("stg_not_null", ["p", "stg_not_null"], deps=["model.p.stg"]),
+            "model.p.fct": _model("fct", ["p", "fct"], deps=["model.p.stg"]),
+        }
+    )
+
+    by_key = {node.task_key: node for node in explode_manifest(manifest)}
+
+    assert by_key["model_fct"].depends_on == ["model_stg", "test_stg_not_null"]
 
 
 def test_non_runnable_resource_types_skipped():

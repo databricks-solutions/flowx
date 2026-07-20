@@ -68,6 +68,7 @@ class PreparedWorkflow:
     # C-10 (SCHED-001): serialised schedule / trigger spec the bundler
     # renders as ``schedule:`` / ``trigger:`` on the emitted DAB job.
     schedule: dict[str, Any] | None = None
+    source: str | None = None
 
 
 # The DAB job ``run_if`` vocabulary. Airflow maps ``trigger_rule`` straight to one of these
@@ -416,6 +417,7 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         pipeline_resources=list(artifacts.pipeline_resources),
         parameter_approximations=list(artifacts.parameter_approximations),
         schedule=pipeline.schedule,
+        source=str(pipeline.tags.get("source")) if pipeline.tags.get("source") else None,
     )
 
 

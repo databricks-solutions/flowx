@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from flowx.validate.bundle_invariants import check_job, check_resource_text
+from flowx.validate.bundle_invariants import check_bundle_dir, check_job, check_resource_text, format_result
 
 
 def _codes(findings) -> set[str]:
@@ -80,3 +80,49 @@ def test_acyclic_chain_has_no_cycle_finding():
         ]
     }
     assert "dependency_cycle" not in _codes(check_job("p", job))
+
+
+def test_bundle_job_reference_can_target_job_in_another_resource_file(tmp_path):
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    (resources / "parent.yml").write_text(
+        "resources:\n"
+        "  jobs:\n"
+        "    parent:\n"
+        "      tasks:\n"
+        "        - task_key: call_child\n"
+        "          run_job_task:\n"
+        "            job_id: ${resources.jobs.child.id}\n",
+        encoding="utf-8",
+    )
+    (resources / "child.yml").write_text(
+        "resources:\n  jobs:\n    child:\n      tasks: []\n",
+        encoding="utf-8",
+    )
+
+    result = check_bundle_dir(tmp_path)
+
+    assert "dangling_run_job_reference" not in _codes(result.findings)
+
+
+def test_bundle_job_reference_to_unknown_resource_is_flagged(tmp_path):
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    (resources / "parent.yml").write_text(
+        "resources:\n"
+        "  jobs:\n"
+        "    parent:\n"
+        "      tasks:\n"
+        "        - task_key: call_missing\n"
+        "          run_job_task:\n"
+        "            job_id: ${resources.jobs.missing.id}\n",
+        encoding="utf-8",
+    )
+
+    result = check_bundle_dir(tmp_path)
+    finding = next(finding for finding in result.findings if finding.code == "dangling_run_job_reference")
+
+    assert finding.severity == "warning"
+    assert "parent.yml" in finding.location
+    assert "call_missing" in finding.location
+    assert "dangling_run_job_reference" in format_result(result)

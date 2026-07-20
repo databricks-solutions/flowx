@@ -212,6 +212,67 @@ class TestWriteBundle:
         assert not (first_dir / "WARNINGS.md").exists()
         assert not (second_dir / "WARNINGS.md").exists()
 
+    def test_cross_bundle_job_reference_uses_declared_job_id_variable(self, tmp_path):
+        workflow = PreparedWorkflow(
+            name="parent",
+            tasks=[
+                {
+                    "task_key": "call_child",
+                    "run_job_task": {"job_id": "${resources.jobs.child.id}"},
+                }
+            ],
+            notebooks=[],
+            secrets=[],
+            setup_tasks=[],
+        )
+
+        write_bundle(workflow, tmp_path)
+
+        config = yaml.safe_load((tmp_path / "databricks.yml").read_text())
+        resource = yaml.safe_load((tmp_path / "resources" / "parent.yml").read_text())
+        task = resource["resources"]["jobs"]["parent"]["tasks"][0]
+        setup = (tmp_path / "SETUP.md").read_text()
+        assert "child_job_id" in config["variables"]
+        assert task["run_job_task"]["job_id"] == "${var.child_job_id}"
+        assert "`child_job_id`" in setup
+        assert "`child`" in setup
+
+        second_output = tmp_path / "second"
+        write_bundle(workflow, second_output)
+        second_config = yaml.safe_load((second_output / "databricks.yml").read_text())
+        assert "child_job_id" in second_config["variables"]
+
+    def test_python_resource_job_reference_remains_a_resource_substitution(self, tmp_path):
+        workflow = PreparedWorkflow(
+            name="parent",
+            tasks=[
+                {
+                    "task_key": "call_dbt",
+                    "run_job_task": {"job_id": "${resources.jobs.generated_dbt.id}"},
+                }
+            ],
+            notebooks=[],
+            secrets=[],
+            setup_tasks=[
+                SetupTask(
+                    type="pydabs_dbt_factory",
+                    config={
+                        "hook_module": "resources.generated_dbt_job",
+                        "job_key": "generated_dbt",
+                    },
+                )
+            ],
+        )
+
+        write_bundle(workflow, tmp_path)
+
+        config = yaml.safe_load((tmp_path / "databricks.yml").read_text())
+        resource = yaml.safe_load((tmp_path / "resources" / "parent.yml").read_text())
+        task = resource["resources"]["jobs"]["parent"]["tasks"][0]
+        assert task["run_job_task"]["job_id"] == "${resources.jobs.generated_dbt.id}"
+        assert "generated_dbt_job_id" not in config["variables"]
+        assert "## Cross-bundle job references" not in (tmp_path / "SETUP.md").read_text()
+
     def test_load_report_handles_aggregated_translations_format(self, tmp_path):
         """``_load_report`` accepts the multi-pipeline aggregated report.
 
@@ -314,6 +375,19 @@ class TestScheduleEmission:
         # The cron-style schedule block must NOT appear for periodic specs.
         assert "schedule" not in job
 
+    def test_continuous_mode_emitted(self, tmp_path):
+        pipeline = Pipeline(
+            name="continuous_job",
+            tasks=[WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10)],
+            schedule={"kind": "continuous", "pause_status": "UNPAUSED"},
+        )
+        write_bundle(prepare_workflow(pipeline), tmp_path)
+        resource_file = next((tmp_path / "resources").glob("*.yml"))
+        job = next(iter(yaml.safe_load(resource_file.read_text())["resources"]["jobs"].values()))
+        assert job["continuous"] == {"pause_status": "UNPAUSED"}
+        assert "schedule" not in job
+        assert "trigger" not in job
+
     def test_trigger_parameter_overrides_mutate_job_parameter_defaults(self, tmp_path):
         """SCHED3-003: schedule.parameter_overrides mutates matching
         job.parameters entries' default values."""
@@ -349,6 +423,28 @@ class TestScheduleEmission:
         params = {p["name"]: p["default"] for p in job["parameters"]}
         assert params["negocio"] == "GLP"
         assert params["applicationName"] == "app0001"
+
+    def test_job_parameter_defaults_are_strings(self, tmp_path):
+        pipeline = Pipeline(
+            name="typed_parameters",
+            tasks=[WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10)],
+            parameters=[
+                {"name": "threshold", "default": 10},
+                {"name": "enabled", "default": True},
+                {"name": "settings", "default": {"mode": "fast"}},
+            ],
+        )
+
+        write_bundle(prepare_workflow(pipeline), tmp_path)
+
+        resource_file = next((tmp_path / "resources").glob("*.yml"))
+        job = next(iter(yaml.safe_load(resource_file.read_text())["resources"]["jobs"].values()))
+        defaults = {parameter["name"]: parameter["default"] for parameter in job["parameters"]}
+        assert defaults == {
+            "threshold": "10",
+            "enabled": "true",
+            "settings": '{"mode": "fast"}',
+        }
 
     def test_file_arrival_trigger_emitted(self, tmp_path):
         pipeline = Pipeline(

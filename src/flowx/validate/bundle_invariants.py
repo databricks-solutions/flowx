@@ -24,6 +24,7 @@ import yaml
 # appears more than once in the tree.  flowx never intends to emit these.
 _ANCHOR_RE = re.compile(r"[&*]id\d+\b")
 _JOB_PARAM_REF_RE = re.compile(r"\{\{\s*job\.parameters\.([A-Za-z0-9_]+)\s*\}\}")
+_JOB_RESOURCE_ID_RE = re.compile(r"\$\{resources\.jobs\.([^.}]+)\.id\}")
 
 
 @dataclass(slots=True, kw_only=True)
@@ -74,6 +75,17 @@ def _collect_task_keys(tasks: list[dict[str, Any]]) -> list[str]:
         if isinstance(nested, dict) and "task_key" in nested:
             keys.append(nested["task_key"])
     return keys
+
+
+def _iter_tasks(tasks: list[dict[str, Any]]):
+    """Yields top-level tasks and nested ``for_each_task.task`` bodies."""
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        yield task
+        nested = (task.get("for_each_task") or {}).get("task")
+        if isinstance(nested, dict):
+            yield from _iter_tasks([nested])
 
 
 def _dump(obj: Any) -> str:
@@ -212,15 +224,53 @@ def check_bundle_dir(bundle_dir: Path) -> BundleInvariantResult:
     databricks_yml = bundle_dir / "databricks.yml"
     if databricks_yml.exists():
         yaml_files.append(databricks_yml)
+
+    documents: list[tuple[Path, dict[str, Any]]] = []
     for path in yaml_files:
-        findings.extend(check_resource_text(path.read_text(encoding="utf-8"), filename=path.name))
+        text = path.read_text(encoding="utf-8")
+        findings.extend(check_resource_text(text, filename=path.name))
+        document = yaml.safe_load(text) or {}
+        if isinstance(document, dict):
+            documents.append((path, document))
+
+    known_jobs: set[str] = set()
+    for _path, document in documents:
+        jobs = (document.get("resources") or {}).get("jobs") or {}
+        if isinstance(jobs, dict):
+            known_jobs.update(str(job_key) for job_key in jobs)
+
+    for path, document in documents:
+        jobs = (document.get("resources") or {}).get("jobs") or {}
+        if not isinstance(jobs, dict):
+            continue
+        for job_key, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            for task in _iter_tasks(job.get("tasks") or []):
+                run_job = task.get("run_job_task") or {}
+                job_id = run_job.get("job_id") if isinstance(run_job, dict) else None
+                match = _JOB_RESOURCE_ID_RE.fullmatch(job_id) if isinstance(job_id, str) else None
+                if match is None or match.group(1) in known_jobs:
+                    continue
+                findings.append(
+                    BundleFinding(
+                        code="dangling_run_job_reference",
+                        severity="warning",
+                        location=f"{path.name}, job '{job_key}', task '{task.get('task_key', '')}'",
+                        message=(
+                            f"run_job_task references bundle job '{match.group(1)}', which is not declared "
+                            "in static resource YAML. Confirm it is supplied by a Python resource or replace "
+                            "the reference with a declared bundle variable containing the external job ID."
+                        ),
+                    )
+                )
     return BundleInvariantResult(findings=findings)
 
 
 def format_result(result: BundleInvariantResult) -> str:
     """Render a result as a compact human-readable report."""
-    if result.ok:
+    if not result.findings:
         return "Bundle invariants: OK"
-    lines = ["Bundle invariants: FAILED"]
+    lines = ["Bundle invariants: FAILED" if result.violations else "Bundle invariants: WARNINGS"]
     lines.extend(f"  - [{finding.code}] {finding.location}: {finding.message}" for finding in result.findings)
     return "\n".join(lines)

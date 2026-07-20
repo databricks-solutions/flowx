@@ -517,11 +517,11 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
         lines.append("")
         lines.append(
             "Each row below describes a `run_job_task` that invokes a job **not** "
-            "defined in this bundle. flowx emitted a bundle variable for each "
-            "one (`${var.<name>}`) so `databricks bundle validate` passes. "
-            "Before running, populate the variable with the numeric job ID the "
-            "target pipeline was deployed under — either set a `default:` in "
-            '`databricks.yml` or pass `--var "<name>=<job_id>"` at deploy time.'
+            "defined in this bundle. flowx replaced each external resource reference "
+            "with a declared bundle variable (`${var.<name>}`). Before validating, "
+            "deploying, or running the bundle, populate the variable with the numeric "
+            "job ID the target pipeline was deployed under — either set a `default:` "
+            'in `databricks.yml` or pass `--var "<name>=<job_id>"` to the bundle command.'
         )
         lines.append("")
         lines.append("| Variable | Target pipeline |")
@@ -775,10 +775,11 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
             "`databricks bundle deploy` can run them:"
         )
         lines.append("")
-        lines.append("1. Install the generator and PyDABs into the bundle's venv (the `python.venv_path`):")
+        lines.append("1. Synchronize the generated Python project into the bundle's `python.venv_path`:")
+        lines.append("   The generated `pyproject.toml` pins `databricks-dbt-factory`, PyDABs, and dbt.")
         lines.append("")
         lines.append("```bash")
-        lines.append("uv venv .venv && uv pip install databricks-dbt-factory databricks-bundles")
+        lines.append("uv sync")
         lines.append("```")
         lines.append("")
         lines.append("2. Ensure each dbt project's `manifest.json` exists (run `dbt parse`/`dbt compile`).")

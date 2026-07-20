@@ -64,6 +64,18 @@ def test_convert_threads_source(captured, tmp_path: Path):
     assert argv[argv.index("--source") + 1] == "airflow"
 
 
+def test_merge_agentic_threads_source(captured):
+    server._cmd_merge_agentic(
+        {
+            "source": "adf",
+            "report_path": "/tmp/report.json",
+            "agentic_results_dir": "/tmp/results",
+        }
+    )
+    argv = _argv(captured, "convert")
+    assert argv[argv.index("--source") + 1] == "adf"
+
+
 def test_inputs_threads_source(captured):
     server._cmd_inputs({"phase": "discover", "source": "airflow"})
     argv = _argv(captured, "inputs")

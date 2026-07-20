@@ -509,6 +509,10 @@ class DbtFactoryActivity(Activity):
         render_mode: ``"static"`` or ``"pydabs"``.
         selectors: dbt ``--select`` selectors the source restricted the run
             to, if any (empty means the whole project).
+        exclude_selectors: dbt ``--exclude`` selectors from the source task.
+        variables: Literal dbt ``--vars`` value from the source task.
+        full_refresh: Whether the source requested ``--full-refresh``.
+        resource_types: dbt manifest resource types enabled by the source command.
         nodes: Pre-exploded node specs (list of dicts with ``task_key``,
             ``command``, ``selector``, ``depends_on``) when the front-end
             already read the manifest; empty when the preparer should read
@@ -521,6 +525,10 @@ class DbtFactoryActivity(Activity):
     manifest_path: str | None = None
     render_mode: str = "static"
     selectors: list[str] = field(default_factory=list)
+    exclude_selectors: list[str] = field(default_factory=list)
+    variables: dict[str, Any] | str | None = None
+    full_refresh: bool = False
+    resource_types: list[str] = field(default_factory=list)
     nodes: list[dict[str, Any]] = field(default_factory=list)
 
 

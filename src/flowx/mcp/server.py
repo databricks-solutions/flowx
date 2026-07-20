@@ -180,7 +180,16 @@ def _cmd_convert(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_merge_agentic(p: dict[str, Any]) -> dict[str, Any]:
-    args = ["convert", "--merge-agentic", "--report", p["report_path"], "--agentic-results", p["agentic_results_dir"]]
+    args = [
+        "convert",
+        "--source",
+        _source_name(p),
+        "--merge-agentic",
+        "--report",
+        p["report_path"],
+        "--agentic-results",
+        p["agentic_results_dir"],
+    ]
     if p.get("output_path"):
         args += ["--output", p["output_path"]]
     result = runner.run_adapter(args)

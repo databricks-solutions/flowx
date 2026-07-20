@@ -167,6 +167,14 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             extra["render_mode"] = activity.render_mode
             if activity.selectors:
                 extra["selectors"] = list(activity.selectors)
+            if activity.exclude_selectors:
+                extra["exclude_selectors"] = list(activity.exclude_selectors)
+            if activity.variables is not None:
+                extra["variables"] = activity.variables
+            if activity.full_refresh:
+                extra["full_refresh"] = True
+            if activity.resource_types:
+                extra["resource_types"] = list(activity.resource_types)
             if activity.nodes:
                 extra["nodes"] = list(activity.nodes)
         case CopyActivity():

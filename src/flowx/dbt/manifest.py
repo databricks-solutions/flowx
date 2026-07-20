@@ -79,7 +79,7 @@ def _fqn_selector(fqn: list[str]) -> str:
     return "fqn:" + ".".join(fqn)
 
 
-def load_dbt_nodes(manifest_path: Path) -> list[DbtNode]:
+def load_dbt_nodes(manifest_path: Path, *, resource_types: set[str] | None = None) -> list[DbtNode]:
     """Reads a dbt manifest and returns its runnable nodes as task specs.
 
     Args:
@@ -96,21 +96,22 @@ def load_dbt_nodes(manifest_path: Path) -> list[DbtNode]:
             them), or when a node's fqn contains unsafe characters.
     """
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-    return explode_manifest(manifest)
+    return explode_manifest(manifest, resource_types=resource_types)
 
 
-def explode_manifest(manifest: dict) -> list[DbtNode]:
+def explode_manifest(manifest: dict, *, resource_types: set[str] | None = None) -> list[DbtNode]:
     """Explodes an in-memory dbt manifest dict into runnable task specs.
 
     Split out from :func:`load_dbt_nodes` so tests can pass a synthetic
     manifest dict without touching the filesystem.
     """
     nodes: dict[str, dict] = manifest.get("nodes", {})
+    enabled_types = _RUNNABLE_RESOURCE_TYPES if resource_types is None else _RUNNABLE_RESOURCE_TYPES & resource_types
 
     runnable: dict[str, DbtNode] = {}
     for unique_id, node in nodes.items():
         resource_type = node.get("resource_type", "")
-        if resource_type not in _RUNNABLE_RESOURCE_TYPES:
+        if resource_type not in enabled_types:
             continue
         fqn = node.get("fqn") or [node.get("name", unique_id)]
         runnable[unique_id] = DbtNode(
@@ -133,9 +134,22 @@ def explode_manifest(manifest: dict) -> list[DbtNode]:
     # Prune dependency edges to the exploded set. dbt nodes depend on sources, macros, and each other;
     # only edges between two runnable nodes become task dependencies.
     task_key_by_uid = {uid: dbt_node.task_key for uid, dbt_node in runnable.items()}
+    tests_by_tested_uid: dict[str, list[str]] = {}
+    for test_uid, test_node in runnable.items():
+        if test_node.resource_type != "test":
+            continue
+        for tested_uid in nodes[test_uid].get("depends_on", {}).get("nodes") or []:
+            tests_by_tested_uid.setdefault(tested_uid, []).append(test_node.task_key)
     for uid, dbt_node in runnable.items():
         upstream_uids = nodes[uid].get("depends_on", {}).get("nodes") or []
-        dbt_node.depends_on = [task_key_by_uid[up] for up in upstream_uids if up in task_key_by_uid]
+        dependencies = [
+            task_key_by_uid[upstream_uid] for upstream_uid in upstream_uids if upstream_uid in task_key_by_uid
+        ]
+        if dbt_node.resource_type != "test":
+            dependencies.extend(
+                test_key for upstream_uid in upstream_uids for test_key in tests_by_tested_uid.get(upstream_uid, [])
+            )
+        dbt_node.depends_on = list(dict.fromkeys(dependencies))
 
     _assert_unique_task_keys(list(runnable.values()))
     # Deterministic order: manifest iteration order is stable, but sort by task_key so the emitted

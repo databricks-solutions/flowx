@@ -14,6 +14,7 @@ import json
 import logging
 from pathlib import Path
 
+from flowx import ir_serde
 from flowx.ir_serde import pipeline_to_dict
 from flowx.models.ir import PlaceholderActivity
 from flowx.sources.airflow.loader import load_pipelines
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 def main(argv: list[str] | None = None) -> int:
     """Convert-phase entry point for the Airflow source."""
     parser = argparse.ArgumentParser(description="Translate Airflow DAGs into flowx Pipeline IR.")
-    parser.add_argument("--source-dir", required=True, type=Path, help="A DAG .py file or directory of DAGs.")
+    parser.add_argument("--source-dir", required=False, type=Path, help="A DAG .py file or directory of DAGs.")
     parser.add_argument("--output-dir", type=Path, default=Path("./flowx_output"), help="Shared migration output dir.")
     parser.add_argument("--pipeline", type=str, default=None, help="Translate only the named DAG (default: all).")
     parser.add_argument(
@@ -34,9 +35,35 @@ def main(argv: list[str] | None = None) -> int:
         help="dbt-factory render mode: 'static' (inner job of per-node tasks, default) or 'pydabs' "
         "(a deploy-time PyDABs hook that builds the dbt job from the live manifest).",
     )
+    parser.add_argument(
+        "--merge-agentic",
+        action="store_true",
+        help="Merge agent-produced results from --agentic-results into --report instead of translating.",
+    )
+    parser.add_argument("--report", type=Path, default=None, help="Translation report to merge agentic results into.")
+    parser.add_argument(
+        "--agentic-results",
+        type=Path,
+        default=None,
+        help="Directory of per-activity agentic result JSON files.",
+    )
+    parser.add_argument("--output", type=Path, default=None, help="Merged report destination; defaults to --report.")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    if args.merge_agentic:
+        if not args.report or not args.agentic_results:
+            parser.error("--merge-agentic requires --report and --agentic-results")
+        merged_count, unmatched_count = ir_serde.merge_agentic_results(args.report, args.agentic_results, args.output)
+        print("\nAgentic Merge Summary")
+        print("=====================")
+        print(f"Merged:    {merged_count}")
+        print(f"Unmatched: {unmatched_count}")
+        return 0 if unmatched_count == 0 else 1
+
+    if not args.source_dir:
+        parser.error("--source-dir is required (unless using --merge-agentic)")
 
     pipelines = load_pipelines(args.source_dir, pipeline=args.pipeline, dbt_mode=args.dbt_mode)
     if not pipelines:
