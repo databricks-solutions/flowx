@@ -1,22 +1,22 @@
 """Airflow operator -> flowx IR builders and the dispatch registry.
 
 Each builder maps one Airflow operator family to an :class:`~flowx.models.ir.Activity`
-subclass the flowx bundler can render.  flowx emits ``notebook_task`` /
-``spark_python_task`` / ``spark_jar_task`` / ``run_job_task`` / ``condition_task`` /
-``for_each_task`` today (no ``sql_task``), so SQL operators map to a NotebookActivity
-that runs ``spark.sql(...)`` on cluster/serverless compute -- the cluster-backed path.
+subclass the flowx bundler can render (``notebook_task`` / ``spark_python_task`` /
+``spark_jar_task`` / ``sql_task`` / ``run_job_task`` / ``condition_task`` / ``for_each_task``).
 
-Sensors and structural operators (Dummy/Empty) are classified here but handled by
-the loader: file sensors lift to a job-level ``file_arrival`` trigger, time sensors
-are absorbed into the schedule, and Dummy/Empty are dropped with dependency rewiring.
-Operators with no deterministic mapping become a PlaceholderActivity carrying guidance.
+Structural operators (Dummy/Empty) and time sensors are classified here but dropped by the
+loader (Dummy/Empty with dependency rewiring; time sensors absorbed into the schedule). A file
+or table sensor at the DAG root with no schedule lifts to a job-level ``file_arrival`` /
+``table_update`` trigger; otherwise (mid-DAG, or under a schedule) it is retained as a polling
+notebook task via :func:`_build_file_sensor` / :func:`_build_table_sensor`. Operators with no
+deterministic mapping become a PlaceholderActivity carrying guidance.
 """
 
 from __future__ import annotations
 
 import ast
+import json as _json
 import shlex
-import textwrap
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -29,6 +29,7 @@ from flowx.models.ir import (
     SparkPythonActivity,
     SqlActivity,
 )
+from flowx.sources.airflow import callable_notebook
 
 # --------------------------------------------------------------------------------------
 # Operator classification (handled specially by the loader, not via a task builder)
@@ -37,7 +38,8 @@ from flowx.models.ir import (
 # Removed from the graph; downstream dependencies rewired to the dropped node's upstreams.
 DUMMY_OPERATORS: frozenset[str] = frozenset({"DummyOperator", "EmptyOperator"})
 
-# Lift to a job-level file_arrival trigger; the sensor task itself is dropped.
+# File sensors: a root file sensor with no schedule lifts to a job-level file_arrival trigger;
+# otherwise it is retained as a dbutils.fs polling task (_build_file_sensor).
 FILE_SENSORS: frozenset[str] = frozenset(
     {"S3KeySensor", "GCSObjectExistenceSensor", "FileSensor", "HdfsSensor", "WebHdfsSensor"}
 )
@@ -45,9 +47,9 @@ FILE_SENSORS: frozenset[str] = frozenset(
 # Absorbed into the job schedule (a start-of-DAG delay); dropped with a migration note.
 TIME_SENSORS: frozenset[str] = frozenset({"TimeSensor", "TimeDeltaSensor"})
 
-# Lift to a job-level table_update trigger; the sensor task itself is dropped. The table
-# name is read from the sensor's table_name kwarg (SQL-condition sensors without one fall
-# through to a placeholder so their arbitrary condition isn't silently lost).
+# Table/SQL sensors: a root table sensor naming a literal table with no schedule lifts to a
+# job-level table_update trigger; otherwise it is retained as a spark.sql polling task
+# (_build_table_sensor). A sensor with no literal sql/table_name becomes a placeholder.
 TABLE_SENSORS: frozenset[str] = frozenset(
     {"DatabricksPartitionSensor", "DatabricksSqlSensor", "DatabricksSQLStatementsSensor", "SqlSensor"}
 )
@@ -148,24 +150,267 @@ def _notebook_header(task_id: str, note: str) -> str:
     return f"# Databricks notebook source\n# Migrated from Airflow {note} '{task_id}'.\n\n"
 
 
-def notebook_from_callable(func: ast.FunctionDef, source: str) -> str:
-    """Renders a PythonOperator callable body as a notebook (dedented body statements).
+def notebook_from_callable(
+    func: ast.FunctionDef, source: str, *, op_args: bool = False, op_kwargs: bool = False
+) -> str:
+    """Renders a PythonOperator callable as a valid, runnable Databricks notebook.
 
-    Airflow ``Variable.get(...)`` / ``BaseHook.get_connection(...)`` calls in the body are
-    rewritten to ``dbutils.widgets.get`` / ``dbutils.secrets.get`` so the notebook does not
-    reference a nonexistent Airflow metastore at runtime.
+    Preserves the callable's full ``def`` (early returns stay legal), carries its transitive
+    module-level dependencies (helpers / constants / non-Airflow imports), and invokes it with
+    ``op_args`` / ``op_kwargs`` read from JSON widgets. Variable/connection access is rewritten.
     """
-    from flowx.sources.airflow import templating
-
-    segments = [ast.get_source_segment(source, stmt) for stmt in func.body]
-    body = textwrap.dedent("\n\n".join(seg for seg in segments if seg))
-    body, _params, _notes = templating.rewrite_airflow_calls(body)
-    return f"# Databricks notebook source\n# Migrated from Airflow PythonOperator '{func.name}'.\n\n{body}\n"
+    return callable_notebook.render(func, source, op_args=op_args, op_kwargs=op_kwargs)
 
 
 def _sh_notebook(task_id: str, command: str) -> str:
     lines = "".join(f"# MAGIC {line}\n" for line in command.splitlines())
     return _notebook_header(task_id, "BashOperator") + "# MAGIC %sh\n" + lines
+
+
+# Airflow sensor defaults (seconds): poke every 60s, give up after 7 days.
+_DEFAULT_POKE_INTERVAL = 60
+_DEFAULT_SENSOR_TIMEOUT = 604800
+
+
+def _poke_settings(kwargs: dict[str, ast.expr]) -> tuple[int, int]:
+    """Reads ``poke_interval`` / ``timeout`` (seconds) from a sensor's kwargs, with Airflow defaults."""
+    interval = literal_value(kwargs.get("poke_interval"))
+    timeout = literal_value(kwargs.get("timeout"))
+    poke = int(interval) if isinstance(interval, (int, float)) and interval > 0 else _DEFAULT_POKE_INTERVAL
+    limit = int(timeout) if isinstance(timeout, (int, float)) and timeout > 0 else _DEFAULT_SENSOR_TIMEOUT
+    return poke, limit
+
+
+def _poll_body(operator: str, check_expr: str, description: str, poke: int, timeout: int) -> str:
+    """The polling loop for a retained sensor (no notebook header / imports; callers add those).
+
+    ``check_expr`` is a Python expression (evaluated each poke) that returns truthy when the
+    awaited condition holds. The loop honours the sensor's poke_interval / timeout and raises on
+    expiry so the task fails rather than passing silently.
+    """
+    return (
+        f"POKE_INTERVAL = {poke}  # seconds\n"
+        + f"TIMEOUT = {timeout}  # seconds\n"
+        + f'DESCRIPTION = "{description}"\n\n'
+        + "def _condition_met():\n"
+        + f"    # {operator} poke: returns truthy once the awaited condition holds.\n"
+        + f"    return {check_expr}\n\n"
+        + "deadline = time.monotonic() + TIMEOUT\n"
+        + "while not _condition_met():\n"
+        + "    if time.monotonic() >= deadline:\n"
+        + '        raise TimeoutError(f"Sensor timed out after {TIMEOUT}s waiting for: {DESCRIPTION}")\n'
+        + "    time.sleep(POKE_INTERVAL)\n"
+        + 'print(f"Condition met: {DESCRIPTION}")\n'
+    )
+
+
+def _file_sensor_path(kwargs: dict[str, ast.expr]) -> str | None:
+    """Best-effort literal storage path a file sensor waits on (S3/GCS/File/HDFS)."""
+    bucket_key = literal_str(kwargs.get("bucket_key"))
+    bucket_name = literal_str(kwargs.get("bucket_name"))
+    if bucket_key is not None:
+        if "://" in bucket_key or bucket_name is None:
+            return bucket_key
+        return f"s3://{bucket_name}/{bucket_key.lstrip('/')}"
+    obj = literal_str(kwargs.get("object"))
+    bucket = literal_str(kwargs.get("bucket"))
+    if obj is not None and bucket is not None:
+        return f"gs://{bucket}/{obj.lstrip('/')}"
+    return literal_str(kwargs.get("filepath")) or literal_str(kwargs.get("filepath_"))
+
+
+def _build_file_sensor(ctx: OperatorContext) -> Activity:
+    """A retained file sensor -> a notebook that polls dbutils.fs for the awaited path."""
+    path = _file_sensor_path(ctx.kwargs)
+    if path is None:
+        return _placeholder(
+            ctx,
+            f"{ctx.operator} path is not a string literal; implement the wait (poll dbutils.fs.ls "
+            "for the awaited object) manually, or lift it to a file_arrival trigger if it gates the DAG.",
+        )
+    poke, timeout = _poke_settings(ctx.kwargs)
+    header = _notebook_header(ctx.task_id, ctx.operator) + (
+        "import time\n\n"
+        "def _path_exists(path):\n"
+        "    try:\n"
+        "        dbutils.fs.ls(path)\n"
+        "        return True\n"
+        "    except Exception:\n"
+        "        return False\n\n"
+    )
+    loop = _poll_body(ctx.operator, f'_path_exists("{path}")', f"file at {path}", poke, timeout)
+    return NotebookActivity(
+        name=ctx.task_id,
+        task_key=ctx.task_key,
+        notebook_path=f"notebooks/{ctx.task_key}.py",
+        generated_source=header + loop,
+    )
+
+
+def _build_table_sensor(ctx: OperatorContext) -> Activity:
+    """A retained table/SQL sensor -> a notebook that polls a spark.sql condition."""
+    poke, timeout = _poke_settings(ctx.kwargs)
+    sql = literal_str(ctx.kwargs.get("sql"))
+    table_name = literal_str(ctx.kwargs.get("table_name"))
+    if sql is not None:
+        # SqlSensor semantics: run the query, take the first row; ready unless there are no rows or
+        # the first cell is falsy (0 / "0" / "" / None), matching Airflow's default success criteria.
+        check = "_sql_sensor_ready(SENSOR_SQL)"
+        header = (
+            _notebook_header(ctx.task_id, ctx.operator)
+            + "import time\n\n"
+            + f"SENSOR_SQL = {sql!r}\n\n"
+            + "def _sql_sensor_ready(query):\n"
+            + "    rows = spark.sql(query).take(1)\n"
+            + "    if not rows:\n"
+            + "        return False\n"
+            + "    first = rows[0][0]\n"
+            + '    return first not in (0, "0", "", None, False)\n\n'
+        )
+        desc = "SQL sensor condition"
+    elif table_name is not None:
+        check = f'spark.catalog.tableExists("{table_name}")'
+        header = _notebook_header(ctx.task_id, ctx.operator) + "import time\n\n"
+        desc = f"table {table_name}"
+    else:
+        return _placeholder(
+            ctx,
+            f"{ctx.operator} has no literal sql/table_name; implement the wait (poll spark.sql for the "
+            "awaited condition) manually.",
+        )
+    loop = _poll_body(ctx.operator, check, desc, poke, timeout)
+    return NotebookActivity(
+        name=ctx.task_id,
+        task_key=ctx.task_key,
+        notebook_path=f"notebooks/{ctx.task_key}.py",
+        generated_source=header + loop,
+    )
+
+
+def _build_external_task_sensor(ctx: OperatorContext) -> Activity:
+    """ExternalTaskSensor -> a notebook that waits for the external DAG's Databricks job to succeed.
+
+    The external DAG becomes a sibling Databricks job (one bundle per DAG); this task polls that
+    job's most recent run via the Jobs API until it reaches a successful terminal state. The job is
+    referenced by the sanitized DAG name, matching TriggerDagRunOperator's RunJobActivity naming.
+    """
+    external_dag = literal_str(ctx.kwargs.get("external_dag_id"))
+    if external_dag is None:
+        return _placeholder(
+            ctx,
+            f"{ctx.operator} external_dag_id is not a string literal; implement the cross-DAG wait "
+            "(poll the upstream job's run state) manually.",
+        )
+    poke, timeout = _poke_settings(ctx.kwargs)
+    job_name = _sanitize_job_name(external_dag)
+    external_task = literal_str(ctx.kwargs.get("external_task_id"))
+    scope = f"task '{external_task}' in " if external_task else ""
+    header = _notebook_header(ctx.task_id, ctx.operator) + (
+        "import time\n\n"
+        "from databricks.sdk import WorkspaceClient\n\n"
+        f"EXTERNAL_JOB_NAME = {job_name!r}\n"
+        "w = WorkspaceClient()\n\n"
+        "def _external_job_succeeded():\n"
+        "    jobs = list(w.jobs.list(name=EXTERNAL_JOB_NAME))\n"
+        "    if not jobs:\n"
+        "        raise RuntimeError(f\"No Databricks job named {EXTERNAL_JOB_NAME!r}; deploy the \"\n"
+        "                           \"migrated upstream DAG's bundle first.\")\n"
+        "    runs = list(w.jobs.list_runs(job_id=jobs[0].job_id, limit=1, completed_only=True))\n"
+        "    if not runs:\n"
+        "        return False\n"
+        "    state = runs[0].state\n"
+        '    return state is not None and str(state.result_state) == "RunResultState.SUCCESS"\n\n'
+    )
+    loop = _poll_body(ctx.operator, "_external_job_succeeded()", f"{scope}DAG '{external_dag}'", poke, timeout)
+    return NotebookActivity(
+        name=ctx.task_id,
+        task_key=ctx.task_key,
+        notebook_path=f"notebooks/{ctx.task_key}.py",
+        generated_source=header + loop,
+    )
+
+
+def _build_http_sensor(ctx: OperatorContext) -> Activity:
+    """HttpSensor -> a notebook that polls an HTTP endpoint until it returns 2xx."""
+    endpoint = literal_str(ctx.kwargs.get("endpoint")) or ""
+    if not endpoint:
+        return _placeholder(
+            ctx,
+            f"{ctx.operator} endpoint is not a string literal; implement the HTTP poll manually "
+            "(the http_conn_id base URL also needs wiring).",
+        )
+    poke, timeout = _poke_settings(ctx.kwargs)
+    header = _notebook_header(ctx.task_id, ctx.operator) + (
+        "import time\n\n"
+        "import requests\n\n"
+        f"ENDPOINT = {endpoint!r}  # TODO: prefix with the http_conn_id base URL\n\n"
+        "def _endpoint_ready():\n"
+        "    try:\n"
+        "        return requests.get(ENDPOINT, timeout=30).ok\n"
+        "    except requests.RequestException:\n"
+        "        return False\n\n"
+    )
+    loop = _poll_body(ctx.operator, "_endpoint_ready()", f"HTTP endpoint {endpoint}", poke, timeout)
+    return NotebookActivity(
+        name=ctx.task_id,
+        task_key=ctx.task_key,
+        notebook_path=f"notebooks/{ctx.task_key}.py",
+        generated_source=header + loop,
+    )
+
+
+def _build_python_sensor(ctx: OperatorContext) -> Activity:
+    """PythonSensor -> a notebook that polls its python_callable until it returns truthy."""
+    func = ctx.functions.get(callable_name(ctx.kwargs.get("python_callable")) or "")
+    if func is None:
+        return _placeholder(
+            ctx,
+            f"{ctx.operator} python_callable could not be resolved; implement the poll manually.",
+        )
+    reason = callable_notebook.task_context_reason(func)
+    if reason is not None:
+        return _placeholder(
+            ctx,
+            f"Airflow {ctx.operator} {reason}. flowx has no Airflow runtime to supply it; implement "
+            "the poll condition manually.",
+        )
+    poke, timeout = _poke_settings(ctx.kwargs)
+    # Emit the callable's def + deps, then poll its return value (no eager one-shot invocation).
+    prelude = callable_notebook.render_definitions(func, ctx.source, note=ctx.operator)
+    loop = _poll_body(ctx.operator, f"{func.name}()", f"{func.name}() condition", poke, timeout)
+    return NotebookActivity(
+        name=ctx.task_id,
+        task_key=ctx.task_key,
+        notebook_path=f"notebooks/{ctx.task_key}.py",
+        generated_source=prelude + "import time\n\n" + loop,
+    )
+
+
+def _build_datetime_sensor(ctx: OperatorContext) -> Activity:
+    """DateTimeSensor -> a notebook that sleeps until a target datetime."""
+    target = literal_str(ctx.kwargs.get("target_time"))
+    if target is None:
+        return _placeholder(
+            ctx,
+            f"{ctx.operator} target_time is not a string literal; implement the wait-until manually.",
+        )
+    _poke, timeout = _poke_settings(ctx.kwargs)
+    header = _notebook_header(ctx.task_id, ctx.operator) + (
+        "import time\n"
+        "from datetime import datetime, timezone\n\n"
+        f"TARGET_TIME = {target!r}\n\n"
+        "def _target_reached():\n"
+        "    target = datetime.fromisoformat(TARGET_TIME)\n"
+        "    now = datetime.now(target.tzinfo or timezone.utc)\n"
+        "    return now >= target\n\n"
+    )
+    loop = _poll_body(ctx.operator, "_target_reached()", f"datetime {target}", 60, timeout)
+    return NotebookActivity(
+        name=ctx.task_id,
+        task_key=ctx.task_key,
+        notebook_path=f"notebooks/{ctx.task_key}.py",
+        generated_source=header + loop,
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -246,14 +491,37 @@ def _spark_activity_from_submit(ctx: OperatorContext, submit: _SparkSubmit, note
 
 def _build_python(ctx: OperatorContext) -> Activity:
     func = ctx.functions.get(callable_name(ctx.kwargs.get("python_callable")) or "")
-    generated = notebook_from_callable(func, ctx.source) if func is not None else None
-    params = literal_value(ctx.kwargs.get("op_kwargs"))
+    # A callable that reads Airflow task context (**context / ti) or XCom can't run as a plain
+    # notebook -- route it to the agentic-gap round instead of emitting code that fails at runtime.
+    if func is not None:
+        reason = callable_notebook.task_context_reason(func)
+        if reason is not None:
+            return _placeholder(
+                ctx,
+                f"Airflow {ctx.operator} {reason}. flowx has no Airflow runtime to supply it; "
+                "translate manually -- pass upstream data via job parameters or map XCom to "
+                "dbutils.jobs.taskValues (set in the producer, get in the consumer).",
+            )
+    op_kwargs = literal_value(ctx.kwargs.get("op_kwargs"))
+    op_args = literal_value(ctx.kwargs.get("op_args"))
+    has_kwargs = isinstance(op_kwargs, dict)
+    has_args = isinstance(op_args, list)
+    generated = (
+        notebook_from_callable(func, ctx.source, op_args=has_args, op_kwargs=has_kwargs) if func is not None else None
+    )
+    # op_args/op_kwargs pass as JSON widgets so lists/numbers/nested objects survive; the notebook
+    # json.loads() them and splats into the call.
+    base_parameters: dict[str, str] = {}
+    if has_args:
+        base_parameters["__flowx_op_args"] = _json.dumps(op_args)
+    if has_kwargs:
+        base_parameters["__flowx_op_kwargs"] = _json.dumps(op_kwargs)
     return NotebookActivity(
         name=ctx.task_id,
         task_key=ctx.task_key,
         notebook_path=f"notebooks/{ctx.task_key}.py",
         generated_source=generated,
-        base_parameters={k: str(v) for k, v in params.items()} if isinstance(params, dict) else None,
+        base_parameters=base_parameters or None,
     )
 
 
@@ -391,18 +659,17 @@ def _build_copy_into(ctx: OperatorContext) -> Activity:
 
 
 def _build_branch(ctx: OperatorContext) -> Activity:
-    # The branch condition lives in a Python callable we can't reduce to left/op/right, so emit
-    # the evaluation as a notebook that should set a task value; wiring a condition_task on that
-    # value is a manual follow-up (surfaced in the placeholder comment).
-    func = ctx.functions.get(callable_name(ctx.kwargs.get("python_callable")) or "")
-    generated = notebook_from_callable(func, ctx.source) if func is not None else None
-    activity = NotebookActivity(
-        name=ctx.task_id,
-        task_key=ctx.task_key,
-        notebook_path=f"notebooks/{ctx.task_key}.py",
-        generated_source=generated,
+    # Airflow Branch/ShortCircuit gate *sibling* tasks on a Python callable's return, which flowx
+    # can't statically lower to a condition_task's left/op/right plus per-branch true/false outcome
+    # wiring. Emitting it as an ordinary notebook would silently let every downstream branch run, so
+    # route it to the agentic-gap round with the callable source instead (a real translation, not a
+    # wrong-but-quiet one). Full Branch->condition_task remains a scoped follow-up.
+    return _placeholder(
+        ctx,
+        f"Airflow {ctx.operator} selects downstream tasks at runtime. Translate to a Databricks "
+        "condition_task (or a task that sets a task value read by a condition_task) and gate each "
+        "downstream branch with a true/false outcome dependency; do NOT run all branches.",
     )
-    return activity
 
 
 def _build_virtualenv(ctx: OperatorContext) -> Activity:
@@ -492,3 +759,22 @@ OPERATOR_REGISTRY: dict[str, Callable[[OperatorContext], Activity]] = {
     "ExternalPythonOperator": _build_virtualenv,
     "EmailOperator": _build_email,
 }
+
+# File/table sensors retained as tasks (mid-DAG, or under a schedule) poll for their condition. Root
+# instances without a schedule are lifted to a job trigger by the loader before dispatch reaches here.
+OPERATOR_REGISTRY.update({name: _build_file_sensor for name in FILE_SENSORS})
+OPERATOR_REGISTRY.update({name: _build_table_sensor for name in TABLE_SENSORS})
+
+# Sensors that always become polling tasks (never triggers): cross-DAG, HTTP, arbitrary-callable,
+# and wait-until-datetime.
+OPERATOR_REGISTRY.update(
+    {
+        "ExternalTaskSensor": _build_external_task_sensor,
+        "ExternalTaskSensorAsync": _build_external_task_sensor,
+        "HttpSensor": _build_http_sensor,
+        "HttpSensorAsync": _build_http_sensor,
+        "PythonSensor": _build_python_sensor,
+        "DateTimeSensor": _build_datetime_sensor,
+        "DateTimeSensorAsync": _build_datetime_sensor,
+    }
+)

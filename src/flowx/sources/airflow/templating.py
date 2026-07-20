@@ -13,18 +13,19 @@ import ast
 import re
 from typing import Any
 
-# Airflow Jinja macros -> Databricks job dynamic-value references. Date macros map to the
-# job start time; params/var/dag_run.conf map to job parameters the pipeline should declare.
+# Airflow Jinja macros -> Databricks job dynamic-value references. Only macros with an exact
+# Databricks equivalent are mapped; date macros -> the job start time, run_id -> the run id.
+# ``ds_nodash``/``ts_nodash`` have no dashless dynamic-value form, so they are intentionally NOT
+# mapped -- they're left untouched (surfaced as an unresolved reference) rather than emitting an
+# invalid ref.
 _MACRO_TO_DAB_REF: dict[str, str] = {
     "ds": "{{job.start_time.iso_date}}",
-    "ds_nodash": "{{job.start_time.[iso_date]}}",
     "ts": "{{job.start_time.iso_datetime}}",
-    "ts_nodash": "{{job.start_time.iso_datetime}}",
     "data_interval_start": "{{job.start_time.iso_datetime}}",
     "data_interval_end": "{{job.start_time.iso_datetime}}",
     "execution_date": "{{job.start_time.iso_datetime}}",
     "logical_date": "{{job.start_time.iso_datetime}}",
-    "run_id": "{{job.id}}",
+    "run_id": "{{job.run_id}}",
 }
 
 # {{ params.X }} / {{ var.value.X }} / {{ dag_run.conf['X'] }} -> {{job.parameters.X}}
@@ -61,6 +62,48 @@ def convert_template(value: str) -> tuple[str, set[str]]:
         return match.group(0)  # unknown expression: leave untouched
 
     return _JINJA.sub(_sub, value), params
+
+
+# Airflow macro -> the sql_task.parameters name + the DAB dynamic value it resolves to. Databricks
+# requires dynamic references in SQL to go through named :markers + sql_task.parameters, never inline.
+_SQL_MACRO_PARAM: dict[str, tuple[str, str]] = {
+    "ds": ("run_date", "{{job.start_time.iso_date}}"),
+    "ts": ("run_timestamp", "{{job.start_time.iso_datetime}}"),
+    "data_interval_start": ("data_interval_start", "{{job.start_time.iso_datetime}}"),
+    "data_interval_end": ("data_interval_end", "{{job.start_time.iso_datetime}}"),
+    "execution_date": ("execution_date", "{{job.start_time.iso_datetime}}"),
+    "logical_date": ("logical_date", "{{job.start_time.iso_datetime}}"),
+    "run_id": ("run_id", "{{job.run_id}}"),
+}
+
+
+def convert_sql_template(sql: str) -> tuple[str, dict[str, str]]:
+    """Rewrites Airflow Jinja in *sql* to ``:name`` markers + a ``sql_task.parameters`` map.
+
+    Databricks requires dynamic references in a ``sql_task`` to be passed through named parameters,
+    not interpolated into the SQL text. ``{{ ds }}`` -> ``:run_date`` with
+    ``{"run_date": "{{job.start_time.iso_date}}"}``; ``{{ params.x }}`` -> ``:x`` with
+    ``{"x": "{{job.parameters.x}}"}``. Unknown expressions are left untouched.
+
+    Returns ``(sql_with_markers, parameters)``.
+    """
+    parameters: dict[str, str] = {}
+
+    def _sub(match: re.Match[str]) -> str:
+        expr = match.group(1).strip()
+        if expr in _SQL_MACRO_PARAM:
+            name, ref = _SQL_MACRO_PARAM[expr]
+            parameters[name] = ref
+            return f":{name}"
+        for pattern in _PARAM_PATTERNS:
+            m = pattern.match(expr)
+            if m:
+                name = m.group(1)
+                parameters[name] = "{{job.parameters." + name + "}}"
+                return f":{name}"
+        return match.group(0)
+
+    return _JINJA.sub(_sub, sql), parameters
 
 
 def convert_params(value: Any) -> tuple[Any, set[str]]:
@@ -162,28 +205,31 @@ def email_on_failure(dag_default_args: dict[str, ast.expr], task_kwargs: dict[st
 # trigger_rule -> dependency outcome
 # --------------------------------------------------------------------------------------
 
-# Map Airflow trigger_rule to the outcome string the preparer's run_if reducer understands
-# (Failed -> AT_LEAST_ONE_FAILED, Completed/Skipped -> ALL_DONE). Default all_success -> None.
-_TRIGGER_RULE_TO_OUTCOME: dict[str, str | None] = {
+# Map Airflow trigger_rule -> the DAB job ``run_if`` constant carried as a dependency outcome. The
+# preparer's reducer passes these through unchanged. Rules with no exact DAB equivalent fall back to
+# the closest safe constant: none_failed_min_one_success -> AT_LEAST_ONE_SUCCESS (both require >=1
+# success and no upstream failure); none_failed_or_skipped -> NONE_FAILED (skips are non-failures).
+# Airflow's default all_success maps to None (no run_if key -> Databricks default ALL_SUCCESS).
+_TRIGGER_RULE_TO_RUN_IF: dict[str, str | None] = {
     "all_success": None,
-    "all_done": "Completed",
-    "all_failed": "Failed",
-    "one_failed": "Failed",
-    "one_success": None,
-    "none_failed": None,
-    "none_failed_min_one_success": None,
-    "none_failed_or_skipped": None,
-    "always": "Completed",
+    "all_done": "ALL_DONE",
+    "all_failed": "ALL_FAILED",
+    "one_failed": "AT_LEAST_ONE_FAILED",
+    "one_success": "AT_LEAST_ONE_SUCCESS",
+    "none_failed": "NONE_FAILED",
+    "none_failed_min_one_success": "AT_LEAST_ONE_SUCCESS",
+    "none_failed_or_skipped": "NONE_FAILED",
+    "always": "ALL_DONE",
 }
 
 
 def trigger_rule_outcome(task_kwargs: dict[str, ast.expr]) -> str | None:
-    """Maps a task's ``trigger_rule`` kwarg to a dependency outcome, or None (all_success)."""
+    """Maps a task's ``trigger_rule`` kwarg to a DAB ``run_if`` constant, or None (ALL_SUCCESS)."""
     node = task_kwargs.get("trigger_rule")
     rule = node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
     if rule is None:
         return None
-    return _TRIGGER_RULE_TO_OUTCOME.get(rule)
+    return _TRIGGER_RULE_TO_RUN_IF.get(rule)
 
 
 # --------------------------------------------------------------------------------------

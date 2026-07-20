@@ -47,6 +47,76 @@ def test_python_operator_becomes_generated_notebook():
     assert "spark.sql('select 1')" in task.generated_source
 
 
+def test_python_operator_notebook_is_valid_python():
+    # A callable with an early return, a helper, a constant, and a non-Airflow import must
+    # produce a notebook that compiles (the review's P1 blind spot: top-level return / undefined names).
+    p = _load(
+        "from datetime import datetime\n"
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "CONST = 10\n"
+        "def _double(x):\n    return x * 2\n"
+        "def process(factor=1):\n"
+        "    n = _double(factor) + CONST\n"
+        "    if n > 100:\n        return 'big'\n"
+        "    return datetime.now().isoformat()\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='proc', python_callable=process, op_kwargs={'factor': 5})\n"
+    )
+    nb = _by_key(p)["proc"].generated_source
+    compile(nb, "<nb>", "exec")  # raises SyntaxError if invalid
+    assert "def process(factor=1):" in nb  # def preserved (early returns stay legal)
+    assert "def _double(x):" in nb  # transitive helper carried
+    assert "CONST = 10" in nb  # constant carried
+    assert "from datetime import datetime" in nb  # non-Airflow import carried
+    assert "from airflow" not in nb  # Airflow imports dropped
+    assert "result = process(**op_kwargs)" in nb  # invoked with op_kwargs
+    assert "taskValues.set" in nb  # return value captured
+
+
+def test_python_operator_with_context_kwarg_becomes_placeholder():
+    # A callable taking **context can't run without the Airflow runtime; route to a gap
+    # rather than emitting a notebook that fails at runtime.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def work(**context):\n    print(context['ds'])\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='work', python_callable=work)\n"
+    )
+    task = _by_key(p)["work"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "context" in task.comment
+    assert task.raw_definition is not None  # carries source for the agentic round
+
+
+def test_python_operator_with_ti_param_becomes_placeholder():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def work(ti):\n    ti.xcom_push(key='k', value=1)\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='work', python_callable=work)\n"
+    )
+    task = _by_key(p)["work"]
+    assert isinstance(task, PlaceholderActivity)
+
+
+def test_python_operator_with_xcom_pull_becomes_placeholder():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def work(data=None):\n"
+        "    prev = work.xcom_pull(task_ids='up')\n"
+        "    print(prev)\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='work', python_callable=work)\n"
+    )
+    task = _by_key(p)["work"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "XCom" in task.comment
+
+
 def test_bash_operator_becomes_sh_notebook():
     p = _load(
         "from airflow import DAG\n"
@@ -158,18 +228,116 @@ def test_table_sensor_lifts_to_table_update_trigger():
     }
 
 
-def test_sql_condition_sensor_without_table_stays_placeholder():
-    # A SqlSensor checking an arbitrary condition (no table_name) must NOT vanish;
-    # it stays as a placeholder task rather than lifting to a table trigger.
+def test_sql_condition_sensor_becomes_polling_task():
+    # A SqlSensor checking an arbitrary condition (no table_name) must NOT vanish and must NOT lift
+    # to a table trigger; it becomes a polling notebook task running the query on a poke loop.
     p = _load(
         "from airflow import DAG\n"
         "from airflow.providers.common.sql.sensors.sql import SqlSensor\n"
         "with DAG(dag_id='d') as dag:\n"
-        "    s = SqlSensor(task_id='chk', sql='SELECT COUNT(*) FROM t WHERE ready')\n"
+        "    s = SqlSensor(task_id='chk', sql='SELECT COUNT(*) FROM t WHERE ready', poke_interval=30, timeout=600)\n"
+    )
+    task = _by_key(p)["chk"]
+    assert isinstance(task, NotebookActivity)
+    assert p.schedule is None
+    src = task.generated_source
+    assert "SELECT COUNT(*) FROM t WHERE ready" in src
+    assert "POKE_INTERVAL = 30" in src
+    assert "TIMEOUT = 600" in src
+    # Generated polling notebook must be valid Python.
+    compile(src, "<chk>", "exec")
+
+
+def test_sql_condition_sensor_without_literal_sql_stays_placeholder():
+    # No literal sql/table_name to poll -> a placeholder task with guidance, never a silent drop.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.providers.common.sql.sensors.sql import SqlSensor\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    s = SqlSensor(task_id='chk', sql=build_query())\n"
     )
     task = _by_key(p)["chk"]
     assert isinstance(task, PlaceholderActivity)
     assert p.schedule is None
+
+
+def test_external_task_sensor_becomes_cross_dag_wait():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.sensors.external_task import ExternalTaskSensor\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    wait = ExternalTaskSensor(task_id='wait_up', external_dag_id='upstream dag',\n"
+        "                              poke_interval=45, timeout=900)\n"
+        "    go = PythonOperator(task_id='go', python_callable=w)\n"
+        "    wait >> go\n"
+    )
+    task = _by_key(p)["wait_up"]
+    assert isinstance(task, NotebookActivity)
+    src = task.generated_source
+    assert "WorkspaceClient" in src
+    assert "EXTERNAL_JOB_NAME = 'upstream_dag'" in src  # sanitized to the sibling job name
+    assert "POKE_INTERVAL = 45" in src
+    compile(src, "<wait_up>", "exec")
+
+
+def test_http_sensor_becomes_polling_task():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.providers.http.sensors.http import HttpSensor\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    s = HttpSensor(task_id='h', endpoint='api/ready', poke_interval=10, timeout=120)\n"
+    )
+    task = _by_key(p)["h"]
+    assert isinstance(task, NotebookActivity)
+    src = task.generated_source
+    assert "requests.get" in src
+    assert "api/ready" in src
+    compile(src, "<h>", "exec")
+
+
+def test_python_sensor_polls_callable_without_eager_call():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.sensors.python import PythonSensor\n"
+        "def is_ready():\n    return spark.table('t').count() > 0\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    s = PythonSensor(task_id='chk', python_callable=is_ready, poke_interval=25, timeout=500)\n"
+    )
+    task = _by_key(p)["chk"]
+    assert isinstance(task, NotebookActivity)
+    src = task.generated_source
+    assert "def is_ready():" in src  # callable carried
+    assert "return is_ready()" in src  # polled inside the loop
+    assert "taskValues.set" not in src  # NOT invoked eagerly as a one-shot
+    compile(src, "<chk>", "exec")
+
+
+def test_python_sensor_with_context_stays_placeholder():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.sensors.python import PythonSensor\n"
+        "def is_ready(**context):\n    return context['ti'].xcom_pull('x')\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    s = PythonSensor(task_id='chk', python_callable=is_ready)\n"
+    )
+    assert isinstance(_by_key(p)["chk"], PlaceholderActivity)
+
+
+def test_datetime_sensor_becomes_wait_until_task():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.sensors.date_time import DateTimeSensor\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    s = DateTimeSensor(task_id='wait', target_time='2026-01-01T00:00:00+00:00')\n"
+    )
+    task = _by_key(p)["wait"]
+    assert isinstance(task, NotebookActivity)
+    src = task.generated_source
+    assert "datetime.fromisoformat" in src
+    assert "2026-01-01T00:00:00+00:00" in src
+    compile(src, "<wait>", "exec")
 
 
 def test_databricks_run_now_becomes_run_job():
@@ -298,19 +466,72 @@ def test_file_sensor_lifts_to_file_arrival_trigger():
     assert p.schedule == {"kind": "file_arrival", "url": "s3://landing/in/", "pause_status": "UNPAUSED"}
 
 
-def test_explicit_cron_wins_over_sensor_trigger():
+def test_cron_and_sensor_keeps_both_schedule_and_polling_task():
+    # cron AND-THEN wait: the cron becomes the schedule and the sensor is retained as a polling
+    # task (never silently dropped), because schedule and file_arrival triggers are mutually exclusive.
     p = _load(
         "from airflow import DAG\n"
         "from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor\n"
         "from airflow.operators.python import PythonOperator\n"
         "def w():\n    pass\n"
         "with DAG(dag_id='d', schedule_interval='0 6 * * *') as dag:\n"
-        "    wait = S3KeySensor(task_id='wait', bucket_key='s3://x/')\n"
+        "    wait = S3KeySensor(task_id='wait', bucket_key='s3://x/in/', poke_interval=30, timeout=600)\n"
         "    go = PythonOperator(task_id='go', python_callable=w)\n"
         "    wait >> go\n"
     )
     assert p.schedule["kind"] == "schedule"
     assert p.schedule["quartz_cron_expression"] == "0 0 6 ? * *"
+    tasks = _by_key(p)
+    assert set(tasks) == {"wait", "go"}  # sensor retained as a task
+    wait = tasks["wait"]
+    assert isinstance(wait, NotebookActivity)
+    assert "dbutils.fs.ls" in wait.generated_source
+    assert "s3://x/in/" in wait.generated_source
+    assert "POKE_INTERVAL = 30" in wait.generated_source
+    assert "TIMEOUT = 600" in wait.generated_source
+    compile(wait.generated_source, "<wait>", "exec")
+    # `go` still depends on the retained sensor task (ordering preserved).
+    assert [d.task_key for d in tasks["go"].depends_on] == ["wait"]
+
+
+def test_mid_dag_sensor_retained_as_polling_task():
+    # A sensor that is not the DAG's entry gate (has an upstream) is an ordering gate within the run,
+    # so it stays a polling task rather than lifting to a job-level trigger.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.providers.databricks.sensors.databricks_partition import DatabricksPartitionSensor\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    prep = PythonOperator(task_id='prep', python_callable=w)\n"
+        "    wait = DatabricksPartitionSensor(task_id='wait', table_name='main.silver.events')\n"
+        "    go = PythonOperator(task_id='go', python_callable=w)\n"
+        "    prep >> wait >> go\n"
+    )
+    assert p.schedule is None  # mid-DAG sensor does not become a trigger
+    tasks = _by_key(p)
+    assert set(tasks) == {"prep", "wait", "go"}
+    wait = tasks["wait"]
+    assert isinstance(wait, NotebookActivity)
+    assert 'spark.catalog.tableExists("main.silver.events")' in wait.generated_source
+    compile(wait.generated_source, "<wait>", "exec")
+
+
+def test_dag_params_supply_job_parameter_defaults():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.models.param import Param\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d', params={'env': 'prod', 'threshold': Param(10)}) as dag:\n"
+        "    t = PythonOperator(task_id='t', python_callable=w,\n"
+        "                       op_kwargs={'e': '{{ params.env }}'})\n"
+    )
+    params = {entry["name"]: entry["default"] for entry in (p.parameters or [])}
+    # Referenced param picks up its params={...} default; a declared-but-unreferenced param is
+    # still emitted (with its default) so the job parameter validates.
+    assert params["env"] == "prod"
+    assert params["threshold"] == 10
 
 
 # --------------------------------------------------------------------------------------
@@ -370,15 +591,20 @@ def test_jinja_macros_convert_to_dab_refs_and_collect_params():
     p = _load(
         "from airflow import DAG\n"
         "from airflow.operators.python import PythonOperator\n"
-        "def w():\n    pass\n"
+        "def w(date=None, env=None):\n    pass\n"
         "with DAG(dag_id='d') as dag:\n"
         "    t = PythonOperator(task_id='t', python_callable=w,\n"
         "                       op_kwargs={'date': '{{ ds }}', 'env': '{{ params.env }}'})\n"
     )
     task = _by_key(p)["t"]
-    assert task.base_parameters == {"date": "{{job.start_time.iso_date}}", "env": "{{job.parameters.env}}"}
-    # The referenced param is declared on the pipeline.
-    assert p.parameters == [{"name": "env"}]
+    # op_kwargs are JSON-encoded into the internal __flowx_op_kwargs widget; Jinja inside the
+    # values is still converted to DAB refs.
+    kwargs_json = task.base_parameters["__flowx_op_kwargs"]
+    assert "{{job.start_time.iso_date}}" in kwargs_json
+    assert "{{job.parameters.env}}" in kwargs_json
+    # The referenced param is declared on the pipeline with a (Databricks-required) default; the
+    # internal __flowx_ widget is NOT declared.
+    assert p.parameters == [{"name": "env", "default": ""}]
 
 
 def test_default_args_apply_retries_timeout_retry_delay():
@@ -407,7 +633,7 @@ def test_per_task_retries_override_default_args():
     assert _by_key(p)["t"].max_retries == 7
 
 
-def test_trigger_rule_maps_to_dependency_outcome():
+def test_trigger_rule_maps_to_run_if_constant():
     p = _load(
         "from airflow import DAG\n"
         "from airflow.operators.python import PythonOperator\n"
@@ -416,12 +642,22 @@ def test_trigger_rule_maps_to_dependency_outcome():
         "    a = PythonOperator(task_id='a', python_callable=w)\n"
         "    cleanup = PythonOperator(task_id='cleanup', python_callable=w, trigger_rule='all_done')\n"
         "    fail_only = PythonOperator(task_id='fail_only', python_callable=w, trigger_rule='one_failed')\n"
+        "    only_fail = PythonOperator(task_id='only_fail', python_callable=w, trigger_rule='all_failed')\n"
+        "    any_ok = PythonOperator(task_id='any_ok', python_callable=w, trigger_rule='one_success')\n"
+        "    no_fail = PythonOperator(task_id='no_fail', python_callable=w, trigger_rule='none_failed')\n"
         "    a >> cleanup\n"
         "    a >> fail_only\n"
+        "    a >> only_fail\n"
+        "    a >> any_ok\n"
+        "    a >> no_fail\n"
     )
     tasks = _by_key(p)
-    assert tasks["cleanup"].depends_on[0].outcome == "Completed"  # all_done -> ALL_DONE
-    assert tasks["fail_only"].depends_on[0].outcome == "Failed"  # one_failed -> AT_LEAST_ONE_FAILED
+    # trigger_rule maps straight to the DAB run_if constant, carried as the dependency outcome.
+    assert tasks["cleanup"].depends_on[0].outcome == "ALL_DONE"
+    assert tasks["fail_only"].depends_on[0].outcome == "AT_LEAST_ONE_FAILED"
+    assert tasks["only_fail"].depends_on[0].outcome == "ALL_FAILED"
+    assert tasks["any_ok"].depends_on[0].outcome == "AT_LEAST_ONE_SUCCESS"
+    assert tasks["no_fail"].depends_on[0].outcome == "NONE_FAILED"
     assert tasks["a"].depends_on is None  # default all_success -> no outcome
 
 
@@ -471,6 +707,32 @@ def test_task_group_prefixes_member_keys():
     assert keys == {"extract__run", "load__run"}  # no collision
 
 
+def test_task_group_level_dependencies_expand_to_boundary_tasks():
+    # `start >> etl >> pub >> end` where etl/pub are TaskGroups: the group-level edges must expand to
+    # leaf(upstream) -> root(downstream), not be silently dropped.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "from airflow.utils.task_group import TaskGroup\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    start = PythonOperator(task_id='start', python_callable=w)\n"
+        "    with TaskGroup('etl') as etl:\n"
+        "        a = PythonOperator(task_id='a', python_callable=w)\n"
+        "        b = PythonOperator(task_id='b', python_callable=w)\n"
+        "        a >> b\n"
+        "    with TaskGroup('publish') as pub:\n"
+        "        c = PythonOperator(task_id='c', python_callable=w)\n"
+        "    end = PythonOperator(task_id='end', python_callable=w)\n"
+        "    start >> etl >> pub >> end\n"
+    )
+    deps = {k: sorted(d.task_key for d in (t.depends_on or [])) for k, t in _by_key(p).items()}
+    assert deps["etl__a"] == ["start"]  # start -> root of etl
+    assert deps["etl__b"] == ["etl__a"]  # intra-group edge preserved
+    assert deps["publish__c"] == ["etl__b"]  # leaf of etl -> root of publish
+    assert deps["end"] == ["publish__c"]  # leaf of publish -> end
+
+
 def test_timedelta_schedule_becomes_periodic():
     p = _load(
         "from datetime import timedelta\n"
@@ -512,7 +774,7 @@ def test_variable_get_rewritten_to_widget_and_declared_as_param():
     task = _by_key(p)["ingest"]
     assert 'dbutils.widgets.get("target_env")' in task.generated_source
     assert "Variable.get" not in task.generated_source
-    assert {"name": "target_env"} in (p.parameters or [])
+    assert {"name": "target_env", "default": ""} in (p.parameters or [])
 
 
 def test_connection_get_rewritten_to_secrets():
@@ -546,3 +808,109 @@ def test_airflow_host_detection_from_dag_source():
             encoding="utf-8",
         )
         assert detect_hosts(src) == ["ws.cloud.databricks.com"]
+
+
+# --------------------------------------------------------------------------------------
+# TaskFlow API (@dag / @task)
+# --------------------------------------------------------------------------------------
+
+
+def test_taskflow_dag_and_tasks_are_detected():
+    # A pure-TaskFlow DAG must yield tasks (not silently drop them), with the @dag config picked up.
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "from datetime import datetime\n"
+        "@task\n"
+        "def extract():\n    return [1, 2, 3]\n"
+        "@task\n"
+        "def transform(data):\n    return [x * 2 for x in data]\n"
+        "@task\n"
+        "def load(data):\n    print(sum(data))\n"
+        "@dag(schedule='0 6 * * *', start_date=datetime(2024, 1, 1), dag_id='etl_flow')\n"
+        "def pipeline():\n"
+        "    load(transform(extract()))\n"
+        "pipeline()\n"
+    )
+    assert p.name == "etl_flow"
+    assert p.schedule["quartz_cron_expression"] == "0 0 6 ? * *"
+    kinds = sorted(type(t).__name__ for t in p.tasks)
+    assert kinds == ["NotebookActivity", "NotebookActivity", "NotebookActivity"]
+    # The nested chain load(transform(extract())) wires extract -> transform -> load.
+    transform_task = next(t for t in p.tasks if t.task_key.startswith("transform"))
+    extract_key = next(t.task_key for t in p.tasks if t.task_key.startswith("extract"))
+    load_task = next(t for t in p.tasks if t.task_key.startswith("load"))
+    assert transform_task.depends_on[0].task_key == extract_key
+    assert load_task.depends_on[0].task_key == transform_task.task_key
+
+
+def test_taskflow_data_flow_reads_upstream_taskvalue():
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def extract():\n    return 5\n"
+        "@task\n"
+        "def transform(data):\n    return data * 2\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    raw = extract()\n"
+        "    transform(raw)\n"
+        "pipeline()\n"
+    )
+    tasks = _by_key(p)
+    assert set(tasks) == {"raw", "transform"}
+    src = tasks["transform"].generated_source
+    compile(src, "<transform>", "exec")
+    assert "def transform(data):" in src  # callable carried
+    assert "dbutils.jobs.taskValues.get(taskKey='raw', key='return_value'" in src  # reads upstream
+    assert "result = transform(_upstream_0)" in src  # bound to positional arg
+    assert "dbutils.jobs.taskValues.set(key='return_value', value=result)" in src  # publishes
+
+
+def test_taskflow_branch_decorator_becomes_placeholder():
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def extract():\n    return 1\n"
+        "@task.branch\n"
+        "def choose(data):\n    return 'a' if data else 'b'\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    choose(extract())\n"
+        "pipeline()\n"
+    )
+    choose = next(t for t in p.tasks if t.task_key.startswith("choose"))
+    assert isinstance(choose, PlaceholderActivity)
+    assert "condition_task" in choose.comment
+
+
+def test_taskflow_task_with_context_becomes_placeholder():
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def work(**context):\n    print(context['ds'])\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    work()\n"
+        "pipeline()\n"
+    )
+    work = next(t for t in p.tasks if t.task_key.startswith("work"))
+    assert isinstance(work, PlaceholderActivity)
+
+
+def test_taskflow_mixed_with_classic_operator():
+    # A @dag body mixing a classic operator and a @task: both become tasks, wired by >>.
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "@task\n"
+        "def finalize():\n    print('done')\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    prep = BashOperator(task_id='prep', bash_command='echo hi')\n"
+        "    prep >> finalize()\n"
+        "pipeline()\n"
+    )
+    tasks = _by_key(p)
+    assert "prep" in tasks
+    finalize = next(t for t in p.tasks if t.task_key.startswith("finalize"))
+    assert finalize.depends_on[0].task_key == "prep"

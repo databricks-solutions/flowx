@@ -70,11 +70,24 @@ class PreparedWorkflow:
     schedule: dict[str, Any] | None = None
 
 
+# The DAB job ``run_if`` vocabulary. Airflow maps ``trigger_rule`` straight to one of these
+# constants (see flowx.sources.airflow.templating), so they arrive as dependency outcomes and are
+# passed through here. ADF's outcome vocabulary (Succeeded/Failed/Completed/Skipped) is disjoint.
+_DAB_RUN_IF: frozenset[str] = frozenset(
+    {"ALL_SUCCESS", "ALL_DONE", "AT_LEAST_ONE_FAILED", "ALL_FAILED", "NONE_FAILED", "AT_LEAST_ONE_SUCCESS"}
+)
+
+
 def run_if_from_adf_outcomes(outcomes: list[str | None]) -> str | None:
-    """Maps a set of ADF dependency-edge outcomes to a single DAB ``run_if``."""
+    """Maps a set of dependency-edge outcomes to a single DAB ``run_if`` (None = ALL_SUCCESS)."""
     normalised = [outcome for outcome in outcomes if outcome]
     if not normalised:
         return None
+    # A DAB run_if constant (Airflow trigger_rule) passes through directly. A task's edges share one
+    # trigger_rule, so these are uniform; the default ALL_SUCCESS collapses to None (no run_if key).
+    dab = [outcome for outcome in normalised if outcome in _DAB_RUN_IF]
+    if dab:
+        return None if dab[0] == "ALL_SUCCESS" else dab[0]
     if any(outcome in ("Completed", "Skipped") for outcome in normalised):
         return "ALL_DONE"
     if any(outcome == "Failed" for outcome in normalised):
