@@ -74,6 +74,34 @@ def test_python_operator_notebook_is_valid_python():
     assert "taskValues.set" in nb  # return value captured
 
 
+def test_python_callable_dependencies_are_emitted_in_definition_order():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "CONST = 7\n"
+        "def helper(value=CONST):\n    return value\n"
+        "def work():\n    return helper()\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='work', python_callable=work)\n"
+    )
+
+    source = _by_key(p)["work"].generated_source
+    assert source.index("CONST = 7") < source.index("def helper")
+
+
+def test_python_callable_carries_annotated_module_constant():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "LIMIT: int = 7\n"
+        "def work():\n    return LIMIT\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='work', python_callable=work)\n"
+    )
+
+    assert "LIMIT: int = 7" in _by_key(p)["work"].generated_source
+
+
 def test_python_operator_with_context_kwarg_becomes_placeholder():
     # A callable taking **context can't run without the Airflow runtime; route to a gap
     # rather than emitting a notebook that fails at runtime.
@@ -90,6 +118,18 @@ def test_python_operator_with_context_kwarg_becomes_placeholder():
     assert task.raw_definition is not None  # carries source for the agentic round
 
 
+def test_python_operator_with_named_airflow_context_becomes_placeholder():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def work(ds):\n    print(ds)\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='work', python_callable=work)\n"
+    )
+
+    assert isinstance(_by_key(p)["work"], PlaceholderActivity)
+
+
 def test_python_operator_with_ti_param_becomes_placeholder():
     p = _load(
         "from airflow import DAG\n"
@@ -100,6 +140,21 @@ def test_python_operator_with_ti_param_becomes_placeholder():
     )
     task = _by_key(p)["work"]
     assert isinstance(task, PlaceholderActivity)
+
+
+def test_python_operator_with_nonliteral_arguments_becomes_placeholder():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "ARGS = {'value': 3}\n"
+        "def work(value):\n    return value\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='work', python_callable=work, op_kwargs=ARGS)\n"
+    )
+
+    task = _by_key(p)["work"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "op_kwargs" in task.comment
 
 
 def test_python_operator_with_xcom_pull_becomes_placeholder():
@@ -180,6 +235,23 @@ def test_sql_operator_becomes_sql_task():
     task = _by_key(p)["rep"]
     assert isinstance(task, SqlActivity)
     assert task.sql == "CREATE TABLE g AS SELECT 1"
+
+
+def test_sql_identifier_template_uses_identifier_marker():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = SQLExecuteQueryOperator(task_id='rep', "
+        "sql='SELECT * FROM {{ params.table }} WHERE id = {{ params.id }}')\n"
+    )
+
+    task = _by_key(p)["rep"]
+    assert task.sql == "SELECT * FROM IDENTIFIER(:table) WHERE id = :id"
+    assert task.parameters == {
+        "table": "{{job.parameters.table}}",
+        "id": "{{job.parameters.id}}",
+    }
     assert task.warehouse_ref == "${var.warehouse_id}"
 
 
@@ -261,7 +333,7 @@ def test_sql_condition_sensor_without_literal_sql_stays_placeholder():
     assert p.schedule is None
 
 
-def test_external_task_sensor_becomes_cross_dag_wait():
+def test_external_task_sensor_becomes_manual_cross_dag_placeholder():
     p = _load(
         "from airflow import DAG\n"
         "from airflow.sensors.external_task import ExternalTaskSensor\n"
@@ -274,15 +346,11 @@ def test_external_task_sensor_becomes_cross_dag_wait():
         "    wait >> go\n"
     )
     task = _by_key(p)["wait_up"]
-    assert isinstance(task, NotebookActivity)
-    src = task.generated_source
-    assert "WorkspaceClient" in src
-    assert "EXTERNAL_JOB_NAME = 'upstream_dag'" in src  # sanitized to the sibling job name
-    assert "POKE_INTERVAL = 45" in src
-    compile(src, "<wait_up>", "exec")
+    assert isinstance(task, PlaceholderActivity)
+    assert "logical run" in task.comment
 
 
-def test_http_sensor_becomes_polling_task():
+def test_http_sensor_with_relative_endpoint_becomes_placeholder():
     p = _load(
         "from airflow import DAG\n"
         "from airflow.providers.http.sensors.http import HttpSensor\n"
@@ -290,11 +358,20 @@ def test_http_sensor_becomes_polling_task():
         "    s = HttpSensor(task_id='h', endpoint='api/ready', poke_interval=10, timeout=120)\n"
     )
     task = _by_key(p)["h"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "http_conn_id" in task.comment
+
+
+def test_http_sensor_with_absolute_endpoint_becomes_polling_task():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.providers.http.sensors.http import HttpSensor\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    s = HttpSensor(task_id='h', endpoint='https://example.com/api/ready')\n"
+    )
+    task = _by_key(p)["h"]
     assert isinstance(task, NotebookActivity)
-    src = task.generated_source
-    assert "requests.get" in src
-    assert "api/ready" in src
-    compile(src, "<h>", "exec")
+    assert "requests.get" in task.generated_source
 
 
 def test_python_sensor_polls_callable_without_eager_call():
@@ -340,6 +417,23 @@ def test_datetime_sensor_becomes_wait_until_task():
     compile(src, "<wait>", "exec")
 
 
+def test_time_delta_sensor_is_retained_as_manual_placeholder():
+    p = _load(
+        "from datetime import timedelta\n"
+        "from airflow import DAG\n"
+        "from airflow.sensors.time_delta import TimeDeltaSensor\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d', schedule='0 0 * * *') as dag:\n"
+        "    wait = TimeDeltaSensor(task_id='wait', delta=timedelta(hours=2))\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work')\n"
+        "    wait >> work\n"
+    )
+
+    tasks = _by_key(p)
+    assert isinstance(tasks["wait"], PlaceholderActivity)
+    assert tasks["work"].depends_on[0].task_key == "wait"
+
+
 def test_databricks_run_now_becomes_run_job():
     p = _load(
         "from airflow import DAG\n"
@@ -363,6 +457,21 @@ def test_trigger_dag_run_becomes_run_job_by_name():
     assert isinstance(task, RunJobActivity)
     assert task.job_name == "other_dag"
     assert task.job_parameters == {"k": "v"}
+
+
+def test_trigger_dag_run_job_name_matches_target_job_resource_key():
+    # job_name becomes ${resources.jobs.<job_name>.id}; it must equal normalize_task_key(dag_id)
+    # (how write_bundle keys the target job), or the cross-DAG ref dangles for hyphenated/mixed-case ids.
+    from flowx.utils import normalize_task_key
+
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.trigger_dagrun import TriggerDagRunOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = TriggerDagRunOperator(task_id='f', trigger_dag_id='Upstream-DAG')\n"
+    )
+    task = _by_key(p)["f"]
+    assert task.job_name == normalize_task_key("Upstream-DAG") == "upstream_dag"
 
 
 def test_databricks_submit_run_reads_notebook_from_json():
@@ -463,7 +572,63 @@ def test_dbt_cli_operators_collapse_to_one_factory():
     assert len(dbt_tasks) == 1  # the seed>>run>>test chain collapses into one factory job
     assert dbt_tasks[0].project_dir == "/opt/proj"
     # A manifest_path must be set or the static preparer would explode zero tasks (empty child job).
-    assert dbt_tasks[0].manifest_path == "/opt/proj/target/dev/manifest.json"
+    assert dbt_tasks[0].manifest_path == "/opt/proj/target/manifest.json"
+
+
+def test_single_dbt_run_operator_limits_factory_to_models():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow_dbt.operators.dbt_operator import DbtRunOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    run = DbtRunOperator(task_id='run', dir='/opt/proj')\n"
+    )
+
+    task = _by_key(p)["run"]
+    assert isinstance(task, DbtFactoryActivity)
+    assert task.resource_types == ["model"]
+
+
+def test_dbt_operator_preserves_command_options_and_standard_manifest_path():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow_dbt.operators.dbt_operator import DbtRunOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    run = DbtRunOperator(task_id='run', dir='/opt/proj', select=['tag:daily'], "
+        "exclude=['tag:slow'], vars={'region': 'west'}, full_refresh=True)\n"
+    )
+
+    task = _by_key(p)["run"]
+    assert isinstance(task, DbtFactoryActivity)
+    assert task.manifest_path == "/opt/proj/target/manifest.json"
+    assert task.selectors == ["tag:daily"]
+    assert task.exclude_selectors == ["tag:slow"]
+    assert task.variables == {"region": "west"}
+    assert task.full_refresh is True
+
+
+def test_dbt_deps_operator_runs_only_dependency_installation(tmp_path):
+    from flowx.preparer.workflow_preparer import prepare_workflow
+
+    project = tmp_path / "project"
+    profiles = tmp_path / "profiles"
+    project.mkdir()
+    profiles.mkdir()
+    (project / "dbt_project.yml").write_text("name: demo\nprofile: demo\n")
+    (profiles / "profiles.yml").write_text("demo:\n  target: dev\n  outputs: {}\n")
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow_dbt.operators.dbt_operator import DbtDepsOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        f"    deps = DbtDepsOperator(task_id='deps', dir={str(project)!r}, profiles_dir={str(profiles)!r})\n"
+    )
+
+    task = _by_key(p)["deps"]
+    assert isinstance(task, DbtFactoryActivity)
+    assert task.resource_types == ["dependency"]
+
+    prepared = prepare_workflow(p)
+    assert prepared.tasks[0]["run_job_task"]
+    assert prepared.inner_workflows[0].tasks[0]["notebook_task"]["base_parameters"]["dbt_command"] == "deps"
 
 
 def test_dbt_chain_downstream_dep_rewired_to_factory_key():
@@ -509,21 +674,28 @@ def test_dbt_factory_explodes_manifest_into_tasks(tmp_path):
         },
         "unit_tests": {},
     }
-    proj = tmp_path / "proj" / "target" / "dev"
+    project_dir = tmp_path / "proj"
+    (project_dir / "dbt_project.yml").parent.mkdir(parents=True)
+    (project_dir / "dbt_project.yml").write_text("name: p\nprofile: p\n", encoding="utf-8")
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "profiles.yml").write_text("p:\n  target: dev\n  outputs: {}\n", encoding="utf-8")
+    proj = project_dir / "target"
     proj.mkdir(parents=True)
     (proj / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     dag = (
         "from airflow import DAG\n"
         "from airflow_dbt.operators.dbt_operator import DbtRunOperator\n"
         "with DAG(dag_id='d') as dag:\n"
-        f"    r = DbtRunOperator(task_id='run', dir={str(tmp_path / 'proj')!r})\n"
+        f"    r = DbtRunOperator(task_id='run', dir={str(tmp_path / 'proj')!r}, "
+        f"profiles_dir={str(profiles_dir)!r})\n"
     )
     dag_file = tmp_path / "dag.py"
     dag_file.write_text(dag, encoding="utf-8")
     p = load_airflow_dag(dag_file)
     wf = prepare_workflow(p)
     inner_task_keys = {t["task_key"] for inner in wf.inner_workflows for t in inner.tasks}
-    assert inner_task_keys == {"seed_codes", "model_stg"}  # non-empty, both manifest nodes exploded
+    assert inner_task_keys == {"model_stg"}
 
 
 # --------------------------------------------------------------------------------------
@@ -544,6 +716,21 @@ def test_file_sensor_lifts_to_file_arrival_trigger():
     )
     assert set(_by_key(p)) == {"go"}  # sensor is not a task
     assert p.schedule == {"kind": "file_arrival", "url": "s3://landing/in/", "pause_status": "UNPAUSED"}
+
+
+def test_s3_sensor_trigger_combines_bucket_and_relative_key():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    wait = S3KeySensor(task_id='wait', bucket_name='landing', bucket_key='incoming/')\n"
+    )
+
+    assert p.schedule == {
+        "kind": "file_arrival",
+        "url": "s3://landing/incoming/",
+        "pause_status": "UNPAUSED",
+    }
 
 
 def test_cron_and_sensor_keeps_both_schedule_and_polling_task():
@@ -662,6 +849,48 @@ def test_convert_emits_gaps_json_for_unmapped_operators():
         assert gaps[0]["raw_definition"]["source"]
 
 
+def test_convert_merges_agentic_results_without_source_dir(tmp_path):
+    import json
+
+    from flowx.sources.airflow.convert import main
+
+    report = tmp_path / "translation_report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "name": "example",
+                "tasks": [
+                    {
+                        "type": "PlaceholderActivity",
+                        "name": "pod",
+                        "task_key": "pod",
+                        "original_type": "KubernetesPodOperator",
+                    }
+                ],
+            }
+        )
+    )
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "pod.json").write_text(
+        json.dumps(
+            {
+                "activity_name": "pod",
+                "task": {
+                    "type": "NotebookActivity",
+                    "name": "pod",
+                    "task_key": "pod",
+                    "notebook_path": "notebooks/pod.py",
+                },
+            }
+        )
+    )
+
+    assert main(["--merge-agentic", "--report", str(report), "--agentic-results", str(results)]) == 0
+    merged = json.loads(report.read_text())
+    assert merged["tasks"][0]["type"] == "NotebookActivity"
+
+
 # --------------------------------------------------------------------------------------
 # Cross-cutting: Jinja templating, default_args, trigger_rule
 # --------------------------------------------------------------------------------------
@@ -685,6 +914,20 @@ def test_jinja_macros_convert_to_dab_refs_and_collect_params():
     # The referenced param is declared on the pipeline with a (Databricks-required) default; the
     # internal __flowx_ widget is NOT declared.
     assert p.parameters == [{"name": "env", "default": ""}]
+
+
+def test_unsupported_airflow_macro_becomes_placeholder():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w(value=None):\n    return value\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='t', python_callable=w, op_kwargs={'value': '{{ ds_nodash }}'})\n"
+    )
+
+    task = _by_key(p)["t"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "ds_nodash" in task.comment
 
 
 def test_default_args_apply_retries_timeout_retry_delay():
@@ -725,11 +968,14 @@ def test_trigger_rule_maps_to_run_if_constant():
         "    only_fail = PythonOperator(task_id='only_fail', python_callable=w, trigger_rule='all_failed')\n"
         "    any_ok = PythonOperator(task_id='any_ok', python_callable=w, trigger_rule='one_success')\n"
         "    no_fail = PythonOperator(task_id='no_fail', python_callable=w, trigger_rule='none_failed')\n"
+        "    no_fail_with_success = PythonOperator(task_id='no_fail_with_success', python_callable=w,\n"
+        "        trigger_rule='none_failed_min_one_success')\n"
         "    a >> cleanup\n"
         "    a >> fail_only\n"
         "    a >> only_fail\n"
         "    a >> any_ok\n"
         "    a >> no_fail\n"
+        "    a >> no_fail_with_success\n"
     )
     tasks = _by_key(p)
     # trigger_rule maps straight to the DAB run_if constant, carried as the dependency outcome.
@@ -738,7 +984,23 @@ def test_trigger_rule_maps_to_run_if_constant():
     assert tasks["only_fail"].depends_on[0].outcome == "ALL_FAILED"
     assert tasks["any_ok"].depends_on[0].outcome == "AT_LEAST_ONE_SUCCESS"
     assert tasks["no_fail"].depends_on[0].outcome == "NONE_FAILED"
+    assert tasks["no_fail_with_success"].depends_on[0].outcome == "NONE_FAILED"
     assert tasks["a"].depends_on is None  # default all_success -> no outcome
+
+
+def test_trigger_rule_enum_member_maps_to_run_if_constant():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "from airflow.utils.trigger_rule import TriggerRule\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    a = PythonOperator(task_id='a', python_callable=w)\n"
+        "    cleanup = PythonOperator(task_id='cleanup', python_callable=w, trigger_rule=TriggerRule.ALL_DONE)\n"
+        "    a >> cleanup\n"
+    )
+
+    assert _by_key(p)["cleanup"].depends_on[0].outcome == "ALL_DONE"
 
 
 # --------------------------------------------------------------------------------------
@@ -769,6 +1031,23 @@ def test_expand_direct_call_form():
         "    m = BashOperator(task_id='run', bash_command='echo').expand(env=[{'a': 1}])\n"
     )
     assert isinstance(_by_key(p)["run"], ForEachActivity)
+
+
+def test_mixed_shift_directions_preserve_each_operator_direction():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    a = BashOperator(task_id='a', bash_command='a')\n"
+        "    b = BashOperator(task_id='b', bash_command='b')\n"
+        "    c = BashOperator(task_id='c', bash_command='c')\n"
+        "    a >> b << c\n"
+    )
+
+    tasks = _by_key(p)
+    assert tasks["a"].depends_on is None
+    assert {dependency.task_key for dependency in tasks["b"].depends_on} == {"a", "c"}
+    assert tasks["c"].depends_on is None
 
 
 def test_task_group_prefixes_member_keys():
@@ -823,6 +1102,26 @@ def test_timedelta_schedule_becomes_periodic():
     assert p.schedule == {"kind": "periodic", "interval": 2, "unit": "DAYS", "pause_status": "UNPAUSED"}
 
 
+def test_subhour_timedelta_schedule_becomes_quartz_cron():
+    p = _load(
+        "from datetime import timedelta\n"
+        "from airflow import DAG\n"
+        "with DAG(dag_id='d', schedule=timedelta(minutes=30)) as dag:\n"
+        "    pass\n"
+    )
+    assert p.schedule == {
+        "kind": "schedule",
+        "quartz_cron_expression": "0 0/30 * * * ?",
+        "timezone_id": "UTC",
+        "pause_status": "UNPAUSED",
+    }
+
+
+def test_continuous_schedule_becomes_continuous_job_mode():
+    p = _load("from airflow import DAG\nwith DAG(dag_id='d', schedule='@continuous') as dag:\n    pass\n")
+    assert p.schedule == {"kind": "continuous", "pause_status": "UNPAUSED"}
+
+
 def test_dag_timezone_extracted_into_cron_schedule():
     p = _load(
         "from datetime import datetime\n"
@@ -857,7 +1156,7 @@ def test_variable_get_rewritten_to_widget_and_declared_as_param():
     assert {"name": "target_env", "default": ""} in (p.parameters or [])
 
 
-def test_connection_get_rewritten_to_secrets():
+def test_connection_get_becomes_placeholder_for_connection_object_mapping():
     p = _load(
         "from airflow import DAG\n"
         "from airflow.operators.python import PythonOperator\n"
@@ -869,9 +1168,27 @@ def test_connection_get_rewritten_to_secrets():
         "    t = PythonOperator(task_id='ingest', python_callable=ingest)\n"
     )
     task = _by_key(p)["ingest"]
-    assert "dbutils.secrets.get(" in task.generated_source
-    assert "snowflake_default_scope" in task.generated_source
-    assert "BaseHook.get_connection" not in task.generated_source
+    assert isinstance(task, PlaceholderActivity)
+    assert "snowflake_default" in task.comment
+
+
+def test_connection_get_in_carried_helper_becomes_placeholder():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "from airflow.hooks.base import BaseHook\n"
+        "def connection_host():\n"
+        "    conn = BaseHook.get_connection('warehouse')\n"
+        "    return conn.host\n"
+        "def ingest():\n"
+        "    print(connection_host())\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='ingest', python_callable=ingest)\n"
+    )
+
+    task = _by_key(p)["ingest"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "warehouse" in task.comment
 
 
 def test_airflow_host_detection_from_dag_source():
@@ -946,6 +1263,108 @@ def test_taskflow_data_flow_reads_upstream_taskvalue():
     assert "dbutils.jobs.taskValues.set(key='return_value', value=result)" in src  # publishes
 
 
+def test_taskflow_literal_arguments_are_preserved():
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def add(x, y):\n    return x + y\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    add(1, y=2)\n"
+        "pipeline()\n"
+    )
+
+    source = p.tasks[0].generated_source
+    assert "result = add(1, y=2)" in source
+
+
+def test_taskflow_nonliteral_argument_becomes_placeholder():
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "VALUE = 3\n"
+        "@task\n"
+        "def work(value):\n    return value\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    work(VALUE)\n"
+        "pipeline()\n"
+    )
+
+    assert isinstance(p.tasks[0], PlaceholderActivity)
+    assert "VALUE" in p.tasks[0].comment
+
+
+def test_taskflow_override_call_is_preserved():
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def work(value):\n    return value\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    work.override(task_id='renamed')(2)\n"
+        "pipeline()\n"
+    )
+
+    assert len(p.tasks) == 1
+    assert p.tasks[0].task_key == "renamed"
+    assert "result = work(2)" in p.tasks[0].generated_source
+
+
+def test_nested_taskflow_callable_carries_module_imports():
+    p = _load(
+        "from datetime import datetime\n"
+        "from airflow.decorators import dag, task\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    @task\n"
+        "    def now():\n"
+        "        return datetime.now().isoformat()\n"
+        "    now()\n"
+        "pipeline()\n"
+    )
+
+    source = p.tasks[0].generated_source
+    assert "from datetime import datetime" in source
+    compile(source, "<now>", "exec")
+
+
+def test_nested_taskflow_callable_carries_literal_closure_bindings():
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    factor = 3\n"
+        "    @task\n"
+        "    def scale(value):\n"
+        "        return value * factor\n"
+        "    scale(2)\n"
+        "pipeline()\n"
+    )
+
+    source = p.tasks[0].generated_source
+    assert "factor = 3" in source
+    assert "result = scale(2)" in source
+
+
+def test_nested_taskflow_callable_with_dynamic_closure_becomes_placeholder():
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "def get_factor():\n"
+        "    return 3\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    factor = get_factor()\n"
+        "    @task\n"
+        "    def scale(value):\n"
+        "        return value * factor\n"
+        "    scale(2)\n"
+        "pipeline()\n"
+    )
+
+    assert isinstance(p.tasks[0], PlaceholderActivity)
+    assert "factor" in p.tasks[0].comment
+
+
 def test_taskflow_branch_decorator_becomes_placeholder():
     p = _load(
         "from airflow.decorators import dag, task\n"
@@ -994,3 +1413,25 @@ def test_taskflow_mixed_with_classic_operator():
     assert "prep" in tasks
     finalize = next(t for t in p.tasks if t.task_key.startswith("finalize"))
     assert finalize.depends_on[0].task_key == "prep"
+
+
+def test_multiple_dags_in_one_file_are_loaded_as_separate_pipelines(tmp_path):
+    from flowx.sources.airflow.loader import load_pipelines
+
+    source = tmp_path / "multi.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='one') as dag_one:\n"
+        "    a = BashOperator(task_id='a', bash_command='echo a')\n"
+        "with DAG(dag_id='two') as dag_two:\n"
+        "    b = BashOperator(task_id='b', bash_command='echo b')\n",
+        encoding="utf-8",
+    )
+
+    pipelines = load_pipelines(source)
+
+    assert [(pipeline.name, [task.task_key for task in pipeline.tasks]) for pipeline in pipelines] == [
+        ("one", ["a"]),
+        ("two", ["b"]),
+    ]

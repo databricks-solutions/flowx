@@ -104,7 +104,7 @@ def test_dependencies_from_both_shift_and_set_upstream(job_def: dict):
 def test_job_parameters_carry_defaults(job_def: dict):
     params = {p["name"]: p["default"] for p in job_def["parameters"]}
     assert params["target_env"] == "prod"  # from Param("prod")
-    assert params["threshold"] == 100  # bare literal default
+    assert params["threshold"] == "100"  # Jobs parameter defaults are strings
 
 
 def test_templated_param_becomes_dab_ref(job_def: dict):

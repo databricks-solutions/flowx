@@ -11,7 +11,7 @@ placeholder — the same `gaps.json` + `merge_agentic` flow the ADF source uses.
 
 **Before converting, check [`sources/airflow-coverage.md`](airflow-coverage.md)** — the verified
 support matrix (classic operators, TaskFlow, sensors, TaskGroups, dbt factory) and the constructs
-still **not** handled (dynamic TaskGroup mapping, shared multi-DAG bundle). Constructs flowx can't
+still **not** handled (including dynamic TaskGroup mapping). Constructs flowx can't
 lower deterministically — callables reading task context (`**context` / `ti`) or XCom, and
 runtime-branching decorators — are routed to a placeholder + `gaps.json` for the agentic round rather
 than emitted as broken code.
@@ -53,7 +53,7 @@ Write one result JSON per gap into `<output_dir>/agentic_results/` and merge the
 `merge_agentic` command (see the parent `SKILL.md`):
 
 ```bash
-"$PY" -m flowx.adapter convert --merge-agentic \
+"$PY" -m flowx.adapter convert --source airflow --merge-agentic \
   --report <output_dir>/.work/translation_report.json \
   --agentic-results <output_dir>/agentic_results
 ```

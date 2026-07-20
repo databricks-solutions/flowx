@@ -75,6 +75,10 @@ _SQL_MACRO_PARAM: dict[str, tuple[str, str]] = {
     "logical_date": ("logical_date", "{{job.start_time.iso_datetime}}"),
     "run_id": ("run_id", "{{job.run_id}}"),
 }
+_SQL_IDENTIFIER_CONTEXT = re.compile(
+    r"(?:\bFROM|\bJOIN|\bINTO|\bUPDATE|\bTABLE|\bVIEW|\bSCHEMA|\bCATALOG)\s*$",
+    re.IGNORECASE,
+)
 
 
 def convert_sql_template(sql: str) -> tuple[str, dict[str, str]]:
@@ -89,18 +93,22 @@ def convert_sql_template(sql: str) -> tuple[str, dict[str, str]]:
     """
     parameters: dict[str, str] = {}
 
+    def _marker(name: str, match: re.Match[str]) -> str:
+        marker = f":{name}"
+        return f"IDENTIFIER({marker})" if _SQL_IDENTIFIER_CONTEXT.search(sql[: match.start()]) else marker
+
     def _sub(match: re.Match[str]) -> str:
         expr = match.group(1).strip()
         if expr in _SQL_MACRO_PARAM:
             name, ref = _SQL_MACRO_PARAM[expr]
             parameters[name] = ref
-            return f":{name}"
+            return _marker(name, match)
         for pattern in _PARAM_PATTERNS:
             m = pattern.match(expr)
             if m:
                 name = m.group(1)
                 parameters[name] = "{{job.parameters." + name + "}}"
-                return f":{name}"
+                return _marker(name, match)
         return match.group(0)
 
     return _JINJA.sub(_sub, sql), parameters
@@ -130,6 +138,21 @@ def convert_params(value: Any) -> tuple[Any, set[str]]:
             params |= refs
         return out_dict, params
     return value, params
+
+
+def unresolved_jinja_expressions(value: Any) -> set[str]:
+    """Returns Jinja expressions that remain after deterministic conversion."""
+    if isinstance(value, str):
+        return {
+            expression
+            for match in _JINJA.findall(value)
+            if not (expression := match.strip()).startswith(("job.", "tasks.", "input."))
+        }
+    if isinstance(value, list):
+        return set().union(*(unresolved_jinja_expressions(item) for item in value)) if value else set()
+    if isinstance(value, dict):
+        return set().union(*(unresolved_jinja_expressions(item) for item in value.values())) if value else set()
+    return set()
 
 
 # --------------------------------------------------------------------------------------
@@ -207,8 +230,8 @@ def email_on_failure(dag_default_args: dict[str, ast.expr], task_kwargs: dict[st
 
 # Map Airflow trigger_rule -> the DAB job ``run_if`` constant carried as a dependency outcome. The
 # preparer's reducer passes these through unchanged. Rules with no exact DAB equivalent fall back to
-# the closest safe constant: none_failed_min_one_success -> AT_LEAST_ONE_SUCCESS (both require >=1
-# success and no upstream failure); none_failed_or_skipped -> NONE_FAILED (skips are non-failures).
+# the closest safe constant: none_failed_min_one_success -> NONE_FAILED so an upstream failure
+# never permits downstream execution; none_failed_or_skipped -> NONE_FAILED (skips are non-failures).
 # Airflow's default all_success maps to None (no run_if key -> Databricks default ALL_SUCCESS).
 _TRIGGER_RULE_TO_RUN_IF: dict[str, str | None] = {
     "all_success": None,
@@ -217,7 +240,7 @@ _TRIGGER_RULE_TO_RUN_IF: dict[str, str | None] = {
     "one_failed": "AT_LEAST_ONE_FAILED",
     "one_success": "AT_LEAST_ONE_SUCCESS",
     "none_failed": "NONE_FAILED",
-    "none_failed_min_one_success": "AT_LEAST_ONE_SUCCESS",
+    "none_failed_min_one_success": "NONE_FAILED",
     "none_failed_or_skipped": "NONE_FAILED",
     "always": "ALL_DONE",
 }
@@ -226,7 +249,12 @@ _TRIGGER_RULE_TO_RUN_IF: dict[str, str | None] = {
 def trigger_rule_outcome(task_kwargs: dict[str, ast.expr]) -> str | None:
     """Maps a task's ``trigger_rule`` kwarg to a DAB ``run_if`` constant, or None (ALL_SUCCESS)."""
     node = task_kwargs.get("trigger_rule")
-    rule = node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        rule = node.value
+    elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "TriggerRule":
+        rule = node.attr.lower()
+    else:
+        rule = None
     if rule is None:
         return None
     return _TRIGGER_RULE_TO_RUN_IF.get(rule)
@@ -243,6 +271,11 @@ _VARIABLE_GET = re.compile(r"""Variable\.get\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"
 _CONNECTION_GET = re.compile(
     r"""(?:BaseHook|Connection)\.get_connection(?:_from_secrets)?\(\s*['"]([A-Za-z_][A-Za-z0-9_.\-]*)['"]\s*\)"""
 )
+
+
+def airflow_connection_names(source: str) -> set[str]:
+    """Returns literal Airflow connection identifiers referenced in Python source."""
+    return set(_CONNECTION_GET.findall(source))
 
 
 def rewrite_airflow_calls(source: str) -> tuple[str, set[str], list[str]]:

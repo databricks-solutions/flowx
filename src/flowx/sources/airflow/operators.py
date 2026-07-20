@@ -4,9 +4,9 @@ Each builder maps one Airflow operator family to an :class:`~flowx.models.ir.Act
 subclass the flowx bundler can render (``notebook_task`` / ``spark_python_task`` /
 ``spark_jar_task`` / ``sql_task`` / ``run_job_task`` / ``condition_task`` / ``for_each_task``).
 
-Structural operators (Dummy/Empty) and time sensors are classified here but dropped by the
-loader (Dummy/Empty with dependency rewiring; time sensors absorbed into the schedule). A file
-or table sensor at the DAG root with no schedule lifts to a job-level ``file_arrival`` /
+Structural operators (Dummy/Empty) are dropped by the loader with dependency rewiring. Time
+sensors remain explicit placeholders because a job schedule cannot preserve their per-run wait
+semantics. A file or table sensor at the DAG root with no schedule lifts to a job-level ``file_arrival`` /
 ``table_update`` trigger; otherwise (mid-DAG, or under a schedule) it is retained as a polling
 notebook task via :func:`_build_file_sensor` / :func:`_build_table_sensor`. Operators with no
 deterministic mapping become a PlaceholderActivity carrying guidance.
@@ -30,6 +30,7 @@ from flowx.models.ir import (
     SqlActivity,
 )
 from flowx.sources.airflow import callable_notebook
+from flowx.utils import normalize_task_key
 
 # --------------------------------------------------------------------------------------
 # Operator classification (handled specially by the loader, not via a task builder)
@@ -44,9 +45,6 @@ FILE_SENSORS: frozenset[str] = frozenset(
     {"S3KeySensor", "GCSObjectExistenceSensor", "FileSensor", "HdfsSensor", "WebHdfsSensor"}
 )
 
-# Absorbed into the job schedule (a start-of-DAG delay); dropped with a migration note.
-TIME_SENSORS: frozenset[str] = frozenset({"TimeSensor", "TimeDeltaSensor"})
-
 # Table/SQL sensors: a root table sensor naming a literal table with no schedule lifts to a
 # job-level table_update trigger; otherwise it is retained as a spark.sql polling task
 # (_build_table_sensor). A sensor with no literal sql/table_name becomes a placeholder.
@@ -58,7 +56,6 @@ TABLE_SENSORS: frozenset[str] = frozenset(
 # a seed>>run>>test chain into one factory job).
 DBT_CLI_OPERATORS: frozenset[str] = frozenset(
     {
-        "DbtOperator",
         "DbtRunOperator",
         "DbtTestOperator",
         "DbtSeedOperator",
@@ -78,6 +75,7 @@ DBT_OPERATOR_COMMAND: dict[str, str] = {
     "DbtSeedOperator": "seed",
     "DbtSnapshotOperator": "snapshot",
     "DbtBuildOperator": "build",
+    "DbtDepsOperator": "deps",
 }
 
 
@@ -157,7 +155,7 @@ def notebook_from_callable(
 
     Preserves the callable's full ``def`` (early returns stay legal), carries its transitive
     module-level dependencies (helpers / constants / non-Airflow imports), and invokes it with
-    ``op_args`` / ``op_kwargs`` read from JSON widgets. Variable/connection access is rewritten.
+    ``op_args`` / ``op_kwargs`` read from JSON widgets. Airflow variable access is rewritten.
     """
     return callable_notebook.render(func, source, op_args=op_args, op_kwargs=op_kwargs)
 
@@ -204,7 +202,7 @@ def _poll_body(operator: str, check_expr: str, description: str, poke: int, time
     )
 
 
-def _file_sensor_path(kwargs: dict[str, ast.expr]) -> str | None:
+def file_sensor_path(kwargs: dict[str, ast.expr]) -> str | None:
     """Best-effort literal storage path a file sensor waits on (S3/GCS/File/HDFS)."""
     bucket_key = literal_str(kwargs.get("bucket_key"))
     bucket_name = literal_str(kwargs.get("bucket_name"))
@@ -221,7 +219,7 @@ def _file_sensor_path(kwargs: dict[str, ast.expr]) -> str | None:
 
 def _build_file_sensor(ctx: OperatorContext) -> Activity:
     """A retained file sensor -> a notebook that polls dbutils.fs for the awaited path."""
-    path = _file_sensor_path(ctx.kwargs)
+    path = file_sensor_path(ctx.kwargs)
     if path is None:
         return _placeholder(
             ctx,
@@ -288,12 +286,7 @@ def _build_table_sensor(ctx: OperatorContext) -> Activity:
 
 
 def _build_external_task_sensor(ctx: OperatorContext) -> Activity:
-    """ExternalTaskSensor -> a notebook that waits for the external DAG's Databricks job to succeed.
-
-    The external DAG becomes a sibling Databricks job (one bundle per DAG); this task polls that
-    job's most recent run via the Jobs API until it reaches a successful terminal state. The job is
-    referenced by the sanitized DAG name, matching TriggerDagRunOperator's RunJobActivity naming.
-    """
+    """Routes ExternalTaskSensor to manual translation preserving logical-run semantics."""
     external_dag = literal_str(ctx.kwargs.get("external_dag_id"))
     if external_dag is None:
         return _placeholder(
@@ -301,32 +294,13 @@ def _build_external_task_sensor(ctx: OperatorContext) -> Activity:
             f"{ctx.operator} external_dag_id is not a string literal; implement the cross-DAG wait "
             "(poll the upstream job's run state) manually.",
         )
-    poke, timeout = _poke_settings(ctx.kwargs)
-    job_name = _sanitize_job_name(external_dag)
     external_task = literal_str(ctx.kwargs.get("external_task_id"))
-    scope = f"task '{external_task}' in " if external_task else ""
-    header = _notebook_header(ctx.task_id, ctx.operator) + (
-        "import time\n\n"
-        "from databricks.sdk import WorkspaceClient\n\n"
-        f"EXTERNAL_JOB_NAME = {job_name!r}\n"
-        "w = WorkspaceClient()\n\n"
-        "def _external_job_succeeded():\n"
-        "    jobs = list(w.jobs.list(name=EXTERNAL_JOB_NAME))\n"
-        "    if not jobs:\n"
-        "        raise RuntimeError(f\"No Databricks job named {EXTERNAL_JOB_NAME!r}; deploy the \"\n"
-        "                           \"migrated upstream DAG's bundle first.\")\n"
-        "    runs = list(w.jobs.list_runs(job_id=jobs[0].job_id, limit=1, completed_only=True))\n"
-        "    if not runs:\n"
-        "        return False\n"
-        "    state = runs[0].state\n"
-        '    return state is not None and str(state.result_state) == "RunResultState.SUCCESS"\n\n'
-    )
-    loop = _poll_body(ctx.operator, "_external_job_succeeded()", f"{scope}DAG '{external_dag}'", poke, timeout)
-    return NotebookActivity(
-        name=ctx.task_id,
-        task_key=ctx.task_key,
-        notebook_path=f"notebooks/{ctx.task_key}.py",
-        generated_source=header + loop,
+    target = f" task '{external_task}'" if external_task else ""
+    return _placeholder(
+        ctx,
+        f"ExternalTaskSensor waits for the matching logical run of DAG '{external_dag}'{target}. Databricks has "
+        "no cross-job task dependency primitive; translate this to upstream run_job_task orchestration, a table "
+        "update trigger, or a logical-time-aware polling implementation.",
     )
 
 
@@ -339,11 +313,17 @@ def _build_http_sensor(ctx: OperatorContext) -> Activity:
             f"{ctx.operator} endpoint is not a string literal; implement the HTTP poll manually "
             "(the http_conn_id base URL also needs wiring).",
         )
+    if not endpoint.startswith(("http://", "https://")):
+        return _placeholder(
+            ctx,
+            f"{ctx.operator} endpoint '{endpoint}' depends on http_conn_id for its base URL; map the Airflow "
+            "connection to a complete URL before generating a polling task.",
+        )
     poke, timeout = _poke_settings(ctx.kwargs)
     header = _notebook_header(ctx.task_id, ctx.operator) + (
         "import time\n\n"
         "import requests\n\n"
-        f"ENDPOINT = {endpoint!r}  # TODO: prefix with the http_conn_id base URL\n\n"
+        f"ENDPOINT = {endpoint!r}\n\n"
         "def _endpoint_ready():\n"
         "    try:\n"
         "        return requests.get(ENDPOINT, timeout=30).ok\n"
@@ -367,7 +347,7 @@ def _build_python_sensor(ctx: OperatorContext) -> Activity:
             ctx,
             f"{ctx.operator} python_callable could not be resolved; implement the poll manually.",
         )
-    reason = callable_notebook.task_context_reason(func)
+    reason = callable_notebook.airflow_runtime_reason(func, ctx.source)
     if reason is not None:
         return _placeholder(
             ctx,
@@ -494,7 +474,7 @@ def _build_python(ctx: OperatorContext) -> Activity:
     # A callable that reads Airflow task context (**context / ti) or XCom can't run as a plain
     # notebook -- route it to the agentic-gap round instead of emitting code that fails at runtime.
     if func is not None:
-        reason = callable_notebook.task_context_reason(func)
+        reason = callable_notebook.airflow_runtime_reason(func, ctx.source)
         if reason is not None:
             return _placeholder(
                 ctx,
@@ -502,8 +482,16 @@ def _build_python(ctx: OperatorContext) -> Activity:
                 "translate manually -- pass upstream data via job parameters or map XCom to "
                 "dbutils.jobs.taskValues (set in the producer, get in the consumer).",
             )
-    op_kwargs = literal_value(ctx.kwargs.get("op_kwargs"))
-    op_args = literal_value(ctx.kwargs.get("op_args"))
+    op_kwargs_node = ctx.kwargs.get("op_kwargs")
+    op_args_node = ctx.kwargs.get("op_args")
+    op_kwargs = literal_value(op_kwargs_node)
+    op_args = literal_value(op_args_node)
+    if op_kwargs_node is not None and not isinstance(op_kwargs, dict):
+        return _placeholder(ctx, "PythonOperator op_kwargs is not a static dictionary; bind its arguments manually.")
+    if op_args_node is not None and not isinstance(op_args, (list, tuple)):
+        return _placeholder(ctx, "PythonOperator op_args is not a static sequence; bind its arguments manually.")
+    if isinstance(op_args, tuple):
+        op_args = list(op_args)
     has_kwargs = isinstance(op_kwargs, dict)
     has_args = isinstance(op_args, list)
     generated = (
@@ -607,10 +595,13 @@ def _build_run_now(ctx: OperatorContext) -> Activity:
 def _build_trigger_dag_run(ctx: OperatorContext) -> Activity:
     target = literal_str(ctx.kwargs.get("trigger_dag_id")) or ctx.task_key
     conf = literal_value(ctx.kwargs.get("conf"))
+    # job_name becomes ${resources.jobs.<job_name>.id}; it must match the target DAG's job resource
+    # key, which write_bundle derives with normalize_task_key(dag_id). Using the same sanitizer keeps
+    # a cross-DAG TriggerDagRunOperator ref resolvable for hyphenated / mixed-case dag_ids.
     return RunJobActivity(
         name=ctx.task_id,
         task_key=ctx.task_key,
-        job_name=_sanitize_job_name(target),
+        job_name=normalize_task_key(target),
         job_parameters={k: str(v) for k, v in conf.items()} if isinstance(conf, dict) else None,
     )
 
@@ -722,11 +713,9 @@ def build_placeholder(ctx: OperatorContext) -> Activity:
     )
 
 
-def _sanitize_job_name(name: str) -> str:
-    import re
-
-    key = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-    return re.sub(r"_+", "_", key).strip("_") or "job"
+def build_placeholder_with_comment(ctx: OperatorContext, comment: str) -> Activity:
+    """Builds a placeholder carrying a caller-supplied migration explanation."""
+    return _placeholder(ctx, comment)
 
 
 # --------------------------------------------------------------------------------------

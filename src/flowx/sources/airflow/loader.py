@@ -13,7 +13,7 @@ Spark-submit, Databricks provider, SQL, dbt CLI), Tier 2 semantic
 (branch/virtualenv, cosmos ``DbtTaskGroup`` -> DbtFactoryActivity, Dummy/Empty
 dropped + rewired), Tier 3 sensors (a root file/table sensor with no schedule ->
 ``file_arrival`` / ``table_update`` trigger, otherwise retained as a polling task;
-time sensors -> schedule), and Tier 4 (unmapped -> PlaceholderActivity).
+time sensors -> PlaceholderActivity), and Tier 4 (unmapped -> PlaceholderActivity).
 ``>>`` / ``<<`` dependencies and cron ``schedule_interval`` -> Quartz are
 handled here.
 """
@@ -46,7 +46,7 @@ class _TaskFlowTask:
     ``positional_deps`` / ``keyword_deps`` map each argument position / keyword the callable was
     invoked with to the upstream task var it references (TaskFlow's implicit XCom data flow), so the
     emitted notebook can read that upstream's return value via ``dbutils.jobs.taskValues``. Literal
-    args are ignored (the callable's own defaults apply).
+    args are preserved when literal and routed to a placeholder when they cannot be resolved safely.
     """
 
     task_id: str
@@ -54,6 +54,9 @@ class _TaskFlowTask:
     decorator: str
     positional_deps: dict[int, str] = field(default_factory=dict)
     keyword_deps: dict[str, str] = field(default_factory=dict)
+    positional_values: dict[int, str] = field(default_factory=dict)
+    keyword_values: dict[str, str] = field(default_factory=dict)
+    unresolved_arguments: list[str] = field(default_factory=list)
 
 
 def _sanitize_task_key(name: str) -> str:
@@ -184,23 +187,29 @@ def _timedelta_to_periodic(node: ast.expr | None) -> dict[str, object] | None:
     maps to the largest exact unit; anything finer (minutes/seconds) is expressed as a
     cron in the caller, so this returns None for those.
     """
-    if not isinstance(node, ast.Call):
-        return None
-    func = node.func
-    name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
-    if name != "timedelta":
-        return None
-    total = 0
-    for kw in node.keywords:
-        if kw.arg in _TIMEDELTA_UNIT_SECONDS and isinstance(kw.value, ast.Constant):
-            if isinstance(kw.value.value, int):
-                total += kw.value.value * _TIMEDELTA_UNIT_SECONDS[kw.arg]
+    total = _timedelta_seconds(node)
     if total <= 0:
         return None
     for unit, unit_seconds in (("WEEKS", 604800), ("DAYS", 86400), ("HOURS", 3600)):
         if total % unit_seconds == 0:
             return {"kind": "periodic", "interval": total // unit_seconds, "unit": unit, "pause_status": "UNPAUSED"}
     return None
+
+
+def _timedelta_seconds(node: ast.expr | None) -> int:
+    """Returns the number of seconds in a literal timedelta call, or zero."""
+    if not isinstance(node, ast.Call):
+        return 0
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
+    if name != "timedelta":
+        return 0
+    total = 0
+    for keyword in node.keywords:
+        if keyword.arg in _TIMEDELTA_UNIT_SECONDS and isinstance(keyword.value, ast.Constant):
+            if isinstance(keyword.value.value, int):
+                total += keyword.value.value * _TIMEDELTA_UNIT_SECONDS[keyword.arg]
+    return total
 
 
 def _schedule_from_interval(
@@ -215,6 +224,8 @@ def _schedule_from_interval(
     a ``timedelta(...)`` -> ``kind: periodic``. Returns None when neither applies.
     """
     if interval:
+        if interval == "@continuous":
+            return {"kind": "continuous", "pause_status": "UNPAUSED"}
         quartz: str | None = _CRON_PRESETS.get(interval) or _cron_to_quartz(interval)
         if quartz is not None:
             return {
@@ -223,7 +234,27 @@ def _schedule_from_interval(
                 "timezone_id": timezone or "UTC",
                 "pause_status": "UNPAUSED",
             }
-    return _timedelta_to_periodic(node)
+    periodic = _timedelta_to_periodic(node)
+    if periodic is not None:
+        return periodic
+    total_seconds = _timedelta_seconds(node)
+    if 0 < total_seconds < 60 and 60 % total_seconds == 0:
+        return {
+            "kind": "schedule",
+            "quartz_cron_expression": f"0/{total_seconds} * * * * ?",
+            "timezone_id": timezone or "UTC",
+            "pause_status": "UNPAUSED",
+        }
+    if total_seconds % 60 == 0:
+        minutes = total_seconds // 60
+        if 0 < minutes < 60 and 60 % minutes == 0:
+            return {
+                "kind": "schedule",
+                "quartz_cron_expression": f"0 0/{minutes} * * * ?",
+                "timezone_id": timezone or "UTC",
+                "pause_status": "UNPAUSED",
+            }
+    return None
 
 
 class _DagVisitor(ast.NodeVisitor):
@@ -314,12 +345,19 @@ class _DagVisitor(ast.NodeVisitor):
         func = call.func
         mapped = False
         override_id: str | None = None
-        while isinstance(func, ast.Attribute):
-            if func.attr == "expand":
-                mapped = True
-            elif func.attr == "override":
-                override_id = ops.literal_str({kw.arg: kw.value for kw in call.keywords if kw.arg}.get("task_id"))
-            func = func.value
+        while True:
+            if isinstance(func, ast.Attribute):
+                if func.attr == "expand":
+                    mapped = True
+                func = func.value
+                continue
+            if isinstance(func, ast.Call) and isinstance(func.func, ast.Attribute):
+                if func.func.attr == "override":
+                    arguments = {keyword.arg: keyword.value for keyword in func.keywords if keyword.arg}
+                    override_id = ops.literal_str(arguments.get("task_id"))
+                    func = func.func.value
+                    continue
+            break
         if isinstance(func, ast.Name) and func.id in self.taskflow_defs:
             return func.id, mapped, override_id
         return None, mapped, override_id
@@ -349,13 +387,26 @@ class _DagVisitor(ast.NodeVisitor):
             if dep is not None:
                 task.positional_deps[index] = dep
                 self.edges.append((dep, var))
+            else:
+                value = _literal_argument_source(arg)
+                if value is None:
+                    task.unresolved_arguments.append(ast.unparse(arg))
+                else:
+                    task.positional_values[index] = value
         for kw in call.keywords:
             if kw.arg is None:
+                task.unresolved_arguments.append(f"**{ast.unparse(kw.value)}")
                 continue
             dep = self._resolve_taskflow_arg(kw.value)
             if dep is not None:
                 task.keyword_deps[kw.arg] = dep
                 self.edges.append((dep, var))
+            else:
+                value = _literal_argument_source(kw.value)
+                if value is None:
+                    task.unresolved_arguments.append(f"{kw.arg}={ast.unparse(kw.value)}")
+                else:
+                    task.keyword_values[kw.arg] = value
         return True
 
     def _resolve_taskflow_arg(self, arg: ast.expr) -> str | None:
@@ -365,7 +416,7 @@ class _DagVisitor(ast.NodeVisitor):
         is registered as its own synthetic task instance and its var returned, so the whole
         expression tree becomes a chain of task instances.
         """
-        if isinstance(arg, ast.Name):
+        if isinstance(arg, ast.Name) and (arg.id in self.operators or arg.id in self.taskflow_tasks):
             return arg.id
         if isinstance(arg, ast.Call):
             def_name, _mapped, _override = self._taskflow_def_name(arg)
@@ -445,27 +496,29 @@ class _DagVisitor(ast.NodeVisitor):
         elif isinstance(value, ast.Call):
             # A bare TaskFlow call (`extract()` with no assignment) is a task instance keyed by its
             # def name; otherwise it may be a set_upstream/set_downstream dependency call.
-            func = value.func
-            if isinstance(func, ast.Name) and func.id in self.taskflow_defs and func.id not in self.taskflow_tasks:
-                self._register_taskflow_call(value, func.id)
+            def_name, _mapped, _override = self._taskflow_def_name(value)
+            if def_name is not None:
+                task_var = def_name
+                if task_var in self.taskflow_tasks:
+                    self._taskflow_counter += 1
+                    task_var = f"{def_name}__tf{self._taskflow_counter}"
+                self._register_taskflow_call(value, task_var)
             else:
                 self._collect_set_dependency(value)
         self.generic_visit(node)
 
     def _collect_shift_chain(self, binop: ast.BinOp) -> None:
-        # Each chain position is a *group* of task names (a bare name, a [list], or an inline
-        # TaskFlow call like `extract()`); adjacent groups are connected as a cross-product so
-        # `a >> [b, c]` yields a->b and a->c.
-        groups = [self._shift_position_names(node) for node in _flatten_shift_nodes(binop)]
-        groups = [g for g in groups if g]
-        if len(groups) < 2:
-            return
-        rightward = isinstance(binop.op, ast.RShift)
-        for upstream_group, downstream_group in zip(groups, groups[1:]):
-            up, down = (upstream_group, downstream_group) if rightward else (downstream_group, upstream_group)
-            for u in up:
-                for d in down:
-                    self.edges.append((u, d))
+        self._collect_shift_expression(binop)
+
+    def _collect_shift_expression(self, node: ast.expr) -> list[str]:
+        """Collects each shift edge recursively and returns the expression's chain result."""
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, (ast.RShift, ast.LShift)):
+            return self._shift_position_names(node)
+        left = self._collect_shift_expression(node.left)
+        right = self._collect_shift_expression(node.right)
+        upstream, downstream = (left, right) if isinstance(node.op, ast.RShift) else (right, left)
+        self.edges.extend((upstream_var, downstream_var) for upstream_var in upstream for downstream_var in downstream)
+        return right
 
     def _shift_position_names(self, node: ast.expr) -> list[str]:
         # A shift-chain position resolves to task vars. An inline TaskFlow call (`extract()`) is
@@ -579,6 +632,14 @@ def _names_in(node: ast.expr) -> list[str]:
     return []
 
 
+def _literal_argument_source(node: ast.expr) -> str | None:
+    """Returns stable Python source for a literal TaskFlow call argument when available."""
+    try:
+        return repr(ast.literal_eval(node))
+    except (ValueError, SyntaxError):
+        return None
+
+
 def _flatten_shift_nodes(node: ast.expr) -> list[ast.expr]:
     """Flattens a ``>>`` / ``<<`` chain into its per-position operand nodes, left to right.
 
@@ -673,7 +734,57 @@ def _has_decorator(func: ast.FunctionDef, names: frozenset[str]) -> bool:
 
 
 def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
-    """Parses an Airflow DAG file into a flowx Pipeline IR.
+    """Parses the first Airflow DAG in a file into a flowx Pipeline IR."""
+    pipelines = load_airflow_dags(dag_path, dbt_mode=dbt_mode)
+    if not pipelines:
+        raise ValueError(f"No Airflow DAG found in {dag_path}")
+    return pipelines[0]
+
+
+def load_airflow_dags(dag_path: Path, *, dbt_mode: str = "static") -> list[Pipeline]:
+    """Parses every independently declared Airflow DAG in a Python file."""
+    source = Path(dag_path).read_text(encoding="utf-8")
+    module = ast.parse(source)
+    dag_nodes = _top_level_dag_nodes(module)
+    if not dag_nodes:
+        return [_load_airflow_module(dag_path, source, module, dbt_mode=dbt_mode)]
+    return [
+        _load_airflow_module(dag_path, source, _module_for_dag(module, dag_node), dbt_mode=dbt_mode)
+        for dag_node in dag_nodes
+    ]
+
+
+def _top_level_dag_nodes(module: ast.Module) -> list[ast.stmt]:
+    """Returns top-level context-manager and decorated-function DAG declarations."""
+    declarations: list[ast.stmt] = []
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and _has_decorator(node, _DAG_DECORATORS):
+            declarations.append(node)
+        elif isinstance(node, ast.With) and any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Name)
+            and item.context_expr.func.id == "DAG"
+            for item in node.items
+        ):
+            declarations.append(node)
+    return declarations
+
+
+def _module_for_dag(module: ast.Module, dag_node: ast.stmt) -> ast.Module:
+    """Returns a module containing shared definitions and one DAG declaration."""
+    dag_nodes = set(_top_level_dag_nodes(module))
+    body = [node for node in module.body if node is dag_node or node not in dag_nodes]
+    return ast.Module(body=body, type_ignores=list(module.type_ignores))
+
+
+def _load_airflow_module(
+    dag_path: Path,
+    source: str,
+    module: ast.Module,
+    *,
+    dbt_mode: str = "static",
+) -> Pipeline:
+    """Parses one isolated DAG declaration into a flowx Pipeline IR.
 
     Args:
         dag_path: Path to a ``.py`` DAG module.
@@ -685,11 +796,9 @@ def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
         node (NotebookActivity, SparkPython/JarActivity, RunJobActivity,
         DbtFactoryActivity, ...); Dummy/Empty are dropped with dependency
         rewiring; file sensors lift to a job-level file_arrival trigger; time
-        sensors are absorbed into the schedule; unmapped operators become a
+        sensors remain explicit placeholders; unmapped operators become a
         PlaceholderActivity.
     """
-    source = Path(dag_path).read_text(encoding="utf-8")
-    module = ast.parse(source)
     visitor = _DagVisitor(module)
     visitor.visit(module)
     functions = visitor.functions()
@@ -712,7 +821,7 @@ def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
     edges = _expand_group_edges(visitor.edges, visitor.operators, visitor.groups, visitor.group_vars)
 
     # Build the upstream adjacency in dependency terms, then drop structural nodes
-    # (Dummy/Empty, file/time sensors) by rewiring their downstreams to their upstreams.
+    # (Dummy/Empty and lifted root sensors) by rewiring their downstreams to their upstreams.
     upstreams: dict[str, list[str]] = {var: [] for var in var_task_ids}
     for upstream_var, downstream_var in edges:
         if downstream_var in upstreams and upstream_var in var_to_task_key:
@@ -727,12 +836,8 @@ def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
     schedule = _schedule_from_interval(visitor.schedule_interval, node=visitor.schedule_node, timezone=visitor.timezone)
     has_schedule = schedule is not None
 
-    # Dummy/Empty and time sensors always drop (structural / absorbed into the schedule as a delay).
-    dropped = {
-        var
-        for var, (_, op, _) in visitor.operators.items()
-        if op in ops.DUMMY_OPERATORS or op in ops.TIME_SENSORS
-    }
+    # Dummy/Empty operators are structural and can be removed after dependency rewiring.
+    dropped = {var for var, (_, op, _) in visitor.operators.items() if op in ops.DUMMY_OPERATORS}
     if not has_schedule:
         trigger_var = _root_trigger_sensor(visitor.operators, upstreams)
         if trigger_var is not None:
@@ -769,7 +874,9 @@ def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
         depends_on = [Dependency(task_key=k, outcome=outcome) for k in sorted(dep_keys)] or None
 
         if operator in ops.COSMOS_CONSTRUCTS:
-            tasks.append(_build_dbt_factory(task_id, task_key, [kwargs], depends_on, dbt_mode))
+            tasks.append(
+                _build_dbt_factory(task_id, task_key, [kwargs], depends_on, dbt_mode, operator_types=[operator])
+            )
             continue
         if operator in ops.DBT_CLI_OPERATORS:
             # Emit one factory job for the whole dbt chain, at the first dbt task's position.
@@ -777,7 +884,16 @@ def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
                 continue
             emitted_dbt = True
             dbt_kwargs = [visitor.operators[v][2] for v in dbt_vars]
-            tasks.append(_build_dbt_factory(task_id, task_key, dbt_kwargs, depends_on, dbt_mode))
+            tasks.append(
+                _build_dbt_factory(
+                    task_id,
+                    task_key,
+                    dbt_kwargs,
+                    depends_on,
+                    dbt_mode,
+                    operator_types=[visitor.operators[dbt_var][1] for dbt_var in dbt_vars],
+                )
+            )
             continue
 
         call_node = visitor.calls.get(var)
@@ -802,6 +918,15 @@ def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
         activity.min_retry_interval_millis = policy.get("min_retry_interval_millis")
         # Convert Airflow Jinja in the activity's parameter fields to DAB refs; collect params.
         referenced_params |= _convert_activity_templates(activity)
+        unresolved_templates = _unresolved_activity_templates(activity)
+        if unresolved_templates:
+            expressions = ", ".join(sorted(unresolved_templates))
+            activity = ops.build_placeholder_with_comment(
+                ctx,
+                f"Airflow template expression(s) {expressions} have no deterministic Databricks mapping; "
+                "translate the value manually.",
+            )
+            activity.depends_on = depends_on
 
         if var in visitor.mapped:
             # Dynamic mapping (.expand()) -> a for_each_task iterating the mapped operator.
@@ -903,6 +1028,15 @@ def _build_taskflow_task(
             original_type=f"@{tf.decorator}",
             comment=f"TaskFlow @{tf.decorator} '{tf.def_name}' could not be resolved; translate manually.",
         )
+    if tf.unresolved_arguments:
+        arguments = ", ".join(tf.unresolved_arguments)
+        return PlaceholderActivity(
+            name=tf.task_id,
+            task_key=task_key,
+            original_type=f"@{tf.decorator}",
+            comment=f"TaskFlow call uses nonliteral argument(s) {arguments}; bind them manually.",
+            raw_definition={"operator": f"@{tf.decorator}", "source": ast.get_source_segment(source, func) or ""},
+        )
     if tf.decorator in _TASKFLOW_BRANCHING:
         return PlaceholderActivity(
             name=tf.task_id,
@@ -915,7 +1049,7 @@ def _build_taskflow_task(
             ),
             raw_definition={"operator": f"@{tf.decorator}", "source": ast.get_source_segment(source, func) or ""},
         )
-    reason = callable_notebook.task_context_reason(func)
+    reason = callable_notebook.airflow_runtime_reason(func, source)
     if reason is not None:
         return PlaceholderActivity(
             name=tf.task_id,
@@ -953,26 +1087,18 @@ def _taskflow_invocation(func: ast.FunctionDef, tf: _TaskFlowTask, var_to_task_k
         dep_key = var_to_task_key.get(dep_var, dep_var)
         return f"dbutils.jobs.taskValues.get(taskKey='{dep_key}', key='return_value', debugValue=None)"
 
-    # Positional args must stay contiguous from index 0 -- only bind a leading run of positions so a
-    # gap doesn't shift later args. Any remaining bound positions are passed by parameter name.
-    param_names = [a.arg for a in (func.args.posonlyargs + func.args.args)]
-    index = 0
-    while index in tf.positional_deps:
-        var = f"_upstream_{index}"
-        lines.append(f"{var} = {_reader(tf.positional_deps[index])}")
-        call_positional.append(var)
-        index += 1
-    for pos, dep_var in sorted(tf.positional_deps.items()):
-        if pos < index or pos >= len(param_names):
-            continue
-        name = param_names[pos]
-        var = f"_upstream_{name}"
-        lines.append(f"{var} = {_reader(dep_var)}")
-        call_keywords.append(f"{name}={var}")
+    for position in sorted(set(tf.positional_deps) | set(tf.positional_values)):
+        if position in tf.positional_deps:
+            variable = f"_upstream_{position}"
+            lines.append(f"{variable} = {_reader(tf.positional_deps[position])}")
+            call_positional.append(variable)
+        else:
+            call_positional.append(tf.positional_values[position])
     for name, dep_var in tf.keyword_deps.items():
-        var = f"_upstream_{name}"
-        lines.append(f"{var} = {_reader(dep_var)}")
-        call_keywords.append(f"{name}={var}")
+        variable = f"_upstream_{name}"
+        lines.append(f"{variable} = {_reader(dep_var)}")
+        call_keywords.append(f"{name}={variable}")
+    call_keywords.extend(f"{name}={value}" for name, value in tf.keyword_values.items())
 
     call_args = ", ".join(call_positional + call_keywords)
     returns = any(isinstance(n, ast.Return) and n.value is not None for n in ast.walk(func))
@@ -1018,6 +1144,14 @@ _WIDGET_GET = re.compile(r"""dbutils\.widgets\.get\(\s*['"]([A-Za-z_][A-Za-z0-9_
 _JOB_PARAM_REF = re.compile(r"\{\{\s*job\.parameters\.([A-Za-z0-9_]+)\s*\}\}")
 
 
+def _unresolved_activity_templates(activity: Activity) -> set[str]:
+    """Returns residual Airflow Jinja expressions in task parameter fields."""
+    unresolved: set[str] = set()
+    for attribute in ("base_parameters", "job_parameters", "parameters", "sql"):
+        unresolved |= templating.unresolved_jinja_expressions(getattr(activity, attribute, None))
+    return unresolved
+
+
 def _rewire_dropped(upstreams: dict[str, list[str]], dropped: set[str]) -> dict[str, list[str]]:
     """Returns upstream edges with *dropped* vars removed and their edges bridged.
 
@@ -1052,11 +1186,7 @@ def _root_trigger_sensor(
     take a single trigger). A table/SQL sensor lifts only when it names a literal table; one
     without a ``table_name`` is an arbitrary-condition sensor kept as a polling task.
     """
-    file_roots = [
-        var
-        for var, (_id, op, _kw) in operators.items()
-        if op in ops.FILE_SENSORS and not upstreams.get(var)
-    ]
+    file_roots = [var for var, (_id, op, _kw) in operators.items() if op in ops.FILE_SENSORS and not upstreams.get(var)]
     if file_roots:
         return file_roots[0]
     for var, (_id, op, kw) in operators.items():
@@ -1072,13 +1202,7 @@ def _trigger_from_sensor(operator: str, kwargs: dict[str, ast.expr]) -> dict[str
     ``table_name`` -> ``trigger.table_update``. Returns None when the sensor can't lift.
     """
     if operator in ops.FILE_SENSORS:
-        url = (
-            ops.literal_str(kwargs.get("bucket_key"))
-            or ops.literal_str(kwargs.get("filepath"))
-            or ops.literal_str(kwargs.get("filepath_"))
-            or ops.literal_str(kwargs.get("bucket_name"))
-            or "<file_arrival_url>"
-        )
+        url = ops.file_sensor_path(kwargs) or "<file_arrival_url>"
         return {"kind": "file_arrival", "url": url, "pause_status": "UNPAUSED"}
     if operator in ops.TABLE_SENSORS:
         table_name = ops.literal_str(kwargs.get("table_name"))
@@ -1098,6 +1222,7 @@ def _build_dbt_factory(
     kwargs_list: list[dict[str, ast.expr]],
     depends_on: list[Dependency] | None,
     dbt_mode: str = "static",
+    operator_types: list[str] | None = None,
 ) -> DbtFactoryActivity:
     """Builds a DbtFactoryActivity from cosmos config or a set of dbt CLI operators.
 
@@ -1109,6 +1234,10 @@ def _build_dbt_factory(
     profiles_dir = "dbt_profiles"
     target = "dev"
     manifest_path: str | None = None
+    selectors: list[str] = []
+    exclude_selectors: list[str] = []
+    variables: dict[str, Any] | str | None = None
+    full_refresh = False
     for kwargs in kwargs_list:
         # dbt CLI operators pass project_dir/target directly as kwargs.
         project_dir = ops.literal_str(kwargs.get("project_dir")) or ops.literal_str(kwargs.get("dir")) or project_dir
@@ -1118,12 +1247,30 @@ def _build_dbt_factory(
         project_dir = _cosmos_project_dir(kwargs.get("project_config")) or project_dir
         target = _cosmos_target(kwargs.get("profile_config")) or target
         manifest_path = _cosmos_manifest_path(kwargs.get("project_config")) or manifest_path
-    # The static preparer needs a manifest to explode into tasks. Point it at the per-target
-    # manifest `make manifest` produces (target/<target>/manifest.json), rooted at the project dir,
-    # unless cosmos gave an explicit manifest_path. Without this the child job would be empty.
+        selectors.extend(_dbt_selector_list(ops.literal_value(kwargs.get("select") or kwargs.get("models"))))
+        exclude_selectors.extend(_dbt_selector_list(ops.literal_value(kwargs.get("exclude"))))
+        dbt_variables = ops.literal_value(kwargs.get("vars"))
+        if isinstance(dbt_variables, (dict, str)):
+            variables = dbt_variables
+        full_refresh = full_refresh or ops.literal_value(kwargs.get("full_refresh")) is True
+    # The static preparer needs the standard manifest produced under target/ unless Cosmos supplied
+    # an explicit manifest path. Without this the child job would be empty.
     if manifest_path is None:
         base = project_dir.rstrip("/") if project_dir not in ("", ".") else "."
-        manifest_path = f"{base}/target/{target}/manifest.json" if base != "." else f"target/{target}/manifest.json"
+        manifest_path = f"{base}/target/manifest.json" if base != "." else "target/manifest.json"
+    commands = {
+        ops.DBT_OPERATOR_COMMAND[operator] for operator in operator_types or [] if operator in ops.DBT_OPERATOR_COMMAND
+    }
+    resource_types: set[str] = set()
+    for command in commands:
+        if command == "build":
+            resource_types.update(("model", "seed", "snapshot", "test"))
+        elif command == "deps":
+            resource_types.add("dependency")
+        else:
+            resource_types.add({"run": "model", "seed": "seed", "snapshot": "snapshot", "test": "test"}[command])
+    if not operator_types or any(operator in ops.COSMOS_CONSTRUCTS for operator in operator_types):
+        resource_types.update(("model", "seed", "snapshot", "test"))
     return DbtFactoryActivity(
         name=task_id,
         task_key=task_key,
@@ -1133,7 +1280,21 @@ def _build_dbt_factory(
         target=target,
         manifest_path=manifest_path,
         render_mode="pydabs" if dbt_mode == "pydabs" else "static",
+        selectors=list(dict.fromkeys(selectors)),
+        exclude_selectors=list(dict.fromkeys(exclude_selectors)),
+        variables=variables,
+        full_refresh=full_refresh,
+        resource_types=sorted(resource_types),
     )
+
+
+def _dbt_selector_list(value: Any) -> list[str]:
+    """Returns literal dbt selectors as a normalized string list."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [selector for selector in value if isinstance(selector, str)]
+    return []
 
 
 def _cosmos_project_dir(node: ast.expr | None) -> str | None:
@@ -1202,7 +1363,9 @@ def load_pipelines(source_path: Path, pipeline: str | None = None, *, dbt_mode: 
         One :class:`~flowx.models.ir.Pipeline` per discovered DAG, filtered to
         *pipeline* when provided.
     """
-    pipelines = [load_airflow_dag(dag_path, dbt_mode=dbt_mode) for dag_path in discover_dags(source_path)]
+    pipelines = [
+        loaded for dag_path in discover_dags(source_path) for loaded in load_airflow_dags(dag_path, dbt_mode=dbt_mode)
+    ]
     if pipeline is not None:
         pipelines = [p for p in pipelines if p.name == pipeline]
     return pipelines
