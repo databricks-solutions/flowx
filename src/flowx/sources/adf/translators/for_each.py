@@ -7,7 +7,7 @@ from typing import Any
 from flowx.models.adf_ast import AdfActivity, AdfDefinitions
 from flowx.models.ir import Activity, ForEachActivity, TranslationContext
 from flowx.parser.expression_parser import resolve_expression
-from flowx.translator.activity_translators.resolve import resolve_field_int
+from flowx.sources.adf.translators.resolve import resolve_field_int
 
 
 def translate(

@@ -19,9 +19,9 @@ from flowx.models.ir import (
     CopyActivity,
     SetVariableActivity,
 )
-from flowx.parser.adf_loader import load_adf_definitions
 from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
-from flowx.translator.engine import translate_pipeline
+from flowx.sources.adf.loader import load_adf_definitions
+from flowx.sources.adf.translate import translate_pipeline
 
 # ---------------------------------------------------------------------------
 # Fixtures

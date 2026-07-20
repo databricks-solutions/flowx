@@ -1,31 +1,42 @@
 ---
 name: flowx-migrate
 description: >
-  End-to-end migration of Azure Data Factory pipelines to Databricks Lakeflow Jobs.
-  Orchestrates discover, convert, and package phases in sequence.
+  End-to-end migration of a source orchestrator's pipelines (Azure Data Factory, Apache Airflow)
+  to Databricks Lakeflow Jobs. Orchestrates discover, convert, and package phases in sequence.
 triggers:
-  - "migrate ADF"
   - "migrate pipelines"
+  - "migrate ADF"
+  - "migrate airflow"
   - "ADF to Databricks"
+  - "airflow to Databricks"
   - "migrate to Lakeflow"
-  - "ADF migration"
-  - "convert ADF to Lakeflow"
   - "migrate data factory"
 ---
 
-# End-to-End ADF to Databricks Migration
+# End-to-End Source to Databricks Migration
 
-Orchestrate the complete migration of Azure Data Factory pipelines to Databricks Lakeflow Jobs via Declarative Automation Bundles. This skill runs all three phases in sequence: discover, convert, package.
+Orchestrate the complete migration of a source orchestrator's pipelines to Databricks Lakeflow Jobs
+via Declarative Automation Bundles. This skill runs all three phases in sequence: discover, convert,
+package.
 
 ## Context
 
 This is the top-level orchestration skill. It runs the full migration pipeline:
 
-1. **Discover** — Parse ADF JSON exports into a typed inventory
-2. **Convert** — Convert ADF activities to Databricks IR (deterministic + agentic)
+1. **Discover** — Parse the source's definitions into a typed inventory
+2. **Convert** — Convert the source's tasks to Databricks IR (deterministic + agentic)
 3. **Package** — Generate Databricks Declarative Automation Bundles for deployment
 
 Each phase builds on the output of the previous phase. The user is shown a summary and asked to confirm before proceeding to the next phase.
+
+## Step 0 — Identify the source (required)
+
+Ask which orchestrator the user is migrating **from**, or infer it from the input: **Azure Data
+Factory / Fabric DF** (`--source adf`) or **Apache Airflow** (`--source airflow`). There is no
+default. Pass `--source <name>` to the discover and convert phases (package is source-independent).
+The discover/convert skills route to the matching `sources/<source>.md` guide for source-specific
+detail; the invocations below show ADF but apply to any source by swapping `--source` and the
+source path (`--adf-source-path` / `--airflow-source-path`, both aliases of `--source-path`).
 
 ## How to run this skill — MCP tools or venv CLI
 
@@ -164,7 +175,9 @@ Example prompt:
 
 ### Step 2 — Phase 1: Discover
 
-Invoke the `flowx:flowx-discover` skill with the ADF source path and `--output-dir <output_dir>` (the shared migration dir). Profile writes `<output_dir>/metadata/{inventory.json, profile_report.csv, <pipeline>.arm.json}`.
+Invoke the `flowx:flowx-discover` skill with `--source <source>`, the source path, and
+`--output-dir <output_dir>` (the shared migration dir). Discover routes to its `sources/<source>.md`
+guide and writes `<output_dir>/metadata/{inventory.json, profile_report.csv}` (plus `<pipeline>.arm.json` for ADF).
 
 Wait for discover to complete and present the inventory summary:
 
@@ -197,7 +210,8 @@ If the user says yes, proceed to step 4.
 ### Step 4 — Phase 2: Convert
 
 Invoke the `flowx:flowx-convert` skill with:
-- ADF source dir: the original ADF source path (same `--source-dir` as discover)
+- `--source <source>`: the same source discover used
+- Source path: the original source path (same one discover used)
 - Output dir: the same shared `<output_dir>` (convert writes its report to `<output_dir>/.work/`)
 
 Wait for the translation to complete and present the summary:

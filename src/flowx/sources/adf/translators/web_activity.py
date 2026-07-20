@@ -12,7 +12,7 @@ from flowx.parser.expression_parser import (
     resolve_expression,
     resolve_interpolated_string_for_notebook,
 )
-from flowx.translator.activity_translators.resolve import resolve_dict_values, resolve_field
+from flowx.sources.adf.translators.resolve import resolve_dict_values, resolve_field
 
 
 def translate(

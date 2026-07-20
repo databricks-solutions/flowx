@@ -29,6 +29,7 @@ from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
     CopyActivity,
+    DbtFactoryActivity,
     DeleteActivity,
     Dependency,
     ExecutePipelineActivity,
@@ -1588,6 +1589,18 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             notebook_path_unresolved=bool(task_ir.get("notebook_path_unresolved", False)),
             notebook_path_expression=task_ir.get("notebook_path_expression"),
             unresolved_libraries=list(task_ir.get("unresolved_libraries") or []),
+            generated_source=task_ir.get("generated_source"),
+        )
+    if task_type == "DbtFactoryActivity":
+        return DbtFactoryActivity(
+            **base,
+            project_dir=task_ir.get("project_dir", "."),
+            profiles_dir=task_ir.get("profiles_dir", "dbt_profiles"),
+            target=task_ir.get("target", "dev"),
+            manifest_path=task_ir.get("manifest_path"),
+            render_mode=task_ir.get("render_mode", "static"),
+            selectors=list(task_ir.get("selectors") or []),
+            nodes=list(task_ir.get("nodes") or []),
         )
     if task_type == "SparkJarActivity":
         return SparkJarActivity(

@@ -20,9 +20,9 @@ from flowx.models.ir import (
     PlaceholderActivity,
     SwitchActivity,
 )
-from flowx.parser.adf_loader import build_inventory
 from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
-from flowx.translator.engine import translate_pipeline
+from flowx.sources.adf.loader import build_inventory
+from flowx.sources.adf.translate import translate_pipeline
 
 # ---------------------------------------------------------------------------
 # TestTranslateAllPipelines — simulates "translate all pipelines"

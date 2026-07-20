@@ -13,7 +13,7 @@ from flowx.parser.expression_parser import (
     resolve_interpolated_string,
     resolve_interpolated_string_for_notebook,
 )
-from flowx.translator.query_analysis import analyze_copy_query, dialect_for_source_type
+from flowx.sources.adf.query_analysis import analyze_copy_query, dialect_for_source_type
 
 _DATASET_TYPE_TO_SPARK_FORMAT: dict[str, str] = {
     "DelimitedText": "csv",

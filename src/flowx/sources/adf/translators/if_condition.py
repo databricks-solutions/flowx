@@ -11,7 +11,7 @@ from typing import Any
 
 from flowx.models.adf_ast import AdfActivity, AdfDefinitions
 from flowx.models.ir import Activity, IfConditionActivity, TranslationContext
-from flowx.translator.activity_translators.resolve import (
+from flowx.sources.adf.translators.resolve import (
     BridgeRequest,
     lower_to_bridge,
     merge_bridge_requests,

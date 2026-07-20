@@ -6,9 +6,9 @@ from typing import Any
 
 from flowx.models.adf_ast import AdfActivity, AdfDefinitions
 from flowx.models.ir import Activity, SwitchActivity, SwitchCase, TranslationContext
-from flowx.parser.adf_loader import parse_activity
 from flowx.parser.expression_parser import resolve_interpolated_string
-from flowx.translator.activity_translators.resolve import (
+from flowx.sources.adf.loader import parse_activity
+from flowx.sources.adf.translators.resolve import (
     BridgeRequest,
     lower_to_bridge,
     resolve_field,

@@ -44,16 +44,13 @@ from flowx.adapter.operations import (
 # the cheap commands (inputs, phase pass-throughs, materialize-lookup, workspace-paths) skip ~0.15s of
 # unused import cost on every adapter subprocess.
 
-# Maps the unified phase runner subcommands to the module CLI they forward to.
-_PHASE_MODULES: dict[str, str] = {
-    "discover": "flowx.parser.adf_loader",
-    "convert": "flowx.translator.engine",
-    "package": "flowx.bundler.dab_writer",
-}
-# Aliases so the inputs option ids double as CLI flags on the phase runners.
-_PHASE_FLAG_ALIASES: dict[str, str] = {
-    "--adf-source-path": "--source-dir",
-}
+# The package phase is source-independent: it consumes the shared Pipeline IR every
+# source produces, so it routes to one module regardless of --source.
+_PACKAGE_MODULE = "flowx.bundler.dab_writer"
+
+# Generic source-path flag the phase runners accept; each source also accepts its own
+# alias (e.g. --adf-source-path). Both normalise to the phase CLI's --source-dir.
+_SOURCE_PATH_FLAG = "--source-path"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         Exit code (0 on success, non-zero on usage or runtime errors).
     """
     raw_args = list(sys.argv[1:]) if argv is None else list(argv)
-    if raw_args and raw_args[0] in _PHASE_MODULES:
+    if raw_args and raw_args[0] in ("discover", "convert", "package"):
         # Phase runners are pure pass-through to the underlying phase CLI;
         # bypass argparse so forwarded --flags aren't misparsed at this level.
         return _run_phase(raw_args[0], raw_args[1:])
@@ -390,43 +387,100 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Workspace folder for the dashboard (defaults to the current user's home).",
     )
 
-    # Unified phase runners: `adapter <phase> -- <flags>` forwards to the phase CLI (one entry point);
-    # --adf-source-path is accepted as an alias of the loader/translator --source-dir flag.
+    # Unified phase runners: `adapter <phase> --source <name> -- <flags>` routes discover/convert
+    # to the named source's phase module (default: adf, for back-compat). package is source-independent.
+    # --source-path (and each source's own alias, e.g. --adf-source-path) normalise to --source-dir.
     for _phase in ("discover", "convert", "package"):
         _runner = subparsers.add_parser(
             _phase,
-            help=f"Run the {_phase} phase (forwards flags to the underlying phase CLI).",
+            help=f"Run the {_phase} phase (routes to the --source's phase module; forwards remaining flags).",
         )
         _runner.add_argument(
             "forward",
             nargs=argparse.REMAINDER,
-            help="Flags forwarded to the phase CLI (e.g. --adf-source-path/--source-dir, --output-dir, --pipeline).",
+            help=(
+                "Flags forwarded to the phase CLI (e.g. --source adf|airflow, "
+                "--source-path/--source-dir, --output-dir, --pipeline)."
+            ),
         )
 
     return parser
 
 
-def _run_phase(phase: str, forward: list[str]) -> int:
-    """Forward a phase runner subcommand to the underlying phase module, **in-process**.
+def _split_source(forward: list[str]) -> tuple[str | None, list[str]]:
+    """Extracts ``--source <name>`` (or ``--source=<name>``) from *forward*.
 
-    ``python -m flowx.adapter discover --adf-source-path X --output-dir Y`` runs
-    ``flowx.parser.adf_loader.main(["--source-dir", "X", "--output-dir", "Y"])`` in this same
-    interpreter -- no second ``python -m`` spawn. The module's ``main(argv)`` reuses the existing,
-    tested phase CLI surface, so there is a single entry point with no argument-surface duplication.
-    Collapsing the former double-spawn (adapter process -> module process) shaves an interpreter
-    start + re-import off every ``discover``/``convert``/``package`` call.
+    Returns ``(source_name, remaining_tokens)``, where ``source_name`` is
+    ``None`` when no ``--source`` was supplied.  ``--source`` is required for
+    the discover/convert phases (there is no default source); the caller
+    reports the error.
+    """
+    source: str | None = None
+    remaining: list[str] = []
+    tokens = list(forward or [])
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--source":
+            if index + 1 < len(tokens):
+                source = tokens[index + 1]
+                index += 2
+                continue
+            index += 1
+            continue
+        if token.startswith("--source="):
+            source = token.split("=", 1)[1]
+            index += 1
+            continue
+        remaining.append(token)
+        index += 1
+    return source, remaining
+
+
+def _run_phase(phase: str, forward: list[str]) -> int:
+    """Forward a phase runner subcommand to the source's phase module, **in-process**.
+
+    ``python -m flowx.adapter discover --source airflow --source-path X --output-dir Y`` runs
+    ``flowx.sources.airflow.discover.main(["--source-dir", "X", "--output-dir", "Y"])`` in this same
+    interpreter -- no second ``python -m`` spawn.  ``--source`` is required for discover/convert
+    (no default: the user must choose a source); ``package`` is source-independent and always routes
+    to the shared bundler.  The generic ``--source-path`` and each source's own alias normalise to
+    the phase CLI's ``--source-dir``.
 
     Args:
         phase: One of ``"discover"`` / ``"convert"`` / ``"package"``.
         forward: Tokens after the phase name (flags for the phase CLI).
 
     Returns:
-        The phase's exit code (0 on success).
+        The phase's exit code (0 on success), or 2 when ``--source`` is missing
+        or names an unknown source.
     """
     import importlib
 
-    module = importlib.import_module(_PHASE_MODULES[phase])
-    mapped = [_PHASE_FLAG_ALIASES.get(token, token) for token in (forward or [])]
+    from flowx.sources import available_sources, get_source
+
+    source_name, remaining = _split_source(forward)
+
+    if phase == "package":
+        module_path = _PACKAGE_MODULE
+        aliases: dict[str, str] = {}
+    else:
+        if source_name is None:
+            print(
+                f"--source is required for the {phase} phase; choose one of: {', '.join(available_sources())}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            source = get_source(source_name)
+        except KeyError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+        module_path = source.discover_module if phase == "discover" else source.convert_module
+        aliases = {_SOURCE_PATH_FLAG: "--source-dir", source.source_path_flag: "--source-dir"}
+
+    module = importlib.import_module(module_path)
+    mapped = [aliases.get(token, token) for token in remaining]
     try:
         return module.main(mapped) or 0
     except SystemExit as exit_signal:  # e.g. argparse usage error -> parser.error() raises SystemExit
@@ -562,9 +616,9 @@ def _run_modify(args: argparse.Namespace) -> int:
         provisioned_pipelines.append(provisioned)
         for message in messages:
             print(message, file=sys.stderr)
-    from flowx.translator.engine import _pipeline_to_dict  # lazy: heavy import (sqlglot)
+    from flowx.ir_serde import pipeline_to_dict
 
-    modified = [_pipeline_to_dict(pipeline) for pipeline in provisioned_pipelines]
+    modified = [pipeline_to_dict(pipeline) for pipeline in provisioned_pipelines]
     _write_modified_report(args.report, modified, stamped_out)
 
     # Persist the collected answers as the kept configuration record.

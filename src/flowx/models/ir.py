@@ -117,6 +117,12 @@ class NotebookActivity(Activity):
             dab_ref.  Each entry has ``type`` (library shape key),
             ``expression`` (raw ADF text), and ``missing`` (referenced
             identifier names not bound in the translation context).
+        generated_source: Full notebook source a source front-end has
+            already produced (e.g. an Airflow PythonOperator callable body
+            or a BashOperator command lowered to a notebook).  When set, the
+            preparer writes it as the notebook content instead of emitting a
+            reference/placeholder for an existing workspace notebook.  ADF,
+            which references existing notebooks, leaves this ``None``.
     """
 
     notebook_path: str
@@ -125,6 +131,7 @@ class NotebookActivity(Activity):
     notebook_path_unresolved: bool = False
     notebook_path_expression: str | None = None
     unresolved_libraries: list[dict[str, Any]] = field(default_factory=list)
+    generated_source: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -454,6 +461,46 @@ class AppendVariableActivity(Activity):
     value_kind: str = "literal"  # "literal", "dab_ref", "notebook_code"
     notebook_code: str | None = None
     notebook_imports: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True, kw_only=True)
+class DbtFactoryActivity(Activity):
+    """A dbt project exploded into one Databricks task per dbt node.
+
+    Produced by a source front-end for a dbt workload (e.g. an Airflow
+    astronomer-cosmos ``DbtTaskGroup`` or a chain of dbt CLI operators).  The
+    preparer renders it two ways from the same node list:
+
+    - ``static`` (default): explode the manifest into an inner job of one task
+      per dbt node at package time, wired via a ``run_job_task`` hop.  Every
+      dbt task is visible to flowx's coverage / validate / REPORT.csv.
+    - ``pydabs`` (opt-in): emit a PyDABs hook module that calls
+      ``databricks-dbt-factory`` at ``bundle deploy`` time, so the dbt job
+      tracks the project automatically (at the cost of being invisible to
+      static coverage until deploy).
+
+    Attributes:
+        project_dir: Path to the dbt project (relative to the bundle root).
+        profiles_dir: Path to the dbt profiles directory.
+        target: dbt target name (``dev`` / ``prod`` / ...).
+        manifest_path: Path to ``manifest.json`` (read at package time for
+            static mode; referenced by the hook for pydabs mode).
+        render_mode: ``"static"`` or ``"pydabs"``.
+        selectors: dbt ``--select`` selectors the source restricted the run
+            to, if any (empty means the whole project).
+        nodes: Pre-exploded node specs (list of dicts with ``task_key``,
+            ``command``, ``selector``, ``depends_on``) when the front-end
+            already read the manifest; empty when the preparer should read
+            ``manifest_path`` itself.
+    """
+
+    project_dir: str
+    profiles_dir: str = "dbt_profiles"
+    target: str = "dev"
+    manifest_path: str | None = None
+    render_mode: str = "static"
+    selectors: list[str] = field(default_factory=list)
+    nodes: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)
