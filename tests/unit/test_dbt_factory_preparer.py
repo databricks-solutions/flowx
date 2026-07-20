@@ -83,9 +83,11 @@ def test_static_parent_hop_keeps_upstream_dependency():
 def test_pydabs_emits_hook_module_and_no_inner_job():
     prepared = prepare_activity(_dbt_activity(render_mode="pydabs", manifest_path="target/manifest.json"))
     assert prepared.inner_workflows == []
-    hook_paths = [nb.relative_path for nb in prepared.notebooks]
-    assert hook_paths == ["resources/dbt_transform_dbt_job.py"]
-    assert "load_resources" in prepared.notebooks[0].content
+    hook_paths = {nb.relative_path for nb in prepared.notebooks}
+    # The hook module plus a resources/ package marker so `python.resources` can import it.
+    assert hook_paths == {"resources/dbt_transform_dbt_job.py", "resources/__init__.py"}
+    hook = next(nb for nb in prepared.notebooks if nb.relative_path.endswith("_dbt_job.py"))
+    assert "load_resources" in hook.content
     assert "run_job_task" in prepared.task
 
 
@@ -128,3 +130,40 @@ def test_survives_json_report_round_trip():
     assert isinstance(dbt, DbtFactoryActivity)
     assert dbt.render_mode == "static"
     assert {n["task_key"] for n in dbt.nodes} == {"seed_codes", "model_stg", "model_fct", "test_stg"}
+
+
+def test_pydabs_bundle_wires_python_resources_and_setup(tmp_path):
+    # End-to-end: PyDABs mode must register the hook under databricks.yml python.resources, write the
+    # hook + package marker to the bundle root (not src/), and surface the setup steps in SETUP.md.
+    import yaml
+
+    from flowx.bundler.dab_writer import write_bundle
+
+    pipeline = Pipeline(
+        name="orders",
+        tasks=[
+            NotebookActivity(
+                name="ingest",
+                task_key="ingest",
+                notebook_path="notebooks/ingest.py",
+                generated_source="# Databricks notebook source\nprint('x')\n",
+            ),
+            _dbt_activity(
+                depends_on=[Dependency(task_key="ingest")],
+                render_mode="pydabs",
+                manifest_path="dbt/target/manifest.json",
+            ),
+        ],
+    )
+    write_bundle(prepare_workflow(pipeline), tmp_path)
+
+    databricks_yml = yaml.safe_load((tmp_path / "databricks.yml").read_text())
+    assert databricks_yml["python"]["resources"] == ["resources.dbt_transform_dbt_job:load_resources"]
+    assert databricks_yml["python"]["venv_path"] == ".venv"
+    # Hook + package marker live at the bundle root so `resources.<mod>` imports resolve.
+    assert (tmp_path / "resources" / "dbt_transform_dbt_job.py").exists()
+    assert (tmp_path / "resources" / "__init__.py").exists()
+    assert not (tmp_path / "src" / "resources").exists()
+    setup = (tmp_path / "SETUP.md").read_text()
+    assert "dbt factory (PyDABs mode)" in setup
+    assert "databricks-dbt-factory" in setup

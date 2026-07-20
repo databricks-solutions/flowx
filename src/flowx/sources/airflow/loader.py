@@ -672,11 +672,13 @@ def _has_decorator(func: ast.FunctionDef, names: frozenset[str]) -> bool:
     return any(_decorator_name(dec) in names for dec in func.decorator_list)
 
 
-def load_airflow_dag(dag_path: Path) -> Pipeline:
+def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
     """Parses an Airflow DAG file into a flowx Pipeline IR.
 
     Args:
         dag_path: Path to a ``.py`` DAG module.
+        dbt_mode: dbt-factory render mode for any dbt workload -- ``"static"`` (default,
+            an inner job of per-node tasks) or ``"pydabs"`` (a deploy-time hook module).
 
     Returns:
         A :class:`~flowx.models.ir.Pipeline`. Mapped operators become their IR
@@ -740,8 +742,17 @@ def load_airflow_dag(dag_path: Path) -> Pipeline:
                 dropped.add(trigger_var)
     upstreams = _rewire_dropped(upstreams, dropped)
 
-    # Collapse all dbt CLI operators over the one project into a single DbtFactoryActivity.
+    # Collapse all dbt CLI operators over the one project into a single DbtFactoryActivity emitted at
+    # the first dbt task's position. Every dbt var's task_key remaps to that single key, so a
+    # downstream task that depended on a later dbt op (e.g. `dbt_test`) points at the factory task
+    # rather than a task_key that was never emitted (which would dangle).
     dbt_vars = [var for var, (_, op, _) in visitor.operators.items() if op in ops.DBT_CLI_OPERATORS]
+    dbt_factory_key = var_to_task_key[dbt_vars[0]] if dbt_vars else None
+    dbt_key_remap = {var_to_task_key[v]: dbt_factory_key for v in dbt_vars} if dbt_factory_key else {}
+
+    def _dep(upstream_var: str, outcome: str | None) -> str:
+        key = var_to_task_key[upstream_var]
+        return dbt_key_remap.get(key, key)
 
     tasks: list[Activity] = []
     referenced_params: set[str] = set()
@@ -751,10 +762,14 @@ def load_airflow_dag(dag_path: Path) -> Pipeline:
             continue
         task_key = var_to_task_key[var]
         outcome = templating.trigger_rule_outcome(kwargs)
-        depends_on = [Dependency(task_key=var_to_task_key[u], outcome=outcome) for u in upstreams[var]] or None
+        # Remap dbt-chain upstreams to the single factory key and drop self-edges (a dbt op
+        # depending on another dbt op in the same collapsed chain).
+        dep_keys = {_dep(u, outcome) for u in upstreams[var]}
+        dep_keys.discard(task_key if operator not in ops.DBT_CLI_OPERATORS else dbt_factory_key)
+        depends_on = [Dependency(task_key=k, outcome=outcome) for k in sorted(dep_keys)] or None
 
         if operator in ops.COSMOS_CONSTRUCTS:
-            tasks.append(_build_dbt_factory(task_id, task_key, [kwargs], depends_on))
+            tasks.append(_build_dbt_factory(task_id, task_key, [kwargs], depends_on, dbt_mode))
             continue
         if operator in ops.DBT_CLI_OPERATORS:
             # Emit one factory job for the whole dbt chain, at the first dbt task's position.
@@ -762,7 +777,7 @@ def load_airflow_dag(dag_path: Path) -> Pipeline:
                 continue
             emitted_dbt = True
             dbt_kwargs = [visitor.operators[v][2] for v in dbt_vars]
-            tasks.append(_build_dbt_factory(task_id, task_key, dbt_kwargs, depends_on))
+            tasks.append(_build_dbt_factory(task_id, task_key, dbt_kwargs, depends_on, dbt_mode))
             continue
 
         call_node = visitor.calls.get(var)
@@ -1082,16 +1097,18 @@ def _build_dbt_factory(
     task_key: str,
     kwargs_list: list[dict[str, ast.expr]],
     depends_on: list[Dependency] | None,
+    dbt_mode: str = "static",
 ) -> DbtFactoryActivity:
     """Builds a DbtFactoryActivity from cosmos config or a set of dbt CLI operators.
 
     Extracts project_dir / profiles_dir / target from cosmos ProjectConfig/ProfileConfig
-    args or dbt operator kwargs. render_mode defaults to static (the flowx-native path);
+    args or dbt operator kwargs. ``dbt_mode`` selects the render mode (static | pydabs);
     the manifest is read at package time from project_dir/target/manifest.json.
     """
     project_dir = "."
     profiles_dir = "dbt_profiles"
     target = "dev"
+    manifest_path: str | None = None
     for kwargs in kwargs_list:
         # dbt CLI operators pass project_dir/target directly as kwargs.
         project_dir = ops.literal_str(kwargs.get("project_dir")) or ops.literal_str(kwargs.get("dir")) or project_dir
@@ -1100,6 +1117,13 @@ def _build_dbt_factory(
         # Cosmos nests config in ProjectConfig(...) / ProfileConfig(...) calls.
         project_dir = _cosmos_project_dir(kwargs.get("project_config")) or project_dir
         target = _cosmos_target(kwargs.get("profile_config")) or target
+        manifest_path = _cosmos_manifest_path(kwargs.get("project_config")) or manifest_path
+    # The static preparer needs a manifest to explode into tasks. Point it at the per-target
+    # manifest `make manifest` produces (target/<target>/manifest.json), rooted at the project dir,
+    # unless cosmos gave an explicit manifest_path. Without this the child job would be empty.
+    if manifest_path is None:
+        base = project_dir.rstrip("/") if project_dir not in ("", ".") else "."
+        manifest_path = f"{base}/target/{target}/manifest.json" if base != "." else f"target/{target}/manifest.json"
     return DbtFactoryActivity(
         name=task_id,
         task_key=task_key,
@@ -1107,7 +1131,8 @@ def _build_dbt_factory(
         project_dir=project_dir,
         profiles_dir=profiles_dir,
         target=target,
-        render_mode="static",
+        manifest_path=manifest_path,
+        render_mode="pydabs" if dbt_mode == "pydabs" else "static",
     )
 
 
@@ -1135,6 +1160,14 @@ def _cosmos_target(node: ast.expr | None) -> str | None:
     return ops.literal_str(kwargs.get("target_name"))
 
 
+def _cosmos_manifest_path(node: ast.expr | None) -> str | None:
+    """Extracts an explicit ``manifest_path`` from a cosmos ``ProjectConfig(...)`` call, if any."""
+    if not isinstance(node, ast.Call):
+        return None
+    kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+    return ops.literal_str(kwargs.get("manifest_path"))
+
+
 def discover_dags(source_path: Path) -> list[Path]:
     """Returns the DAG ``.py`` files under *source_path*.
 
@@ -1157,18 +1190,19 @@ def discover_dags(source_path: Path) -> list[Path]:
     return dags
 
 
-def load_pipelines(source_path: Path, pipeline: str | None = None) -> list[Pipeline]:
+def load_pipelines(source_path: Path, pipeline: str | None = None, *, dbt_mode: str = "static") -> list[Pipeline]:
     """Loads every DAG under *source_path* into Pipeline IR.
 
     Args:
         source_path: A DAG ``.py`` file or a directory of them.
         pipeline: When set, keep only the pipeline whose name (dag_id) matches.
+        dbt_mode: dbt-factory render mode -- ``"static"`` (default) or ``"pydabs"``.
 
     Returns:
         One :class:`~flowx.models.ir.Pipeline` per discovered DAG, filtered to
         *pipeline* when provided.
     """
-    pipelines = [load_airflow_dag(dag_path) for dag_path in discover_dags(source_path)]
+    pipelines = [load_airflow_dag(dag_path, dbt_mode=dbt_mode) for dag_path in discover_dags(source_path)]
     if pipeline is not None:
         pipelines = [p for p in pipelines if p.name == pipeline]
     return pipelines

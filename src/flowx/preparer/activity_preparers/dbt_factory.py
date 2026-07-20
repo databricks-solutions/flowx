@@ -165,6 +165,8 @@ def _prepare_pydabs(activity: DbtFactoryActivity) -> PreparedActivity:
 
     hook_relative_path = f"resources/{activity.task_key}_dbt_job.py"
     hook_notebook = DabNotebook(relative_path=hook_relative_path, content=_pydabs_hook_source(activity))
+    # `resources` must be an importable package for `python.resources: resources.<mod>` to resolve.
+    package_marker = DabNotebook(relative_path="resources/__init__.py", content="")
     setup_task = SetupTask(
         type="pydabs_dbt_factory",
         config={
@@ -177,7 +179,7 @@ def _prepare_pydabs(activity: DbtFactoryActivity) -> PreparedActivity:
             ),
         },
     )
-    return PreparedActivity(task=parent_task, notebooks=[hook_notebook], setup_tasks=[setup_task])
+    return PreparedActivity(task=parent_task, notebooks=[hook_notebook, package_marker], setup_tasks=[setup_task])
 
 
 def prepare(activity: DbtFactoryActivity, *, scope: str = "") -> PreparedActivity:

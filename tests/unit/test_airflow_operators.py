@@ -431,6 +431,24 @@ def test_cosmos_dbt_task_group_becomes_dbt_factory():
     assert task.render_mode == "static"
 
 
+def test_dbt_mode_pydabs_sets_render_mode():
+    # `--dbt-mode pydabs` (threaded through load_airflow_dag) makes the factory reachable in PyDABs mode.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "dag.py"
+        path.write_text(
+            "from airflow import DAG\n"
+            "from cosmos import DbtTaskGroup, ProjectConfig, ProfileConfig\n"
+            "with DAG(dag_id='d') as dag:\n"
+            "    dbt = DbtTaskGroup(group_id='t', project_config=ProjectConfig('/opt/proj'),\n"
+            "                       profile_config=ProfileConfig(profile_name='p', target_name='prod'))\n",
+            encoding="utf-8",
+        )
+        p = load_airflow_dag(path, dbt_mode="pydabs")
+    task = _by_key(p)["t"]
+    assert isinstance(task, DbtFactoryActivity)
+    assert task.render_mode == "pydabs"
+
+
 def test_dbt_cli_operators_collapse_to_one_factory():
     p = _load(
         "from airflow import DAG\n"
@@ -444,6 +462,68 @@ def test_dbt_cli_operators_collapse_to_one_factory():
     dbt_tasks = [t for t in p.tasks if isinstance(t, DbtFactoryActivity)]
     assert len(dbt_tasks) == 1  # the seed>>run>>test chain collapses into one factory job
     assert dbt_tasks[0].project_dir == "/opt/proj"
+    # A manifest_path must be set or the static preparer would explode zero tasks (empty child job).
+    assert dbt_tasks[0].manifest_path == "/opt/proj/target/dev/manifest.json"
+
+
+def test_dbt_chain_downstream_dep_rewired_to_factory_key():
+    # A non-dbt task depending on the LAST dbt op (`test`) must point at the single collapsed
+    # factory task (`seed`), not the vanished `test` key (which would dangle at package time).
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "from airflow_dbt.operators.dbt_operator import DbtSeedOperator, DbtRunOperator, DbtTestOperator\n"
+        "def pub():\n    pass\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    s = DbtSeedOperator(task_id='seed', dir='/opt/proj')\n"
+        "    r = DbtRunOperator(task_id='run', dir='/opt/proj')\n"
+        "    t = DbtTestOperator(task_id='test', dir='/opt/proj')\n"
+        "    p2 = PythonOperator(task_id='publish', python_callable=pub)\n"
+        "    s >> r >> t >> p2\n"
+    )
+    tasks = _by_key(p)
+    factory_key = next(t.task_key for t in p.tasks if isinstance(t, DbtFactoryActivity))
+    assert [d.task_key for d in tasks["publish"].depends_on] == [factory_key]
+
+
+def test_dbt_factory_explodes_manifest_into_tasks(tmp_path):
+    # End-to-end: a real (synthetic) manifest must explode into per-node tasks, not an empty job.
+    import json
+
+    from flowx.preparer.workflow_preparer import prepare_workflow
+
+    manifest = {
+        "nodes": {
+            "seed.p.codes": {
+                "resource_type": "seed",
+                "name": "codes",
+                "fqn": ["p", "codes"],
+                "depends_on": {"nodes": []},
+            },
+            "model.p.stg": {
+                "resource_type": "model",
+                "name": "stg",
+                "fqn": ["p", "stg"],
+                "depends_on": {"nodes": ["seed.p.codes"]},
+            },
+        },
+        "unit_tests": {},
+    }
+    proj = tmp_path / "proj" / "target" / "dev"
+    proj.mkdir(parents=True)
+    (proj / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    dag = (
+        "from airflow import DAG\n"
+        "from airflow_dbt.operators.dbt_operator import DbtRunOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        f"    r = DbtRunOperator(task_id='run', dir={str(tmp_path / 'proj')!r})\n"
+    )
+    dag_file = tmp_path / "dag.py"
+    dag_file.write_text(dag, encoding="utf-8")
+    p = load_airflow_dag(dag_file)
+    wf = prepare_workflow(p)
+    inner_task_keys = {t["task_key"] for inner in wf.inner_workflows for t in inner.tasks}
+    assert inner_task_keys == {"seed_codes", "model_stg"}  # non-empty, both manifest nodes exploded
 
 
 # --------------------------------------------------------------------------------------

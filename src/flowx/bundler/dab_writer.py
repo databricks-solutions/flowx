@@ -129,6 +129,10 @@ def write_bundle(
             "warehouse_id", {"description": "SQL warehouse id for sql_task queries"}
         )
 
+    # dbt-factory PyDABs hooks: each `resources.<key>_dbt_job:load_resources` module must be
+    # registered under the `python.resources` block so `bundle deploy` runs it to build the dbt job.
+    pydabs_resource_entries = _collect_pydabs_resource_entries(workflow)
+
     # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id
     #    defaults come from the ADF linked-service configs; when every task is serverless, they're omitted.
     databricks_yml_path = output_dir / "databricks.yml"
@@ -141,6 +145,7 @@ def write_bundle(
         node_type_id=inferred_node_type_id,
         include_cluster_variables=bundle_uses_classic_cluster,
         extra_variables=pipeline_variable_declarations,
+        pydabs_resources=pydabs_resource_entries,
     )
     databricks_yml_path.write_text(
         yaml.dump(
@@ -206,10 +211,21 @@ def write_bundle(
         )
         created_files.append(resource_yml_path.resolve())
 
-    # 3. Write generated notebooks
+    # 3. Write generated notebooks. PyDABs hook modules (relative_path under ``resources/``) are
+    #    Python resources the bundle imports as ``resources.<module>`` from the bundle root, so they
+    #    go to output_dir; all other generated notebooks go under ``src/``.
     src_dir = output_dir / "src"
+
+    def _write_generated(notebooks: list[DabNotebook]) -> None:
+        hooks = [nb for nb in notebooks if nb.relative_path.startswith("resources/")]
+        rest = [nb for nb in notebooks if not nb.relative_path.startswith("resources/")]
+        if rest:
+            created_files.extend(write_notebooks(rest, src_dir))
+        if hooks:
+            created_files.extend(write_notebooks(hooks, output_dir))
+
     if workflow.notebooks:
-        created_files.extend(write_notebooks(workflow.notebooks, src_dir))
+        _write_generated(workflow.notebooks)
 
     # 4. Generate and write setup notebooks (create-scope, create-volume, etc.) — the executable
     #    provisioning artifacts; SETUP.md (below) is the human-readable companion.
@@ -225,7 +241,7 @@ def write_bundle(
     # Collect notebooks from inner workflows
     for inner in workflow.inner_workflows:
         if inner.notebooks:
-            created_files.extend(write_notebooks(inner.notebooks, src_dir))
+            _write_generated(inner.notebooks)
         inner_setup = generate_setup_tasks(
             secrets=inner.secrets,
             setup_tasks=inner.setup_tasks,
@@ -262,7 +278,11 @@ def write_bundle(
         task.config for task in workflow.setup_tasks if task.type == "manual_schedule_time_of_day"
     ]
     manual_credential_configs = [task.config for task in workflow.setup_tasks if task.type == "manual_credential"]
+    pydabs_dbt_factory_configs = [task.config for task in workflow.setup_tasks if task.type == "pydabs_dbt_factory"]
     for inner in workflow.inner_workflows:
+        pydabs_dbt_factory_configs.extend(
+            task.config for task in inner.setup_tasks if task.type == "pydabs_dbt_factory"
+        )
         dynamic_dispatch_configs.extend(
             task.config for task in inner.setup_tasks if task.type == "dynamic_notebook_dispatch"
         )
@@ -296,6 +316,7 @@ def write_bundle(
         manual_schedule_time_of_day=manual_schedule_time_of_day_configs,
         manual_credentials=manual_credential_configs,
         neutralized_conditions=list(_neutralized_conditions),
+        pydabs_dbt_factories=pydabs_dbt_factory_configs,
     )
     setup_path = output_dir / "SETUP.md"
     setup_path.write_text(render_setup_md(prereqs, bundle_name=effective_name), encoding="utf-8")
@@ -600,6 +621,7 @@ def _build_databricks_yml(
     node_type_id: str = _DEFAULT_NODE_TYPE_ID,
     include_cluster_variables: bool = True,
     extra_variables: dict[str, Any] | None = None,
+    pydabs_resources: list[str] | None = None,
 ) -> dict[str, Any]:
     """Builds the root ``databricks.yml`` configuration as a dict.
 
@@ -618,6 +640,9 @@ def _build_databricks_yml(
         extra_variables: Additional variable declarations (name -> DAB
             declaration dict) to merge into the ``variables`` block, e.g.
             the source-side variables a Lakeflow Connect pipeline references.
+        pydabs_resources: ``python.resources`` entries (``<module>:load_resources``)
+            for dbt-factory PyDABs hooks. When present, a ``python:`` block is
+            emitted so ``bundle deploy`` runs each hook to build its dbt job.
 
     Returns:
         Dict ready for YAML serialization.
@@ -656,7 +681,7 @@ def _build_databricks_yml(
                 "the default here."
             ),
         }
-    return {
+    config: dict[str, Any] = {
         "bundle": {
             "name": bundle_name,
         },
@@ -664,18 +689,23 @@ def _build_databricks_yml(
         "include": [
             "resources/*.yml",
         ],
-        "targets": {
-            "dev": {
-                "mode": "development",
-            },
-            "staging": {
-                "mode": "production",
-            },
-            "prod": {
-                "mode": "production",
-            },
+    }
+    if pydabs_resources:
+        # PyDABs hooks build dbt jobs at deploy time; venv_path points at the project's own venv
+        # (created by `make setup` / `uv sync`), which must have `databricks-dbt-factory` installed.
+        config["python"] = {"venv_path": ".venv", "resources": list(pydabs_resources)}
+    config["targets"] = {
+        "dev": {
+            "mode": "development",
+        },
+        "staging": {
+            "mode": "production",
+        },
+        "prod": {
+            "mode": "production",
         },
     }
+    return config
 
 
 def _build_default_job_clusters(
@@ -791,6 +821,24 @@ def _collect_pipeline_resources(workflow: PreparedWorkflow) -> list[dict[str, An
     for inner in workflow.inner_workflows:
         resources.extend(inner.pipeline_resources)
     return resources
+
+
+def _collect_pydabs_resource_entries(workflow: PreparedWorkflow) -> list[str]:
+    """Returns the ``python.resources`` entries for every dbt-factory PyDABs hook in *workflow*.
+
+    Each ``pydabs_dbt_factory`` SetupTask carries a ``hook_module`` (e.g.
+    ``resources.orders_dbt_job``); the databricks.yml ``python.resources`` list needs
+    ``<hook_module>:load_resources`` so ``bundle deploy`` runs the hook to build the dbt job.
+    """
+    entries: list[str] = []
+    for wf in [workflow, *workflow.inner_workflows]:
+        for task in wf.setup_tasks:
+            if task.type == "pydabs_dbt_factory":
+                module = task.config.get("hook_module")
+                if module:
+                    entries.append(f"{module}:load_resources")
+    # De-dup while preserving order.
+    return list(dict.fromkeys(entries))
 
 
 def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:

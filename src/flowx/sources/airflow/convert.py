@@ -27,11 +27,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-dir", required=True, type=Path, help="A DAG .py file or directory of DAGs.")
     parser.add_argument("--output-dir", type=Path, default=Path("./flowx_output"), help="Shared migration output dir.")
     parser.add_argument("--pipeline", type=str, default=None, help="Translate only the named DAG (default: all).")
+    parser.add_argument(
+        "--dbt-mode",
+        choices=("static", "pydabs"),
+        default="static",
+        help="dbt-factory render mode: 'static' (inner job of per-node tasks, default) or 'pydabs' "
+        "(a deploy-time PyDABs hook that builds the dbt job from the live manifest).",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    pipelines = load_pipelines(args.source_dir, pipeline=args.pipeline)
+    pipelines = load_pipelines(args.source_dir, pipeline=args.pipeline, dbt_mode=args.dbt_mode)
     if not pipelines:
         logger.error("No Airflow DAGs found under %s (or none matched --pipeline).", args.source_dir)
         return 1

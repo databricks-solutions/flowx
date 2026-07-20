@@ -131,6 +131,9 @@ class Prereqs:
     # C-43 (CF5-001 / CF5-002): condition_task operands blanked because they referenced a task in another
     # job ({task_key, field, original_ref}); a blanked operand is always-true, so the user must re-wire it.
     neutralized_conditions: list[dict[str, str]] = field(default_factory=list)
+    # dbt-factory PyDABs hooks; each entry is the SetupTask config dict ({hook_module, job_key,
+    # manifest_path, note}). The user must `pip install databricks-dbt-factory` before deploy.
+    pydabs_dbt_factories: list[dict[str, Any]] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         """Return ``True`` when nothing needs to happen before ``bundle run``."""
@@ -150,6 +153,7 @@ class Prereqs:
             and not self.manual_schedule_time_of_day
             and not self.manual_credentials
             and not self.neutralized_conditions
+            and not self.pydabs_dbt_factories
         )
 
 
@@ -361,6 +365,7 @@ def build_prereqs(
     manual_schedule_time_of_day: list[dict[str, Any]] | None = None,
     manual_credentials: list[dict[str, Any]] | None = None,
     neutralized_conditions: list[dict[str, str]] | None = None,
+    pydabs_dbt_factories: list[dict[str, Any]] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
 
@@ -408,6 +413,7 @@ def build_prereqs(
         manual_schedule_time_of_day=list(manual_schedule_time_of_day or []),
         manual_credentials=list(manual_credentials or []),
         neutralized_conditions=list(neutralized_conditions or []),
+        pydabs_dbt_factories=list(pydabs_dbt_factories or []),
     )
 
 
@@ -758,6 +764,32 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
         for endpoint in prereqs.network_endpoints:
             label = kind_label.get(endpoint.kind, endpoint.kind)
             lines.append(f"| {label} | `{endpoint.target}` | {endpoint.notes} |")
+        lines.append("")
+
+    if prereqs.pydabs_dbt_factories:
+        lines.append("## dbt factory (PyDABs mode)")
+        lines.append("")
+        lines.append(
+            "This bundle builds its dbt job(s) at deploy time via a PyDABs hook. `databricks.yml` "
+            "already registers each hook under `python.resources`; complete the environment so "
+            "`databricks bundle deploy` can run them:"
+        )
+        lines.append("")
+        lines.append("1. Install the generator and PyDABs into the bundle's venv (the `python.venv_path`):")
+        lines.append("")
+        lines.append("```bash")
+        lines.append("uv venv .venv && uv pip install databricks-dbt-factory databricks-bundles")
+        lines.append("```")
+        lines.append("")
+        lines.append("2. Ensure each dbt project's `manifest.json` exists (run `dbt parse`/`dbt compile`).")
+        lines.append("")
+        lines.append("| dbt job | Hook module | Manifest |")
+        lines.append("|---|---|---|")
+        for entry in prereqs.pydabs_dbt_factories:
+            job_key = entry.get("job_key", "")
+            module = entry.get("hook_module", "")
+            manifest = entry.get("manifest_path", "")
+            lines.append(f"| `{job_key}` | `{module}:load_resources` | `{manifest}` |")
         lines.append("")
 
     return "\n".join(lines)
