@@ -1302,9 +1302,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.merge_agentic:
         if not args.report or not args.agentic_results:
             parser.error("--merge-agentic requires --report and --agentic-results")
-        merged_count, unmatched_count = ir_serde.merge_agentic_results(
-            args.report, args.agentic_results, args.output
-        )
+        merged_count, unmatched_count = ir_serde.merge_agentic_results(args.report, args.agentic_results, args.output)
         print("\nAgentic Merge Summary")
         print("=====================")
         print(f"Merged:    {merged_count}")

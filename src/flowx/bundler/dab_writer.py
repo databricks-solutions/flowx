@@ -45,6 +45,7 @@ from flowx.models.ir import (
     SetVariableActivity,
     SparkJarActivity,
     SparkPythonActivity,
+    SqlActivity,
     SwitchActivity,
     SwitchCase,
     UnsupportedActivity,
@@ -122,6 +123,11 @@ def write_bundle(
 
     pipeline_resources = _collect_pipeline_resources(workflow)
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
+    # sql_task references ${var.warehouse_id}; declare it (no default -> user supplies at deploy).
+    if _bundle_uses_sql_task(workflow):
+        pipeline_variable_declarations.setdefault(
+            "warehouse_id", {"description": "SQL warehouse id for sql_task queries"}
+        )
 
     # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id
     #    defaults come from the ADF linked-service configs; when every task is serverless, they're omitted.
@@ -941,6 +947,12 @@ def _any_task_uses_classic_cluster(tasks: list[dict[str, Any]]) -> bool:
     return any(task.get("job_cluster_key") for task in _iter_tasks_recursively(tasks))
 
 
+def _bundle_uses_sql_task(workflow: PreparedWorkflow) -> bool:
+    """Return True if any task (parent or inner workflow) is a sql_task."""
+    task_lists = [workflow.tasks, *(inner.tasks for inner in workflow.inner_workflows)]
+    return any("sql_task" in task for tasks in task_lists for task in _iter_tasks_recursively(tasks))
+
+
 def _bind_cluster_to_notebook_tasks(tasks: list[dict[str, Any]]) -> None:
     """Binds notebook tasks to the cluster their compute_mode marker dictates.
 
@@ -1102,6 +1114,18 @@ def _apply_schedule_to_job(job_def: dict[str, Any], spec: dict[str, Any]) -> Non
         trigger_block = {
             "file_arrival": {"url": spec.get("url", "")},
         }
+        if spec.get("pause_status"):
+            trigger_block["pause_status"] = spec["pause_status"]
+        job_def["trigger"] = trigger_block
+        return
+    if kind == "table_update":
+        table_update: dict[str, Any] = {
+            "table_names": list(spec.get("table_names") or []),
+            "condition": spec.get("condition", "ANY_UPDATED"),
+        }
+        if spec.get("min_time_between_triggers_seconds"):
+            table_update["min_time_between_triggers_seconds"] = spec["min_time_between_triggers_seconds"]
+        trigger_block = {"table_update": table_update}
         if spec.get("pause_status"):
             trigger_block["pause_status"] = spec["pause_status"]
         job_def["trigger"] = trigger_block
@@ -1602,6 +1626,13 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             selectors=list(task_ir.get("selectors") or []),
             nodes=list(task_ir.get("nodes") or []),
         )
+    if task_type == "SqlActivity":
+        return SqlActivity(
+            **base,
+            sql=task_ir.get("sql", ""),
+            parameters=task_ir.get("parameters"),
+            warehouse_ref=task_ir.get("warehouse_ref", "${var.warehouse_id}"),
+        )
     if task_type == "SparkJarActivity":
         return SparkJarActivity(
             **base,
@@ -1699,6 +1730,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             original_type=task_ir.get("original_type", task_type),
             notebook_path=task_ir.get("notebook_path", "/UNSUPPORTED_ADF_ACTIVITY"),
             comment=task_ir.get("comment"),
+            raw_definition=task_ir.get("raw_definition"),
         )
     return PlaceholderActivity(
         **base,

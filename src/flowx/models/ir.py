@@ -348,6 +348,27 @@ class RunJobActivity(Activity):
 
 
 @dataclass(slots=True, kw_only=True)
+class SqlActivity(Activity):
+    """Warehouse-backed SQL activity -> Databricks ``sql_task``.
+
+    A source SQL step (an Airflow SQLExecuteQuery/DatabricksSql/Hive operator, or
+    an ADF activity whose SQL runs on a warehouse) whose SQL text is extracted to
+    a ``.sql`` file and run on a SQL warehouse.
+
+    Attributes:
+        sql: The SQL statement text (extracted to a ``.sql`` file by the preparer).
+        parameters: Named ``sql_task.parameters`` (e.g. ``run_date``) passed to
+            the query, referenced in the SQL as ``:name``.
+        warehouse_ref: DAB reference for the warehouse id (defaults to the
+            ``warehouse_id`` bundle variable).
+    """
+
+    sql: str
+    parameters: dict[str, str] | None = None
+    warehouse_ref: str = "${var.warehouse_id}"
+
+
+@dataclass(slots=True, kw_only=True)
 class SparkJarActivity(Activity):
     """Spark JAR activity.
 

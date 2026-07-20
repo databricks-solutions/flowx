@@ -37,6 +37,7 @@ from flowx.models.ir import (
     SetVariableActivity,
     SparkJarActivity,
     SparkPythonActivity,
+    SqlActivity,
     SwitchActivity,
     UnsupportedActivity,
     WaitActivity,
@@ -262,6 +263,11 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
                 extra["bridge_required_parameters"] = dict(activity.bridge_required_parameters)
         case WaitActivity():
             extra["wait_time_seconds"] = activity.wait_time_seconds
+        case SqlActivity():
+            extra["sql"] = activity.sql
+            if activity.parameters:
+                extra["parameters"] = dict(activity.parameters)
+            extra["warehouse_ref"] = activity.warehouse_ref
         case SparkJarActivity():
             extra["main_class_name"] = activity.main_class_name
             if activity.parameters:
@@ -325,6 +331,8 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
         case PlaceholderActivity():
             extra["original_type"] = activity.original_type
             extra["comment"] = activity.comment
+            if activity.raw_definition is not None:
+                extra["raw_definition"] = activity.raw_definition
         case UnsupportedActivity():
             extra["original_type"] = activity.original_type
             extra["reason"] = activity.reason

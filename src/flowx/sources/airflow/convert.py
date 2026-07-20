@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 
 from flowx.ir_serde import pipeline_to_dict
+from flowx.models.ir import PlaceholderActivity
 from flowx.sources.airflow.loader import load_pipelines
 
 logger = logging.getLogger(__name__)
@@ -44,13 +45,42 @@ def main(argv: list[str] | None = None) -> int:
     report_file = work_dir / "translation_report.json"
     report_file.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
+    # Emit gaps.json for every unmapped operator so the agentic-gap round (driven by the
+    # convert SKILL guide + merge_agentic) can reason from the operator source and replace
+    # the placeholder with a real notebook -- the same flow the ADF source uses.
+    gaps = _collect_gaps(pipelines)
+    if gaps:
+        (work_dir / "gaps.json").write_text(json.dumps(gaps, indent=2, default=str), encoding="utf-8")
+
     total_tasks = sum(len(p.tasks) for p in pipelines)
     print("\nAirflow Translation Summary")
     print("===========================")
     print(f"DAGs translated:    {len(pipelines)}")
     print(f"Total tasks:        {total_tasks}")
+    print(f"Agentic gaps:       {len(gaps)}")
     print(f"\nTranslation report (intermediate): {report_file}")
     return 0
+
+
+def _collect_gaps(pipelines: list) -> list[dict]:
+    """Returns one AgenticGap-shaped dict per PlaceholderActivity across all pipelines.
+
+    Each carries the placeholder's ``activity_name``, ``activity_type`` (the Airflow
+    operator), and ``raw_definition`` (the operator's source) so the agentic round can
+    translate it -- the Airflow analog of ADF's gaps.json.
+    """
+    gaps: list[dict] = []
+    for pipeline in pipelines:
+        for task in pipeline.tasks:
+            if isinstance(task, PlaceholderActivity):
+                gaps.append(
+                    {
+                        "activity_name": task.name,
+                        "activity_type": task.original_type,
+                        "raw_definition": task.raw_definition,
+                    }
+                )
+    return gaps
 
 
 if __name__ == "__main__":

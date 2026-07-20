@@ -148,7 +148,14 @@ def _run_workspace_paths(args: argparse.Namespace) -> int:
         path / host lists so the skill can detect the no-op case.
     """
     paths = collect_workspace_artifact_paths(args.report)
-    suggested_hosts = detect_databricks_hosts(args.source_dir) if args.source_dir else []
+    suggested_hosts: list[str] = []
+    if args.source_dir:
+        if getattr(args, "source", "adf") == "airflow":
+            from flowx.sources.airflow.loader import detect_hosts
+
+            suggested_hosts = detect_hosts(args.source_dir)
+        else:
+            suggested_hosts = detect_databricks_hosts(args.source_dir)
     payload = {
         "paths": paths,
         "suggested_hosts": suggested_hosts,
@@ -170,7 +177,7 @@ def _run_inputs(args: argparse.Namespace) -> int:
     """
     from flowx.adapter.session import MigrationInputSession
 
-    session = MigrationInputSession(phase=args.phase)
+    session = MigrationInputSession(phase=args.phase, source=getattr(args, "source", "adf"))
     pending = session.pending()
     payload = {
         "phase": pending.phase,
@@ -280,18 +287,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "workspace-paths",
         help=(
             "Detect absolute workspace paths in a stamped report and suggest "
-            "Databricks workspace hosts from the ADF linked services."
+            "Databricks workspace hosts from the source (ADF linked services / Airflow DAGs)."
         ),
     )
     workspace_paths.add_argument("report", type=Path, help="Path to the translation report or pipeline IR JSON.")
+    workspace_paths.add_argument(
+        "--source",
+        default="adf",
+        help="Migration source (adf | airflow); selects how workspace hosts are detected.",
+    )
     workspace_paths.add_argument(
         "--source-dir",
         type=Path,
         default=None,
         help=(
-            "Optional path to the ADF JSON export directory.  When supplied, "
-            "the command reads ``linked_services/*.json`` to suggest the "
-            "workspace host that ``databricks auth login --host`` should use."
+            "Optional path to the source. For adf, the JSON export dir (reads "
+            "``linked_services/*.json``); for airflow, a DAG file/dir (scans DAG source for "
+            "workspace hosts). Used to suggest the host for ``databricks auth login --host``."
         ),
     )
     workspace_paths.add_argument(
@@ -309,6 +321,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "phase",
         choices=("discover", "convert", "package"),
         help="Migration phase whose input prompts the agent should surface.",
+    )
+    inputs.add_argument(
+        "--source",
+        default="adf",
+        help="Migration source (adf | airflow); words the source-path prompt for discover/convert.",
     )
     inputs.add_argument(
         "--out",

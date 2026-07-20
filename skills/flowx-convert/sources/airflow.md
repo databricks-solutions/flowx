@@ -3,10 +3,11 @@
 Source guide for `--source airflow`. Translate parsed Airflow DAGs into Databricks IR. See the
 parent `SKILL.md` for how to run the phase and the report contract.
 
-Airflow translation is **deterministic** today: the same static parse the discover phase uses
-produces the Pipeline IR directly. There is no separate agentic-gap round for Airflow yet —
-operators without a mapping are emitted as placeholder tasks the user fills in manually (or via a
-future agentic pass), not as pending gaps in the report.
+Airflow translation is **deterministic-first with an agentic-gap round**, like the ADF source. The
+static parse maps ~35 operator/sensor families directly to IR (Tier 1-3). Operators with no
+deterministic mapping become `PlaceholderActivity` tasks *and* are recorded in `gaps.json`, each
+carrying the operator's raw source so an agent can reason out the translation and replace the
+placeholder — the same `gaps.json` + `merge_agentic` flow the ADF source uses.
 
 ## Step 1 — Run the translation
 
@@ -28,13 +29,27 @@ PythonOperator callable or BashOperator command, carrying `generated_source`) or
 `PlaceholderActivity` (an unmapped operator). Dependencies come from `>>` / `<<`; the DAG's cron
 `schedule_interval` is carried as the pipeline `schedule`.
 
-## Step 3 — Handle placeholders (optional)
+## Step 3 — Handle agentic gaps
 
-For any `PlaceholderActivity`, decide whether to hand-write the notebook body now or leave the
-placeholder for the package phase to emit (it ships a notebook with a clear TODO). The shared
-`inspect`/`modify`/`merge_agentic` commands from the parent `SKILL.md` are available if you want to
-apply agent-translated results, but the ADF just-in-time option chain (notify motifs,
-metadata-driven consolidation) does not apply to Airflow.
+If convert wrote `<output_dir>/.work/gaps.json`, each entry is an unmapped operator awaiting
+LLM-assisted translation. For each gap, read its `raw_definition` (the operator's source, embedded
+in the placeholder notebook too) and translate it into a real Databricks task — most portably a
+notebook you write to the workspace. Reason from the operator's arguments: e.g. a
+`KubernetesPodOperator` running a Python image becomes a notebook (or `%pip install` + the image's
+entrypoint logic); an `HttpSensor` becomes a polling notebook using `requests`; a `LivyOperator`
+submits Spark directly.
+
+Write one result JSON per gap into `<output_dir>/agentic_results/` and merge them with the shared
+`merge_agentic` command (see the parent `SKILL.md`):
+
+```bash
+"$PY" -m flowx.adapter convert --merge-agentic \
+  --report <output_dir>/.work/translation_report.json \
+  --agentic-results <output_dir>/agentic_results
+```
+
+The ADF just-in-time option chain (notify motifs, metadata-driven consolidation) does not apply to
+Airflow; only the agentic-gap round does.
 
 ## Step 4 — Proceed to package
 

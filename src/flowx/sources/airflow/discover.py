@@ -47,7 +47,9 @@ def build_inventory_dict(pipelines: list[Pipeline], source_dir: str) -> dict[str
         agentic += sum(1 for i in items if i["strategy"] == "agentic")
         pipeline_entries.append({"name": pipeline.name, "activities": items})
     activity_count = deterministic + agentic
-    coverage = round(100.0 * deterministic / activity_count, 1) if activity_count else 0.0
+    # Coverage counts both deterministic and agentic as "has a translation path", matching the
+    # shared reporting.coverage formula (agentic gaps are translated in the convert phase).
+    coverage = round(100.0 * (deterministic + agentic) / activity_count, 1) if activity_count else 0.0
     return {
         "source": "airflow",
         "source_dir": source_dir,
@@ -63,15 +65,57 @@ def build_inventory_dict(pipelines: list[Pipeline], source_dir: str) -> dict[str
     }
 
 
+# Full profile column set the shared reporting.coverage / dashboard consume. Airflow has no
+# dataset/linked-service/motif concept, so those are 0; the rest are computed from task types.
+_PROFILE_COLUMNS: tuple[str, ...] = (
+    "pipeline",
+    "activities",
+    "datasets",
+    "linked_services",
+    "collapsible_patterns",
+    "databricks_native_activities",
+    "control_flow_activities",
+    "other_activities",
+    "complexity_score",
+    "complexity_size",
+)
+
+_NATIVE_TYPES = frozenset(
+    {"NotebookActivity", "SparkPythonActivity", "SparkJarActivity", "SqlActivity", "RunJobActivity"}
+)
+_CONTROL_FLOW_TYPES = frozenset({"ForEachActivity"})
+
+
+def _profile_row(pipeline: Pipeline) -> dict[str, Any]:
+    """Computes one profile row for *pipeline* over the full column set."""
+    type_names = [type(task).__name__ for task in pipeline.tasks]
+    total = len(type_names)
+    native = sum(1 for name in type_names if name in _NATIVE_TYPES)
+    control = sum(1 for name in type_names if name in _CONTROL_FLOW_TYPES)
+    other = total - native - control
+    score = native * 1 + control * 2 + other * 3
+    size = "S" if score <= 5 else "M" if score <= 15 else "L" if score <= 30 else "XL"
+    return {
+        "pipeline": pipeline.name,
+        "activities": total,
+        "datasets": 0,
+        "linked_services": 0,
+        "collapsible_patterns": 0,
+        "databricks_native_activities": native,
+        "control_flow_activities": control,
+        "other_activities": other,
+        "complexity_score": score,
+        "complexity_size": size,
+    }
+
+
 def _write_profile_csv(pipelines: list[Pipeline], path: Path) -> None:
-    """Writes one per-pipeline complexity row, mirroring the ADF profile report."""
+    """Writes the per-pipeline complexity report with the full shared column set."""
     with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["pipeline", "activities", "complexity_size"])
+        writer = csv.DictWriter(handle, fieldnames=list(_PROFILE_COLUMNS))
+        writer.writeheader()
         for pipeline in pipelines:
-            count = len(pipeline.tasks)
-            size = "S" if count <= 5 else "M" if count <= 15 else "L" if count <= 30 else "XL"
-            writer.writerow([pipeline.name, count, size])
+            writer.writerow(_profile_row(pipeline))
 
 
 def main(argv: list[str] | None = None) -> int:
