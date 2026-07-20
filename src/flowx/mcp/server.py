@@ -64,32 +64,40 @@ def _phase_result(result: runner.AdapterResult, output_dir: Path, **extra: Any) 
     return payload
 
 
-def _resolve_source(p: dict[str, Any], path_key: str = "adf_source_path") -> tuple[str | None, Callable[[], None]]:
-    """Resolve the ADF source for a command into a local path the adapter can read.
+def _source_name(p: dict[str, Any]) -> str:
+    """The migration source for a command (``adf`` default; ``airflow`` when requested)."""
+    return str(p.get("source", "adf"))
 
-    Input modes, in priority order — a hosted app can't read the user's files directly, so it relies
-    on the first three:
+
+def _resolve_source(p: dict[str, Any], path_key: str | None = None) -> tuple[str | None, Callable[[], None]]:
+    """Resolve the migration source for a command into a local path the adapter can read.
+
+    ADF input modes, in priority order — a hosted app can't read the user's files directly, so it
+    relies on the first three:
 
     1. ``adf_volume_path`` — a UC Volume directory; the server downloads it via the SDK Files API.
-    2. ``adf_workspace_path`` — a ``/Workspace`` directory (e.g. an ADF Git folder); the server
-       downloads it via the SDK Workspace API.
-       Both (1) and (2) scale to large factories — the bytes bypass the agent. Each returns a temp
-       dir + cleanup.
+    2. ``adf_workspace_path`` — a ``/Workspace`` directory (e.g. an ADF Git folder); downloaded via
+       the SDK Workspace API. Both (1) and (2) scale to large factories — the bytes bypass the agent.
     3. ``adf_definitions`` — an inline ARM-JSON payload (small jobs); materialized to a temp dir.
-    4. ``path_key`` (``adf_source_path`` / ``source_dir``) — a path the server itself can read
-       (local hosting or a mounted volume).
+    4. ``<source>_source_path`` / explicit ``path_key`` — a path the server itself can read.
+
+    For ``source="airflow"`` the volume/workspace/inline modes are ADF-specific and skipped; the DAG
+    path is read from ``airflow_source_path`` (or the explicit ``path_key``).
     """
-    if p.get("adf_volume_path"):
-        src = runner.download_volume_dir(p["adf_volume_path"])
-        return src, lambda: runner.cleanup_materialized(src)
-    if p.get("adf_workspace_path"):
-        src = runner.download_workspace_dir(p["adf_workspace_path"])
-        return src, lambda: runner.cleanup_materialized(src)
-    definitions = p.get("adf_definitions")
-    if definitions:
-        src = runner.materialize_adf_definitions(definitions)
-        return src, lambda: runner.cleanup_materialized(src)
-    return p.get(path_key), (lambda: None)
+    source = _source_name(p)
+    if source == "adf":
+        if p.get("adf_volume_path"):
+            src = runner.download_volume_dir(p["adf_volume_path"])
+            return src, lambda: runner.cleanup_materialized(src)
+        if p.get("adf_workspace_path"):
+            src = runner.download_workspace_dir(p["adf_workspace_path"])
+            return src, lambda: runner.cleanup_materialized(src)
+        definitions = p.get("adf_definitions")
+        if definitions:
+            src = runner.materialize_adf_definitions(definitions)
+            return src, lambda: runner.cleanup_materialized(src)
+    default_key = path_key or f"{source}_source_path"
+    return p.get(default_key), (lambda: None)
 
 
 def _bundle_output(p: dict[str, Any], out: Path) -> dict[str, Any]:
@@ -130,17 +138,21 @@ def _pending_options(inspect_result: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _cmd_inputs(p: dict[str, Any]) -> dict[str, Any]:
-    result = runner.run_adapter(["inputs", p["phase"]])
+    result = runner.run_adapter(["inputs", p["phase"], "--source", _source_name(p)])
     return {"ok": result.ok, "inputs": runner.parse_stdout_json(result), "process": result.as_dict()}
 
 
 def _cmd_discover(p: dict[str, Any]) -> dict[str, Any]:
     output_dir = p.get("output_dir", "./flowx_output")
+    source_name = _source_name(p)
     source, cleanup = _resolve_source(p)
     if not source:
-        return {"ok": False, "error": "Provide 'adf_definitions' (inline ARM JSON) or 'adf_source_path'."}
+        return {
+            "ok": False,
+            "error": f"Provide a source path for source '{source_name}' (e.g. '{source_name}_source_path').",
+        }
     try:
-        args = ["discover", "--adf-source-path", source, "--output-dir", output_dir]
+        args = ["discover", "--source", source_name, "--source-path", source, "--output-dir", output_dir]
         if p.get("pipeline"):
             args += ["--pipeline", p["pipeline"]]
         result = runner.run_adapter(args)
@@ -152,11 +164,12 @@ def _cmd_discover(p: dict[str, Any]) -> dict[str, Any]:
 
 def _cmd_convert(p: dict[str, Any]) -> dict[str, Any]:
     output_dir = p.get("output_dir", "./flowx_output")
+    source_name = _source_name(p)
     source, cleanup = _resolve_source(p)
     try:
-        args = ["convert", "--output-dir", output_dir]
+        args = ["convert", "--source", source_name, "--output-dir", output_dir]
         if source:
-            args += ["--adf-source-path", source]
+            args += ["--source-path", source]
         if p.get("pipeline"):
             args += ["--pipeline", p["pipeline"]]
         result = runner.run_adapter(args)
@@ -200,7 +213,7 @@ def _cmd_materialize_lookup(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_workspace_paths(p: dict[str, Any]) -> dict[str, Any]:
-    args: list[Any] = ["workspace-paths", p["report_path"]]
+    args: list[Any] = ["workspace-paths", p["report_path"], "--source", _source_name(p)]
     source, cleanup = _resolve_source(p, path_key="source_dir")
     try:
         if source:
@@ -252,6 +265,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
     prompt and package with defaults.
     """
     output_dir = p.get("output_dir", "./flowx_output")
+    source_name = _source_name(p)
     catalog = p.get("catalog", "main")
     schema = p.get("schema", "default")
     pipeline = p.get("pipeline")
@@ -272,10 +286,12 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                 return {
                     "ok": False,
                     "error": (
-                        "Provide 'adf_volume_path' / 'adf_workspace_path' / 'adf_definitions' / 'adf_source_path'."
+                        f"Provide a source path for source '{source_name}' "
+                        "(adf: adf_volume_path / adf_workspace_path / adf_definitions / adf_source_path; "
+                        "airflow: airflow_source_path)."
                     ),
                 }
-            discover_args = ["discover", "--adf-source-path", source, "--output-dir", output_dir]
+            discover_args = ["discover", "--source", source_name, "--source-path", source, "--output-dir", output_dir]
             if pipeline:
                 discover_args += ["--pipeline", pipeline]
             discover_res = runner.run_adapter(discover_args)
@@ -283,7 +299,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
             if not discover_res.ok:
                 return {"ok": False, "status": "failed", "failed_phase": "discover", "steps": steps}
 
-            convert_args = ["convert", "--output-dir", output_dir, "--adf-source-path", source]
+            convert_args = ["convert", "--source", source_name, "--output-dir", output_dir, "--source-path", source]
             if pipeline:
                 convert_args += ["--pipeline", pipeline]
             convert_res = runner.run_adapter(convert_args)

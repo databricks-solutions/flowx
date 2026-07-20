@@ -17,7 +17,7 @@ jobs:
           python-version: "3.12"
       - name: Scrub internal proxy URLs from uv.lock
         run: sed -i 's|https://pypi-proxy\.dev\.databricks\.com/simple|https://pypi.org/simple|g' uv.lock
-      - run: uv sync --frozen
+      - run: uv sync --frozen --extra mcp
       - run: make test
       - name: Verify requirements.txt is in sync with the lockfile
         run: |
