@@ -62,3 +62,10 @@ Current deterministic coverage: `PythonOperator` (callable body → generated Py
 `BashOperator` (command → `%sh` notebook). Dependencies (`>>` / `<<`) and cron
 `schedule_interval` → Quartz are handled. Other operators become placeholders. Confirm the output
 location and proceed to `flowx-convert` with the same `<output_dir>` and `--source airflow`.
+
+For the full verified support matrix — classic operators, TaskFlow (`@dag`/`@task`), sensors,
+TaskGroups (incl. group-level dependencies), and dbt factory (static + PyDABs) — plus the constructs
+that are **not** handled (dynamic TaskGroup mapping, shared multi-DAG bundle), see
+[`../../flowx-convert/sources/airflow-coverage.md`](../../flowx-convert/sources/airflow-coverage.md).
+Callables reading Airflow task context (`**context` / `ti`) or XCom, and runtime-branching
+decorators, are routed to placeholders for manual/agentic translation rather than converted.

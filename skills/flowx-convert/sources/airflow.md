@@ -9,6 +9,16 @@ deterministic mapping become `PlaceholderActivity` tasks *and* are recorded in `
 carrying the operator's raw source so an agent can reason out the translation and replace the
 placeholder — the same `gaps.json` + `merge_agentic` flow the ADF source uses.
 
+**Before converting, check [`sources/airflow-coverage.md`](airflow-coverage.md)** — the verified
+support matrix (classic operators, TaskFlow, sensors, TaskGroups, dbt factory) and the constructs
+still **not** handled (dynamic TaskGroup mapping, shared multi-DAG bundle). Constructs flowx can't
+lower deterministically — callables reading task context (`**context` / `ti`) or XCom, and
+runtime-branching decorators — are routed to a placeholder + `gaps.json` for the agentic round rather
+than emitted as broken code.
+
+dbt workloads default to static explosion; pass `--dbt-mode pydabs` to emit a deploy-time PyDABs hook
+instead (see the dbt factory section of the coverage doc).
+
 ## Step 1 — Run the translation
 
 ```bash
