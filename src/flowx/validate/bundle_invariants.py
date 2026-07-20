@@ -3,8 +3,9 @@
 These guard against output that is valid YAML / valid Python but invalid as a
 Databricks job -- e.g. a job parameter declared twice (the duplicate-``region``
 regression), a duplicate task key, a ``{{job.parameters.X}}`` reference to an
-undeclared parameter, a ``depends_on`` edge to a missing task, or a leaked YAML
-anchor/alias (the fingerprint of a shared mutable object reaching serialization).
+undeclared parameter, a ``depends_on`` edge to a missing task, a dependency
+cycle, or a leaked YAML anchor/alias (the fingerprint of a shared mutable object
+reaching serialization).
 
 Run :func:`check_bundle_dir` over a generated bundle in tests (and optionally as
 a Tier-0 prepare step) so these never ship silently.
@@ -133,7 +134,51 @@ def check_job(job_key: str, job: dict[str, Any]) -> list[BundleFinding]:
                         message=f"depends_on references unknown task '{target}'.",
                     )
                 )
+
+    # 5. The task dependency graph is acyclic (a cycle fails `databricks bundle validate`).
+    if _has_dependency_cycle(job.get("tasks") or []):
+        findings.append(
+            BundleFinding(
+                code="dependency_cycle",
+                location=where,
+                message="The job's task dependency graph contains a cycle.",
+            )
+        )
     return findings
+
+
+def _has_dependency_cycle(tasks: list[dict[str, Any]]) -> bool:
+    """Returns True when the top-level ``depends_on`` graph has a cycle (Kahn's algorithm).
+
+    Source-agnostic: operates on the emitted job's task keys and depends_on edges, so it
+    guards every source's output. Edges to unknown tasks are ignored here (surfaced
+    separately as ``dangling_depends_on``).
+    """
+    keys: list[str] = [
+        task["task_key"] for task in tasks if isinstance(task, dict) and isinstance(task.get("task_key"), str)
+    ]
+    key_set = set(keys)
+    in_degree: dict[str, int] = {key: 0 for key in keys}
+    adjacency: dict[str, set[str]] = {key: set() for key in keys}
+    for task in tasks:
+        downstream = task.get("task_key")
+        if not isinstance(downstream, str) or downstream not in key_set:
+            continue
+        for dep in task.get("depends_on") or []:
+            upstream = dep.get("task_key")
+            if isinstance(upstream, str) and upstream in key_set and downstream not in adjacency[upstream]:
+                adjacency[upstream].add(downstream)
+                in_degree[downstream] += 1
+    queue = [key for key in keys if in_degree[key] == 0]
+    visited = 0
+    while queue:
+        node = queue.pop()
+        visited += 1
+        for successor in adjacency[node]:
+            in_degree[successor] -= 1
+            if in_degree[successor] == 0:
+                queue.append(successor)
+    return visited != len(keys)
 
 
 def check_resource_text(text: str, *, filename: str = "") -> list[BundleFinding]:

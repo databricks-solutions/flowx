@@ -59,3 +59,24 @@ def test_yaml_anchor_smell_flagged():
     assert "yaml_anchor" in codes
     # and the parsed structure also trips the duplicate-parameter invariant
     assert "duplicate_job_parameter" in codes
+
+
+def test_dependency_cycle_flagged():
+    job = {
+        "tasks": [
+            {"task_key": "a", "depends_on": [{"task_key": "b"}]},
+            {"task_key": "b", "depends_on": [{"task_key": "a"}]},
+        ]
+    }
+    assert "dependency_cycle" in _codes(check_job("p", job))
+
+
+def test_acyclic_chain_has_no_cycle_finding():
+    job = {
+        "tasks": [
+            {"task_key": "a"},
+            {"task_key": "b", "depends_on": [{"task_key": "a"}]},
+            {"task_key": "c", "depends_on": [{"task_key": "b"}]},
+        ]
+    }
+    assert "dependency_cycle" not in _codes(check_job("p", job))

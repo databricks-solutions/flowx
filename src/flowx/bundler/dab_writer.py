@@ -444,6 +444,22 @@ def main(argv: list[str] | None = None) -> int:
         all_created.extend(created)
         print(f"  [{index + 1}/{len(workflows)}] {workflow.name}: {len(created)} files")
 
+    # Tier-0 structural check over the emitted bundle(s): duplicate task keys / job params,
+    # dangling depends_on, undeclared {{job.parameters.X}}, leaked YAML anchors. Source-agnostic.
+    from flowx.validate.bundle_invariants import check_bundle_dir, format_result
+
+    bundle_dirs = (
+        [args.output_dir / normalize_task_key(workflow.name) for workflow in workflows]
+        if len(workflows) > 1
+        else [args.output_dir]
+    )
+    invariant_violations = 0
+    for bundle_dir in bundle_dirs:
+        result = check_bundle_dir(bundle_dir)
+        if not result.ok or result.warnings:
+            print(format_result(result), file=sys.stderr)
+        invariant_violations += len(result.violations)
+
     if not args.keep_intermediates:
         work_dir = args.output_dir / ".work"
         if work_dir.is_dir():
@@ -453,12 +469,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Pruned transient {work_dir}")
 
     print(f"\nBundle generation complete: {len(all_created)} files written to {args.output_dir}")
+    if invariant_violations:
+        print(
+            f"\nWARNING: {invariant_violations} bundle-invariant violation(s) above — "
+            "fix before `databricks bundle validate`.",
+            file=sys.stderr,
+        )
     print("\nNext steps:")
     print("  1. Review the generated notebooks in src/")
     print("  2. Run the setup notebooks to create secrets and volumes")
     print("  3. Validate the bundle: databricks bundle validate")
     print("  4. Deploy: databricks bundle deploy -t dev")
-    return 0
+    return 1 if invariant_violations else 0
 
 
 def _warn(task_key: str, message: str) -> None:
@@ -1392,6 +1414,15 @@ def _load_report(report_path: Path) -> list[PreparedWorkflow]:
     if "tasks" in report and "name" in report:
         workflow = _pipeline_dict_to_workflow(report)
         workflows.append(workflow)
+        return workflows
+
+    if "pipelines" in report and isinstance(report["pipelines"], list):
+        # Multi-pipeline report ({"pipelines": [<pipeline IR dict>, ...]}), emitted when a source
+        # converts more than one pipeline/DAG at once. Each entry is a full pipeline IR dict, so it
+        # routes through the same single-pipeline machinery.
+        for entry in report["pipelines"]:
+            if isinstance(entry, dict) and "tasks" in entry and "name" in entry:
+                workflows.append(_pipeline_dict_to_workflow(entry))
         return workflows
 
     if "translations" in report:
