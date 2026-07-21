@@ -1,6 +1,6 @@
 """Golden-bundle fixture DAG for the airflow source.
 
-Exercises the Phase-2 conversion behaviours in one representative DAG so the golden test
+Exercises several conversion behaviours in one representative DAG so the golden test
 pins their end-to-end bundle output:
   - cron schedule AND a root file sensor -> schedule kept + sensor retained as a polling task
   - a mid-DAG table sensor -> polling task (not a trigger)

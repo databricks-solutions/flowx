@@ -1,7 +1,6 @@
 """Tests that the MCP dispatcher threads --source to the adapter for both sources.
 
-Guards the P0 regression where the adapter began requiring --source but the MCP commands
-never passed it (breaking ADF and never supporting Airflow).
+The adapter requires --source for discover/convert, so every MCP command must pass it.
 """
 
 from __future__ import annotations

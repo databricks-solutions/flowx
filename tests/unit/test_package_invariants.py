@@ -43,7 +43,7 @@ def test_package_fails_on_duplicate_task_key():
 
 def test_package_loads_multi_pipeline_report():
     # A {"pipelines": [...]} report (emitted for multi-DAG conversion) must package all pipelines,
-    # not silently produce "no pipelines found". Guards the P0 multi-DAG load crash.
+    # not silently produce "no pipelines found".
     from flowx.bundler.dab_writer import _load_report
 
     report = {
@@ -140,7 +140,7 @@ def test_shared_bundle_cross_dag_ref_resolves_for_hyphenated_dag_id():
         upstream = yaml.safe_load((out / "resources" / "upstream_dag.yml").read_text())
         assert "upstream_dag" in upstream["resources"]["jobs"]
         downstream = (out / "resources" / "downstream.yml").read_text(encoding="utf-8")
-        # The ref matches the emitted job resource key (would be ${...Upstream-DAG.id} before the fix).
+        # The ref must match the emitted job resource key, which is normalize_task_key(dag_id).
         assert "${resources.jobs.upstream_dag.id}" in downstream
 
 

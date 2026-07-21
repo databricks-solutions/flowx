@@ -1,8 +1,8 @@
 """Golden-bundle test for the Airflow source.
 
 Converts a single representative DAG (tests/resources/airflow/golden_pipeline_dag.py) all the
-way to a DAB bundle on disk and pins the emitted job YAML + notebooks. It guards the Phase-2
-conversion behaviours together, end-to-end, so a regression in any one of them fails here:
+way to a DAB bundle on disk and pins the emitted job YAML + notebooks. It guards these
+conversion behaviours together, end-to-end:
 
   - cron schedule + a root file sensor -> schedule kept AND sensor retained as a polling task
     (schedule / file_arrival triggers are mutually exclusive on a Databricks job)

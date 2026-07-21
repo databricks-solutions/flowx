@@ -49,7 +49,7 @@ def test_python_operator_becomes_generated_notebook():
 
 def test_python_operator_notebook_is_valid_python():
     # A callable with an early return, a helper, a constant, and a non-Airflow import must
-    # produce a notebook that compiles (the review's P1 blind spot: top-level return / undefined names).
+    # produce a notebook that compiles (no top-level return, no undefined names).
     p = _load(
         "from datetime import datetime\n"
         "from airflow import DAG\n"

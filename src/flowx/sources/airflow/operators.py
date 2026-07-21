@@ -653,8 +653,7 @@ def _build_branch(ctx: OperatorContext) -> Activity:
     # Airflow Branch/ShortCircuit gate *sibling* tasks on a Python callable's return, which flowx
     # can't statically lower to a condition_task's left/op/right plus per-branch true/false outcome
     # wiring. Emitting it as an ordinary notebook would silently let every downstream branch run, so
-    # route it to the agentic-gap round with the callable source instead (a real translation, not a
-    # wrong-but-quiet one). Full Branch->condition_task remains a scoped follow-up.
+    # route it to the agentic-gap round with the callable source instead.
     return _placeholder(
         ctx,
         f"Airflow {ctx.operator} selects downstream tasks at runtime. Translate to a Databricks "
