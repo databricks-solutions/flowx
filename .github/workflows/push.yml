@@ -13,18 +13,14 @@ jobs:
   # tool environment) and draft PRs do not trigger the expensive acceptance suite.
   # PRs from forks are to be tested by the reviewer(s) / maintainer(s) before merging.
   not-a-fork:
-    runs-on:
-      group: databricks-solutions-protected-runner-group
-      labels: linux-ubuntu-latest
+    runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft && !github.event.pull_request.head.repo.fork
     steps:
       - run: echo "Not a fork PR, proceeding"
 
   ci:
     needs: not-a-fork
-    runs-on:
-      group: databricks-solutions-protected-runner-group
-      labels: linux-ubuntu-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
@@ -44,9 +40,7 @@ jobs:
 
   fmt:
     needs: not-a-fork
-    runs-on:
-      group: databricks-solutions-protected-runner-group
-      labels: linux-ubuntu-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
