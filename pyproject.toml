@@ -38,7 +38,7 @@ mcp = [
 [dependency-groups]
 dev = [
     "pytest>=8.3.3,<9",
-    "coverage>=7.6.1,<8",
+    "coverage>=7.15.0,<8",
     "ruff>=0.14.0,<1",
     "mypy>=1.18.2,<2",
     "types-pyyaml>=6.0.12.20250915,<7",
