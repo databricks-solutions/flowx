@@ -527,14 +527,14 @@ class TestMigrationInputSession:
     def test_discover_session_lists_expected_options(self):
         from flowx.adapter import MigrationInputSession
 
-        session = MigrationInputSession(phase="discover")
+        session = MigrationInputSession(phase="discover", source="adf")
         ids = [q.option_id for q in session.pending().options]
         assert ids == ["adf_source_path", "adf_resource_url", "output_dir"]
 
     def test_convert_session_lists_expected_options(self):
         from flowx.adapter import MigrationInputSession
 
-        session = MigrationInputSession(phase="convert")
+        session = MigrationInputSession(phase="convert", source="adf")
         ids = [q.option_id for q in session.pending().options]
         assert "inventory_path" in ids
         assert "adf_source_path" in ids
@@ -555,7 +555,7 @@ class TestMigrationInputSession:
     def test_answer_records_value_and_drops_from_pending(self):
         from flowx.adapter import MigrationInputSession
 
-        session = MigrationInputSession(phase="discover")
+        session = MigrationInputSession(phase="discover", source="adf")
         session.answer("adf_source_path", "/Volumes/main/default/adf")
         ids = [q.option_id for q in session.pending().options]
         assert "adf_source_path" not in ids
@@ -563,7 +563,7 @@ class TestMigrationInputSession:
     def test_answer_rejects_unknown_option(self):
         from flowx.adapter import MigrationInputSession
 
-        session = MigrationInputSession(phase="discover")
+        session = MigrationInputSession(phase="discover", source="adf")
         with pytest.raises(ValueError, match="Unknown input option"):
             session.answer("not_a_field", "x")
 
@@ -580,7 +580,7 @@ class TestMigrationInputSession:
     def test_collected_omits_required_when_missing(self):
         from flowx.adapter import MigrationInputSession
 
-        session = MigrationInputSession(phase="discover")
+        session = MigrationInputSession(phase="discover", source="adf")
         collected = session.collected()
         assert "adf_source_path" not in collected
         assert collected["output_dir"] == "./flowx_output"
@@ -600,7 +600,7 @@ class TestWorkspacePathsCli:
         report_path = tmp_path / "report.json"
         report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         out = tmp_path / "ws.json"
-        exit_code = adapter_cli_main(["workspace-paths", str(report_path), "--out", str(out)])
+        exit_code = adapter_cli_main(["workspace-paths", str(report_path), "--source", "adf", "--out", str(out)])
         assert exit_code == 0
         payload = json.loads(out.read_text())
         assert payload["paths"] == ["/Shared/team/a", "/Shared/team/b"]
@@ -614,7 +614,7 @@ class TestWorkspacePathsCli:
         report_path = tmp_path / "report.json"
         report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         out = tmp_path / "ws.json"
-        adapter_cli_main(["workspace-paths", str(report_path), "--out", str(out)])
+        adapter_cli_main(["workspace-paths", str(report_path), "--source", "adf", "--out", str(out)])
         payload = json.loads(out.read_text())
         assert payload["paths"] == []
         assert payload["needs_auth"] is False
@@ -642,19 +642,38 @@ class TestWorkspacePathsCli:
             json.dumps({"name": "LS_Other", "properties": {"type": "AzureSqlDatabase"}})
         )
         out = tmp_path / "ws.json"
-        adapter_cli_main(["workspace-paths", str(report_path), "--source-dir", str(source_dir), "--out", str(out)])
+        adapter_cli_main(
+            ["workspace-paths", str(report_path), "--source", "adf", "--source-dir", str(source_dir), "--out", str(out)]
+        )
         payload = json.loads(out.read_text())
         assert payload["suggested_hosts"] == ["https://adb-1234.5.azuredatabricks.net"]
 
 
 class TestInputsCli:
     def test_inputs_emits_discover_options(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
-        exit_code = adapter_cli_main(["inputs", "discover"])
+        exit_code = adapter_cli_main(["inputs", "discover", "--source", "adf"])
         assert exit_code == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["phase"] == "discover"
         ids = [q["option_id"] for q in payload["options"]]
         assert ids == ["adf_source_path", "adf_resource_url", "output_dir"]
+
+    def test_inputs_requires_source_for_discover(self, capsys: pytest.CaptureFixture[str]):
+        # discover prompts are source-specific; no default source -> clear error, exit 2.
+        exit_code = adapter_cli_main(["inputs", "discover"])
+        assert exit_code == 2
+        assert "source" in capsys.readouterr().err.lower()
+
+    def test_inputs_rejects_unknown_source(self, capsys: pytest.CaptureFixture[str]):
+        # An unrecognised source is a clean usage error (exit 2), not an uncaught ValueError traceback.
+        exit_code = adapter_cli_main(["inputs", "discover", "--source", "typo"])
+        assert exit_code == 2
+        assert "not recognized" in capsys.readouterr().err.lower()
+
+    def test_inputs_package_ignores_missing_source(self, capsys: pytest.CaptureFixture[str]):
+        # package is source-independent: no --source needed, and it succeeds.
+        exit_code = adapter_cli_main(["inputs", "package"])
+        assert exit_code == 0
 
     def test_inputs_writes_to_file(self, tmp_path: Path):
         out = tmp_path / "options.json"

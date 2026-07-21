@@ -5,6 +5,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from flowx.adapter.session import MigrationInputSession
 from flowx.reporting.coverage import COVERAGE_METRIC_COLUMNS, build_coverage_rows
 from flowx.sources.airflow.discover import main as discover_main
@@ -31,10 +33,11 @@ def test_inputs_convert_airflow_uses_airflow_source_path():
     assert "adf_source_path" not in ids
 
 
-def test_inputs_default_source_is_adf():
-    # Back-compat: no source arg -> ADF prompts.
+def test_inputs_discover_requires_source():
+    # No default source: discover prompts can't be worded without one, so pending() raises.
     session = MigrationInputSession(phase="discover")
-    assert any(o.option_id == "adf_source_path" for o in session.pending().options)
+    with pytest.raises(ValueError, match="source is required"):
+        session.pending()
 
 
 def test_airflow_profile_csv_has_all_coverage_columns():

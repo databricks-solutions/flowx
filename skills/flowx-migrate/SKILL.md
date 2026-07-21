@@ -58,6 +58,7 @@ phase:
 
 ```
 flowx(command="migrate", parameters={
+  "source": "adf",
   "adf_definitions": {"pipeline/Foo.json": {...}, "linkedService/Bar.json": {...}, ...},
   "output_dir": ..., "catalog": ..., "schema": ..., "pipeline": "<optional>"})
 ```
@@ -94,13 +95,15 @@ To accept all defaults and skip the prompts, pass `"interactive": false`. (Re-ca
 > `mcp-flowx` app's service principal read on the source and write on the output target.
 
 For step-by-step control, run the commands in order (the app reuses `output_dir` across calls, so
-only `discover` needs `adf_definitions`):
+only `discover` needs the source input). `source` ("adf" | "airflow") is required for
+discover/convert/merge_agentic and for `inputs discover`/`inputs convert`; for Airflow, swap
+`adf_definitions` for `airflow_source_path`. `package` and `inputs package` are source-independent:
 
 ```
-flowx(command="inputs", parameters={"phase": "discover" | "convert" | "package"})  # learn each phase's inputs
-flowx(command="discover", parameters={"adf_definitions": {...}, "output_dir": ..., "pipeline": ...})
-flowx(command="convert", parameters={"output_dir": ..., "pipeline": ...})
-flowx(command="merge_agentic", parameters={"report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # if agentic results
+flowx(command="inputs", parameters={"phase": "discover", "source": "adf"})  # source req for discover/convert
+flowx(command="discover", parameters={"source": "adf", "adf_definitions": {...}, "output_dir": ..., "pipeline": ...})
+flowx(command="convert", parameters={"source": "adf", "output_dir": ..., "pipeline": ...})
+flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # if agentic results
 flowx(command="inspect", parameters={"report_path": ...})
 flowx(command="apply_answers", parameters={"report_path": ..., "answers": [...], "output_dir": ...})
 flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema": ...})
@@ -128,7 +131,7 @@ interpreter (from the marker file `<plugin_dir>/.migration-venv`) and `src/` on 
 ```bash
 export PYTHONPATH="<plugin_dir>/src"
 PY="$(cat <plugin_dir>/.migration-venv)"
-"$PY" -m flowx.adapter inputs discover
+"$PY" -m flowx.adapter inputs discover --source adf   # or --source airflow
 ```
 
 If Python or pip is missing, `bootstrap.sh` prints a warning telling the user what to install — relay
@@ -144,9 +147,9 @@ Before invoking discover, run the adapter inputs subcommand once per
 phase so the agent surfaces the matching free-text prompts:
 
 ```bash
-"$PY" -m flowx.adapter inputs discover
-"$PY" -m flowx.adapter inputs convert
-"$PY" -m flowx.adapter inputs package
+"$PY" -m flowx.adapter inputs discover --source adf   # or --source airflow
+"$PY" -m flowx.adapter inputs convert --source adf     # or --source airflow
+"$PY" -m flowx.adapter inputs package                  # source-independent
 ```
 
 Each response carries the options for that phase plus their descriptions and
@@ -311,7 +314,8 @@ the bundle would need to download:
 ```bash
 "$PY" -m flowx.adapter workspace-paths \
   <output_dir>/.work/translation_report.stamped.json \
-  --source-dir <adf_source_path>
+  --source adf \
+  --source-dir <source_path>
 ```
 
 When the response carries `needs_auth: true`:

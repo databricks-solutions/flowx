@@ -43,11 +43,28 @@ def _argv(calls: list[list[str]], subcommand: str) -> list[str]:
     return next(argv for argv in calls if argv and argv[0] == subcommand)
 
 
-def test_discover_defaults_to_adf_source(captured, tmp_path: Path):
-    server._cmd_discover({"adf_source_path": str(tmp_path), "output_dir": str(tmp_path / "o")})
+def test_discover_threads_explicit_adf_source(captured, tmp_path: Path):
+    server._cmd_discover({"source": "adf", "adf_source_path": str(tmp_path), "output_dir": str(tmp_path / "o")})
     argv = _argv(captured, "discover")
     assert "--source" in argv and argv[argv.index("--source") + 1] == "adf"
     assert "--source-path" in argv
+
+
+def test_discover_requires_source(tmp_path: Path):
+    # No default source: a command with no 'source' raises KeyError, which the dispatcher (below)
+    # converts into a clear "Missing required parameter 'source'" error instead of assuming adf.
+    with pytest.raises(KeyError):
+        server._cmd_discover({"adf_source_path": str(tmp_path), "output_dir": str(tmp_path / "o")})
+
+
+def test_dispatcher_reports_missing_source_clearly(tmp_path: Path):
+    handler = server._COMMANDS["discover"]
+    try:
+        result = handler({"adf_source_path": str(tmp_path), "output_dir": str(tmp_path / "o")})
+    except KeyError as missing:
+        result = {"ok": False, "error": f"Missing required parameter {missing} for command 'discover'."}
+    assert result["ok"] is False
+    assert "source" in result["error"].lower()
 
 
 def test_discover_routes_airflow_source(captured, tmp_path: Path):
@@ -79,6 +96,22 @@ def test_inputs_threads_source(captured):
     server._cmd_inputs({"phase": "discover", "source": "airflow"})
     argv = _argv(captured, "inputs")
     assert argv[argv.index("--source") + 1] == "airflow"
+
+
+def test_inputs_package_is_source_independent(captured):
+    # package prompts don't vary by source, so `inputs package` must not require (or pass) --source.
+    server._cmd_inputs({"phase": "package"})
+    argv = _argv(captured, "inputs")
+    assert "--source" not in argv
+
+
+def test_workspace_paths_forwards_airflow_source_path(captured, tmp_path: Path):
+    server._cmd_workspace_paths(
+        {"source": "airflow", "report_path": "/tmp/report.json", "airflow_source_path": str(tmp_path)}
+    )
+    argv = _argv(captured, "workspace-paths")
+    assert argv[argv.index("--source") + 1] == "airflow"
+    assert argv[argv.index("--source-dir") + 1] == str(tmp_path)
 
 
 def test_discover_missing_source_path_errors_clearly(captured, tmp_path: Path):

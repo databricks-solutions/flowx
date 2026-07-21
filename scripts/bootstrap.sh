@@ -17,7 +17,7 @@
 # After bootstrapping, run the plugin's Python code with the venv interpreter and
 # src/ on PYTHONPATH, e.g.:
 #
-#   PYTHONPATH="<plugin_root>/src" "<venv>/bin/python" -m flowx.adapter inputs discover
+#   PYTHONPATH="<plugin_root>/src" "<venv>/bin/python" -m flowx.adapter inputs discover --source adf
 #
 # The resolved interpreter path is also written to <plugin_root>/.migration-venv
 # so the skills can discover it without re-deriving the location.
@@ -201,5 +201,5 @@ flowx Python environment is ready.
   Marker file : $PLUGIN_ROOT/.migration-venv
 
 Run the plugin's Python code with src/ on PYTHONPATH, for example:
-  PYTHONPATH="$PLUGIN_ROOT/src" "$VENV_PYTHON" -m flowx.adapter inputs discover
+  PYTHONPATH="$PLUGIN_ROOT/src" "$VENV_PYTHON" -m flowx.adapter inputs discover --source adf
 EOF

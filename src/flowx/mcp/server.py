@@ -38,21 +38,26 @@ def _transport_security() -> TransportSecuritySettings:
 
 
 _INSTRUCTIONS = """\
-flowx translates Azure Data Factory (ADF) pipelines into Databricks Lakeflow Jobs packaged as
-Declarative Automation Bundles (DABs). Everything is driven through the single `flowx` tool:
-`flowx(command="<command>", parameters={...})`.
+flowx translates a source orchestrator's pipelines (Azure Data Factory or Apache Airflow) into
+Databricks Lakeflow Jobs packaged as Declarative Automation Bundles (DABs). Everything is driven
+through the single `flowx` tool: `flowx(command="<command>", parameters={...})`.
 
-Typical flow:
-  flowx("inputs", {"phase": "discover"})             # learn a phase's inputs
-  flowx("discover", {"adf_source_path": "...", "output_dir": "..."})
-  flowx("convert", {"output_dir": "..."})
+Every discover/convert/migrate call requires `source` ("adf" | "airflow") — there is no default.
+ADF reads adf_volume_path | adf_workspace_path | adf_definitions | adf_source_path; Airflow reads
+airflow_source_path (a DAG .py file or directory).
+
+Typical flow (ADF shown; swap source + source-path for Airflow):
+  flowx("inputs", {"phase": "discover", "source": "adf"})   # learn a phase's inputs
+  flowx("discover", {"source": "adf", "adf_source_path": "...", "output_dir": "..."})
+  flowx("convert", {"source": "adf", "output_dir": "..."})
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
   flowx("package", {"output_dir": "...", "catalog": "main", "schema": "default"})
 Or run it all at once:
-  flowx("migrate", {"adf_source_path": "...", "output_dir": "...", "catalog": "...", "schema": "..."})
+  flowx("migrate", {"source": "airflow", "airflow_source_path": "...", "output_dir": "...",
+                    "catalog": "...", "schema": "..."})
 
-All phases share one output_dir. Provide ADF source paths and output_dir as locations the server can
+All phases share one output_dir. Provide source paths and output_dir as locations the server can
 read/write (a local path, or a Unity Catalog Volume path when the host has volume access).
 """
 
@@ -65,8 +70,8 @@ def _phase_result(result: runner.AdapterResult, output_dir: Path, **extra: Any) 
 
 
 def _source_name(p: dict[str, Any]) -> str:
-    """The migration source for a command (``adf`` default; ``airflow`` when requested)."""
-    return str(p.get("source", "adf"))
+    """The migration source for a command; required (no default) -- ``KeyError`` when absent."""
+    return str(p["source"])
 
 
 def _resolve_source(p: dict[str, Any], path_key: str | None = None) -> tuple[str | None, Callable[[], None]]:
@@ -79,7 +84,9 @@ def _resolve_source(p: dict[str, Any], path_key: str | None = None) -> tuple[str
     2. ``adf_workspace_path`` — a ``/Workspace`` directory (e.g. an ADF Git folder); downloaded via
        the SDK Workspace API. Both (1) and (2) scale to large factories — the bytes bypass the agent.
     3. ``adf_definitions`` — an inline ARM-JSON payload (small jobs); materialized to a temp dir.
-    4. ``<source>_source_path`` / explicit ``path_key`` — a path the server itself can read.
+    4. ``<source>_source_path`` (e.g. ``airflow_source_path``) or the explicit ``path_key`` — a path
+       the server itself can read. ``path_key`` is an *additional* key to try (e.g. ``source_dir``),
+       not a replacement, so the source's natural key still resolves.
 
     For ``source="airflow"`` the volume/workspace/inline modes are ADF-specific and skipped; the DAG
     path is read from ``airflow_source_path`` (or the explicit ``path_key``).
@@ -96,8 +103,11 @@ def _resolve_source(p: dict[str, Any], path_key: str | None = None) -> tuple[str
         if definitions:
             src = runner.materialize_adf_definitions(definitions)
             return src, lambda: runner.cleanup_materialized(src)
-    default_key = path_key or f"{source}_source_path"
-    return p.get(default_key), (lambda: None)
+    candidate_keys = [f"{source}_source_path"]
+    if path_key:
+        candidate_keys.append(path_key)
+    resolved = next((p[key] for key in candidate_keys if p.get(key)), None)
+    return resolved, (lambda: None)
 
 
 def _bundle_output(p: dict[str, Any], out: Path) -> dict[str, Any]:
@@ -138,7 +148,12 @@ def _pending_options(inspect_result: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _cmd_inputs(p: dict[str, Any]) -> dict[str, Any]:
-    result = runner.run_adapter(["inputs", p["phase"], "--source", _source_name(p)])
+    phase = p["phase"]
+    args = ["inputs", phase]
+    # package is source-independent; discover/convert prompts are source-specific (source required).
+    if phase != "package":
+        args += ["--source", _source_name(p)]
+    result = runner.run_adapter(args)
     return {"ok": result.ok, "inputs": runner.parse_stdout_json(result), "process": result.as_dict()}
 
 
@@ -423,35 +438,43 @@ def build_server() -> FastMCP:
     # declare one); the dict is still returned as JSON text. See "MCP server design notes" in AGENTS.md.
     @mcp.tool(structured_output=False)
     def flowx(command: str, parameters: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Run an flowx ADF→Databricks migration command.
+        """Run an flowx source→Databricks migration command (source: Azure Data Factory or Apache Airflow).
 
         Call as ``flowx(command="<command>", parameters={...})``. Commands and their
-        ``parameters`` keys (req = required; phases share ``output_dir``, default "./flowx_output"):
+        ``parameters`` keys (req = required; phases share ``output_dir``, default "./flowx_output").
+        ``source`` ("adf" | "airflow") is **required** for discover/convert/migrate/inputs (and
+        workspace_paths); there is no default. It selects both the parser and which source-path key
+        applies: ADF reads adf_volume_path | adf_workspace_path | adf_definitions | adf_source_path,
+        Airflow reads ``airflow_source_path`` (a DAG .py file or directory). ``package`` is
+        source-independent (it consumes the translation report).
 
-        - "inputs": phase(req: "discover"|"convert"|"package") — list a phase's input prompts.
-        - "discover": one of adf_volume_path | adf_workspace_path | adf_definitions | adf_source_path
-          (req), output_dir, pipeline — parse ADF JSON, classify activities.
-        - "convert": output_dir, (adf_volume_path | adf_workspace_path | adf_definitions |
-          adf_source_path), pipeline.
-        - "merge_agentic": report_path(req), agentic_results_dir(req), output_path — merge agent results.
+        - "inputs": phase(req: "discover"|"convert"|"package"), source(req for discover/convert) —
+          list a phase's input prompts.
+        - "discover": source(req), one ADF source key | airflow_source_path (req), output_dir,
+          pipeline — parse the source's definitions, classify activities.
+        - "convert": source(req), (one ADF source key | airflow_source_path), output_dir, pipeline.
+        - "merge_agentic": source(req), report_path(req), agentic_results_dir(req), output_path —
+          merge agent results.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
         - "materialize_lookup": source(req: CSV path or literal CSV), out(req: destination JSON path).
-        - "workspace_paths": report_path(req), (adf_volume_path | adf_workspace_path | adf_definitions
+        - "workspace_paths": source(req), report_path(req), (one ADF source key | airflow_source_path
           | source_dir).
         - "package": output_dir, output_volume_path, output_workspace_path, report_path,
           catalog(default "main"), schema(default "default"), bundle_name, profile,
           download_workspace_files(bool), keep_intermediates(bool).
-        - "migrate": one of adf_volume_path | adf_workspace_path | adf_definitions | adf_source_path
-          (req), output_dir, output_volume_path, output_workspace_path, catalog, schema, pipeline,
+        - "migrate": source(req), one ADF source key | airflow_source_path (req), output_dir,
+          output_volume_path, output_workspace_path, catalog, schema, pipeline,
           answers(list of "ID=VALUE"), interactive(bool, default true), lookup_csv — runs
           discover→convert→package, returning the full option schema once (status "needs_input") when
           configuration is available; re-call once with the complete answers to apply (see below).
         - "record_results": output_dir(req), results_table(req: catalog.schema.table), warehouse_id.
         - "install_dashboard": results_table(req), warehouse_id, dashboard_name, parent_path.
 
-        Providing the ADF source (a hosted app can't read the user's workspace/volume files directly):
+        Providing the source (a hosted app can't read the user's workspace/volume files directly). For
+        ``source="airflow"`` pass ``airflow_source_path`` (a DAG .py file or directory the server can
+        read). For ``source="adf"``, in priority order:
         - ``adf_volume_path``: a UC Volume directory the server reads via the SDK Files API. **Preferred
           for large factories** — the bytes never pass through the agent. Requires the app's service
           principal to have read on the volume.

@@ -41,7 +41,7 @@ This phase runs one of two ways; run the **`setup`** skill first if you haven't.
                                             "download_workspace_files": true,
                                             "output_volume_path": "<optional /Volumes/... target>",
                                             "output_workspace_path": "<optional /Workspace/... target>"})
-  flowx(command="workspace_paths", parameters={"report_path": "...", "source_dir": "<optional ADF source>"})
+  flowx(command="workspace_paths", parameters={"source": "adf", "report_path": "...", "source_dir": "<optional source dir>"})
   flowx(command="record_results", parameters={"output_dir": "<dir>", "results_table": "catalog.schema.table", "warehouse_id": "<optional>"})
   flowx(command="install_dashboard", parameters={"results_table": "catalog.schema.table", "warehouse_id": "<optional>"})
   ```
@@ -118,7 +118,8 @@ download to be self-contained:
 ```bash
 "$PY" -m flowx.adapter workspace-paths \
   <output_dir>/.work/translation_report.stamped.json \
-  --source-dir <adf_source_dir>
+  --source adf \
+  --source-dir <source_dir>
 ```
 
 The command emits:

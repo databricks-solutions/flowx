@@ -271,7 +271,7 @@ _OUTPUT_DIR_OPTION = MigrationInputOption(
 
 def _discover_options(source: str) -> tuple[MigrationInputOption, ...]:
     """Discover-phase input prompts for *source* (source-path prompt varies by source)."""
-    spec = _SOURCE_PATH_OPTION.get(source, _SOURCE_PATH_OPTION["adf"])
+    spec = _SOURCE_PATH_OPTION[source]
     options = [
         MigrationInputOption(
             option_id=spec["option_id"], prompt=spec["prompt"], description=spec["description"], required=True
@@ -296,7 +296,7 @@ def _discover_options(source: str) -> tuple[MigrationInputOption, ...]:
 
 def _convert_options(source: str) -> tuple[MigrationInputOption, ...]:
     """Convert-phase input prompts for *source*."""
-    spec = _SOURCE_PATH_OPTION.get(source, _SOURCE_PATH_OPTION["adf"])
+    spec = _SOURCE_PATH_OPTION[source]
     return (
         MigrationInputOption(
             option_id=INPUT_INVENTORY_PATH,
@@ -404,13 +404,15 @@ _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
 _SUPPORTED_PHASES: frozenset[str] = frozenset({PHASE_DISCOVER, PHASE_CONVERT, PHASE_PACKAGE})
 
 
-def _options_for(phase: str, source: str) -> tuple[MigrationInputOption, ...]:
-    """Returns the input options for *phase*, source-worded for discover/convert."""
-    if phase == PHASE_DISCOVER:
-        return _discover_options(source)
-    if phase == PHASE_CONVERT:
-        return _convert_options(source)
-    return _PACKAGE_OPTIONS
+def _options_for(phase: str, source: str | None) -> tuple[MigrationInputOption, ...]:
+    """Returns the input options for *phase*; discover/convert need a known source (else ``ValueError``)."""
+    if phase == PHASE_PACKAGE:
+        return _PACKAGE_OPTIONS
+    if source not in _SOURCE_PATH_OPTION:
+        raise ValueError(
+            f"--source is required for the {phase} phase; choose one of: {', '.join(sorted(_SOURCE_PATH_OPTION))}"
+        )
+    return _discover_options(source) if phase == PHASE_DISCOVER else _convert_options(source)
 
 
 class UnknownMigrationPhaseError(ValueError):
@@ -431,11 +433,12 @@ class MigrationInputSession:
     Attributes:
         phase: One of ``"discover"``, ``"convert"``, ``"package"``.
         source: Migration source (``"adf"`` / ``"airflow"``); words the
-            source-path prompt for the discover/convert phases.
+            source-path prompt for the discover/convert phases. Required for
+            those phases (there is no default source); unused for ``package``.
     """
 
     phase: str
-    source: str = "adf"
+    source: str | None = None
     _answers: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -455,6 +458,10 @@ class MigrationInputSession:
         Returns:
             A :class:`PendingMigrationInputs` with the unanswered
             options for ``self.phase`` in registration order.
+
+        Raises:
+            ValueError: When the discover/convert phase has a missing or
+                unrecognised ``source`` (there is no default source).
         """
         options = [option for option in _options_for(self.phase, self.source) if option.option_id not in self._answers]
         return PendingMigrationInputs(phase=self.phase, options=options)
@@ -468,7 +475,8 @@ class MigrationInputSession:
 
         Raises:
             ValueError: When *option_id* is not a known input for the
-                session's phase.
+                session's phase, or when the discover/convert phase has a
+                missing or unrecognised ``source`` (there is no default source).
         """
         if not any(option.option_id == option_id for option in _options_for(self.phase, self.source)):
             raise ValueError(f"Unknown input option {option_id!r} for phase {self.phase!r}")
@@ -481,8 +489,10 @@ class MigrationInputSession:
             answers: Mapping of option_id to the caller-supplied value.
 
         Raises:
-            ValueError: When any pair references an unknown option.
-                No answers are recorded when the call raises.
+            ValueError: When any pair references an unknown option, or when
+                the discover/convert phase has a missing or unrecognised
+                ``source`` (there is no default source). No answers are
+                recorded when the call raises.
         """
         known_ids = {option.option_id for option in _options_for(self.phase, self.source)}
         unknown = set(answers) - known_ids
@@ -499,6 +509,10 @@ class MigrationInputSession:
             the option's ``default`` value (which may be the empty
             string) is used.  Required options whose answers are
             missing are omitted so the caller can detect them.
+
+        Raises:
+            ValueError: When the discover/convert phase has a missing or
+                unrecognised ``source`` (there is no default source).
         """
         collected: dict[str, str] = {}
         for option in _options_for(self.phase, self.source):

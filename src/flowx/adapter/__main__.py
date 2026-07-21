@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from flowx.adapter.constants import MOTIF_CONSOLIDATE_OPTION_PREFIX
+from flowx.adapter.constants import MOTIF_CONSOLIDATE_OPTION_PREFIX, PHASE_PACKAGE
 from flowx.adapter.models import (
     DEFAULT_CONFIGURATION,
     CopyActivityParadigm,
@@ -39,6 +39,8 @@ from flowx.adapter.operations import (
     provision_notification_destinations,
     validate_answer,
 )
+from flowx.adapter.session import MigrationInputSession
+from flowx.sources import available_sources, get_source
 
 # bundler.dab_writer + translator.engine (sqlglot) are imported lazily inside inspect/modify only, so
 # the cheap commands (inputs, phase pass-throughs, materialize-lookup, workspace-paths) skip ~0.15s of
@@ -150,7 +152,7 @@ def _run_workspace_paths(args: argparse.Namespace) -> int:
     paths = collect_workspace_artifact_paths(args.report)
     suggested_hosts: list[str] = []
     if args.source_dir:
-        if getattr(args, "source", "adf") == "airflow":
+        if args.source == "airflow":
             from flowx.sources.airflow.loader import detect_hosts
 
             suggested_hosts = detect_hosts(args.source_dir)
@@ -169,15 +171,24 @@ def _run_inputs(args: argparse.Namespace) -> int:
     """Implements the ``inputs`` subcommand.
 
     Args:
-        args: Parsed CLI namespace carrying ``phase`` and ``out``.
+        args: Parsed CLI namespace carrying ``phase``, ``source``, and ``out``.
 
     Returns:
-        ``0`` on success.  The CLI never raises here because the phase
-        argument is constrained by argparse.
+        ``0`` on success, or ``2`` when the discover/convert phase is missing
+        the required ``--source``.
     """
-    from flowx.adapter.session import MigrationInputSession
-
-    session = MigrationInputSession(phase=args.phase, source=getattr(args, "source", "adf"))
+    source = getattr(args, "source", None)
+    # discover/convert prompts are source-specific and need a known source; package is
+    # source-independent. Validate here so a missing or unknown source is a clean usage error
+    # rather than an uncaught ValueError from session.pending().
+    if args.phase != PHASE_PACKAGE and source not in available_sources():
+        problem = "is required" if source is None else f"{source!r} is not recognized"
+        print(
+            f"--source {problem} for the {args.phase} phase; choose one of: {', '.join(available_sources())}",
+            file=sys.stderr,
+        )
+        return 2
+    session = MigrationInputSession(phase=args.phase, source=source)
     pending = session.pending()
     payload = {
         "phase": pending.phase,
@@ -293,7 +304,7 @@ def _build_parser() -> argparse.ArgumentParser:
     workspace_paths.add_argument("report", type=Path, help="Path to the translation report or pipeline IR JSON.")
     workspace_paths.add_argument(
         "--source",
-        default="adf",
+        required=True,
         help="Migration source (adf | airflow); selects how workspace hosts are detected.",
     )
     workspace_paths.add_argument(
@@ -324,8 +335,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     inputs.add_argument(
         "--source",
-        default="adf",
-        help="Migration source (adf | airflow); words the source-path prompt for discover/convert.",
+        default=None,
+        help="Migration source (adf | airflow); required for discover/convert, unused for package.",
     )
     inputs.add_argument(
         "--out",
@@ -405,8 +416,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # Unified phase runners: `adapter <phase> --source <name> -- <flags>` routes discover/convert
-    # to the named source's phase module (default: adf, for back-compat). package is source-independent.
-    # --source-path (and each source's own alias, e.g. --adf-source-path) normalise to --source-dir.
+    # to the named source's phase module. --source is required for those phases (no default);
+    # package is source-independent. --source-path (and each source's own alias, e.g.
+    # --adf-source-path) normalise to --source-dir.
     for _phase in ("discover", "convert", "package"):
         _runner = subparsers.add_parser(
             _phase,
@@ -473,8 +485,6 @@ def _run_phase(phase: str, forward: list[str]) -> int:
         or names an unknown source.
     """
     import importlib
-
-    from flowx.sources import available_sources, get_source
 
     source_name, remaining = _split_source(forward)
 
