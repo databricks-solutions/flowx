@@ -28,9 +28,10 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 | `HttpSensor` / `PythonSensor` / `DateTimeSensor` | Polling notebook tasks for absolute HTTP URLs, callable polls, and wait-until. Relative HTTP endpoints and Python callables reading task context route to placeholders. |
 | Time sensors (`TimeSensor`, `TimeDeltaSensor`) | Placeholder; their per-run wait semantics are not silently folded into or removed from the job schedule. |
 | `DummyOperator` / `EmptyOperator` | Dropped, downstream dependencies rewired. |
-| `.expand()` on an operator | `for_each_task`. |
+| `.expand()` on an operator or `@task` | `for_each_task` when the mapped iterable is a literal list; a non-literal iterable (e.g. an upstream task's output) routes to a placeholder + gap. |
 | Dependencies | `>>` / `<<` chains (incl. list/tuple fan-out and inline TaskFlow calls) and `set_upstream` / `set_downstream`. |
-| **TaskGroups** | Static nesting → task-key namespacing (`group__subgroup__task`); group-level edges (`group_a >> group_b`, `task >> group`) expand to leaf→root edges between member tasks. |
+| **TaskGroups** (context-manager `with TaskGroup(...)`) | Static nesting → task-key namespacing (`group__subgroup__task`); group-level edges (`group_a >> group_b`, `task >> group`) expand to leaf→root edges between member tasks. |
+| **`@task_group`** (decorator form) | Placeholder + gap (with dependency edges preserved); a decorator group is a sub-pipeline flowx doesn't lower — the agentic round expands it into its member tasks / a for_each when mapped. |
 | Schedule | Cron `schedule_interval` → Quartz (Unix DOW 0–6 → Quartz 1–7); exact sub-hour `timedelta` → Quartz, longer intervals → periodic, `@continuous` → continuous mode. |
 | `trigger_rule` | DAB `run_if` constant per edge (`ALL_DONE`, `ALL_FAILED`, `AT_LEAST_ONE_SUCCESS`, `NONE_FAILED`, …). |
 | Job parameters | `params={...}` / `Param(default=...)` → job parameters with defaults; `{{ params.x }}` / `{{ var.value.x }}` / `{{ dag_run.conf['x'] }}` → `{{job.parameters.x}}`. |
@@ -48,8 +49,10 @@ emitting code that fails at runtime.
 These are absent but fail safely — routed to a placeholder + `gaps.json`, or simply not exploded — or
 are deliberate scope decisions.
 
-- **Dynamic TaskGroup mapping** (`.expand()` on a `@task_group` or `TaskGroup.partial().expand()`).
-  `.expand()` is only recognized on operator/`@task` calls; a mapped *group's* fan-out is lost.
+- **Full TaskGroup expansion** — a `@task_group` invocation (mapped `pair.expand(...)` or plain
+  `pair(...)`) and `TaskGroup.partial().expand()` aren't lowered into their member tasks. They route
+  to a placeholder + gap with dependency edges preserved (never a silent drop); the agentic round
+  expands the group. `.expand()` on an operator/`@task` *call* is supported (see the table).
 - **Sensors beyond the mapped families** (`S3PrefixSensor`, custom sensors, etc.) → placeholder + gap.
   A file sensor with a non-literal path, or a table/SQL sensor with no literal `sql` / `table_name`,
   also falls back to a placeholder.
@@ -76,6 +79,6 @@ mode with `--dbt-mode {static,pydabs}` on the convert phase (default `static`).
 
 ## Priority for remaining follow-ups
 
-1. **Dynamic TaskGroup mapping** — expand a mapped `@task_group` / `TaskGroup.partial().expand()` into
-   a for-each over the group's tasks (today the fan-out is lost).
+1. **Full TaskGroup expansion** — lower a `@task_group` / `TaskGroup.partial().expand()` into its
+   member tasks (a for-each over the group when mapped) instead of a placeholder.
 2. **Additional sensor families** — as demand warrants; unmapped sensors route to a placeholder today.

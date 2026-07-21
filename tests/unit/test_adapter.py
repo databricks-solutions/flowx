@@ -648,6 +648,15 @@ class TestWorkspacePathsCli:
         payload = json.loads(out.read_text())
         assert payload["suggested_hosts"] == ["https://adb-1234.5.azuredatabricks.net"]
 
+    def test_workspace_paths_rejects_unknown_source(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+        from flowx.ir_serde import pipeline_to_dict
+
+        report_path = tmp_path / "report.json"
+        report_path.write_text(json.dumps(pipeline_to_dict(Pipeline(name="p", tasks=[_delta_copy()]))))
+        exit_code = adapter_cli_main(["workspace-paths", str(report_path), "--source", "typo"])
+        assert exit_code == 2
+        assert "not recognized" in capsys.readouterr().err.lower()
+
 
 class TestInputsCli:
     def test_inputs_emits_discover_options(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):

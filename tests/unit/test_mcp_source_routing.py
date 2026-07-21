@@ -118,3 +118,9 @@ def test_discover_missing_source_path_errors_clearly(captured, tmp_path: Path):
     result = server._cmd_discover({"source": "airflow", "output_dir": str(tmp_path)})
     assert result["ok"] is False
     assert "airflow" in result["error"]
+
+
+def test_source_name_rejects_non_string(captured):
+    # A malformed non-string source must raise (ValueError), not silently coerce 123 -> "123".
+    with pytest.raises(ValueError, match="must be a string"):
+        server._source_name({"source": 123})

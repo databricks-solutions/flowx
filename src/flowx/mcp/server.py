@@ -70,8 +70,15 @@ def _phase_result(result: runner.AdapterResult, output_dir: Path, **extra: Any) 
 
 
 def _source_name(p: dict[str, Any]) -> str:
-    """The migration source for a command; required (no default) -- ``KeyError`` when absent."""
-    return str(p["source"])
+    """The migration source for a command; required as a string (no default).
+
+    Raises ``KeyError`` when absent and ``ValueError`` when non-string; the dispatcher
+    surfaces both as a clear error rather than coercing e.g. ``123`` to ``"123"``.
+    """
+    source = p["source"]
+    if not isinstance(source, str):
+        raise ValueError(f"'source' must be a string, got {type(source).__name__}")
+    return source
 
 
 def _resolve_source(p: dict[str, Any], path_key: str | None = None) -> tuple[str | None, Callable[[], None]]:

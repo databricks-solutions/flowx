@@ -249,19 +249,19 @@ def _prepare_placeholder(activity: Activity) -> PreparedActivity:
     notebook_name = f"{activity.task_key}.py"
     notebook_path = f"notebooks/{notebook_name}"
 
-    # When the activity is an agentic gap (e.g. Until), embed its full ADF/ARM
-    # JSON so the agentic handler can translate it directly from source.
-    arm_block = ""
+    # When the activity is an agentic gap, embed its raw source definition (ADF/ARM JSON for the ADF
+    # source, the operator source for Airflow) so the agentic handler can translate it directly.
+    source_block = ""
     if raw_definition is not None:
         import json as _json
 
-        arm_lines = _json.dumps(raw_definition, indent=2).splitlines()
-        arm_block = (
+        source_lines = _json.dumps(raw_definition, indent=2).splitlines()
+        source_block = (
             "# MAGIC\n"
-            "# MAGIC An agent should translate this activity from the ADF/ARM JSON below,\n"
+            "# MAGIC An agent should translate this activity from the source definition below,\n"
             "# MAGIC then replace the `raise NotImplementedError` cell with the generated code.\n"
             "# MAGIC\n"
-            "# MAGIC ```json\n" + "".join(f"# MAGIC {line}\n" for line in arm_lines) + "# MAGIC ```\n"
+            "# MAGIC ```json\n" + "".join(f"# MAGIC {line}\n" for line in source_lines) + "# MAGIC ```\n"
         )
 
     content = (
@@ -269,9 +269,9 @@ def _prepare_placeholder(activity: Activity) -> PreparedActivity:
         "# MAGIC %md\n"
         f"# MAGIC # Placeholder: {activity.name}\n"
         "# MAGIC\n"
-        f"# MAGIC Original ADF activity type: **{original_type}**\n"
+        f"# MAGIC Original source activity type: **{original_type}**\n"
         "# MAGIC\n"
-        f"# MAGIC {comment}\n" + arm_block + "\n# COMMAND ----------\n\n"
+        f"# MAGIC {comment}\n" + source_block + "\n# COMMAND ----------\n\n"
         f"raise NotImplementedError(\"Activity '{activity.name}' ({original_type}) needs agentic translation.\")\n"
     )
 

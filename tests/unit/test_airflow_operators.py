@@ -1415,6 +1415,189 @@ def test_taskflow_mixed_with_classic_operator():
     assert finalize.depends_on[0].task_key == "prep"
 
 
+def test_taskflow_expand_literal_list_becomes_for_each():
+    # @task.expand over a literal list -> for_each_task; the inner notebook reads the per-iteration
+    # element from the `item` widget (Tier 1, deterministic).
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def process(item):\n    return item * 2\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    process.expand(item=[1, 2, 3])\n"
+        "pipeline()\n"
+    )
+    task = next(t for t in p.tasks if t.task_key.startswith("process"))
+    assert isinstance(task, ForEachActivity)
+    # Each element is JSON-encoded individually so the inner notebook's json.loads recovers the exact
+    # value (ints stay ints, JSON-looking strings stay strings) regardless of {{input}} serialization.
+    assert task.items_expression == '["1", "2", "3"]'
+    inner = task.inner_activities[0]
+    assert isinstance(inner, NotebookActivity)
+    assert "dbutils.widgets.get('item')" in inner.generated_source
+    assert "item=_expand_item" in inner.generated_source
+    compile(inner.generated_source, "<proc>", "exec")
+
+
+def test_taskflow_expand_dict_list_becomes_for_each():
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def process(cfg):\n    return cfg\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    process.expand(cfg=[{'a': 1}, {'a': 2}])\n"
+        "pipeline()\n"
+    )
+    task = next(t for t in p.tasks if t.task_key.startswith("process"))
+    assert isinstance(task, ForEachActivity)
+    # Elements are individually JSON-encoded (each is the JSON text of the dict).
+    assert task.items_expression == '["{\\"a\\": 1}", "{\\"a\\": 2}"]'
+
+
+def test_taskflow_expand_string_elements_round_trip_as_strings():
+    # Regression: a list of JSON-looking strings must stay strings, not decode to int/bool/dict.
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def process(item):\n    return item\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    process.expand(item=['123', 'true'])\n"
+        "pipeline()\n"
+    )
+    import json
+
+    task = next(t for t in p.tasks if t.task_key.startswith("process"))
+    assert isinstance(task, ForEachActivity)
+    # Simulate the runtime: each inputs element's content is fed to the notebook's json.loads.
+    decoded = [json.loads(element) for element in json.loads(task.items_expression)]
+    assert decoded == ["123", "true"]  # strings, not 123 / True
+
+
+def test_taskflow_expand_nonliteral_iterable_becomes_placeholder():
+    # .expand over an upstream task's output isn't statically knowable -> placeholder + gap, never a
+    # silent single-run notebook.
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def make():\n    return [1, 2, 3]\n"
+        "@task\n"
+        "def process(item):\n    return item * 2\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    vals = make()\n"
+        "    process.expand(item=vals)\n"
+        "pipeline()\n"
+    )
+    process = next(t for t in p.tasks if t.task_key.startswith("process"))
+    assert isinstance(process, PlaceholderActivity)
+    assert "for_each_task" in process.comment
+    assert process.raw_definition is not None
+    # The mapped iterable comes from `vals`, so the dependency edge must survive (not be dropped by
+    # the mapped-call early return).
+    assert [d.task_key for d in process.depends_on] == ["vals"]
+
+
+def test_taskflow_partial_expand_becomes_placeholder_not_dropped():
+    # .partial(...).expand(...) carries fixed args a for_each inner task can't represent, so it must
+    # route to a placeholder (not a for_each that silently omits the partial args, nor a silent drop).
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def process(a, b):\n    return a + b\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    process.partial(a=1).expand(b=[1, 2, 3])\n"
+        "pipeline()\n"
+    )
+    assert len(p.tasks) == 1
+    task = p.tasks[0]
+    assert isinstance(task, PlaceholderActivity)
+
+
+def test_taskflow_partial_expand_preserves_upstream_dependency():
+    # A .partial(x=upstream) fixed arg is an upstream data-flow dependency; the edge must survive
+    # even though the mapped task routes to a placeholder.
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def extract():\n    return 1\n"
+        "@task\n"
+        "def process(x, z):\n    return x + z\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    raw = extract()\n"
+        "    process.partial(x=raw).expand(z=[1, 2, 3])\n"
+        "pipeline()\n"
+    )
+    process = next(t for t in p.tasks if t.task_key.startswith("process"))
+    assert isinstance(process, PlaceholderActivity)
+    assert [d.task_key for d in process.depends_on] == ["raw"]
+
+
+def test_taskflow_expand_kwargs_becomes_placeholder():
+    # .expand_kwargs([...]) maps whole kwargs dicts (not one param's iterable) -> placeholder, not a
+    # single-run notebook.
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def process(a, b):\n    return a\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    process.expand_kwargs([{'a': 1, 'b': 2}])\n"
+        "pipeline()\n"
+    )
+    assert len(p.tasks) == 1
+    assert isinstance(p.tasks[0], PlaceholderActivity)
+
+
+def test_task_group_mapped_call_becomes_placeholder_not_dropped():
+    # A mapped @task_group is a sub-pipeline flowx can't lower; it must become a placeholder + gap,
+    # never a silently empty pipeline.
+    p = _load(
+        "from airflow.decorators import dag, task, task_group\n"
+        "@task\n"
+        "def step_a(x):\n    return x + 1\n"
+        "@task_group\n"
+        "def pair(x):\n    return step_a(x)\n"
+        "@dag(dag_id='g')\n"
+        "def pipeline():\n"
+        "    pair.expand(x=[1, 2, 3])\n"
+        "pipeline()\n"
+    )
+    assert len(p.tasks) == 1
+    group = p.tasks[0]
+    assert isinstance(group, PlaceholderActivity)
+    assert group.original_type == "@task_group"
+    assert "maps the group over an iterable" in group.comment
+    assert group.raw_definition is not None
+
+
+def test_task_group_call_preserves_dependency_edges():
+    # A @task_group wired with >> must keep its ordering: prep >> grp >> finish.
+    p = _load(
+        "from airflow.decorators import dag, task, task_group\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w():\n    pass\n"
+        "@task\n"
+        "def step_a(x):\n    return x + 1\n"
+        "@task_group\n"
+        "def pair(x):\n    return step_a(x)\n"
+        "@dag(dag_id='g')\n"
+        "def pipeline():\n"
+        "    prep = PythonOperator(task_id='prep', python_callable=w)\n"
+        "    grp = pair(5)\n"
+        "    finish = PythonOperator(task_id='finish', python_callable=w)\n"
+        "    prep >> grp >> finish\n"
+        "pipeline()\n"
+    )
+    tasks = _by_key(p)
+    assert isinstance(tasks["grp"], PlaceholderActivity)
+    assert [d.task_key for d in tasks["grp"].depends_on] == ["prep"]
+    assert [d.task_key for d in tasks["finish"].depends_on] == ["grp"]
+
+
 def test_multiple_dags_in_one_file_are_loaded_as_separate_pipelines(tmp_path):
     from flowx.sources.airflow.loader import load_pipelines
 

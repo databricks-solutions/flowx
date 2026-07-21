@@ -145,10 +145,17 @@ def _run_workspace_paths(args: argparse.Namespace) -> int:
             and ``out``.
 
     Returns:
-        ``0`` on success.  The command always succeeds when the report
-        can be read; missing or unreadable inputs simply produce empty
-        path / host lists so the skill can detect the no-op case.
+        ``0`` on success, or ``2`` when ``--source`` names an unknown source.
+        Otherwise the command succeeds when the report can be read; missing or
+        unreadable inputs simply produce empty path / host lists so the skill
+        can detect the no-op case.
     """
+    if args.source not in available_sources():
+        print(
+            f"--source {args.source!r} is not recognized; choose one of: {', '.join(available_sources())}",
+            file=sys.stderr,
+        )
+        return 2
     paths = collect_workspace_artifact_paths(args.report)
     suggested_hosts: list[str] = []
     if args.source_dir:

@@ -32,7 +32,9 @@ from flowx.models.ir import (
     DbtFactoryActivity,
     Dependency,
     ForEachActivity,
+    NotebookActivity,
     Pipeline,
+    PlaceholderActivity,
     SqlActivity,
 )
 from flowx.sources.airflow import callable_notebook, templating
@@ -47,6 +49,11 @@ class _TaskFlowTask:
     invoked with to the upstream task var it references (TaskFlow's implicit XCom data flow), so the
     emitted notebook can read that upstream's return value via ``dbutils.jobs.taskValues``. Literal
     args are preserved when literal and routed to a placeholder when they cannot be resolved safely.
+
+    ``.expand(param=<iterable>)`` dynamic mapping is captured in ``expand_kwarg`` (the mapped
+    parameter name) and ``expand_items_json`` (the iterable as a JSON-array literal) when the
+    iterable is statically knowable; a non-literal iterable leaves ``expand_items_json`` None and
+    routes the task to the agentic-gap round.
     """
 
     task_id: str
@@ -57,6 +64,8 @@ class _TaskFlowTask:
     positional_values: dict[int, str] = field(default_factory=dict)
     keyword_values: dict[str, str] = field(default_factory=dict)
     unresolved_arguments: list[str] = field(default_factory=list)
+    expand_kwarg: str | None = None
+    expand_items_json: str | None = None
 
 
 def _sanitize_task_key(name: str) -> str:
@@ -288,15 +297,23 @@ class _DagVisitor(ast.NodeVisitor):
         # TaskFlow: function name -> (FunctionDef, decorator dotted-name) for @task-decorated defs.
         # Pre-scanned so a @task def defined after the @dag body that uses it is still resolved.
         self.taskflow_defs: dict[str, tuple[ast.FunctionDef, str]] = {}
+        # @task_group def names -- a group is a sub-pipeline, not a single renderable task, so an
+        # invocation routes to a placeholder + gap rather than being expanded here.
+        self.taskgroup_defs: set[str] = set()
         for fn in _iter_functions(module):
             decorator = next(
                 (_decorator_name(d) for d in fn.decorator_list if _decorator_name(d) in _TASK_DECORATORS), None
             )
             if decorator is not None:
                 self.taskflow_defs[fn.name] = (fn, decorator)
+            elif _has_decorator(fn, _TASK_GROUP_DECORATORS):
+                self.taskgroup_defs.add(fn.name)
         # TaskFlow task instances: var name -> _TaskFlowTask (id, def-name, decorator, arg bindings).
         self.taskflow_tasks: dict[str, _TaskFlowTask] = {}
+        # @task_group invocations: var name -> (task_id, def-name, is_mapped).
+        self.taskgroup_calls: dict[str, tuple[str, str, bool]] = {}
         self._taskflow_counter = 0
+        self._taskgroup_counter = 0
         # A @dag-decorated function was found (so a bare `@task` file is still recognized as a DAG).
         self.is_taskflow_dag: bool = False
 
@@ -304,10 +321,11 @@ class _DagVisitor(ast.NodeVisitor):
         return self._functions
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        # A @task-decorated function defines a task from its callable; its body is task logic, not DAG
-        # structure, so don't descend. @dag marks the DAG-defining function: read its config off the
-        # decorator, then descend so the body's task instances / edges are collected.
-        if _has_decorator(node, _TASK_DECORATORS):
+        # A @task- or @task_group-decorated function defines a task / sub-pipeline from its body,
+        # which is internal logic rather than DAG structure, so don't descend. @dag marks the
+        # DAG-defining function: read its config off the decorator, then descend so the body's task
+        # instances / edges are collected.
+        if _has_decorator(node, _TASK_DECORATORS) or _has_decorator(node, _TASK_GROUP_DECORATORS):
             return
         if _has_decorator(node, _DAG_DECORATORS):
             self.is_taskflow_dag = True
@@ -335,27 +353,35 @@ class _DagVisitor(ast.NodeVisitor):
                     self.groups[var] = "__".join(self._group_stack)
             elif self._register_taskflow_call(node.value, var):
                 pass  # a `x = mytask(...)` TaskFlow invocation, captured with var as its key
+            else:
+                self._register_taskgroup_call(node.value, var)  # a `x = mygroup(...)` @task_group call
         self.generic_visit(node)
 
     def _taskflow_def_name(self, call: ast.Call) -> tuple[str | None, bool, str | None]:
-        """Resolves a call's underlying ``@task`` def name, unwrapping ``.expand`` / ``.override``.
+        """Resolves a call's underlying ``@task`` def name, unwrapping the mapping/config chain.
 
-        Returns ``(def_name_or_None, is_mapped, override_task_id)``.
+        Handles ``.expand(...)`` / ``.expand_kwargs(...)`` (both set ``is_mapped``) and the
+        ``.override(...)`` / ``.partial(...)`` config calls, in any order, so forms like
+        ``op.partial(...).expand(...)`` resolve. Returns ``(def_name_or_None, is_mapped, override_id)``.
         """
         func = call.func
         mapped = False
         override_id: str | None = None
         while True:
             if isinstance(func, ast.Attribute):
-                if func.attr == "expand":
+                if func.attr in ("expand", "expand_kwargs"):
                     mapped = True
                 func = func.value
                 continue
             if isinstance(func, ast.Call) and isinstance(func.func, ast.Attribute):
-                if func.func.attr == "override":
+                config_call = func.func
+                if config_call.attr == "override":
                     arguments = {keyword.arg: keyword.value for keyword in func.keywords if keyword.arg}
                     override_id = ops.literal_str(arguments.get("task_id"))
-                    func = func.func.value
+                    func = config_call.value
+                    continue
+                if config_call.attr == "partial":
+                    func = config_call.value
                     continue
             break
         if isinstance(func, ast.Name) and func.id in self.taskflow_defs:
@@ -379,8 +405,21 @@ class _DagVisitor(ast.NodeVisitor):
         self.calls[var] = call
         if mapped:
             self.mapped.add(var)
+            # ``.expand(param=<iterable>)`` args live on the outer call; capture the single mapped
+            # parameter + its literal iterable (Tier 1). A non-literal iterable leaves items None,
+            # which routes the task to the agentic-gap round in _build_taskflow_task.
+            self._capture_expand(task, call)
+            # A mapped iterable OR a .partial(...) fixed arg can be an upstream task's output
+            # (``process.partial(x=raw).expand(y=vals)``); wire those data-flow edges so the mapped
+            # task still depends on its producers, whether it lowers to a for_each or a placeholder.
+            for mapped_arg in _mapping_chain_args(call):
+                dep = self._resolve_taskflow_arg(mapped_arg)
+                if dep is not None and dep != var:
+                    self.edges.append((dep, var))
         if self._group_stack:
             self.groups[var] = "__".join(self._group_stack)
+        if mapped:
+            return True
         # Bind each arg that resolves to an upstream task var, and add the data-flow edge.
         for index, arg in enumerate(call.args):
             dep = self._resolve_taskflow_arg(arg)
@@ -407,6 +446,57 @@ class _DagVisitor(ast.NodeVisitor):
                     task.unresolved_arguments.append(f"{kw.arg}={ast.unparse(kw.value)}")
                 else:
                     task.keyword_values[kw.arg] = value
+        return True
+
+    def _capture_expand(self, task: _TaskFlowTask, call: ast.Call) -> None:
+        """Captures a ``@task.expand(param=<iterable>)`` mapping onto *task*.
+
+        Tier 1 (deterministic -> for_each_task): a plain ``.expand(...)`` with exactly one mapped
+        parameter whose iterable is a literal list, and no ``.partial(...)`` fixed args (a for_each
+        inner task can't carry them). Anything else -- ``.expand_kwargs``, multiple mapped params, a
+        ``.partial(...).expand(...)`` chain, or a non-literal iterable -- leaves ``expand_items_json``
+        None so _build_taskflow_task routes the task to the agentic-gap round.
+        """
+        if not (isinstance(call.func, ast.Attribute) and call.func.attr == "expand"):
+            return  # .expand_kwargs(...) or other mapping form -> not Tier 1
+        if _has_partial_call(call.func.value):
+            return  # .partial(...) fixed args can't be represented on a for_each inner task
+        keywords = [kw for kw in call.keywords if kw.arg]
+        if len(keywords) != 1 or len(keywords) != len(call.keywords):
+            return  # 0 / multiple mapped params, or **expand_kwargs -> not Tier 1
+        keyword = keywords[0]
+        task.expand_kwarg = keyword.arg
+        value = ops.literal_value(keyword.value)
+        if isinstance(value, list):
+            # Encode each element as its own JSON text, so the for_each `inputs` is a list of JSON
+            # strings and the inner notebook's json.loads unambiguously recovers the original value.
+            # (A bare list like [1, 2, 3] would make `{{input}}` deliver "1"/"2"/"3" -- indistinguishable
+            # from the string elements ["1", "2", "3"]; wrapping each element removes that ambiguity.)
+            task.expand_items_json = json.dumps([json.dumps(element) for element in value])
+
+    def _register_taskgroup_call(self, call: ast.Call, var: str | None) -> bool:
+        """Records a ``@task_group`` invocation (``pair(...)`` / ``pair.expand(...)``) as a placeholder.
+
+        A ``@task_group`` is a sub-pipeline of tasks, not a single renderable callable, so it can't be
+        mechanically lowered here -- it's captured (keyed by *var*, or a synthetic name for a bare
+        call) so an edge to/from it resolves, and emitted as a placeholder + gap for the agentic round.
+        Returns True when the call resolved to a known group def.
+        """
+        func = call.func
+        mapped = False
+        while isinstance(func, ast.Attribute):
+            if func.attr == "expand":
+                mapped = True
+            func = func.value
+        if not (isinstance(func, ast.Name) and func.id in self.taskgroup_defs):
+            return False
+        def_name = func.id
+        if var is None:
+            self._taskgroup_counter += 1
+            var = f"{def_name}__tg{self._taskgroup_counter}"
+        self.taskgroup_calls[var] = (var, def_name, mapped)
+        if self._group_stack:
+            self.groups[var] = "__".join(self._group_stack)
         return True
 
     def _resolve_taskflow_arg(self, arg: ast.expr) -> str | None:
@@ -503,7 +593,7 @@ class _DagVisitor(ast.NodeVisitor):
                     self._taskflow_counter += 1
                     task_var = f"{def_name}__tf{self._taskflow_counter}"
                 self._register_taskflow_call(value, task_var)
-            else:
+            elif not self._register_taskgroup_call(value, None):
                 self._collect_set_dependency(value)
         self.generic_visit(node)
 
@@ -603,6 +693,39 @@ def _expand_group_edges(
                 if u != d:
                     expanded.append((u, d))
     return expanded
+
+
+def _has_partial_call(node: ast.expr) -> bool:
+    """True when a ``@task`` mapping chain contains a ``.partial(...)`` config call."""
+    current: ast.expr = node
+    while True:
+        if isinstance(current, ast.Call):
+            if isinstance(current.func, ast.Attribute) and current.func.attr == "partial":
+                return True
+            current = current.func
+        elif isinstance(current, ast.Attribute):
+            current = current.value
+        else:
+            return False
+
+
+def _mapping_chain_args(node: ast.expr) -> list[ast.expr]:
+    """Every argument expression across a ``@task`` mapping chain's call nodes.
+
+    Walks ``op.partial(x=up).expand(y=vals)`` (and ``.override(...)``), collecting the args of every
+    ``.partial`` / ``.expand`` / ``.expand_kwargs`` call so upstream-task references in either the
+    fixed args or the mapped iterable are found for data-flow edge wiring.
+    """
+    args: list[ast.expr] = []
+    current: ast.expr = node
+    while isinstance(current, (ast.Call, ast.Attribute)):
+        if isinstance(current, ast.Call):
+            args.extend(current.args)
+            args.extend(kw.value for kw in current.keywords)
+            current = current.func
+        else:
+            current = current.value
+    return args
 
 
 def _iter_functions(module: ast.Module) -> list[ast.FunctionDef]:
@@ -727,6 +850,7 @@ _DAG_DECORATORS: frozenset[str] = frozenset({"dag"})
 _TASK_DECORATORS: frozenset[str] = frozenset(
     {"task", "task.branch", "task.virtualenv", "task.short_circuit", "task.sensor", "task.external_python"}
 )
+_TASK_GROUP_DECORATORS: frozenset[str] = frozenset({"task_group"})
 
 
 def _has_decorator(func: ast.FunctionDef, names: frozenset[str]) -> bool:
@@ -813,6 +937,7 @@ def _load_airflow_module(
     # a task_key and dependency edges downstream).
     var_task_ids: dict[str, str] = {var: tid for var, (tid, _, _) in visitor.operators.items()}
     var_task_ids.update({var: tf.task_id for var, tf in visitor.taskflow_tasks.items()})
+    var_task_ids.update({var: task_id for var, (task_id, _, _) in visitor.taskgroup_calls.items()})
     var_to_task_key = {var: _task_key(var, tid) for var, tid in var_task_ids.items()}
 
     # Expand group-level edges (`group_a >> group_b`, `task >> group`, ...) into edges between the
@@ -941,10 +1066,65 @@ def _load_airflow_module(
         dep_keys = {var_to_task_key[u] for u in upstreams.get(var, []) if u in var_to_task_key}
         dep_keys.discard(task_key)
         depends_on = [Dependency(task_key=k) for k in sorted(dep_keys)] or None
+        if var in visitor.mapped and tf.expand_items_json is None:
+            # .expand over a non-literal iterable (e.g. an upstream task's output) can't be lowered to
+            # a static for_each inputs array -- route to the agentic-gap round instead of silently
+            # emitting a single-run notebook.
+            reason = f"mapped parameter {tf.expand_kwarg!r}" if tf.expand_kwarg else "multiple mapped parameters"
+            func = functions.get(tf.def_name)
+            placeholder = PlaceholderActivity(
+                name=tf.task_id,
+                task_key=task_key,
+                original_type=f"@{tf.decorator}.expand",
+                comment=(
+                    f"TaskFlow @{tf.decorator} '{tf.def_name}'.expand() maps over a non-literal iterable "
+                    f"({reason}); translate to a Databricks for_each_task whose inputs reference the "
+                    "upstream task value, iterating the callable."
+                ),
+                raw_definition={
+                    "operator": f"@{tf.decorator}.expand",
+                    "source": ast.get_source_segment(source, func) if func is not None else "",
+                },
+            )
+            placeholder.depends_on = depends_on
+            tasks.append(placeholder)
+            continue
         activity = _build_taskflow_task(tf, var_to_task_key, functions, source, task_key)
         activity.depends_on = depends_on
         referenced_params |= _convert_activity_templates(activity)
-        tasks.append(activity)
+        if var in visitor.mapped and isinstance(activity, NotebookActivity):
+            # .expand(param=[literal list]) -> a for_each_task iterating the callable notebook; the
+            # inner notebook reads the mapped parameter from the per-iteration `item` widget.
+            tasks.append(_wrap_taskflow_in_for_each(activity, tf, task_key, depends_on))
+        else:
+            tasks.append(activity)
+
+    # @task_group invocations: a group is a sub-pipeline of tasks with no single-task lowering, so
+    # emit a placeholder + gap (never silently drop the whole group) for the agentic round to expand.
+    for var, (task_id, def_name, mapped) in visitor.taskgroup_calls.items():
+        task_key = var_to_task_key[var]
+        dep_keys = {var_to_task_key[u] for u in upstreams.get(var, []) if u in var_to_task_key}
+        dep_keys.discard(task_key)
+        depends_on = [Dependency(task_key=k) for k in sorted(dep_keys)] or None
+        group_func = functions.get(def_name)
+        detail = (
+            "maps the group over an iterable (one group run per element); translate to a for_each_task "
+            "whose inner task expands the group's tasks"
+            if mapped
+            else "bundles multiple tasks; expand it into its member tasks with their dependencies"
+        )
+        placeholder = PlaceholderActivity(
+            name=task_id,
+            task_key=task_key,
+            original_type="@task_group",
+            comment=f"Airflow @task_group '{def_name}' {detail}. flowx does not lower task groups.",
+            raw_definition={
+                "operator": "@task_group",
+                "source": ast.get_source_segment(source, group_func) if group_func is not None else "",
+            },
+        )
+        placeholder.depends_on = depends_on
+        tasks.append(placeholder)
 
     # Declare every job parameter -- those referenced in templates plus any from the DAG's
     # params={...} -- each with a default (Databricks requires one): the params={...} default when
@@ -999,6 +1179,29 @@ def _wrap_in_for_each(
     )
 
 
+def _wrap_taskflow_in_for_each(
+    activity: NotebookActivity,
+    tf: _TaskFlowTask,
+    task_key: str,
+    depends_on: list[Dependency] | None,
+) -> ForEachActivity:
+    """Wraps a mapped ``@task.expand(param=[...])`` notebook in a ForEachActivity (-> for_each_task).
+
+    The literal iterable becomes the for_each ``inputs`` array; the preparer injects each element as
+    the inner task's ``item`` widget, which the callable notebook reads for the mapped parameter.
+    """
+    activity.task_key = f"{task_key}_iteration"
+    activity.name = f"{tf.task_id}_iteration"
+    activity.depends_on = None
+    return ForEachActivity(
+        name=tf.task_id,
+        task_key=task_key,
+        depends_on=depends_on,
+        items_expression=tf.expand_items_json or "[]",
+        inner_activities=[activity],
+    )
+
+
 # TaskFlow decorators that gate downstream tasks at runtime -- can't lower to a notebook (same
 # reason BranchPythonOperator/ShortCircuitOperator route to the agentic round).
 _TASKFLOW_BRANCHING = frozenset({"task.branch", "task.short_circuit"})
@@ -1018,7 +1221,6 @@ def _build_taskflow_task(
     those bound arguments, and publishes its own return value. Callables that read Airflow task
     context/XCom, or use a branching decorator, route to a placeholder for the agentic round.
     """
-    from flowx.models.ir import NotebookActivity, PlaceholderActivity
 
     func = functions.get(tf.def_name)
     if func is None:
@@ -1099,6 +1301,17 @@ def _taskflow_invocation(func: ast.FunctionDef, tf: _TaskFlowTask, var_to_task_k
         lines.append(f"{variable} = {_reader(dep_var)}")
         call_keywords.append(f"{name}={variable}")
     call_keywords.extend(f"{name}={value}" for name, value in tf.keyword_values.items())
+    if tf.expand_kwarg is not None:
+        # .expand(param=[...]) fan-out: each for_each `inputs` element is the JSON text of the
+        # original value (see _capture_expand), so json.loads on the injected `item` widget recovers
+        # it exactly -- ints stay ints and JSON-looking strings stay strings. The except is a defensive
+        # fallback for an unexpected raw value.
+        lines.append("_raw_item = dbutils.widgets.get('item')")
+        lines.append("try:")
+        lines.append("    _expand_item = json.loads(_raw_item)")
+        lines.append("except (ValueError, TypeError):")
+        lines.append("    _expand_item = _raw_item")
+        call_keywords.append(f"{tf.expand_kwarg}=_expand_item")
 
     call_args = ", ".join(call_positional + call_keywords)
     returns = any(isinstance(n, ast.Return) and n.value is not None for n in ast.walk(func))
