@@ -514,7 +514,18 @@ def _run_phase(phase: str, forward: list[str]) -> int:
         aliases = {_SOURCE_PATH_FLAG: "--source-dir", source.source_path_flag: "--source-dir"}
 
     module = importlib.import_module(module_path)
-    mapped = [aliases.get(token, token) for token in remaining]
+    # Alias both the bare form (`--source-path X`) and the equals form (`--source-path=X`) so a
+    # documented alias works either way; the phase module only knows `--source-dir`.
+    def _alias(token: str) -> str:
+        if token in aliases:
+            return aliases[token]
+        if token.startswith("--") and "=" in token:
+            flag, value = token.split("=", 1)
+            if flag in aliases:
+                return f"{aliases[flag]}={value}"
+        return token
+
+    mapped = [_alias(token) for token in remaining]
     try:
         return module.main(mapped) or 0
     except SystemExit as exit_signal:  # e.g. argparse usage error -> parser.error() raises SystemExit

@@ -946,6 +946,19 @@ def test_default_args_apply_retries_timeout_retry_delay():
     assert task.min_retry_interval_millis == 300000
 
 
+def test_subsecond_timeout_rounds_up_not_dropped():
+    # A sub-second execution_timeout must round up to 1s, not truncate to 0 (which reads as "unset").
+    p = _load(
+        "from datetime import timedelta\n"
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d', default_args={'execution_timeout': timedelta(milliseconds=500)}) as dag:\n"
+        "    t = PythonOperator(task_id='t', python_callable=w)\n"
+    )
+    assert _by_key(p)["t"].timeout_seconds == 1
+
+
 def test_per_task_retries_override_default_args():
     p = _load(
         "from airflow import DAG\n"

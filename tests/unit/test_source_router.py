@@ -87,6 +87,28 @@ def test_airflow_discover_then_convert_route():
         assert (out / ".work" / "translation_report.json").exists()
 
 
+def test_source_path_alias_equals_form_routes():
+    # The `--source-path=<x>` equals form must normalise to --source-dir just like the space form,
+    # or the phase module rejects it with a usage error.
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        rc = _run_phase(
+            "discover", ["--source", "airflow", f"--source-path={_DAG_FIXTURE}", f"--output-dir={out}"]
+        )
+        assert rc == 0
+        assert (out / "metadata" / "inventory.json").exists()
+
+
+def test_source_specific_alias_equals_form_routes():
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        rc = _run_phase(
+            "discover", ["--source", "airflow", f"--airflow-source-path={_DAG_FIXTURE}", "--output-dir", str(out)]
+        )
+        assert rc == 0
+        assert (out / "metadata" / "inventory.json").exists()
+
+
 def test_package_is_source_independent():
     # package ignores --source and routes to the shared bundler; drive the whole chain.
     with tempfile.TemporaryDirectory() as tmp:

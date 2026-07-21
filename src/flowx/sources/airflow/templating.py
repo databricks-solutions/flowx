@@ -10,6 +10,7 @@ Databricks dynamic-value references, `max_retries`/`timeout_seconds`, and depend
 from __future__ import annotations
 
 import ast
+import math
 import re
 from typing import Any
 
@@ -173,7 +174,9 @@ def _timedelta_seconds(node: ast.expr | None) -> int | None:
     for kw in node.keywords:
         if kw.arg in units and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, (int, float)):
             total += kw.value.value * units[kw.arg]
-    return int(total) if total > 0 else None
+    # Round a sub-second total UP to 1s rather than truncating to 0 -- a sub-second timeout/retry_delay
+    # is better preserved as 1s than silently dropped (int(0.5) == 0 would read as "unset").
+    return math.ceil(total) if total > 0 else None
 
 
 def _literal_int(node: ast.expr | None) -> int | None:

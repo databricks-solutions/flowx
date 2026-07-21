@@ -173,11 +173,13 @@ def _has_dependency_cycle(tasks: list[dict[str, Any]]) -> bool:
     in_degree: dict[str, int] = {key: 0 for key in keys}
     adjacency: dict[str, set[str]] = {key: set() for key in keys}
     for task in tasks:
+        if not isinstance(task, dict):
+            continue
         downstream = task.get("task_key")
         if not isinstance(downstream, str) or downstream not in key_set:
             continue
         for dep in task.get("depends_on") or []:
-            upstream = dep.get("task_key")
+            upstream = dep.get("task_key") if isinstance(dep, dict) else None
             if isinstance(upstream, str) and upstream in key_set and downstream not in adjacency[upstream]:
                 adjacency[upstream].add(downstream)
                 in_degree[downstream] += 1
