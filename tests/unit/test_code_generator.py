@@ -29,6 +29,7 @@ from flowx.preparer.code_generator import (
     generate_set_variable_notebook,
     generate_wait_notebook,
     generate_web_activity_notebook,
+    render_bridge_notebook,
 )
 
 # ---------------------------------------------------------------------------
@@ -584,3 +585,61 @@ class TestGenerateAppendVariableNotebook:
         assert "from datetime import" in content
         # Should NOT reference widgets.get("value") for code values
         assert 'dbutils.widgets.get("value")' not in content
+
+
+# ---------------------------------------------------------------------------
+# Bridge notebook renderer (shared by IfCondition, Switch, ForEach preparers)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderBridgeNotebook:
+    def test_full_structure_and_order(self):
+        content = render_bridge_notebook(
+            "1 + 1",
+            ["import json"],
+            ["parent_uid"],
+            "result",
+            title="IfCondition bridge: If_ParentUId",
+        )
+        _assert_valid_python(content, "bridge notebook")
+        assert content.startswith("# Databricks notebook source")
+        assert "# MAGIC # IfCondition bridge: If_ParentUId" in content
+        assert "# COMMAND ----------" in content
+        # Body (after the header/separator) preserves import -> widget ->
+        # assignment -> publish ordering.
+        body = content.split("# COMMAND ----------", 1)[1]
+        import_pos = body.index("import json")
+        widget_pos = body.index("dbutils.widgets.text('parent_uid', '')")
+        assign_pos = body.index("_bridge_value = 1 + 1")
+        publish_pos = body.index("dbutils.jobs.taskValues.set(key='result', value=_bridge_value)")
+        assert import_pos < widget_pos < assign_pos < publish_pos
+
+    def test_dedups_repeated_imports(self):
+        content = render_bridge_notebook("1", ["import json", "import json"], [], "result", title="t")
+        assert content.count("import json") == 1
+
+    def test_no_imports_omits_leading_blank_line(self):
+        content = render_bridge_notebook("1", [], ["x"], "result", title="t")
+        body = content.split("# COMMAND ----------\n\n", 1)[1]
+        assert body.startswith("dbutils.widgets.text('x', '')")
+
+    def test_no_widgets_omits_blank_line(self):
+        content = render_bridge_notebook("1", [], [], "result", title="t")
+        body = content.split("# COMMAND ----------\n\n", 1)[1]
+        assert body.startswith("_bridge_value = 1")
+
+    def test_notebook_code_inserted_verbatim(self):
+        # Expressions with quotes/commas must pass through untouched -- the
+        # renderer does plain string interpolation, no escaping.
+        code = "str(dbutils.widgets.get('item_type')).split(',')[0]"
+        content = render_bridge_notebook(code, [], ["item_type"], "result", title="t")
+        assert f"_bridge_value = {code}" in content
+
+    def test_multiple_widgets_all_declared(self):
+        content = render_bridge_notebook("1", [], ["a", "b"], "result", title="t")
+        assert "dbutils.widgets.text('a', '')" in content
+        assert "dbutils.widgets.text('b', '')" in content
+
+    def test_value_key_used_in_publish_call(self):
+        content = render_bridge_notebook("1", [], [], "items", title="t")
+        assert "dbutils.jobs.taskValues.set(key='items', value=_bridge_value)" in content

@@ -1206,6 +1206,68 @@ class TestPlaceholderPreparer:
 
 
 # ---------------------------------------------------------------------------
+# Bridge notebook header (BUG_bridge_notebook_missing_header)
+# ---------------------------------------------------------------------------
+
+
+class TestBridgeNotebookHeader:
+    """Every generated bridge notebook must start with the Databricks notebook
+    header, like every other flowx-generated notebook, or `bundle validate`
+    rejects it as "not a notebook". Covers all three independent bridge
+    renderers: if_condition, switch, and for_each's inputs bridge."""
+
+    def test_if_condition_bridge_notebook_has_header(self):
+        activity = IfConditionActivity(
+            **_make_base("If_ParentUId", "if_parentuid"),
+            op="EQUAL_TO",
+            left="__bridge__",
+            right="1",
+            bridge_notebook_code="str(dbutils.widgets.get('parent_uid'))",
+            bridge_notebook_imports=[],
+            bridge_required_parameters={"parent_uid": "{{tasks.init.values.parent_uid}}"},
+        )
+        prepared = prepare_activity(activity)
+        bridge_notebooks = [nb for nb in prepared.notebooks if nb.relative_path.endswith("_bridge.py")]
+        assert len(bridge_notebooks) == 1
+        assert bridge_notebooks[0].content.startswith("# Databricks notebook source")
+        assert "# MAGIC # IfCondition bridge: If_ParentUId" in bridge_notebooks[0].content
+
+    def test_switch_bridge_notebook_has_header(self):
+        activity = SwitchActivity(
+            **_make_base("Route", "route"),
+            on_expression="@toUpper(item().type)",
+            cases=[SwitchCase(value="FULL", activities=[WaitActivity(**_make_base("W", "w"), wait_time_seconds=1)])],
+            bridge_notebook_code="str(dbutils.widgets.get('item_type')).upper()",
+            bridge_notebook_imports=[],
+            bridge_required_parameters={"item_type": "{{tasks.init.values.item_type}}"},
+        )
+        prepared = prepare_activity(activity)
+        bridge_notebooks = [nb for nb in prepared.notebooks if nb.relative_path.endswith("_bridge.py")]
+        assert len(bridge_notebooks) == 1
+        assert bridge_notebooks[0].content.startswith("# Databricks notebook source")
+        assert "# MAGIC # Switch bridge: Route" in bridge_notebooks[0].content
+
+    def test_for_each_inputs_bridge_notebook_has_header(self):
+        inner = WaitActivity(**_make_base("Inner", "inner"), wait_time_seconds=1)
+        activity = ForEachActivity(
+            **_make_base("Loop", "loop"),
+            items_expression="@split(variables('fecha'),',')",
+            inputs_bridge_notebook_code=(
+                "str(dbutils.jobs.taskValues.get(taskKey='_init_fecha', key='fecha')).split(str(','))"
+            ),
+            inputs_bridge_notebook_imports=[],
+            inputs_bridge_required_parameters={"fecha": "{{tasks._init_fecha.values.fecha}}"},
+            inner_activities=[inner],
+            concurrency=10,
+        )
+        prepared = prepare_activity(activity)
+        bridge_notebooks = [nb for nb in prepared.notebooks if nb.relative_path.endswith("_bridge.py")]
+        assert len(bridge_notebooks) == 1
+        assert bridge_notebooks[0].content.startswith("# Databricks notebook source")
+        assert "# MAGIC # ForEach inputs bridge: Loop" in bridge_notebooks[0].content
+
+
+# ---------------------------------------------------------------------------
 # Notebook content validity
 # ---------------------------------------------------------------------------
 
