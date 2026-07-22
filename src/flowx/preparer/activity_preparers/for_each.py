@@ -16,6 +16,7 @@ from flowx.bundler.inner_job_params import (
 from flowx.models.dab import DabNotebook, SecretInstruction, SetupTask
 from flowx.models.ir import TranslationContext
 from flowx.parser.expression_parser import resolve_expression
+from flowx.preparer.code_generator import render_bridge_notebook
 from flowx.preparer.workflow_preparer import (
     PreparedActivity,
     PreparedWorkflow,
@@ -58,11 +59,12 @@ def _resolve_for_each_inputs_with_bridge(
         value_key = "items"
         notebook_relative_path = f"notebooks/{bridge_key}.py"
         base_parameters: dict[str, str] = dict(activity.inputs_bridge_required_parameters)
-        notebook_source = _render_for_each_inputs_bridge(
+        notebook_source = render_bridge_notebook(
             activity.inputs_bridge_notebook_code,
             list(activity.inputs_bridge_notebook_imports),
             list(base_parameters.keys()),
             value_key,
+            title=f"ForEach inputs bridge: {activity.name}",
         )
         bridge_task: dict[str, Any] = {
             "task_key": bridge_key,
@@ -91,11 +93,12 @@ def _resolve_for_each_inputs_with_bridge(
         value_key = "items"
         notebook_relative_path = f"notebooks/{bridge_key}.py"
         base_parameters = dict(result.required_parameters)
-        notebook_source = _render_for_each_inputs_bridge(
+        notebook_source = render_bridge_notebook(
             result.value,
             result.imports,
             list(base_parameters.keys()),
             value_key,
+            title=f"ForEach inputs bridge: {activity.name}",
         )
         bridge_task = {
             "task_key": bridge_key,
@@ -109,36 +112,6 @@ def _resolve_for_each_inputs_with_bridge(
         return bridge_value_ref, bridge_task, notebooks
 
     return items_expression, None, []
-
-
-def _render_for_each_inputs_bridge(
-    notebook_code: str,
-    imports: list[str],
-    widget_names: list[str],
-    value_key: str,
-) -> str:
-    """Generates the Python source for a ForEach-inputs bridge notebook.
-
-    The notebook computes the array value and publishes it via
-    ``dbutils.jobs.taskValues.set`` so the parent ForEach task can
-    reference it via ``{{tasks.<bridge>.values.items}}``.
-    """
-    lines: list[str] = []
-    seen_imports: set[str] = set()
-    for imp in imports:
-        if imp in seen_imports:
-            continue
-        seen_imports.add(imp)
-        lines.append(imp)
-    if seen_imports:
-        lines.append("")
-    for widget in widget_names:
-        lines.append(f"dbutils.widgets.text('{widget}', '')")
-    if widget_names:
-        lines.append("")
-    lines.append(f"_bridge_value = {notebook_code}")
-    lines.append(f"dbutils.jobs.taskValues.set(key='{value_key}', value=_bridge_value)")
-    return "\n".join(lines) + "\n"
 
 
 def _inject_input_parameter(inner_task: dict) -> dict:

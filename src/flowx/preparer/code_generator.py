@@ -902,6 +902,50 @@ def _command_separator() -> str:
     return "\n# COMMAND ----------\n\n"
 
 
+def render_bridge_notebook(
+    notebook_code: str,
+    imports: list[str],
+    widget_names: list[str],
+    value_key: str,
+    *,
+    title: str,
+) -> str:
+    """Generates the Python source for a bridge notebook.
+
+    A bridge notebook evaluates a complex ADF expression that can't be
+    inlined directly into a task's parameters, then publishes the result
+    as a task value via ``dbutils.jobs.taskValues.set``. Shared by the
+    IfCondition, Switch, and ForEach preparers.
+
+    Args:
+        notebook_code: Python expression to evaluate and publish.
+        imports: Import statements the expression needs.
+        widget_names: Names of widgets to declare (bound from base_parameters).
+        value_key: Task-value key the result is published under.
+        title: Notebook header title (e.g. naming the source activity).
+
+    Returns:
+        Complete notebook source, including the Databricks notebook header.
+    """
+    lines: list[str] = []
+    seen_imports: set[str] = set()
+    for imp in imports:
+        if imp in seen_imports:
+            continue
+        seen_imports.add(imp)
+        lines.append(imp)
+    if seen_imports:
+        lines.append("")
+    for widget in widget_names:
+        lines.append(f"dbutils.widgets.text('{widget}', '')")
+    if widget_names:
+        lines.append("")
+    lines.append(f"_bridge_value = {notebook_code}")
+    lines.append(f"dbutils.jobs.taskValues.set(key='{value_key}', value=_bridge_value)")
+    body = "\n".join(lines) + "\n"
+    return _notebook_header(title) + _command_separator() + body
+
+
 def _render_query_assignment(query: str) -> str:
     """Returns ``query = <expr>`` source for embedding a lookup query in a notebook.
 
