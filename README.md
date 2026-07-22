@@ -95,6 +95,28 @@ Or run individual phases:
 
 (In Genie Code, invoke the same skills with the `@` prefix, e.g. `@flowx-migrate`.)
 
+## Setup
+
+`/flowx:flowx-setup` keys off the `DATABRICKS_RUNTIME_VERSION` environment variable
+(the same signal the rest of the plugin uses to detect Databricks) and prepares one
+of two execution paths:
+
+- **Local / Claude Code (virtual environment).** The phases run from the plugin's
+  CLI. Setup runs `scripts/bootstrap.sh`, which creates a `.venv`, installs
+  `requirements.txt`, and writes the resolved interpreter path to a
+  `.migration-venv` marker file that the phase skills read. Optionally, a local
+  (stdio) MCP server can be registered to drive the phases through MCP tools
+  instead of the CLI.
+
+- **Databricks Genie Code (MCP server, no virtual environment).** The phases run as
+  a single `flowx` MCP tool hosted on a Databricks App. Setup runs `app/deploy.sh`,
+  which stages a self-contained bundle, syncs it to `/Workspace/Shared/mcp-flowx`,
+  and deploys the `mcp-flowx` app. You then grant app/data access and register the
+  app under Genie Code **Settings → MCP Servers**. No venv is created on this path.
+
+Run setup once before any other flowx skill, or again whenever the environment is
+missing.
+
 ## Supported ADF Activity Types
 
 ### Deterministic (16 types)
