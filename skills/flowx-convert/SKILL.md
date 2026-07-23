@@ -95,7 +95,8 @@ Execute the translation engine on all deterministic activities:
 "$PY" -m flowx.translator.engine \
   --source-dir <adf_source_dir> \
   --output-dir <output_dir> \
-  [--pipeline <pipeline_name>]
+  [--pipeline <pipeline_name>] \
+  [--global-parameter-resolution literal|bundle_variable]
 ```
 
 Where:
@@ -103,6 +104,13 @@ Where:
 - `<output_dir>` is the **shared migration output directory** (default: `./flowx_output`) — the
   same one discover used
 - `<pipeline_name>` (optional) — when provided, translates only the named pipeline. **Always pass `--pipeline` when the user has specified a specific pipeline to migrate**, matching the value passed to the discover phase.
+- `--global-parameter-resolution` (optional, default `literal`) — how `@pipeline().globalParameters.X`
+  references resolve, applied to every pipeline. `literal` bakes the factory value in as a literal;
+  `bundle_variable` emits `${var.X}` and declares the global as a DAB bundle variable whose default is
+  the factory value, so it can be set at deploy time (`--var X=…` or a per-target override) instead of
+  being hard-coded into pipeline/activity bodies. Globals referenced inside generated notebook code are
+  bridged through the task's `base_parameters` so `${var.X}` still resolves. See SETUP.md for the list
+  of hoisted variables and a plaintext-secret caveat.
 
 The translation report and intermediate IR are written to the **transient** `<output_dir>/.work/`
 folder (`translation_report.json`, per-pipeline IR, `gaps.json`). These are consumed by the steps

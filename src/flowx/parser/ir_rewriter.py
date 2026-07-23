@@ -65,6 +65,8 @@ def rewrite_pipeline_expressions(
     pipeline: Pipeline,
     *,
     warnings: list[str] | None = None,
+    global_parameters: dict[str, Any] | None = None,
+    global_parameter_resolution: str = "literal",
 ) -> Pipeline:
     """Walks every string field in *pipeline* and rewrites ``@{...}`` tokens.
 
@@ -74,6 +76,13 @@ def rewrite_pipeline_expressions(
             for every string field that still contains an unresolved
             ``@{...}`` token after the pass.  When ``None`` the rewriter
             still runs but cannot surface gaps.
+        global_parameters: Factory-level global parameters, so
+            ``@{pipeline().globalParameters.X}`` tokens embedded in raw SQL
+            / REST bodies resolve the same way the per-activity translators
+            resolve them.
+        global_parameter_resolution: ``"literal"`` or ``"bundle_variable"`` --
+            forwarded to the context so this pass honours the same
+            global-parameter policy as ``translate_pipeline``.
 
     Returns:
         A new :class:`Pipeline` whose activities have had their string
@@ -91,18 +100,30 @@ def rewrite_pipeline_expressions(
         - Unknown field types (ints, bools, None, custom dataclasses
           beyond Activity/SwitchCase) pass through unchanged.
     """
-    context = _build_context_from_pipeline(pipeline)
+    context = _build_context_from_pipeline(
+        pipeline,
+        global_parameters=global_parameters,
+        global_parameter_resolution=global_parameter_resolution,
+    )
     sink: list[str] = warnings if warnings is not None else []
     rewritten_tasks = [_rewrite_activity(activity, context, sink) for activity in pipeline.tasks]
     return dataclasses.replace(pipeline, tasks=rewritten_tasks)
 
 
-def _build_context_from_pipeline(pipeline: Pipeline) -> TranslationContext:
+def _build_context_from_pipeline(
+    pipeline: Pipeline,
+    global_parameters: dict[str, Any] | None = None,
+    global_parameter_resolution: str = "literal",
+) -> TranslationContext:
     """Builds a TranslationContext whose variable_cache is keyed by every
     SetVariable / AppendVariable activity in the pipeline.
 
     Args:
         pipeline: Translated pipeline IR.
+        global_parameters: Factory-level global parameters to seed so
+            ``@{pipeline().globalParameters.X}`` tokens resolve here too.
+        global_parameter_resolution: ``"literal"`` or ``"bundle_variable"``
+            global-parameter policy carried on the context.
 
     Returns:
         A :class:`TranslationContext` with ``variable_cache`` populated.
@@ -125,6 +146,8 @@ def _build_context_from_pipeline(pipeline: Pipeline) -> TranslationContext:
         activity_cache=MappingProxyType({}),
         registry=MappingProxyType({}),
         variable_cache=MappingProxyType(variable_cache),
+        global_parameters=MappingProxyType(dict(global_parameters or {})),
+        global_parameter_resolution=global_parameter_resolution,
     )
 
 

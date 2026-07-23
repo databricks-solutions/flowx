@@ -9,6 +9,7 @@ from flowx.parser.expression_parser import (
     parse_expression,
     parse_expression_for_dab,
     resolve_expression,
+    resolve_interpolated_string_for_notebook,
 )
 
 
@@ -887,9 +888,10 @@ class TestBackwardCompat:
 class TestGlobalParameters:
     """Change expr-resolver-globalparams-and-wrappers (P0)."""
 
-    def _ctx_with_globals(self, **globals_) -> TranslationContext:
+    def _ctx_with_globals(self, *, resolution: str = "literal", **globals_) -> TranslationContext:
         return TranslationContext(
             global_parameters=MappingProxyType(dict(globals_)),
+            global_parameter_resolution=resolution,
         )
 
     def test_global_parameter_resolves_to_literal(self):
@@ -927,6 +929,114 @@ class TestGlobalParameters:
         assert result is not None
         assert result.kind == "literal"
         assert result.value == "/Volumes/datahub01t/x/myjar.jar"
+
+    def test_global_parameter_bundle_variable_mode_emits_var_ref(self):
+        ctx = self._ctx_with_globals(resolution="bundle_variable", env_variable="t")
+        result = resolve_expression("@pipeline().globalParameters.env_variable", ctx)
+        assert result is not None
+        assert result.kind == "dab_ref"
+        assert result.value == "${var.env_variable}"
+
+    def test_global_parameter_bundle_variable_mode_dict_value(self):
+        ctx = self._ctx_with_globals(resolution="bundle_variable", env_variable={"type": "string", "value": "t"})
+        result = resolve_expression("@pipeline().globalParameters.env_variable", ctx)
+        assert result is not None
+        assert result.kind == "dab_ref"
+        assert result.value == "${var.env_variable}"
+
+    def test_global_parameter_bundle_variable_missing_still_falls_back_to_job_param(self):
+        ctx = self._ctx_with_globals(resolution="bundle_variable")
+        result = resolve_expression("@pipeline().globalParameters.absent", ctx)
+        assert result is not None
+        assert result.kind == "dab_ref"
+        assert result.value == "{{job.parameters.absent}}"
+
+    def test_concat_with_globals_bundle_variable_mode_bridges_widgets(self):
+        ctx = self._ctx_with_globals(resolution="bundle_variable", env_variable="t", libFileName="myjar.jar")
+        expr = (
+            "@concat('/Volumes/datahub01', pipeline().globalParameters.env_variable, "
+            "'/x/', pipeline().globalParameters.libFileName)"
+        )
+        result = resolve_expression(expr, ctx)
+        assert result is not None
+        assert result.kind == "notebook_code"
+        assert "dbutils.widgets.get('env_variable')" in result.value
+        assert "dbutils.widgets.get('libFileName')" in result.value
+        assert result.required_parameters == {
+            "env_variable": "${var.env_variable}",
+            "libFileName": "${var.libFileName}",
+        }
+
+    def test_notebook_interpolation_bridges_var_ref_to_widget(self):
+        ctx = self._ctx_with_globals(resolution="bundle_variable", env_variable="t")
+        resolved = resolve_interpolated_string_for_notebook("path/@{pipeline().globalParameters.env_variable}/end", ctx)
+        assert resolved == "path/{dbutils.widgets.get('env_variable')}/end"
+
+    def test_function_wrapped_global_literal_mode_bakes_value_into_python(self):
+        """A global inside a Python-requiring function (e.g. @split) lowers to
+        notebook_code with the factory value baked in as a string literal."""
+        ctx = self._ctx_with_globals(path="/a/b/c")
+        result = resolve_expression("@split(pipeline().globalParameters.path, '/')", ctx)
+        assert result is not None
+        assert result.kind == "notebook_code"
+        assert "'/a/b/c'" in result.value
+        assert "dbutils.widgets.get" not in result.value
+
+    def test_function_wrapped_global_bundle_variable_mode_uses_widget(self):
+        """The same function wrapper under bundle_variable resolves the global to
+        a widget read (bound to ${var.X}) rather than a baked-in literal."""
+        ctx = self._ctx_with_globals(resolution="bundle_variable", env="PROD")
+        result = resolve_expression("@toLower(pipeline().globalParameters.env)", ctx)
+        assert result is not None
+        assert result.kind == "notebook_code"
+        assert "dbutils.widgets.get('env')" in result.value
+        assert result.required_parameters == {"env": "${var.env}"}
+
+    def test_function_wrapped_global_in_interpolated_string_literal_mode(self):
+        """In literal mode a function-wrapped global inside @{...} bakes the factory
+        value into the f-string expression rather than reading a widget."""
+        ctx = self._ctx_with_globals(env="PROD")
+        resolved = resolve_interpolated_string_for_notebook(
+            "prefix-@{toLower(pipeline().globalParameters.env)}-suffix", ctx
+        )
+        assert resolved == "prefix-{str('PROD').lower()}-suffix"
+
+    def test_function_wrapped_global_in_interpolated_string_bundle_variable_mode(self):
+        """A function-wrapped global inside @{...} lowers to an f-string widget read."""
+        ctx = self._ctx_with_globals(resolution="bundle_variable", env="PROD")
+        resolved = resolve_interpolated_string_for_notebook(
+            "prefix-@{toLower(pipeline().globalParameters.env)}-suffix", ctx
+        )
+        assert resolved == "prefix-{str(dbutils.widgets.get('env')).lower()}-suffix"
+
+    def test_braces_in_resolved_literal_are_escaped_for_fstring(self):
+        """A global whose literal value contains braces must be doubled so the caller's
+        f-string stays valid (would otherwise be read as an f-string field)."""
+        ctx = self._ctx_with_globals(tmpl="prefix-{region}-suffix")
+        resolved = resolve_interpolated_string_for_notebook("x=@{pipeline().globalParameters.tmpl}/end", ctx)
+        assert resolved == "x=prefix-{{region}}-suffix/end"
+        # And it round-trips through an actual f-string back to the original value.
+        assert eval(f"f{__import__('json').dumps(resolved)}") == "x=prefix-{region}-suffix/end"  # noqa: S307
+
+    def test_braces_in_surrounding_literal_text_are_escaped(self):
+        """Braces in the static text around a token (e.g. a JSON body) are also escaped,
+        while the resolved widget field stays a single-brace f-string expression."""
+        ctx = self._ctx_with_globals(resolution="bundle_variable", env="PROD")
+        resolved = resolve_interpolated_string_for_notebook('{"e": "@{pipeline().globalParameters.env}"}', ctx)
+        assert resolved == '{{"e": "{dbutils.widgets.get(\'env\')}"}}'
+
+    def test_resolution_policy_survives_context_with_methods(self):
+        """Every with_* reconstruction preserves global_parameter_resolution."""
+        ctx = self._ctx_with_globals(resolution="bundle_variable", env="PROD")
+        ctx = ctx.with_activity("a", object())  # type: ignore[arg-type]
+        ctx = ctx.with_variable("v", "task_v")
+        ctx = ctx.with_variable_types({"v": "String"})
+        ctx = ctx.with_linked_service_parameters({"p": "1"})
+        assert ctx.global_parameter_resolution == "bundle_variable"
+        # And the global is still resolvable after all the reconstructions.
+        result = resolve_expression("@pipeline().globalParameters.env", ctx)
+        assert result is not None
+        assert result.value == "${var.env}"
 
 
 class TestNoopWrappers:

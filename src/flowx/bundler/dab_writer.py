@@ -121,6 +121,8 @@ def write_bundle(
 
     pipeline_resources = _collect_pipeline_resources(workflow)
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
+    hoisted_global_variables = _collect_hoisted_global_variables(workflow)
+    extra_variable_declarations = {**pipeline_variable_declarations, **hoisted_global_variables}
 
     # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id
     #    defaults come from the ADF linked-service configs; when every task is serverless, they're omitted.
@@ -133,7 +135,7 @@ def write_bundle(
         spark_version=inferred_spark_version,
         node_type_id=inferred_node_type_id,
         include_cluster_variables=bundle_uses_classic_cluster,
-        extra_variables=pipeline_variable_declarations,
+        extra_variables=extra_variable_declarations,
     )
     databricks_yml_path.write_text(
         yaml.dump(
@@ -156,7 +158,8 @@ def write_bundle(
     resources_dir = output_dir / "resources"
     resources_dir.mkdir(parents=True, exist_ok=True)
     job_yml_path = resources_dir / f"{resource_key}.yml"
-    job_resource = _build_job_resource(workflow, resource_key)
+    hoisted_global_names = set(hoisted_global_variables)
+    job_resource = _build_job_resource(workflow, resource_key, hoisted_globals=hoisted_global_names)
     job_yml_path.write_text(
         yaml.dump(
             job_resource, default_flow_style=False, sort_keys=False, allow_unicode=True, Dumper=_BundleYamlDumper
@@ -170,7 +173,9 @@ def write_bundle(
     for inner in workflow.inner_workflows:
         inner_key = normalize_task_key(inner.name)
         inner_yml_path = resources_dir / f"{inner_key}.yml"
-        inner_resource = _build_job_resource(inner, inner_key, extra_notebooks_for_augment=workflow.notebooks)
+        inner_resource = _build_job_resource(
+            inner, inner_key, extra_notebooks_for_augment=workflow.notebooks, hoisted_globals=hoisted_global_names
+        )
         inner_yml_path.write_text(
             yaml.dump(
                 inner_resource,
@@ -289,6 +294,7 @@ def write_bundle(
         manual_schedule_time_of_day=manual_schedule_time_of_day_configs,
         manual_credentials=manual_credential_configs,
         neutralized_conditions=list(_neutralized_conditions),
+        hoisted_global_variables=hoisted_global_variables,
     )
     setup_path = output_dir / "SETUP.md"
     setup_path.write_text(render_setup_md(prereqs, bundle_name=effective_name), encoding="utf-8")
@@ -797,6 +803,26 @@ def _collect_variable_references(value: Any) -> set[str]:
     return refs
 
 
+def _collect_hoisted_global_variables(workflow: PreparedWorkflow) -> dict[str, Any]:
+    """Returns the bundle-variable declarations for hoisted factory globals.
+
+    Merges ``bundle_variables`` from *workflow* and every inner workflow so a
+    global referenced only inside a nested (run_job_task) workflow is still
+    declared in the root ``variables:`` block.
+
+    Args:
+        workflow: The prepared workflow being written.
+
+    Returns:
+        Mapping of variable name to its DAB declaration dict.
+    """
+    declarations: dict[str, Any] = {}
+    for inner in workflow.inner_workflows:
+        declarations.update(inner.bundle_variables)
+    declarations.update(workflow.bundle_variables)
+    return declarations
+
+
 def _build_pipeline_variable_declarations(
     pipeline_resources: list[dict[str, Any]],
     catalog: str,
@@ -1204,13 +1230,20 @@ def _collect_all_task_keys(tasks: list[dict[str, Any]]) -> set[str]:
     return keys
 
 
-def _augment_base_parameters(tasks: list[dict[str, Any]], notebooks: list[DabNotebook]) -> None:
+def _augment_base_parameters(
+    tasks: list[dict[str, Any]], notebooks: list[DabNotebook], hoisted_globals: set[str] | None = None
+) -> None:
     """Ensure every widget a notebook reads is declared in its base_parameters.
 
     Args:
         tasks: Top-level task dicts (mutated in place).
         notebooks: Generated notebooks to scan.
+        hoisted_globals: Names of factory globals hoisted to bundle variables.
+            A widget matching one of these binds to ``${var.NAME}`` so the
+            deploy-time bundle variable flows into the notebook; other widgets
+            default to an empty string as before.
     """
+    hoisted = hoisted_globals or set()
     notebook_by_relpath = {notebook.relative_path: notebook for notebook in notebooks}
 
     def visit(task: dict[str, Any]) -> None:
@@ -1223,7 +1256,8 @@ def _augment_base_parameters(tasks: list[dict[str, Any]], notebooks: list[DabNot
                 widgets = set(_WIDGET_REFERENCE.findall(notebook.content))
                 base_parameters = notebook_task.setdefault("base_parameters", {})
                 for widget_name in sorted(widgets):
-                    base_parameters.setdefault(widget_name, "")
+                    fallback = "${var." + widget_name + "}" if widget_name in hoisted else ""
+                    base_parameters.setdefault(widget_name, fallback)
         for_each = task.get("for_each_task")
         if for_each and isinstance(for_each.get("task"), dict):
             visit(for_each["task"])
@@ -1238,6 +1272,7 @@ def _build_job_resource(
     *,
     attach_clusters: bool = True,
     extra_notebooks_for_augment: list[DabNotebook] | None = None,
+    hoisted_globals: set[str] | None = None,
 ) -> dict[str, Any]:
     """Builds a job resource dict for a single workflow.
 
@@ -1256,7 +1291,7 @@ def _build_job_resource(
     # For inner jobs (run_job_task), notebooks live in the parent workflow's list — pass them in so widget
     # auto-augment can still find the bound notebook and populate base_parameters.
     augment_scope = list(workflow.notebooks) + list(extra_notebooks_for_augment or [])
-    _augment_base_parameters(workflow.tasks, augment_scope)
+    _augment_base_parameters(workflow.tasks, augment_scope, hoisted_globals)
     # Task values don't cross run_job_task boundaries; such a reference resolves to an empty string at
     # runtime, so emit it now for SETUP.md §4. C-43: a blanked condition operand is always-true, so record
     # each neutralised condition for the SETUP.md re-wiring section.
@@ -1463,6 +1498,7 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         parameters=parameters or None,
         translation_configuration=_reconstruct_configuration(pipeline_dict.get("translation_configuration")),
         schedule=pipeline_dict.get("schedule"),
+        bundle_variables=pipeline_dict.get("bundle_variables") or {},
     )
     return pipeline, parameters
 

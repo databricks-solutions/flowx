@@ -19,6 +19,7 @@ from flowx.adapter.constants import (
     INPUT_BUNDLE_NAME,
     INPUT_CATALOG,
     INPUT_DATABRICKS_PROFILE,
+    INPUT_GLOBAL_PARAMETER_RESOLUTION,
     INPUT_INSTALL_DASHBOARD,
     INPUT_INVENTORY_PATH,
     INPUT_OUTPUT_BUNDLE_PATH,
@@ -295,6 +296,17 @@ _CONVERT_OPTIONS: tuple[MigrationInputOption, ...] = (
             "Convert writes its transient report and IR to the directory's ``.work/`` subfolder."
         ),
         default="./flowx_output",
+        required=False,
+    ),
+    MigrationInputOption(
+        option_id=INPUT_GLOBAL_PARAMETER_RESOLUTION,
+        prompt="How should factory global parameters be resolved?",
+        description=(
+            "Applies to every pipeline. 'literal' bakes each @pipeline().globalParameters.X value in as a "
+            "literal; 'bundle_variable' emits ${var.X} and declares the global as a DAB bundle variable with "
+            "the factory value as its default, so it can be changed at deploy time."
+        ),
+        default="literal",
         required=False,
     ),
 )
