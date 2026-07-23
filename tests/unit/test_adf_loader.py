@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from flowx.models.adf_ast import (
     AdfDefinitions,
     TranslationStrategy,
@@ -9,8 +11,11 @@ from flowx.models.adf_ast import (
 from flowx.parser.adf_loader import (
     AGENTIC_TYPES,
     DETERMINISTIC_TYPES,
+    _find_arm_parameters_file,
+    _load_arm_parameter_values,
     _normalize_arm,
     _parse_pipeline_json,
+    _resolve_arm_parameters,
     build_inventory,
     classify_activity,
     clear_stale_outputs,
@@ -292,6 +297,123 @@ class TestNormalizeArm:
         data = {"name": "simple", "properties": {"activities": []}}
         result = _normalize_arm(data)
         assert result is data
+
+
+class TestLoadArmTemplate:
+    """Single-file ARM template ingestion, including global params and parameter resolution."""
+
+    def _write_template(self, tmp_path, resources):
+        template = tmp_path / "ARMTemplateForFactory.json"
+        template.write_text(
+            json.dumps(
+                {
+                    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                    "resources": resources,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return template
+
+    def test_global_parameters_resource_is_loaded(self, tmp_path):
+        """A standalone /globalparameters resource populates global_parameters."""
+        template = self._write_template(
+            tmp_path,
+            [
+                {
+                    "type": "Microsoft.DataFactory/factories/globalparameters",
+                    "name": "[concat(parameters('factoryName'), '/default')]",
+                    "properties": {"env": {"type": "string", "value": "prod"}},
+                }
+            ],
+        )
+        defs = load_adf_definitions(template)
+        assert defs.global_parameters == {"env": {"type": "string", "value": "prod"}}
+
+    def test_parameter_references_are_resolved(self, tmp_path):
+        """parameters('X') references resolve from the sibling parameters file."""
+        self._write_template(
+            tmp_path,
+            [
+                {
+                    "type": "Microsoft.DataFactory/factories/linkedServices",
+                    "name": "[concat(parameters('factoryName'), '/ls_kv')]",
+                    "properties": {
+                        "type": "AzureKeyVault",
+                        "typeProperties": {"baseUrl": "[parameters('ls_kv_baseUrl')]"},
+                    },
+                }
+            ],
+        )
+        (tmp_path / "ARMTemplateParametersForFactory.json").write_text(
+            json.dumps({"parameters": {"ls_kv_baseUrl": {"value": "https://kv.vault.azure.net/"}}}),
+            encoding="utf-8",
+        )
+        defs = load_adf_definitions(tmp_path / "ARMTemplateForFactory.json")
+        ls = defs.linked_services["ls_kv"]
+        assert ls.properties["typeProperties"]["baseUrl"] == "https://kv.vault.azure.net/"
+
+    def test_unknown_parameter_reference_is_left_intact(self, tmp_path):
+        """A reference with no matching parameter value is not substituted."""
+        template = self._write_template(
+            tmp_path,
+            [
+                {
+                    "type": "Microsoft.DataFactory/factories/linkedServices",
+                    "name": "[concat(parameters('factoryName'), '/ls_x')]",
+                    "properties": {
+                        "type": "AzureKeyVault",
+                        "typeProperties": {"baseUrl": "[parameters('missing')]"},
+                    },
+                }
+            ],
+        )
+        defs = load_adf_definitions(template)
+        assert defs.linked_services["ls_x"].properties["typeProperties"]["baseUrl"] == "[parameters('missing')]"
+
+
+class TestArmParameterHelpers:
+    """Direct coverage for the ARM parameters-file discovery / substitution helpers."""
+
+    def test_find_parameters_file_exact_name(self, tmp_path):
+        template = tmp_path / "ARMTemplateForFactory.json"
+        template.write_text("{}", encoding="utf-8")
+        params = tmp_path / "ARMTemplateParametersForFactory.json"
+        params.write_text("{}", encoding="utf-8")
+        assert _find_arm_parameters_file(template) == params
+
+    def test_find_parameters_file_glob_fallback(self, tmp_path):
+        template = tmp_path / "weird.json"
+        template.write_text("{}", encoding="utf-8")
+        params = tmp_path / "myParametersForFactory.json"
+        params.write_text("{}", encoding="utf-8")
+        assert _find_arm_parameters_file(template) == params
+
+    def test_find_parameters_file_none_when_absent(self, tmp_path):
+        template = tmp_path / "only.json"
+        template.write_text("{}", encoding="utf-8")
+        assert _find_arm_parameters_file(template) is None
+
+    def test_load_parameter_values_skips_entries_without_value(self, tmp_path):
+        params = tmp_path / "p.json"
+        params.write_text(
+            json.dumps({"parameters": {"a": {"value": "1"}, "b": {"type": "string"}}}),
+            encoding="utf-8",
+        )
+        assert _load_arm_parameter_values(params) == {"a": "1"}
+
+    def test_resolve_whole_string_ref_preserves_type(self):
+        # A whole-string reference returns the value verbatim (int stays int).
+        assert _resolve_arm_parameters("[parameters('n')]", {"n": 5}) == 5
+
+    def test_resolve_embedded_ref_substitutes_token_only(self):
+        # An embedded reference replaces just the parameters('x') token with the string value;
+        # surrounding ARM syntax (here the brackets) is left intact since flowx does not evaluate it.
+        assert _resolve_arm_parameters("prefix-[parameters('x')]-suffix", {"x": "REAL"}) == "prefix-[REAL]-suffix"
+
+    def test_resolve_recurses_into_nested_structures(self):
+        obj = {"a": ["[parameters('x')]", {"b": "[parameters('x')]"}]}
+        assert _resolve_arm_parameters(obj, {"x": "V"}) == {"a": ["V", {"b": "V"}]}
 
 
 # ---------------------------------------------------------------------------

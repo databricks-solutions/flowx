@@ -66,6 +66,7 @@ class PreparedWorkflow:
     # C-10 (SCHED-001): serialised schedule / trigger spec the bundler
     # renders as ``schedule:`` / ``trigger:`` on the emitted DAB job.
     schedule: dict[str, Any] | None = None
+    bundle_variables: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def run_if_from_adf_outcomes(outcomes: list[str | None]) -> str | None:
@@ -397,6 +398,7 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         pipeline_resources=list(artifacts.pipeline_resources),
         parameter_approximations=list(artifacts.parameter_approximations),
         schedule=pipeline.schedule,
+        bundle_variables=dict(pipeline.bundle_variables),
     )
 
 

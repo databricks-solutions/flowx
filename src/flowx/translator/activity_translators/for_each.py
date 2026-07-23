@@ -81,6 +81,7 @@ def translate(
             variable_value_cache=context.variable_value_cache,
             global_parameters=context.global_parameters,
             linked_service_parameters=context.linked_service_parameters,
+            global_parameter_resolution=context.global_parameter_resolution,
         )
         inner_activities, _ = translate_activities_fn(child_adf_activities, child_context, definitions)
 

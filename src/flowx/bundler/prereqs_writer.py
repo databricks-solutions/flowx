@@ -131,6 +131,7 @@ class Prereqs:
     # C-43 (CF5-001 / CF5-002): condition_task operands blanked because they referenced a task in another
     # job ({task_key, field, original_ref}); a blanked operand is always-true, so the user must re-wire it.
     neutralized_conditions: list[dict[str, str]] = field(default_factory=list)
+    hoisted_global_variables: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def is_empty(self) -> bool:
         """Return ``True`` when nothing needs to happen before ``bundle run``."""
@@ -150,6 +151,7 @@ class Prereqs:
             and not self.manual_schedule_time_of_day
             and not self.manual_credentials
             and not self.neutralized_conditions
+            and not self.hoisted_global_variables
         )
 
 
@@ -361,6 +363,7 @@ def build_prereqs(
     manual_schedule_time_of_day: list[dict[str, Any]] | None = None,
     manual_credentials: list[dict[str, Any]] | None = None,
     neutralized_conditions: list[dict[str, str]] | None = None,
+    hoisted_global_variables: dict[str, dict[str, Any]] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
 
@@ -408,6 +411,7 @@ def build_prereqs(
         manual_schedule_time_of_day=list(manual_schedule_time_of_day or []),
         manual_credentials=list(manual_credentials or []),
         neutralized_conditions=list(neutralized_conditions or []),
+        hoisted_global_variables=dict(hoisted_global_variables or {}),
     )
 
 
@@ -473,6 +477,29 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
         lines.append(
             '`put-secret` opens an editor by default; pass `--json \'{"string_value": "…"}\'` '
             "for a non-interactive flow."
+        )
+        lines.append("")
+
+    if prereqs.hoisted_global_variables:
+        lines.append("## Factory global parameters (bundle variables)")
+        lines.append("")
+        lines.append(
+            "These ADF factory global parameters were hoisted to DAB bundle variables "
+            "(`global_parameter_resolution=bundle_variable`). Each is declared in `databricks.yml` "
+            "with its factory value as the default, so a deploy with no overrides reproduces the "
+            "original behaviour. Override per target in `databricks.yml` or at deploy time:"
+        )
+        lines.append("")
+        lines.append("```bash")
+        for name in sorted(prereqs.hoisted_global_variables):
+            lines.append(f'databricks bundle deploy -t <target> --var "{name}=<value>"')
+        lines.append("```")
+        lines.append("")
+        lines.append(
+            "> **Security note:** the factory-value defaults are stored in plaintext in "
+            "`databricks.yml`. For any sensitive value (tokens, connection strings, URLs with "
+            "embedded SAS signatures), clear the default and supply it at deploy time via `--var`, "
+            "a per-target override, or a secret scope instead of committing it to the bundle."
         )
         lines.append("")
 

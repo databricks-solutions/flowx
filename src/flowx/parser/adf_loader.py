@@ -104,7 +104,7 @@ def load_adf_definitions(source_dir: Path) -> AdfDefinitions:
     source_dir = Path(source_dir).resolve()
 
     if source_dir.is_file() and source_dir.suffix == ".json":
-        return _load_arm_template(source_dir)
+        return _load_arm_template(source_dir, parameters_path=_find_arm_parameters_file(source_dir))
 
     pipelines: list[AdfPipeline] = []
     datasets: dict[str, AdfDataset] = {}
@@ -569,17 +569,104 @@ def _normalize_arm(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def _load_arm_template(template_path: Path) -> AdfDefinitions:
+# Matches an ARM string that is *entirely* a single parameter reference, e.g.
+# ``[parameters('ls_kv_central_..._baseUrl')]`` -- captures the parameter name.
+_ARM_PARAM_WHOLE_RE = re.compile(r"^\[parameters\('([^']+)'\)\]$")
+# Matches a parameter reference embedded inside a larger ARM expression.
+_ARM_PARAM_TOKEN_RE = re.compile(r"parameters\('([^']+)'\)")
+
+
+def _find_arm_parameters_file(template_path: Path) -> Path | None:
+    """Finds the ``*ParametersForFactory.json`` that sits next to an ARM template.
+
+    Args:
+        template_path: Path to the ARM template JSON file.
+
+    Returns:
+        The matching parameters file, or ``None`` if there isn't one.
+    """
+    directory = template_path.parent
+    # ARMTemplateForFactory.json pairs with ARMTemplateParametersForFactory.json.
+    expected_name = directory / template_path.name.replace("ForFactory", "ParametersForFactory")
+    if expected_name != template_path and expected_name.is_file():
+        return expected_name
+    other_matches = sorted(directory.glob("*ParametersForFactory.json"))
+    return other_matches[0] if other_matches else None
+
+
+def _load_arm_parameter_values(parameters_path: Path) -> dict[str, Any]:
+    """Reads an ``*ParametersForFactory.json`` file into a name -> value map.
+
+    Args:
+        parameters_path: Path to the ARM parameters file.
+
+    Returns:
+        Each parameter name mapped to its value.  Parameters with no value
+        (the ones filled in at deploy time) are skipped.
+    """
+    try:
+        data = json.loads(parameters_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Failed to read ARM parameters file %s", parameters_path)
+        return {}
+    parameters = data.get("parameters", {})
+    if not isinstance(parameters, dict):
+        return {}
+    return {name: entry["value"] for name, entry in parameters.items() if isinstance(entry, dict) and "value" in entry}
+
+
+def _resolve_arm_parameters(value: Any, parameter_values: dict[str, Any]) -> Any:
+    """Walks a JSON structure and fills in ``parameters('X')`` references.
+
+    If a string is nothing but a single reference (``[parameters('X')]``), it
+    becomes the parameter's value as-is, keeping its original type (an int stays
+    an int).  If a reference sits inside a larger ARM expression, only the
+    ``parameters('X')`` token is swapped for the string value -- the rest of the
+    expression (e.g. ``concat(...)``) is left alone, since flowx does not run ARM
+    expressions.  References whose name is not in the parameters file are left as-is.
+
+    Args:
+        value: Any JSON-decoded value (dict, list, string, or scalar).
+        parameter_values: Parameter name -> value map from the parameters file.
+
+    Returns:
+        A copy of *value* with every resolvable reference filled in.
+    """
+    if not parameter_values:
+        return value
+    if isinstance(value, dict):
+        return {key: _resolve_arm_parameters(item, parameter_values) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_resolve_arm_parameters(item, parameter_values) for item in value]
+    if isinstance(value, str):
+        whole_reference = _ARM_PARAM_WHOLE_RE.match(value)
+        if whole_reference is not None and whole_reference.group(1) in parameter_values:
+            return parameter_values[whole_reference.group(1)]
+        return _ARM_PARAM_TOKEN_RE.sub(
+            lambda match: (
+                str(parameter_values[match.group(1)]) if match.group(1) in parameter_values else match.group(0)
+            ),
+            value,
+        )
+    return value
+
+
+def _load_arm_template(template_path: Path, parameters_path: Path | None = None) -> AdfDefinitions:
     """Loads all ADF resources from a single ARM template file.
 
     Args:
         template_path: Path to the ARM template JSON file.
+        parameters_path: Optional path to the sibling
+            ``*ParametersForFactory.json`` file.  When provided, ``parameters('X')``
+            references in resource bodies are resolved to their concrete values.
 
     Returns:
         Parsed :class:`AdfDefinitions`.
     """
     data = json.loads(template_path.read_text(encoding="utf-8"))
     resources = data.get("resources", [])
+
+    parameter_values = _load_arm_parameter_values(parameters_path) if parameters_path is not None else {}
 
     pipelines: list[AdfPipeline] = []
     datasets: dict[str, AdfDataset] = {}
@@ -589,7 +676,7 @@ def _load_arm_template(template_path: Path) -> AdfDefinitions:
 
     for resource in resources:
         rtype = resource.get("type", "")
-        props = resource.get("properties", {})
+        props = _resolve_arm_parameters(resource.get("properties", {}), parameter_values)
         raw_name = resource.get("name", "")
         if "/" in raw_name:
             name = raw_name.rsplit("/", 1)[-1].strip("'])")
@@ -598,7 +685,12 @@ def _load_arm_template(template_path: Path) -> AdfDefinitions:
 
         wrapped = {"name": name, "properties": props}
 
-        if rtype.endswith("/pipelines"):
+        if rtype.endswith("/globalparameters"):
+            try:
+                global_parameters.update(props)
+            except Exception:
+                logger.exception("Failed to parse ARM global-parameters resource %s", name)
+        elif rtype.endswith("/pipelines"):
             try:
                 pipelines.append(_parse_pipeline_json(wrapped, fallback_name=name))
             except Exception:

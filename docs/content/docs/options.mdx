@@ -83,6 +83,30 @@ The following are required to consolidate into a single ingestion pipeline:
 - The number of metadata rows or objects must be less than 250
 </Callout>
 
+## global_parameter_resolution
+
+Controls how global parameters (`@pipeline().globalParameters.X`) are translated. This option is
+applied uniformly to every pipeline in the input resource.
+
+| Value             | Default | Behavior                                                                                                                                                 |
+|-------------------|---------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `literal`         | True    | Writes each global variable into the translated configuration or notebook code.                                                                          |
+| `bundle_variable` | False   | Uses a `${var.X}` reference and declares the global variable as a [DAB bundle variable](https://docs.databricks.com/aws/en/dev-tools/bundles/variables). |
+
+Under `bundle_variable`, each referenced global becomes a variable in `databricks.yml` with its
+factory value as the default, so a deploy with no overrides reproduces the original ADF behavior.
+You then change the value per target or at deploy time
+(`databricks bundle deploy -t <target> --var "X=<value>"`). Globals referenced inside generated
+notebook code are wired through the task's `base_parameters` so `${var.X}` still resolves at
+runtime.
+
+<Callout type="warn" title="Sensitive values ship in plaintext">
+The default values for global parameters are written into `databricks.yml` as plain text. For sensitive
+values (e.g. tokens, connection strings, URLs with embedded SAS signatures), clear the default and
+supply the value at deploy time using a `--var` argument, a per-target override, or a secret scope instead 
+of committing sensitive values to the bundle. See `SETUP.md` for a full list of converted global variables.
+</Callout>
+
 ## Discover complexity report
 
 The `discover` phase emits `<output_dir>/metadata/profile_report.csv` (default `./flowx_output/metadata/profile_report.csv`), one row per pipeline with the following columns:

@@ -1034,3 +1034,75 @@ class TestPipelineDictToIrBridgeFields:
         assert isinstance(task, SwitchActivity)
         assert task.bridge_notebook_code == "result = item.get('type', 'default').upper()"
         assert task.bridge_required_parameters == {"item": "{{tasks.upstream.values.row}}"}
+
+
+class TestHoistedGlobalVariables:
+    """bundle_variable resolution: hoisted globals declared as DAB variables + SETUP note."""
+
+    def _workflow_with_hoisted_global(self):
+        pipeline = Pipeline(
+            name="pl_hoisted",
+            tasks=[
+                NotebookActivity(
+                    name="Run NB",
+                    task_key="run_nb",
+                    notebook_path="/Shared/ETL/transform",
+                    base_parameters={"env": "dev"},
+                )
+            ],
+            bundle_variables={
+                "env": {"description": "Factory global parameter 'env' (override at deploy time).", "default": "prod"}
+            },
+        )
+        return prepare_workflow(pipeline)
+
+    def test_variable_declared_in_databricks_yml(self, tmp_path):
+        wf = self._workflow_with_hoisted_global()
+        write_bundle(wf, tmp_path, catalog="main", schema="ingest")
+        content = yaml.safe_load((tmp_path / "databricks.yml").read_text())
+        assert content["variables"]["env"]["default"] == "prod"
+
+    def test_setup_md_lists_hoisted_variable_and_secret_note(self, tmp_path):
+        wf = self._workflow_with_hoisted_global()
+        write_bundle(wf, tmp_path, catalog="main", schema="ingest")
+        setup = (tmp_path / "SETUP.md").read_text()
+        assert "Factory global parameters (bundle variables)" in setup
+        assert "--var" in setup
+        assert "Security note" in setup
+
+    def test_augment_base_parameters_binds_hoisted_widget_to_var_ref(self):
+        """A notebook widget matching a hoisted global binds to ${var.X}, others to ''."""
+        from flowx.bundler.dab_writer import _augment_base_parameters
+        from flowx.models.dab import DabNotebook
+
+        notebook = DabNotebook(
+            relative_path="nb/run.py",
+            content="env = dbutils.widgets.get('env')\nother = dbutils.widgets.get('other')\n",
+        )
+        tasks = [{"notebook_task": {"notebook_path": "../src/nb/run.py"}}]
+        _augment_base_parameters(tasks, [notebook], hoisted_globals={"env"})
+        base = tasks[0]["notebook_task"]["base_parameters"]
+        assert base["env"] == "${var.env}"
+        assert base["other"] == ""
+
+    def test_prepare_workflow_threads_bundle_variables(self):
+        """prepare_workflow copies Pipeline.bundle_variables onto the PreparedWorkflow."""
+        pipeline = Pipeline(
+            name="pl",
+            tasks=[NotebookActivity(name="n", task_key="n", notebook_path="/x")],
+            bundle_variables={"env": {"description": "d", "default": "prod"}},
+        )
+        wf = prepare_workflow(pipeline)
+        assert wf.bundle_variables == {"env": {"description": "d", "default": "prod"}}
+
+    def test_prereqs_not_empty_when_only_hoisted_globals(self):
+        """is_empty() must return False when the only prereq is hoisted globals,
+        otherwise render_setup_md would skip the section entirely."""
+        from flowx.bundler.prereqs_writer import Prereqs, render_setup_md
+
+        prereqs = Prereqs(hoisted_global_variables={"env": {"description": "d", "default": "prod"}})
+        assert not prereqs.is_empty()
+        md = render_setup_md(prereqs, bundle_name="b")
+        assert "Factory global parameters (bundle variables)" in md
+        assert "Security note" in md
+        assert "env=<value>" in md

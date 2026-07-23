@@ -532,6 +532,8 @@ class Pipeline:
         tasks: Ordered list of translated activities.
         tags: System and user-defined tags.
         not_translatable: Entries describing properties that could not be translated.
+        bundle_variables: DAB bundle-variable declarations (name -> ``{"description", "default"}``)
+            for factory globals hoisted under the ``bundle_variable`` resolution policy.
     """
 
     name: str
@@ -541,6 +543,7 @@ class Pipeline:
     tags: dict[str, str] = field(default_factory=dict)
     not_translatable: list[dict[str, Any]] = field(default_factory=list)
     translation_configuration: TranslationConfiguration | None = None
+    bundle_variables: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,6 +565,7 @@ class TranslationContext:
     variable_default_literals: MappingProxyType[str, str] = field(default_factory=lambda: MappingProxyType({}))
     global_parameters: MappingProxyType[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     linked_service_parameters: MappingProxyType[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    global_parameter_resolution: str = "literal"
 
     def with_activity(self, name: str, activity: Activity) -> TranslationContext:
         """Return a new context with *activity* added to the cache.
@@ -582,6 +586,7 @@ class TranslationContext:
             variable_default_literals=self.variable_default_literals,
             global_parameters=self.global_parameters,
             linked_service_parameters=self.linked_service_parameters,
+            global_parameter_resolution=self.global_parameter_resolution,
         )
 
     def get_activity(self, activity_name: str) -> Activity | None:
@@ -627,6 +632,7 @@ class TranslationContext:
             variable_default_literals=self.variable_default_literals,
             global_parameters=self.global_parameters,
             linked_service_parameters=self.linked_service_parameters,
+            global_parameter_resolution=self.global_parameter_resolution,
         )
 
     def with_variable_types(
@@ -661,6 +667,7 @@ class TranslationContext:
             variable_default_literals=MappingProxyType({**self.variable_default_literals, **(default_literals or {})}),
             global_parameters=self.global_parameters,
             linked_service_parameters=self.linked_service_parameters,
+            global_parameter_resolution=self.global_parameter_resolution,
         )
 
     def get_variable_task_key(self, variable_name: str) -> str | None:
@@ -698,6 +705,7 @@ class TranslationContext:
             variable_default_literals=self.variable_default_literals,
             global_parameters=self.global_parameters,
             linked_service_parameters=MappingProxyType(dict(params)),
+            global_parameter_resolution=self.global_parameter_resolution,
         )
 
     def get_global_parameter(self, name: str) -> Any:

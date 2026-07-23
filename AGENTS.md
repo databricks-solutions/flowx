@@ -113,6 +113,17 @@ ExecuteDataFlow, SqlServerStoredProcedure, AzureFunction, WebHook, Custom, Execu
 - Leaf types return Activity only, control-flow returns (Activity, TranslationContext)
 - Use `parse_expression()` for ADF expression translation, return None for unsupported
 
+### Naming, docstrings, and comments
+
+- Spell names out: use unabbreviated variable, parameter, function, and class names
+  (`parameter_values` not `params`, `whole_reference` not `whole`). Short loop indices and
+  regex match binders (`match`, `item`) are fine.
+- Write docstrings in plain, conversational language aimed at both users and maintainers.
+  Say what the function does and why in everyday terms; skip jargon and marketing tone.
+- Prefer self-documenting code over inline comments. Reserve comments for the non-obvious
+  *why* (a workaround, a spec quirk, a subtle ordering constraint) -- not for restating what
+  the code already says. Delete comments that narrate self-evident lines.
+
 ## Adding a New Deterministic Translator
 
 1. Add IR dataclass to `src/flowx/models/ir.py`
