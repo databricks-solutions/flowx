@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -91,6 +91,7 @@ def translate_pipeline(
     definitions: AdfDefinitions,
     *,
     motif_consolidations: dict[str, str] | None = None,
+    global_parameter_resolution: str = "literal",
 ) -> TranslationReport:
     """Translates an ADF pipeline into a Databricks pipeline IR.
 
@@ -104,6 +105,13 @@ def translate_pipeline(
             consolidates every detected motif.  When provided, only
             motifs whose id maps to ``"consolidate"`` are collapsed; the
             rest remain as the original activity-by-activity translation.
+        global_parameter_resolution: How ``@pipeline().globalParameters.X``
+            references resolve.  ``"literal"`` (default) bakes the concrete
+            factory value in as a literal; ``"bundle_variable"`` lowers each
+            reference to ``${var.X}`` and declares the global as a DAB
+            bundle variable (with the factory value as its default) so the
+            value is set at deploy time instead of being hard-coded into
+            pipeline/activity bodies.
 
     Returns:
         :class:`TranslationReport` containing the translated :class:`Pipeline`,
@@ -124,6 +132,7 @@ def translate_pipeline(
         registry=MappingProxyType(TRANSLATOR_REGISTRY),
         variable_cache=MappingProxyType({}),
         global_parameters=MappingProxyType(dict(definitions.global_parameters)),
+        global_parameter_resolution=global_parameter_resolution,
     )
 
     # C-41 (CF5-001): seed declared variable types so the IfCondition fallback recognises Boolean
@@ -193,7 +202,15 @@ def translate_pipeline(
 
     # Whole-IR expression rewrite: catches @{...} tokens the per-activity translators missed (raw SQL
     # WHERE, REST bodies, dataset folder paths, ...). Unresolved tokens become translation warnings.
-    pipeline_ir = rewrite_pipeline_expressions(pipeline_ir, warnings=warnings)
+    pipeline_ir = rewrite_pipeline_expressions(
+        pipeline_ir,
+        warnings=warnings,
+        global_parameters=definitions.global_parameters,
+        global_parameter_resolution=global_parameter_resolution,
+    )
+
+    if global_parameter_resolution == "bundle_variable":
+        pipeline_ir = _declare_referenced_globals_as_bundle_variables(pipeline_ir, definitions.global_parameters)
 
     # Motif detection. Collapsing is gated on motif_consolidations: None preserves back-compat (collapse
     # every detected motif), otherwise only motifs mapped to "consolidate" are collapsed.
@@ -225,6 +242,44 @@ def translate_pipeline(
         warnings=warnings,
         detected_motifs=list(detected_motifs),
     )
+
+
+_VAR_REF_RE: re.Pattern[str] = re.compile(r"\$\{var\.([A-Za-z0-9_]+)\}")
+
+
+def _unwrap_global_value(raw_value: Any) -> Any:
+    """Returns a factory global's plain value, unwrapping the ARM ``{"type", "value"}`` shape."""
+    if isinstance(raw_value, dict) and "value" in raw_value:
+        return raw_value["value"]
+    return raw_value
+
+
+def _declare_referenced_globals_as_bundle_variables(
+    pipeline_ir: Pipeline, global_parameters: dict[str, Any]
+) -> Pipeline:
+    """Declares a bundle variable for every global that was turned into ``${var.X}``.
+
+    Args:
+        pipeline_ir: Translated pipeline IR (already expression-rewritten).
+        global_parameters: Factory-level global parameters.
+
+    Returns:
+        A new :class:`Pipeline` whose ``bundle_variables`` holds a declaration
+        (with the factory value as its ``default``) for each hoisted global, or
+        the pipeline unchanged when none are referenced.
+    """
+    referenced_names = set(_VAR_REF_RE.findall(json.dumps(_pipeline_to_dict(pipeline_ir), default=str)))
+    declarations = {
+        name: {
+            "description": f"Factory global parameter '{name}' (override at deploy time).",
+            "default": _unwrap_global_value(global_parameters[name]),
+        }
+        for name in sorted(referenced_names)
+        if name in global_parameters
+    }
+    if not declarations:
+        return pipeline_ir
+    return replace(pipeline_ir, bundle_variables={**pipeline_ir.bundle_variables, **declarations})
 
 
 _OPT_IN_ONLY_MOTIFS: frozenset[str] = frozenset({"activity_and_notify"})
@@ -1275,6 +1330,8 @@ def _pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
         "tags": pipeline.tags,
         "tasks": [_activity_to_dict(task) for task in pipeline.tasks],
     }
+    if pipeline.bundle_variables:
+        result["bundle_variables"] = pipeline.bundle_variables
     if pipeline.translation_configuration is not None:
         result["translation_configuration"] = _configuration_to_dict(pipeline.translation_configuration)
     return result
@@ -1707,6 +1764,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Translate only the named pipeline (default: all).",
     )
     parser.add_argument(
+        "--global-parameter-resolution",
+        choices=("literal", "bundle_variable"),
+        default="literal",
+        help=(
+            "How @pipeline().globalParameters.X references resolve. 'literal' (default) bakes the "
+            "factory value in as a literal; 'bundle_variable' emits ${var.X} and declares the global "
+            "as a DAB bundle variable with the factory value as its default, so it can be set at "
+            "deploy time."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Write a full debug IR dump alongside the normal output.",
@@ -1770,7 +1838,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.pipeline and pipeline.name != args.pipeline:
             continue
 
-        report = translate_pipeline(pipeline, definitions)
+        report = translate_pipeline(pipeline, definitions, global_parameter_resolution=args.global_parameter_resolution)
         total_deterministic += report.deterministic_count
         total_agentic += report.agentic_count
         total_unsupported += report.unsupported_count

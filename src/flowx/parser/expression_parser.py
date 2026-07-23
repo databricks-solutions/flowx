@@ -272,6 +272,9 @@ def resolve_interpolated_string_for_notebook(
             return result.value
         if result.kind == "dab_ref":
             ref = result.value
+            var_match = re.match(r"\$\{var\.(\w+)\}", ref)
+            if var_match:
+                return "{dbutils.widgets.get('" + var_match.group(1) + "')}"
             param_match = re.match(r"\{\{job\.parameters\.(\w+)\}\}", ref)
             if param_match:
                 return "{dbutils.widgets.get('" + param_match.group(1) + "')}"
@@ -349,17 +352,24 @@ def _resolve_pipeline_param(expr: str) -> ExpressionResult | None:
 def _resolve_pipeline_global_param(expr: str, context: TranslationContext) -> ExpressionResult | None:
     """Resolves ``pipeline().globalParameters.X`` against factory globals.
 
-    When ``context.global_parameters`` carries a concrete value for *X*
-    the expression collapses to a literal so downstream callers (notably
-    ``concat`` reductions) get the actual factory value baked in.  When
-    no factory value is available we fall back to a job-parameter DAB
-    ref so the bundle YAML can supply it.
+    Under the default ``literal`` policy, when ``context.global_parameters``
+    carries a concrete value for *X* the expression collapses to a literal
+    so downstream callers (notably ``concat`` reductions) get the actual
+    factory value baked in.  Under the ``bundle_variable`` policy the
+    reference lowers to a ``${var.X}`` DAB ref -- even when a concrete value
+    exists -- so the value becomes a bundle variable (the engine declares it
+    with the factory value as its default) that can be set at deploy time
+    rather than being hard-coded into pipeline/activity bodies.  When no
+    factory value is available we fall back to a ``{{job.parameters.X}}`` ref
+    regardless of policy so the bundle YAML can supply it.
     """
     match = _PIPELINE_GLOBAL_PARAM_RE.match(expr)
     if match is None:
         return None
     param_name = match.group(1)
     value = context.get_global_parameter(param_name)
+    if context.global_parameter_resolution == "bundle_variable" and value is not None:
+        return ExpressionResult(kind="dab_ref", value="${var." + param_name + "}")
     if value is None:
         return ExpressionResult(kind="dab_ref", value="{{" + f"job.parameters.{param_name}" + "}}")
     return ExpressionResult(kind="literal", value=str(value))

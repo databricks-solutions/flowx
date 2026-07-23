@@ -535,9 +535,14 @@ class TestMigrationInputSession:
         from flowx.adapter import MigrationInputSession
 
         session = MigrationInputSession(phase="convert")
-        ids = [q.option_id for q in session.pending().options]
+        options = session.pending().options
+        ids = [option.option_id for option in options]
         assert "inventory_path" in ids
         assert "adf_source_path" in ids
+        assert "global_parameter_resolution" in ids
+        # The default must match the engine's accepted values (literal / bundle_variable).
+        resolution_option = next(o for o in options if o.option_id == "global_parameter_resolution")
+        assert resolution_option.default == "literal"
 
     def test_package_session_lists_expected_options(self):
         from flowx.adapter import MigrationInputSession

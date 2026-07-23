@@ -1664,6 +1664,135 @@ class TestSwitchTranslator:
         assert result.on_expression.startswith("__BRIDGE__::")
 
 
+class TestGlobalParameterResolution:
+    """Engine-level global_parameter_resolution policy (literal vs bundle_variable)."""
+
+    def _pipeline_with_global(self):
+        from flowx.models.adf_ast import AdfPipeline
+
+        pipeline = AdfPipeline(
+            name="pl_globals",
+            activities=[
+                _make_activity(
+                    "Run NB",
+                    "DatabricksNotebook",
+                    {
+                        "notebookPath": "/Shared/x",
+                        "libraries": [{"jar": "@pipeline().globalParameters.libPath"}],
+                    },
+                ),
+            ],
+        )
+        definitions = AdfDefinitions(
+            pipelines=[pipeline],
+            datasets={},
+            linked_services={},
+            triggers=[],
+            global_parameters={"libPath": "/Volumes/my.jar"},
+        )
+        return pipeline, definitions
+
+    def test_literal_mode_bakes_value_and_declares_no_variable(self):
+        pipeline, definitions = self._pipeline_with_global()
+        report = translate_pipeline(pipeline, definitions, global_parameter_resolution="literal")
+        assert report.pipeline.bundle_variables == {}
+        notebook_task = next(t for t in report.pipeline.tasks if t.name == "Run NB")
+        assert notebook_task.libraries == [{"jar": "/Volumes/my.jar"}]
+
+    def test_bundle_variable_mode_hoists_and_declares_variable(self):
+        pipeline, definitions = self._pipeline_with_global()
+        report = translate_pipeline(pipeline, definitions, global_parameter_resolution="bundle_variable")
+        assert "libPath" in report.pipeline.bundle_variables
+        assert report.pipeline.bundle_variables["libPath"]["default"] == "/Volumes/my.jar"
+        notebook_task = next(t for t in report.pipeline.tasks if t.name == "Run NB")
+        assert notebook_task.libraries == [{"jar": "${var.libPath}"}]
+
+    def test_default_policy_is_literal(self):
+        pipeline, definitions = self._pipeline_with_global()
+        report = translate_pipeline(pipeline, definitions)
+        assert report.pipeline.bundle_variables == {}
+        notebook_task = next(t for t in report.pipeline.tasks if t.name == "Run NB")
+        assert notebook_task.libraries == [{"jar": "/Volumes/my.jar"}]
+
+    def test_bundle_variables_survive_report_round_trip(self):
+        """bundle_variables serialize via _pipeline_to_dict and reconstruct via pipeline_dict_to_ir."""
+        import json
+
+        from flowx.bundler.dab_writer import pipeline_dict_to_ir
+        from flowx.translator.engine import _pipeline_to_dict
+
+        pipeline, definitions = self._pipeline_with_global()
+        report = translate_pipeline(pipeline, definitions, global_parameter_resolution="bundle_variable")
+        # Full JSON round-trip, mirroring how the convert report reaches the package phase.
+        serialized = json.loads(json.dumps(_pipeline_to_dict(report.pipeline), default=str))
+        reconstructed, _ = pipeline_dict_to_ir(serialized)
+        assert reconstructed.bundle_variables == report.pipeline.bundle_variables
+        assert reconstructed.bundle_variables["libPath"]["default"] == "/Volumes/my.jar"
+
+    def test_global_inside_foreach_inherits_policy(self):
+        """A global referenced inside a ForEach inner activity resolves per the parent policy."""
+        from flowx.models.adf_ast import AdfPipeline
+
+        inner = _make_activity(
+            "InnerNB",
+            "DatabricksNotebook",
+            {"notebookPath": "/x", "libraries": [{"jar": "@pipeline().globalParameters.libPath"}]},
+        )
+        foreach = _make_activity(
+            "FE",
+            "ForEach",
+            {"items": {"value": "@pipeline().parameters.list", "type": "Expression"}},
+            activities=[inner],
+        )
+        pipeline = AdfPipeline(name="pl_fe", activities=[foreach])
+        definitions = AdfDefinitions(
+            pipelines=[pipeline],
+            datasets={},
+            linked_services={},
+            triggers=[],
+            global_parameters={"libPath": "/Volumes/x.jar"},
+        )
+        report = translate_pipeline(pipeline, definitions, global_parameter_resolution="bundle_variable")
+        fe_task = next(t for t in report.pipeline.tasks if t.name == "FE")
+        inner_nb = fe_task.inner_activities[0]
+        assert inner_nb.libraries == [{"jar": "${var.libPath}"}]
+        assert "libPath" in report.pipeline.bundle_variables
+
+    def test_global_in_raw_sql_body_resolved_by_whole_ir_rewrite(self):
+        """A global embedded in a raw SQL query is resolved by the whole-IR rewrite pass in both modes."""
+        from flowx.models.adf_ast import AdfPipeline
+
+        copy = _make_activity(
+            "Cp",
+            "Copy",
+            {
+                "source": {
+                    "type": "AzureSqlSource",
+                    "sqlReaderQuery": "SELECT * FROM t WHERE env='@{pipeline().globalParameters.env}'",
+                },
+                "sink": {"type": "DeltaSink"},
+            },
+        )
+        pipeline = AdfPipeline(name="pl_sql", activities=[copy])
+        definitions = AdfDefinitions(
+            pipelines=[pipeline],
+            datasets={},
+            linked_services={},
+            triggers=[],
+            global_parameters={"env": "PROD"},
+        )
+
+        literal = translate_pipeline(pipeline, definitions, global_parameter_resolution="literal")
+        literal_query = literal.pipeline.tasks[0].source_properties["sqlReaderQuery"]
+        assert "PROD" in literal_query
+        assert "${var." not in literal_query
+
+        hoisted = translate_pipeline(pipeline, definitions, global_parameter_resolution="bundle_variable")
+        hoisted_query = hoisted.pipeline.tasks[0].source_properties["sqlReaderQuery"]
+        assert "${var.env}" in hoisted_query
+        assert "env" in hoisted.pipeline.bundle_variables
+
+
 class TestVariableInitTasks:
     """C-05 (VAREX-002): init SetVariable tasks for default-valued variables."""
 
