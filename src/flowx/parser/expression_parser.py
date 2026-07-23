@@ -244,6 +244,11 @@ def resolve_interpolated_string(
     return _INTERPOLATION_RE.sub(_replace_match, value)
 
 
+def _escape_fstring_braces(text: str) -> str:
+    """Doubles ``{`` / ``}`` so *text* is safe as literal content inside an f-string."""
+    return text.replace("{", "{{").replace("}", "}}")
+
+
 def resolve_interpolated_string_for_notebook(
     value: str,
     context: TranslationContext,
@@ -252,24 +257,31 @@ def resolve_interpolated_string_for_notebook(
 ) -> str:
     """Resolves ``@{...}`` tokens to Python f-string expressions for notebook code.
 
+    The result is meant to be embedded in an f-string by the caller, so every
+    ``{`` / ``}`` that is *not* part of a generated f-string field (literal
+    values and the static text around the tokens) is doubled, keeping the
+    surrounding f-string valid when a value carries braces (e.g. JSON).
+
     Args:
         value: A string containing ``@{...}`` tokens.
         context: Translation context for resolving variables.
         variable_task_keys: Optional explicit variable-name-to-task-key map.
 
     Returns:
-        A string with ``@{...}`` tokens replaced by Python f-string expressions.
+        A string with ``@{...}`` tokens replaced by Python f-string expressions
+        and all other braces escaped for safe f-string embedding.
     """
     if not isinstance(value, str) or "@{" not in value:
         return value
 
-    def _replace_match(match: re.Match[str]) -> str:
-        inner_expr = match.group(1)
+    def _resolve_token(inner_expr: str) -> str:
         result = resolve_expression("@" + inner_expr, context, variable_task_keys=variable_task_keys)
         if result is None:
-            return match.group(0)
+            return _escape_fstring_braces("@{" + inner_expr + "}")
         if result.kind == "literal":
-            return result.value
+            # Literal text sits outside any f-string field, so brace characters in the value
+            # (e.g. a JSON template) must be escaped or they break the surrounding f-string.
+            return _escape_fstring_braces(result.value)
         if result.kind == "dab_ref":
             ref = result.value
             var_match = re.match(r"\$\{var\.(\w+)\}", ref)
@@ -298,7 +310,16 @@ def resolve_interpolated_string_for_notebook(
             return ref
         return "{" + result.value + "}"
 
-    return _INTERPOLATION_RE.sub(_replace_match, value)
+    # Walk the string ourselves rather than using re.sub so the static text *between* @{...} tokens
+    # (which may itself contain braces, e.g. a surrounding JSON body) also gets f-string-escaped.
+    parts: list[str] = []
+    cursor = 0
+    for match in _INTERPOLATION_RE.finditer(value):
+        parts.append(_escape_fstring_braces(value[cursor : match.start()]))
+        parts.append(_resolve_token(match.group(1)))
+        cursor = match.end()
+    parts.append(_escape_fstring_braces(value[cursor:]))
+    return "".join(parts)
 
 
 def parse_expression(value: str | dict[str, Any] | int | float | bool, context: TranslationContext) -> str | None:

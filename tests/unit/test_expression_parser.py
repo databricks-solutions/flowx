@@ -1009,6 +1009,22 @@ class TestGlobalParameters:
         )
         assert resolved == "prefix-{str(dbutils.widgets.get('env')).lower()}-suffix"
 
+    def test_braces_in_resolved_literal_are_escaped_for_fstring(self):
+        """A global whose literal value contains braces must be doubled so the caller's
+        f-string stays valid (would otherwise be read as an f-string field)."""
+        ctx = self._ctx_with_globals(tmpl="prefix-{region}-suffix")
+        resolved = resolve_interpolated_string_for_notebook("x=@{pipeline().globalParameters.tmpl}/end", ctx)
+        assert resolved == "x=prefix-{{region}}-suffix/end"
+        # And it round-trips through an actual f-string back to the original value.
+        assert eval(f"f{__import__('json').dumps(resolved)}") == "x=prefix-{region}-suffix/end"  # noqa: S307
+
+    def test_braces_in_surrounding_literal_text_are_escaped(self):
+        """Braces in the static text around a token (e.g. a JSON body) are also escaped,
+        while the resolved widget field stays a single-brace f-string expression."""
+        ctx = self._ctx_with_globals(resolution="bundle_variable", env="PROD")
+        resolved = resolve_interpolated_string_for_notebook('{"e": "@{pipeline().globalParameters.env}"}', ctx)
+        assert resolved == '{{"e": "{dbutils.widgets.get(\'env\')}"}}'
+
     def test_resolution_policy_survives_context_with_methods(self):
         """Every with_* reconstruction preserves global_parameter_resolution."""
         ctx = self._ctx_with_globals(resolution="bundle_variable", env="PROD")
