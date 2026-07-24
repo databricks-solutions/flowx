@@ -1561,7 +1561,7 @@ def _rewrite_cross_bundle_run_job_refs(
     tasks: list[dict[str, Any]],
     known_bundle_jobs: set[str],
     cross_bundle_variables: dict[str, str],
-) -> int:
+) -> None:
     """Rewrites ``run_job_task`` refs to jobs outside this bundle into ``${var.X}``.
 
     An ExecutePipeline activity is emitted as ``run_job_task.job_id =
@@ -1575,12 +1575,12 @@ def _rewrite_cross_bundle_run_job_refs(
     rewrite it to ``${var.X}`` and register ``X`` in *cross_bundle_variables* so
     the ``databricks.yml`` builder declares a matching bundle variable (the user
     supplies the numeric job id at deploy time, per SETUP.md).  Recurses into
-    ``for_each_task.task`` bodies.  Returns the number of refs rewritten.
+    ``for_each_task.task`` bodies.  The rewritten refs are surfaced to the
+    operator via *cross_bundle_variables* (declared in ``databricks.yml`` and
+    listed in SETUP.md), so this mutates in place and returns nothing.
     """
-    rewritten = 0
 
     def visit(task: dict[str, Any]) -> None:
-        nonlocal rewritten
         run_job = task.get("run_job_task")
         if isinstance(run_job, dict):
             match = _CROSS_BUNDLE_JOB_ID_REF.fullmatch(str(run_job.get("job_id", "")))
@@ -1589,14 +1589,12 @@ def _rewrite_cross_bundle_run_job_refs(
                 if target not in known_bundle_jobs:
                     run_job["job_id"] = f"${{var.{target}}}"
                     cross_bundle_variables[target] = target
-                    rewritten += 1
         for_each = task.get("for_each_task")
         if for_each and isinstance(for_each.get("task"), dict):
             visit(for_each["task"])
 
     for task in tasks:
         visit(task)
-    return rewritten
 
 
 def _collect_all_task_keys(tasks: list[dict[str, Any]]) -> set[str]:
