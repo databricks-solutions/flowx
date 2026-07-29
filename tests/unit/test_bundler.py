@@ -540,6 +540,23 @@ class TestStripDanglingTaskValueRefs:
         assert "{{tasks._init_continue.values.continue}}" in md
         assert "`branch`" in md
 
+    def test_airflow_backfill_renders_setup_section(self):
+        # An Airflow catchup=True DAG surfaces a native-backfill section in SETUP.md so the
+        # run_date override path is documented rather than silently lost.
+        from flowx.bundler.prereqs_writer import build_prereqs, render_setup_md
+
+        prereqs = build_prereqs(
+            notebooks=[],
+            tasks=[],
+            known_bundle_jobs=set(),
+            airflow_backfills=[{"pipeline": "daily_etl"}],
+        )
+        assert not prereqs.is_empty()
+        md = render_setup_md(prereqs, bundle_name="b")
+        assert "Backfill (Airflow catchup)" in md
+        assert "{{backfill.iso_date}}" in md
+        assert "`daily_etl`" in md
+
     def test_recurses_into_for_each_task_body(self):
         from flowx.bundler.dab_writer import _strip_dangling_task_value_refs
 

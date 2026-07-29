@@ -376,6 +376,11 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
             )
         )
 
+    # Airflow catchup=True has no DABs schedule setting; surface that history is replayed via a native
+    # Databricks backfill, which overrides the run_date job parameter with {{backfill.iso_date}}.
+    if pipeline.tags.get("airflow_catchup") == "true":
+        setup_tasks_out.append(SetupTask(type="airflow_backfill", config={"pipeline": pipeline.name}))
+
     # C-39 (LSC4-004): ADF auth modes with no Databricks equivalent (MSI, CredentialReference) make the
     # default_cluster fall back to single_user_name: ${workspace.current_user.userName}; flag it via SetupTask.
     seen_auth: set[tuple[str, str]] = set()

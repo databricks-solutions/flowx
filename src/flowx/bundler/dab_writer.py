@@ -288,6 +288,7 @@ def write_bundle(
         task.config for task in workflow.setup_tasks if task.type == "manual_schedule_time_of_day"
     ]
     manual_credential_configs = [task.config for task in workflow.setup_tasks if task.type == "manual_credential"]
+    airflow_backfill_configs = [task.config for task in workflow.setup_tasks if task.type == "airflow_backfill"]
     pydabs_dbt_factory_configs = [task.config for task in workflow.setup_tasks if task.type == "pydabs_dbt_factory"]
     for inner in workflow.inner_workflows:
         pydabs_dbt_factory_configs.extend(
@@ -327,6 +328,7 @@ def write_bundle(
         manual_credentials=manual_credential_configs,
         neutralized_conditions=list(_neutralized_conditions),
         pydabs_dbt_factories=pydabs_dbt_factory_configs,
+        airflow_backfills=airflow_backfill_configs,
     )
     setup_path = output_dir / "SETUP.md"
     setup_path.write_text(render_setup_md(prereqs, bundle_name=effective_name), encoding="utf-8")

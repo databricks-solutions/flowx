@@ -14,20 +14,42 @@ import math
 import re
 from typing import Any
 
-# Airflow Jinja macros -> Databricks job dynamic-value references. Only macros with an exact
-# Databricks equivalent are mapped; date macros -> the job start time, run_id -> the run id.
-# ``ds_nodash``/``ts_nodash`` have no dashless dynamic-value form, so they are intentionally NOT
-# mapped -- they're left untouched (surfaced as an unresolved reference) rather than emitting an
-# invalid ref.
+# Airflow date/time macros carrying the run's *logical date* -> a named job parameter (not an inline
+# time ref), so a native Databricks backfill can override the parameter per replayed window with
+# {{backfill.iso_date}}. Each maps to (parameter_name, time_field); the loader assigns the parameter a
+# schedule-aware default (see `date_param_default`). ``ds_nodash``/``ts_nodash`` have no dashless
+# dynamic-value form, so they are intentionally NOT mapped -- they're left untouched (surfaced as an
+# unresolved reference) rather than emitting an invalid ref.
+_DATE_MACRO_PARAM: dict[str, tuple[str, str]] = {
+    "ds": ("run_date", "iso_date"),
+    "ts": ("run_timestamp", "iso_datetime"),
+    "data_interval_start": ("data_interval_start", "iso_datetime"),
+    "data_interval_end": ("data_interval_end", "iso_datetime"),
+    "execution_date": ("execution_date", "iso_datetime"),
+    "logical_date": ("logical_date", "iso_datetime"),
+}
+
+# job parameter name -> its time field, so the loader can default each to the right granularity.
+DATE_PARAM_FIELDS: dict[str, str] = {param: field for param, field in _DATE_MACRO_PARAM.values()}
+
+# Non-date macros with an exact Databricks equivalent, mapped inline (no backfill relevance).
 _MACRO_TO_DAB_REF: dict[str, str] = {
-    "ds": "{{job.start_time.iso_date}}",
-    "ts": "{{job.start_time.iso_datetime}}",
-    "data_interval_start": "{{job.start_time.iso_datetime}}",
-    "data_interval_end": "{{job.start_time.iso_datetime}}",
-    "execution_date": "{{job.start_time.iso_datetime}}",
-    "logical_date": "{{job.start_time.iso_datetime}}",
     "run_id": "{{job.run_id}}",
 }
+
+
+def date_param_default(field: str, schedule: dict[str, object] | None) -> str:
+    """Returns the default dynamic-value ref for a logical-date job parameter.
+
+    On a cron/periodic schedule the logical date is the scheduled trigger time
+    (``{{job.trigger.time...}}``) -- ``start_time`` would drift with queue delay and retries. On an
+    event-triggered job (``file_arrival``/``table_update``/``continuous``) or an unscheduled job there
+    is no scheduled trigger time, so approximate with the run's start time. A native backfill overrides
+    the parameter regardless of this default.
+    """
+    kind = schedule.get("kind") if schedule else None
+    base = "{{job.trigger.time." if kind in ("schedule", "periodic") else "{{job.start_time."
+    return f"{base}{field}}}}}"
 
 # {{ params.X }} / {{ var.value.X }} / {{ dag_run.conf['X'] }} -> {{job.parameters.X}}
 _PARAM_PATTERNS: list[re.Pattern[str]] = [
@@ -43,15 +65,20 @@ _JINJA = re.compile(r"\{\{\s*(.*?)\s*\}\}")
 def convert_template(value: str) -> tuple[str, set[str]]:
     """Converts Airflow Jinja in *value* to DAB dynamic-value references.
 
-    Returns ``(converted_value, referenced_param_names)``.  Date/system macros map
-    to ``{{job.start_time.*}}`` refs; ``params.X`` / ``var.value.X`` / ``dag_run.conf['X']``
-    map to ``{{job.parameters.X}}`` and X is reported so the pipeline can declare it.
-    An unrecognised expression is left as-is (so nothing is silently corrupted).
+    Returns ``(converted_value, referenced_param_names)``.  A logical-date macro (``ds``,
+    ``execution_date``, ...) maps to ``{{job.parameters.run_date}}`` (etc.) so a native backfill can
+    override it; ``params.X`` / ``var.value.X`` / ``dag_run.conf['X']`` map to ``{{job.parameters.X}}``;
+    ``run_id`` maps to its inline ref. Referenced parameter names are reported so the pipeline can
+    declare them. An unrecognised expression is left as-is (so nothing is silently corrupted).
     """
     params: set[str] = set()
 
     def _sub(match: re.Match[str]) -> str:
         expr = match.group(1).strip()
+        if expr in _DATE_MACRO_PARAM:
+            name, _ = _DATE_MACRO_PARAM[expr]
+            params.add(name)
+            return "{{job.parameters." + name + "}}"
         if expr in _MACRO_TO_DAB_REF:
             return _MACRO_TO_DAB_REF[expr]
         for pattern in _PARAM_PATTERNS:
@@ -65,17 +92,6 @@ def convert_template(value: str) -> tuple[str, set[str]]:
     return _JINJA.sub(_sub, value), params
 
 
-# Airflow macro -> the sql_task.parameters name + the DAB dynamic value it resolves to. Databricks
-# requires dynamic references in SQL to go through named :markers + sql_task.parameters, never inline.
-_SQL_MACRO_PARAM: dict[str, tuple[str, str]] = {
-    "ds": ("run_date", "{{job.start_time.iso_date}}"),
-    "ts": ("run_timestamp", "{{job.start_time.iso_datetime}}"),
-    "data_interval_start": ("data_interval_start", "{{job.start_time.iso_datetime}}"),
-    "data_interval_end": ("data_interval_end", "{{job.start_time.iso_datetime}}"),
-    "execution_date": ("execution_date", "{{job.start_time.iso_datetime}}"),
-    "logical_date": ("logical_date", "{{job.start_time.iso_datetime}}"),
-    "run_id": ("run_id", "{{job.run_id}}"),
-}
 _SQL_IDENTIFIER_CONTEXT = re.compile(
     r"(?:\bFROM|\bJOIN|\bINTO|\bUPDATE|\bTABLE|\bVIEW|\bSCHEMA|\bCATALOG)\s*$",
     re.IGNORECASE,
@@ -86,9 +102,10 @@ def convert_sql_template(sql: str) -> tuple[str, dict[str, str]]:
     """Rewrites Airflow Jinja in *sql* to ``:name`` markers + a ``sql_task.parameters`` map.
 
     Databricks requires dynamic references in a ``sql_task`` to be passed through named parameters,
-    not interpolated into the SQL text. ``{{ ds }}`` -> ``:run_date`` with
-    ``{"run_date": "{{job.start_time.iso_date}}"}``; ``{{ params.x }}`` -> ``:x`` with
-    ``{"x": "{{job.parameters.x}}"}``. Unknown expressions are left untouched.
+    not interpolated into the SQL text. A logical-date macro ``{{ ds }}`` -> ``:run_date`` with
+    ``{"run_date": "{{job.parameters.run_date}}"}`` (a job parameter, so a native backfill can override
+    it); ``{{ params.x }}`` -> ``:x`` with ``{"x": "{{job.parameters.x}}"}``; ``run_id`` binds to its
+    inline ref. Unknown expressions are left untouched.
 
     Returns ``(sql_with_markers, parameters)``.
     """
@@ -100,10 +117,13 @@ def convert_sql_template(sql: str) -> tuple[str, dict[str, str]]:
 
     def _sub(match: re.Match[str]) -> str:
         expr = match.group(1).strip()
-        if expr in _SQL_MACRO_PARAM:
-            name, ref = _SQL_MACRO_PARAM[expr]
-            parameters[name] = ref
+        if expr in _DATE_MACRO_PARAM:
+            name, _ = _DATE_MACRO_PARAM[expr]
+            parameters[name] = "{{job.parameters." + name + "}}"
             return _marker(name, match)
+        if expr in _MACRO_TO_DAB_REF:
+            parameters["run_id"] = _MACRO_TO_DAB_REF[expr]
+            return _marker("run_id", match)
         for pattern in _PARAM_PATTERNS:
             m = pattern.match(expr)
             if m:

@@ -282,6 +282,9 @@ class _DagVisitor(ast.NodeVisitor):
         self.schedule_interval: str | None = None
         self.schedule_node: ast.expr | None = None
         self.timezone: str | None = None
+        # DAG catchup= flag: True means Airflow backfills missed intervals, which maps to a native
+        # Databricks backfill overriding the run_date parameter rather than any DABs schedule setting.
+        self.catchup: bool = False
         self.default_args: dict[str, ast.expr] = {}
         # DAG-level params={...} defaults (param name -> literal default), so emitted job parameters
         # carry a Databricks-required default rather than an empty placeholder.
@@ -561,6 +564,7 @@ class _DagVisitor(ast.NodeVisitor):
             kwargs.get("schedule")
         )
         self.timezone = _extract_timezone(kwargs.get("start_date")) or _extract_timezone(kwargs.get("timezone"))
+        self.catchup = ops.literal_value(kwargs.get("catchup")) is True
         # default_args is a dict literal of DAG-wide task settings (retries, timeouts, email).
         default_args = kwargs.get("default_args")
         if isinstance(default_args, ast.Dict):
@@ -1181,18 +1185,24 @@ def _load_airflow_module(
 
     # Declare every job parameter -- those referenced in templates plus any from the DAG's
     # params={...} -- each with a default (Databricks requires one): the params={...} default when
-    # present, else an empty string so the bundle still validates.
+    # present; a logical-date parameter (run_date/execution_date/...) its schedule-aware time ref so a
+    # native backfill can override it per window; else an empty string so the bundle still validates.
     param_names = referenced_params | set(visitor.dag_params)
     parameters = [
-        {"name": name, "default": visitor.dag_params[name] if visitor.dag_params.get(name) is not None else ""}
+        {"name": name, "default": _declared_param_default(name, visitor.dag_params, schedule)}
         for name in sorted(param_names)
     ] or None
+    tags = {"source": "airflow", "dag_id": visitor.dag_id or ""}
+    if visitor.catchup:
+        # Airflow catchup=True has no DABs schedule setting; it maps to running a native Databricks
+        # backfill, which overrides the run_date job parameter with {{backfill.iso_date}} per window.
+        tags["airflow_catchup"] = "true"
     return Pipeline(
         name=visitor.dag_id or Path(dag_path).stem,
         tasks=tasks,
         parameters=parameters,
         schedule=schedule,
-        tags={"source": "airflow", "dag_id": visitor.dag_id or ""},
+        tags=tags,
     )
 
 
@@ -1373,6 +1383,21 @@ def _taskflow_invocation(func: ast.FunctionDef, tf: _TaskFlowTask, var_to_task_k
     if returns:
         lines.append("dbutils.jobs.taskValues.set(key='return_value', value=result)")
     return "\n".join(lines) + "\n"
+
+
+def _declared_param_default(name: str, dag_params: dict[str, Any], schedule: dict[str, object] | None) -> Any:
+    """Returns the Databricks-required default for a declared job parameter.
+
+    A DAG ``params={...}`` default wins. A logical-date parameter (``run_date`` etc., from an Airflow
+    ``{{ ds }}``/``execution_date`` macro) defaults to its schedule-aware time ref so a native backfill
+    can override it per replayed window. Everything else defaults to an empty string.
+    """
+    if dag_params.get(name) is not None:
+        return dag_params[name]
+    field = templating.DATE_PARAM_FIELDS.get(name)
+    if field is not None:
+        return templating.date_param_default(field, schedule)
+    return ""
 
 
 def _convert_activity_templates(activity: Activity) -> set[str]:

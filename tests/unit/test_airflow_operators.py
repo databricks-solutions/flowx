@@ -963,19 +963,76 @@ def test_jinja_macros_convert_to_dab_refs_and_collect_params():
         "from airflow import DAG\n"
         "from airflow.operators.python import PythonOperator\n"
         "def w(date=None, env=None):\n    pass\n"
-        "with DAG(dag_id='d') as dag:\n"
+        "with DAG(dag_id='d', schedule_interval='0 6 * * *') as dag:\n"
         "    t = PythonOperator(task_id='t', python_callable=w,\n"
         "                       op_kwargs={'date': '{{ ds }}', 'env': '{{ params.env }}'})\n"
     )
     task = _by_key(p)["t"]
     # op_kwargs are JSON-encoded into the internal __flowx_op_kwargs widget; Jinja inside the
-    # values is still converted to DAB refs.
+    # values is still converted to DAB refs. {{ ds }} routes through a run_date job parameter (so a
+    # native backfill can override it), not an inline start_time ref.
     kwargs_json = task.base_parameters["__flowx_op_kwargs"]
-    assert "{{job.start_time.iso_date}}" in kwargs_json
+    assert "{{job.parameters.run_date}}" in kwargs_json
     assert "{{job.parameters.env}}" in kwargs_json
-    # The referenced param is declared on the pipeline with a (Databricks-required) default; the
-    # internal __flowx_ widget is NOT declared.
-    assert p.parameters == [{"name": "env", "default": ""}]
+    # Referenced params are declared with a (Databricks-required) default; run_date defaults to the
+    # scheduled trigger time on a cron job. The internal __flowx_ widget is NOT declared.
+    assert p.parameters == [
+        {"name": "env", "default": ""},
+        {"name": "run_date", "default": "{{job.trigger.time.iso_date}}"},
+    ]
+
+
+def test_execution_date_on_event_triggered_job_defaults_to_start_time():
+    # A cron+sensor collapses to a file_arrival trigger -- no scheduled trigger time exists, so the
+    # run_date parameter approximates with the run start time (still overridable by a backfill).
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor\n"
+        "def w(date=None):\n    pass\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    wait = S3KeySensor(task_id='wait', bucket_key='s3://b/landing/')\n"
+        "    t = PythonOperator(task_id='t', python_callable=w, op_kwargs={'date': '{{ execution_date }}'})\n"
+        "    wait >> t\n"
+    )
+    assert (p.schedule or {}).get("kind") == "file_arrival"
+    assert p.parameters == [{"name": "execution_date", "default": "{{job.start_time.iso_datetime}}"}]
+
+
+def test_catchup_true_tags_pipeline_for_native_backfill():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d', schedule_interval='0 6 * * *', catchup=True) as dag:\n"
+        "    t = PythonOperator(task_id='t', python_callable=w)\n"
+    )
+    assert p.tags.get("airflow_catchup") == "true"
+
+
+def test_catchup_false_leaves_no_backfill_tag():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d', schedule_interval='0 6 * * *', catchup=False) as dag:\n"
+        "    t = PythonOperator(task_id='t', python_callable=w)\n"
+    )
+    assert "airflow_catchup" not in p.tags
+
+
+def test_dag_param_named_run_date_keeps_user_default():
+    # An explicit params={'run_date': ...} default wins over the schedule-aware backfill default.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.models.param import Param\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w(date=None):\n    pass\n"
+        "with DAG(dag_id='d', schedule_interval='0 6 * * *', params={'run_date': Param('2024-01-01')}) as dag:\n"
+        "    t = PythonOperator(task_id='t', python_callable=w, op_kwargs={'date': '{{ ds }}'})\n"
+    )
+    run_date = next(param for param in p.parameters if param["name"] == "run_date")
+    assert run_date["default"] == "2024-01-01"
 
 
 def test_unsupported_airflow_macro_becomes_placeholder():

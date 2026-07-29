@@ -134,6 +134,9 @@ class Prereqs:
     # dbt-factory PyDABs hooks; each entry is the SetupTask config dict ({hook_module, job_key,
     # manifest_path, note}). The user must `pip install databricks-dbt-factory` before deploy.
     pydabs_dbt_factories: list[dict[str, Any]] = field(default_factory=list)
+    # Airflow catchup=True jobs; each entry is the SetupTask config dict ({pipeline}). History is
+    # replayed via a native Databricks backfill overriding the run_date parameter, not a DABs setting.
+    airflow_backfills: list[dict[str, Any]] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         """Return ``True`` when nothing needs to happen before ``bundle run``."""
@@ -154,6 +157,7 @@ class Prereqs:
             and not self.manual_credentials
             and not self.neutralized_conditions
             and not self.pydabs_dbt_factories
+            and not self.airflow_backfills
         )
 
 
@@ -366,6 +370,7 @@ def build_prereqs(
     manual_credentials: list[dict[str, Any]] | None = None,
     neutralized_conditions: list[dict[str, str]] | None = None,
     pydabs_dbt_factories: list[dict[str, Any]] | None = None,
+    airflow_backfills: list[dict[str, Any]] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
 
@@ -414,6 +419,7 @@ def build_prereqs(
         manual_credentials=list(manual_credentials or []),
         neutralized_conditions=list(neutralized_conditions or []),
         pydabs_dbt_factories=list(pydabs_dbt_factories or []),
+        airflow_backfills=list(airflow_backfills or []),
     )
 
 
@@ -680,6 +686,21 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
             interval = entry.get("interval", "")
             tod_spec = entry.get("time_of_day_note", "")
             lines.append(f"| `{pipeline}` | `{frequency}` | `{interval}` | `{tod_spec}` |")
+        lines.append("")
+
+    if prereqs.airflow_backfills:
+        lines.append("## Backfill (Airflow catchup)")
+        lines.append("")
+        lines.append(
+            "The DAG(s) below set `catchup=True`, so Airflow backfilled missed intervals.  There is "
+            "no equivalent DABs schedule setting.  To replay history, run a "
+            "[native Databricks backfill](https://docs.databricks.com/aws/en/jobs/backfill-jobs), which "
+            "overrides the `run_date` job parameter with `{{backfill.iso_date}}` per replayed window "
+            "(the run_date parameter is emitted for exactly this reason)."
+        )
+        lines.append("")
+        for entry in sorted(prereqs.airflow_backfills, key=lambda config: config.get("pipeline", "")):
+            lines.append(f"- `{entry.get('pipeline', '')}`")
         lines.append("")
 
     if prereqs.manual_credentials:
