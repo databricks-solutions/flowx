@@ -27,6 +27,10 @@ def _test(name, fqn, deps=None):
     return {"resource_type": "test", "name": name, "fqn": fqn, "depends_on": {"nodes": deps or []}}
 
 
+def _unit_test(name, fqn, model_uid):
+    return {"resource_type": "unit_test", "name": name, "fqn": fqn, "depends_on": {"nodes": [model_uid]}}
+
+
 def _manifest(nodes, unit_tests=None):
     return {"nodes": nodes, "unit_tests": unit_tests or {}}
 
@@ -116,22 +120,51 @@ def test_output_is_sorted_by_task_key():
     assert keys == sorted(keys)
 
 
-def test_rejects_unit_tests_when_test_node_present():
+def test_unit_tests_explode_into_their_own_test_command_tasks():
     manifest = _manifest(
-        {"test.p.t": _test("t", ["p", "t"])},
-        unit_tests={"unit_test.p.a": {}},
+        {"model.p.stg": _model("stg", ["p", "staging", "stg"])},
+        unit_tests={
+            "unit_test.p.stg.check_amount": _unit_test(
+                "check_amount", ["p", "staging", "stg", "check_amount"], "model.p.stg"
+            )
+        },
     )
-    with pytest.raises(ValueError, match="unit_test"):
-        explode_manifest(manifest)
+
+    by_key = {node.task_key: node for node in explode_manifest(manifest)}
+
+    unit = by_key["unit_test_check_amount"]
+    assert unit.command == "test"
+    assert unit.selector == "fqn:p.staging.stg.check_amount"
+    # The unit test gates on the model it targets, like a data test.
+    assert unit.depends_on == ["model_stg"]
 
 
-def test_allows_unit_tests_when_no_test_node():
-    # A manifest with unit_tests but no exploded test node is fine (nothing dropped).
+def test_downstream_model_waits_for_unit_tests_on_its_upstream_model():
+    manifest = _manifest(
+        {
+            "model.p.stg": _model("stg", ["p", "stg"]),
+            "model.p.fct": _model("fct", ["p", "fct"], deps=["model.p.stg"]),
+        },
+        unit_tests={
+            "unit_test.p.stg.check": _unit_test("check", ["p", "stg", "check"], "model.p.stg"),
+        },
+    )
+
+    by_key = {node.task_key: node for node in explode_manifest(manifest)}
+
+    assert by_key["model_fct"].depends_on == ["model_stg", "unit_test_check"]
+
+
+def test_unit_tests_dropped_when_test_scope_excluded():
+    # `dbt run` (resource_types={"model"}) does not run tests, so unit tests are out of scope too.
     manifest = _manifest(
         {"model.p.stg": _model("stg", ["p", "stg"])},
-        unit_tests={"unit_test.p.a": {}},
+        unit_tests={"unit_test.p.stg.check": _unit_test("check", ["p", "stg", "check"], "model.p.stg")},
     )
-    explode_manifest(manifest)  # no raise
+
+    keys = {node.task_key for node in explode_manifest(manifest, resource_types={"model"})}
+
+    assert keys == {"model_stg"}
 
 
 def test_rejects_unsafe_fqn_characters():

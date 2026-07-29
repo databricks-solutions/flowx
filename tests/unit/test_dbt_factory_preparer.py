@@ -171,10 +171,11 @@ def test_pydabs_emits_hook_module_and_no_inner_job(tmp_path):
     } <= hook_paths
     hook = next(nb for nb in prepared.notebooks if nb.relative_path.endswith("_dbt_job.py"))
     assert "load_resources" in hook.content
-    assert "from databricks_dbt_factory.SpecsHandler import SpecsHandler" in hook.content
-    assert "DbtFactory(SpecsHandler(), task_factories" in hook.content
-    import_block = hook.content.split("from databricks_dbt_factory", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
-    assert "read_dbt_manifest" not in import_block
+    assert "from databricks_dbt_factory.Utils import read_dbt_manifest" in hook.content
+    assert "DbtFactory(task_factories" in hook.content
+    # 0.3.1 dropped SpecsHandler; the manifest reader is a module-level Utils function.
+    assert "SpecsHandler" not in hook.content
+    assert "read_dbt_manifest(MANIFEST_PATH)" in hook.content
     runner = next(nb for nb in prepared.notebooks if nb.relative_path == "notebooks/run_dbt_command.py")
     assert "dbt_commands" in runner.content
     assert "project_directory" in runner.content
@@ -271,7 +272,7 @@ def test_pydabs_bundle_wires_python_resources_and_setup(tmp_path):
     assert (tmp_path / "resources" / "__init__.py").exists()
     assert not (tmp_path / "src" / "resources").exists()
     pyproject = (tmp_path / "pyproject.toml").read_text()
-    assert "databricks-dbt-factory==0.2.1" in pyproject
+    assert "databricks-dbt-factory==0.3.1" in pyproject
     assert "dbt-databricks==1.12.2" in pyproject
     setup = (tmp_path / "SETUP.md").read_text()
     assert "dbt factory (PyDABs mode)" in setup

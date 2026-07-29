@@ -2,9 +2,10 @@
 
 This is the deterministic core of dbt-factory mode: it turns the stable
 dbt-core manifest artifact into an ordered list of :class:`DbtNode` objects, one
-per dbt model / seed / snapshot / test, with the dependency edges between them
-pruned to the exploded set.  It performs no I/O beyond reading the manifest file
-and needs no dbt install, so it is unit-testable against a synthetic manifest.
+per dbt model / seed / snapshot / data test / unit test, with the dependency
+edges between them pruned to the exploded set.  It performs no I/O beyond reading
+the manifest file and needs no dbt install, so it is unit-testable against a
+synthetic manifest.
 
 Both renderers (static explosion and the PyDABs deploy-time hook) consume the
 same :class:`DbtNode` list, so the "one IR node, two renderers" contract holds.
@@ -17,16 +18,25 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# dbt resource_types that dbt-factory turns into their own orchestrator task. deps/docs and source
-# definitions are not runnable nodes; snapshots/seeds/models/tests are.
+# dbt resource_types that become their own orchestrator task. deps/docs and source definitions are
+# not runnable nodes; snapshots/seeds/models/data tests are (all live under manifest["nodes"]).
 _RUNNABLE_RESOURCE_TYPES: frozenset[str] = frozenset({"model", "seed", "snapshot", "test"})
 
-# The dbt command each runnable resource_type maps to (dbt-factory's model->run, seed->seed, etc.).
+# Unit tests live under a separate top-level manifest["unit_tests"] key (dbt >= 1.8), not under
+# "nodes". They run under `dbt test`, gate like data tests, and are exploded when "test" is in scope.
+_UNIT_TEST_RESOURCE_TYPE = "unit_test"
+
+# Resource types that gate downstream nodes: a downstream model waits for the tests (data and unit)
+# on its upstream models, and a test never waits for another test.
+_TEST_RESOURCE_TYPES: frozenset[str] = frozenset({"test", _UNIT_TEST_RESOURCE_TYPE})
+
+# The dbt command each runnable resource_type maps to (model->run, seed->seed, unit_test->test, etc.).
 _RESOURCE_TYPE_TO_COMMAND: dict[str, str] = {
     "model": "run",
     "seed": "seed",
     "snapshot": "snapshot",
     "test": "test",
+    _UNIT_TEST_RESOURCE_TYPE: "test",
 }
 
 # FQN components go into a `--select fqn:a.b.c` selector; restrict to characters dbt's own selector
@@ -40,7 +50,7 @@ class DbtNode:
 
     Attributes:
         unique_id: dbt manifest unique_id (e.g. ``model.pkg.stg_orders``).
-        resource_type: ``model`` / ``seed`` / ``snapshot`` / ``test``.
+        resource_type: ``model`` / ``seed`` / ``snapshot`` / ``test`` / ``unit_test``.
         name: dbt node name.
         command: dbt subcommand for this node (``run`` / ``seed`` / ...).
         selector: The ``fqn:`` selector that resolves to exactly this node.
@@ -79,6 +89,20 @@ def _fqn_selector(fqn: list[str]) -> str:
     return "fqn:" + ".".join(fqn)
 
 
+def _runnable_node(unique_id: str, node: dict, resource_type: str) -> DbtNode:
+    """Builds a :class:`DbtNode` from a manifest entry of a runnable resource_type."""
+    name = node.get("name", unique_id)
+    fqn = node.get("fqn") or [name]
+    return DbtNode(
+        unique_id=unique_id,
+        resource_type=resource_type,
+        name=name,
+        command=_RESOURCE_TYPE_TO_COMMAND[resource_type],
+        selector=_fqn_selector(fqn),
+        task_key=_sanitize_task_key(resource_type, name),
+    )
+
+
 def load_dbt_nodes(manifest_path: Path, *, resource_types: set[str] | None = None) -> list[DbtNode]:
     """Reads a dbt manifest and returns its runnable nodes as task specs.
 
@@ -91,9 +115,8 @@ def load_dbt_nodes(manifest_path: Path, *, resource_types: set[str] | None = Non
         macros, or filtered-out nodes are dropped).
 
     Raises:
-        ValueError: When the test factory would be enabled but the
-            manifest carries unit tests (dbt-factory 0.2.1 silently drops
-            them), or when a node's fqn contains unsafe characters.
+        ValueError: When a node's fqn contains unsafe characters, or two
+            nodes sanitize to the same task key.
     """
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     return explode_manifest(manifest, resource_types=resource_types)
@@ -106,46 +129,42 @@ def explode_manifest(manifest: dict, *, resource_types: set[str] | None = None) 
     manifest dict without touching the filesystem.
     """
     nodes: dict[str, dict] = manifest.get("nodes", {})
+    unit_tests: dict[str, dict] = manifest.get("unit_tests", {})
     enabled_types = _RUNNABLE_RESOURCE_TYPES if resource_types is None else _RUNNABLE_RESOURCE_TYPES & resource_types
+    # Unit tests run under `dbt test`, so they are in scope exactly when data tests are.
+    unit_tests_enabled = "test" in enabled_types
 
     runnable: dict[str, DbtNode] = {}
+    # The raw manifest entry for each exploded node, keyed by unique_id, so edge pruning can read a
+    # unit test's depends_on (unit tests live under a separate top-level key) the same way it reads a
+    # regular node's.
+    manifest_entry: dict[str, dict] = {}
     for unique_id, node in nodes.items():
         resource_type = node.get("resource_type", "")
         if resource_type not in enabled_types:
             continue
-        fqn = node.get("fqn") or [node.get("name", unique_id)]
-        runnable[unique_id] = DbtNode(
-            unique_id=unique_id,
-            resource_type=resource_type,
-            name=node.get("name", unique_id),
-            command=_RESOURCE_TYPE_TO_COMMAND[resource_type],
-            selector=_fqn_selector(fqn),
-            task_key=_sanitize_task_key(resource_type, node.get("name", unique_id)),
-        )
-
-    # Fail closed on unit tests: dbt-factory 0.2.1 does not emit unit-test tasks, so a manifest that
-    # carries them would silently lose coverage if any test task is exploded.
-    if manifest.get("unit_tests") and any(n.resource_type == "test" for n in runnable.values()):
-        raise ValueError(
-            "Manifest declares unit_tests, which dbt-factory 0.2.1 does not explode into tasks. "
-            "Refusing to emit an incomplete dbt job (fail-closed)."
-        )
+        runnable[unique_id] = _runnable_node(unique_id, node, resource_type)
+        manifest_entry[unique_id] = node
+    if unit_tests_enabled:
+        for unique_id, node in unit_tests.items():
+            runnable[unique_id] = _runnable_node(unique_id, node, _UNIT_TEST_RESOURCE_TYPE)
+            manifest_entry[unique_id] = node
 
     # Prune dependency edges to the exploded set. dbt nodes depend on sources, macros, and each other;
     # only edges between two runnable nodes become task dependencies.
     task_key_by_uid = {uid: dbt_node.task_key for uid, dbt_node in runnable.items()}
     tests_by_tested_uid: dict[str, list[str]] = {}
     for test_uid, test_node in runnable.items():
-        if test_node.resource_type != "test":
+        if test_node.resource_type not in _TEST_RESOURCE_TYPES:
             continue
-        for tested_uid in nodes[test_uid].get("depends_on", {}).get("nodes") or []:
+        for tested_uid in manifest_entry[test_uid].get("depends_on", {}).get("nodes") or []:
             tests_by_tested_uid.setdefault(tested_uid, []).append(test_node.task_key)
     for uid, dbt_node in runnable.items():
-        upstream_uids = nodes[uid].get("depends_on", {}).get("nodes") or []
+        upstream_uids = manifest_entry[uid].get("depends_on", {}).get("nodes") or []
         dependencies = [
             task_key_by_uid[upstream_uid] for upstream_uid in upstream_uids if upstream_uid in task_key_by_uid
         ]
-        if dbt_node.resource_type != "test":
+        if dbt_node.resource_type not in _TEST_RESOURCE_TYPES:
             dependencies.extend(
                 test_key for upstream_uid in upstream_uids for test_key in tests_by_tested_uid.get(upstream_uid, [])
             )

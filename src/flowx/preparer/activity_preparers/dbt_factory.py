@@ -82,7 +82,7 @@ def _pydabs_pyproject_source() -> str:
         'requires-python = ">=3.10"\n'
         "dependencies = [\n"
         '    "databricks-bundles>=1.0.0,<2.0.0",\n'
-        '    "databricks-dbt-factory==0.2.1",\n'
+        '    "databricks-dbt-factory==0.3.1",\n'
         '    "dbt-databricks==1.12.2",\n'
         '    "dbt-core==1.11.12",\n'
         "]\n"
@@ -336,14 +336,14 @@ def _pydabs_hook_source(activity: DbtFactoryActivity) -> str:
         "from databricks.bundles.jobs import Job\n"
         "from databricks_dbt_factory.DbtFactory import DbtFactory\n"
         "from databricks_dbt_factory.DbtTask import DbtTaskOptions, TaskType\n"
-        "from databricks_dbt_factory.SpecsHandler import SpecsHandler\n"
         "from databricks_dbt_factory.TaskFactory import (\n"
         "    DbtDependencyResolver,\n"
         "    ModelTaskFactory,\n"
         "    SeedTaskFactory,\n"
         "    SnapshotTaskFactory,\n"
         "    TestTaskFactory,\n"
-        ")\n\n"
+        ")\n"
+        "from databricks_dbt_factory.Utils import read_dbt_manifest\n\n"
         f"MANIFEST_PATH = {'src/dbt_project/target/manifest.json'!r}\n"
         f"PROJECT_DIR = {'../dbt_project'!r}\n"
         f"PROFILES_DIR = {'../dbt_profiles'!r}\n"
@@ -369,15 +369,15 @@ def _pydabs_hook_source(activity: DbtFactoryActivity) -> str:
         "        for name in RESOURCE_TYPES\n"
         "    }\n\n"
         "def load_resources(bundle: Bundle) -> Resources:\n"
-        "    manifest = SpecsHandler.read_dbt_manifest(MANIFEST_PATH)\n"
+        "    manifest = read_dbt_manifest(MANIFEST_PATH)\n"
         "    task_factories = _task_factories()\n"
         "    resources = Resources()\n"
-        "    factory = DbtFactory(SpecsHandler(), task_factories, bundle_tests=False)\n"
+        "    factory = DbtFactory(task_factories, bundle_tests=False)\n"
         "    tasks = factory.create_tasks(manifest)\n"
         "    environment = {\n"
         "        'environment_key': 'Default',\n"
         "        'spec': {\n"
-        "            'environment_version': '4',\n"
+        "            'environment_version': '5',\n"
         "            'dependencies': ['dbt-databricks==1.12.2', 'dbt-core==1.11.12'],\n"
         "        },\n"
         "    }\n"
