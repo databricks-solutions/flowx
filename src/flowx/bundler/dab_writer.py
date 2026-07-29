@@ -635,6 +635,17 @@ def _build_databricks_yml(
         "include": [
             "resources/*.yml",
         ],
+        # Force the generated notebook sources into the deploy sync set. DABs derives its
+        # sync set by honoring .gitignore, and the default output dir (./flowx_output) is
+        # commonly gitignored, which would otherwise make `bundle deploy` upload zero files
+        # and leave the job's notebooks missing. A nested .gitignore negation can't recover
+        # this (git won't re-include a path under an excluded parent), so sync.include is the
+        # only reliable override. Harmless when the dir isn't ignored.
+        "sync": {
+            "include": [
+                "src/**",
+            ],
+        },
         "targets": {
             "dev": {
                 "mode": "development",
