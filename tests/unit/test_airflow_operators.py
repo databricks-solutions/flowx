@@ -651,6 +651,68 @@ def test_dbt_chain_downstream_dep_rewired_to_factory_key():
     assert [d.task_key for d in tasks["publish"].depends_on] == [factory_key]
 
 
+def test_dbt_chain_absorbs_every_dbt_ops_upstream():
+    # An external task feeding a LATER dbt op must gate the single collapsed factory -- not be dropped
+    # because only the first dbt op's upstreams were absorbed.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "from airflow_dbt.operators.dbt_operator import DbtRunOperator, DbtTestOperator\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    ingest = PythonOperator(task_id='ingest', python_callable=w)\n"
+        "    seed_src = PythonOperator(task_id='seed_src', python_callable=w)\n"
+        "    r = DbtRunOperator(task_id='run', dir='/opt/proj')\n"
+        "    t = DbtTestOperator(task_id='test', dir='/opt/proj')\n"
+        "    ingest >> r\n"
+        "    seed_src >> t\n"
+        "    r >> t\n"
+    )
+    factory = next(t for t in p.tasks if isinstance(t, DbtFactoryActivity))
+    assert sorted(d.task_key for d in factory.depends_on) == ["ingest", "seed_src"]
+
+
+def test_dbt_chain_preserves_sandwiched_task_ordering():
+    # A non-dbt task between two dbt ops (seed >> mid >> run) is downstream of the collapsed factory,
+    # so a task consuming the later dbt op must still wait for it -- and no cycle is formed.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "from airflow_dbt.operators.dbt_operator import DbtSeedOperator, DbtRunOperator\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    s = DbtSeedOperator(task_id='seed', dir='/opt/proj')\n"
+        "    mid = PythonOperator(task_id='mid', python_callable=w)\n"
+        "    r = DbtRunOperator(task_id='run', dir='/opt/proj')\n"
+        "    tail = PythonOperator(task_id='tail', python_callable=w)\n"
+        "    s >> mid >> r >> tail\n"
+    )
+    tasks = _by_key(p)
+    factory_key = next(t.task_key for t in p.tasks if isinstance(t, DbtFactoryActivity))
+    # `mid` gates on the factory; `tail` (consumer of the vanished `run`) waits for BOTH the factory
+    # and `mid`, preserving the mid->tail ordering without depending on itself (no cycle).
+    assert [d.task_key for d in tasks["mid"].depends_on] == [factory_key]
+    assert sorted(d.task_key for d in tasks["tail"].depends_on) == sorted([factory_key, "mid"])
+
+
+def test_table_sensor_escapes_quotes_in_table_name():
+    # A table_name (or file path) carrying a double quote must not break the generated notebook: the
+    # value goes through repr(), so the source still compiles.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.providers.databricks.sensors.databricks_partition import DatabricksPartitionSensor\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    prep = PythonOperator(task_id='prep', python_callable=w)\n"
+        '    wait = DatabricksPartitionSensor(task_id=\'wait\', table_name=\'main.silver.we"ird\')\n'
+        "    prep >> wait\n"
+    )
+    wait = _by_key(p)["wait"]
+    assert isinstance(wait, NotebookActivity)
+    compile(wait.generated_source, "<wait>", "exec")  # would raise before the repr() fix
+
+
 def test_dbt_factory_explodes_manifest_into_tasks(tmp_path):
     # End-to-end: a real (synthetic) manifest must explode into per-node tasks, not an empty job.
     import json
@@ -780,7 +842,7 @@ def test_mid_dag_sensor_retained_as_polling_task():
     assert set(tasks) == {"prep", "wait", "go"}
     wait = tasks["wait"]
     assert isinstance(wait, NotebookActivity)
-    assert 'spark.catalog.tableExists("main.silver.events")' in wait.generated_source
+    assert "spark.catalog.tableExists('main.silver.events')" in wait.generated_source
     compile(wait.generated_source, "<wait>", "exec")
 
 

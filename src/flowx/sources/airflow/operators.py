@@ -189,7 +189,7 @@ def _poll_body(operator: str, check_expr: str, description: str, poke: int, time
     return (
         f"POKE_INTERVAL = {poke}  # seconds\n"
         + f"TIMEOUT = {timeout}  # seconds\n"
-        + f'DESCRIPTION = "{description}"\n\n'
+        + f"DESCRIPTION = {description!r}\n\n"
         + "def _condition_met():\n"
         + f"    # {operator} poke: returns truthy once the awaited condition holds.\n"
         + f"    return {check_expr}\n\n"
@@ -236,7 +236,7 @@ def _build_file_sensor(ctx: OperatorContext) -> Activity:
         "    except Exception:\n"
         "        return False\n\n"
     )
-    loop = _poll_body(ctx.operator, f'_path_exists("{path}")', f"file at {path}", poke, timeout)
+    loop = _poll_body(ctx.operator, f"_path_exists({path!r})", f"file at {path}", poke, timeout)
     return NotebookActivity(
         name=ctx.task_id,
         task_key=ctx.task_key,
@@ -267,7 +267,7 @@ def _build_table_sensor(ctx: OperatorContext) -> Activity:
         )
         desc = "SQL sensor condition"
     elif table_name is not None:
-        check = f'spark.catalog.tableExists("{table_name}")'
+        check = f"spark.catalog.tableExists({table_name!r})"
         header = _notebook_header(ctx.task_id, ctx.operator) + "import time\n\n"
         desc = f"table {table_name}"
     else:

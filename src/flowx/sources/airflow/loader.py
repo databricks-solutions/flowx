@@ -977,8 +977,51 @@ def _load_airflow_module(
     # downstream task that depended on a later dbt op (e.g. `dbt_test`) points at the factory task
     # rather than a task_key that was never emitted (which would dangle).
     dbt_vars = [var for var, (_, op, _) in visitor.operators.items() if op in ops.DBT_CLI_OPERATORS]
+    dbt_var_set = set(dbt_vars)
     dbt_factory_key = var_to_task_key[dbt_vars[0]] if dbt_vars else None
     dbt_key_remap = {var_to_task_key[v]: dbt_factory_key for v in dbt_vars} if dbt_factory_key else {}
+
+    # Non-dbt tasks reachable *downstream* from the collapsed dbt set. Because every dbt op folds into
+    # one factory task, a task that sat between two dbt ops (e.g. `dbt_seed >> task_b >> dbt_run`) is
+    # downstream of the factory; the factory therefore cannot depend on it without forming a cycle,
+    # but it must still depend on the factory and gate whatever followed it.
+    downstream_of_factory: set[str] = set()
+    if dbt_factory_key:
+        adjacency: dict[str, list[str]] = {v: [] for v in var_task_ids}
+        for downstream_var, ups in upstreams.items():
+            for upstream_var in ups:
+                adjacency.setdefault(upstream_var, []).append(downstream_var)
+        stack = list(dbt_vars)
+        seen_ds: set[str] = set(dbt_vars)
+        while stack:
+            for nxt in adjacency.get(stack.pop(), []):
+                if nxt not in seen_ds:
+                    seen_ds.add(nxt)
+                    stack.append(nxt)
+        downstream_of_factory = {var_to_task_key[v] for v in seen_ds if v not in dbt_var_set}
+
+    def _sandwiched_before(dbt_var: str) -> set[str]:
+        """Non-dbt tasks that fed *dbt_var* (through the collapsed dbt chain) and sit downstream of the
+        factory. A task consuming a later dbt op must still wait for these, since the collapse drops
+        the intermediate dbt op they fed."""
+        result: set[str] = set()
+        for upstream_var in upstreams.get(dbt_var, []):
+            if upstream_var in dbt_var_set:
+                result |= _sandwiched_before(upstream_var)
+            elif var_to_task_key[upstream_var] in downstream_of_factory:
+                result.add(var_to_task_key[upstream_var])
+        return result
+
+    # The factory absorbs every dbt op's external (non-dbt) upstream that is not itself downstream of
+    # the factory -- not just the first dbt op's, so a later dbt op's upstream is not silently dropped.
+    factory_dep_keys: set[str] = set()
+    for dbt_var in dbt_vars:
+        for upstream_var in upstreams.get(dbt_var, []):
+            if upstream_var in dbt_var_set:
+                continue
+            key = var_to_task_key[upstream_var]
+            if key not in downstream_of_factory:
+                factory_dep_keys.add(key)
 
     def _dep(upstream_var: str, outcome: str | None) -> str:
         key = var_to_task_key[upstream_var]
@@ -995,6 +1038,11 @@ def _load_airflow_module(
         # Remap dbt-chain upstreams to the single factory key and drop self-edges (a dbt op
         # depending on another dbt op in the same collapsed chain).
         dep_keys = {_dep(u, outcome) for u in upstreams[var]}
+        # A task consuming a later dbt op must also wait for any non-dbt task that sat between two dbt
+        # ops (the collapse folds away the intermediate dbt op that carried that ordering).
+        for upstream_var in upstreams[var]:
+            if upstream_var in dbt_var_set:
+                dep_keys |= _sandwiched_before(upstream_var)
         dep_keys.discard(task_key if operator not in ops.DBT_CLI_OPERATORS else dbt_factory_key)
         depends_on = [Dependency(task_key=k, outcome=outcome) for k in sorted(dep_keys)] or None
 
@@ -1008,13 +1056,18 @@ def _load_airflow_module(
             if emitted_dbt:
                 continue
             emitted_dbt = True
+            # The factory gates on every dbt op's external upstreams (not just the first op's), minus
+            # any that are downstream of the factory itself (a sandwiched task, which would cycle).
+            factory_depends_on = [
+                Dependency(task_key=k, outcome=outcome) for k in sorted(factory_dep_keys)
+            ] or None
             dbt_kwargs = [visitor.operators[v][2] for v in dbt_vars]
             tasks.append(
                 _build_dbt_factory(
                     task_id,
                     task_key,
                     dbt_kwargs,
-                    depends_on,
+                    factory_depends_on,
                     dbt_mode,
                     operator_types=[visitor.operators[dbt_var][1] for dbt_var in dbt_vars],
                 )
