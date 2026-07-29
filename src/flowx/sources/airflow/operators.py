@@ -29,7 +29,7 @@ from flowx.models.ir import (
     SparkPythonActivity,
     SqlActivity,
 )
-from flowx.sources.airflow import callable_notebook
+from flowx.sources.airflow import callable_notebook, templating
 from flowx.utils import normalize_task_key
 
 # --------------------------------------------------------------------------------------
@@ -160,9 +160,24 @@ def notebook_from_callable(
     return callable_notebook.render(func, source, op_args=op_args, op_kwargs=op_kwargs)
 
 
-def _sh_notebook(task_id: str, command: str) -> str:
+def _sh_notebook(task_id: str, command: str, env_widgets: dict[str, str] | None = None) -> str:
+    """Renders a bash command as a ``%sh`` notebook.
+
+    Airflow macros in the command are converted to ``$name`` shell variables (see
+    :func:`templating.convert_shell_template`); ``env_widgets`` maps each such name to the DAB
+    dynamic-value ref its widget resolves to. A Python cell reads those widgets and exports them as
+    environment variables so the following ``%sh`` cell (a subshell that inherits ``os.environ``) can
+    reference them -- a DAB ref does not resolve inside ``%sh`` source directly.
+    """
+    header = _notebook_header(task_id, "BashOperator")
+    if env_widgets:
+        export = ["import os"]
+        for name in sorted(env_widgets):
+            export.append(f"dbutils.widgets.text({name!r}, '')")
+            export.append(f"os.environ[{name!r}] = dbutils.widgets.get({name!r})")
+        header += "\n".join(export) + "\n\n# COMMAND ----------\n\n"
     lines = "".join(f"# MAGIC {line}\n" for line in command.splitlines())
-    return _notebook_header(task_id, "BashOperator") + "# MAGIC %sh\n" + lines
+    return header + "# MAGIC %sh\n" + lines
 
 
 # Airflow sensor defaults (seconds): poke every 60s, give up after 7 days.
@@ -513,18 +528,25 @@ def _build_python(ctx: OperatorContext) -> Activity:
     )
 
 
+def _sh_notebook_activity(ctx: OperatorContext, command: str) -> NotebookActivity:
+    """Builds a %sh NotebookActivity, converting Airflow macros in the command to shell vars fed by
+    job-parameter widgets so ``{{ ds }}`` and friends resolve at run time."""
+    converted, env_widgets = templating.convert_shell_template(command)
+    return NotebookActivity(
+        name=ctx.task_id,
+        task_key=ctx.task_key,
+        notebook_path=f"notebooks/{ctx.task_key}.py",
+        generated_source=_sh_notebook(ctx.task_id, converted, env_widgets),
+    )
+
+
 def _build_bash(ctx: OperatorContext) -> Activity:
     command = literal_str(ctx.kwargs.get("bash_command"))
     if command is not None:
         submit = parse_spark_submit(command)
         if submit is not None:
             return _spark_activity_from_submit(ctx, submit, "BashOperator spark-submit")
-        return NotebookActivity(
-            name=ctx.task_id,
-            task_key=ctx.task_key,
-            notebook_path=f"notebooks/{ctx.task_key}.py",
-            generated_source=_sh_notebook(ctx.task_id, command),
-        )
+        return _sh_notebook_activity(ctx, command)
     return _placeholder(ctx, "BashOperator command is not a string literal; supply the command manually.")
 
 
@@ -535,12 +557,7 @@ def _build_ssh(ctx: OperatorContext) -> Activity:
         if submit is not None:
             # The SSH hop is eliminated -- Databricks runs Spark natively.
             return _spark_activity_from_submit(ctx, submit, "SSHOperator spark-submit")
-        return NotebookActivity(
-            name=ctx.task_id,
-            task_key=ctx.task_key,
-            notebook_path=f"notebooks/{ctx.task_key}.py",
-            generated_source=_sh_notebook(ctx.task_id, command),
-        )
+        return _sh_notebook_activity(ctx, command)
     return _placeholder(ctx, "SSHOperator command is not a string literal; supply the command manually.")
 
 

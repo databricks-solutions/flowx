@@ -51,6 +51,23 @@ def date_param_default(field: str, schedule: dict[str, object] | None) -> str:
     base = "{{job.trigger.time." if kind in ("schedule", "periodic") else "{{job.start_time."
     return f"{base}{field}}}}}"
 
+
+def macro_param_default(name: str, schedule: dict[str, object] | None) -> str | None:
+    """Returns the Databricks-required default for a macro-derived job parameter, or None.
+
+    A logical-date parameter (``run_date`` etc.) gets its schedule-aware time ref; ``run_id`` gets the
+    inline run-id ref (bash/env-var threading forces even ``run_id`` through a job parameter, and its
+    default must resolve to the run id rather than an empty string). Any other name is not
+    macro-derived, so this returns None and the caller falls back to its own default.
+    """
+    field = DATE_PARAM_FIELDS.get(name)
+    if field is not None:
+        return date_param_default(field, schedule)
+    if name == "run_id":
+        return _MACRO_TO_DAB_REF["run_id"]
+    return None
+
+
 # {{ params.X }} / {{ var.value.X }} / {{ dag_run.conf['X'] }} -> {{job.parameters.X}}
 _PARAM_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^params\.([A-Za-z_][A-Za-z0-9_]*)$"),
@@ -133,6 +150,46 @@ def convert_sql_template(sql: str) -> tuple[str, dict[str, str]]:
         return match.group(0)
 
     return _JINJA.sub(_sub, sql), parameters
+
+
+# Shell-safe env var name from a job-parameter name (bash disallows the same characters as the param
+# patterns already restrict, so this is a straight pass-through kept for intent/clarity).
+def _shell_var(name: str) -> str:
+    return name
+
+
+def convert_shell_template(command: str) -> tuple[str, dict[str, str]]:
+    """Rewrites Airflow Jinja in a bash command to ``$NAME`` shell variable references.
+
+    A DAB dynamic-value ref (``{{job.parameters.X}}``) only resolves in a task *parameter* value, not
+    inside ``%sh`` notebook source, so a bash macro can't be replaced inline. Instead each recognised
+    macro becomes a ``$name`` shell variable the runner notebook exports from a widget of the same
+    name. ``{{ ds }}`` -> ``$run_date``; ``{{ params.x }}`` -> ``$x``; ``run_id`` -> ``$run_id``.
+    Unknown expressions are left untouched.
+
+    Returns ``(command_with_shell_vars, {name: dynamic_value_ref})`` where each ref is what the widget
+    of that name must resolve to (a job parameter, or an inline ref for run_id).
+    """
+    bindings: dict[str, str] = {}
+
+    def _sub(match: re.Match[str]) -> str:
+        expr = match.group(1).strip()
+        if expr in _DATE_MACRO_PARAM:
+            name, _ = _DATE_MACRO_PARAM[expr]
+            bindings[name] = "{{job.parameters." + name + "}}"
+            return f"${_shell_var(name)}"
+        if expr in _MACRO_TO_DAB_REF:
+            bindings["run_id"] = _MACRO_TO_DAB_REF[expr]
+            return f"${_shell_var('run_id')}"
+        for pattern in _PARAM_PATTERNS:
+            m = pattern.match(expr)
+            if m:
+                name = m.group(1)
+                bindings[name] = "{{job.parameters." + name + "}}"
+                return f"${_shell_var(name)}"
+        return match.group(0)
+
+    return _JINJA.sub(_sub, command), bindings
 
 
 def convert_params(value: Any) -> tuple[Any, set[str]]:

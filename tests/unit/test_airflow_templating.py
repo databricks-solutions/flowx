@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from flowx.sources.airflow.templating import (
+    convert_shell_template,
     convert_sql_template,
     convert_template,
     date_param_default,
+    macro_param_default,
 )
 
 
@@ -47,3 +49,25 @@ def test_date_param_default_is_schedule_aware():
     assert date_param_default("iso_datetime", {"kind": "periodic"}) == "{{job.trigger.time.iso_datetime}}"
     assert date_param_default("iso_date", {"kind": "file_arrival"}) == "{{job.start_time.iso_date}}"
     assert date_param_default("iso_date", None) == "{{job.start_time.iso_date}}"
+
+
+def test_shell_template_threads_macros_through_named_vars():
+    command, bindings = convert_shell_template("etl.py --date {{ ds }} --run {{ run_id }} --env {{ params.env }}")
+    assert command == "etl.py --date $run_date --run $run_id --env $env"
+    assert bindings == {
+        "run_date": "{{job.parameters.run_date}}",
+        "run_id": "{{job.run_id}}",
+        "env": "{{job.parameters.env}}",
+    }
+
+
+def test_shell_template_leaves_unknown_expressions():
+    command, bindings = convert_shell_template("echo {{ some.unknown }}")
+    assert command == "echo {{ some.unknown }}"
+    assert bindings == {}
+
+
+def test_macro_param_default_covers_date_and_run_id_and_none():
+    assert macro_param_default("run_date", {"kind": "schedule"}) == "{{job.trigger.time.iso_date}}"
+    assert macro_param_default("run_id", None) == "{{job.run_id}}"
+    assert macro_param_default("env", None) is None  # a user param, not macro-derived

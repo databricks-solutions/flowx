@@ -1388,15 +1388,16 @@ def _taskflow_invocation(func: ast.FunctionDef, tf: _TaskFlowTask, var_to_task_k
 def _declared_param_default(name: str, dag_params: dict[str, Any], schedule: dict[str, object] | None) -> Any:
     """Returns the Databricks-required default for a declared job parameter.
 
-    A DAG ``params={...}`` default wins. A logical-date parameter (``run_date`` etc., from an Airflow
-    ``{{ ds }}``/``execution_date`` macro) defaults to its schedule-aware time ref so a native backfill
-    can override it per replayed window. Everything else defaults to an empty string.
+    A DAG ``params={...}`` default wins. A macro-derived parameter (``run_date`` etc. from an Airflow
+    ``{{ ds }}``/``execution_date`` macro, or ``run_id``) gets its schedule-aware / inline default so
+    the value resolves at run time (and a native backfill can override a logical date). Everything else
+    defaults to an empty string.
     """
     if dag_params.get(name) is not None:
         return dag_params[name]
-    field = templating.DATE_PARAM_FIELDS.get(name)
-    if field is not None:
-        return templating.date_param_default(field, schedule)
+    macro_default = templating.macro_param_default(name, schedule)
+    if macro_default is not None:
+        return macro_default
     return ""
 
 

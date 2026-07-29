@@ -182,6 +182,47 @@ def test_bash_operator_becomes_sh_notebook():
     task = _by_key(p)["clean"]
     assert isinstance(task, NotebookActivity)
     assert "%sh" in task.generated_source
+    # No macros -> no widget prelude, just the %sh cell.
+    assert "dbutils.widgets" not in task.generated_source
+
+
+def test_bash_operator_macros_thread_through_shell_env_vars():
+    # A BashOperator with Airflow macros must resolve them at run time: each macro becomes a $var fed
+    # by a job-parameter widget exported to the shell env, not a literal left in the command.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d', schedule_interval='0 6 * * *') as dag:\n"
+        "    t = BashOperator(task_id='run',\n"
+        "                     bash_command='python /opt/etl.py --date {{ ds }} --env {{ params.env }}')\n"
+    )
+    task = _by_key(p)["run"]
+    assert isinstance(task, NotebookActivity)
+    # Macros converted to shell variables; the raw {{ ... }} is gone from the %sh cell.
+    assert "--date $run_date" in task.generated_source
+    assert "--env $env" in task.generated_source
+    assert "{{ ds }}" not in task.generated_source
+    # The widgets are declared and exported to the environment before the %sh cell.
+    assert "os.environ['run_date'] = dbutils.widgets.get('run_date')" in task.generated_source
+    compile("\n".join(task.generated_source.split("# MAGIC %sh")[0].splitlines()), "<pre>", "exec")
+    # run_date declared as a job parameter with the schedule-aware default (backfill-overridable).
+    params = {param["name"]: param["default"] for param in p.parameters}
+    assert params["run_date"] == "{{job.trigger.time.iso_date}}"
+    assert params["env"] == ""
+
+
+def test_bash_operator_run_id_macro_defaults_to_run_id_ref():
+    # run_id has no user default: threaded through a widget whose default resolves to the run id.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = BashOperator(task_id='run', bash_command='echo {{ run_id }}')\n"
+    )
+    task = _by_key(p)["run"]
+    assert "echo $run_id" in task.generated_source
+    params = {param["name"]: param["default"] for param in p.parameters}
+    assert params["run_id"] == "{{job.run_id}}"
 
 
 def test_bash_operator_wrapping_spark_submit_becomes_spark_task():
