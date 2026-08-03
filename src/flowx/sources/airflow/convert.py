@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 
 from flowx import ir_serde
+from flowx.adapter.predicates import walk_activities
 from flowx.ir_serde import pipeline_to_dict
 from flowx.models.ir import PlaceholderActivity
 from flowx.sources.airflow.loader import load_pipelines
@@ -105,7 +106,9 @@ def _collect_gaps(pipelines: list) -> list[dict]:
     """
     gaps: list[dict] = []
     for pipeline in pipelines:
-        for task in pipeline.tasks:
+        # Descend into for_each bodies: a mapped operator's placeholder lives in inner_activities, and
+        # a gap the agentic round never sees is guidance generated and dropped.
+        for task in walk_activities(pipeline.tasks):
             if isinstance(task, PlaceholderActivity):
                 gaps.append(
                     {

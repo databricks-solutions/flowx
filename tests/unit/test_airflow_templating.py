@@ -1,7 +1,8 @@
-"""Unit tests for Airflow Jinja -> DAB reference conversion (flowx.sources.airflow.templating)."""
+"""Unit tests for Airflow Jinja -> DAB reference conversion and cron -> Quartz translation."""
 
 from __future__ import annotations
 
+from flowx.sources.airflow.loader import _cron_to_quartz
 from flowx.sources.airflow.templating import (
     convert_shell_template,
     convert_sql_template,
@@ -71,3 +72,22 @@ def test_macro_param_default_covers_date_and_run_id_and_none():
     assert macro_param_default("run_date", {"kind": "schedule"}) == "{{job.trigger.time.iso_date}}"
     assert macro_param_default("run_id", None) == "{{job.run_id}}"
     assert macro_param_default("env", None) is None  # a user param, not macro-derived
+
+
+def test_quartz_never_restricts_both_day_of_month_and_day_of_week():
+    # Unix cron ORs a restricted dom with a restricted dow; Quartz rejects an expression that sets
+    # both, so one must become '?' or the emitted job fails to validate.
+    assert _cron_to_quartz("0 0 1 * 1") == "0 0 0 ? * 2"
+    assert _cron_to_quartz("0 0 15 * MON") == "0 0 0 ? * MON"
+    # The single-restriction cases keep their field and '?' the other.
+    assert _cron_to_quartz("0 0 1 * *") == "0 0 0 1 * ?"
+    assert _cron_to_quartz("0 6 * * 1") == "0 0 6 ? * 2"
+    assert _cron_to_quartz("0 0 * * *") == "0 0 0 ? * *"
+
+
+def test_quartz_splits_week_wrapping_weekday_ranges():
+    # Unix 5-0 (Fri-Sun) shifts to 6-1, which Quartz reads as a descending (empty) range.
+    assert _cron_to_quartz("0 0 * * 5-0") == "0 0 0 ? * 6-7,1"
+    assert _cron_to_quartz("0 0 * * 6-2") == "0 0 0 ? * 7,1-3"
+    # A non-wrapping range is untouched apart from the +1 shift.
+    assert _cron_to_quartz("0 0 * * 1-5") == "0 0 0 ? * 2-6"

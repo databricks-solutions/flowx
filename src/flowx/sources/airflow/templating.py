@@ -152,12 +152,6 @@ def convert_sql_template(sql: str) -> tuple[str, dict[str, str]]:
     return _JINJA.sub(_sub, sql), parameters
 
 
-# Shell-safe env var name from a job-parameter name (bash disallows the same characters as the param
-# patterns already restrict, so this is a straight pass-through kept for intent/clarity).
-def _shell_var(name: str) -> str:
-    return name
-
-
 def convert_shell_template(command: str) -> tuple[str, dict[str, str]]:
     """Rewrites Airflow Jinja in a bash command to ``$NAME`` shell variable references.
 
@@ -177,16 +171,16 @@ def convert_shell_template(command: str) -> tuple[str, dict[str, str]]:
         if expr in _DATE_MACRO_PARAM:
             name, _ = _DATE_MACRO_PARAM[expr]
             bindings[name] = "{{job.parameters." + name + "}}"
-            return f"${_shell_var(name)}"
+            return f"${name}"
         if expr in _MACRO_TO_DAB_REF:
             bindings["run_id"] = _MACRO_TO_DAB_REF[expr]
-            return f"${_shell_var('run_id')}"
+            return "$run_id"
         for pattern in _PARAM_PATTERNS:
             m = pattern.match(expr)
             if m:
                 name = m.group(1)
                 bindings[name] = "{{job.parameters." + name + "}}"
-                return f"${_shell_var(name)}"
+                return f"${name}"
         return match.group(0)
 
     return _JINJA.sub(_sub, command), bindings
@@ -292,7 +286,11 @@ def retry_policy(dag_default_args: dict[str, ast.expr], task_kwargs: dict[str, a
 
 
 def email_on_failure(dag_default_args: dict[str, ast.expr], task_kwargs: dict[str, ast.expr]) -> list[str]:
-    """Returns email recipients when email_on_failure is set (for a job-level notification note)."""
+    """Returns email recipients when email_on_failure is set (for a job-level notification note).
+
+    TODO: not wired up yet -- the shared IR has no email-notification field, so carrying these through
+    to a job's ``email_notifications`` needs an IR addition (tracked separately).
+    """
     on_failure = task_kwargs.get("email_on_failure", dag_default_args.get("email_on_failure"))
     if isinstance(on_failure, ast.Constant) and on_failure.value is False:
         return []

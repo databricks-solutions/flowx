@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from flowx.adapter.predicates import walk_activities
 from flowx.models.ir import NotebookActivity, Pipeline, PlaceholderActivity
 from flowx.sources.adf.loader import clear_stale_outputs
 from flowx.sources.airflow.loader import load_pipelines
@@ -24,9 +25,13 @@ logger = logging.getLogger(__name__)
 
 
 def _classify(pipeline: Pipeline) -> list[dict[str, str]]:
-    """Classifies each task in *pipeline* for the inventory."""
+    """Classifies each task in *pipeline* for the inventory.
+
+    Descends into for_each bodies so a mapped operator's nested placeholder is counted as agentic
+    rather than being invisible to the inventory (which would report full coverage).
+    """
     items: list[dict[str, str]] = []
-    for task in pipeline.tasks:
+    for task in walk_activities(pipeline.tasks):
         if isinstance(task, NotebookActivity):
             strategy = "deterministic"
         elif isinstance(task, PlaceholderActivity):

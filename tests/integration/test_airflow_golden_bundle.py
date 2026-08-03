@@ -80,7 +80,8 @@ def test_root_file_sensor_is_polling_task(bundle_dir: Path):
 
 def test_mid_dag_table_sensor_is_polling_task(bundle_dir: Path):
     src = (bundle_dir / "src" / "notebooks" / "wait_partition.py").read_text()
-    assert 'spark.catalog.tableExists("main.analytics.raw_orders")' in src
+    # The table name is emitted through repr() so a name containing a quote can't break the source.
+    assert f"spark.catalog.tableExists({'main.analytics.raw_orders'!r})" in src
     assert "POKE_INTERVAL = 60" in src
     ast.parse(src)
 

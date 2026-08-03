@@ -205,10 +205,31 @@ def test_bash_operator_macros_thread_through_shell_env_vars():
     # The widgets are declared and exported to the environment before the %sh cell.
     assert "os.environ['run_date'] = dbutils.widgets.get('run_date')" in task.generated_source
     compile("\n".join(task.generated_source.split("# MAGIC %sh")[0].splitlines()), "<pre>", "exec")
+    # Each widget must be BOUND to its job parameter: an unbound widget is backfilled with an empty
+    # string by the bundler, so the command would silently run with blank values.
+    assert task.base_parameters == {
+        "run_date": "{{job.parameters.run_date}}",
+        "env": "{{job.parameters.env}}",
+    }
     # run_date declared as a job parameter with the schedule-aware default (backfill-overridable).
     params = {param["name"]: param["default"] for param in p.parameters}
     assert params["run_date"] == "{{job.trigger.time.iso_date}}"
     assert params["env"] == ""
+
+
+def test_python_operator_with_unresolvable_callable_becomes_placeholder():
+    # python_callable imported from another module has no source to render -- it must become a
+    # placeholder (a real gaps.json entry), not a bodyless notebook counted as deterministic.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "import my_module\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    a = PythonOperator(task_id='a', python_callable=my_module.etl_step)\n"
+    )
+    task = _by_key(p)["a"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "could not be resolved" in task.comment
 
 
 def test_bash_operator_run_id_macro_defaults_to_run_id_ref():
@@ -1204,6 +1225,40 @@ def test_expand_direct_call_form():
         "    m = BashOperator(task_id='run', bash_command='echo').expand(env=[{'a': 1}])\n"
     )
     assert isinstance(_by_key(p)["run"], ForEachActivity)
+
+
+def test_for_each_inputs_come_from_expand_not_partial():
+    # A list-valued .partial() arg is a FIXED value; only the .expand() kwarg is fanned out. Taking the
+    # partial list would iterate the wrong values (and the wrong count).
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    m = BashOperator.partial(task_id='t', env=['FIXED1', 'FIXED2']).expand(\n"
+        "        bash_command=['echo a', 'echo b', 'echo c'])\n"
+    )
+    task = _by_key(p)["t"]
+    assert isinstance(task, ForEachActivity)
+    assert task.items_expression == '["echo a", "echo b", "echo c"]'
+
+
+def test_placeholder_nested_in_for_each_is_collected_as_a_gap():
+    # A mapped operator whose command isn't a literal becomes a PlaceholderActivity INSIDE the
+    # for_each; gaps.json and the inventory must see it, or the guidance is generated then dropped.
+    from flowx.sources.airflow.convert import _collect_gaps
+    from flowx.sources.airflow.discover import _classify
+
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    m = BashOperator.partial(task_id='t').expand(bash_command=['echo a', 'echo b'])\n"
+    )
+    outer = _by_key(p)["t"]
+    assert isinstance(outer, ForEachActivity)
+    assert isinstance(outer.inner_activities[0], PlaceholderActivity)
+    assert len(_collect_gaps([p])) == 1
+    assert [item["strategy"] for item in _classify(p)].count("agentic") == 1
 
 
 def test_mixed_shift_directions_preserve_each_operator_direction():

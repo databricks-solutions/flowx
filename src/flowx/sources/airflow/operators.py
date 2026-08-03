@@ -459,12 +459,17 @@ def parse_spark_submit(command: str) -> _SparkSubmit | None:
 
 
 def _spark_activity_from_submit(ctx: OperatorContext, submit: _SparkSubmit, note: str) -> Activity:
-    """Builds a Spark JAR/Python activity from a parsed spark-submit."""
+    """Builds a Spark JAR/Python activity from a parsed spark-submit.
+
+    ``note`` records which operator the spark-submit came from and is carried as the activity
+    description so the emitted task states its provenance.
+    """
     app = submit.application or ""
     if submit.java_class or app.endswith(".jar"):
         activity: Activity = SparkJarActivity(
             name=ctx.task_id,
             task_key=ctx.task_key,
+            description=f"Migrated from Airflow {note}.",
             main_class_name=submit.java_class or "UNKNOWN_MAIN_CLASS",
             parameters=submit.app_args or None,
             libraries=[{"jar": app}] if app else None,
@@ -473,6 +478,7 @@ def _spark_activity_from_submit(ctx: OperatorContext, submit: _SparkSubmit, note
         activity = SparkPythonActivity(
             name=ctx.task_id,
             task_key=ctx.task_key,
+            description=f"Migrated from Airflow {note}.",
             python_file=app or f"../src/{ctx.task_key}.py",
             parameters=submit.app_args or None,
         )
@@ -486,17 +492,25 @@ def _spark_activity_from_submit(ctx: OperatorContext, submit: _SparkSubmit, note
 
 def _build_python(ctx: OperatorContext) -> Activity:
     func = ctx.functions.get(callable_name(ctx.kwargs.get("python_callable")) or "")
+    # The callable is not defined in this DAG module (commonly imported from a helper package), so
+    # there is no source to render -- route it to the agentic-gap round rather than emitting a
+    # notebook with no body.
+    if func is None:
+        return _placeholder(
+            ctx,
+            f"{ctx.operator} python_callable could not be resolved in the DAG module "
+            "(likely imported from another module); port the callable manually.",
+        )
     # A callable that reads Airflow task context (**context / ti) or XCom can't run as a plain
     # notebook -- route it to the agentic-gap round instead of emitting code that fails at runtime.
-    if func is not None:
-        reason = callable_notebook.airflow_runtime_reason(func, ctx.source)
-        if reason is not None:
-            return _placeholder(
-                ctx,
-                f"Airflow {ctx.operator} {reason}. flowx has no Airflow runtime to supply it; "
-                "translate manually -- pass upstream data via job parameters or map XCom to "
-                "dbutils.jobs.taskValues (set in the producer, get in the consumer).",
-            )
+    reason = callable_notebook.airflow_runtime_reason(func, ctx.source)
+    if reason is not None:
+        return _placeholder(
+            ctx,
+            f"Airflow {ctx.operator} {reason}. flowx has no Airflow runtime to supply it; "
+            "translate manually -- pass upstream data via job parameters or map XCom to "
+            "dbutils.jobs.taskValues (set in the producer, get in the consumer).",
+        )
     op_kwargs_node = ctx.kwargs.get("op_kwargs")
     op_args_node = ctx.kwargs.get("op_args")
     op_kwargs = literal_value(op_kwargs_node)
@@ -509,9 +523,7 @@ def _build_python(ctx: OperatorContext) -> Activity:
         op_args = list(op_args)
     has_kwargs = isinstance(op_kwargs, dict)
     has_args = isinstance(op_args, list)
-    generated = (
-        notebook_from_callable(func, ctx.source, op_args=has_args, op_kwargs=has_kwargs) if func is not None else None
-    )
+    generated = notebook_from_callable(func, ctx.source, op_args=has_args, op_kwargs=has_kwargs)
     # op_args/op_kwargs pass as JSON widgets so lists/numbers/nested objects survive; the notebook
     # json.loads() them and splats into the call.
     base_parameters: dict[str, str] = {}
@@ -530,13 +542,18 @@ def _build_python(ctx: OperatorContext) -> Activity:
 
 def _sh_notebook_activity(ctx: OperatorContext, command: str) -> NotebookActivity:
     """Builds a %sh NotebookActivity, converting Airflow macros in the command to shell vars fed by
-    job-parameter widgets so ``{{ ds }}`` and friends resolve at run time."""
+    job-parameter widgets so ``{{ ds }}`` and friends resolve at run time.
+
+    ``base_parameters`` must carry the dynamic-value ref for each widget: an unbound widget is
+    backfilled with an empty string by the bundler, which would run the command with blank values.
+    """
     converted, env_widgets = templating.convert_shell_template(command)
     return NotebookActivity(
         name=ctx.task_id,
         task_key=ctx.task_key,
         notebook_path=f"notebooks/{ctx.task_key}.py",
         generated_source=_sh_notebook(ctx.task_id, converted, env_widgets),
+        base_parameters=dict(env_widgets) or None,
     )
 
 

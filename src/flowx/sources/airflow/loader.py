@@ -70,8 +70,6 @@ class _TaskFlowTask:
 
 def _sanitize_task_key(name: str) -> str:
     """Converts an Airflow task_id into a valid Databricks task key."""
-    import re
-
     key = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
     key = re.sub(r"_+", "_", key).strip("_")
     return key or "unnamed"
@@ -118,7 +116,14 @@ def _shift_weekday_field(dow: str) -> str:
             step = "/" + step
         if "-" in part:
             lo, _, hi = part.partition("-")
-            return f"{_shift_token(lo)}-{_shift_token(hi)}{step}"
+            shifted_lo, shifted_hi = _shift_token(lo), _shift_token(hi)
+            # A range that wraps the week in Unix numbering (e.g. 5-0, Fri-Sun) shifts to a descending
+            # range Quartz reads as empty; split it at the week boundary instead (6-7,1).
+            if shifted_lo.isdigit() and shifted_hi.isdigit() and int(shifted_lo) > int(shifted_hi):
+                head = shifted_lo if shifted_lo == "7" else f"{shifted_lo}-7"
+                tail = shifted_hi if shifted_hi == "1" else f"1-{shifted_hi}"
+                return f"{head},{tail}{step}"
+            return f"{shifted_lo}-{shifted_hi}{step}"
         return f"{_shift_token(part)}{step}"
 
     return ",".join(_shift_part(p) for p in dow.split(","))
@@ -139,7 +144,12 @@ def _cron_to_quartz(cron: str) -> str | None:
     minute, hour, dom, month, dow = fields
     if dow not in ("*", "?"):
         dow = _shift_weekday_field(dow)
-    if dow == "*" and dom != "*":
+    if dom != "*" and dow not in ("*", "?"):
+        # Unix cron ORs a restricted day-of-month with a restricted day-of-week; Quartz cannot express
+        # both (it rejects the expression outright). Keep the day-of-week and drop the day-of-month so
+        # the job is still valid -- narrower than the Airflow schedule, and flagged for review.
+        dom = "?"
+    elif dow == "*" and dom != "*":
         dow = "?"
     elif dom == "*":
         dom = "?"
@@ -270,9 +280,7 @@ class _DagVisitor(ast.NodeVisitor):
     """Collects operator calls, dependency edges, and the DAG's schedule."""
 
     def __init__(self, module: ast.Module) -> None:
-        self._functions: dict[str, ast.FunctionDef] = {
-            node.name: node for node in _iter_functions(module) if isinstance(node, ast.FunctionDef)
-        }
+        self._functions: dict[str, ast.FunctionDef] = {node.name: node for node in _iter_functions(module)}
         # task variable name -> (task_id, operator, kwargs)
         self.operators: dict[str, tuple[str, str, dict[str, ast.expr]]] = {}
         # task variable name -> the operator's ast.Call node (for source-slicing placeholders)
@@ -297,6 +305,9 @@ class _DagVisitor(ast.NodeVisitor):
         self.group_vars: dict[str, str] = {}
         # task variable names defined via dynamic mapping (.expand()) -> wrapped in a for_each
         self.mapped: set[str] = set()
+        # mapped var -> the kwarg names passed to .expand(). Only these fan out; a list-valued
+        # .partial() arg is a fixed value and must not be mistaken for the mapped iterable.
+        self.expand_kwargs: dict[str, list[str]] = {}
         # TaskFlow: function name -> (FunctionDef, decorator dotted-name) for @task-decorated defs.
         # Pre-scanned so a @task def defined after the @dag body that uses it is still resolved.
         self.taskflow_defs: dict[str, tuple[ast.FunctionDef, str]] = {}
@@ -343,7 +354,7 @@ class _DagVisitor(ast.NodeVisitor):
             var = node.targets[0].id
             direct = _direct_operator_call(node.value)
             mapped = None if direct is not None else _mapped_operator_call(node.value)
-            call = direct or mapped
+            call = direct or (mapped[0] if mapped is not None else None)
             if call is not None and isinstance(call.func, ast.Name):
                 construct = call.func.id
                 kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg}
@@ -352,6 +363,7 @@ class _DagVisitor(ast.NodeVisitor):
                 self.calls[var] = call
                 if mapped is not None:
                     self.mapped.add(var)
+                    self.expand_kwargs[var] = mapped[1]
                 if self._group_stack:
                     self.groups[var] = "__".join(self._group_stack)
             elif self._register_taskflow_call(node.value, var):
@@ -648,7 +660,6 @@ class _DagVisitor(ast.NodeVisitor):
 
 def _expand_group_edges(
     edges: list[tuple[str, str]],
-    operators: dict[str, tuple[str, str, dict[str, ast.expr]]],
     groups: dict[str, str],
     group_vars: dict[str, str],
 ) -> list[tuple[str, str]]:
@@ -745,11 +756,6 @@ def _iter_functions(module: ast.Module) -> list[ast.FunctionDef]:
     return found
 
 
-def _referenced_names(node: ast.expr) -> set[str]:
-    """Every bare Name id loaded anywhere in *node* (for TaskFlow data-flow edge detection)."""
-    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
-
-
 def _names_in(node: ast.expr) -> list[str]:
     """Returns the task-variable names in a Name or a ``[Name, ...]`` list node."""
     if isinstance(node, ast.Name):
@@ -767,17 +773,6 @@ def _literal_argument_source(node: ast.expr) -> str | None:
         return None
 
 
-def _flatten_shift_nodes(node: ast.expr) -> list[ast.expr]:
-    """Flattens a ``>>`` / ``<<`` chain into its per-position operand nodes, left to right.
-
-    ``a >> [b, c] >> d()`` becomes ``[Name('a'), List([b, c]), Call(d)]``; the caller resolves each
-    position to task vars (registering an inline TaskFlow call along the way).
-    """
-    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.RShift, ast.LShift)):
-        return _flatten_shift_nodes(node.left) + _flatten_shift_nodes(node.right)
-    return [node]
-
-
 def _direct_operator_call(node: ast.Call) -> ast.Call | None:
     """Returns *node* if it is a direct ``SomeOperator(...)`` / ``SomeSensor(...)`` call."""
     if isinstance(node.func, ast.Name) and _is_task_construct(node.func.id):
@@ -785,13 +780,14 @@ def _direct_operator_call(node: ast.Call) -> ast.Call | None:
     return None
 
 
-def _mapped_operator_call(node: ast.Call) -> ast.Call | None:
+def _mapped_operator_call(node: ast.Call) -> tuple[ast.Call, list[str]] | None:
     """Returns the underlying operator call for a dynamic-mapping ``.expand(...)`` chain.
 
-    Handles ``Op(...).expand(...)`` and ``Op.partial(...).expand(...)``. The returned
-    Call's keywords are the merged operator kwargs (partial args + expand args), and its
-    ``.func`` is the operator Name, so the caller treats it like a direct operator call.
-    The mapped kwargs let the loader wrap the operator in a for_each_task.
+    Handles ``Op(...).expand(...)`` and ``Op.partial(...).expand(...)``. Returns
+    ``(merged_call, expand_kwarg_names)``: the Call's keywords are the merged operator kwargs
+    (partial args + expand args) and its ``.func`` is the operator Name, so the caller treats it like a
+    direct operator call. The expand kwarg names are returned separately because only those are
+    fanned out -- a list-valued ``.partial()`` arg is a fixed value, not the mapped iterable.
     """
     if not (isinstance(node.func, ast.Attribute) and node.func.attr == "expand"):
         return None
@@ -814,7 +810,7 @@ def _mapped_operator_call(node: ast.Call) -> ast.Call | None:
         args=[],
         keywords=list(inner.keywords) + list(node.keywords),
     )
-    return merged
+    return merged, [kw.arg for kw in node.keywords if kw.arg]
 
 
 def _is_task_construct(name: str) -> bool:
@@ -947,7 +943,7 @@ def _load_airflow_module(
     # Expand group-level edges (`group_a >> group_b`, `task >> group`, ...) into edges between the
     # groups' boundary tasks: leaves of the upstream group -> roots of the downstream group, matching
     # Airflow's TaskGroup dependency semantics. A non-group var resolves to itself.
-    edges = _expand_group_edges(visitor.edges, visitor.operators, visitor.groups, visitor.group_vars)
+    edges = _expand_group_edges(visitor.edges, visitor.groups, visitor.group_vars)
 
     # Build the upstream adjacency in dependency terms, then drop structural nodes
     # (Dummy/Empty and lifted root sensors) by rewiring their downstreams to their upstreams.
@@ -1112,7 +1108,11 @@ def _load_airflow_module(
 
         if var in visitor.mapped:
             # Dynamic mapping (.expand()) -> a for_each_task iterating the mapped operator.
-            tasks.append(_wrap_in_for_each(activity, task_id, task_key, depends_on, kwargs))
+            tasks.append(
+                _wrap_in_for_each(
+                    activity, task_id, task_key, depends_on, kwargs, visitor.expand_kwargs.get(var) or []
+                )
+            )
         else:
             tasks.append(activity)
 
@@ -1212,18 +1212,21 @@ def _wrap_in_for_each(
     task_key: str,
     depends_on: list[Dependency] | None,
     kwargs: dict[str, ast.expr],
+    expand_kwargs: list[str],
 ) -> ForEachActivity:
     """Wraps a dynamically-mapped operator in a ForEachActivity (-> for_each_task).
 
-    Airflow ``.expand(x=[...])`` fans a task out over an iterable. The for_each's
-    ``inputs`` is the first list-valued expand kwarg (rendered as a JSON array literal
-    when it is a static list; otherwise ``{{job.parameters...}}`` is left for review).
-    The mapped operator becomes the single inner activity, re-keyed so it doesn't
-    collide with the for_each task key.
+    Airflow ``.expand(x=[...])`` fans a task out over an iterable. The for_each's ``inputs`` is the
+    first list-valued kwarg passed to ``.expand()`` -- restricted to *expand* kwargs because a
+    list-valued ``.partial()`` arg is a fixed value, and taking it would fan the task out over the
+    wrong list. The mapped operator becomes the single inner activity, re-keyed so it doesn't collide
+    with the for_each task key.
     """
     items = "[]"
-    for key, node in kwargs.items():
-        if key in ("task_id", "group_id"):
+    candidates = expand_kwargs or [key for key in kwargs if key not in ("task_id", "group_id")]
+    for key in candidates:
+        node = kwargs.get(key)
+        if node is None or key in ("task_id", "group_id"):
             continue
         value = ops.literal_value(node)
         if isinstance(value, list):
