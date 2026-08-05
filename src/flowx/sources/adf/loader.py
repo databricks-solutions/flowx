@@ -59,6 +59,8 @@ AGENTIC_TYPES: set[str] = {
     "ExecuteDataFlow",
     "Until",
     "SqlServerStoredProcedure",
+    # ADF exports the type as "AzureFunctionActivity"; the bare alias covers pre-normalized inputs.
+    "AzureFunctionActivity",
     "AzureFunction",
     "WebHook",
     "Custom",

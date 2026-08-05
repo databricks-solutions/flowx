@@ -58,7 +58,10 @@ intermediates under `.work/` (pruned by `package`).
 
 1. **Discover** -- Parse ADF JSON from UC volumes -> typed AST -> `metadata/inventory.json` + `metadata/profile_report.csv` + verbatim `metadata/<pipeline>.arm.json`
 2. **Convert** -- Registry dispatch + topological sort -> Pipeline IR (deterministic + agentic gaps); transient report at `.work/translation_report.json`
-3. **Package** -- IR -> DAB YAML + generated notebooks + setup scripts; prunes `.work/`
+3. **Package** -- IR -> DAB YAML + generated notebooks + setup scripts; prunes `.work/`. The
+   `--packaging-mode` flag (`per-pipeline` default / `single` / `per-group`) controls how a
+   multi-pipeline factory is laid out into bundles; a top-level `DEPLOY.md` records the suggested
+   callees-first deploy order for every mode.
 
 ### Key Patterns
 - `@dataclass(slots=True, kw_only=True)` for all models
@@ -80,7 +83,10 @@ intermediates under `.work/` (pruned by `package`).
 | `preparer/workflow_preparer.py` | Orchestrates activity preparers |
 | `preparer/code_generator.py` | Notebook code generation for activity types |
 | `preparer/activity_preparers/` | One module per activity type |
-| `bundler/dab_writer.py` | Generates databricks.yml, job YAML, resources |
+| `bundler/dab_writer.py` | Generates databricks.yml, job YAML, resources; groups pipelines into bundles per `--packaging-mode` |
+| `bundler/pipeline_graph.py` | Run Pipeline (ExecutePipeline) dependency graph: grouping (connected components) + deploy order (topo sort) |
+| `bundler/deploy_writer.py` | Renders the top-level `DEPLOY.md` (bundle layout + suggested deploy order) |
+| `bundler/deployer.py` | Ordered multi-bundle deploy: discovers bundles, deploys callees first, wires cross-bundle job ids |
 | `bundler/notebook_writer.py` | Writes generated notebooks to bundle |
 | `bundler/setup_generator.py` | Setup scripts for UC volumes, secrets, connections |
 | `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/` |
