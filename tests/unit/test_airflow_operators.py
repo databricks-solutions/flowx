@@ -15,7 +15,7 @@ from flowx.models.ir import (
     SparkPythonActivity,
     SqlActivity,
 )
-from flowx.sources.airflow.loader import load_airflow_dag
+from flowx.sources.airflow.loader import load_airflow_dag, load_airflow_dags
 
 
 def _load(dag_source: str):
@@ -23,6 +23,14 @@ def _load(dag_source: str):
         path = Path(tmp) / "dag.py"
         path.write_text(dag_source, encoding="utf-8")
         return load_airflow_dag(path)
+
+
+def _load_all(dag_source: str):
+    """Loads every DAG declared in one module (the multi-DAG form)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "dag.py"
+        path.write_text(dag_source, encoding="utf-8")
+        return load_airflow_dags(path)
 
 
 def _by_key(pipeline):
@@ -1198,6 +1206,64 @@ def test_trigger_rule_enum_member_maps_to_run_if_constant():
 
 
 # --------------------------------------------------------------------------------------
+# Bare (unassigned) operator statements
+# --------------------------------------------------------------------------------------
+
+
+def test_bare_operator_statements_are_registered():
+    # Airflow registers a task when the operator is instantiated inside a DAG context; assigning it to
+    # a name is optional. Unassigned operators must not vanish (the Airflow example DAGs use this form).
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    BashOperator(task_id='alpha', bash_command='echo alpha')\n"
+        "    BashOperator(task_id='beta', bash_command='echo beta')\n"
+        "    assigned = BashOperator(task_id='gamma', bash_command='echo gamma')\n"
+    )
+    assert set(_by_key(p)) == {"alpha", "beta", "gamma"}
+
+
+def test_bare_operator_chain_keeps_tasks_and_edge():
+    # `Op() >> Op()` with no assignments: both tasks register and the dependency edge survives.
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    BashOperator(task_id='first', bash_command='echo 1')"
+        " >> BashOperator(task_id='second', bash_command='echo 2')\n"
+    )
+    tasks = _by_key(p)
+    assert set(tasks) == {"first", "second"}
+    assert [d.task_key for d in tasks["second"].depends_on] == ["first"]
+
+
+def test_bare_operator_without_literal_task_id_gets_synthetic_key():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    BashOperator(bash_command='echo x')\n"
+    )
+    assert list(_by_key(p)) == ["bare_task1"]
+
+
+def test_bare_operators_stay_scoped_to_their_own_dag():
+    # Two DAGs in one module: each keeps only its own bare tasks.
+    p = _load_all(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='one') as dag1:\n"
+        "    BashOperator(task_id='a', bash_command='echo a')\n"
+        "with DAG(dag_id='two') as dag2:\n"
+        "    BashOperator(task_id='b', bash_command='echo b')\n"
+        "    BashOperator(task_id='c', bash_command='echo c')\n"
+    )
+    by_name = {pipeline.name: sorted(t.task_key for t in pipeline.tasks) for pipeline in p}
+    assert by_name == {"one": ["a"], "two": ["b", "c"]}
+
+
+# --------------------------------------------------------------------------------------
 # Dynamic mapping (.expand), TaskGroup prefixing, timezone/timedelta schedules
 # --------------------------------------------------------------------------------------
 
@@ -1665,6 +1731,27 @@ def test_taskflow_expand_literal_list_becomes_for_each():
     assert "dbutils.widgets.get('item')" in inner.generated_source
     assert "item=_expand_item" in inner.generated_source
     compile(inner.generated_source, "<proc>", "exec")
+
+
+def test_taskflow_partial_expand_gap_carries_the_mapping_call():
+    # .partial() fixed args can't ride on a for_each inner task, so the task becomes a placeholder --
+    # but the gap must carry the mapping call, or the fixed argument values are lost and the agentic
+    # round can't reconstruct the invocation (the callable's own source doesn't contain them).
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def get_astronauts():\n    return [{'name': 'A'}]\n"
+        "@task\n"
+        "def greet(greeting, person):\n    print(greeting, person)\n"
+        "@dag(dag_id='f')\n"
+        "def pipeline():\n"
+        "    greet.partial(greeting='Hello! :)').expand(person=get_astronauts())\n"
+        "pipeline()\n"
+    )
+    placeholder = next(t for t in p.tasks if isinstance(t, PlaceholderActivity))
+    mapping = placeholder.raw_definition["mapping"]
+    assert "greeting='Hello! :)'" in mapping
+    assert "expand(person=get_astronauts())" in mapping
 
 
 def test_taskflow_expand_dict_list_becomes_for_each():

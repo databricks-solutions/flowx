@@ -308,6 +308,8 @@ class _DagVisitor(ast.NodeVisitor):
         # mapped var -> the kwarg names passed to .expand(). Only these fan out; a list-valued
         # .partial() arg is a fixed value and must not be mistaken for the mapped iterable.
         self.expand_kwargs: dict[str, list[str]] = {}
+        # Disambiguates synthetic vars for operators instantiated without an assignment.
+        self._bare_operator_counter = 0
         # TaskFlow: function name -> (FunctionDef, decorator dotted-name) for @task-decorated defs.
         # Pre-scanned so a @task def defined after the @dag body that uses it is still resolved.
         self.taskflow_defs: dict[str, tuple[ast.FunctionDef, str]] = {}
@@ -352,25 +354,64 @@ class _DagVisitor(ast.NodeVisitor):
     def visit_Assign(self, node: ast.Assign) -> None:
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call):
             var = node.targets[0].id
-            direct = _direct_operator_call(node.value)
-            mapped = None if direct is not None else _mapped_operator_call(node.value)
-            call = direct or (mapped[0] if mapped is not None else None)
-            if call is not None and isinstance(call.func, ast.Name):
-                construct = call.func.id
-                kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg}
-                task_id = ops.literal_str(kwargs.get("task_id")) or ops.literal_str(kwargs.get("group_id")) or var
-                self.operators[var] = (task_id, construct, kwargs)
-                self.calls[var] = call
-                if mapped is not None:
-                    self.mapped.add(var)
-                    self.expand_kwargs[var] = mapped[1]
-                if self._group_stack:
-                    self.groups[var] = "__".join(self._group_stack)
+            if self._register_operator_call(node.value, var):
+                pass  # a `x = SomeOperator(...)` (optionally .expand()-mapped) instantiation
             elif self._register_taskflow_call(node.value, var):
                 pass  # a `x = mytask(...)` TaskFlow invocation, captured with var as its key
             else:
                 self._register_taskgroup_call(node.value, var)  # a `x = mygroup(...)` @task_group call
         self.generic_visit(node)
+
+    def _register_operator_call(self, node: ast.Call, var: str) -> bool:
+        """Registers a classic operator/sensor instantiation under the task variable *var*.
+
+        Airflow registers a task when the operator is instantiated inside a DAG context; assigning it
+        to a name is a Python convenience, not a requirement. So this is shared by the assigned form
+        and the bare-statement / bare-chain forms, which synthesise *var* from the task_id.
+
+        Returns True when *node* was a (possibly ``.expand()``-mapped) operator call.
+        """
+        direct = _direct_operator_call(node)
+        mapped = None if direct is not None else _mapped_operator_call(node)
+        call = direct or (mapped[0] if mapped is not None else None)
+        if call is None or not isinstance(call.func, ast.Name):
+            return False
+        construct = call.func.id
+        kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        task_id = ops.literal_str(kwargs.get("task_id")) or ops.literal_str(kwargs.get("group_id")) or var
+        self.operators[var] = (task_id, construct, kwargs)
+        self.calls[var] = call
+        if mapped is not None:
+            self.mapped.add(var)
+            self.expand_kwargs[var] = mapped[1]
+        if self._group_stack:
+            self.groups[var] = "__".join(self._group_stack)
+        return True
+
+    def _register_bare_operator_call(self, node: ast.Call) -> str | None:
+        """Registers an operator instantiated without an assignment, keyed by a synthetic var.
+
+        The var is derived from the literal ``task_id`` (which is what the emitted task key comes from
+        anyway), with a counter suffix if two bare operators somehow share one.
+        """
+        if _direct_operator_call(node) is None and _mapped_operator_call(node) is None:
+            return None
+        kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        base = ops.literal_str(kwargs.get("task_id")) or ops.literal_str(kwargs.get("group_id"))
+        if base is None:
+            # `.expand()` chains carry task_id on the inner .partial(...) call, not the outer one.
+            mapped = _mapped_operator_call(node)
+            if mapped is not None:
+                inner_kwargs = {kw.arg: kw.value for kw in mapped[0].keywords if kw.arg}
+                base = ops.literal_str(inner_kwargs.get("task_id")) or ops.literal_str(inner_kwargs.get("group_id"))
+        if base is None:
+            self._bare_operator_counter += 1
+            base = f"_bare_task{self._bare_operator_counter}"
+        var = base
+        while var in self.operators:
+            self._bare_operator_counter += 1
+            var = f"{base}__{self._bare_operator_counter}"
+        return var if self._register_operator_call(node, var) else None
 
     def _taskflow_def_name(self, call: ast.Call) -> tuple[str | None, bool, str | None]:
         """Resolves a call's underlying ``@task`` def name, unwrapping the mapping/config chain.
@@ -609,6 +650,8 @@ class _DagVisitor(ast.NodeVisitor):
                     self._taskflow_counter += 1
                     task_var = f"{def_name}__tf{self._taskflow_counter}"
                 self._register_taskflow_call(value, task_var)
+            elif self._register_bare_operator_call(value) is not None:
+                pass  # a bare `SomeOperator(task_id=...)` statement -- registered under a synthetic var
             elif not self._register_taskgroup_call(value, None):
                 self._collect_set_dependency(value)
         self.generic_visit(node)
@@ -643,6 +686,10 @@ class _DagVisitor(ast.NodeVisitor):
                 synthetic = f"{def_name}__tf{self._taskflow_counter}"
                 self._register_taskflow_call(node, synthetic)
                 return [synthetic]
+            # An inline classic operator (`Op(...) >> Op(...)` with no assignments) is still a task.
+            bare_var = self._register_bare_operator_call(node)
+            if bare_var is not None:
+                return [bare_var]
         return []
 
     def _collect_set_dependency(self, call: ast.Call) -> None:
@@ -1129,6 +1176,11 @@ def _load_airflow_module(
             # emitting a single-run notebook.
             reason = f"mapped parameter {tf.expand_kwarg!r}" if tf.expand_kwarg else "multiple mapped parameters"
             func = functions.get(tf.def_name)
+            # The mapping call carries the .partial(...) fixed args and the mapped iterable, neither of
+            # which appears in the callable's own source -- without it the agentic round can't
+            # reconstruct the invocation.
+            mapping_call = visitor.calls.get(var)
+            mapping_source = ast.get_source_segment(source, mapping_call) if mapping_call is not None else None
             placeholder = PlaceholderActivity(
                 name=tf.task_id,
                 task_key=task_key,
@@ -1141,6 +1193,7 @@ def _load_airflow_module(
                 raw_definition={
                     "operator": f"@{tf.decorator}.expand",
                     "source": ast.get_source_segment(source, func) if func is not None else "",
+                    "mapping": mapping_source or "",
                 },
             )
             placeholder.depends_on = depends_on
