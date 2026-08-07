@@ -608,6 +608,9 @@ class Pipeline:
         tasks: Ordered list of translated activities.
         tags: System and user-defined tags.
         not_translatable: Entries describing properties that could not be translated.
+        reconciliation_status: Source-audit result for this pipeline.
+        migration_status: Whether the pipeline is included or explicitly excluded.
+        audit: Source-audit counts and transformation ledger.
     """
 
     name: str
@@ -616,6 +619,9 @@ class Pipeline:
     tasks: list[Activity] = field(default_factory=list)
     tags: dict[str, str] = field(default_factory=dict)
     not_translatable: list[dict[str, Any]] = field(default_factory=list)
+    reconciliation_status: str | None = None
+    migration_status: str = "included"
+    audit: dict[str, Any] = field(default_factory=dict)
     translation_configuration: TranslationConfiguration | None = None
 
 

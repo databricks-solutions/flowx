@@ -129,11 +129,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-dir", required=True, type=Path, help="A DAG .py file or directory of DAGs.")
     parser.add_argument("--output-dir", type=Path, default=Path("./flowx_output"), help="Shared migration output dir.")
     parser.add_argument("--pipeline", type=str, default=None, help="Filter to a single DAG by dag_id.")
+    parser.add_argument(
+        "--exclude-dag",
+        action="append",
+        default=[],
+        help="Exclude a DAG from bundle emission while retaining it in audit and coverage reporting. Repeatable.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    pipelines = load_pipelines(args.source_dir, pipeline=args.pipeline)
+    pipelines = load_pipelines(args.source_dir, pipeline=args.pipeline, exclude_dags=set(args.exclude_dag))
     if not pipelines:
         logger.error("No Airflow DAGs found under %s (or none matched --pipeline).", args.source_dir)
         return 1
@@ -156,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Deterministic:    {summary['deterministic_count']}")
     print(f"  Agentic:          {summary['agentic_count']}")
     print(f"Coverage:           {summary['coverage_pct']}%")
-    return 0
+    return 1 if any(pipeline.reconciliation_status == "failed" for pipeline in pipelines) else 0
 
 
 if __name__ == "__main__":

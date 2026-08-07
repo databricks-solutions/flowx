@@ -122,7 +122,7 @@ def test_bundle_job_reference_to_unknown_resource_is_flagged(tmp_path):
     result = check_bundle_dir(tmp_path)
     finding = next(finding for finding in result.findings if finding.code == "dangling_run_job_reference")
 
-    assert finding.severity == "warning"
+    assert finding.severity == "violation"
     assert "parent.yml" in finding.location
     assert "call_missing" in finding.location
     assert "dangling_run_job_reference" in format_result(result)

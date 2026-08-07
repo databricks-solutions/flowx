@@ -62,6 +62,10 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
         "schedule": pipeline.schedule,
         "tags": pipeline.tags,
         "tasks": [activity_to_dict(task) for task in pipeline.tasks],
+        "not_translatable": list(pipeline.not_translatable),
+        "reconciliation_status": pipeline.reconciliation_status,
+        "migration_status": pipeline.migration_status,
+        "audit": dict(pipeline.audit),
     }
     if pipeline.translation_configuration is not None:
         result["translation_configuration"] = configuration_to_dict(pipeline.translation_configuration)
@@ -414,6 +418,10 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
         "schedule": pipeline.schedule,
         "tags": pipeline.tags,
         "tasks": [activity_to_debug_dict(task) for task in pipeline.tasks],
+        "not_translatable": list(pipeline.not_translatable),
+        "reconciliation_status": pipeline.reconciliation_status,
+        "migration_status": pipeline.migration_status,
+        "audit": dict(pipeline.audit),
     }
 
 

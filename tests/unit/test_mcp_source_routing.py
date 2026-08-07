@@ -74,6 +74,23 @@ def test_discover_routes_airflow_source(captured, tmp_path: Path):
     assert argv[argv.index("--source-path") + 1] == str(tmp_path)
 
 
+def test_airflow_exclusions_are_forwarded_as_repeatable_flags(captured, tmp_path: Path):
+    parameters = {
+        "source": "airflow",
+        "airflow_source_path": str(tmp_path),
+        "output_dir": str(tmp_path / "o"),
+        "exclude_dag": ["legacy", "experimental"],
+    }
+
+    server._cmd_discover(parameters)
+    server._cmd_convert(parameters)
+
+    for command in ("discover", "convert"):
+        argv = _argv(captured, command)
+        exclusions = [argv[index + 1] for index, value in enumerate(argv) if value == "--exclude-dag"]
+        assert exclusions == ["legacy", "experimental"]
+
+
 def test_convert_threads_source(captured, tmp_path: Path):
     server._cmd_convert({"source": "airflow", "airflow_source_path": str(tmp_path), "output_dir": str(tmp_path)})
     argv = _argv(captured, "convert")

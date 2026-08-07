@@ -154,6 +154,14 @@ def _pending_options(inspect_result: dict[str, Any]) -> list[dict[str, Any]]:
 # missing one raises KeyError, which the dispatcher converts into a clear error.
 
 
+def _excluded_dags(parameters: dict[str, Any]) -> list[str]:
+    """Normalizes the MCP repeatable exclusion parameter."""
+    value = parameters.get("exclude_dag") or parameters.get("exclude_dags") or []
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value]
+
+
 def _cmd_inputs(p: dict[str, Any]) -> dict[str, Any]:
     phase = p["phase"]
     args = ["inputs", phase]
@@ -177,6 +185,8 @@ def _cmd_discover(p: dict[str, Any]) -> dict[str, Any]:
         args = ["discover", "--source", source_name, "--source-path", source, "--output-dir", output_dir]
         if p.get("pipeline"):
             args += ["--pipeline", p["pipeline"]]
+        for dag_id in _excluded_dags(p):
+            args += ["--exclude-dag", dag_id]
         result = runner.run_adapter(args)
         out = Path(output_dir)
         return _phase_result(result, out, inventory=runner.summarize_inventory(out))
@@ -194,6 +204,8 @@ def _cmd_convert(p: dict[str, Any]) -> dict[str, Any]:
             args += ["--source-path", source]
         if p.get("pipeline"):
             args += ["--pipeline", p["pipeline"]]
+        for dag_id in _excluded_dags(p):
+            args += ["--exclude-dag", dag_id]
         result = runner.run_adapter(args)
         out = Path(output_dir)
         return _phase_result(result, out, translation=runner.summarize_translation(out))
@@ -300,6 +312,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
     catalog = p.get("catalog", "main")
     schema = p.get("schema", "default")
     pipeline = p.get("pipeline")
+    excluded_dags = _excluded_dags(p)
     answers = p.get("answers") or []
     interactive = p.get("interactive", True)
     out = Path(output_dir)
@@ -325,6 +338,8 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
             discover_args = ["discover", "--source", source_name, "--source-path", source, "--output-dir", output_dir]
             if pipeline:
                 discover_args += ["--pipeline", pipeline]
+            for dag_id in excluded_dags:
+                discover_args += ["--exclude-dag", dag_id]
             discover_res = runner.run_adapter(discover_args)
             steps["discover"] = _phase_result(discover_res, out, inventory=runner.summarize_inventory(out))
             if not discover_res.ok:
@@ -333,6 +348,8 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
             convert_args = ["convert", "--source", source_name, "--output-dir", output_dir, "--source-path", source]
             if pipeline:
                 convert_args += ["--pipeline", pipeline]
+            for dag_id in excluded_dags:
+                convert_args += ["--exclude-dag", dag_id]
             convert_res = runner.run_adapter(convert_args)
             steps["convert"] = _phase_result(convert_res, out, translation=runner.summarize_translation(out))
             if not convert_res.ok:

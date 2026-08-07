@@ -24,6 +24,7 @@ import ast
 import copy
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,10 +37,13 @@ from flowx.models.ir import (
     NotebookActivity,
     Pipeline,
     PlaceholderActivity,
+    RunJobActivity,
     SqlActivity,
 )
+from flowx.sources.airflow import audit as source_audit
 from flowx.sources.airflow import callable_notebook, templating
 from flowx.sources.airflow import operators as ops
+from flowx.utils import normalize_task_key
 
 
 @dataclass(slots=True)
@@ -498,6 +502,55 @@ def _expand_top_level_loops(module: ast.Module) -> ast.Module:
     return expanded
 
 
+def _index_lexical_functions(
+    module: ast.Module,
+) -> dict[int, dict[str, list[tuple[int, bool, ast.FunctionDef]]]]:
+    """Indexes function bindings by lexical scope, source order, and conditionality."""
+    index: dict[int, dict[str, list[tuple[int, bool, ast.FunctionDef]]]] = {}
+
+    def add(scope: ast.Module | ast.FunctionDef, definition: ast.FunctionDef, conditional: bool) -> None:
+        by_name = index.setdefault(id(scope), {})
+        by_name.setdefault(definition.name, []).append((definition.lineno, conditional, definition))
+
+    def scan_statements(
+        scope: ast.Module | ast.FunctionDef,
+        statements: list[ast.stmt],
+        *,
+        conditional: bool,
+    ) -> None:
+        for statement in statements:
+            if isinstance(statement, ast.FunctionDef):
+                add(scope, statement, conditional)
+                scan_statements(statement, statement.body, conditional=False)
+                continue
+            if isinstance(statement, (ast.ClassDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(statement, (ast.With, ast.AsyncWith)):
+                scan_statements(scope, statement.body, conditional=conditional)
+                continue
+            if isinstance(statement, ast.If):
+                scan_statements(scope, statement.body, conditional=True)
+                scan_statements(scope, statement.orelse, conditional=True)
+                continue
+            if isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                scan_statements(scope, statement.body, conditional=True)
+                scan_statements(scope, statement.orelse, conditional=True)
+                continue
+            if isinstance(statement, (ast.Try, ast.TryStar)):
+                scan_statements(scope, statement.body, conditional=True)
+                scan_statements(scope, statement.orelse, conditional=True)
+                scan_statements(scope, statement.finalbody, conditional=True)
+                for handler in statement.handlers:
+                    scan_statements(scope, handler.body, conditional=True)
+                continue
+            if isinstance(statement, ast.Match):
+                for case in statement.cases:
+                    scan_statements(scope, case.body, conditional=True)
+
+    scan_statements(module, module.body, conditional=False)
+    return index
+
+
 class _DagVisitor(ast.NodeVisitor):
     """Collects operator calls, dependency edges, and the DAG's schedule."""
 
@@ -509,13 +562,23 @@ class _DagVisitor(ast.NodeVisitor):
         self._functions: dict[str, ast.FunctionDef] = {
             node.name: node for node in module.body if isinstance(node, ast.FunctionDef)
         }
+        self._lexical_functions = _index_lexical_functions(module)
+        self._scope_stack: list[ast.Module | ast.FunctionDef] = [module]
+        self._resolved_callables: dict[str, tuple[str, ast.FunctionDef | None]] = {}
+        self.helper_expansions: list[dict[str, Any]] = []
         self._constants: dict[str, Any] = {}
         self._task_bindings: dict[str, str | list[str]] = {}
         self._list_bindings: dict[str, list[str]] = {}
         self._capture_sequence = 0
         self.task_captures: dict[str, TaskCapture] = {}
         self.edge_captures: list[EdgeCapture] = []
+        self.unclaimed_task_calls: list[ast.Call] = []
+        self.unclaimed_statements: list[ast.stmt] = []
         self.unresolved_constructs: list[tuple[str, ast.AST]] = []
+        self._claimed_task_call_ids: set[int] = set()
+        self._claimed_statement_ids: set[int] = set()
+        self._dag_scope_depth = 0
+        self.captured_dag_settings: set[str] = set()
         # task variable name -> (task_id, operator, kwargs)
         self.operators: dict[str, tuple[str, str, dict[str, ast.expr]]] = {}
         # task variable name -> the operator's ast.Call node (for source-slicing placeholders)
@@ -543,6 +606,7 @@ class _DagVisitor(ast.NodeVisitor):
         # mapped var -> the kwarg names passed to .expand(). Only these fan out; a list-valued
         # .partial() arg is a fixed value and must not be mistaken for the mapped iterable.
         self.expand_kwargs: dict[str, list[str]] = {}
+        self.partial_mapped: set[str] = set()
         # Disambiguates synthetic vars for operators instantiated without an assignment.
         self._bare_operator_counter = 0
         # TaskFlow: function name -> (FunctionDef, decorator dotted-name) for @task-decorated defs.
@@ -572,20 +636,51 @@ class _DagVisitor(ast.NodeVisitor):
         taskflow = {name: definition for name, (definition, _decorator) in self.taskflow_defs.items()}
         return {**self._functions, **taskflow}
 
+    def functions_for(self, task_var: str) -> dict[str, ast.FunctionDef]:
+        """Returns module functions with a task's lexically resolved callable overlaid."""
+        functions = self.functions()
+        resolved = self._resolved_callables.get(task_var)
+        if resolved is None:
+            return functions
+        name, definition = resolved
+        functions.pop(name, None)
+        if definition is not None:
+            functions[name] = definition
+        return functions
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         # A @task- or @task_group-decorated function defines a task / sub-pipeline from its body,
         # which is internal logic rather than DAG structure, so don't descend. @dag marks the
         # DAG-defining function: read its config off the decorator, then descend so the body's task
         # instances / edges are collected.
         if _has_decorator(node, _TASK_DECORATORS) or _has_decorator(node, _TASK_GROUP_DECORATORS):
+            if self._dag_scope_depth:
+                self._claimed_statement_ids.add(id(node))
             return
-        if _has_decorator(node, _DAG_DECORATORS):
+        is_dag_definition = _has_decorator(node, _DAG_DECORATORS)
+        if not is_dag_definition:
+            if self._dag_scope_depth:
+                self._claimed_statement_ids.add(id(node))
+            return
+        if is_dag_definition:
             self.is_taskflow_dag = True
             dag_kwargs = _decorator_kwargs(node.decorator_list, _DAG_DECORATORS)
             self._apply_dag_kwargs(dag_kwargs)
             if self.dag_id is None:
                 self.dag_id = ops.literal_str(dag_kwargs.get("dag_id")) or node.name
-        self.generic_visit(node)
+        self._scope_stack.append(node)
+        if is_dag_definition:
+            self._dag_scope_depth += 1
+        try:
+            for statement in node.body:
+                if is_dag_definition:
+                    self._visit_dag_statement(statement)
+                else:
+                    self.visit(statement)
+        finally:
+            if is_dag_definition:
+                self._dag_scope_depth -= 1
+            self._scope_stack.pop()
 
     def visit_Assign(self, node: ast.Assign) -> None:
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call):
@@ -593,18 +688,23 @@ class _DagVisitor(ast.NodeVisitor):
             if _construct_name(node.value.func, self._aliases) == "DAG":
                 self._read_dag_kwargs(node.value)
                 self.dag_id = self.dag_id or var
+                self._claimed_statement_ids.add(id(node))
                 return
             internal_var = self._new_task_var(var, node.value)
             if self._register_operator_call(node.value, internal_var, binding=var):
+                self._claimed_statement_ids.add(id(node))
                 pass  # a `x = SomeOperator(...)` (optionally .expand()-mapped) instantiation
             elif self._register_helper_factory_call(node.value, internal_var, binding=var):
+                self._claimed_statement_ids.add(id(node))
                 pass
             elif self._register_taskflow_call(node.value, internal_var):
                 self._task_bindings[var] = internal_var
+                self._claimed_statement_ids.add(id(node))
                 pass  # a `x = mytask(...)` TaskFlow invocation, captured with var as its key
             else:
                 if self._register_taskgroup_call(node.value, internal_var):
                     self._task_bindings[var] = internal_var
+                    self._claimed_statement_ids.add(id(node))
                     return
         elif len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             target = node.targets[0].id
@@ -613,6 +713,7 @@ class _DagVisitor(ast.NodeVisitor):
                 if resolved:
                     self._task_bindings[target] = resolved[0] if len(resolved) == 1 else resolved
                     self._constants.pop(target, None)
+                    self._claimed_statement_ids.add(id(node))
                     return
             value = _safe_static_value(node.value, self._constants)
             if value is not _UNRESOLVED:
@@ -620,6 +721,7 @@ class _DagVisitor(ast.NodeVisitor):
                 self._task_bindings.pop(target, None)
                 if isinstance(value, list):
                     self._list_bindings[target] = []
+                self._claimed_statement_ids.add(id(node))
                 return
         self.generic_visit(node)
 
@@ -651,9 +753,11 @@ class _DagVisitor(ast.NodeVisitor):
             isinstance(dag_node, ast.Name) and dag_node.id == self._target_dag_variable
         ):
             return False
-        call = ast.Call(func=ast.Name(id=construct, ctx=ast.Load()), args=[], keywords=[
-            ast.keyword(arg=key, value=value) for key, value in kwargs.items()
-        ])
+        call = ast.Call(
+            func=ast.Name(id=construct, ctx=ast.Load()),
+            args=[],
+            keywords=[ast.keyword(arg=key, value=value) for key, value in kwargs.items()],
+        )
         ast.copy_location(call, node)
         task_id = ops.literal_str(kwargs.get("task_id")) or ops.literal_str(kwargs.get("group_id")) or var
         self.operators[var] = (task_id, construct, kwargs)
@@ -667,26 +771,28 @@ class _DagVisitor(ast.NodeVisitor):
             call=call,
             span=_span(node),
         )
+        self._claimed_task_call_ids.add(id(node))
+        callable_node = kwargs.get("python_callable")
+        if isinstance(callable_node, ast.Name):
+            self._resolved_callables[var] = (
+                callable_node.id,
+                self._resolve_lexical_function(callable_node.id, node),
+            )
         if mapped is not None:
             self.mapped.add(var)
             self.expand_kwargs[var] = mapped[1]
+            if mapped[2]:
+                self.partial_mapped.add(var)
         if self._group_stack:
             self.groups[var] = "__".join(self._group_stack)
         return True
 
     def _register_helper_factory_call(self, node: ast.Call, var: str, *, binding: str) -> bool:
         """Expands the deliberately narrow single-return operator factory shape."""
-        if not isinstance(node.func, ast.Name):
+        helper_return = self._helper_factory_return(node)
+        if helper_return is None:
             return False
-        helper = self._functions.get(node.func.id)
-        if helper is None or helper.decorator_list or helper.args.vararg or helper.args.kwarg:
-            return False
-        body = list(helper.body)
-        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-            if isinstance(body[0].value.value, str):
-                body = body[1:]
-        if len(body) != 1 or not isinstance(body[0], ast.Return) or not isinstance(body[0].value, ast.Call):
-            return False
+        helper, return_call = helper_return
         parameters = [*helper.args.posonlyargs, *helper.args.args, *helper.args.kwonlyargs]
         if len(node.args) > len(parameters) or any(keyword.arg is None for keyword in node.keywords):
             return False
@@ -721,8 +827,52 @@ class _DagVisitor(ast.NodeVisitor):
                 if value is _UNRESOLVED:
                     return False
                 constants[name] = value
-        factory_call = _bind_constants(body[0].value, constants)
-        return isinstance(factory_call, ast.Call) and self._register_operator_call(factory_call, var, binding=binding)
+        factory_call = _bind_constants(return_call, constants)
+        registered = isinstance(factory_call, ast.Call) and self._register_operator_call(
+            factory_call, var, binding=binding
+        )
+        if registered:
+            self._claimed_task_call_ids.add(id(node))
+            self.helper_expansions.append(
+                {
+                    "code": "helper_factory_expanded",
+                    "capture_id": var,
+                    "helper": helper.name,
+                    "helper_line": helper.lineno,
+                    "invocation_line": getattr(node, "lineno", 0),
+                }
+            )
+        return registered
+
+    def _helper_factory_return(self, node: ast.Call) -> tuple[ast.FunctionDef, ast.Call] | None:
+        """Returns the operator call from a supported single-return helper invocation."""
+        if not isinstance(node.func, ast.Name):
+            return None
+        helper = self._resolve_lexical_function(node.func.id, node)
+        if helper is None or helper.decorator_list or helper.args.vararg or helper.args.kwarg:
+            return None
+        body = list(helper.body)
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            if isinstance(body[0].value.value, str):
+                body = body[1:]
+        if len(body) != 1 or not isinstance(body[0], ast.Return) or not isinstance(body[0].value, ast.Call):
+            return None
+        if _direct_operator_call(body[0].value, self._aliases) is None:
+            return None
+        return helper, body[0].value
+
+    def _resolve_lexical_function(self, name: str, reference: ast.AST) -> ast.FunctionDef | None:
+        """Resolves a function name by lexical scope and source-order binding semantics."""
+        line = getattr(reference, "lineno", 0)
+        for scope in reversed(self._scope_stack):
+            events = self._lexical_functions.get(id(scope), {}).get(name, [])
+            visible = [event for event in events if event[0] <= line]
+            if visible:
+                _event_line, conditional, definition = visible[-1]
+                return None if conditional else definition
+            if events and isinstance(scope, ast.FunctionDef):
+                return None
+        return None
 
     def _register_bare_operator_call(self, node: ast.Call) -> str | None:
         """Registers an operator instantiated without an assignment, keyed by a synthetic var.
@@ -795,6 +945,7 @@ class _DagVisitor(ast.NodeVisitor):
         task = _TaskFlowTask(task_id=override_id or var, def_name=def_name, decorator=decorator)
         self.taskflow_tasks[var] = task
         self.calls[var] = call
+        self._claimed_task_call_ids.add(id(call))
         if mapped:
             self.mapped.add(var)
             # ``.expand(param=<iterable>)`` args live on the outer call; capture the single mapped
@@ -807,7 +958,7 @@ class _DagVisitor(ast.NodeVisitor):
             for mapped_arg in _mapping_chain_args(call):
                 dep = self._resolve_taskflow_arg(mapped_arg)
                 if dep is not None and dep != var:
-                    self.edges.append((dep, var))
+                    self._add_edges([dep], [var], call)
         if self._group_stack:
             self.groups[var] = "__".join(self._group_stack)
         if mapped:
@@ -817,7 +968,7 @@ class _DagVisitor(ast.NodeVisitor):
             dep = self._resolve_taskflow_arg(arg)
             if dep is not None:
                 task.positional_deps[index] = dep
-                self.edges.append((dep, var))
+                self._add_edges([dep], [var], call)
             else:
                 value = _literal_argument_source(arg)
                 if value is None:
@@ -831,7 +982,7 @@ class _DagVisitor(ast.NodeVisitor):
             dep = self._resolve_taskflow_arg(kw.value)
             if dep is not None:
                 task.keyword_deps[kw.arg] = dep
-                self.edges.append((dep, var))
+                self._add_edges([dep], [var], call)
             else:
                 value = _literal_argument_source(kw.value)
                 if value is None:
@@ -887,6 +1038,7 @@ class _DagVisitor(ast.NodeVisitor):
             self._taskgroup_counter += 1
             var = f"{def_name}__tg{self._taskgroup_counter}"
         self.taskgroup_calls[var] = (var, def_name, mapped)
+        self._claimed_task_call_ids.add(id(call))
         if self._group_stack:
             self.groups[var] = "__".join(self._group_stack)
         return True
@@ -913,12 +1065,14 @@ class _DagVisitor(ast.NodeVisitor):
 
     def visit_With(self, node: ast.With) -> None:
         pushed_group = False
+        opens_dag_scope = False
         for item in node.items:
             call = item.context_expr
             if isinstance(call, ast.Call):
                 construct = _construct_name(call.func, self._aliases)
                 if construct == "DAG":
                     self._read_dag_kwargs(call)
+                    opens_dag_scope = True
                 elif construct == "TaskGroup":
                     # `with TaskGroup("etl") as tg:` — namespace the member tasks by group id.
                     kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg}
@@ -941,9 +1095,103 @@ class _DagVisitor(ast.NodeVisitor):
                         task_id = ops.literal_str(kwargs.get("group_id")) or var
                         self.operators[var] = (task_id, construct, kwargs)
                         self.calls[var] = call
-        self.generic_visit(node)
+        if opens_dag_scope:
+            self._dag_scope_depth += 1
+            try:
+                for statement in node.body:
+                    self._visit_dag_statement(statement)
+            finally:
+                self._dag_scope_depth -= 1
+        elif self._dag_scope_depth:
+            for statement in node.body:
+                self._visit_dag_statement(statement)
+        else:
+            self.generic_visit(node)
         if pushed_group:
             self._group_stack.pop()
+        self._claimed_statement_ids.add(id(node))
+
+    def _visit_dag_statement(self, statement: ast.stmt) -> None:
+        """Visits one DAG-body statement and records any unclaimed structural source."""
+        unclaimed_calls_before = len(self.unclaimed_task_calls)
+        unresolved_before = len(self.unresolved_constructs)
+        self.visit(statement)
+        if id(statement) in self._claimed_statement_ids:
+            return
+        if (
+            len(self.unclaimed_task_calls) > unclaimed_calls_before
+            or len(self.unresolved_constructs) > unresolved_before
+        ):
+            return
+        if isinstance(statement, (ast.Import, ast.ImportFrom, ast.Pass, ast.Return)):
+            self._claimed_statement_ids.add(id(statement))
+            return
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+            self._claimed_statement_ids.add(id(statement))
+            return
+        self.unclaimed_statements.append(statement)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        """Fails closed when a task-producing call in a DAG scope was not captured."""
+        in_selected_assigned_dag = False
+        is_assigned_task_factory = False
+        if self._target_dag_variable is not None:
+            direct = _direct_operator_call(node, self._aliases)
+            mapped = None if direct is not None else _mapped_operator_call(node, self._aliases)
+            operator_call = direct or (mapped[0] if mapped is not None else None)
+            if operator_call is not None:
+                dag_argument = next((kw.value for kw in operator_call.keywords if kw.arg == "dag"), None)
+                in_selected_assigned_dag = (
+                    isinstance(dag_argument, ast.Name) and dag_argument.id == self._target_dag_variable
+                )
+            is_assigned_task_factory = self._helper_targets_assigned_dag(node)
+            in_selected_assigned_dag = in_selected_assigned_dag or is_assigned_task_factory
+        if (self._dag_scope_depth or in_selected_assigned_dag) and id(node) not in self._claimed_task_call_ids:
+            is_operator = _direct_operator_call(node, self._aliases) is not None
+            is_mapped_operator = _mapped_operator_call(node, self._aliases) is not None
+            is_taskflow = self._taskflow_def_name(node)[0] is not None
+            is_taskgroup = any(
+                isinstance(candidate, ast.Name) and candidate.id in self.taskgroup_defs
+                for candidate in ast.walk(node.func)
+            )
+            if (
+                is_operator
+                or is_mapped_operator
+                or is_taskflow
+                or is_taskgroup
+                or is_assigned_task_factory
+                or self._helper_factory_return(node)
+            ):
+                self.unclaimed_task_calls.append(node)
+        self.generic_visit(node)
+
+    def _helper_targets_assigned_dag(self, call: ast.Call) -> bool:
+        """Returns whether a local helper can construct a task for the selected assigned DAG."""
+        if self._target_dag_variable is None or not isinstance(call.func, ast.Name):
+            return False
+        helper = self._resolve_lexical_function(call.func.id, call)
+        if helper is None:
+            return False
+        parameters = [*helper.args.posonlyargs, *helper.args.args, *helper.args.kwonlyargs]
+        bound: dict[str, ast.expr] = {parameter.arg: argument for parameter, argument in zip(parameters, call.args)}
+        bound.update({keyword.arg: keyword.value for keyword in call.keywords if keyword.arg})
+        for candidate in ast.walk(helper):
+            if not isinstance(candidate, ast.Call):
+                continue
+            direct = _direct_operator_call(candidate, self._aliases)
+            mapped = None if direct is not None else _mapped_operator_call(candidate, self._aliases)
+            operator_call = direct or (mapped[0] if mapped is not None else None)
+            if operator_call is None:
+                continue
+            dag_argument = next((keyword.value for keyword in operator_call.keywords if keyword.arg == "dag"), None)
+            if not isinstance(dag_argument, ast.Name):
+                continue
+            if dag_argument.id == self._target_dag_variable:
+                return True
+            bound_argument = bound.get(dag_argument.id)
+            if isinstance(bound_argument, ast.Name) and bound_argument.id == self._target_dag_variable:
+                return True
+        return False
 
     def _read_dag_kwargs(self, call: ast.Call) -> None:
         kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
@@ -951,6 +1199,7 @@ class _DagVisitor(ast.NodeVisitor):
         self._apply_dag_kwargs(kwargs)
 
     def _apply_dag_kwargs(self, kwargs: dict[str, ast.expr]) -> None:
+        self.captured_dag_settings.update(kwargs)
         self.schedule_node = kwargs.get("schedule_interval") or kwargs.get("schedule")
         self.schedule_interval = ops.literal_str(kwargs.get("schedule_interval")) or ops.literal_str(
             kwargs.get("schedule")
@@ -965,6 +1214,7 @@ class _DagVisitor(ast.NodeVisitor):
                 for key, val in zip(default_args.keys, default_args.values)
                 if isinstance(key, ast.Constant) and isinstance(key.value, str)
             }
+            self.captured_dag_settings.update(f"default_args.{name}" for name in self.default_args)
         # params={...} supplies DAG parameter defaults; each value is a literal or a Param(default=...).
         params = kwargs.get("params")
         if isinstance(params, ast.Dict):
@@ -978,13 +1228,17 @@ class _DagVisitor(ast.NodeVisitor):
         #   - method calls: `a.set_upstream(b)` / `a.set_downstream([b, c])`
         value = node.value
         if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.RShift, ast.LShift)):
+            before = len(self.edge_captures)
             self._collect_shift_chain(value)
+            if len(self.edge_captures) > before:
+                self._claimed_statement_ids.add(id(node))
         elif isinstance(value, ast.Call):
             call_name = _construct_name(value.func, self._aliases)
             if call_name == "chain":
                 positions = [self._resolve_task_names(argument) for argument in value.args]
                 for left, right in zip(positions, positions[1:]):
                     self._add_edges(left, right, value)
+                self._claimed_statement_ids.add(id(node))
                 return
             if call_name == "cross_downstream" and len(value.args) >= 2:
                 self._add_edges(
@@ -992,6 +1246,7 @@ class _DagVisitor(ast.NodeVisitor):
                     self._resolve_task_names(value.args[1]),
                     value,
                 )
+                self._claimed_statement_ids.add(id(node))
                 return
             if isinstance(value.func, ast.Attribute) and value.func.attr == "append" and value.args:
                 owner = value.func.value
@@ -1001,9 +1256,13 @@ class _DagVisitor(ast.NodeVisitor):
                         internal = self._register_bare_operator_call(appended)
                         if internal is not None:
                             self._list_bindings.setdefault(owner.id, []).append(internal)
+                            self._claimed_statement_ids.add(id(node))
                             return
-                    self._list_bindings.setdefault(owner.id, []).extend(self._resolve_task_names(appended))
-                    return
+                    resolved = self._resolve_task_names(appended)
+                    if resolved:
+                        self._list_bindings.setdefault(owner.id, []).extend(resolved)
+                        self._claimed_statement_ids.add(id(node))
+                        return
             # A bare TaskFlow call (`extract()` with no assignment) is a task instance keyed by its
             # def name; otherwise it may be a set_upstream/set_downstream dependency call.
             def_name, _mapped, _override = self._taskflow_def_name(value)
@@ -1013,16 +1272,24 @@ class _DagVisitor(ast.NodeVisitor):
                     self._taskflow_counter += 1
                     task_var = f"{def_name}__tf{self._taskflow_counter}"
                 self._register_taskflow_call(value, task_var)
+                self._claimed_statement_ids.add(id(node))
             elif self._register_bare_operator_call(value) is not None:
+                self._claimed_statement_ids.add(id(node))
                 pass  # a bare `SomeOperator(task_id=...)` statement -- registered under a synthetic var
-            elif not self._register_taskgroup_call(value, None):
+            elif self._register_taskgroup_call(value, None):
+                self._claimed_statement_ids.add(id(node))
+            else:
+                before = len(self.edge_captures)
                 self._collect_set_dependency(value)
+                if len(self.edge_captures) > before:
+                    self._claimed_statement_ids.add(id(node))
         self.generic_visit(node)
 
     def visit_For(self, node: ast.For) -> None:
         """Executes bounded literal/range loops with Python name rebinding semantics."""
         if not isinstance(node.target, ast.Name):
             self.unresolved_constructs.append(("dynamic_loop_target", node))
+            self._claimed_statement_ids.add(id(node))
             return
         items = _static_iteration_nodes(node.iter, self._constants)
         if items is None:
@@ -1032,6 +1299,7 @@ class _DagVisitor(ast.NodeVisitor):
                 items = list(node.iter.elts)
             else:
                 self.unresolved_constructs.append(("dynamic_loop_iterable", node))
+                self._claimed_statement_ids.add(id(node))
                 return
         for item in items:
             resolved_tasks = self._resolve_task_names(item)
@@ -1042,13 +1310,15 @@ class _DagVisitor(ast.NodeVisitor):
                 value = _safe_static_value(item, self._constants)
                 if value is _UNRESOLVED:
                     self.unresolved_constructs.append(("dynamic_loop_value", item))
+                    self._claimed_statement_ids.add(id(node))
                     return
                 self._constants[node.target.id] = value
                 self._task_bindings.pop(node.target.id, None)
             for statement in node.body:
-                self.visit(statement)
+                self._visit_dag_statement(statement) if self._dag_scope_depth else self.visit(statement)
         for statement in node.orelse:
-            self.visit(statement)
+            self._visit_dag_statement(statement) if self._dag_scope_depth else self.visit(statement)
+        self._claimed_statement_ids.add(id(node))
 
     def visit_If(self, node: ast.If) -> None:
         """Follows a statically decidable branch; records ambiguous control flow explicitly."""
@@ -1057,10 +1327,12 @@ class _DagVisitor(ast.NodeVisitor):
             value = True
         if value is _UNRESOLVED:
             self.unresolved_constructs.append(("ambiguous_condition", node))
+            self._claimed_statement_ids.add(id(node))
             return
         branch = node.body if bool(value) else node.orelse
         for statement in branch:
-            self.visit(statement)
+            self._visit_dag_statement(statement) if self._dag_scope_depth else self.visit(statement)
+        self._claimed_statement_ids.add(id(node))
 
     def _collect_shift_chain(self, binop: ast.BinOp) -> None:
         self._collect_shift_expression(binop)
@@ -1257,7 +1529,7 @@ def _direct_operator_call(node: ast.Call, aliases: dict[str, str] | None = None)
 
 def _mapped_operator_call(
     node: ast.Call, aliases: dict[str, str] | None = None
-) -> tuple[ast.Call, list[str]] | None:
+) -> tuple[ast.Call, list[str], bool] | None:
     """Returns the underlying operator call for a dynamic-mapping ``.expand(...)`` chain.
 
     Handles ``Op(...).expand(...)`` and ``Op.partial(...).expand(...)``. Returns
@@ -1287,7 +1559,7 @@ def _mapped_operator_call(
         args=[],
         keywords=list(inner.keywords) + list(node.keywords),
     )
-    return merged, [kw.arg for kw in node.keywords if kw.arg]
+    return merged, [kw.arg for kw in node.keywords if kw.arg], isinstance(inner.func, ast.Attribute)
 
 
 def _is_task_construct(name: str) -> bool:
@@ -1342,13 +1614,26 @@ def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
     return pipelines[0]
 
 
-def load_airflow_dags(dag_path: Path, *, dbt_mode: str = "static") -> list[Pipeline]:
+def load_airflow_dags(
+    dag_path: Path,
+    *,
+    dbt_mode: str = "static",
+    source_file: str | None = None,
+) -> list[Pipeline]:
     """Parses every independently declared Airflow DAG in a Python file."""
     source = Path(dag_path).read_text(encoding="utf-8")
     module = _expand_top_level_loops(ast.parse(source))
     declarations = _top_level_dag_declarations(module)
     if not declarations:
-        return [_load_airflow_module(dag_path, source, module, dbt_mode=dbt_mode)]
+        return [
+            _load_airflow_module(
+                dag_path,
+                source,
+                module,
+                dbt_mode=dbt_mode,
+                source_file=source_file or dag_path.name,
+            )
+        ]
     return [
         _load_airflow_module(
             dag_path,
@@ -1356,6 +1641,7 @@ def load_airflow_dags(dag_path: Path, *, dbt_mode: str = "static") -> list[Pipel
             _module_for_dag(module, declaration),
             dbt_mode=dbt_mode,
             target_dag_variable=declaration.variable,
+            source_file=source_file or dag_path.name,
         )
         for declaration in declarations
     ]
@@ -1371,8 +1657,7 @@ def _top_level_dag_declarations(module: ast.Module) -> list[DagDeclaration]:
         if isinstance(node, ast.FunctionDef) and _has_decorator(node, _DAG_DECORATORS):
             is_dag = True
         elif isinstance(node, ast.With) and any(
-            isinstance(item.context_expr, ast.Call)
-            and _construct_name(item.context_expr.func, aliases) == "DAG"
+            isinstance(item.context_expr, ast.Call) and _construct_name(item.context_expr.func, aliases) == "DAG"
             for item in node.items
         ):
             is_dag = True
@@ -1412,6 +1697,7 @@ def _load_airflow_module(
     *,
     dbt_mode: str = "static",
     target_dag_variable: str | None = None,
+    source_file: str | None = None,
 ) -> Pipeline:
     """Parses one isolated DAG declaration into a flowx Pipeline IR.
 
@@ -1428,6 +1714,7 @@ def _load_airflow_module(
         sensors remain explicit placeholders; unmapped operators become a
         PlaceholderActivity.
     """
+    audit = source_audit.audit_module(module, target_dag_variable=target_dag_variable)
     visitor = _DagVisitor(module, target_dag_variable=target_dag_variable)
     visitor.visit(module)
     functions = visitor.functions()
@@ -1478,13 +1765,21 @@ def _load_airflow_module(
 
     # Dummy/Empty operators are structural and can be removed after dependency rewiring.
     dropped = {var for var, (_, op, _) in visitor.operators.items() if op in ops.DUMMY_OPERATORS}
+    sensor_lift_proof: dict[str, Any] | None = None
     if not has_schedule:
-        trigger_var = _root_trigger_sensor(visitor.operators, upstreams)
-        if trigger_var is not None:
+        trigger_candidate = _root_trigger_sensor(visitor.operators, upstreams, set(var_task_ids))
+        if trigger_candidate is not None:
+            trigger_var, covered_tasks = trigger_candidate
             trigger = _trigger_from_sensor(*visitor.operators[trigger_var][1:])
             if trigger is not None:
                 schedule = trigger
                 dropped.add(trigger_var)
+                sensor_lift_proof = {
+                    "code": "sensor_lift_dominates_dag",
+                    "capture_id": trigger_var,
+                    "task_key": var_to_task_key[trigger_var],
+                    "covered_capture_ids": sorted(covered_tasks),
+                }
     upstreams = _rewire_dropped(upstreams, dropped)
 
     # Collapse all dbt CLI operators over the one project into a single DbtFactoryActivity emitted at
@@ -1543,13 +1838,25 @@ def _load_airflow_module(
         return dbt_key_remap.get(key, key)
 
     tasks: list[Activity] = []
+    semantic_findings: list[dict[str, Any]] = []
+    argument_proofs = [
+        {
+            "code": "operator_arguments_classified",
+            "capture_id": var,
+            "task_key": var_to_task_key[var],
+            "operator": operator,
+            "arguments": ops.argument_classification(operator, kwargs),
+        }
+        for var, (_task_id, operator, kwargs) in visitor.operators.items()
+    ]
     referenced_params: set[str] = set()
     emitted_dbt = False
     for var, (task_id, operator, kwargs) in visitor.operators.items():
         if var in dropped:
             continue
         task_key = var_to_task_key[var]
-        outcome = templating.trigger_rule_outcome(kwargs)
+        trigger_mapping = templating.trigger_rule_mapping(kwargs)
+        outcome = trigger_mapping.outcome
         # Remap dbt-chain upstreams to the single factory key and drop self-edges (a dbt op
         # depending on another dbt op in the same collapsed chain).
         dep_keys = {_dep(u, outcome) for u in upstreams[var]}
@@ -1573,9 +1880,7 @@ def _load_airflow_module(
             emitted_dbt = True
             # The factory gates on every dbt op's external upstreams (not just the first op's), minus
             # any that are downstream of the factory itself (a sandwiched task, which would cycle).
-            factory_depends_on = [
-                Dependency(task_key=k, outcome=outcome) for k in sorted(factory_dep_keys)
-            ] or None
+            factory_depends_on = [Dependency(task_key=k, outcome=outcome) for k in sorted(factory_dep_keys)] or None
             dbt_kwargs = [visitor.operators[v][2] for v in dbt_vars]
             tasks.append(
                 _build_dbt_factory(
@@ -1596,7 +1901,7 @@ def _load_airflow_module(
             task_key=task_key,
             operator=operator,
             kwargs=kwargs,
-            functions=functions,
+            functions=visitor.functions_for(var),
             source=source,
             call_source=call_source,
             default_args=visitor.default_args,
@@ -1604,6 +1909,53 @@ def _load_airflow_module(
         builder = ops.OPERATOR_REGISTRY.get(operator, ops.build_placeholder)
         activity = builder(ctx)
         activity.depends_on = depends_on
+        if trigger_mapping.status == "unsupported":
+            activity = ops.build_placeholder_with_comment(
+                ctx,
+                f"Airflow trigger_rule {trigger_mapping.rule!r} is unsupported. {trigger_mapping.message}",
+            )
+            activity.depends_on = depends_on
+            semantic_findings.append(
+                _semantic_finding(
+                    source_file or dag_path.name,
+                    visitor.calls.get(var),
+                    code="unsupported_trigger_rule",
+                    message=(f"Task {task_id!r} uses trigger_rule {trigger_mapping.rule!r}; {trigger_mapping.message}"),
+                    task_key=task_key,
+                )
+            )
+        elif trigger_mapping.status == "approximate":
+            semantic_findings.append(
+                _semantic_finding(
+                    source_file or dag_path.name,
+                    visitor.calls.get(var),
+                    code="approximated_trigger_rule",
+                    message=(
+                        f"Task {task_id!r} maps trigger_rule {trigger_mapping.rule!r} to "
+                        f"{trigger_mapping.outcome}. {trigger_mapping.message}"
+                    ),
+                    task_key=task_key,
+                )
+            )
+        unconsumed = ops.unconsumed_kwargs(operator, kwargs)
+        if unconsumed:
+            names = ", ".join(sorted(unconsumed))
+            activity = ops.build_placeholder_with_comment(
+                ctx,
+                f"Airflow {operator} argument(s) {names} are not represented by the Databricks task; "
+                "translate them explicitly.",
+            )
+            activity.depends_on = depends_on
+            semantic_findings.append(
+                _semantic_finding(
+                    source_file or dag_path.name,
+                    visitor.calls.get(var),
+                    code="unconsumed_operator_arguments",
+                    message=f"Task {task_id!r} has unconsumed operator argument(s): {names}.",
+                    task_key=task_key,
+                    arguments=sorted(unconsumed),
+                )
+            )
         # Stamp DAG/task retry + timeout policy (per-task kwargs override default_args).
         policy = templating.retry_policy(visitor.default_args, kwargs)
         activity.max_retries = policy.get("max_retries")
@@ -1620,14 +1972,43 @@ def _load_airflow_module(
                 "translate the value manually.",
             )
             activity.depends_on = depends_on
-
-        if var in visitor.mapped:
-            # Dynamic mapping (.expand()) -> a for_each_task iterating the mapped operator.
-            tasks.append(
-                _wrap_in_for_each(
-                    activity, task_id, task_key, depends_on, kwargs, visitor.expand_kwargs.get(var) or []
+            semantic_findings.append(
+                _semantic_finding(
+                    source_file or dag_path.name,
+                    visitor.calls.get(var),
+                    code="unresolved_airflow_template",
+                    message=f"Task {task_id!r} contains unresolved Airflow template expression(s): {expressions}.",
+                    task_key=task_key,
+                    expressions=sorted(unresolved_templates),
                 )
             )
+
+        if var in visitor.mapped:
+            mapped_names = visitor.expand_kwargs.get(var) or []
+            partial_note = (
+                " The mapping also contains .partial() fixed arguments." if var in visitor.partial_mapped else ""
+            )
+            activity = ops.build_placeholder_with_comment(
+                ctx,
+                "Classic Airflow dynamic mapping cannot be emitted until every mapped argument is "
+                f"bound into the inner task ({', '.join(mapped_names) or 'unknown mapping'}).{partial_note}",
+            )
+            activity.depends_on = depends_on
+            semantic_findings.append(
+                _semantic_finding(
+                    source_file or dag_path.name,
+                    visitor.calls.get(var),
+                    code="classic_mapping_arguments_unbound",
+                    message=(
+                        f"Task {task_id!r} maps argument(s) {', '.join(mapped_names) or '<unknown>'}, "
+                        "but the generated inner task cannot bind them safely."
+                    ),
+                    task_key=task_key,
+                    arguments=mapped_names,
+                    has_partial=var in visitor.partial_mapped,
+                )
+            )
+            tasks.append(_wrap_in_for_each(activity, task_id, task_key, depends_on, kwargs, mapped_names))
         else:
             tasks.append(activity)
 
@@ -1718,13 +2099,535 @@ def _load_airflow_module(
         # Airflow catchup=True has no DABs schedule setting; it maps to running a native Databricks
         # backfill, which overrides the run_date job parameter with {{backfill.iso_date}} per window.
         tags["airflow_catchup"] = "true"
-    return Pipeline(
+    expected_ir_edges = {(dependency.task_key, task.task_key) for task in tasks for dependency in task.depends_on or []}
+    pipeline = Pipeline(
         name=visitor.dag_id or Path(dag_path).stem,
         tasks=tasks,
         parameters=parameters,
         schedule=schedule,
         tags=tags,
     )
+    return _reconcile_pipeline(
+        pipeline,
+        audit=audit,
+        visitor=visitor,
+        source_file=source_file or dag_path.name,
+        var_to_task_key=var_to_task_key,
+        dropped=dropped,
+        dbt_vars=dbt_vars,
+        semantic_findings=semantic_findings,
+        sensor_lift_proof=sensor_lift_proof,
+        argument_proofs=argument_proofs,
+        expected_ir_edges=expected_ir_edges,
+    )
+
+
+_SUPPORTED_DAG_SETTINGS = frozenset(
+    {
+        "dag_id",
+        "schedule",
+        "schedule_interval",
+        "start_date",
+        "timezone",
+        "catchup",
+        "default_args",
+        "params",
+        "default_args.retries",
+        "default_args.retry_delay",
+        "default_args.execution_timeout",
+    }
+)
+
+
+def _semantic_finding(
+    source_file: str,
+    node: ast.AST | None,
+    *,
+    code: str,
+    message: str,
+    task_key: str,
+    **details: Any,
+) -> dict[str, Any]:
+    """Builds a stable gap finding for a captured task-level semantic limitation."""
+    candidate = source_audit.AuditCandidate(
+        kind="task_semantics",
+        code=code,
+        line=getattr(node, "lineno", 0),
+        column=getattr(node, "col_offset", 0),
+        occurrence=1,
+        end_line=getattr(node, "end_lineno", 0),
+        end_column=getattr(node, "end_col_offset", 0),
+        details={"task_key": task_key, **details},
+    )
+    return source_audit.finding(
+        source_file=source_file,
+        code=code,
+        severity="gap",
+        message=message,
+        candidate=candidate,
+    )
+
+
+def _iter_placeholders(tasks: list[Activity]) -> list[PlaceholderActivity]:
+    """Returns placeholders in top-level and Airflow-generated for_each tasks."""
+    placeholders: list[PlaceholderActivity] = []
+    for task in tasks:
+        if isinstance(task, PlaceholderActivity):
+            placeholders.append(task)
+        if isinstance(task, ForEachActivity):
+            placeholders.extend(_iter_placeholders(task.inner_activities))
+    return placeholders
+
+
+def _reconcile_pipeline(
+    pipeline: Pipeline,
+    *,
+    audit: source_audit.SourceAudit,
+    visitor: _DagVisitor,
+    source_file: str,
+    var_to_task_key: dict[str, str],
+    dropped: set[str],
+    dbt_vars: list[str],
+    semantic_findings: list[dict[str, Any]],
+    sensor_lift_proof: dict[str, Any] | None,
+    argument_proofs: list[dict[str, Any]],
+    expected_ir_edges: set[tuple[str, str]],
+) -> Pipeline:
+    """Reconciles an independent source audit with captured graph and emitted IR."""
+    findings: list[dict[str, Any]] = list(semantic_findings)
+    transformations: list[dict[str, Any]] = list(argument_proofs)
+    transformations.extend(visitor.helper_expansions)
+    transformations.extend(
+        {
+            "code": "edge_captured",
+            "upstream_capture_id": edge.upstream_id,
+            "downstream_capture_id": edge.downstream_id,
+            "upstream_task_key": var_to_task_key.get(edge.upstream_id),
+            "downstream_task_key": var_to_task_key.get(edge.downstream_id),
+            "source_span": {
+                "line": edge.span.line,
+                "column": edge.span.column,
+                "end_line": edge.span.end_line,
+                "end_column": edge.span.end_column,
+            },
+        }
+        for edge in visitor.edge_captures
+    )
+    if sensor_lift_proof is not None:
+        transformations.append(sensor_lift_proof)
+    captured_task_count = len(visitor.operators) + len(visitor.taskflow_tasks) + len(visitor.taskgroup_calls)
+
+    unresolved = list(audit.unresolved)
+    for code, node in visitor.unresolved_constructs:
+        if not any(
+            candidate.line == getattr(node, "lineno", 0) and candidate.column == getattr(node, "col_offset", 0)
+            for candidate in unresolved
+        ):
+            unresolved.append(
+                source_audit.AuditCandidate(
+                    kind="unresolved",
+                    code=code,
+                    line=getattr(node, "lineno", 0),
+                    column=getattr(node, "col_offset", 0),
+                    occurrence=1,
+                    end_line=getattr(node, "end_lineno", 0),
+                    end_column=getattr(node, "end_col_offset", 0),
+                    details={"expression": ast.unparse(node)},
+                )
+            )
+
+    helper_claims = {
+        ("helper_factory_task", int(item["invocation_line"]), str(item["helper"])): 1
+        for item in visitor.helper_expansions
+    }
+    helper_capture_ids = {str(item["capture_id"]) for item in visitor.helper_expansions}
+    capture_claims: Counter[tuple[str, int, str]] = Counter(helper_claims)
+    for capture in visitor.task_captures.values():
+        if capture.capture_id not in helper_capture_ids:
+            capture_claims[("operator_task", capture.span.line, capture.operator)] += 1
+    for var, taskflow_task in visitor.taskflow_tasks.items():
+        call = visitor.calls.get(var)
+        capture_claims[("taskflow_task", getattr(call, "lineno", 0), taskflow_task.def_name)] += 1
+
+    unmatched_audit_tasks: list[source_audit.AuditCandidate] = []
+    for candidate in audit.tasks:
+        discriminator = str(
+            candidate.details.get("operator")
+            or candidate.details.get("helper")
+            or candidate.details.get("callable")
+            or ""
+        )
+        key = (candidate.code, candidate.line, discriminator)
+        if capture_claims[key]:
+            capture_claims[key] -= 1
+        else:
+            unmatched_audit_tasks.append(candidate)
+
+    for candidate in unmatched_audit_tasks:
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="task_capture_mismatch",
+                severity="failed",
+                message="An independently audited Airflow task candidate was not claimed by the capture pass.",
+                candidate=candidate,
+            )
+        )
+    for call in visitor.unclaimed_task_calls:
+        candidate = source_audit.AuditCandidate(
+            kind="task",
+            code="unclaimed_dag_task",
+            line=getattr(call, "lineno", 0),
+            column=getattr(call, "col_offset", 0),
+            occurrence=1,
+            end_line=getattr(call, "end_lineno", 0),
+            end_column=getattr(call, "end_col_offset", 0),
+            details={"expression": ast.unparse(call)},
+        )
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="unclaimed_dag_task",
+                severity="failed",
+                message="A task-producing call in the DAG body was not claimed by the capture pass.",
+                candidate=candidate,
+            )
+        )
+    for statement in visitor.unclaimed_statements:
+        candidate = source_audit.AuditCandidate(
+            kind="statement",
+            code="unclaimed_dag_statement",
+            line=getattr(statement, "lineno", 0),
+            column=getattr(statement, "col_offset", 0),
+            occurrence=1,
+            end_line=getattr(statement, "end_lineno", 0),
+            end_column=getattr(statement, "end_col_offset", 0),
+            details={"expression": ast.unparse(statement)},
+        )
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="unclaimed_dag_statement",
+                severity="failed",
+                message="A DAG-body statement was not classified by the static capture pass.",
+                candidate=candidate,
+            )
+        )
+
+    if len(audit.edges) != len(visitor.edge_captures):
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="edge_capture_mismatch",
+                severity="failed",
+                message=(
+                    f"Source audit found {len(audit.edges)} dependency edge(s), but capture produced "
+                    f"{len(visitor.edge_captures)}."
+                ),
+                details={"audited": len(audit.edges), "captured": len(visitor.edge_captures)},
+            )
+        )
+    comparable_audit_edges = [
+        candidate
+        for candidate in audit.edges
+        if candidate.details.get("syntax") != "taskflow_data"
+        and candidate.details.get("upstream")
+        and candidate.details.get("downstream")
+    ]
+    comparable_spans = {
+        (candidate.line, candidate.column, candidate.end_line, candidate.end_column)
+        for candidate in comparable_audit_edges
+    }
+
+    def source_reference(capture_id: str) -> str:
+        capture = visitor.task_captures.get(capture_id)
+        return capture.variable if capture is not None else capture_id.split("__L", 1)[0]
+
+    audited_edge_identities = sorted(
+        (str(candidate.details["upstream"]), str(candidate.details["downstream"]))
+        for candidate in comparable_audit_edges
+    )
+    captured_edge_identities = sorted(
+        (source_reference(edge.upstream_id), source_reference(edge.downstream_id))
+        for edge in visitor.edge_captures
+        if (edge.span.line, edge.span.column, edge.span.end_line, edge.span.end_column) in comparable_spans
+    )
+    if audited_edge_identities != captured_edge_identities:
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="edge_identity_mismatch",
+                severity="failed",
+                message="Captured Airflow dependency endpoints do not match the audited source endpoints.",
+                details={
+                    "audited_edges": [list(edge) for edge in audited_edge_identities],
+                    "captured_edges": [list(edge) for edge in captured_edge_identities],
+                },
+            )
+        )
+
+    emitted_ir_edges = {
+        (dependency.task_key, task.task_key) for task in pipeline.tasks for dependency in task.depends_on or []
+    }
+    missing_ir_edges = sorted(expected_ir_edges - emitted_ir_edges)
+    unexpected_ir_edges = sorted(emitted_ir_edges - expected_ir_edges)
+    if missing_ir_edges:
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="captured_edge_not_emitted",
+                severity="failed",
+                message="Captured dependency edge(s) were not emitted to Pipeline IR.",
+                details={"missing_edges": [list(edge) for edge in missing_ir_edges]},
+            )
+        )
+    if unexpected_ir_edges:
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="unexplained_emitted_edge",
+                severity="failed",
+                message="Pipeline IR contains dependency edge(s) absent from the transformation ledger.",
+                details={"unexpected_edges": [list(edge) for edge in unexpected_ir_edges]},
+            )
+        )
+
+    capture_by_location: dict[tuple[int, str], list[TaskCapture]] = {}
+    for capture in visitor.task_captures.values():
+        capture_by_location.setdefault((capture.span.line, capture.operator), []).append(capture)
+    argument_failure_keys: set[str] = set()
+    audit_candidate_by_capture: dict[str, source_audit.AuditCandidate] = {}
+    for candidate in audit.tasks:
+        if candidate.code != "operator_task":
+            continue
+        operator = str(candidate.details.get("operator", ""))
+        matches = capture_by_location.get((candidate.line, operator), [])
+        if not matches:
+            continue
+        capture = matches.pop(0)
+        audit_candidate_by_capture[capture.capture_id] = candidate
+        expected = set(candidate.details.get("kwargs", []))
+        actual = set(visitor.operators[capture.capture_id][2])
+        if expected == actual:
+            continue
+        task_key = var_to_task_key.get(capture.capture_id, capture.capture_id)
+        argument_failure_keys.add(task_key)
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="operator_argument_capture_mismatch",
+                severity="failed",
+                message=(
+                    f"Airflow task {capture.task_id!r} audited argument(s) {sorted(expected)}, "
+                    f"but capture retained {sorted(actual)}."
+                ),
+                candidate=candidate,
+                details={
+                    "task_key": task_key,
+                    "missing": sorted(expected - actual),
+                    "unexpected": sorted(actual - expected),
+                },
+            )
+        )
+
+    dbt_factory_var = dbt_vars[0] if dbt_vars else None
+    expected_key_by_capture: dict[str, str] = {}
+    for var, task_key in var_to_task_key.items():
+        if var in dropped:
+            continue
+        expected_key_by_capture[var] = (
+            var_to_task_key[dbt_factory_var] if var in dbt_vars and dbt_factory_var is not None else task_key
+        )
+    expected_task_keys = set(expected_key_by_capture.values())
+    emitted_task_keys = {task.task_key for task in pipeline.tasks}
+    missing_task_keys = sorted(expected_task_keys - emitted_task_keys)
+    unexpected_task_keys = sorted(emitted_task_keys - expected_task_keys)
+    if missing_task_keys:
+        missing_capture = next(
+            (var for var, task_key in expected_key_by_capture.items() if task_key in missing_task_keys),
+            None,
+        )
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="captured_task_not_emitted",
+                severity="failed",
+                message=f"Captured Airflow task key(s) were not emitted to Pipeline IR: {missing_task_keys}.",
+                candidate=audit_candidate_by_capture.get(missing_capture or ""),
+                details={"task_keys": missing_task_keys},
+            )
+        )
+    if unexpected_task_keys:
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="unexplained_emitted_task",
+                severity="failed",
+                message=f"Pipeline IR contains task key(s) with no captured Airflow task: {unexpected_task_keys}.",
+                details={"task_keys": unexpected_task_keys},
+            )
+        )
+
+    unsupported_settings = [
+        candidate for candidate in audit.settings if candidate.details.get("name") not in _SUPPORTED_DAG_SETTINGS
+    ]
+    missing_supported_settings = [
+        candidate
+        for candidate in audit.settings
+        if candidate.details.get("name") in _SUPPORTED_DAG_SETTINGS
+        and candidate.details.get("name") not in visitor.captured_dag_settings
+    ]
+    for candidate in missing_supported_settings:
+        name = str(candidate.details.get("name"))
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="dag_setting_capture_mismatch",
+                severity="failed",
+                message=f"Audited DAG setting {name!r} was not captured by the Airflow loader.",
+                candidate=candidate,
+            )
+        )
+    for candidate in unsupported_settings:
+        name = str(candidate.details.get("name"))
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="unsupported_dag_setting",
+                severity="gap",
+                message=f"Airflow DAG setting {name!r} has no deterministic Databricks Jobs mapping.",
+                candidate=candidate,
+            )
+        )
+
+    for candidate in unresolved:
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code=candidate.code,
+                severity="gap",
+                message="Dynamic Airflow control flow could not be expanded safely by the static parser.",
+                candidate=candidate,
+            )
+        )
+
+    for var, task_key in var_to_task_key.items():
+        task_id = (
+            visitor.operators[var][0]
+            if var in visitor.operators
+            else visitor.taskflow_tasks[var].task_id
+            if var in visitor.taskflow_tasks
+            else visitor.taskgroup_calls[var][0]
+        )
+        base = _sanitize_task_key(task_id)
+        if var in visitor.groups:
+            base = f"{visitor.groups[var]}__{base}"
+        transformations.append(
+            {
+                "code": "task_key_allocated",
+                "capture_id": var,
+                "source_task_id": task_id,
+                "task_key": task_key,
+                "emitted_task_key": expected_key_by_capture.get(var),
+            }
+        )
+        if task_key != base:
+            transformations.append(
+                {
+                    "code": "task_key_collision_resolved",
+                    "capture_id": var,
+                    "source_task_id": task_id,
+                    "task_key": task_key,
+                }
+            )
+    for var in sorted(dropped):
+        transformations.append(
+            {
+                "code": "structural_task_rewired",
+                "capture_id": var,
+                "task_key": var_to_task_key.get(var, var),
+            }
+        )
+    if len(dbt_vars) > 1:
+        transformations.append(
+            {
+                "code": "dbt_chain_collapsed",
+                "capture_ids": list(dbt_vars),
+                "task_key": var_to_task_key.get(dbt_vars[0], ""),
+            }
+        )
+
+    placeholder_by_key = {
+        placeholder.task_key: placeholder
+        for placeholder in _iter_placeholders(pipeline.tasks)
+        if not placeholder.task_key.startswith("__flowx_")
+    }
+    for index, placeholder in enumerate(placeholder_by_key.values()):
+        placeholder_candidate = audit.tasks[index] if index < len(audit.tasks) else None
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="operator_placeholder",
+                severity="gap",
+                message=(
+                    f"Airflow task {placeholder.name!r} ({placeholder.original_type}) requires explicit migration."
+                ),
+                candidate=placeholder_candidate,
+                details={"task_key": placeholder.task_key, "operator": placeholder.original_type},
+            )
+        )
+
+    blocking_gaps = [*unsupported_settings, *unresolved]
+    if blocking_gaps:
+        placeholder_key = "__flowx_source_gaps"
+        gap_task = PlaceholderActivity(
+            name="Airflow source semantics requiring migration",
+            task_key=placeholder_key,
+            original_type="AirflowSourceSemantics",
+            comment="Resolve the source-audit findings before enabling this DAG.",
+            raw_definition={"findings": [item for item in findings if item["severity"] == "gap"]},
+        )
+        for task in pipeline.tasks:
+            if not task.depends_on:
+                task.depends_on = [Dependency(task_key=placeholder_key)]
+        pipeline.tasks.insert(0, gap_task)
+
+    failed_findings = [item for item in findings if item["severity"] == "failed"]
+    gap_findings = [item for item in findings if item["severity"] == "gap"]
+    status = "failed" if failed_findings else "verified_with_gaps" if gap_findings else "verified"
+    failed_capture_keys = argument_failure_keys | set(missing_task_keys)
+    agentic_captured_count = len(placeholder_by_key)
+    deterministic_count = captured_task_count - len(failed_capture_keys) - agentic_captured_count
+    agentic_count = agentic_captured_count + len(unresolved)
+    failed_count = (
+        len(failed_capture_keys)
+        + len(unmatched_audit_tasks)
+        + len(visitor.unclaimed_task_calls)
+        + len(visitor.unclaimed_statements)
+    )
+    audited_task_count = (
+        captured_task_count
+        + len(unresolved)
+        + len(unmatched_audit_tasks)
+        + len(visitor.unclaimed_task_calls)
+        + len(visitor.unclaimed_statements)
+    )
+
+    pipeline.not_translatable = findings
+    pipeline.reconciliation_status = status
+    pipeline.audit = {
+        "source_file": source_file,
+        "audited_activity_count": audited_task_count,
+        "captured_task_count": captured_task_count,
+        "audited_edge_count": len(audit.edges),
+        "captured_edge_count": len(visitor.edge_captures),
+        "deterministic_count": deterministic_count,
+        "agentic_count": agentic_count,
+        "failed_count": failed_count,
+        "excluded_count": 0,
+        "transformations": transformations,
+    }
+    return pipeline
 
 
 def _wrap_in_for_each(
@@ -1963,7 +2866,7 @@ _JOB_PARAM_REF = re.compile(r"\{\{\s*job\.parameters\.([A-Za-z0-9_]+)\s*\}\}")
 def _unresolved_activity_templates(activity: Activity) -> set[str]:
     """Returns residual Airflow Jinja expressions in task parameter fields."""
     unresolved: set[str] = set()
-    for attribute in ("base_parameters", "job_parameters", "parameters", "sql"):
+    for attribute in ("base_parameters", "job_parameters", "parameters", "sql", "generated_source"):
         unresolved |= templating.unresolved_jinja_expressions(getattr(activity, attribute, None))
     return unresolved
 
@@ -1993,21 +2896,50 @@ def _rewire_dropped(upstreams: dict[str, list[str]], dropped: set[str]) -> dict[
 def _root_trigger_sensor(
     operators: dict[str, tuple[str, str, dict[str, ast.expr]]],
     upstreams: dict[str, list[str]],
-) -> str | None:
-    """Returns the var of a root sensor eligible to become a job-level trigger, else None.
+    all_task_vars: set[str],
+) -> tuple[str, set[str]] | None:
+    """Returns a root sensor and its proven descendant set, or None.
 
     Only a sensor with no upstreams (the DAG's entry gate) can lift to a file_arrival /
     table_update trigger: mid-DAG sensors are ordering gates within the run and must stay
-    as tasks. File sensors win over table sensors when both sit at the root (Databricks jobs
-    take a single trigger). A table/SQL sensor lifts only when it names a literal table; one
-    without a ``table_name`` is an arbitrary-condition sensor kept as a polling task.
+    as tasks. The sensor must reach every non-sensor task; otherwise lifting it would gate
+    independent work that Airflow did not gate. File sensors win over table sensors when both
+    qualify. A table/SQL sensor lifts only when it names a literal table.
     """
-    file_roots = [var for var, (_id, op, _kw) in operators.items() if op in ops.FILE_SENSORS and not upstreams.get(var)]
-    if file_roots:
-        return file_roots[0]
-    for var, (_id, op, kw) in operators.items():
-        if op in ops.TABLE_SENSORS and not upstreams.get(var) and ops.literal_str(kw.get("table_name")) is not None:
-            return var
+    adjacency: dict[str, set[str]] = {var: set() for var in all_task_vars}
+    for downstream, dependencies in upstreams.items():
+        for upstream in dependencies:
+            adjacency.setdefault(upstream, set()).add(downstream)
+
+    def _descendants(root: str) -> set[str]:
+        descendants: set[str] = set()
+        stack = list(adjacency.get(root, ()))
+        while stack:
+            current = stack.pop()
+            if current in descendants:
+                continue
+            descendants.add(current)
+            stack.extend(adjacency.get(current, ()))
+        return descendants
+
+    sensor_vars = {var for var, (_id, operator, _kwargs) in operators.items() if operator.endswith("Sensor")}
+    required = all_task_vars - sensor_vars
+    candidates = [
+        var
+        for var, (_id, operator, _kwargs) in operators.items()
+        if operator in ops.FILE_SENSORS and not upstreams.get(var)
+    ]
+    candidates.extend(
+        var
+        for var, (_id, operator, kwargs) in operators.items()
+        if operator in ops.TABLE_SENSORS
+        and not upstreams.get(var)
+        and ops.literal_str(kwargs.get("table_name")) is not None
+    )
+    for candidate in candidates:
+        descendants = _descendants(candidate)
+        if required <= descendants:
+            return candidate, descendants
     return None
 
 
@@ -2167,7 +3099,13 @@ def discover_dags(source_path: Path) -> list[Path]:
     return dags
 
 
-def load_pipelines(source_path: Path, pipeline: str | None = None, *, dbt_mode: str = "static") -> list[Pipeline]:
+def load_pipelines(
+    source_path: Path,
+    pipeline: str | None = None,
+    *,
+    dbt_mode: str = "static",
+    exclude_dags: set[str] | None = None,
+) -> list[Pipeline]:
     """Loads every DAG under *source_path* into Pipeline IR.
 
     Args:
@@ -2179,12 +3117,66 @@ def load_pipelines(source_path: Path, pipeline: str | None = None, *, dbt_mode: 
         One :class:`~flowx.models.ir.Pipeline` per discovered DAG, filtered to
         *pipeline* when provided.
     """
+    root = source_path if source_path.is_dir() else source_path.parent
     pipelines = [
-        loaded for dag_path in discover_dags(source_path) for loaded in load_airflow_dags(dag_path, dbt_mode=dbt_mode)
+        loaded
+        for dag_path in discover_dags(source_path)
+        for loaded in load_airflow_dags(
+            dag_path,
+            dbt_mode=dbt_mode,
+            source_file=source_audit.source_label(dag_path, root),
+        )
     ]
     if pipeline is not None:
         pipelines = [p for p in pipelines if p.name == pipeline]
+    excluded = set(exclude_dags or ())
+    for loaded in pipelines:
+        if loaded.name in excluded:
+            loaded.migration_status = "excluded"
+            count = int(loaded.audit.get("audited_activity_count", 0))
+            loaded.audit.update(
+                {
+                    "deterministic_count": 0,
+                    "agentic_count": 0,
+                    "failed_count": 0,
+                    "excluded_count": count,
+                }
+            )
+    if excluded:
+        _replace_excluded_dag_references(pipelines, excluded)
     return pipelines
+
+
+def _replace_excluded_dag_references(pipelines: list[Pipeline], excluded: set[str]) -> None:
+    """Replaces included-to-excluded run-job references with explicit placeholders."""
+    excluded_by_key = {normalize_task_key(name): name for name in excluded}
+    for pipeline in pipelines:
+        if pipeline.migration_status == "excluded":
+            continue
+        for index, task in enumerate(pipeline.tasks):
+            if isinstance(task, RunJobActivity) and task.job_name in excluded_by_key:
+                excluded_name = excluded_by_key[task.job_name]
+                placeholder = PlaceholderActivity(
+                    name=task.name,
+                    task_key=task.task_key,
+                    depends_on=task.depends_on,
+                    original_type="ExcludedDagReference",
+                    comment=f"Referenced Airflow DAG {excluded_name!r} was excluded from this migration.",
+                    raw_definition={"excluded_dag": excluded_name},
+                )
+                pipeline.tasks[index] = placeholder
+                entry = source_audit.finding(
+                    source_file=str(pipeline.audit.get("source_file", "")),
+                    code="excluded_dag_reference",
+                    severity="gap",
+                    message=f"Task {task.task_key!r} references excluded DAG {excluded_name!r}.",
+                    details={"task_key": task.task_key, "excluded_dag": excluded_name},
+                )
+                pipeline.not_translatable.append(entry)
+                if pipeline.reconciliation_status != "failed":
+                    pipeline.reconciliation_status = "verified_with_gaps"
+                pipeline.audit["agentic_count"] = int(pipeline.audit.get("agentic_count", 0)) + 1
+                pipeline.audit["deterministic_count"] = max(0, int(pipeline.audit.get("deterministic_count", 0)) - 1)
 
 
 _HOST_PATTERN = re.compile(r"https://([A-Za-z0-9._-]*(?:azuredatabricks\.net|databricks\.com|cloud\.databricks\.com))")

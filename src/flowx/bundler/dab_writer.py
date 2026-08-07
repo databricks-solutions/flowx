@@ -7,6 +7,7 @@ import copy
 import json
 import re
 import sys
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -438,6 +439,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: Report file not found: {args.report}", file=sys.stderr)
         return 1
 
+    reconciliation_failures = _report_reconciliation_failures(args.report)
+    if reconciliation_failures:
+        print("Error: source reconciliation failed; no bundle files were written.", file=sys.stderr)
+        for failure in reconciliation_failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+
     if args.profile:
         set_profile(args.profile)
 
@@ -460,6 +468,48 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     shared_airflow_bundle = len(workflows) > 1 and all(workflow.source == "airflow" for workflow in workflows)
+    from flowx.validate.bundle_invariants import check_bundle_dir, format_result
+
+    # Render and validate away from the destination. This keeps a reconciliation or structural
+    # failure from leaving a partially-written bundle in the migration directory.
+    args.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".flowx-preflight-", dir=args.output_dir.parent) as temporary:
+        staging_root = Path(temporary)
+        if shared_airflow_bundle:
+            write_bundle(
+                workflow=_combine_airflow_workflows(workflows),
+                output_dir=staging_root,
+                catalog=args.catalog,
+                schema=args.schema,
+                bundle_name=args.bundle_name or normalize_task_key(args.output_dir.name),
+            )
+            staged_dirs = [staging_root]
+        else:
+            staged_dirs = []
+            for workflow in workflows:
+                workflow_dir = staging_root / normalize_task_key(workflow.name) if len(workflows) > 1 else staging_root
+                write_bundle(
+                    workflow=workflow,
+                    output_dir=workflow_dir,
+                    catalog=args.catalog,
+                    schema=args.schema,
+                    bundle_name=args.bundle_name if len(workflows) == 1 else None,
+                )
+                staged_dirs.append(workflow_dir)
+        preflight_violations = 0
+        for bundle_dir in staged_dirs:
+            result = check_bundle_dir(bundle_dir)
+            if not result.ok or result.warnings:
+                print(format_result(result), file=sys.stderr)
+            preflight_violations += len(result.violations)
+        if preflight_violations:
+            print(
+                f"Error: package preflight found {preflight_violations} bundle-invariant violation(s); "
+                "no bundle files were written.",
+                file=sys.stderr,
+            )
+            return 1
+
     all_created: list[Path] = []
     if shared_airflow_bundle:
         combined = _combine_airflow_workflows(workflows)
@@ -491,8 +541,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # Tier-0 structural check over the emitted bundle(s): duplicate task keys / job params,
     # dangling depends_on, undeclared {{job.parameters.X}}, leaked YAML anchors. Source-agnostic.
-    from flowx.validate.bundle_invariants import check_bundle_dir, format_result
-
     bundle_dirs = (
         [args.output_dir]
         if shared_airflow_bundle or len(workflows) == 1
@@ -1606,6 +1654,8 @@ def _load_report(report_path: Path) -> list[PreparedWorkflow]:
     workflows: list[PreparedWorkflow] = []
 
     if "tasks" in report and "name" in report:
+        if report.get("migration_status") == "excluded":
+            return workflows
         workflow = _pipeline_dict_to_workflow(report)
         workflows.append(workflow)
         return workflows
@@ -1615,7 +1665,12 @@ def _load_report(report_path: Path) -> list[PreparedWorkflow]:
         # converts more than one pipeline/DAG at once. Each entry is a full pipeline IR dict, so it
         # routes through the same single-pipeline machinery.
         for entry in report["pipelines"]:
-            if isinstance(entry, dict) and "tasks" in entry and "name" in entry:
+            if (
+                isinstance(entry, dict)
+                and "tasks" in entry
+                and "name" in entry
+                and entry.get("migration_status") != "excluded"
+            ):
                 workflows.append(_pipeline_dict_to_workflow(entry))
         return workflows
 
@@ -1657,6 +1712,38 @@ def _load_report(report_path: Path) -> list[PreparedWorkflow]:
 
     # Empty or unrecognised report shape — nothing to do.
     return workflows
+
+
+def _report_reconciliation_failures(report_path: Path) -> list[str]:
+    """Returns included pipelines whose source reconciliation is not package-safe."""
+    with report_path.open(encoding="utf-8") as handle:
+        report = json.load(handle)
+    if isinstance(report, dict) and isinstance(report.get("pipelines"), list):
+        pipelines = report["pipelines"]
+    elif isinstance(report, dict) and "tasks" in report:
+        pipelines = [report]
+    else:
+        return []
+    failures: list[str] = []
+    for pipeline in pipelines:
+        if not isinstance(pipeline, dict) or pipeline.get("migration_status") == "excluded":
+            continue
+        if pipeline.get("reconciliation_status") != "failed":
+            continue
+        findings = [
+            finding
+            for finding in pipeline.get("not_translatable") or []
+            if isinstance(finding, dict) and finding.get("severity") == "failed"
+        ]
+        if findings:
+            failures.extend(
+                f"{pipeline.get('name', 'unknown')}: {finding.get('code', 'reconciliation_failed')} - "
+                f"{finding.get('message', '')}"
+                for finding in findings
+            )
+        else:
+            failures.append(f"{pipeline.get('name', 'unknown')}: reconciliation_failed")
+    return failures
 
 
 def _pipeline_dict_to_workflow(pipeline_dict: dict[str, Any]) -> PreparedWorkflow:
@@ -1714,6 +1801,10 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         translation_configuration=_reconstruct_configuration(pipeline_dict.get("translation_configuration")),
         schedule=pipeline_dict.get("schedule"),
         tags=dict(pipeline_dict.get("tags") or {}),
+        not_translatable=list(pipeline_dict.get("not_translatable") or []),
+        reconciliation_status=pipeline_dict.get("reconciliation_status"),
+        migration_status=pipeline_dict.get("migration_status", "included"),
+        audit=dict(pipeline_dict.get("audit") or {}),
     )
     return pipeline, parameters
 

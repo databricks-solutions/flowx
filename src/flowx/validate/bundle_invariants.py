@@ -25,6 +25,7 @@ import yaml
 _ANCHOR_RE = re.compile(r"[&*]id\d+\b")
 _JOB_PARAM_REF_RE = re.compile(r"\{\{\s*job\.parameters\.([A-Za-z0-9_]+)\s*\}\}")
 _JOB_RESOURCE_ID_RE = re.compile(r"\$\{resources\.jobs\.([^.}]+)\.id\}")
+_PYDABS_JOB_RE = re.compile(r"resources\.add_job\(\s*['\"]([^'\"]+)['\"]")
 
 
 @dataclass(slots=True, kw_only=True)
@@ -240,6 +241,15 @@ def check_bundle_dir(bundle_dir: Path) -> BundleInvariantResult:
         jobs = (document.get("resources") or {}).get("jobs") or {}
         if isinstance(jobs, dict):
             known_jobs.update(str(job_key) for job_key in jobs)
+        python_resources = (document.get("python") or {}).get("resources") or []
+        for resource in python_resources:
+            if not isinstance(resource, str):
+                continue
+            module = resource.split(":", 1)[0]
+            if module.startswith("resources."):
+                known_jobs.add(module.rsplit(".", 1)[-1])
+    for hook_path in sorted(resources_dir.glob("*.py")) if resources_dir.exists() else []:
+        known_jobs.update(_PYDABS_JOB_RE.findall(hook_path.read_text(encoding="utf-8")))
 
     for path, document in documents:
         jobs = (document.get("resources") or {}).get("jobs") or {}
@@ -257,12 +267,10 @@ def check_bundle_dir(bundle_dir: Path) -> BundleInvariantResult:
                 findings.append(
                     BundleFinding(
                         code="dangling_run_job_reference",
-                        severity="warning",
                         location=f"{path.name}, job '{job_key}', task '{task.get('task_key', '')}'",
                         message=(
                             f"run_job_task references bundle job '{match.group(1)}', which is not declared "
-                            "in static resource YAML. Confirm it is supplied by a Python resource or replace "
-                            "the reference with a declared bundle variable containing the external job ID."
+                            "in static resource YAML or registered as a Python resource."
                         ),
                     )
                 )

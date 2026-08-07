@@ -30,6 +30,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, default=Path("./flowx_output"), help="Shared migration output dir.")
     parser.add_argument("--pipeline", type=str, default=None, help="Translate only the named DAG (default: all).")
     parser.add_argument(
+        "--exclude-dag",
+        action="append",
+        default=[],
+        help="Exclude a DAG from bundle emission while retaining it in audit and coverage reporting. Repeatable.",
+    )
+    parser.add_argument(
         "--dbt-mode",
         choices=("static", "pydabs"),
         default="static",
@@ -66,7 +72,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.source_dir:
         parser.error("--source-dir is required (unless using --merge-agentic)")
 
-    pipelines = load_pipelines(args.source_dir, pipeline=args.pipeline, dbt_mode=args.dbt_mode)
+    pipelines = load_pipelines(
+        args.source_dir,
+        pipeline=args.pipeline,
+        dbt_mode=args.dbt_mode,
+        exclude_dags=set(args.exclude_dag),
+    )
     if not pipelines:
         logger.error("No Airflow DAGs found under %s (or none matched --pipeline).", args.source_dir)
         return 1
@@ -94,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Total tasks:        {total_tasks}")
     print(f"Agentic gaps:       {len(gaps)}")
     print(f"\nTranslation report (intermediate): {report_file}")
-    return 0
+    return 1 if any(pipeline.reconciliation_status == "failed" for pipeline in pipelines) else 0
 
 
 def _collect_gaps(pipelines: list) -> list[dict]:
