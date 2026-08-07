@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import math
 import re
+from dataclasses import dataclass
 from typing import Any
 
 # Airflow date/time macros carrying the run's *logical date* -> a named job parameter (not an inline
@@ -306,11 +307,18 @@ def email_on_failure(dag_default_args: dict[str, ast.expr], task_kwargs: dict[st
 # trigger_rule -> dependency outcome
 # --------------------------------------------------------------------------------------
 
-# Map Airflow trigger_rule -> the DAB job ``run_if`` constant carried as a dependency outcome. The
-# preparer's reducer passes these through unchanged. Rules with no exact DAB equivalent fall back to
-# the closest safe constant: none_failed_min_one_success -> NONE_FAILED so an upstream failure
-# never permits downstream execution; none_failed_or_skipped -> NONE_FAILED (skips are non-failures).
-# Airflow's default all_success maps to None (no run_if key -> Databricks default ALL_SUCCESS).
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TriggerRuleMapping:
+    """Databricks run-if mapping and its semantic confidence."""
+
+    rule: str
+    outcome: str | None
+    status: str
+    message: str | None = None
+
+
+# Exact mappings only. Rules outside this table must not collapse to ALL_SUCCESS.
 _TRIGGER_RULE_TO_RUN_IF: dict[str, str | None] = {
     "all_success": None,
     "all_done": "ALL_DONE",
@@ -318,24 +326,47 @@ _TRIGGER_RULE_TO_RUN_IF: dict[str, str | None] = {
     "one_failed": "AT_LEAST_ONE_FAILED",
     "one_success": "AT_LEAST_ONE_SUCCESS",
     "none_failed": "NONE_FAILED",
-    "none_failed_min_one_success": "NONE_FAILED",
     "none_failed_or_skipped": "NONE_FAILED",
-    "always": "ALL_DONE",
 }
+
+_UNSUPPORTED_TRIGGER_RULES = frozenset({"always", "dummy", "none_skipped", "all_skipped", "one_done"})
+
+
+def _trigger_rule_name(task_kwargs: dict[str, ast.expr]) -> str | None:
+    node = task_kwargs.get("trigger_rule")
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.lower()
+    if isinstance(node, ast.Attribute):
+        return node.attr.lower()
+    return None
+
+
+def trigger_rule_mapping(task_kwargs: dict[str, ast.expr]) -> TriggerRuleMapping:
+    """Classifies an Airflow trigger rule as exact, approximate, or unsupported."""
+    rule = _trigger_rule_name(task_kwargs) or "all_success"
+    if rule == "none_failed_min_one_success":
+        return TriggerRuleMapping(
+            rule=rule,
+            outcome="NONE_FAILED",
+            status="approximate",
+            message=(
+                "Databricks NONE_FAILED preserves the no-upstream-failure requirement but may run "
+                "when every upstream task was skipped or excluded."
+            ),
+        )
+    if rule in _TRIGGER_RULE_TO_RUN_IF:
+        return TriggerRuleMapping(rule=rule, outcome=_TRIGGER_RULE_TO_RUN_IF[rule], status="exact")
+    detail = (
+        "Databricks has no run_if predicate with equivalent skipped/not-run behavior."
+        if rule in _UNSUPPORTED_TRIGGER_RULES
+        else "The trigger rule is not recognized by the static Airflow translator."
+    )
+    return TriggerRuleMapping(rule=rule, outcome=None, status="unsupported", message=detail)
 
 
 def trigger_rule_outcome(task_kwargs: dict[str, ast.expr]) -> str | None:
     """Maps a task's ``trigger_rule`` kwarg to a DAB ``run_if`` constant, or None (ALL_SUCCESS)."""
-    node = task_kwargs.get("trigger_rule")
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        rule = node.value
-    elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "TriggerRule":
-        rule = node.attr.lower()
-    else:
-        rule = None
-    if rule is None:
-        return None
-    return _TRIGGER_RULE_TO_RUN_IF.get(rule)
+    return trigger_rule_mapping(task_kwargs).outcome
 
 
 # --------------------------------------------------------------------------------------

@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from flowx.models.ir import NotebookActivity
+from flowx.models.ir import ForEachActivity, NotebookActivity, PlaceholderActivity, SparkPythonActivity
+from flowx.preparer.workflow_preparer import prepare_workflow
 from flowx.sources.airflow.loader import load_airflow_dag, load_airflow_dags
 
 _REPROS = Path(__file__).parents[1] / "resources" / "airflow" / "review_repros"
@@ -10,8 +11,7 @@ _REPROS = Path(__file__).parents[1] / "resources" / "airflow" / "review_repros"
 
 def _dependencies(pipeline) -> dict[str, list[str]]:
     return {
-        task.task_key: sorted(dependency.task_key for dependency in (task.depends_on or []))
-        for task in pipeline.tasks
+        task.task_key: sorted(dependency.task_key for dependency in (task.depends_on or [])) for task in pipeline.tasks
     }
 
 
@@ -81,3 +81,144 @@ def test_literal_dag_factory_loop_and_multiple_assigned_dags_remain_distinct() -
     assert [pipeline.name for pipeline in generated] == ["etl_alpha", "etl_beta"]
     assert [pipeline.name for pipeline in assigned] == ["team_a_etl", "team_b_etl"]
     assert all([task.task_key for task in pipeline.tasks] == ["extract", "load"] for pipeline in assigned)
+
+
+def test_spark_submit_requires_a_single_invocation_and_known_option_arities() -> None:
+    pipeline = load_airflow_dag(_REPROS / "t2_sparksubmit.py")
+    first, second, third = pipeline.tasks
+
+    assert isinstance(first, SparkPythonActivity)
+    assert first.python_file == "/jobs/etl.py"
+    assert first.parameters == ["--date", "2024-01-01"]
+    assert isinstance(second, NotebookActivity)
+    assert "cd /opt/app && spark-submit" in (second.generated_source or "")
+    assert isinstance(third, NotebookActivity)
+    assert "spark-submit /jobs/x.py && aws" in (third.generated_source or "")
+
+
+def test_unknown_spark_submit_option_falls_back_to_bash(tmp_path: Path) -> None:
+    dag = tmp_path / "spark.py"
+    dag.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='spark') as dag:\n"
+        "    run = BashOperator(task_id='run', bash_command='spark-submit --future-option value app.py')\n",
+        encoding="utf-8",
+    )
+
+    task = load_airflow_dag(dag).tasks[0]
+
+    assert isinstance(task, NotebookActivity)
+    assert "--future-option value app.py" in (task.generated_source or "")
+
+
+def test_spark_submit_option_cannot_consume_another_option_as_its_value(tmp_path: Path) -> None:
+    dag = tmp_path / "spark_option_value.py"
+    dag.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='spark_option_value') as dag:\n"
+        "    run = BashOperator(\n"
+        "        task_id='run',\n"
+        "        bash_command='spark-submit --conf --driver-memory=4g app.py',\n"
+        "    )\n",
+        encoding="utf-8",
+    )
+
+    task = load_airflow_dag(dag).tasks[0]
+
+    assert isinstance(task, NotebookActivity)
+    assert "spark-submit --conf --driver-memory=4g app.py" in (task.generated_source or "")
+
+
+def test_unresolved_jinja_in_generated_source_becomes_placeholder() -> None:
+    pipeline = load_airflow_dag(_REPROS / "t4_bashjinja.py")
+
+    assert isinstance(pipeline.tasks[0], PlaceholderActivity)
+    assert pipeline.reconciliation_status == "verified_with_gaps"
+    assert any(finding["code"] == "unresolved_airflow_template" for finding in pipeline.not_translatable)
+
+
+def test_unsupported_and_approximate_trigger_rules_are_explicit(tmp_path: Path) -> None:
+    unsupported = load_airflow_dag(_REPROS / "t23_tr2.py")
+    assert all(isinstance(unsupported.tasks[index], PlaceholderActivity) for index in (1, 2, 3))
+
+    dag = tmp_path / "approximate.py"
+    dag.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='rules') as dag:\n"
+        "    up = BashOperator(task_id='up', bash_command='echo up')\n"
+        "    down = BashOperator(task_id='down', bash_command='echo down', "
+        "trigger_rule='none_failed_min_one_success')\n"
+        "    up >> down\n",
+        encoding="utf-8",
+    )
+    approximate = load_airflow_dag(dag)
+
+    assert approximate.tasks[1].depends_on[0].outcome == "NONE_FAILED"
+    finding = next(item for item in approximate.not_translatable if item["code"] == "approximated_trigger_rule")
+    assert "every upstream task was skipped or excluded" in finding["message"]
+
+
+def test_sensor_lift_requires_full_non_sensor_reachability(tmp_path: Path) -> None:
+    guarded = load_airflow_dag(_REPROS / "t24_sensorscope.py")
+    assert guarded.schedule is None
+    assert {task.task_key for task in guarded.tasks} == {"wait", "gated", "independent"}
+
+    dag = tmp_path / "dominating_sensor.py"
+    dag.write_text(
+        "from airflow import DAG\n"
+        "from airflow.sensors.filesystem import FileSensor\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='dominating', schedule=None) as dag:\n"
+        "    wait = FileSensor(task_id='wait', filepath='/mnt/input')\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work')\n"
+        "    wait >> work\n",
+        encoding="utf-8",
+    )
+    dominating = load_airflow_dag(dag)
+
+    assert (dominating.schedule or {})["kind"] == "file_arrival"
+    proof = next(item for item in dominating.audit["transformations"] if item["code"].startswith("sensor_lift"))
+    assert proof["covered_capture_ids"] == ["work"]
+
+
+def test_classic_mapping_with_unbound_args_links_a_failing_placeholder() -> None:
+    pipeline = load_airflow_dag(_REPROS / "a8_classic_mapping.py")
+    outer = pipeline.tasks[0]
+
+    assert isinstance(outer, ForEachActivity)
+    assert isinstance(outer.inner_activities[0], PlaceholderActivity)
+    assert any(finding["code"] == "classic_mapping_arguments_unbound" for finding in pipeline.not_translatable)
+
+    prepared = prepare_workflow(pipeline)
+    inner_task = prepared.tasks[0]["for_each_task"]["task"]
+    notebook_path = inner_task["notebook_task"]["notebook_path"]
+    notebook = next(item for item in prepared.notebooks if notebook_path.endswith(item.relative_path))
+    assert "raise NotImplementedError" in notebook.content
+
+
+def test_shell_notebook_directives_remain_inert() -> None:
+    magic = load_airflow_dag(_REPROS / "t15_magic.py").tasks[0]
+    boundary = load_airflow_dag(_REPROS / "t31_inject.py").tasks[0]
+
+    assert isinstance(magic, NotebookActivity)
+    assert isinstance(boundary, NotebookActivity)
+    magic_source = magic.generated_source or ""
+    boundary_source = boundary.generated_source or ""
+    assert magic_source.count("# MAGIC %sh") == 1
+    assert "# MAGIC ## MAGIC %sql" in magic_source
+    assert boundary_source.count("# MAGIC %sh") == 1
+    assert "# MAGIC ## COMMAND ----------" in boundary_source
+    assert "# MAGIC echo one" in boundary_source
+    assert "# MAGIC echo two" in boundary_source
+
+
+def test_unconsumed_operator_arguments_become_placeholder() -> None:
+    pipeline = load_airflow_dag(_REPROS / "t29_dagsem.py")
+    task = next(task for task in pipeline.tasks if task.task_key == "a")
+
+    assert isinstance(task, PlaceholderActivity)
+    finding = next(item for item in pipeline.not_translatable if item["code"] == "unconsumed_operator_arguments")
+    assert finding["details"]["arguments"] == ["pool", "priority_weight", "queue"]

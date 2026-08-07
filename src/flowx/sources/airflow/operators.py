@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import json as _json
+import re
 import shlex
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -176,8 +177,17 @@ def _sh_notebook(task_id: str, command: str, env_widgets: dict[str, str] | None 
             export.append(f"dbutils.widgets.text({name!r}, '')")
             export.append(f"os.environ[{name!r}] = dbutils.widgets.get({name!r})")
         header += "\n".join(export) + "\n\n# COMMAND ----------\n\n"
-    lines = "".join(f"# MAGIC {line}\n" for line in command.splitlines())
+    lines = "".join(f"# MAGIC {_sanitize_sh_line(line)}\n" for line in command.splitlines())
     return header + "# MAGIC %sh\n" + lines
+
+
+def _sanitize_sh_line(line: str) -> str:
+    """Keeps notebook source directives inert inside the generated shell cell."""
+    stripped = line.lstrip()
+    if stripped.startswith("# MAGIC") or stripped.startswith("# COMMAND ----------"):
+        indentation = line[: len(line) - len(stripped)]
+        return f"{indentation}#{stripped}"
+    return line
 
 
 # Airflow sensor defaults (seconds): poke every 60s, give up after 7 days.
@@ -420,41 +430,94 @@ class _SparkSubmit:
     app_args: list[str]
 
 
+_SPARK_VALUE_OPTIONS = frozenset(
+    {
+        "--master",
+        "--deploy-mode",
+        "--class",
+        "--name",
+        "--jars",
+        "--packages",
+        "--exclude-packages",
+        "--repositories",
+        "--py-files",
+        "--files",
+        "--archives",
+        "--conf",
+        "--properties-file",
+        "--driver-memory",
+        "--driver-java-options",
+        "--driver-library-path",
+        "--driver-class-path",
+        "--executor-memory",
+        "--proxy-user",
+        "--driver-cores",
+        "--queue",
+        "--num-executors",
+        "--total-executor-cores",
+        "--executor-cores",
+        "--principal",
+        "--keytab",
+        "--resourceProfile",
+    }
+)
+_SPARK_BOOLEAN_OPTIONS = frozenset({"--supervise", "--verbose", "--load-spark-defaults"})
+_SHELL_CONTROL = re.compile(r"(?:&&|\|\||[|;]|(?:^|\s)cd(?:\s|$))")
+
+
 def parse_spark_submit(command: str) -> _SparkSubmit | None:
     """Parses a ``spark-submit ...`` command line into its application + args.
 
     Returns ``None`` when the command is not a spark-submit invocation.
     """
+    if "\n" in command or _SHELL_CONTROL.search(command):
+        return None
     try:
         tokens = shlex.split(command)
     except ValueError:
         return None
-    if "spark-submit" not in tokens:
+    if not tokens or tokens[0].rsplit("/", 1)[-1] != "spark-submit":
         return None
-    tokens = tokens[tokens.index("spark-submit") + 1 :]
+    tokens = tokens[1:]
 
     java_class: str | None = None
     application: str | None = None
     app_args: list[str] = []
     index = 0
-    # spark-submit flags that take a value we skip over (cluster-side config, not app args).
-    valued_flags = {"--master", "--deploy-mode", "--conf", "--name", "--jars", "--packages", "--files", "--py-files"}
     while index < len(tokens):
         token = tokens[index]
-        if token == "--class" and index + 1 < len(tokens):
-            java_class = tokens[index + 1]
-            index += 2
+        option, separator, inline_value = token.partition("=")
+        if option in _SPARK_VALUE_OPTIONS:
+            if separator:
+                value = inline_value
+                if not value or value.startswith("-"):
+                    return None
+            elif index + 1 < len(tokens):
+                value = tokens[index + 1]
+                if value.startswith("-"):
+                    return None
+            else:
+                return None
+            if option == "--class":
+                java_class = value
+            index += 1 if separator else 2
             continue
-        if token in valued_flags and index + 1 < len(tokens):
-            index += 2
-            continue
-        if token.startswith("--"):
+        if option in _SPARK_BOOLEAN_OPTIONS and not separator:
             index += 1
             continue
-        # First bare token is the application; the rest are application args.
+        if token.startswith("--"):
+            return None
+        if token.startswith("-"):
+            return None
+        if token == "spark-submit":
+            return None
+        if not token:
+            return None
         application = token
         app_args = tokens[index + 1 :]
         break
+    if application is None:
+        return None
     return _SparkSubmit(application=application, java_class=java_class, app_args=app_args)
 
 
@@ -749,6 +812,58 @@ def build_placeholder(ctx: OperatorContext) -> Activity:
 def build_placeholder_with_comment(ctx: OperatorContext, comment: str) -> Activity:
     """Builds a placeholder carrying a caller-supplied migration explanation."""
     return _placeholder(ctx, comment)
+
+
+_LOADER_CONSUMED_KWARGS = frozenset({"task_id", "dag", "trigger_rule", "retries", "retry_delay", "execution_timeout"})
+_OPERATOR_CONSUMED_KWARGS: dict[str, frozenset[str]] = {
+    "PythonOperator": frozenset({"python_callable", "op_args", "op_kwargs"}),
+    "BranchPythonOperator": frozenset({"python_callable", "op_args", "op_kwargs"}),
+    "ShortCircuitOperator": frozenset({"python_callable", "op_args", "op_kwargs"}),
+    "BashOperator": frozenset({"bash_command"}),
+    "SSHOperator": frozenset({"command"}),
+    "SparkSubmitOperator": frozenset({"application", "java_class", "application_args"}),
+    "DatabricksSubmitRunOperator": frozenset({"json"}),
+    "DatabricksSubmitRunDeferrableOperator": frozenset({"json"}),
+    "DatabricksRunNowOperator": frozenset({"job_id", "notebook_params", "python_params", "jar_params"}),
+    "DatabricksRunNowDeferrableOperator": frozenset({"job_id", "notebook_params", "python_params", "jar_params"}),
+    "DatabricksNotebookOperator": frozenset({"notebook_path", "notebook_params"}),
+    "DatabricksSqlOperator": frozenset({"sql"}),
+    "DatabricksSQLStatementsOperator": frozenset({"sql"}),
+    "DatabricksCopyIntoOperator": frozenset({"file_location", "table_name", "file_format"}),
+    "SQLExecuteQueryOperator": frozenset({"sql"}),
+    "PostgresOperator": frozenset({"sql"}),
+    "MySqlOperator": frozenset({"sql"}),
+    "HiveOperator": frozenset({"hql"}),
+    "TriggerDagRunOperator": frozenset({"trigger_dag_id", "conf"}),
+    "PythonVirtualenvOperator": frozenset({"python_callable", "requirements"}),
+    "ExternalPythonOperator": frozenset({"python_callable", "requirements"}),
+    "EmailOperator": frozenset(),
+    "ExternalTaskSensor": frozenset({"external_dag_id", "external_task_id", "poke_interval", "timeout"}),
+    "ExternalTaskSensorAsync": frozenset({"external_dag_id", "external_task_id", "poke_interval", "timeout"}),
+    "HttpSensor": frozenset({"endpoint", "poke_interval", "timeout"}),
+    "HttpSensorAsync": frozenset({"endpoint", "poke_interval", "timeout"}),
+    "PythonSensor": frozenset({"python_callable", "op_args", "op_kwargs", "poke_interval", "timeout"}),
+    "DateTimeSensor": frozenset({"target_time", "timeout"}),
+    "DateTimeSensorAsync": frozenset({"target_time", "timeout"}),
+}
+_FILE_SENSOR_KWARGS = frozenset(
+    {"bucket_key", "bucket_name", "object", "bucket", "filepath", "filepath_", "poke_interval", "timeout"}
+)
+_TABLE_SENSOR_KWARGS = frozenset({"sql", "table_name", "poke_interval", "timeout"})
+
+
+def unconsumed_kwargs(operator: str, kwargs: dict[str, ast.expr]) -> set[str]:
+    """Returns supplied arguments with no declared loader or adapter semantics."""
+    consumed: frozenset[str] | None
+    if operator in FILE_SENSORS:
+        consumed = _FILE_SENSOR_KWARGS
+    elif operator in TABLE_SENSORS:
+        consumed = _TABLE_SENSOR_KWARGS
+    else:
+        consumed = _OPERATOR_CONSUMED_KWARGS.get(operator)
+    if consumed is None:
+        return set()
+    return set(kwargs) - _LOADER_CONSUMED_KWARGS - consumed
 
 
 # --------------------------------------------------------------------------------------
