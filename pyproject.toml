@@ -79,7 +79,7 @@ markers = [
 cache-dir = ".venv/ruff-cache"
 target-version = "py312"
 line-length = 120
-exclude = ["templates/*"]
+exclude = ["templates/*", "tests/resources/airflow/review_repros/*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

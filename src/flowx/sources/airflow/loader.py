@@ -21,6 +21,7 @@ handled here.
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import re
 from dataclasses import dataclass, field
@@ -66,6 +67,57 @@ class _TaskFlowTask:
     unresolved_arguments: list[str] = field(default_factory=list)
     expand_kwarg: str | None = None
     expand_items_json: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SourceSpan:
+    """Stable source location used to identify captured Airflow constructs."""
+
+    line: int
+    column: int
+    end_line: int
+    end_column: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DagDeclaration:
+    """One statically discovered DAG declaration in a Python module."""
+
+    capture_id: str
+    variable: str | None
+    node: ast.stmt
+    span: SourceSpan
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TaskCapture:
+    """One operator or TaskFlow invocation before Databricks key allocation."""
+
+    capture_id: str
+    variable: str
+    task_id: str
+    operator: str
+    call: ast.Call
+    span: SourceSpan
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EdgeCapture:
+    """A dependency edge expressed in capture identities rather than task keys."""
+
+    upstream_id: str
+    downstream_id: str
+    span: SourceSpan
+
+
+def _span(node: ast.AST) -> SourceSpan:
+    """Returns a complete source span for an AST node."""
+    return SourceSpan(
+        line=getattr(node, "lineno", 0),
+        column=getattr(node, "col_offset", 0),
+        end_line=getattr(node, "end_lineno", getattr(node, "lineno", 0)),
+        end_column=getattr(node, "end_col_offset", getattr(node, "col_offset", 0)),
+    )
 
 
 def _sanitize_task_key(name: str) -> str:
@@ -276,11 +328,194 @@ def _schedule_from_interval(
     return None
 
 
+_UNRESOLVED = object()
+
+
+def _import_aliases(module: ast.Module) -> dict[str, str]:
+    """Returns local import bindings mapped to their canonical dotted names."""
+    aliases: dict[str, str] = {}
+    for node in module.body:
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                aliases[item.asname or item.name.split(".")[0]] = item.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for item in node.names:
+                if item.name != "*":
+                    aliases[item.asname or item.name] = f"{node.module}.{item.name}"
+    return aliases
+
+
+def _canonical_name(node: ast.expr, aliases: dict[str, str]) -> str:
+    """Resolves an imported name or attribute chain without importing its module."""
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return ""
+    root = aliases.get(current.id, current.id)
+    return ".".join([root, *reversed(parts)])
+
+
+def _construct_name(node: ast.expr, aliases: dict[str, str]) -> str:
+    """Returns the canonical class/function leaf name for a call target."""
+    canonical = _canonical_name(node, aliases)
+    return canonical.rsplit(".", 1)[-1] if canonical else ""
+
+
+def _safe_static_value(node: ast.expr, constants: dict[str, Any]) -> Any:
+    """Evaluates the small literal expression subset used by static DAG factories."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return constants.get(node.id, _UNRESOLVED)
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        values = [_safe_static_value(item, constants) for item in node.elts]
+        if any(value is _UNRESOLVED for value in values):
+            return _UNRESOLVED
+        if isinstance(node, ast.Tuple):
+            return tuple(values)
+        if isinstance(node, ast.Set):
+            return set(values)
+        return values
+    if isinstance(node, ast.Dict):
+        keys = [_safe_static_value(item, constants) for item in node.keys if item is not None]
+        values = [_safe_static_value(item, constants) for item in node.values]
+        if len(keys) != len(node.values) or any(value is _UNRESOLVED for value in [*keys, *values]):
+            return _UNRESOLVED
+        return dict(zip(keys, values))
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for item in node.values:
+            if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                parts.append(item.value)
+                continue
+            if isinstance(item, ast.FormattedValue):
+                value = _safe_static_value(item.value, constants)
+                if value is not _UNRESOLVED:
+                    parts.append(str(value))
+                    continue
+            return _UNRESOLVED
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _safe_static_value(node.left, constants)
+        right = _safe_static_value(node.right, constants)
+        if left is _UNRESOLVED or right is _UNRESOLVED:
+            return _UNRESOLVED
+        try:
+            return left + right
+        except TypeError:
+            return _UNRESOLVED
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        value = _safe_static_value(node.operand, constants)
+        if value is _UNRESOLVED or not isinstance(value, (int, float)):
+            return _UNRESOLVED
+        return -value if isinstance(node.op, ast.USub) else value
+    return _UNRESOLVED
+
+
+def _value_node(value: Any) -> ast.expr:
+    """Builds an expression node for a statically evaluated Python value."""
+    return ast.parse(repr(value), mode="eval").body
+
+
+class _ConstantSubstituter(ast.NodeTransformer):
+    """Replaces known constant names and folds the supported literal subset."""
+
+    def __init__(self, constants: dict[str, Any]) -> None:
+        self.constants = constants
+
+    def visit_Name(self, node: ast.Name) -> ast.expr:
+        value = self.constants.get(node.id, _UNRESOLVED)
+        return ast.copy_location(_value_node(value), node) if value is not _UNRESOLVED else node
+
+    def generic_visit(self, node: ast.AST) -> ast.AST:
+        visited = super().generic_visit(node)
+        if isinstance(visited, ast.expr):
+            value = _safe_static_value(visited, {})
+            if value is not _UNRESOLVED:
+                return ast.copy_location(_value_node(value), visited)
+        return visited
+
+
+def _bind_constants(node: ast.AST, constants: dict[str, Any]) -> Any:
+    """Returns a deep-copied AST with known constant names substituted and folded."""
+    bound = _ConstantSubstituter(constants).visit(copy.deepcopy(node))
+    ast.fix_missing_locations(bound)
+    if isinstance(bound, ast.expr):
+        value = _safe_static_value(bound, {})
+        if value is not _UNRESOLVED:
+            return ast.copy_location(_value_node(value), bound)
+    return bound
+
+
+def _static_iteration_nodes(node: ast.expr, constants: dict[str, Any]) -> list[ast.expr] | None:
+    """Returns bounded literal/range loop values, or None for a dynamic iterable."""
+    if isinstance(node, ast.Call) and _construct_name(node.func, {}) == "range":
+        values = [_safe_static_value(argument, constants) for argument in node.args]
+        if any(value is _UNRESOLVED or not isinstance(value, int) for value in values):
+            return None
+        try:
+            result = list(range(*values))
+        except (TypeError, ValueError):
+            return None
+        return [_value_node(value) for value in result] if len(result) <= 256 else None
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return [copy.deepcopy(item) for item in node.elts] if len(node.elts) <= 256 else None
+    value = _safe_static_value(node, constants)
+    if isinstance(value, (list, tuple)) and len(value) <= 256:
+        return [_value_node(item) for item in value]
+    return None
+
+
+def _expand_top_level_loops(module: ast.Module) -> ast.Module:
+    """Unrolls bounded module-level loops so generated DAG declarations stay distinct."""
+    body: list[ast.stmt] = []
+    constants: dict[str, Any] = {}
+    for statement in module.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            value = _safe_static_value(statement.value, constants)
+            if value is not _UNRESOLVED:
+                constants[statement.targets[0].id] = value
+        if isinstance(statement, ast.For) and isinstance(statement.target, ast.Name):
+            items = _static_iteration_nodes(statement.iter, constants)
+            if items is not None:
+                for item in items:
+                    value = _safe_static_value(item, constants)
+                    if value is _UNRESOLVED:
+                        continue
+                    iteration_constants = {**constants, statement.target.id: value}
+                    body.extend(_bind_constants(child, iteration_constants) for child in statement.body)
+                continue
+        body.append(statement)
+    expanded = ast.Module(body=body, type_ignores=list(module.type_ignores))
+    ast.fix_missing_locations(expanded)
+    return expanded
+
+
 class _DagVisitor(ast.NodeVisitor):
     """Collects operator calls, dependency edges, and the DAG's schedule."""
 
-    def __init__(self, module: ast.Module) -> None:
-        self._functions: dict[str, ast.FunctionDef] = {node.name: node for node in _iter_functions(module)}
+    def __init__(self, module: ast.Module, *, target_dag_variable: str | None = None) -> None:
+        self._aliases = _import_aliases(module)
+        self._target_dag_variable = target_dag_variable
+        # Classic python_callable resolution starts at module scope. Nested functions are only visible
+        # from their lexical parent and must never overwrite a same-named module function.
+        self._functions: dict[str, ast.FunctionDef] = {
+            node.name: node for node in module.body if isinstance(node, ast.FunctionDef)
+        }
+        self._constants: dict[str, Any] = {}
+        self._task_bindings: dict[str, str | list[str]] = {}
+        self._list_bindings: dict[str, list[str]] = {}
+        self._capture_sequence = 0
+        self.task_captures: dict[str, TaskCapture] = {}
+        self.edge_captures: list[EdgeCapture] = []
+        self.unresolved_constructs: list[tuple[str, ast.AST]] = []
         # task variable name -> (task_id, operator, kwargs)
         self.operators: dict[str, tuple[str, str, dict[str, ast.expr]]] = {}
         # task variable name -> the operator's ast.Call node (for source-slicing placeholders)
@@ -334,7 +569,8 @@ class _DagVisitor(ast.NodeVisitor):
         self.is_taskflow_dag: bool = False
 
     def functions(self) -> dict[str, ast.FunctionDef]:
-        return self._functions
+        taskflow = {name: definition for name, (definition, _decorator) in self.taskflow_defs.items()}
+        return {**self._functions, **taskflow}
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         # A @task- or @task_group-decorated function defines a task / sub-pipeline from its body,
@@ -354,15 +590,47 @@ class _DagVisitor(ast.NodeVisitor):
     def visit_Assign(self, node: ast.Assign) -> None:
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call):
             var = node.targets[0].id
-            if self._register_operator_call(node.value, var):
+            if _construct_name(node.value.func, self._aliases) == "DAG":
+                self._read_dag_kwargs(node.value)
+                self.dag_id = self.dag_id or var
+                return
+            internal_var = self._new_task_var(var, node.value)
+            if self._register_operator_call(node.value, internal_var, binding=var):
                 pass  # a `x = SomeOperator(...)` (optionally .expand()-mapped) instantiation
-            elif self._register_taskflow_call(node.value, var):
+            elif self._register_helper_factory_call(node.value, internal_var, binding=var):
+                pass
+            elif self._register_taskflow_call(node.value, internal_var):
+                self._task_bindings[var] = internal_var
                 pass  # a `x = mytask(...)` TaskFlow invocation, captured with var as its key
             else:
-                self._register_taskgroup_call(node.value, var)  # a `x = mygroup(...)` @task_group call
+                if self._register_taskgroup_call(node.value, internal_var):
+                    self._task_bindings[var] = internal_var
+                    return
+        elif len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            target = node.targets[0].id
+            if isinstance(node.value, ast.Name):
+                resolved = self._resolve_task_names(node.value)
+                if resolved:
+                    self._task_bindings[target] = resolved[0] if len(resolved) == 1 else resolved
+                    self._constants.pop(target, None)
+                    return
+            value = _safe_static_value(node.value, self._constants)
+            if value is not _UNRESOLVED:
+                self._constants[target] = value
+                self._task_bindings.pop(target, None)
+                if isinstance(value, list):
+                    self._list_bindings[target] = []
+                return
         self.generic_visit(node)
 
-    def _register_operator_call(self, node: ast.Call, var: str) -> bool:
+    def _new_task_var(self, binding: str, node: ast.AST) -> str:
+        """Allocates an internal identity while preserving Python's latest name binding."""
+        if binding not in self.operators and binding not in self.taskflow_tasks and binding not in self.taskgroup_calls:
+            return binding
+        self._capture_sequence += 1
+        return f"{binding}__L{getattr(node, 'lineno', 0)}_{self._capture_sequence}"
+
+    def _register_operator_call(self, node: ast.Call, var: str, *, binding: str | None = None) -> bool:
         """Registers a classic operator/sensor instantiation under the task variable *var*.
 
         Airflow registers a task when the operator is instantiated inside a DAG context; assigning it
@@ -371,16 +639,34 @@ class _DagVisitor(ast.NodeVisitor):
 
         Returns True when *node* was a (possibly ``.expand()``-mapped) operator call.
         """
-        direct = _direct_operator_call(node)
-        mapped = None if direct is not None else _mapped_operator_call(node)
+        direct = _direct_operator_call(node, self._aliases)
+        mapped = None if direct is not None else _mapped_operator_call(node, self._aliases)
         call = direct or (mapped[0] if mapped is not None else None)
-        if call is None or not isinstance(call.func, ast.Name):
+        if call is None:
             return False
-        construct = call.func.id
-        kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        construct = _construct_name(call.func, self._aliases)
+        kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
+        dag_node = kwargs.get("dag")
+        if self._target_dag_variable is not None and not (
+            isinstance(dag_node, ast.Name) and dag_node.id == self._target_dag_variable
+        ):
+            return False
+        call = ast.Call(func=ast.Name(id=construct, ctx=ast.Load()), args=[], keywords=[
+            ast.keyword(arg=key, value=value) for key, value in kwargs.items()
+        ])
+        ast.copy_location(call, node)
         task_id = ops.literal_str(kwargs.get("task_id")) or ops.literal_str(kwargs.get("group_id")) or var
         self.operators[var] = (task_id, construct, kwargs)
         self.calls[var] = call
+        self._task_bindings[binding or var] = var
+        self.task_captures[var] = TaskCapture(
+            capture_id=var,
+            variable=binding or var,
+            task_id=task_id,
+            operator=construct,
+            call=call,
+            span=_span(node),
+        )
         if mapped is not None:
             self.mapped.add(var)
             self.expand_kwargs[var] = mapped[1]
@@ -388,19 +674,69 @@ class _DagVisitor(ast.NodeVisitor):
             self.groups[var] = "__".join(self._group_stack)
         return True
 
+    def _register_helper_factory_call(self, node: ast.Call, var: str, *, binding: str) -> bool:
+        """Expands the deliberately narrow single-return operator factory shape."""
+        if not isinstance(node.func, ast.Name):
+            return False
+        helper = self._functions.get(node.func.id)
+        if helper is None or helper.decorator_list or helper.args.vararg or helper.args.kwarg:
+            return False
+        body = list(helper.body)
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            if isinstance(body[0].value.value, str):
+                body = body[1:]
+        if len(body) != 1 or not isinstance(body[0], ast.Return) or not isinstance(body[0].value, ast.Call):
+            return False
+        parameters = [*helper.args.posonlyargs, *helper.args.args, *helper.args.kwonlyargs]
+        if len(node.args) > len(parameters) or any(keyword.arg is None for keyword in node.keywords):
+            return False
+        bound: dict[str, Any] = {}
+        for parameter, argument in zip(parameters, node.args):
+            bound[parameter.arg] = _bind_constants(argument, self._constants)
+        for keyword in node.keywords:
+            if keyword.arg:
+                bound[keyword.arg] = _bind_constants(keyword.value, self._constants)
+        missing = [parameter.arg for parameter in parameters if parameter.arg not in bound]
+        positional_defaults = [None] * (len(helper.args.args) - len(helper.args.defaults)) + list(helper.args.defaults)
+        defaults = {
+            parameter.arg: default
+            for parameter, default in zip(helper.args.args, positional_defaults)
+            if default is not None
+        }
+        defaults.update(
+            {
+                parameter.arg: default
+                for parameter, default in zip(helper.args.kwonlyargs, helper.args.kw_defaults)
+                if default is not None
+            }
+        )
+        for name in missing:
+            if name not in defaults:
+                return False
+            bound[name] = defaults[name]
+        constants = dict(self._constants)
+        for name, expression in bound.items():
+            if isinstance(expression, ast.expr):
+                value = _safe_static_value(expression, constants)
+                if value is _UNRESOLVED:
+                    return False
+                constants[name] = value
+        factory_call = _bind_constants(body[0].value, constants)
+        return isinstance(factory_call, ast.Call) and self._register_operator_call(factory_call, var, binding=binding)
+
     def _register_bare_operator_call(self, node: ast.Call) -> str | None:
         """Registers an operator instantiated without an assignment, keyed by a synthetic var.
 
         The var is derived from the literal ``task_id`` (which is what the emitted task key comes from
         anyway), with a counter suffix if two bare operators somehow share one.
         """
-        if _direct_operator_call(node) is None and _mapped_operator_call(node) is None:
+        if _direct_operator_call(node, self._aliases) is None and _mapped_operator_call(node, self._aliases) is None:
             return None
         kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
         base = ops.literal_str(kwargs.get("task_id")) or ops.literal_str(kwargs.get("group_id"))
         if base is None:
             # `.expand()` chains carry task_id on the inner .partial(...) call, not the outer one.
-            mapped = _mapped_operator_call(node)
+            mapped = _mapped_operator_call(node, self._aliases)
             if mapped is not None:
                 inner_kwargs = {kw.arg: kw.value for kw in mapped[0].keywords if kw.arg}
                 base = ops.literal_str(inner_kwargs.get("task_id")) or ops.literal_str(inner_kwargs.get("group_id"))
@@ -411,7 +747,7 @@ class _DagVisitor(ast.NodeVisitor):
         while var in self.operators:
             self._bare_operator_counter += 1
             var = f"{base}__{self._bare_operator_counter}"
-        return var if self._register_operator_call(node, var) else None
+        return var if self._register_operator_call(node, var, binding=var) else None
 
     def _taskflow_def_name(self, call: ast.Call) -> tuple[str | None, bool, str | None]:
         """Resolves a call's underlying ``@task`` def name, unwrapping the mapping/config chain.
@@ -562,8 +898,10 @@ class _DagVisitor(ast.NodeVisitor):
         is registered as its own synthetic task instance and its var returned, so the whole
         expression tree becomes a chain of task instances.
         """
-        if isinstance(arg, ast.Name) and (arg.id in self.operators or arg.id in self.taskflow_tasks):
-            return arg.id
+        if isinstance(arg, ast.Name):
+            resolved = self._resolve_task_names(arg)
+            if len(resolved) == 1:
+                return resolved[0]
         if isinstance(arg, ast.Call):
             def_name, _mapped, _override = self._taskflow_def_name(arg)
             if def_name is not None:
@@ -577,10 +915,11 @@ class _DagVisitor(ast.NodeVisitor):
         pushed_group = False
         for item in node.items:
             call = item.context_expr
-            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
-                if call.func.id == "DAG":
+            if isinstance(call, ast.Call):
+                construct = _construct_name(call.func, self._aliases)
+                if construct == "DAG":
                     self._read_dag_kwargs(call)
-                elif call.func.id == "TaskGroup":
+                elif construct == "TaskGroup":
                     # `with TaskGroup("etl") as tg:` — namespace the member tasks by group id.
                     kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg}
                     group_id = (
@@ -594,20 +933,20 @@ class _DagVisitor(ast.NodeVisitor):
                     # edge on `tg` resolves to the group's member tasks.
                     if isinstance(item.optional_vars, ast.Name):
                         self.group_vars[item.optional_vars.id] = "__".join(self._group_stack)
-                elif _is_task_construct(call.func.id) and item.optional_vars is not None:
+                elif _is_task_construct(construct) and item.optional_vars is not None:
                     # `with DbtTaskGroup(...) as g:` — a cosmos group bound to a name.
                     if isinstance(item.optional_vars, ast.Name):
                         var = item.optional_vars.id
                         kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg}
                         task_id = ops.literal_str(kwargs.get("group_id")) or var
-                        self.operators[var] = (task_id, call.func.id, kwargs)
+                        self.operators[var] = (task_id, construct, kwargs)
                         self.calls[var] = call
         self.generic_visit(node)
         if pushed_group:
             self._group_stack.pop()
 
     def _read_dag_kwargs(self, call: ast.Call) -> None:
-        kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
         self.dag_id = ops.literal_str(kwargs.get("dag_id"))
         self._apply_dag_kwargs(kwargs)
 
@@ -641,6 +980,30 @@ class _DagVisitor(ast.NodeVisitor):
         if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.RShift, ast.LShift)):
             self._collect_shift_chain(value)
         elif isinstance(value, ast.Call):
+            call_name = _construct_name(value.func, self._aliases)
+            if call_name == "chain":
+                positions = [self._resolve_task_names(argument) for argument in value.args]
+                for left, right in zip(positions, positions[1:]):
+                    self._add_edges(left, right, value)
+                return
+            if call_name == "cross_downstream" and len(value.args) >= 2:
+                self._add_edges(
+                    self._resolve_task_names(value.args[0]),
+                    self._resolve_task_names(value.args[1]),
+                    value,
+                )
+                return
+            if isinstance(value.func, ast.Attribute) and value.func.attr == "append" and value.args:
+                owner = value.func.value
+                if isinstance(owner, ast.Name):
+                    appended = value.args[0]
+                    if isinstance(appended, ast.Call):
+                        internal = self._register_bare_operator_call(appended)
+                        if internal is not None:
+                            self._list_bindings.setdefault(owner.id, []).append(internal)
+                            return
+                    self._list_bindings.setdefault(owner.id, []).extend(self._resolve_task_names(appended))
+                    return
             # A bare TaskFlow call (`extract()` with no assignment) is a task instance keyed by its
             # def name; otherwise it may be a set_upstream/set_downstream dependency call.
             def_name, _mapped, _override = self._taskflow_def_name(value)
@@ -656,6 +1019,49 @@ class _DagVisitor(ast.NodeVisitor):
                 self._collect_set_dependency(value)
         self.generic_visit(node)
 
+    def visit_For(self, node: ast.For) -> None:
+        """Executes bounded literal/range loops with Python name rebinding semantics."""
+        if not isinstance(node.target, ast.Name):
+            self.unresolved_constructs.append(("dynamic_loop_target", node))
+            return
+        items = _static_iteration_nodes(node.iter, self._constants)
+        if items is None:
+            # A tuple/list of task variables is also statically bounded even though the values are
+            # capture identities rather than Python literals.
+            if isinstance(node.iter, (ast.List, ast.Tuple)):
+                items = list(node.iter.elts)
+            else:
+                self.unresolved_constructs.append(("dynamic_loop_iterable", node))
+                return
+        for item in items:
+            resolved_tasks = self._resolve_task_names(item)
+            if resolved_tasks:
+                self._task_bindings[node.target.id] = resolved_tasks[0] if len(resolved_tasks) == 1 else resolved_tasks
+                self._constants.pop(node.target.id, None)
+            else:
+                value = _safe_static_value(item, self._constants)
+                if value is _UNRESOLVED:
+                    self.unresolved_constructs.append(("dynamic_loop_value", item))
+                    return
+                self._constants[node.target.id] = value
+                self._task_bindings.pop(node.target.id, None)
+            for statement in node.body:
+                self.visit(statement)
+        for statement in node.orelse:
+            self.visit(statement)
+
+    def visit_If(self, node: ast.If) -> None:
+        """Follows a statically decidable branch; records ambiguous control flow explicitly."""
+        value = _safe_static_value(node.test, self._constants)
+        if value is _UNRESOLVED and isinstance(node.test, ast.Name) and node.test.id in self._task_bindings:
+            value = True
+        if value is _UNRESOLVED:
+            self.unresolved_constructs.append(("ambiguous_condition", node))
+            return
+        branch = node.body if bool(value) else node.orelse
+        for statement in branch:
+            self.visit(statement)
+
     def _collect_shift_chain(self, binop: ast.BinOp) -> None:
         self._collect_shift_expression(binop)
 
@@ -666,19 +1072,14 @@ class _DagVisitor(ast.NodeVisitor):
         left = self._collect_shift_expression(node.left)
         right = self._collect_shift_expression(node.right)
         upstream, downstream = (left, right) if isinstance(node.op, ast.RShift) else (right, left)
-        self.edges.extend((upstream_var, downstream_var) for upstream_var in upstream for downstream_var in downstream)
+        self._add_edges(upstream, downstream, node)
         return right
 
     def _shift_position_names(self, node: ast.expr) -> list[str]:
         # A shift-chain position resolves to task vars. An inline TaskFlow call (`extract()`) is
         # registered as its own instance so `prep >> finalize()` doesn't drop finalize.
-        if isinstance(node, (ast.List, ast.Tuple)):
-            names: list[str] = []
-            for elt in node.elts:
-                names.extend(self._shift_position_names(elt))
-            return names
-        if isinstance(node, ast.Name):
-            return [node.id]
+        if isinstance(node, (ast.List, ast.Tuple, ast.Name)):
+            return self._resolve_task_names(node)
         if isinstance(node, ast.Call):
             def_name, _mapped, _override = self._taskflow_def_name(node)
             if def_name is not None:
@@ -692,17 +1093,44 @@ class _DagVisitor(ast.NodeVisitor):
                 return [bare_var]
         return []
 
+    def _resolve_task_names(self, node: ast.expr) -> list[str]:
+        """Resolves current Python bindings to stable task capture identities."""
+        if isinstance(node, ast.Name):
+            binding = self._task_bindings.get(node.id)
+            if isinstance(binding, str):
+                return [binding]
+            if isinstance(binding, list):
+                return list(binding)
+            if node.id in self._list_bindings:
+                return list(self._list_bindings[node.id])
+            if node.id in self.group_vars:
+                return [node.id]
+            if node.id in self.operators or node.id in self.taskflow_tasks or node.id in self.taskgroup_calls:
+                return [node.id]
+            return []
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return [task for item in node.elts for task in self._resolve_task_names(item)]
+        return []
+
+    def _add_edges(self, upstreams: list[str], downstreams: list[str], node: ast.AST) -> None:
+        for upstream_var in upstreams:
+            for downstream_var in downstreams:
+                self.edges.append((upstream_var, downstream_var))
+                self.edge_captures.append(
+                    EdgeCapture(upstream_id=upstream_var, downstream_id=downstream_var, span=_span(node))
+                )
+
     def _collect_set_dependency(self, call: ast.Call) -> None:
         # `x.set_upstream(y)` / `x.set_downstream(y)` where y is a Name or a list of Names.
         func = call.func
         if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and call.args):
             return
-        this = func.value.id
-        others = _names_in(call.args[0])
+        this_names = self._resolve_task_names(func.value)
+        others = self._resolve_task_names(call.args[0])
         if func.attr == "set_downstream":
-            self.edges.extend((this, other) for other in others)
+            self._add_edges(this_names, others, call)
         elif func.attr == "set_upstream":
-            self.edges.extend((other, this) for other in others)
+            self._add_edges(others, this_names, call)
 
 
 def _expand_group_edges(
@@ -820,14 +1248,16 @@ def _literal_argument_source(node: ast.expr) -> str | None:
         return None
 
 
-def _direct_operator_call(node: ast.Call) -> ast.Call | None:
+def _direct_operator_call(node: ast.Call, aliases: dict[str, str] | None = None) -> ast.Call | None:
     """Returns *node* if it is a direct ``SomeOperator(...)`` / ``SomeSensor(...)`` call."""
-    if isinstance(node.func, ast.Name) and _is_task_construct(node.func.id):
+    if _is_task_construct(_construct_name(node.func, aliases or {})):
         return node
     return None
 
 
-def _mapped_operator_call(node: ast.Call) -> tuple[ast.Call, list[str]] | None:
+def _mapped_operator_call(
+    node: ast.Call, aliases: dict[str, str] | None = None
+) -> tuple[ast.Call, list[str]] | None:
     """Returns the underlying operator call for a dynamic-mapping ``.expand(...)`` chain.
 
     Handles ``Op(...).expand(...)`` and ``Op.partial(...).expand(...)``. Returns
@@ -841,15 +1271,15 @@ def _mapped_operator_call(node: ast.Call) -> tuple[ast.Call, list[str]] | None:
     inner = node.func.value  # the Op(...) or Op.partial(...) call
     if not isinstance(inner, ast.Call):
         return None
-    if isinstance(inner.func, ast.Name) and _is_task_construct(inner.func.id):
-        operator_name = inner.func.id  # Op(...).expand(...)
+    alias_map = aliases or {}
+    if _is_task_construct(_construct_name(inner.func, alias_map)):
+        operator_name = _construct_name(inner.func, alias_map)  # Op(...).expand(...)
     elif (
         isinstance(inner.func, ast.Attribute)
         and inner.func.attr == "partial"
-        and isinstance(inner.func.value, ast.Name)
-        and _is_task_construct(inner.func.value.id)
+        and _is_task_construct(_construct_name(inner.func.value, alias_map))
     ):
-        operator_name = inner.func.value.id  # Op.partial(...).expand(...)
+        operator_name = _construct_name(inner.func.value, alias_map)  # Op.partial(...).expand(...)
     else:
         return None
     merged = ast.Call(
@@ -915,36 +1345,63 @@ def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
 def load_airflow_dags(dag_path: Path, *, dbt_mode: str = "static") -> list[Pipeline]:
     """Parses every independently declared Airflow DAG in a Python file."""
     source = Path(dag_path).read_text(encoding="utf-8")
-    module = ast.parse(source)
-    dag_nodes = _top_level_dag_nodes(module)
-    if not dag_nodes:
+    module = _expand_top_level_loops(ast.parse(source))
+    declarations = _top_level_dag_declarations(module)
+    if not declarations:
         return [_load_airflow_module(dag_path, source, module, dbt_mode=dbt_mode)]
     return [
-        _load_airflow_module(dag_path, source, _module_for_dag(module, dag_node), dbt_mode=dbt_mode)
-        for dag_node in dag_nodes
+        _load_airflow_module(
+            dag_path,
+            source,
+            _module_for_dag(module, declaration),
+            dbt_mode=dbt_mode,
+            target_dag_variable=declaration.variable,
+        )
+        for declaration in declarations
     ]
 
 
-def _top_level_dag_nodes(module: ast.Module) -> list[ast.stmt]:
-    """Returns top-level context-manager and decorated-function DAG declarations."""
-    declarations: list[ast.stmt] = []
+def _top_level_dag_declarations(module: ast.Module) -> list[DagDeclaration]:
+    """Returns context-manager, decorated, and assigned top-level DAG declarations."""
+    aliases = _import_aliases(module)
+    declarations: list[DagDeclaration] = []
     for node in module.body:
+        variable: str | None = None
+        is_dag = False
         if isinstance(node, ast.FunctionDef) and _has_decorator(node, _DAG_DECORATORS):
-            declarations.append(node)
+            is_dag = True
         elif isinstance(node, ast.With) and any(
             isinstance(item.context_expr, ast.Call)
-            and isinstance(item.context_expr.func, ast.Name)
-            and item.context_expr.func.id == "DAG"
+            and _construct_name(item.context_expr.func, aliases) == "DAG"
             for item in node.items
         ):
-            declarations.append(node)
+            is_dag = True
+        elif (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and _construct_name(node.value.func, aliases) == "DAG"
+        ):
+            is_dag = True
+            variable = node.targets[0].id
+        if is_dag:
+            span = _span(node)
+            declarations.append(
+                DagDeclaration(
+                    capture_id=f"dag:{span.line}:{span.column}:{len(declarations) + 1}",
+                    variable=variable,
+                    node=node,
+                    span=span,
+                )
+            )
     return declarations
 
 
-def _module_for_dag(module: ast.Module, dag_node: ast.stmt) -> ast.Module:
+def _module_for_dag(module: ast.Module, declaration: DagDeclaration) -> ast.Module:
     """Returns a module containing shared definitions and one DAG declaration."""
-    dag_nodes = set(_top_level_dag_nodes(module))
-    body = [node for node in module.body if node is dag_node or node not in dag_nodes]
+    dag_nodes = {item.node for item in _top_level_dag_declarations(module)}
+    body = [node for node in module.body if node is declaration.node or node not in dag_nodes]
     return ast.Module(body=body, type_ignores=list(module.type_ignores))
 
 
@@ -954,6 +1411,7 @@ def _load_airflow_module(
     module: ast.Module,
     *,
     dbt_mode: str = "static",
+    target_dag_variable: str | None = None,
 ) -> Pipeline:
     """Parses one isolated DAG declaration into a flowx Pipeline IR.
 
@@ -970,7 +1428,7 @@ def _load_airflow_module(
         sensors remain explicit placeholders; unmapped operators become a
         PlaceholderActivity.
     """
-    visitor = _DagVisitor(module)
+    visitor = _DagVisitor(module, target_dag_variable=target_dag_variable)
     visitor.visit(module)
     functions = visitor.functions()
 
@@ -985,7 +1443,17 @@ def _load_airflow_module(
     var_task_ids: dict[str, str] = {var: tid for var, (tid, _, _) in visitor.operators.items()}
     var_task_ids.update({var: tf.task_id for var, tf in visitor.taskflow_tasks.items()})
     var_task_ids.update({var: task_id for var, (task_id, _, _) in visitor.taskgroup_calls.items()})
-    var_to_task_key = {var: _task_key(var, tid) for var, tid in var_task_ids.items()}
+    var_to_task_key: dict[str, str] = {}
+    used_task_keys: set[str] = set()
+    for var, task_id in var_task_ids.items():
+        base = _task_key(var, task_id)
+        candidate = base
+        suffix = 2
+        while candidate in used_task_keys:
+            candidate = f"{base}__{suffix}"
+            suffix += 1
+        used_task_keys.add(candidate)
+        var_to_task_key[var] = candidate
 
     # Expand group-level edges (`group_a >> group_b`, `task >> group`, ...) into edges between the
     # groups' boundary tasks: leaves of the upstream group -> roots of the downstream group, matching

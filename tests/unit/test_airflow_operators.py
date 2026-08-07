@@ -150,7 +150,7 @@ def test_python_operator_with_ti_param_becomes_placeholder():
     assert isinstance(task, PlaceholderActivity)
 
 
-def test_python_operator_with_nonliteral_arguments_becomes_placeholder():
+def test_python_operator_with_module_constant_arguments_is_rendered():
     p = _load(
         "from airflow import DAG\n"
         "from airflow.operators.python import PythonOperator\n"
@@ -161,8 +161,8 @@ def test_python_operator_with_nonliteral_arguments_becomes_placeholder():
     )
 
     task = _by_key(p)["work"]
-    assert isinstance(task, PlaceholderActivity)
-    assert "op_kwargs" in task.comment
+    assert isinstance(task, NotebookActivity)
+    assert task.base_parameters == {"__flowx_op_kwargs": '{"value": 3}'}
 
 
 def test_python_operator_with_xcom_pull_becomes_placeholder():
