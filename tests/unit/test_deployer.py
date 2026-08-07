@@ -14,6 +14,7 @@ import yaml
 
 from flowx.bundler import deployer
 from flowx.bundler.deployer import (
+    AmbiguousLayoutError,
     CycleError,
     MissingDependencyError,
     _build_graph,
@@ -233,3 +234,37 @@ def test_cycle_returns_error(tmp_path, monkeypatch):
     _make_bundle(tmp_path, "b", jobs=["b"], deps=["a"])
     monkeypatch.setattr(deployer, "_run_cli", _FakeCli())
     assert run(tmp_path) == 1
+
+
+class TestAmbiguousLayout:
+    """A root databricks.yml *and* subdirectory bundles both present (a mode-switch on one output dir,
+    since package never clears the dir) must be refused, not silently resolved to one layout."""
+
+    def test_root_and_subdir_bundles_raise(self, tmp_path):
+        # A stale single-mode bundle at the root, then a per-pipeline re-package writing subdir bundles.
+        (tmp_path / "databricks.yml").write_text("bundle:\n  name: stale_single\n")
+        _make_bundle(tmp_path, "a", jobs=["a"])
+        _make_bundle(tmp_path, "b", jobs=["b"])
+        with pytest.raises(AmbiguousLayoutError) as excinfo:
+            _discover_bundles(tmp_path)
+        # The message names both stale subdirs so the operator knows what to clear.
+        assert "a" in str(excinfo.value) and "b" in str(excinfo.value)
+
+    def test_run_reports_ambiguous_layout_and_deploys_nothing(self, tmp_path, monkeypatch):
+        (tmp_path / "databricks.yml").write_text("bundle:\n  name: stale_single\n")
+        _make_bundle(tmp_path, "a", jobs=["a"])
+        fake = _FakeCli()
+        monkeypatch.setattr(deployer, "_run_cli", fake)
+        assert run(tmp_path) == 1
+        # No deploy was attempted — the ambiguity is caught before any CLI call.
+        assert fake.commands == []
+
+    def test_root_only_still_deploys_directly(self, tmp_path):
+        # Only a root bundle (clean single-mode dir) is unambiguous and returns the '.' bundle.
+        (tmp_path / "databricks.yml").write_text("bundle:\n  name: only_single\n")
+        (tmp_path / "resources").mkdir()
+        (tmp_path / "resources" / "j.yml").write_text(
+            yaml.safe_dump({"resources": {"jobs": {"j": {"name": "j", "tasks": []}}}})
+        )
+        bundles = _discover_bundles(tmp_path)
+        assert [b.bundle_dir for b in bundles] == ["."]

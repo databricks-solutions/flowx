@@ -12,6 +12,7 @@ from flowx.bundler.dab_writer import (
     _group_workflows,
     _load_group_spec,
     _load_report,
+    _prefixed_notebook_relative_path,
     write_bundle_group,
 )
 from flowx.models.ir import (
@@ -286,6 +287,24 @@ class TestPackageMainModes:
         # Intra-bundle call stays a direct ref.
         assert "${resources.jobs.callee.id}" in (tmp_path / "resources" / "caller.yml").read_text()
         assert "single bundle" in (tmp_path / "DEPLOY.md").read_text()
+        # bundle.name is the group name (flowx_bundle), NOT the first pipeline — so the dev workspace
+        # path is .bundle/flowx_bundle/dev, not .bundle/caller/dev for a bundle holding many pipelines.
+        databricks_yml = yaml.safe_load((tmp_path / "databricks.yml").read_text())
+        assert databricks_yml["bundle"]["name"] == "flowx_bundle"
+
+    def test_writer_valueerror_surfaces_cleanly(self, tmp_path, monkeypatch, capsys):
+        """A ValueError from write_bundle_group (e.g. the inner-key collision guard) must be reported as
+        a clean 'Error: ...' + exit 1, not escape main() as a traceback."""
+        import flowx.bundler.dab_writer as dab_writer
+
+        _write_two_pipeline_report(tmp_path)
+
+        def _boom(*_args, **_kwargs):
+            raise ValueError("simulated collision")
+
+        monkeypatch.setattr(dab_writer, "write_bundle_group", _boom)
+        assert self._run(tmp_path, "--packaging-mode", "per-pipeline") == 1
+        assert "Error: simulated collision" in capsys.readouterr().err
 
     def test_per_group_inferred_colocates_connected_pipelines(self, tmp_path):
         _write_two_pipeline_report(tmp_path)
@@ -445,3 +464,51 @@ class TestSyntheticParameterDefault:
         )
         write_bundle_group([wf], tmp_path, bundle_name="has_param")
         assert "Job parameters without an ADF default" not in (tmp_path / "SETUP.md").read_text()
+
+
+class TestWriterDoesNotMutateCaller:
+    """write_bundle_group must not mutate the PreparedWorkflows it is handed. It rewrites
+    ${resources.jobs.X.id} -> ${var.X} in place internally; if that leaked back to the caller it would
+    erase the Run Pipeline edges pipeline_graph reads, silently breaking grouping / DEPLOY.md order for
+    any caller that builds the graph after writing."""
+
+    def test_run_pipeline_graph_survives_writing(self, tmp_path):
+        from flowx.bundler.pipeline_graph import build_pipeline_dependencies
+
+        # 'a' calls 'b'; write them as separate per-pipeline bundles (so b is cross-bundle for a).
+        wfs = [_workflow("a", ["b"]), _workflow("b")]
+        write_bundle_group([wfs[0]], tmp_path / "a", bundle_name="a")
+        write_bundle_group([wfs[1]], tmp_path / "b", bundle_name="b")
+
+        # Graph built AFTER writing must still see the a->b edge (writer worked on copies).
+        deps = build_pipeline_dependencies(wfs)
+        assert deps == {"a": {"b"}, "b": set()}
+
+    def test_caller_task_dicts_unchanged(self, tmp_path):
+        wf = _workflow("caller", ["callee"])
+        before = [dict(t) for t in wf.tasks]
+        write_bundle_group([wf], tmp_path, bundle_name="caller")
+        # The caller's own task dicts are untouched — no ${var.X} rewrite bled back.
+        assert wf.tasks == before
+
+
+class TestPrefixedNotebookRelativePath:
+    """Every notebook this codebase emits is under a category dir (notebooks/, lib/, src/…), so the
+    slashed path is the real case and must be idempotent (double-apply is a no-op). The function must
+    NOT special-case head==prefix, which would silently skip namespacing a genuine path whose top
+    segment equals the pipeline key (e.g. a pipeline literally named 'notebooks')."""
+
+    def test_slashed_path_prefixed_once(self):
+        assert _prefixed_notebook_relative_path("notebooks/x.py", "pre") == "notebooks/pre/x.py"
+
+    def test_slashed_path_idempotent(self):
+        once = _prefixed_notebook_relative_path("notebooks/x.py", "pre")
+        assert _prefixed_notebook_relative_path(once, "pre") == once
+
+    def test_genuine_path_with_head_equal_to_prefix_is_still_namespaced(self):
+        # A pipeline named 'notebooks' -> prefix 'notebooks'; its path notebooks/x.py must still be
+        # namespaced to notebooks/notebooks/x.py, not skipped because head == prefix.
+        assert _prefixed_notebook_relative_path("notebooks/x.py", "notebooks") == "notebooks/notebooks/x.py"
+
+    def test_slashless_path_prefixed_once(self):
+        assert _prefixed_notebook_relative_path("x.py", "pre") == "pre/x.py"

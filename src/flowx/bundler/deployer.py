@@ -106,6 +106,10 @@ def _read_bundle_dir(bundle_dir: Path, bundle_name: str) -> DiscoveredBundle:
     return DiscoveredBundle(bundle_name, resource_keys, depends_on)
 
 
+class AmbiguousLayoutError(Exception):
+    """Raised when the output dir holds both a root bundle and subdirectory bundles."""
+
+
 def _discover_bundles(output_dir: Path) -> list[DiscoveredBundle]:
     """Finds every bundle under *output_dir* and reads its jobs + cross-bundle deps.
 
@@ -114,16 +118,32 @@ def _discover_bundles(output_dir: Path) -> list[DiscoveredBundle]:
     single-pipeline layout, where the sole bundle sits at the root), that root bundle is returned
     instead — a single root bundle has no siblings to order against, so it is deployed directly. Its
     ``bundle_dir`` is ``"."`` so ``run`` shells out in *output_dir* itself.
+
+    Raises:
+        AmbiguousLayoutError: when *both* a root ``databricks.yml`` and subdirectory bundles are
+            present. ``package`` never clears the output dir (it only prunes ``.work/``), so
+            re-packaging into the same dir with a different ``--packaging-mode`` leaves both layouts on
+            disk. Silently deploying the root bundle would ignore the freshly-written subdirectory
+            bundles (or vice versa). Refuse and tell the operator to clear the dir, rather than deploy a
+            stale layout.
     """
+    subdir_bundles = [
+        child for child in sorted(output_dir.iterdir()) if child.is_dir() and (child / "databricks.yml").exists()
+    ]
+
     if (output_dir / "databricks.yml").exists():
+        if subdir_bundles:
+            names = ", ".join(child.name for child in subdir_bundles)
+            raise AmbiguousLayoutError(
+                f"{output_dir} holds both a root-level databricks.yml (a 'single'-mode bundle) and "
+                f"subdirectory bundle(s): {names}. This usually means the dir was packaged more than "
+                "once with different --packaging-mode values (package does not clear the output dir). "
+                "Deploying would use only one layout and silently ignore the other. Delete the stale "
+                "layout (or re-package into a clean directory) and retry."
+            )
         return [_read_bundle_dir(output_dir, ".")]
 
-    bundles: list[DiscoveredBundle] = []
-    for child in sorted(output_dir.iterdir()):
-        if not child.is_dir() or not (child / "databricks.yml").exists():
-            continue
-        bundles.append(_read_bundle_dir(child, child.name))
-    return bundles
+    return [_read_bundle_dir(child, child.name) for child in subdir_bundles]
 
 
 def _build_graph(bundles: list[DiscoveredBundle], *, allow_missing_deps: bool = False) -> dict[str, list[str]]:
@@ -256,7 +276,11 @@ def run(
         print(f"Error: output directory not found: {output_dir}", file=sys.stderr)
         return 1
 
-    bundles = _discover_bundles(output_dir)
+    try:
+        bundles = _discover_bundles(output_dir)
+    except AmbiguousLayoutError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     if not bundles:
         print(
             f"No bundles found under {output_dir} (looked for immediate subdirectories with a "

@@ -78,7 +78,15 @@ class _BundleYamlDumper(yaml.SafeDumper):
     """YAML dumper that leaves keys unquoted and only quotes values when needed."""
 
 
-# Module-level warnings collector — reset per write_bundle call.
+# Module-level accumulators (_bundle_warnings, _cross_bundle_variables, _neutralized_conditions,
+# _synthetic_default_parameters) are reset at the top of every write_bundle_group call and read at the
+# end of the same call. single / per-group modes invoke the writer in a loop over groups, but each
+# iteration resets first, so a prior group's state — even after a mid-write exception — never leaks
+# into the next: the reset, not the previous run's cleanup, guarantees a clean slate. This is safe only
+# for sequential writing; parallelising bundle writing would require threading this state through
+# instead. Kept module-level (a pre-existing pattern) to avoid re-plumbing every helper's signature.
+#
+# Module-level warnings collector — reset per write_bundle_group call.
 _bundle_warnings: list[str] = []
 
 # Cross-bundle ExecutePipeline refs seen while translating (variable_name -> target pipeline). Reset per
@@ -162,6 +170,12 @@ def _rewrite_task_string_values(tasks: list[dict[str, Any]], replacements: dict[
     swaps any string equal to a key of *replacements* for its mapped value. Used to keep notebook /
     python-file paths and ``run_job_task`` job-id refs in sync after a namespacing rename, without
     hard-coding every field name (``notebook_path``, ``python_file``, ``job_id``, …).
+
+    Trade-off: matching is by exact string value, not by field, so a non-path field whose value
+    happens to equal a renamed notebook path (e.g. a ``base_parameters`` entry that genuinely passes a
+    notebook path) is rewritten too. That is intentional — if a parameter carries the path, it should
+    track the rename — and it only fires on an exact whole-string match, so free text merely mentioning
+    a path (``"see ../src/notebooks/x.py"``) is left untouched.
     """
     if not replacements:
         return
@@ -204,10 +218,22 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
     replacements: dict[str, str] = {}
 
     # 1. Inner ForEach job keys: rename inner.name, map old resources.jobs ref -> new.
+    seen_new_keys: dict[str, str] = {}
     for inner in workflow.inner_workflows:
         old_key = normalize_task_key(inner.name)
         inner.name = f"{prefix}__{inner.name}"
         new_key = normalize_task_key(inner.name)
+        # normalize_task_key collapses the "__" separator to "_", so a pipeline name containing "__"
+        # could make two inner jobs land on the same namespaced key (e.g. prefix "a" + inner "b__c" vs
+        # prefix "a__b" + inner "c" both -> "a_b_c"), silently overwriting one resource file. Refuse
+        # rather than ship a corrupt bundle — this requires pathological ADF names but is cheap to catch.
+        if new_key in seen_new_keys:
+            raise ValueError(
+                f"Namespacing inner ForEach jobs under prefix '{prefix}' produced a duplicate resource "
+                f"key '{new_key}' (from inner jobs '{seen_new_keys[new_key]}' and '{inner.name}'). "
+                "Rename the offending pipeline/activity so keys don't collide after normalization."
+            )
+        seen_new_keys[new_key] = inner.name
         if old_key != new_key:
             replacements[f"${{resources.jobs.{old_key}.id}}"] = f"${{resources.jobs.{new_key}.id}}"
 
@@ -233,11 +259,21 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
 def _prefixed_notebook_relative_path(relative_path: str, prefix: str) -> str:
     """Inserts *prefix* as a subdirectory under the top-level segment of a notebook relative path.
 
-    ``notebooks/copy_data.py`` -> ``notebooks/<prefix>/copy_data.py``; a path with no ``/`` is just
-    prefixed. Idempotent when the prefix segment is already present.
+    ``notebooks/copy_data.py`` -> ``notebooks/<prefix>/copy_data.py``. Idempotent for these real
+    (slashed) paths: a double-apply is a no-op (``tail`` already starts with ``<prefix>/``) rather than
+    nesting ``notebooks/<prefix>/<prefix>/…``.
+
+    A path with no ``/`` (``x.py`` -> ``<prefix>/x.py``) is a defensive fallback — every notebook this
+    codebase emits is under a category dir (``notebooks/``, ``lib/``, ``src/…``), so it does not occur
+    in practice. Only the trivial ``relative_path == prefix`` re-apply is guarded there; nesting on a
+    slash-less re-apply is not, because distinguishing a once-prefixed ``<prefix>/x.py`` from a genuine
+    first-time slashed path whose head equals the prefix (a pipeline literally named ``notebooks``) is
+    ambiguous — and skipping a genuine path would defeat the namespacing this function exists to do.
     """
     head, sep, tail = relative_path.partition("/")
     if not sep:
+        if relative_path == prefix:
+            return relative_path
         return f"{prefix}/{relative_path}"
     if tail.startswith(f"{prefix}/"):
         return relative_path
@@ -286,10 +322,13 @@ def write_bundle_group(
     if not workflows:
         raise ValueError("write_bundle_group requires at least one workflow")
 
-    # Deep-copy the input so writing a bundle never mutates the caller's PreparedWorkflows: several steps
-    # below rewrite the task dicts in place (namespacing, ${resources.jobs.X.id} -> ${var.X}), and leaking
-    # that back would erase the Run Pipeline edges pipeline_graph reads. Copying makes the writer a pure
-    # sink so callers can build the dependency graph before or after writing, in any order.
+    # Deep-copy the input so writing a bundle never mutates the caller's PreparedWorkflows. This
+    # matters because several steps below rewrite the task dicts in place — namespacing and the
+    # cross-bundle rewrite that turns ${resources.jobs.X.id} into ${var.X_job_id} — which would erase
+    # the Run Pipeline edges pipeline_graph reads. Without the copy, correctness of the caller's
+    # dependency graph / DEPLOY.md order would silently depend on it being computed before this call
+    # (main() does, but that is an unenforceable ordering trap). Copying makes the writer a pure sink:
+    # callers can build the graph before or after writing, in any order.
     workflows = [copy.deepcopy(workflow) for workflow in workflows]
 
     output_dir = Path(output_dir)
@@ -724,8 +763,9 @@ def _render_deploy_md_for_run(
 ) -> str:
     """Builds DEPLOY.md from the workflows written this run (bridges to :mod:`deploy_writer`).
 
-    *pipeline_deps* must be computed **before** write_bundle_group mutates the task dicts (it rewrites
-    cross-bundle ``${resources.jobs.X.id}`` refs to ``${var.X}`` in place, which erases the edges).
+    *pipeline_deps* is the Run Pipeline graph from :func:`build_pipeline_dependencies`. write_bundle_group
+    works on a deep copy of its input, so the graph can be built before or after writing; passing it in
+    (rather than re-deriving it here from *written_groups*) just avoids scanning the task trees twice.
     """
     from flowx.bundler.deploy_writer import render_deploy_md
 
@@ -993,7 +1033,14 @@ def main(argv: list[str] | None = None) -> int:
         # written bundle in the migration directory.
         args.output_dir.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".flowx-preflight-", dir=args.output_dir.parent) as temporary:
-            _, staged_dirs = _write_groups(Path(temporary), announce=False)
+            try:
+                _, staged_dirs = _write_groups(Path(temporary), announce=False)
+            except ValueError as exc:
+                # e.g. the inner-ForEach-key collision guard in _namespace_bundle_artifacts. Surface it
+                # as a clean message + exit code rather than a raw traceback. Caught here in the temp-dir
+                # preflight so nothing is written to the destination.
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
             preflight_violations = 0
             for staged_dir in staged_dirs:
                 result = check_bundle_dir(staged_dir)
