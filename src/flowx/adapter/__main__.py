@@ -514,6 +514,7 @@ def _run_phase(phase: str, forward: list[str]) -> int:
         aliases = {_SOURCE_PATH_FLAG: "--source-dir", source.source_path_flag: "--source-dir"}
 
     module = importlib.import_module(module_path)
+
     # Alias both the bare form (`--source-path X`) and the equals form (`--source-path=X`) so a
     # documented alias works either way; the phase module only knows `--source-dir`.
     def _alias(token: str) -> str:

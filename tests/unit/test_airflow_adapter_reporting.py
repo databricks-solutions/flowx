@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from flowx.adapter.session import MigrationInputSession
+from flowx.models.ir import NotebookActivity, Pipeline
 from flowx.reporting.coverage import COVERAGE_METRIC_COLUMNS, build_coverage_rows
+from flowx.sources.airflow.discover import _profile_row, build_inventory_dict
 from flowx.sources.airflow.discover import main as discover_main
 
 
@@ -65,3 +67,71 @@ def test_airflow_profile_csv_has_all_coverage_columns():
         assert row["databricks_native_activities"] == 1  # the PythonOperator
         assert row["other_activities"] == 1  # the placeholder
         assert row["complexity_score"] == 4  # 1*1 + 1*3
+
+
+def test_airflow_inventory_persists_audit_status_counts_and_findings() -> None:
+    finding = {
+        "code": "unsupported_operator",
+        "severity": "gap",
+        "fingerprint": "stable123",
+        "message": "manual translation required",
+    }
+    pipeline = Pipeline(
+        name="audited",
+        reconciliation_status="verified_with_gaps",
+        migration_status="included",
+        not_translatable=[finding],
+        audit={
+            "audited_activity_count": 8,
+            "deterministic_count": 7,
+            "agentic_count": 1,
+            "failed_count": 0,
+            "excluded_count": 0,
+            "transformations": [{"code": "task_key_collision_resolved"}],
+        },
+    )
+
+    inventory = build_inventory_dict([pipeline], "/src")
+    entry = inventory["pipelines"][0]
+
+    assert entry["audited_activity_count"] == 8
+    assert entry["deterministic_count"] == 7
+    assert entry["agentic_count"] == 1
+    assert entry["failed_count"] == 0
+    assert entry["excluded_count"] == 0
+    assert entry["coverage_pct"] == 100.0
+    assert entry["deterministic_coverage_pct"] == 87.5
+    assert entry["reconciliation_status"] == "verified_with_gaps"
+    assert entry["findings"] == [finding]
+    assert entry["transformations"] == [{"code": "task_key_collision_resolved"}]
+    assert inventory["summary"]["activity_count"] == 8
+    assert inventory["summary"]["deterministic_coverage_pct"] == 87.5
+
+
+def test_airflow_profile_categories_never_mix_audited_and_synthetic_tasks() -> None:
+    pipeline = Pipeline(
+        name="profile",
+        tasks=[],
+        audit={
+            "audited_activity_count": 1,
+            "deterministic_count": 0,
+            "agentic_count": 0,
+            "failed_count": 1,
+            "excluded_count": 0,
+        },
+    )
+    pipeline.tasks.extend(
+        [
+            NotebookActivity(name="first", task_key="first", notebook_path="/Shared/first"),
+            NotebookActivity(name="second", task_key="second", notebook_path="/Shared/second"),
+        ]
+    )
+
+    row = _profile_row(pipeline)
+
+    assert row["other_activities"] >= 0
+    assert row["complexity_score"] >= 0
+    assert (
+        row["databricks_native_activities"] + row["control_flow_activities"] + row["other_activities"]
+        == row["activities"]
+    )

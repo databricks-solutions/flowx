@@ -475,8 +475,9 @@ def build_server() -> FastMCP:
         - "inputs": phase(req: "discover"|"convert"|"package"), source(req for discover/convert) —
           list a phase's input prompts.
         - "discover": source(req), one ADF source key | airflow_source_path (req), output_dir,
-          pipeline — parse the source's definitions, classify activities.
-        - "convert": source(req), (one ADF source key | airflow_source_path), output_dir, pipeline.
+          pipeline, exclude_dag | exclude_dags (Airflow, repeatable list) — parse and audit definitions.
+        - "convert": source(req), (one ADF source key | airflow_source_path), output_dir, pipeline,
+          exclude_dag | exclude_dags (Airflow, repeatable list).
         - "merge_agentic": source(req), report_path(req), agentic_results_dir(req), output_path —
           merge agent results.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
@@ -490,6 +491,7 @@ def build_server() -> FastMCP:
           download_workspace_files(bool), keep_intermediates(bool).
         - "migrate": source(req), one ADF source key | airflow_source_path (req), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
+          exclude_dag | exclude_dags (Airflow, repeatable list),
           answers(list of "ID=VALUE"), interactive(bool, default true), lookup_csv — runs
           discover→convert→package, returning the full option schema once (status "needs_input") when
           configuration is available; re-call once with the complete answers to apply (see below).

@@ -92,9 +92,7 @@ def test_source_path_alias_equals_form_routes():
     # or the phase module rejects it with a usage error.
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
-        rc = _run_phase(
-            "discover", ["--source", "airflow", f"--source-path={_DAG_FIXTURE}", f"--output-dir={out}"]
-        )
+        rc = _run_phase("discover", ["--source", "airflow", f"--source-path={_DAG_FIXTURE}", f"--output-dir={out}"])
         assert rc == 0
         assert (out / "metadata" / "inventory.json").exists()
 

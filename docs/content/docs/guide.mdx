@@ -82,6 +82,10 @@ When running with workspace auth (e.g. Genie Code), `package` can optionally per
 coverage to a Unity Catalog table — one row per pipeline stamped with a UUID `run_id`, `run_date`,
 and `run_by` (`record-results`) — and install a published AI/BI coverage dashboard over that table
 (`install-dashboard`). See [Configuration options](/docs/options) for details.
+
+For Airflow, `activities` is the independent source-audit count rather than the number of tasks the
+translator happened to emit. Reporting distinguishes deterministic, agentic, failed, and excluded
+candidates and carries reconciliation status plus both translation-path and deterministic coverage.
 </Step>
 
 <Step>

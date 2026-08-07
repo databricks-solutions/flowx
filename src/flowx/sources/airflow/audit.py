@@ -18,6 +18,8 @@ class AuditCandidate:
     line: int
     column: int
     occurrence: int
+    end_line: int = 0
+    end_column: int = 0
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -43,7 +45,9 @@ def finding(
     """Builds a stable, serializable reconciliation finding."""
     line = candidate.line if candidate else 0
     column = candidate.column if candidate else 0
-    identity = f"{source_file}:{line}:{column}:{code}"
+    end_line = candidate.end_line if candidate else 0
+    end_column = candidate.end_column if candidate else 0
+    identity = f"{source_file}:{line}:{column}:{end_line}:{end_column}:{code}"
     return {
         "fingerprint": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
         "code": code,
@@ -52,6 +56,8 @@ def finding(
         "source_file": source_file,
         "line": line,
         "column": column,
+        "end_line": end_line,
+        "end_column": end_column,
         "details": {**(candidate.details if candidate else {}), **(details or {})},
     }
 
@@ -89,9 +95,7 @@ class _SourceAuditor(ast.NodeVisitor):
             if isinstance(node, ast.FunctionDef) and _decorator_leaf(node) in _TASK_DECORATORS
         }
         self.dag_defs = {
-            node.name
-            for node in module.body
-            if isinstance(node, ast.FunctionDef) and _decorator_leaf(node) == "dag"
+            node.name for node in module.body if isinstance(node, ast.FunctionDef) and _decorator_leaf(node) == "dag"
         }
         self.factories = {
             node.name
@@ -109,6 +113,8 @@ class _SourceAuditor(ast.NodeVisitor):
             line=key[1],
             column=key[2],
             occurrence=occurrence,
+            end_line=getattr(node, "end_lineno", key[1]),
+            end_column=getattr(node, "end_col_offset", key[2]),
             details=details,
         )
 
@@ -243,6 +249,15 @@ class _SourceAuditor(ast.NodeVisitor):
                     mapped=mapped,
                 )
             )
+            if call.args or any(keyword.arg is None for keyword in call.keywords):
+                self.audit.unresolved.append(
+                    self._candidate(
+                        "unresolved",
+                        "dynamic_operator_arguments",
+                        call,
+                        expression=ast.unparse(call),
+                    )
+                )
             return True
         base = _base_call_name(call)
         if base in self.factories:
@@ -320,9 +335,7 @@ class _SourceAuditor(ast.NodeVisitor):
     def _audit_settings(self, call: ast.Call) -> None:
         for keyword in call.keywords:
             if keyword.arg:
-                self.audit.settings.append(
-                    self._candidate("setting", "dag_setting", keyword.value, name=keyword.arg)
-                )
+                self.audit.settings.append(self._candidate("setting", "dag_setting", keyword.value, name=keyword.arg))
                 if keyword.arg == "default_args" and isinstance(keyword.value, ast.Dict):
                     for key, value in zip(keyword.value.keys, keyword.value.values):
                         if isinstance(key, ast.Constant) and isinstance(key.value, str):
@@ -389,9 +402,7 @@ def _operator_call(call: ast.Call, aliases: dict[str, str]) -> tuple[str, dict[s
         operator = _leaf(inner.func.value, aliases)
     if not _is_operator(operator):
         return "", {}, False
-    keywords = {
-        keyword.arg: keyword.value for keyword in [*inner.keywords, *call.keywords] if keyword.arg
-    }
+    keywords = {keyword.arg: keyword.value for keyword in [*inner.keywords, *call.keywords] if keyword.arg}
     return operator, keywords, True
 
 

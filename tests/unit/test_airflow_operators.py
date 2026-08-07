@@ -775,7 +775,7 @@ def test_table_sensor_escapes_quotes_in_table_name():
         "def w():\n    pass\n"
         "with DAG(dag_id='d') as dag:\n"
         "    prep = PythonOperator(task_id='prep', python_callable=w)\n"
-        '    wait = DatabricksPartitionSensor(task_id=\'wait\', table_name=\'main.silver.we"ird\')\n'
+        "    wait = DatabricksPartitionSensor(task_id='wait', table_name='main.silver.we\"ird')\n"
         "    prep >> wait\n"
     )
     wait = _by_key(p)["wait"]

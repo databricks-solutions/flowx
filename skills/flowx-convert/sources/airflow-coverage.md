@@ -14,7 +14,7 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 | `PythonOperator` (classic) | Notebook task; callable `def` preserved, transitive helpers/constants/non-Airflow imports carried, `op_args`/`op_kwargs` passed as JSON widgets, return value via `dbutils.jobs.taskValues.set`. |
 | `PythonVirtualenvOperator` / `ExternalPythonOperator` | Notebook task with a `%pip install` cell for `requirements`. |
 | `BranchPythonOperator` / `ShortCircuitOperator` | Placeholder routed to the agentic-gap round (runtime branch selection can't be lowered statically). |
-| `BashOperator` / `SSHOperator` | `%sh` notebook; a wrapped `spark-submit` is lifted to a Spark JAR/Python task. |
+| `BashOperator` / `SSHOperator` | `%sh` notebook; a single unchained `spark-submit` invocation is lifted only when every option arity is known. |
 | `SparkSubmitOperator` | Spark JAR or Python task. |
 | Databricks provider operators (`DatabricksSubmitRun*`, `DatabricksRunNow*`, `DatabricksNotebookOperator`) | Notebook / run-job tasks. |
 | SQL operators (`DatabricksSql*`, `SQLExecuteQueryOperator`, `PostgresOperator`, `MySqlOperator`, `HiveOperator`, `DatabricksCopyIntoOperator`) | `sql_task` (SqlActivity); Jinja values → `:name`, identifier positions → `IDENTIFIER(:name)`, with `sql_task.parameters`. |
@@ -22,18 +22,19 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 | `EmailOperator` | Placeholder recommending job-level email notifications. |
 | dbt CLI operators (`DbtRun/Test/Seed/Snapshot/Build/Deps`) and Cosmos `DbtDag` / `DbtTaskGroup` | Single `DbtFactoryActivity`, **static explosion** (default) or **PyDABs** (`--dbt-mode pydabs`); see [dbt factory](#dbt-factory-mode). |
 | **TaskFlow API** (`@dag`, `@task`, `@task.virtualenv`) | Each `@task` invocation → a task; implicit XCom data flow (`transform(extract())`) → a notebook that reads upstream return values via `dbutils.jobs.taskValues.get`, calls the function, and publishes its own. `@task.branch` / `@task.short_circuit`, or a callable reading task context/XCom, route to a placeholder + gap. |
-| File sensors (`S3KeySensor`, `GCSObjectExistenceSensor`, `FileSensor`, `HdfsSensor`, `WebHdfsSensor`) | Root sensor with no schedule → `file_arrival` trigger; otherwise a `dbutils.fs` polling notebook task. |
-| Table/SQL sensors (`DatabricksPartitionSensor`, `DatabricksSqlSensor`, `DatabricksSQLStatementsSensor`, `SqlSensor`) | Root sensor naming a literal table with no schedule → `table_update` trigger; otherwise a `spark.sql` polling notebook task. |
+| File sensors (`S3KeySensor`, `GCSObjectExistenceSensor`, `FileSensor`, `HdfsSensor`, `WebHdfsSensor`) | With no schedule, a root sensor whose descendants cover every non-sensor task → `file_arrival` trigger; otherwise a `dbutils.fs` polling notebook task. |
+| Table/SQL sensors (`DatabricksPartitionSensor`, `DatabricksSqlSensor`, `DatabricksSQLStatementsSensor`, `SqlSensor`) | With no schedule, a root literal-table sensor whose descendants cover every non-sensor task → `table_update` trigger; otherwise a `spark.sql` polling notebook task. |
 | `ExternalTaskSensor` | Placeholder explaining logical-run-aware migration options; polling the latest Databricks job run is not equivalent to Airflow's matching logical run. |
 | `HttpSensor` / `PythonSensor` / `DateTimeSensor` | Polling notebook tasks for absolute HTTP URLs, callable polls, and wait-until. Relative HTTP endpoints and Python callables reading task context route to placeholders. |
 | Time sensors (`TimeSensor`, `TimeDeltaSensor`) | Placeholder; their per-run wait semantics are not silently folded into or removed from the job schedule. |
 | `DummyOperator` / `EmptyOperator` | Dropped, downstream dependencies rewired. |
-| `.expand()` on an operator or `@task` | `for_each_task` when the mapped iterable is a literal list; a non-literal iterable (e.g. an upstream task's output) routes to a placeholder + gap. |
+| `.expand()` on `@task` | `for_each_task` when exactly one mapped argument is a literal list and no `.partial()` arguments are present; other forms route to a placeholder + gap. |
+| Classic operator `.partial().expand()` / `.expand()` | `for_each_task` containing a linked failing placeholder until every mapped and fixed argument can be proven bound into the inner Databricks task. |
 | Dependencies | `>>` / `<<` chains (incl. list/tuple fan-out and inline TaskFlow calls) and `set_upstream` / `set_downstream`. |
 | **TaskGroups** (context-manager `with TaskGroup(...)`) | Static nesting → task-key namespacing (`group__subgroup__task`); group-level edges (`group_a >> group_b`, `task >> group`) expand to leaf→root edges between member tasks. |
 | **`@task_group`** (decorator form) | Placeholder + gap (with dependency edges preserved); a decorator group is a sub-pipeline flowx doesn't lower — the agentic round expands it into its member tasks / a for_each when mapped. |
 | Schedule | Cron `schedule_interval` → Quartz (Unix DOW 0–6 → Quartz 1–7); exact sub-hour `timedelta` → Quartz, longer intervals → periodic, `@continuous` → continuous mode. |
-| `trigger_rule` | DAB `run_if` constant per edge (`ALL_DONE`, `ALL_FAILED`, `AT_LEAST_ONE_SUCCESS`, `NONE_FAILED`, …). |
+| `trigger_rule` | Exact supported rules map to `run_if`; `none_failed_min_one_success` maps to `NONE_FAILED` with the all-skipped delta recorded. Rules without an equivalent become linked placeholders. |
 | Job parameters | `params={...}` / `Param(default=...)` → job parameters with defaults; `{{ params.x }}` / `{{ var.value.x }}` / `{{ dag_run.conf['x'] }}` → `{{job.parameters.x}}`. |
 | `Variable.get` in a callable | Rewritten to `dbutils.widgets.get`; a callable using an Airflow `Connection` object routes to a placeholder because one secret string cannot preserve the object API. |
 | Multiple DAGs | Every DAG, including multiple declarations in one Python file, becomes a sibling job in one shared Airflow bundle so `TriggerDagRunOperator` resource references resolve. |
@@ -46,13 +47,17 @@ emitting code that fails at runtime.
 
 ## Not yet supported
 
-These are absent but fail safely — routed to a placeholder + `gaps.json`, or simply not exploded — or
-are deliberate scope decisions.
+These are absent but fail safely — routed to a linked placeholder notebook that raises
+`NotImplementedError`, explicitly excluded, or rejected by reconciliation — or are deliberate scope
+decisions.
 
 - **Full TaskGroup expansion** — a `@task_group` invocation (mapped `pair.expand(...)` or plain
   `pair(...)`) and `TaskGroup.partial().expand()` aren't lowered into their member tasks. They route
-  to a placeholder + gap with dependency edges preserved (never a silent drop); the agentic round
-  expands the group. `.expand()` on an operator/`@task` *call* is supported (see the table).
+  to a placeholder + gap with dependency edges preserved; the agentic round expands the group.
+- **Dynamic operator construction** — operators created inside comprehensions are not statically
+  expanded. Helper factories are supported only when their body is an optional docstring followed
+  by one statically bindable `return RecognizedOperator(...)`; other forms fail reconciliation and
+  block package output.
 - **Sensors beyond the mapped families** (`S3PrefixSensor`, custom sensors, etc.) → placeholder + gap.
   A file sensor with a non-literal path, or a table/SQL sensor with no literal `sql` / `table_name`,
   also falls back to a placeholder.

@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _METRIC_SQL_TYPES: dict[str, str] = {
     "pipeline": "STRING",
     "activities": "INT",
+    "audited_activities": "INT",
     "datasets": "INT",
     "linked_services": "INT",
     "collapsible_patterns": "INT",
@@ -32,7 +33,14 @@ _METRIC_SQL_TYPES: dict[str, str] = {
     "deterministic_activities": "INT",
     "agentic_activities": "INT",
     "unsupported_activities": "INT",
+    "failed_activities": "INT",
+    "excluded_activities": "INT",
+    "reconciliation_status": "STRING",
+    "migration_status": "STRING",
     "coverage_pct": "DOUBLE",
+    "deterministic_coverage_pct": "DOUBLE",
+    "finding_count": "INT",
+    "finding_fingerprints": "STRING",
     "complexity_score": "INT",
     "complexity_size": "STRING",
 }
@@ -44,7 +52,10 @@ RESULTS_COLUMNS: tuple[tuple[str, str], ...] = (
     *((col, _METRIC_SQL_TYPES[col]) for col in COVERAGE_METRIC_COLUMNS),
 )
 
-_STRING_METRICS: frozenset[str] = frozenset({"pipeline", "complexity_size"})
+_STRING_METRICS: frozenset[str] = frozenset(
+    {"pipeline", "reconciliation_status", "migration_status", "finding_fingerprints", "complexity_size"}
+)
+_FLOAT_METRICS: frozenset[str] = frozenset({"coverage_pct", "deterministic_coverage_pct"})
 
 
 def _sql_str(value: Any) -> str:
@@ -56,7 +67,7 @@ def _metric_value_sql(column: str, value: Any) -> str:
     """Renders one metric column value as a SQL literal."""
     if column in _STRING_METRICS:
         return _sql_str(value)
-    if column == "coverage_pct":
+    if column in _FLOAT_METRICS:
         return repr(float(value or 0))
     return str(int(value or 0))
 
@@ -65,6 +76,16 @@ def build_create_table_sql(table_fqn: str) -> str:
     """Returns ``CREATE TABLE IF NOT EXISTS`` for the results table."""
     cols = ",\n  ".join(f"{name} {sql_type}" for name, sql_type in RESULTS_COLUMNS)
     return f"CREATE TABLE IF NOT EXISTS {table_fqn} (\n  {cols}\n)"
+
+
+def build_add_columns_sql(table_fqn: str, existing_columns: set[str]) -> str:
+    """Returns an ALTER TABLE statement for result columns absent from an existing table."""
+    normalized_existing = {name.lower() for name in existing_columns}
+    missing = [(name, sql_type) for name, sql_type in RESULTS_COLUMNS if name.lower() not in normalized_existing]
+    if not missing:
+        return ""
+    columns = ",\n  ".join(f"{name} {sql_type}" for name, sql_type in missing)
+    return f"ALTER TABLE {table_fqn} ADD COLUMNS (\n  {columns}\n)"
 
 
 def build_insert_sql(table_fqn: str, rows: list[dict[str, Any]], run_id: str) -> str:
@@ -121,7 +142,7 @@ def resolve_warehouse_id(client: Any, warehouse_id: str | None = None) -> str:
     return best.id
 
 
-def _execute(client: Any, statement: str, warehouse_id: str) -> None:
+def _execute(client: Any, statement: str, warehouse_id: str) -> Any:
     """Runs a SQL statement via the Statement Execution API; raises on failure."""
     resp = client.statement_execution.execute_statement(
         statement=statement, warehouse_id=warehouse_id, wait_timeout="50s"
@@ -131,6 +152,14 @@ def _execute(client: Any, statement: str, warehouse_id: str) -> None:
     if state_str.upper() not in ("", "SUCCEEDED"):
         err = getattr(getattr(resp, "status", None), "error", None)
         raise RuntimeError(f"Statement failed ({state_str}): {getattr(err, 'message', err)}")
+    return resp
+
+
+def _existing_columns(client: Any, table_fqn: str, warehouse_id: str) -> set[str]:
+    """Reads the current table column names through Databricks SQL."""
+    response = _execute(client, f"SHOW COLUMNS IN {table_fqn}", warehouse_id)
+    data = getattr(getattr(response, "result", None), "data_array", None) or []
+    return {str(row[0]) for row in data if row}
 
 
 def write_results(
@@ -166,6 +195,10 @@ def write_results(
     resolved_wh = resolve_warehouse_id(client, warehouse_id)
     run_id = str(uuid.uuid4())
     _execute(client, build_create_table_sql(table_fqn), resolved_wh)
+    existing_columns = _existing_columns(client, table_fqn, resolved_wh)
+    add_columns_sql = build_add_columns_sql(table_fqn, existing_columns)
+    if add_columns_sql:
+        _execute(client, add_columns_sql, resolved_wh)
     _execute(client, build_insert_sql(table_fqn, rows, run_id), resolved_wh)
     logger.info("Recorded %d pipeline rows to %s (run_id=%s).", len(rows), table_fqn, run_id)
     return run_id, len(rows)

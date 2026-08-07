@@ -5,11 +5,14 @@
       "displayName": "Latest run summary",
       "queryLines": [
         "SELECT COUNT(*) AS pipelines, ",
-        "SUM(activities) AS activities, ",
+        "SUM(audited_activities) AS audited_activities, ",
         "SUM(deterministic_activities) AS deterministic_activities, ",
         "SUM(agentic_activities) AS agentic_activities, ",
         "SUM(unsupported_activities) AS unsupported_activities, ",
-        "ROUND(100.0*(SUM(deterministic_activities)+SUM(agentic_activities))/NULLIF(SUM(activities),0),1) AS coverage_pct ",
+        "SUM(failed_activities) AS failed_activities, ",
+        "SUM(excluded_activities) AS excluded_activities, ",
+        "ROUND(100.0*(SUM(deterministic_activities)+SUM(agentic_activities))/NULLIF(SUM(audited_activities),0),1) AS coverage_pct, ",
+        "ROUND(100.0*SUM(deterministic_activities)/NULLIF(SUM(audited_activities),0),1) AS deterministic_coverage_pct ",
         "FROM {{RESULTS_TABLE}} ",
         "WHERE run_id = (SELECT run_id FROM {{RESULTS_TABLE}} ORDER BY run_date DESC LIMIT 1)"
       ]
@@ -28,11 +31,12 @@
       "name": "latest_pipelines",
       "displayName": "Pipeline coverage (latest run)",
       "queryLines": [
-        "SELECT pipeline, activities, deterministic_activities, agentic_activities, ",
-        "unsupported_activities, coverage_pct, collapsible_patterns, complexity_size ",
+        "SELECT pipeline, audited_activities, deterministic_activities, agentic_activities, ",
+        "unsupported_activities, failed_activities, excluded_activities, reconciliation_status, ",
+        "migration_status, coverage_pct, deterministic_coverage_pct, finding_count, collapsible_patterns, complexity_size ",
         "FROM {{RESULTS_TABLE}} ",
         "WHERE run_id = (SELECT run_id FROM {{RESULTS_TABLE}} ORDER BY run_date DESC LIMIT 1) ",
-        "ORDER BY coverage_pct ASC, activities DESC"
+        "ORDER BY coverage_pct ASC, audited_activities DESC"
       ]
     },
     {
@@ -40,8 +44,10 @@
       "displayName": "Coverage over runs",
       "queryLines": [
         "SELECT DATE_TRUNC('SECOND', run_date) AS run_ts, ",
-        "ROUND(100.0*(SUM(deterministic_activities)+SUM(agentic_activities))/NULLIF(SUM(activities),0),1) AS coverage_pct, ",
-        "SUM(activities) AS activities ",
+        "ROUND(100.0*(SUM(deterministic_activities)+SUM(agentic_activities))/NULLIF(SUM(audited_activities),0),1) AS coverage_pct, ",
+        "ROUND(100.0*SUM(deterministic_activities)/NULLIF(SUM(audited_activities),0),1) AS deterministic_coverage_pct, ",
+        "SUM(audited_activities) AS audited_activities, SUM(failed_activities) AS failed_activities, ",
+        "SUM(excluded_activities) AS excluded_activities ",
         "FROM {{RESULTS_TABLE}} ",
         "GROUP BY DATE_TRUNC('SECOND', run_date) ",
         "ORDER BY run_ts"
@@ -59,7 +65,7 @@
             "name": "title",
             "multilineTextboxSpec": {
               "lines": [
-                "## ADF \u2192 Databricks Migration Coverage"
+                "## flowx Migration Coverage"
               ]
             }
           },
@@ -75,7 +81,7 @@
             "name": "subtitle",
             "multilineTextboxSpec": {
               "lines": [
-                "Per-pipeline translation coverage from the latest flowx run. Coverage % = (deterministic + agentic) / total activities."
+                "Per-pipeline translation coverage from the latest flowx run. Coverage % = (deterministic + agentic) / audited activities."
               ]
             }
           },
@@ -176,8 +182,8 @@
                   "datasetName": "latest_summary",
                   "fields": [
                     {
-                      "name": "activities",
-                      "expression": "`activities`"
+                      "name": "audited_activities",
+                      "expression": "`audited_activities`"
                     }
                   ],
                   "disaggregated": true
@@ -189,12 +195,12 @@
               "widgetType": "counter",
               "encodings": {
                 "value": {
-                  "fieldName": "activities",
-                  "displayName": "Activities"
+                  "fieldName": "audited_activities",
+                  "displayName": "Audited activities"
                 }
               },
               "frame": {
-                "title": "Activities",
+                "title": "Audited activities",
                 "showTitle": true
               }
             }
@@ -448,8 +454,8 @@
                       "expression": "`pipeline`"
                     },
                     {
-                      "name": "activities",
-                      "expression": "`activities`"
+                      "name": "audited_activities",
+                      "expression": "`audited_activities`"
                     },
                     {
                       "name": "deterministic_activities",
@@ -460,8 +466,20 @@
                       "expression": "`agentic_activities`"
                     },
                     {
-                      "name": "unsupported_activities",
-                      "expression": "`unsupported_activities`"
+                      "name": "failed_activities",
+                      "expression": "`failed_activities`"
+                    },
+                    {
+                      "name": "excluded_activities",
+                      "expression": "`excluded_activities`"
+                    },
+                    {
+                      "name": "reconciliation_status",
+                      "expression": "`reconciliation_status`"
+                    },
+                    {
+                      "name": "deterministic_coverage_pct",
+                      "expression": "`deterministic_coverage_pct`"
                     },
                     {
                       "name": "coverage_pct",
@@ -490,8 +508,8 @@
                     "displayName": "Pipeline"
                   },
                   {
-                    "fieldName": "activities",
-                    "displayName": "Activities"
+                    "fieldName": "audited_activities",
+                    "displayName": "Audited"
                   },
                   {
                     "fieldName": "deterministic_activities",
@@ -502,8 +520,20 @@
                     "displayName": "Agentic"
                   },
                   {
-                    "fieldName": "unsupported_activities",
-                    "displayName": "Unsupported"
+                    "fieldName": "failed_activities",
+                    "displayName": "Failed"
+                  },
+                  {
+                    "fieldName": "excluded_activities",
+                    "displayName": "Excluded"
+                  },
+                  {
+                    "fieldName": "reconciliation_status",
+                    "displayName": "Reconciliation"
+                  },
+                  {
+                    "fieldName": "deterministic_coverage_pct",
+                    "displayName": "Deterministic %"
                   },
                   {
                     "fieldName": "coverage_pct",

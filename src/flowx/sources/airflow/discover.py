@@ -1,9 +1,9 @@
 """Airflow discover phase: parse DAGs into a classified inventory.
 
 Mirrors the ADF discover contract: writes ``metadata/inventory.json`` and
-``metadata/profile_report.csv`` under the shared output dir, classifying each
-task as deterministic (a mapped operator -> NotebookActivity) or agentic (an
-unmapped operator -> PlaceholderActivity, needing LLM-assisted translation).
+``metadata/profile_report.csv`` under the shared output dir. Independently audited
+task candidates drive deterministic, agentic, failed, and excluded counts; emitted
+IR tasks remain available for the per-task inventory.
 Exposes ``main(argv)`` so the adapter runs it in-process, like the ADF loader.
 """
 
@@ -45,27 +45,75 @@ def _classify(pipeline: Pipeline) -> list[dict[str, str]]:
 def build_inventory_dict(pipelines: list[Pipeline], source_dir: str) -> dict[str, Any]:
     """Builds the inventory.json payload matching the ADF discover shape."""
     pipeline_entries: list[dict[str, Any]] = []
-    deterministic = agentic = 0
+    audited = deterministic = agentic = failed = excluded = 0
     for pipeline in pipelines:
         items = _classify(pipeline)
-        deterministic += sum(1 for i in items if i["strategy"] == "deterministic")
-        agentic += sum(1 for i in items if i["strategy"] == "agentic")
-        pipeline_entries.append({"name": pipeline.name, "activities": items})
-    activity_count = deterministic + agentic
-    # Coverage counts both deterministic and agentic as "has a translation path", matching the
-    # shared reporting.coverage formula (agentic gaps are translated in the convert phase).
-    coverage = round(100.0 * (deterministic + agentic) / activity_count, 1) if activity_count else 0.0
+        pipeline_audited = int(pipeline.audit.get("audited_activity_count", len(items)))
+        pipeline_deterministic = int(
+            pipeline.audit.get("deterministic_count", sum(1 for item in items if item["strategy"] == "deterministic"))
+        )
+        pipeline_agentic = int(
+            pipeline.audit.get("agentic_count", sum(1 for item in items if item["strategy"] == "agentic"))
+        )
+        pipeline_failed = int(pipeline.audit.get("failed_count", 0))
+        pipeline_excluded = int(pipeline.audit.get("excluded_count", 0))
+        coverage = (
+            round(100.0 * (pipeline_deterministic + pipeline_agentic) / pipeline_audited, 1)
+            if pipeline_audited
+            else 0.0
+        )
+        deterministic_coverage = (
+            round(100.0 * pipeline_deterministic / pipeline_audited, 1) if pipeline_audited else 0.0
+        )
+        audited += pipeline_audited
+        deterministic += pipeline_deterministic
+        agentic += pipeline_agentic
+        failed += pipeline_failed
+        excluded += pipeline_excluded
+        pipeline_entries.append(
+            {
+                "name": pipeline.name,
+                "activities": items,
+                "audited_activity_count": pipeline_audited,
+                "deterministic_count": pipeline_deterministic,
+                "agentic_count": pipeline_agentic,
+                "failed_count": pipeline_failed,
+                "excluded_count": pipeline_excluded,
+                "reconciliation_status": pipeline.reconciliation_status or "verified",
+                "migration_status": pipeline.migration_status,
+                "coverage_pct": coverage,
+                "deterministic_coverage_pct": deterministic_coverage,
+                "findings": pipeline.not_translatable,
+                "transformations": pipeline.audit.get("transformations", []),
+            }
+        )
+    coverage = round(100.0 * (deterministic + agentic) / audited, 1) if audited else 0.0
+    deterministic_coverage = round(100.0 * deterministic / audited, 1) if audited else 0.0
+    reconciliation_status = (
+        "failed"
+        if any(pipeline.reconciliation_status == "failed" for pipeline in pipelines)
+        else "verified_with_gaps"
+        if any(pipeline.reconciliation_status == "verified_with_gaps" for pipeline in pipelines)
+        else "excluded"
+        if pipelines and all(pipeline.migration_status == "excluded" for pipeline in pipelines)
+        else "verified"
+    )
     return {
         "source": "airflow",
         "source_dir": source_dir,
         "pipelines": pipeline_entries,
         "summary": {
             "pipeline_count": len(pipelines),
-            "activity_count": activity_count,
+            "activity_count": audited,
+            "audited_activity_count": audited,
             "deterministic_count": deterministic,
             "agentic_count": agentic,
             "unsupported_count": 0,
+            "failed_count": failed,
+            "excluded_count": excluded,
             "coverage_pct": coverage,
+            "deterministic_coverage_pct": deterministic_coverage,
+            "reconciliation_status": reconciliation_status,
         },
     }
 
@@ -93,7 +141,7 @@ _CONTROL_FLOW_TYPES = frozenset({"ForEachActivity"})
 
 def _profile_row(pipeline: Pipeline) -> dict[str, Any]:
     """Computes one profile row for *pipeline* over the full column set."""
-    type_names = [type(task).__name__ for task in pipeline.tasks]
+    type_names = [type(task).__name__ for task in pipeline.tasks if not task.task_key.startswith("__flowx_")]
     total = len(type_names)
     native = sum(1 for name in type_names if name in _NATIVE_TYPES)
     control = sum(1 for name in type_names if name in _CONTROL_FLOW_TYPES)
@@ -161,7 +209,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Total tasks:        {summary['activity_count']}")
     print(f"  Deterministic:    {summary['deterministic_count']}")
     print(f"  Agentic:          {summary['agentic_count']}")
-    print(f"Coverage:           {summary['coverage_pct']}%")
+    print(f"  Failed:           {summary['failed_count']}")
+    print(f"  Excluded:         {summary['excluded_count']}")
+    print(f"Translation path:   {summary['coverage_pct']}%")
+    print(f"Deterministic:      {summary['deterministic_coverage_pct']}%")
+    print(f"Reconciliation:     {summary['reconciliation_status']}")
     return 1 if any(pipeline.reconciliation_status == "failed" for pipeline in pipelines) else 0
 
 

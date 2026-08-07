@@ -814,7 +814,6 @@ def build_placeholder_with_comment(ctx: OperatorContext, comment: str) -> Activi
     return _placeholder(ctx, comment)
 
 
-_LOADER_CONSUMED_KWARGS = frozenset({"task_id", "dag", "trigger_rule", "retries", "retry_delay", "execution_timeout"})
 _OPERATOR_CONSUMED_KWARGS: dict[str, frozenset[str]] = {
     "PythonOperator": frozenset({"python_callable", "op_args", "op_kwargs"}),
     "BranchPythonOperator": frozenset({"python_callable", "op_args", "op_kwargs"}),
@@ -850,20 +849,46 @@ _FILE_SENSOR_KWARGS = frozenset(
     {"bucket_key", "bucket_name", "object", "bucket", "filepath", "filepath_", "poke_interval", "timeout"}
 )
 _TABLE_SENSOR_KWARGS = frozenset({"sql", "table_name", "poke_interval", "timeout"})
+_LOADER_KWARG_RATIONALES: dict[str, str] = {
+    "task_id": "capture_identity",
+    "dag": "dag_membership",
+    "trigger_rule": "dependency_outcome",
+    "retries": "retry_policy",
+    "retry_delay": "retry_policy",
+    "execution_timeout": "timeout_policy",
+}
+
+
+def argument_classification(operator: str, kwargs: dict[str, ast.expr]) -> list[dict[str, str]]:
+    """Classifies every supplied operator argument and records why it is represented."""
+    if operator in FILE_SENSORS:
+        adapter_consumed: frozenset[str] | None = _FILE_SENSOR_KWARGS
+    elif operator in TABLE_SENSORS:
+        adapter_consumed = _TABLE_SENSOR_KWARGS
+    else:
+        adapter_consumed = _OPERATOR_CONSUMED_KWARGS.get(operator)
+
+    classified: list[dict[str, str]] = []
+    for name in sorted(kwargs):
+        if name in _LOADER_KWARG_RATIONALES:
+            status = "consumed"
+            rationale = _LOADER_KWARG_RATIONALES[name]
+        elif adapter_consumed is None:
+            status = "preserved"
+            rationale = "placeholder_raw_definition"
+        elif name in adapter_consumed:
+            status = "consumed"
+            rationale = "operator_adapter"
+        else:
+            status = "unconsumed"
+            rationale = "no_declared_semantics"
+        classified.append({"name": name, "status": status, "rationale": rationale})
+    return classified
 
 
 def unconsumed_kwargs(operator: str, kwargs: dict[str, ast.expr]) -> set[str]:
     """Returns supplied arguments with no declared loader or adapter semantics."""
-    consumed: frozenset[str] | None
-    if operator in FILE_SENSORS:
-        consumed = _FILE_SENSOR_KWARGS
-    elif operator in TABLE_SENSORS:
-        consumed = _TABLE_SENSOR_KWARGS
-    else:
-        consumed = _OPERATOR_CONSUMED_KWARGS.get(operator)
-    if consumed is None:
-        return set()
-    return set(kwargs) - _LOADER_CONSUMED_KWARGS - consumed
+    return {item["name"] for item in argument_classification(operator, kwargs) if item["status"] == "unconsumed"}
 
 
 # --------------------------------------------------------------------------------------

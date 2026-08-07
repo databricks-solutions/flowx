@@ -114,11 +114,13 @@ phase surfaces three optional inputs — `results_table`, `results_warehouse_id`
 
 - **`record-results`** writes one row **per pipeline per run** to the supplied Unity Catalog
   table (`catalog.schema.table`), combining the complexity columns above with the
-  deterministic/agentic/unsupported coverage breakdown. Every row is stamped with a shared
+  audited/deterministic/agentic/failed/excluded coverage breakdown, reconciliation and migration
+  status, finding fingerprints, translation-path coverage, and deterministic coverage. Airflow's
+  audited count remains the denominator even for failed or excluded candidates. Every row is stamped with a shared
   **`run_id`** (UUID), **`run_date`** (`CURRENT_TIMESTAMP()`), and **`run_by`**
   (`CURRENT_USER()`), so coverage is trackable across runs and users.
 - **`install-dashboard`** creates and publishes an AI/BI (Lakeview) dashboard over that table —
-  KPI counters (pipelines, coverage %, deterministic/agentic/unsupported activity totals), a
+  KPI counters (pipelines, audited activities, and coverage), failed/excluded totals, a
   pipelines-by-complexity bar chart, a coverage-over-runs line, and a per-pipeline coverage
   table.
 

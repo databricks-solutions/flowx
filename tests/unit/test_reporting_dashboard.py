@@ -16,6 +16,11 @@ def test_build_serialized_dashboard_injects_table_and_is_valid_json():
     # every dataset query references the fully-qualified table
     joined = " ".join(line for ds in spec["datasets"] for line in ds["queryLines"])
     assert "cat.sch.results" in joined
+    assert "audited_activities" in joined
+    assert "failed_activities" in joined
+    assert "excluded_activities" in joined
+    assert "reconciliation_status" in joined
+    assert "deterministic_coverage_pct" in joined
     assert spec["pages"][0]["pageType"] == "PAGE_TYPE_CANVAS"
     # widget field names match their dataset fields (counter references a real column)
     widget_names = {w["widget"]["name"] for w in spec["pages"][0]["layout"]}

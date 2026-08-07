@@ -157,7 +157,7 @@ execution) and maps ~35 operator/sensor families to the shared IR. Highlights:
   …) → `sql_task`.
 - **TaskFlow API** — `@dag` / `@task`; implicit XCom data flow lowers to `dbutils.jobs.taskValues`.
   `@task.expand([literal])` → `for_each_task`; non-literal / `.partial().expand()` / `@task_group` →
-  placeholder + gap (dependencies preserved — never a silent drop).
+  a linked placeholder notebook that raises `NotImplementedError`.
 - **Sensors** — file/table/time sensors → job triggers or polling notebooks; `ExternalTaskSensor` →
   cross-DAG wait; Http/Python/DateTime → polling tasks.
 - **dbt** — dbt CLI operators and astronomer-cosmos `DbtDag` / `DbtTaskGroup` → a dbt-factory job
@@ -168,10 +168,19 @@ execution) and maps ~35 operator/sensor families to the shared IR. Highlights:
 Operators without a deterministic mapping become a placeholder recorded in `gaps.json` for the
 agentic round. Full matrix: [`skills/flowx-convert/sources/airflow-coverage.md`](skills/flowx-convert/sources/airflow-coverage.md).
 
+Airflow discovery independently audits DAG declarations, task candidates, dependency declarations,
+DAG settings, mapped calls, and operator arguments before comparing them with captured IR. An
+included DAG is `verified` when every audited construct has a proven translation,
+`verified_with_gaps` when every unsupported construct is linked to a runnable-failure placeholder,
+or `failed` when reconciliation finds unexplained loss. Failed reconciliation exits nonzero and
+blocks package writes. `--exclude-dag <dag_id>` is repeatable; excluded DAGs emit no Job but remain
+visible with zero translated activities in inventory and coverage reporting. This guarantee applies
+to the supported static subset; flowx never imports or executes DAG modules.
+
 ## How It Works
 
 ### Phase 1: Discover
-Parses the source into typed nodes and classifies each activity/operator as deterministic, agentic, or unsupported — ADF JSON from Unity Catalog volumes (or a `/Workspace` Git folder, normalizing ARM template format), or Airflow DAG `.py` modules read statically with `ast`. Produces `metadata/inventory.json` and a per-pipeline complexity report at `metadata/profile_report.csv`.
+Parses the source into typed nodes and classifies each activity/operator as deterministic, agentic, or unsupported — ADF JSON from Unity Catalog volumes (or a `/Workspace` Git folder, normalizing ARM template format), or Airflow DAG `.py` modules read statically with `ast`. Airflow inventory includes audited/deterministic/agentic/failed/excluded counts, reconciliation status, stable finding fingerprints, translation-path coverage, and deterministic coverage. Produces `metadata/inventory.json` and a per-pipeline complexity report at `metadata/profile_report.csv`.
 
 ### Phase 2: Convert
 Applies deterministic translators (ADF activity registry / Airflow operator mapping), resolves dependencies, and flags agentic gaps for LLM-assisted translation. Produces the shared Pipeline IR consumed unchanged by the package phase.
@@ -188,7 +197,7 @@ flowx_output/
   databricks.yml              # Bundle configuration (package)
   resources/
     jobs/
-      <pipeline_name>.yml     # One job per ADF pipeline
+      <pipeline_name>.yml     # One Job per included ADF pipeline or Airflow DAG
   src/
     notebooks/
       <pipeline_name>/
