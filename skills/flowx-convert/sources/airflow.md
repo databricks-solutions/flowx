@@ -42,8 +42,9 @@ PythonOperator callable or BashOperator command, carrying `generated_source`) or
 
 If convert wrote `<output_dir>/.work/gaps.json`, each entry describes an unmapped construct whose
 generated Job task points to a notebook that raises `NotImplementedError`. Review every gap before
-deployment. The shared `merge_agentic` command is not a supported Airflow workflow yet; keep the
-placeholder, exclude the DAG, or implement and validate the replacement explicitly.
+deployment. The shared `merge_agentic` command is disabled for Airflow and rejects
+`--source airflow`; keep the placeholder or exclude the DAG. This prevents an unsafe name-based
+replacement from bypassing source reconciliation.
 
 ## Step 4 — Proceed to package
 

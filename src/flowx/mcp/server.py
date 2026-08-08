@@ -214,10 +214,16 @@ def _cmd_convert(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_merge_agentic(p: dict[str, Any]) -> dict[str, Any]:
+    source_name = _source_name(p)
+    if source_name == "airflow":
+        return {
+            "ok": False,
+            "error": "Airflow agentic merge is disabled until the fingerprint-bound resolution workflow is available.",
+        }
     args = [
         "convert",
         "--source",
-        _source_name(p),
+        source_name,
         "--merge-agentic",
         "--report",
         p["report_path"],
@@ -478,8 +484,9 @@ def build_server() -> FastMCP:
           pipeline, exclude_dag | exclude_dags (Airflow, repeatable list) — parse and audit definitions.
         - "convert": source(req), (one ADF source key | airflow_source_path), output_dir, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list).
-        - "merge_agentic": source(req), report_path(req), agentic_results_dir(req), output_path —
-          merge agent results.
+        - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
+          merge ADF agent results. Airflow's legacy name-based merge is disabled pending the
+          fingerprint-bound resolution workflow.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

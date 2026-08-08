@@ -946,8 +946,8 @@ def test_unknown_operator_becomes_placeholder():
 
 
 def test_placeholder_carries_operator_source_for_agentic_round():
-    # The placeholder must carry the operator's raw source so the agentic-gap round
-    # (gaps.json + merge_agentic) can reason from it, like the ADF source's ARM JSON.
+    # The placeholder must carry the operator's raw source so a reviewed resolution workflow can
+    # reason from it without reparsing or executing the DAG.
     p = _load(
         "from airflow import DAG\n"
         "with DAG(dag_id='d') as dag:\n"
@@ -981,7 +981,7 @@ def test_convert_emits_gaps_json_for_unmapped_operators():
         assert gaps[0]["raw_definition"]["source"]
 
 
-def test_convert_merges_agentic_results_without_source_dir(tmp_path):
+def test_convert_rejects_legacy_agentic_merge_without_modifying_report(tmp_path):
     import json
 
     from flowx.sources.airflow.convert import main
@@ -994,8 +994,10 @@ def test_convert_merges_agentic_results_without_source_dir(tmp_path):
                 "tasks": [
                     {
                         "type": "PlaceholderActivity",
-                        "name": "pod",
-                        "task_key": "pod",
+                        "name": "b",
+                        "task_key": "b",
+                        "depends_on": [{"task_key": "a"}],
+                        "max_retries": 1,
                         "original_type": "KubernetesPodOperator",
                     }
                 ],
@@ -1007,20 +1009,23 @@ def test_convert_merges_agentic_results_without_source_dir(tmp_path):
     (results / "pod.json").write_text(
         json.dumps(
             {
-                "activity_name": "pod",
+                "activity_name": "b",
                 "task": {
                     "type": "NotebookActivity",
-                    "name": "pod",
-                    "task_key": "pod",
-                    "notebook_path": "notebooks/pod.py",
+                    "name": "b",
+                    "task_key": "HIJACKED_KEY",
+                    "depends_on": [],
+                    "max_retries": 99,
+                    "notebook_path": "/Workspace/evil",
                 },
             }
         )
     )
 
-    assert main(["--merge-agentic", "--report", str(report), "--agentic-results", str(results)]) == 0
-    merged = json.loads(report.read_text())
-    assert merged["tasks"][0]["type"] == "NotebookActivity"
+    original = report.read_text()
+
+    assert main(["--merge-agentic", "--report", str(report), "--agentic-results", str(results)]) == 2
+    assert report.read_text() == original
 
 
 # --------------------------------------------------------------------------------------

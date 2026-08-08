@@ -20,7 +20,7 @@ operation; `parameters` is its keyword-argument dict.
 | `inputs` | `adapter inputs` | List a phase's input prompts/defaults |
 | `discover` | `adapter discover` | Parse ADF JSON, classify activities |
 | `convert` | `adapter convert` | ADF activities → Databricks IR |
-| `merge_agentic` | `adapter convert --merge-agentic` | Merge agent-produced results into the report |
+| `merge_agentic` | `adapter convert --merge-agentic` | Merge ADF agent-produced results into the report |
 | `inspect` | `adapter inspect` | Surface pending translation options |
 | `apply_answers` | `adapter modify` | Apply answers → stamped IR |
 | `materialize_lookup` | `adapter materialize-lookup` | CSV → lookup-values JSON |

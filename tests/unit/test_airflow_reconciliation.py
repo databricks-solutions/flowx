@@ -116,6 +116,7 @@ def test_failed_report_blocks_package_before_bundle_writes(tmp_path: Path) -> No
     output = tmp_path / "bundle"
     pipeline = Pipeline(
         name="failed",
+        tags={"source": "airflow"},
         reconciliation_status="failed",
         not_translatable=[
             {
@@ -124,6 +125,11 @@ def test_failed_report_blocks_package_before_bundle_writes(tmp_path: Path) -> No
                 "message": "one source task was not captured",
             }
         ],
+        audit={
+            "source_file": "failed.py",
+            "audited_activity_count": 1,
+            "transformations": [],
+        },
     )
     report.write_text(json.dumps(ir_serde.pipeline_to_dict(pipeline)), encoding="utf-8")
 
@@ -356,6 +362,11 @@ def test_bundle_invariant_failure_is_preflighted_before_destination_writes(tmp_p
         name="parent",
         tags={"source": "airflow"},
         reconciliation_status="verified",
+        audit={
+            "source_file": "parent.py",
+            "audited_activity_count": 1,
+            "transformations": [],
+        },
         tasks=[
             PlaceholderActivity(
                 name="dangling",

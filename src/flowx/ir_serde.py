@@ -7,8 +7,9 @@ halves share.  This lives at the top level (not inside a source) because it
 belongs to the IR, not to ADF: the Airflow convert phase and the bundler import
 it just as the ADF engine does.
 
-Also hosts ``merge_agentic_results`` -- the agentic-gap merge operates purely on
-serialised report dicts, so it is source-neutral too.
+Also hosts the legacy ``merge_agentic_results`` implementation used by the ADF
+source. Airflow does not expose this name-based merge because it cannot preserve
+the source-audit and graph-identity guarantees.
 """
 
 from __future__ import annotations

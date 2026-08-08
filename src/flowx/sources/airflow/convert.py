@@ -14,7 +14,6 @@ import json
 import logging
 from pathlib import Path
 
-from flowx import ir_serde
 from flowx.adapter.predicates import walk_activities
 from flowx.ir_serde import pipeline_to_dict
 from flowx.models.ir import PlaceholderActivity
@@ -45,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--merge-agentic",
         action="store_true",
-        help="Merge agent-produced results from --agentic-results into --report instead of translating.",
+        help="Deprecated and disabled for Airflow; retained only to return a migration error.",
     )
     parser.add_argument("--report", type=Path, default=None, help="Translation report to merge agentic results into.")
     parser.add_argument(
@@ -60,17 +59,11 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     if args.merge_agentic:
-        if not args.report or not args.agentic_results:
-            parser.error("--merge-agentic requires --report and --agentic-results")
-        merged_count, unmatched_count = ir_serde.merge_agentic_results(args.report, args.agentic_results, args.output)
-        print("\nAgentic Merge Summary")
-        print("=====================")
-        print(f"Merged:    {merged_count}")
-        print(f"Unmatched: {unmatched_count}")
-        return 0 if unmatched_count == 0 else 1
+        logger.error("Airflow agentic merge is disabled until the fingerprint-bound resolution workflow is available.")
+        return 2
 
     if not args.source_dir:
-        parser.error("--source-dir is required (unless using --merge-agentic)")
+        parser.error("--source-dir is required")
 
     pipelines = load_pipelines(
         args.source_dir,
@@ -91,9 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     report_file = work_dir / "translation_report.json"
     report_file.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
-    # Emit gaps.json for every unmapped operator so the agentic-gap round (driven by the
-    # convert SKILL guide + merge_agentic) can reason from the operator source and replace
-    # the placeholder with a real notebook -- the same flow the ADF source uses.
+    # Preserve unmapped operator context for review and the future fingerprint-bound resolver.
     gaps = _collect_gaps(pipelines)
     if gaps:
         (work_dir / "gaps.json").write_text(json.dumps(gaps, indent=2, default=str), encoding="utf-8")
@@ -112,8 +103,7 @@ def _collect_gaps(pipelines: list) -> list[dict]:
     """Returns one AgenticGap-shaped dict per PlaceholderActivity across all pipelines.
 
     Each carries the placeholder's ``activity_name``, ``activity_type`` (the Airflow
-    operator), and ``raw_definition`` (the operator's source) so the agentic round can
-    translate it -- the Airflow analog of ADF's gaps.json.
+    operator), and ``raw_definition`` (the operator's source).
     """
     gaps: list[dict] = []
     for pipeline in pipelines:

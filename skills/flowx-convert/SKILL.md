@@ -20,7 +20,8 @@ phase 2 of the flowx migration workflow; it produces a transient translation rep
 
 Translation is **source-specific** (ADF activity translators vs. Airflow operator mapping), so this
 skill routes to the right source guide. The shared mechanics — how to run the phase, the report
-contract, and the `inspect`/`modify`/`merge_agentic` machinery — live here.
+contract, and the `inspect`/`modify` machinery — live here. The legacy `merge_agentic` command is
+ADF-only; Airflow rejects it until the fingerprint-bound resolution workflow is available.
 
 ## Step 1 — Identify the source (required)
 
@@ -64,15 +65,15 @@ across ADF and Airflow.
 
 ## Shared adapter commands
 
-These operate on the report, not on a source's raw definitions, so they are the same for every
-source (the ADF guide uses them heavily; Airflow currently needs only the base convert):
+`inspect` and `modify` operate on the report rather than raw source definitions. The ADF guide uses
+them heavily; Airflow currently needs only the base conversion:
 
 - `inspect <report>` — emit the full just-in-time option schema (each option annotated with a
   `show_when` condition). Walk it locally; ask an option only when its `show_when` is satisfied.
 - `modify <report> --output-dir <dir> --answer OPTION_ID=VALUE ...` — validate and apply collected
   answers, writing `.work/translation_report.stamped.json` + `metadata/configuration.json`.
-- `merge_agentic --report <report> --agentic-results <dir>` — fold agent-produced per-activity
-  translations into the report (placeholders replaced in place).
+- `merge_agentic --report <report> --agentic-results <dir>` — **ADF only**. Fold agent-produced
+  per-activity translations into an ADF report. Airflow's legacy name-based merge is disabled.
 
 ## Output artifacts (shared, transient under `<output_dir>/.work/`)
 
@@ -80,7 +81,7 @@ source (the ADF guide uses them heavily; Airflow currently needs only the base c
 |---|---|
 | `.work/translation_report.json` | Full translation report with IR for all tasks |
 | `.work/<pipeline>.json` | Per-pipeline Databricks IR |
-| `.work/gaps.json` | Agentic gaps awaiting LLM-assisted conversion (ADF) |
+| `.work/gaps.json` | Unmapped source constructs; agentic inputs for ADF and review-only gaps for Airflow |
 | `.work/translation_report.stamped.json` | Configuration-stamped report (written by `modify`) |
 
 ## Reference

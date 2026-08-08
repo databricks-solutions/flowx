@@ -87,6 +87,23 @@ def test_airflow_discover_then_convert_route():
         assert (out / ".work" / "translation_report.json").exists()
 
 
+def test_airflow_legacy_agentic_merge_is_rejected_by_adapter():
+    rc = _run_phase(
+        "convert",
+        [
+            "--source",
+            "airflow",
+            "--merge-agentic",
+            "--report",
+            "/tmp/report.json",
+            "--agentic-results",
+            "/tmp/results",
+        ],
+    )
+
+    assert rc == 2
+
+
 def test_source_path_alias_equals_form_routes():
     # The `--source-path=<x>` equals form must normalise to --source-dir just like the space form,
     # or the phase module rejects it with a usage error.

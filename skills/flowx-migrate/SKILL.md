@@ -96,14 +96,15 @@ To accept all defaults and skip the prompts, pass `"interactive": false`. (Re-ca
 
 For step-by-step control, run the commands in order (the app reuses `output_dir` across calls, so
 only `discover` needs the source input). `source` ("adf" | "airflow") is required for
-discover/convert/merge_agentic and for `inputs discover`/`inputs convert`; for Airflow, swap
-`adf_definitions` for `airflow_source_path`. `package` and `inputs package` are source-independent:
+discover/convert and for `inputs discover`/`inputs convert`; for Airflow, swap `adf_definitions` for
+`airflow_source_path`. `merge_agentic` is ADF-only. `package` and `inputs package` are
+source-independent:
 
 ```
 flowx(command="inputs", parameters={"phase": "discover", "source": "adf"})  # source req for discover/convert
 flowx(command="discover", parameters={"source": "adf", "adf_definitions": {...}, "output_dir": ..., "pipeline": ...})
 flowx(command="convert", parameters={"source": "adf", "output_dir": ..., "pipeline": ...})
-flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # if agentic results
+flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # ADF only, if agentic results
 flowx(command="inspect", parameters={"report_path": ...})
 flowx(command="apply_answers", parameters={"report_path": ..., "answers": [...], "output_dir": ...})
 flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema": ...})

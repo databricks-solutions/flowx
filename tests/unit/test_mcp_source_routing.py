@@ -109,6 +109,22 @@ def test_merge_agentic_threads_source(captured):
     assert argv[argv.index("--source") + 1] == "adf"
 
 
+def test_merge_agentic_rejects_airflow_without_invoking_adapter(captured):
+    result = server._cmd_merge_agentic(
+        {
+            "source": "airflow",
+            "report_path": "/tmp/report.json",
+            "agentic_results_dir": "/tmp/results",
+        }
+    )
+
+    assert result == {
+        "ok": False,
+        "error": "Airflow agentic merge is disabled until the fingerprint-bound resolution workflow is available.",
+    }
+    assert captured == []
+
+
 def test_inputs_threads_source(captured):
     server._cmd_inputs({"phase": "discover", "source": "airflow"})
     argv = _argv(captured, "inputs")

@@ -439,10 +439,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: Report file not found: {args.report}", file=sys.stderr)
         return 1
 
-    reconciliation_failures = _report_reconciliation_failures(args.report)
-    if reconciliation_failures:
-        print("Error: source reconciliation failed; no bundle files were written.", file=sys.stderr)
-        for failure in reconciliation_failures:
+    report_failures = _report_reconciliation_failures(args.report)
+    if report_failures:
+        print("Error: translation report preflight failed; no bundle files were written.", file=sys.stderr)
+        for failure in report_failures:
             print(f"  - {failure}", file=sys.stderr)
         return 1
 
@@ -1715,21 +1715,96 @@ def _load_report(report_path: Path) -> list[PreparedWorkflow]:
 
 
 def _report_reconciliation_failures(report_path: Path) -> list[str]:
-    """Returns included pipelines whose source reconciliation is not package-safe."""
-    with report_path.open(encoding="utf-8") as handle:
-        report = json.load(handle)
-    if isinstance(report, dict) and isinstance(report.get("pipelines"), list):
+    """Returns report-shape, source-contract, and reconciliation failures.
+
+    Packaging is a security boundary for source reconciliation. A malformed report or an
+    unrecognized status must fail closed rather than falling through as an empty/safe report.
+    """
+    try:
+        with report_path.open(encoding="utf-8") as handle:
+            report = json.load(handle)
+    except json.JSONDecodeError as error:
+        return [f"translation report contains invalid JSON: {error}"]
+    except OSError as error:
+        return [f"translation report could not be read: {error}"]
+
+    if not isinstance(report, dict):
+        return ["translation report must be a top-level object"]
+
+    shape_keys = [key for key in ("tasks", "pipelines", "translations") if key in report]
+    if not shape_keys:
+        return ["translation report does not match a recognized report shape"]
+    if len(shape_keys) > 1:
+        return [f"translation report contains ambiguous report shapes: {', '.join(shape_keys)}"]
+
+    shape = shape_keys[0]
+    if shape == "pipelines":
+        if not isinstance(report["pipelines"], list):
+            return ["translation report pipelines must be a list"]
+        if not report["pipelines"]:
+            return ["translation report pipelines must contain at least one pipeline"]
         pipelines = report["pipelines"]
-    elif isinstance(report, dict) and "tasks" in report:
+    elif shape == "tasks":
         pipelines = [report]
     else:
+        if report.get("source") not in {None, "adf"}:
+            return ["legacy ADF translations report cannot declare a non-ADF source"]
+        translations = report["translations"]
+        if not isinstance(translations, list) or not translations:
+            return ["legacy ADF translations must be a non-empty list"]
+        for index, translation in enumerate(translations):
+            if not isinstance(translation, dict):
+                return [f"legacy ADF translation at index {index} must be an object"]
+            if not isinstance(translation.get("pipeline"), str) or not isinstance(translation.get("ir"), dict):
+                return [f"legacy ADF translation at index {index} is missing pipeline or IR data"]
         return []
+
     failures: list[str] = []
-    for pipeline in pipelines:
-        if not isinstance(pipeline, dict) or pipeline.get("migration_status") == "excluded":
+    airflow_statuses = {"verified", "verified_with_gaps", "failed"}
+    required_airflow_audit_fields = {"source_file", "audited_activity_count", "transformations"}
+    for index, pipeline in enumerate(pipelines):
+        label = f"pipeline[{index}]"
+        if not isinstance(pipeline, dict):
+            failures.append(f"{label}: pipeline must be an object")
             continue
-        if pipeline.get("reconciliation_status") != "failed":
+        name = pipeline.get("name")
+        if not isinstance(name, str) or not name:
+            failures.append(f"{label}: pipeline name must be a non-empty string")
             continue
+        label = name
+        if not isinstance(pipeline.get("tasks"), list):
+            failures.append(f"{label}: pipeline tasks must be a list")
+            continue
+        tags = pipeline.get("tags")
+        source = tags.get("source") if isinstance(tags, dict) else None
+        if source not in {"adf", "airflow"}:
+            failures.append(f"{label}: pipeline tags.source must be 'adf' or 'airflow'")
+            continue
+
+        status = pipeline.get("reconciliation_status")
+        if source == "adf":
+            if status not in {None, "not_applicable"}:
+                failures.append(f"{label}: unknown reconciliation_status {status!r} for ADF")
+            continue
+
+        audit = pipeline.get("audit")
+        if not isinstance(audit, dict) or not required_airflow_audit_fields.issubset(audit):
+            failures.append(f"{label}: Airflow source-audit metadata is missing or incomplete")
+            continue
+        migration_status = pipeline.get("migration_status", "included")
+        if migration_status not in {"included", "excluded"}:
+            failures.append(f"{label}: unknown migration_status {migration_status!r} for Airflow")
+            continue
+        if status == "excluded":
+            if migration_status != "excluded":
+                failures.append(f"{label}: reconciliation_status 'excluded' requires migration_status 'excluded'")
+            continue
+        if status not in airflow_statuses:
+            failures.append(f"{label}: unknown reconciliation_status {status!r} for Airflow")
+            continue
+        if migration_status == "excluded" or status != "failed":
+            continue
+
         findings = [
             finding
             for finding in pipeline.get("not_translatable") or []

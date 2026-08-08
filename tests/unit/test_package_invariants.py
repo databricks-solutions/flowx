@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from flowx.bundler.dab_writer import _report_reconciliation_failures
 from flowx.bundler.dab_writer import main as package_main
 
 
@@ -30,14 +31,37 @@ def _notebook_task(name: str, task_key: str) -> dict:
     }
 
 
+def _adf_pipeline(name: str, tasks: list[dict]) -> dict:
+    return {
+        "name": name,
+        "tags": {"source": "adf"},
+        "reconciliation_status": None,
+        "tasks": tasks,
+    }
+
+
+def _airflow_pipeline(name: str, tasks: list[dict], *, status: str = "verified") -> dict:
+    return {
+        "name": name,
+        "tags": {"source": "airflow"},
+        "reconciliation_status": status,
+        "audit": {
+            "source_file": f"{name}.py",
+            "audited_activity_count": len(tasks),
+            "transformations": [],
+        },
+        "tasks": tasks,
+    }
+
+
 def test_package_passes_invariants_for_clean_bundle():
-    report = {"name": "clean", "tasks": [_notebook_task("a", "a"), _notebook_task("b", "b")]}
+    report = _adf_pipeline("clean", [_notebook_task("a", "a"), _notebook_task("b", "b")])
     assert _run_package(report) == 0
 
 
 def test_package_fails_on_duplicate_task_key():
     # Two tasks sharing a task_key -> duplicate_task_key violation -> non-zero exit.
-    report = {"name": "bad", "tasks": [_notebook_task("a", "dup"), _notebook_task("b", "dup")]}
+    report = _adf_pipeline("bad", [_notebook_task("a", "dup"), _notebook_task("b", "dup")])
     assert _run_package(report) == 1
 
 
@@ -48,8 +72,8 @@ def test_package_loads_multi_pipeline_report():
 
     report = {
         "pipelines": [
-            {"name": "first", "tasks": [_notebook_task("x", "x")]},
-            {"name": "second", "tasks": [_notebook_task("y", "y")]},
+            _adf_pipeline("first", [_notebook_task("x", "x")]),
+            _adf_pipeline("second", [_notebook_task("y", "y")]),
         ]
     }
     with tempfile.TemporaryDirectory() as tmp:
@@ -66,10 +90,9 @@ def test_package_loads_multi_pipeline_report():
 def test_package_writes_airflow_dags_as_jobs_in_one_shared_bundle():
     report = {
         "pipelines": [
-            {
-                "name": "parent",
-                "tags": {"source": "airflow"},
-                "tasks": [
+            _airflow_pipeline(
+                "parent",
+                [
                     _notebook_task("extract", "extract"),
                     {
                         "name": "trigger_child",
@@ -78,12 +101,8 @@ def test_package_writes_airflow_dags_as_jobs_in_one_shared_bundle():
                         "job_name": "child",
                     },
                 ],
-            },
-            {
-                "name": "child",
-                "tags": {"source": "airflow"},
-                "tasks": [_notebook_task("extract", "extract")],
-            },
+            ),
+            _airflow_pipeline("child", [_notebook_task("extract", "extract")]),
         ]
     }
     with tempfile.TemporaryDirectory() as tmp:
@@ -109,10 +128,9 @@ def test_shared_bundle_cross_dag_ref_resolves_for_hyphenated_dag_id():
     # job by its normalized resource key, not a differently-sanitized name, or the ref dangles.
     report = {
         "pipelines": [
-            {
-                "name": "downstream",
-                "tags": {"source": "airflow"},
-                "tasks": [
+            _airflow_pipeline(
+                "downstream",
+                [
                     {
                         "name": "trig",
                         "task_key": "trig",
@@ -120,12 +138,8 @@ def test_shared_bundle_cross_dag_ref_resolves_for_hyphenated_dag_id():
                         "job_name": "upstream_dag",  # normalize_task_key("Upstream-DAG")
                     },
                 ],
-            },
-            {
-                "name": "Upstream-DAG",
-                "tags": {"source": "airflow"},
-                "tasks": [_notebook_task("a", "a")],
-            },
+            ),
+            _airflow_pipeline("Upstream-DAG", [_notebook_task("a", "a")]),
         ]
     }
     with tempfile.TemporaryDirectory() as tmp:
@@ -156,8 +170,8 @@ def test_shared_airflow_bundle_namespaces_pydabs_hooks_and_jobs():
     }
     report = {
         "pipelines": [
-            {"name": "first", "tags": {"source": "airflow"}, "tasks": [dbt_task]},
-            {"name": "second", "tags": {"source": "airflow"}, "tasks": [dbt_task]},
+            _airflow_pipeline("first", [dbt_task]),
+            _airflow_pipeline("second", [dbt_task]),
         ]
     }
     with tempfile.TemporaryDirectory() as tmp:
@@ -184,3 +198,123 @@ def test_shared_airflow_bundle_namespaces_pydabs_hooks_and_jobs():
         assert (out / "resources" / "second_dbt_dbt_job.py").exists()
         assert "${resources.jobs.first_dbt_dbt.id}" in (out / "resources" / "first.yml").read_text()
         assert "${resources.jobs.second_dbt_dbt.id}" in (out / "resources" / "second.yml").read_text()
+
+
+def _preflight_failures(tmp_path: Path, report: object) -> list[str]:
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return _report_reconciliation_failures(path)
+
+
+def test_report_preflight_rejects_unknown_reconciliation_status(tmp_path: Path):
+    report = _airflow_pipeline("typo", [_notebook_task("a", "a")], status="verifed")
+
+    failures = _preflight_failures(tmp_path, report)
+
+    assert any("unknown reconciliation_status" in failure for failure in failures)
+
+
+def test_report_preflight_rejects_reviewed_resolution_status_until_validator_exists(tmp_path: Path):
+    report = _airflow_pipeline(
+        "premature_resolution",
+        [_notebook_task("a", "a")],
+        status="verified_with_reviewed_resolutions",
+    )
+
+    failures = _preflight_failures(tmp_path, report)
+
+    assert any("unknown reconciliation_status" in failure for failure in failures)
+
+
+def test_report_preflight_rejects_excluded_status_for_included_dag(tmp_path: Path):
+    report = _airflow_pipeline("false_exclusion", [_notebook_task("a", "a")], status="excluded")
+
+    failures = _preflight_failures(tmp_path, report)
+
+    assert any("requires migration_status 'excluded'" in failure for failure in failures)
+
+
+def test_report_preflight_accepts_explicitly_excluded_dag(tmp_path: Path):
+    report = _airflow_pipeline("excluded", [_notebook_task("a", "a")], status="excluded")
+    report["migration_status"] = "excluded"
+
+    assert _preflight_failures(tmp_path, report) == []
+
+
+def test_report_preflight_rejects_airflow_without_audit_metadata(tmp_path: Path):
+    report = _airflow_pipeline("missing_audit", [_notebook_task("a", "a")])
+    report.pop("audit")
+
+    failures = _preflight_failures(tmp_path, report)
+
+    assert any("source-audit metadata" in failure for failure in failures)
+
+
+def test_report_preflight_rejects_top_level_list(tmp_path: Path):
+    failures = _preflight_failures(tmp_path, [_adf_pipeline("p", [_notebook_task("a", "a")])])
+
+    assert any("top-level object" in failure for failure in failures)
+
+
+def test_package_rejects_malformed_report_before_writing_bundle(tmp_path: Path, capsys):
+    report_path = tmp_path / "malformed.json"
+    report_path.write_text("[]", encoding="utf-8")
+    output_dir = tmp_path / "bundle"
+
+    exit_code = package_main(["--report", str(report_path), "--output-dir", str(output_dir)])
+
+    assert exit_code == 1
+    assert "translation report preflight failed" in capsys.readouterr().err
+    assert not output_dir.exists()
+
+
+def test_report_preflight_rejects_unrecognized_dictionary(tmp_path: Path):
+    failures = _preflight_failures(tmp_path, {"name": "missing_tasks"})
+
+    assert any("recognized report shape" in failure for failure in failures)
+
+
+def test_report_preflight_rejects_malformed_pipelines_wrapper(tmp_path: Path):
+    failures = _preflight_failures(tmp_path, {"pipelines": "not-a-list"})
+
+    assert any("pipelines must be a list" in failure for failure in failures)
+
+
+def test_report_preflight_accepts_legacy_adf_translations(tmp_path: Path):
+    report = {
+        "translations": [
+            {
+                "pipeline": "legacy_adf",
+                "status": "translated",
+                "ir": _notebook_task("a", "a"),
+            }
+        ]
+    }
+
+    assert _preflight_failures(tmp_path, report) == []
+
+
+def test_report_preflight_rejects_airflow_claiming_legacy_adf_shape(tmp_path: Path):
+    report = {
+        "source": "airflow",
+        "translations": [
+            {
+                "pipeline": "not_airflow_contract",
+                "status": "translated",
+                "ir": _notebook_task("a", "a"),
+            }
+        ],
+    }
+
+    failures = _preflight_failures(tmp_path, report)
+
+    assert any("legacy ADF" in failure for failure in failures)
+
+
+def test_report_preflight_rejects_invalid_json(tmp_path: Path):
+    path = tmp_path / "report.json"
+    path.write_text("{not-json", encoding="utf-8")
+
+    failures = _report_reconciliation_failures(path)
+
+    assert any("invalid JSON" in failure for failure in failures)
