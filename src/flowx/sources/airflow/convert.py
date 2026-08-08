@@ -59,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     if args.merge_agentic:
-        logger.error("Airflow agentic merge is disabled until the fingerprint-bound resolution workflow is available.")
+        logger.error("Airflow agentic merge is disabled; use the fingerprint-bound resolve-agentic workflow.")
         return 2
 
     if not args.source_dir:

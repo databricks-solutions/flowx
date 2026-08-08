@@ -111,6 +111,11 @@ flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema"
 flowx(command="record_results", parameters={...}) / flowx(command="install_dashboard", parameters={...})
 ```
 
+For an Airflow report with eligible leaf placeholders, use the `flowx-resolve-airflow-gaps` skill
+between convert and package. It calls `resolve_agentic` with `action="prepare"`, stages one or more
+provider candidates, and applies only the gap fingerprints the user explicitly accepts. Package
+must then receive `<output_dir>/.work/translation_report.agentic.json` as `report_path`.
+
 The server's `output_dir` is ephemeral and not reachable from your workspace, so **have `migrate`/
 `package` write the DAB to the target via the SDK** — pass `"output_volume_path": "/Volumes/…"` or
 `"output_workspace_path": "/Workspace/…"` and the bundle is uploaded there (returned as

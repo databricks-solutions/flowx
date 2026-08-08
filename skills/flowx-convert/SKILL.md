@@ -21,7 +21,7 @@ phase 2 of the flowx migration workflow; it produces a transient translation rep
 Translation is **source-specific** (ADF activity translators vs. Airflow operator mapping), so this
 skill routes to the right source guide. The shared mechanics — how to run the phase, the report
 contract, and the `inspect`/`modify` machinery — live here. The legacy `merge_agentic` command is
-ADF-only; Airflow rejects it until the fingerprint-bound resolution workflow is available.
+ADF-only; Airflow uses `resolve-agentic prepare|stage|apply` instead.
 
 ## Step 1 — Identify the source (required)
 
@@ -36,7 +36,8 @@ There is no default source. Every phase invocation passes `--source <name>` expl
 ## Step 2 — Follow the source guide
 
 Read the matching `sources/<source>.md` and follow it. ADF has a rich deterministic-first +
-agentic-gap flow with just-in-time configuration; Airflow is currently deterministic-only.
+agentic-gap flow with just-in-time configuration. Airflow converts deterministically first and may
+then use the separately reviewed, fingerprint-bound `flowx-resolve-airflow-gaps` workflow.
 
 ## How to run this phase — MCP tool or venv CLI
 
@@ -88,4 +89,4 @@ them heavily; Airflow currently needs only the base conversion:
 
 - `sources/adf.md` — ADF translation: deterministic engine, agentic gaps, just-in-time config,
   notify motifs, metadata-driven consolidation. See also `references/activity-mapping.md`.
-- `sources/airflow.md` — Airflow translation (operator → IR, deterministic-only today).
+- `sources/airflow.md` — Airflow deterministic-first translation plus reviewed leaf-gap resolution.

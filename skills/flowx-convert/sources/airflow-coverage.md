@@ -40,7 +40,8 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 | Multiple DAGs | Every DAG, including multiple declarations and repeated static `@dag` factory invocations in one Python file, becomes a sibling job in one shared Airflow bundle so `TriggerDagRunOperator` resource references resolve. Narrow classic factories shaped as one DAG declaration followed by `return dag` are expanded with statically bindable arguments. |
 
 Any operator not listed becomes a `PlaceholderActivity` **and** a `gaps.json` entry carrying the
-operator's raw source for review. The legacy `merge_agentic` command is disabled for Airflow. The
+operator's raw source for review. The legacy `merge_agentic` command is disabled for Airflow;
+eligible one-task leaf gaps may use the fingerprint-bound `flowx-resolve-airflow-gaps` workflow. The
 safe fallback is a flagged, failing task rather than a silent omission. Callables that read Airflow task context
 (`**context` / `ti`) or XCom, and runtime-branching decorators, take the same route rather than
 emitting code that fails at runtime.

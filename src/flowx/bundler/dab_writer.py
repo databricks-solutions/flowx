@@ -1759,8 +1759,29 @@ def _report_reconciliation_failures(report_path: Path) -> list[str]:
                 return [f"legacy ADF translation at index {index} is missing pipeline or IR data"]
         return []
 
+    if any(
+        isinstance(pipeline, dict)
+        and (
+            pipeline.get("reconciliation_status") == "verified_with_reviewed_resolutions"
+            or (
+                isinstance(pipeline.get("audit"), dict)
+                and isinstance(pipeline["audit"].get("agentic_resolution"), dict)
+            )
+        )
+        for pipeline in pipelines
+    ):
+        from flowx.agentic import validate_persisted_agentic_report
+
+        output_dir = report_path.parent.parent if report_path.parent.name == ".work" else report_path.parent
+        agentic_failures = validate_persisted_agentic_report(
+            report,
+            evidence_dir=output_dir / "metadata" / "agentic",
+        )
+        if agentic_failures:
+            return agentic_failures
+
     failures: list[str] = []
-    airflow_statuses = {"verified", "verified_with_gaps", "failed"}
+    airflow_statuses = {"verified", "verified_with_gaps", "verified_with_reviewed_resolutions", "failed"}
     required_airflow_audit_fields = {"source_file", "audited_activity_count", "transformations"}
     for index, pipeline in enumerate(pipelines):
         label = f"pipeline[{index}]"

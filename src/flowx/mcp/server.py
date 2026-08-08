@@ -6,7 +6,9 @@ keeping flowx to one tool stays under host tool-count caps such as Genie Code's 
 
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -53,6 +55,8 @@ Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
   flowx("package", {"output_dir": "...", "catalog": "main", "schema": "default"})
+For a reviewed Airflow leaf gap, call `resolve_agentic` with action `prepare`, then `stage` with
+provider-authored candidates, then `apply` with an explicit `accept_gap` allowlist.
 Or run it all at once:
   flowx("migrate", {"source": "airflow", "airflow_source_path": "...", "output_dir": "...",
                     "catalog": "...", "schema": "..."})
@@ -218,7 +222,7 @@ def _cmd_merge_agentic(p: dict[str, Any]) -> dict[str, Any]:
     if source_name == "airflow":
         return {
             "ok": False,
-            "error": "Airflow agentic merge is disabled until the fingerprint-bound resolution workflow is available.",
+            "error": "Airflow agentic merge is disabled; use the fingerprint-bound resolve_agentic workflow.",
         }
     args = [
         "convert",
@@ -234,6 +238,51 @@ def _cmd_merge_agentic(p: dict[str, Any]) -> dict[str, Any]:
         args += ["--output", p["output_path"]]
     result = runner.run_adapter(args)
     return {"ok": result.ok, "process": result.as_dict()}
+
+
+def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
+    source_name = _source_name(p)
+    if source_name != "airflow":
+        return {"ok": False, "error": "resolve_agentic is not enabled for ADF; ADF uses the legacy merge path."}
+    action = p["action"]
+    if action not in {"prepare", "stage", "apply"}:
+        return {"ok": False, "error": "resolve_agentic action must be prepare, stage, or apply."}
+    output_dir = Path(p.get("output_dir", "./flowx_output"))
+    args: list[Any] = ["resolve-agentic", action, "--source", "airflow", "--output-dir", output_dir]
+    if p.get("airflow_source_path"):
+        args += ["--source-path", p["airflow_source_path"]]
+    if p.get("report_path"):
+        args += ["--report", p["report_path"]]
+    if p.get("dbt_mode"):
+        args += ["--dbt-mode", p["dbt_mode"]]
+    accepted_gaps = p.get("accept_gap") or p.get("accept_gaps") or []
+    if isinstance(accepted_gaps, str):
+        accepted_gaps = [accepted_gaps]
+    for gap_id in accepted_gaps:
+        args += ["--accept-gap", gap_id]
+    if p.get("accept_all"):
+        args.append("--accept-all")
+    if p.get("reset"):
+        args.append("--reset")
+
+    raw_candidate_paths = p.get("candidate_paths") or []
+    candidate_paths = [raw_candidate_paths] if isinstance(raw_candidate_paths, str) else list(raw_candidate_paths)
+    inline_candidates = p.get("candidates") or []
+    if isinstance(inline_candidates, dict):
+        inline_candidates = [inline_candidates]
+    with tempfile.TemporaryDirectory(prefix="flowx-agentic-candidates-") as temporary:
+        for index, candidate in enumerate(inline_candidates):
+            inline_path = Path(temporary) / f"candidate-{index}.json"
+            inline_path.write_text(json.dumps(candidate, indent=2), encoding="utf-8")
+            candidate_paths.append(str(inline_path))
+        for candidate_path in candidate_paths:
+            args += ["--candidate", candidate_path]
+        result = runner.run_adapter(args)
+    payload = runner.parse_stdout_json(result)
+    extra: dict[str, Any] = {"result": payload}
+    if action == "prepare":
+        extra["gaps"] = runner.read_json(output_dir / ".work" / "agentic" / "gaps.json")
+    return {"ok": result.ok, "process": result.as_dict(), **extra}
 
 
 def _cmd_inspect(p: dict[str, Any]) -> dict[str, Any]:
@@ -437,6 +486,7 @@ _COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "discover": _cmd_discover,
     "convert": _cmd_convert,
     "merge_agentic": _cmd_merge_agentic,
+    "resolve_agentic": _cmd_resolve_agentic,
     "inspect": _cmd_inspect,
     "apply_answers": _cmd_apply_answers,
     "materialize_lookup": _cmd_materialize_lookup,
@@ -485,8 +535,10 @@ def build_server() -> FastMCP:
         - "convert": source(req), (one ADF source key | airflow_source_path), output_dir, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list).
         - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
-          merge ADF agent results. Airflow's legacy name-based merge is disabled pending the
-          fingerprint-bound resolution workflow.
+          merge ADF agent results. Airflow's legacy name-based merge is disabled; use resolve_agentic.
+        - "resolve_agentic": source(req: "airflow"), action(req: prepare | stage | apply), output_dir,
+          airflow_source_path, report_path, candidates, accept_gap | accept_gaps, accept_all, reset —
+          prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

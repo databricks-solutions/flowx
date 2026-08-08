@@ -120,7 +120,50 @@ def test_merge_agentic_rejects_airflow_without_invoking_adapter(captured):
 
     assert result == {
         "ok": False,
-        "error": "Airflow agentic merge is disabled until the fingerprint-bound resolution workflow is available.",
+        "error": "Airflow agentic merge is disabled; use the fingerprint-bound resolve_agentic workflow.",
+    }
+    assert captured == []
+
+
+def test_resolve_agentic_prepare_routes_airflow_contract(captured):
+    result = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "prepare",
+            "airflow_source_path": "/tmp/dags",
+            "report_path": "/tmp/out/.work/translation_report.json",
+            "output_dir": "/tmp/out",
+        }
+    )
+
+    argv = _argv(captured, "resolve-agentic")
+    assert argv[:4] == ["resolve-agentic", "prepare", "--source", "airflow"]
+    assert argv[argv.index("--source-path") + 1] == "/tmp/dags"
+    assert argv[argv.index("--report") + 1] == "/tmp/out/.work/translation_report.json"
+    assert result["ok"] is True
+
+
+def test_resolve_agentic_stage_materializes_inline_candidate(captured):
+    result = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "stage",
+            "output_dir": "/tmp/out",
+            "candidates": [{"gap_id": "abc"}],
+        }
+    )
+
+    argv = _argv(captured, "resolve-agentic")
+    assert "--candidate" in argv
+    assert result["ok"] is True
+
+
+def test_resolve_agentic_rejects_adf_without_invoking_adapter(captured):
+    result = server._cmd_resolve_agentic({"source": "adf", "action": "prepare", "output_dir": "/tmp/out"})
+
+    assert result == {
+        "ok": False,
+        "error": "resolve_agentic is not enabled for ADF; ADF uses the legacy merge path.",
     }
     assert captured == []
 

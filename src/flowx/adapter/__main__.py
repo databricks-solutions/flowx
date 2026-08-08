@@ -1,9 +1,9 @@
 """Unified CLI entry point that the flowx skills and MCP tools drive via subprocesses.
 
 Exposes stateless subcommands -- the ``discover``/``convert``/``package`` phase runners plus
-``inspect``, ``modify``, ``inputs``, ``materialize-lookup``, ``workspace-paths``, ``record-results``,
-and ``install-dashboard`` -- so each agent turn runs as an independent process holding no session
-state across user prompts.
+``inspect``, ``modify``, ``resolve-agentic``, ``inputs``, ``materialize-lookup``, ``workspace-paths``,
+``record-results``, and ``install-dashboard`` -- so each agent turn runs as an independent process
+holding no session state across user prompts.
 """
 
 from __future__ import annotations
@@ -83,12 +83,54 @@ def main(argv: list[str] | None = None) -> int:
         return _run_inputs(args)
     if args.command == "workspace-paths":
         return _run_workspace_paths(args)
+    if args.command == "resolve-agentic":
+        return _run_resolve_agentic(args)
     if args.command == "record-results":
         return _run_record_results(args)
     if args.command == "install-dashboard":
         return _run_install_dashboard(args)
     parser.print_help(sys.stderr)
     return 2
+
+
+def _run_resolve_agentic(args: argparse.Namespace) -> int:
+    """Runs the fingerprint-bound agentic resolution workflow for Airflow leaf gaps."""
+    if args.source != "airflow":
+        print("resolve-agentic is not enabled for ADF; ADF uses the legacy merge path.", file=sys.stderr)
+        return 2
+    from flowx.agentic import (
+        AgenticContractError,
+        apply_airflow_resolutions,
+        prepare_airflow_resolutions,
+        stage_airflow_resolutions,
+    )
+
+    try:
+        if args.action == "prepare":
+            if args.source_path is None or args.report is None:
+                print("resolve-agentic prepare requires --source-path and --report.", file=sys.stderr)
+                return 2
+            payload = prepare_airflow_resolutions(
+                source_path=args.source_path,
+                report_path=args.report,
+                output_dir=args.output_dir,
+                dbt_mode=args.dbt_mode,
+            )
+        elif args.action == "stage":
+            payload = stage_airflow_resolutions(output_dir=args.output_dir, candidate_paths=args.candidate)
+        else:
+            payload = apply_airflow_resolutions(
+                output_dir=args.output_dir,
+                accepted_gap_ids=args.accept_gap,
+                accept_all=args.accept_all,
+                reset=args.reset,
+                source_path=args.source_path,
+            )
+    except (AgenticContractError, OSError, json.JSONDecodeError) as error:
+        print(f"Agentic resolution failed: {error}", file=sys.stderr)
+        return 1
+    _emit_json(payload, None)
+    return 0
 
 
 def _run_record_results(args: argparse.Namespace) -> int:
@@ -368,6 +410,37 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Destination path for the lookup-values JSON list.",
+    )
+
+    resolve_agentic = subparsers.add_parser(
+        "resolve-agentic",
+        help="Prepare, validate, and apply fingerprint-bound Airflow leaf-gap resolutions.",
+    )
+    resolve_agentic.add_argument("action", choices=("prepare", "stage", "apply"))
+    resolve_agentic.add_argument("--source", required=True, help="Must be airflow; ADF uses merge_agentic.")
+    resolve_agentic.add_argument("--output-dir", type=Path, required=True, help="Shared migration output directory.")
+    resolve_agentic.add_argument("--source-path", type=Path, default=None, help="Airflow DAG file or directory.")
+    resolve_agentic.add_argument("--report", type=Path, default=None, help="Deterministic translation report.")
+    resolve_agentic.add_argument(
+        "--candidate",
+        type=Path,
+        action="append",
+        default=[],
+        help="Provider-authored AgenticResolution JSON to validate and stage. Repeatable.",
+    )
+    resolve_agentic.add_argument(
+        "--accept-gap",
+        action="append",
+        default=[],
+        help="Prepared gap fingerprint to accept. Repeatable; the full allowlist is replayed from baseline.",
+    )
+    resolve_agentic.add_argument("--accept-all", action="store_true", help="Accept all already-staged candidates.")
+    resolve_agentic.add_argument("--reset", action="store_true", help="Restore the immutable deterministic baseline.")
+    resolve_agentic.add_argument(
+        "--dbt-mode",
+        choices=("static", "pydabs"),
+        default="static",
+        help="Airflow dbt conversion mode used to reproduce the deterministic report during prepare.",
     )
 
     record = subparsers.add_parser(

@@ -214,7 +214,7 @@ def test_report_preflight_rejects_unknown_reconciliation_status(tmp_path: Path):
     assert any("unknown reconciliation_status" in failure for failure in failures)
 
 
-def test_report_preflight_rejects_reviewed_resolution_status_until_validator_exists(tmp_path: Path):
+def test_report_preflight_rejects_reviewed_resolution_status_without_replay_evidence(tmp_path: Path):
     report = _airflow_pipeline(
         "premature_resolution",
         [_notebook_task("a", "a")],
@@ -223,7 +223,7 @@ def test_report_preflight_rejects_reviewed_resolution_status_until_validator_exi
 
     failures = _preflight_failures(tmp_path, report)
 
-    assert any("unknown reconciliation_status" in failure for failure in failures)
+    assert any("agentic resolution evidence" in failure for failure in failures)
 
 
 def test_report_preflight_rejects_excluded_status_for_included_dag(tmp_path: Path):
