@@ -407,3 +407,142 @@ def test_excluded_dag_stays_audited_and_included_reference_becomes_placeholder(t
     assert isinstance(by_name["caller"].tasks[0], PlaceholderActivity)
     assert by_name["caller"].tasks[0].raw_definition == {"excluded_dag": "target"}
     assert by_name["caller"].reconciliation_status == "verified_with_gaps"
+
+
+@pytest.mark.parametrize(
+    ("filename", "dag_import", "decorator"),
+    [
+        ("aliased.py", "from airflow.decorators import dag as workflow", "workflow"),
+        ("qualified.py", "import airflow.sdk", "airflow.sdk.dag"),
+    ],
+)
+def test_discovery_resolves_aliased_and_qualified_dag_decorators(
+    tmp_path: Path,
+    filename: str,
+    dag_import: str,
+    decorator: str,
+) -> None:
+    dag_path = tmp_path / filename
+    dag_id = dag_path.stem
+    dag_path.write_text(
+        f"{dag_import}\n"
+        "from airflow.operators.bash import BashOperator\n"
+        f"@{decorator}(dag_id='{dag_id}')\n"
+        "def build():\n"
+        "    BashOperator(task_id='work', bash_command='echo work')\n"
+        "build()\n",
+        encoding="utf-8",
+    )
+
+    assert airflow_loader.discover_dags(dag_path) == [dag_path]
+    pipeline = airflow_loader.load_pipelines(dag_path)[0]
+    assert pipeline.name == dag_id
+    assert pipeline.reconciliation_status == "verified"
+    assert [task.task_key for task in pipeline.tasks] == ["work"]
+
+
+def test_mixed_directory_does_not_hide_an_aliased_dag(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical.py"
+    canonical.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='canonical') as dag:\n"
+        "    BashOperator(task_id='work', bash_command='echo canonical')\n",
+        encoding="utf-8",
+    )
+    aliased = tmp_path / "aliased.py"
+    aliased.write_text(
+        "from airflow.decorators import dag as workflow\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "@workflow(dag_id='aliased')\n"
+        "def build():\n"
+        "    BashOperator(task_id='work', bash_command='echo aliased')\n"
+        "build()\n",
+        encoding="utf-8",
+    )
+
+    assert airflow_loader.discover_dags(tmp_path) == [aliased, canonical]
+    assert {pipeline.name for pipeline in airflow_loader.load_pipelines(tmp_path)} == {"aliased", "canonical"}
+
+
+def test_taskflow_alias_is_captured_inside_a_recognized_dag(tmp_path: Path) -> None:
+    dag_path = tmp_path / "task_alias.py"
+    dag_path.write_text(
+        "from airflow.decorators import dag, task as step\n"
+        "@step\n"
+        "def work():\n"
+        "    return 1\n"
+        "@dag(dag_id='task_alias')\n"
+        "def build():\n"
+        "    work()\n"
+        "build()\n",
+        encoding="utf-8",
+    )
+
+    pipeline = airflow_loader.load_pipelines(dag_path)[0]
+
+    assert pipeline.reconciliation_status == "verified"
+    assert [task.task_key for task in pipeline.tasks] == ["work"]
+
+
+def test_static_classic_dag_factory_preserves_dag_identity_and_tasks(tmp_path: Path) -> None:
+    dag_path = tmp_path / "classic_factory.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "def make_dag(dag_id, message='default'):\n"
+        "    with DAG(dag_id=dag_id) as dag:\n"
+        "        BashOperator(task_id='work', bash_command=f'echo {message}')\n"
+        "    return dag\n"
+        "factory_dag = make_dag('factory_dag', message='hello')\n",
+        encoding="utf-8",
+    )
+
+    pipeline = airflow_loader.load_pipelines(dag_path)[0]
+
+    assert pipeline.name == "factory_dag"
+    assert pipeline.reconciliation_status == "verified"
+    assert [task.task_key for task in pipeline.tasks] == ["work"]
+    assert "echo hello" in (pipeline.tasks[0].generated_source or "")
+
+
+def test_decorated_dag_factory_override_emits_each_invocation(tmp_path: Path) -> None:
+    dag_path = tmp_path / "decorated_factory.py"
+    dag_path.write_text(
+        "from airflow.decorators import dag\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "@dag\n"
+        "def build(message='default'):\n"
+        "    BashOperator(task_id='work', bash_command=f'echo {message}')\n"
+        "first = build.override(dag_id='first')('one')\n"
+        "second = build.override(dag_id='second')('two')\n",
+        encoding="utf-8",
+    )
+
+    pipelines = airflow_loader.load_pipelines(dag_path)
+
+    assert [pipeline.name for pipeline in pipelines] == ["first", "second"]
+    assert all(pipeline.reconciliation_status == "verified" for pipeline in pipelines)
+    assert "echo one" in (pipelines[0].tasks[0].generated_source or "")
+    assert "echo two" in (pipelines[1].tasks[0].generated_source or "")
+
+
+def test_dynamic_dag_factory_fails_closed_instead_of_emitting_verified_empty_ir(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dynamic_factory.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "def make_dag(dag_id):\n"
+        "    with DAG(dag_id=dag_id) as dag:\n"
+        "        BashOperator(task_id='work', bash_command='echo work')\n"
+        "    return dag\n"
+        "factory_dag = make_dag(runtime_dag_id())\n",
+        encoding="utf-8",
+    )
+
+    pipeline = airflow_loader.load_pipelines(dag_path)[0]
+
+    assert pipeline.name == "factory_dag"
+    assert pipeline.reconciliation_status == "failed"
+    assert pipeline.audit["failed_count"] == 1
+    assert any(finding["code"] == "unsupported_dag_factory" for finding in pipeline.not_translatable)

@@ -91,6 +91,12 @@ class DagDeclaration:
     variable: str | None
     node: ast.stmt
     span: SourceSpan
+    kind: str = "direct"
+    factory: ast.FunctionDef | None = None
+    bindings: dict[str, Any] = field(default_factory=dict)
+    target_dag_variable: str | None = None
+    decorator_overrides: dict[str, ast.expr] = field(default_factory=dict)
+    unsupported_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -431,6 +437,8 @@ class _ConstantSubstituter(ast.NodeTransformer):
         self.constants = constants
 
     def visit_Name(self, node: ast.Name) -> ast.expr:
+        if not isinstance(node.ctx, ast.Load):
+            return node
         value = self.constants.get(node.id, _UNRESOLVED)
         return ast.copy_location(_value_node(value), node) if value is not _UNRESOLVED else node
 
@@ -617,11 +625,16 @@ class _DagVisitor(ast.NodeVisitor):
         self.taskgroup_defs: set[str] = set()
         for fn in _iter_functions(module):
             decorator = next(
-                (_decorator_name(d) for d in fn.decorator_list if _decorator_name(d) in _TASK_DECORATORS), None
+                (
+                    _decorator_name(d, self._aliases)
+                    for d in fn.decorator_list
+                    if _decorator_name(d, self._aliases) in _TASK_DECORATORS
+                ),
+                None,
             )
             if decorator is not None:
                 self.taskflow_defs[fn.name] = (fn, decorator)
-            elif _has_decorator(fn, _TASK_GROUP_DECORATORS):
+            elif _has_decorator(fn, _TASK_GROUP_DECORATORS, self._aliases):
                 self.taskgroup_defs.add(fn.name)
         # TaskFlow task instances: var name -> _TaskFlowTask (id, def-name, decorator, arg bindings).
         self.taskflow_tasks: dict[str, _TaskFlowTask] = {}
@@ -653,18 +666,23 @@ class _DagVisitor(ast.NodeVisitor):
         # which is internal logic rather than DAG structure, so don't descend. @dag marks the
         # DAG-defining function: read its config off the decorator, then descend so the body's task
         # instances / edges are collected.
-        if _has_decorator(node, _TASK_DECORATORS) or _has_decorator(node, _TASK_GROUP_DECORATORS):
+        if _has_decorator(node, _TASK_DECORATORS, self._aliases) or _has_decorator(
+            node, _TASK_GROUP_DECORATORS, self._aliases
+        ):
             if self._dag_scope_depth:
                 self._claimed_statement_ids.add(id(node))
             return
-        is_dag_definition = _has_decorator(node, _DAG_DECORATORS)
+        is_dag_definition = _has_decorator(node, _DAG_DECORATORS, self._aliases)
         if not is_dag_definition:
             if self._dag_scope_depth:
                 self._claimed_statement_ids.add(id(node))
             return
         if is_dag_definition:
             self.is_taskflow_dag = True
-            dag_kwargs = _decorator_kwargs(node.decorator_list, _DAG_DECORATORS)
+            dag_kwargs = {
+                name: _bind_constants(value, self._constants)
+                for name, value in _decorator_kwargs(node.decorator_list, _DAG_DECORATORS, self._aliases).items()
+            }
             self._apply_dag_kwargs(dag_kwargs)
             if self.dag_id is None:
                 self.dag_id = ops.literal_str(dag_kwargs.get("dag_id")) or node.name
@@ -1571,23 +1589,25 @@ def _is_task_construct(name: str) -> bool:
     return name.endswith("Operator") or name.endswith("Sensor") or name in ops.COSMOS_CONSTRUCTS
 
 
-def _decorator_name(node: ast.expr) -> str:
-    """Dotted name of a decorator, ignoring call args: ``@task`` / ``@task.branch()`` -> 'task.branch'."""
+def _decorator_name(node: ast.expr, aliases: dict[str, str] | None = None) -> str:
+    """Returns the normalized Airflow decorator name without importing its module."""
     if isinstance(node, ast.Call):
         node = node.func
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-    return ".".join(reversed(parts))
+    canonical = _canonical_name(node, aliases or {})
+    for name in sorted(_ALL_AIRFLOW_DECORATORS, key=len, reverse=True):
+        if canonical == name or (canonical.startswith("airflow.") and canonical.endswith(f".{name}")):
+            return name
+    return canonical
 
 
-def _decorator_kwargs(decorators: list[ast.expr], names: frozenset[str]) -> dict[str, ast.expr]:
+def _decorator_kwargs(
+    decorators: list[ast.expr],
+    names: frozenset[str],
+    aliases: dict[str, str] | None = None,
+) -> dict[str, ast.expr]:
     """Merged keyword args of the first decorator whose dotted name is in *names* (if it's a call)."""
     for dec in decorators:
-        if _decorator_name(dec) in names and isinstance(dec, ast.Call):
+        if _decorator_name(dec, aliases) in names and isinstance(dec, ast.Call):
             return {kw.arg: kw.value for kw in dec.keywords if kw.arg}
     return {}
 
@@ -1600,10 +1620,184 @@ _TASK_DECORATORS: frozenset[str] = frozenset(
     {"task", "task.branch", "task.virtualenv", "task.short_circuit", "task.sensor", "task.external_python"}
 )
 _TASK_GROUP_DECORATORS: frozenset[str] = frozenset({"task_group"})
+_ALL_AIRFLOW_DECORATORS = _DAG_DECORATORS | _TASK_DECORATORS | _TASK_GROUP_DECORATORS
 
 
-def _has_decorator(func: ast.FunctionDef, names: frozenset[str]) -> bool:
-    return any(_decorator_name(dec) in names for dec in func.decorator_list)
+def _has_decorator(
+    func: ast.FunctionDef,
+    names: frozenset[str],
+    aliases: dict[str, str] | None = None,
+) -> bool:
+    return any(_decorator_name(dec, aliases) in names for dec in func.decorator_list)
+
+
+def _statement_call(statement: ast.stmt) -> ast.Call | None:
+    """Returns the top-level call produced by an expression or simple assignment."""
+    if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+        return statement.value
+    if isinstance(statement, ast.Assign) and isinstance(statement.value, ast.Call):
+        return statement.value
+    if isinstance(statement, ast.AnnAssign) and isinstance(statement.value, ast.Call):
+        return statement.value
+    return None
+
+
+def _statement_binding(statement: ast.stmt) -> str | None:
+    """Returns the single name bound by a top-level statement, when present."""
+    if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
+        return statement.targets[0].id
+    if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+        return statement.target.id
+    return None
+
+
+def _static_function_bindings(
+    function: ast.FunctionDef,
+    call: ast.Call,
+    constants: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Binds a factory invocation when every argument is statically knowable."""
+    if function.args.vararg or function.args.kwarg or any(keyword.arg is None for keyword in call.keywords):
+        return None
+    positional = [*function.args.posonlyargs, *function.args.args]
+    keyword_only = list(function.args.kwonlyargs)
+    all_parameters = {parameter.arg for parameter in [*positional, *keyword_only]}
+    if len(call.args) > len(positional):
+        return None
+    expressions: dict[str, ast.expr] = {parameter.arg: argument for parameter, argument in zip(positional, call.args)}
+    for keyword in call.keywords:
+        if keyword.arg not in all_parameters or keyword.arg in expressions:
+            return None
+        expressions[keyword.arg] = keyword.value
+    positional_defaults = [None] * (len(positional) - len(function.args.defaults)) + list(function.args.defaults)
+    defaults = {
+        parameter.arg: default for parameter, default in zip(positional, positional_defaults) if default is not None
+    }
+    defaults.update(
+        {
+            parameter.arg: default
+            for parameter, default in zip(keyword_only, function.args.kw_defaults)
+            if default is not None
+        }
+    )
+    bindings: dict[str, Any] = {}
+    for parameter in [*positional, *keyword_only]:
+        expression = expressions.get(parameter.arg) or defaults.get(parameter.arg)
+        if expression is None:
+            return None
+        bound = _bind_constants(expression, constants)
+        value = _safe_static_value(bound, constants) if isinstance(bound, ast.expr) else _UNRESOLVED
+        if value is _UNRESOLVED:
+            return None
+        bindings[parameter.arg] = value
+    return bindings
+
+
+def _classic_dag_factory_body(
+    function: ast.FunctionDef,
+    aliases: dict[str, str],
+) -> tuple[list[ast.stmt], str | None] | None:
+    """Returns the narrow classic DAG-factory body and any assigned DAG variable."""
+    if function.decorator_list or function.args.vararg or function.args.kwarg:
+        return None
+    body = list(function.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        if isinstance(body[0].value.value, str):
+            body = body[1:]
+    if len(body) < 2 or not isinstance(body[-1], ast.Return) or not isinstance(body[-1].value, ast.Name):
+        return None
+    returned_name = body[-1].value.id
+    statements = body[:-1]
+    if len(statements) == 1 and isinstance(statements[0], ast.With):
+        dag_items = [
+            item
+            for item in statements[0].items
+            if isinstance(item.context_expr, ast.Call) and _construct_name(item.context_expr.func, aliases) == "DAG"
+        ]
+        if len(dag_items) != 1 or not isinstance(dag_items[0].optional_vars, ast.Name):
+            return None
+        if dag_items[0].optional_vars.id != returned_name:
+            return None
+        return statements, None
+    assigned_names: list[str] = []
+    for statement in statements:
+        if not (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and isinstance(statement.value, ast.Call)
+            and _construct_name(statement.value.func, aliases) == "DAG"
+        ):
+            continue
+        assigned_names.append(statement.targets[0].id)
+    if assigned_names != [returned_name]:
+        return None
+    return statements, returned_name
+
+
+def _decorated_factory_invocation(
+    call: ast.Call,
+    factories: dict[str, ast.FunctionDef],
+) -> tuple[ast.FunctionDef, ast.Call, dict[str, ast.expr]] | None:
+    """Resolves ``factory()`` and ``factory.override(...)(...)`` DAG invocations."""
+    if isinstance(call.func, ast.Name) and call.func.id in factories:
+        return factories[call.func.id], call, {}
+    if not isinstance(call.func, ast.Call):
+        return None
+    configuration = call.func
+    configuration_function = configuration.func
+    if not isinstance(configuration_function, ast.Attribute):
+        return None
+    if configuration_function.attr != "override" or not isinstance(configuration_function.value, ast.Name):
+        return None
+    name = configuration_function.value.id
+    if name not in factories or any(keyword.arg is None for keyword in configuration.keywords):
+        return None
+    overrides = {keyword.arg: keyword.value for keyword in configuration.keywords if keyword.arg}
+    return factories[name], call, overrides
+
+
+def _function_contains_dag_constructor(function: ast.FunctionDef, aliases: dict[str, str]) -> bool:
+    """Returns whether a function body contains a static Airflow ``DAG(...)`` call."""
+    return any(
+        isinstance(node, ast.Call) and _construct_name(node.func, aliases) == "DAG"
+        for statement in function.body
+        for node in ast.walk(statement)
+    )
+
+
+def _bound_decorated_factory(
+    declaration: DagDeclaration,
+    aliases: dict[str, str],
+) -> ast.FunctionDef:
+    """Clones one decorated factory invocation into an isolated static DAG definition."""
+    if declaration.factory is None:
+        raise ValueError("Decorated factory declaration has no function definition")
+    function = copy.deepcopy(declaration.factory)
+    function.body = [_bind_constants(statement, declaration.bindings) for statement in function.body]
+    for index, decorator in enumerate(function.decorator_list):
+        if _decorator_name(decorator, aliases) != "dag":
+            continue
+        if isinstance(decorator, ast.Call):
+            keywords = {keyword.arg: keyword for keyword in decorator.keywords if keyword.arg}
+            for name, value in declaration.decorator_overrides.items():
+                keywords[name] = ast.keyword(arg=name, value=copy.deepcopy(value))
+            decorator.keywords = list(keywords.values())
+        elif declaration.decorator_overrides:
+            function.decorator_list[index] = ast.copy_location(
+                ast.Call(
+                    func=decorator,
+                    args=[],
+                    keywords=[
+                        ast.keyword(arg=name, value=copy.deepcopy(value))
+                        for name, value in declaration.decorator_overrides.items()
+                    ],
+                ),
+                decorator,
+            )
+        break
+    ast.fix_missing_locations(function)
+    return function
 
 
 def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
@@ -1624,43 +1818,79 @@ def load_airflow_dags(
     source = Path(dag_path).read_text(encoding="utf-8")
     module = _expand_top_level_loops(ast.parse(source))
     declarations = _top_level_dag_declarations(module)
-    if not declarations:
-        return [
+    pipelines: list[Pipeline] = []
+    for declaration in declarations:
+        if declaration.unsupported_reason is not None:
+            pipelines.append(
+                _failed_dag_declaration_pipeline(
+                    dag_path,
+                    declaration,
+                    source_file=source_file or dag_path.name,
+                )
+            )
+            continue
+        pipelines.append(
             _load_airflow_module(
                 dag_path,
                 source,
-                module,
+                _module_for_dag(module, declaration, declarations),
                 dbt_mode=dbt_mode,
+                target_dag_variable=declaration.target_dag_variable,
                 source_file=source_file or dag_path.name,
             )
-        ]
-    return [
-        _load_airflow_module(
-            dag_path,
-            source,
-            _module_for_dag(module, declaration),
-            dbt_mode=dbt_mode,
-            target_dag_variable=declaration.variable,
-            source_file=source_file or dag_path.name,
         )
-        for declaration in declarations
-    ]
+    return pipelines
 
 
 def _top_level_dag_declarations(module: ast.Module) -> list[DagDeclaration]:
-    """Returns context-manager, decorated, and assigned top-level DAG declarations."""
+    """Returns direct DAG declarations and statically invoked DAG factories."""
     aliases = _import_aliases(module)
+    functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
+    decorated_factories = {
+        name: function for name, function in functions.items() if _has_decorator(function, _DAG_DECORATORS, aliases)
+    }
+    classic_factories = {
+        name: function
+        for name, function in functions.items()
+        if name not in decorated_factories and _function_contains_dag_constructor(function, aliases)
+    }
     declarations: list[DagDeclaration] = []
+    constants: dict[str, Any] = {}
+
+    def add(
+        node: ast.stmt,
+        *,
+        variable: str | None = None,
+        kind: str = "direct",
+        factory: ast.FunctionDef | None = None,
+        bindings: dict[str, Any] | None = None,
+        target_dag_variable: str | None = None,
+        decorator_overrides: dict[str, ast.expr] | None = None,
+        unsupported_reason: str | None = None,
+    ) -> None:
+        span = _span(node)
+        declarations.append(
+            DagDeclaration(
+                capture_id=f"dag:{span.line}:{span.column}:{len(declarations) + 1}",
+                variable=variable,
+                node=node,
+                span=span,
+                kind=kind,
+                factory=factory,
+                bindings=bindings or {},
+                target_dag_variable=target_dag_variable,
+                decorator_overrides=decorator_overrides or {},
+                unsupported_reason=unsupported_reason,
+            )
+        )
+
     for node in module.body:
-        variable: str | None = None
-        is_dag = False
-        if isinstance(node, ast.FunctionDef) and _has_decorator(node, _DAG_DECORATORS):
-            is_dag = True
-        elif isinstance(node, ast.With) and any(
+        if isinstance(node, ast.With) and any(
             isinstance(item.context_expr, ast.Call) and _construct_name(item.context_expr.func, aliases) == "DAG"
             for item in node.items
         ):
-            is_dag = True
+            add(node)
+            continue
         elif (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
@@ -1668,26 +1898,156 @@ def _top_level_dag_declarations(module: ast.Module) -> list[DagDeclaration]:
             and isinstance(node.value, ast.Call)
             and _construct_name(node.value.func, aliases) == "DAG"
         ):
-            is_dag = True
             variable = node.targets[0].id
-        if is_dag:
-            span = _span(node)
-            declarations.append(
-                DagDeclaration(
-                    capture_id=f"dag:{span.line}:{span.column}:{len(declarations) + 1}",
-                    variable=variable,
-                    node=node,
-                    span=span,
+            add(node, variable=variable, target_dag_variable=variable)
+            continue
+
+        call = _statement_call(node)
+        binding = _statement_binding(node)
+        if call is not None:
+            decorated = _decorated_factory_invocation(call, decorated_factories)
+            if decorated is not None:
+                factory, invocation, overrides = decorated
+                bindings = _static_function_bindings(factory, invocation, constants)
+                bound_overrides = {name: _bind_constants(value, constants) for name, value in overrides.items()}
+                dag_id_override = bound_overrides.get("dag_id")
+                reason = None
+                if bindings is None:
+                    reason = "Decorated DAG factory arguments are not statically bindable."
+                elif dag_id_override is not None and ops.literal_str(dag_id_override) is None:
+                    reason = "Decorated DAG factory dag_id override is not a literal string."
+                add(
+                    node,
+                    variable=binding,
+                    kind="decorated_factory",
+                    factory=factory,
+                    bindings=bindings,
+                    decorator_overrides=bound_overrides,
+                    unsupported_reason=reason,
                 )
+                continue
+
+            if isinstance(call.func, ast.Name) and call.func.id in classic_factories:
+                factory = classic_factories[call.func.id]
+                factory_body = _classic_dag_factory_body(factory, aliases)
+                bindings = _static_function_bindings(factory, call, constants)
+                reason = None
+                target_dag_variable = None
+                if factory_body is None:
+                    reason = "Classic DAG factory body is outside the supported static shape."
+                elif bindings is None:
+                    reason = "Classic DAG factory arguments are not statically bindable."
+                else:
+                    _statements, target_dag_variable = factory_body
+                add(
+                    node,
+                    variable=binding,
+                    kind="classic_factory",
+                    factory=factory,
+                    bindings=bindings,
+                    target_dag_variable=target_dag_variable,
+                    unsupported_reason=reason,
+                )
+                continue
+
+        if not isinstance(node, ast.FunctionDef) and any(
+            isinstance(candidate, ast.Call) and _construct_name(candidate.func, aliases) == "DAG"
+            for candidate in ast.walk(node)
+        ):
+            add(
+                node,
+                variable=binding,
+                kind="unsupported",
+                unsupported_reason="DAG construction is outside the supported static declaration shapes.",
             )
+            continue
+
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            value = _safe_static_value(node.value, constants)
+            if value is not _UNRESOLVED:
+                constants[node.targets[0].id] = value
     return declarations
 
 
-def _module_for_dag(module: ast.Module, declaration: DagDeclaration) -> ast.Module:
+def _module_for_dag(
+    module: ast.Module,
+    declaration: DagDeclaration,
+    declarations: list[DagDeclaration],
+) -> ast.Module:
     """Returns a module containing shared definitions and one DAG declaration."""
-    dag_nodes = {item.node for item in _top_level_dag_declarations(module)}
-    body = [node for node in module.body if node is declaration.node or node not in dag_nodes]
-    return ast.Module(body=body, type_ignores=list(module.type_ignores))
+    aliases = _import_aliases(module)
+    declaration_nodes = {item.node for item in declarations}
+    decorated_factories = {
+        item.factory for item in declarations if item.kind == "decorated_factory" and item.factory is not None
+    }
+    body: list[ast.stmt] = []
+    for node in module.body:
+        if node in decorated_factories:
+            if declaration.kind == "decorated_factory" and node is declaration.factory:
+                body.append(_bound_decorated_factory(declaration, aliases))
+            continue
+        if node in declaration_nodes:
+            if node is not declaration.node:
+                continue
+            if declaration.kind == "direct":
+                body.append(node)
+            elif declaration.kind == "classic_factory" and declaration.factory is not None:
+                factory_body = _classic_dag_factory_body(declaration.factory, aliases)
+                if factory_body is None:
+                    raise ValueError("Supported classic DAG factory has no static body")
+                statements, _target = factory_body
+                body.extend(_bind_constants(statement, declaration.bindings) for statement in statements)
+            continue
+        body.append(node)
+    isolated = ast.Module(body=body, type_ignores=list(module.type_ignores))
+    ast.fix_missing_locations(isolated)
+    return isolated
+
+
+def _failed_dag_declaration_pipeline(
+    dag_path: Path,
+    declaration: DagDeclaration,
+    *,
+    source_file: str,
+) -> Pipeline:
+    """Returns a failed, reportable pipeline for an unrepresentable DAG declaration."""
+    candidate = source_audit.AuditCandidate(
+        kind="dag",
+        code="unsupported_dag_factory",
+        line=declaration.span.line,
+        column=declaration.span.column,
+        occurrence=1,
+        end_line=declaration.span.end_line,
+        end_column=declaration.span.end_column,
+        details={"expression": ast.unparse(declaration.node)},
+    )
+    finding = source_audit.finding(
+        source_file=source_file,
+        code="unsupported_dag_factory",
+        severity="failed",
+        message=declaration.unsupported_reason or "Airflow DAG declaration could not be captured statically.",
+        candidate=candidate,
+    )
+    name = declaration.variable or Path(dag_path).stem
+    return Pipeline(
+        name=name,
+        tasks=[],
+        tags={"source": "airflow", "dag_id": name},
+        not_translatable=[finding],
+        reconciliation_status="failed",
+        audit={
+            "source_file": source_file,
+            "audited_activity_count": 1,
+            "captured_task_count": 0,
+            "audited_edge_count": 0,
+            "captured_edge_count": 0,
+            "deterministic_count": 0,
+            "agentic_count": 0,
+            "failed_count": 1,
+            "excluded_count": 0,
+            "transformations": [],
+        },
+    )
 
 
 def _load_airflow_module(
@@ -3081,8 +3441,8 @@ def discover_dags(source_path: Path) -> list[Path]:
     """Returns the DAG ``.py`` files under *source_path*.
 
     Accepts either a single ``.py`` file or a directory (scanned recursively).
-    Files whose source contains no ``DAG(`` construct are skipped so helper
-    modules in a DAGs folder are not mistaken for DAG definitions.
+    Discovery uses the same static declaration model as loading, including
+    import aliases and qualified TaskFlow decorators.
     """
     source_path = Path(source_path)
     candidates = [source_path] if source_path.is_file() else sorted(source_path.rglob("*.py"))
@@ -3091,10 +3451,10 @@ def discover_dags(source_path: Path) -> list[Path]:
         if candidate.suffix != ".py":
             continue
         try:
-            text = candidate.read_text(encoding="utf-8")
-        except OSError:
+            module = _expand_top_level_loops(ast.parse(candidate.read_text(encoding="utf-8")))
+        except (OSError, SyntaxError):
             continue
-        if "DAG(" in text or "@dag" in text:
+        if _top_level_dag_declarations(module):
             dags.append(candidate)
     return dags
 

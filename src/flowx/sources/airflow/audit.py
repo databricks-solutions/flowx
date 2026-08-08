@@ -92,10 +92,12 @@ class _SourceAuditor(ast.NodeVisitor):
         self.taskflow_defs = {
             node.name
             for node in ast.walk(module)
-            if isinstance(node, ast.FunctionDef) and _decorator_leaf(node) in _TASK_DECORATORS
+            if isinstance(node, ast.FunctionDef) and _has_decorator(node, _TASK_DECORATORS, self.aliases)
         }
         self.dag_defs = {
-            node.name for node in module.body if isinstance(node, ast.FunctionDef) and _decorator_leaf(node) == "dag"
+            node.name
+            for node in module.body
+            if isinstance(node, ast.FunctionDef) and _has_decorator(node, {"dag"}, self.aliases)
         }
         self.factories = {
             node.name
@@ -120,7 +122,9 @@ class _SourceAuditor(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         if node.name in self.dag_defs:
-            decorator = next((item for item in node.decorator_list if _leaf(item, self.aliases) == "dag"), None)
+            decorator = next(
+                (item for item in node.decorator_list if _decorator_name(item, self.aliases) == "dag"), None
+            )
             if isinstance(decorator, ast.Call):
                 self._audit_settings(decorator)
             for statement in node.body:
@@ -349,7 +353,15 @@ class _SourceAuditor(ast.NodeVisitor):
                             )
 
 
-_TASK_DECORATORS = {"task", "branch", "virtualenv", "short_circuit", "sensor", "external_python"}
+_TASK_DECORATORS = {
+    "task",
+    "task.branch",
+    "task.virtualenv",
+    "task.short_circuit",
+    "task.sensor",
+    "task.external_python",
+}
+_ALL_AIRFLOW_DECORATORS = {"dag", "task_group", *_TASK_DECORATORS}
 
 
 def _aliases(module: ast.Module) -> dict[str, str]:
@@ -380,8 +392,16 @@ def _leaf(node: ast.expr, aliases: dict[str, str]) -> str:
     return _dotted(node, aliases).rsplit(".", 1)[-1]
 
 
-def _decorator_leaf(node: ast.FunctionDef) -> str:
-    return _leaf(node.decorator_list[0], {}) if node.decorator_list else ""
+def _decorator_name(node: ast.expr, aliases: dict[str, str]) -> str:
+    canonical = _dotted(node, aliases)
+    for name in sorted(_ALL_AIRFLOW_DECORATORS, key=len, reverse=True):
+        if canonical == name or (canonical.startswith("airflow.") and canonical.endswith(f".{name}")):
+            return name
+    return canonical
+
+
+def _has_decorator(function: ast.FunctionDef, names: set[str], aliases: dict[str, str]) -> bool:
+    return any(_decorator_name(decorator, aliases) in names for decorator in function.decorator_list)
 
 
 def _is_operator(name: str) -> bool:
