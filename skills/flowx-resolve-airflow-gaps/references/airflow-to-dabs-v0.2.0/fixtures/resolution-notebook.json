@@ -1,0 +1,52 @@
+{
+  "contract_version": "1",
+  "gap_id": "1111111111111111",
+  "status": "resolved",
+  "baseline_report_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "provider": {
+    "name": "airflow-to-dabs",
+    "version": "0.2.0",
+    "repository": "https://github.com/park-peter/airflow-to-dabs"
+  },
+  "model": {"name": "fixture-model"},
+  "argument_disposition": [
+    {
+      "name": "task_id",
+      "disposition": "preserved_by_flowx",
+      "rationale": "Flowx preserves the collision-safe task identity."
+    },
+    {
+      "name": "endpoint",
+      "disposition": "consumed",
+      "rationale": "The endpoint is embedded in the generated HTTP request."
+    },
+    {
+      "name": "method",
+      "disposition": "consumed",
+      "rationale": "The generated notebook issues the captured POST request."
+    },
+    {
+      "name": "data",
+      "disposition": "consumed",
+      "rationale": "The captured payload is passed as the JSON request body."
+    },
+    {
+      "name": "retries",
+      "disposition": "preserved_by_flowx",
+      "rationale": "Flowx preserves retry policy on the enclosing job task."
+    }
+  ],
+  "prerequisites": ["The Databricks task must have outbound network access to example.com."],
+  "warnings": [],
+  "semantic_deltas": ["The HTTP request runs in a Databricks notebook instead of an Airflow worker."],
+  "replacement": {"kind": "notebook", "file": "notify_orders.py", "base_parameters": {}},
+  "generated_files": [
+    {
+      "path": "notify_orders.py",
+      "language": "python",
+      "content": "# Databricks notebook source\nimport requests\n\nresponse = requests.post(\n    \"https://example.com/hooks/orders\",\n    json={\"event\": \"orders_ready\"},\n    timeout=30,\n)\nresponse.raise_for_status()\n",
+      "sha256": "07d382c58a610ecfabf55c0e3d2097988c4db1b1fd664d0e8cdc60dce9eaddec"
+    }
+  ]
+}

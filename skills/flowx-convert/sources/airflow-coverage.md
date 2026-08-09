@@ -46,6 +46,12 @@ safe fallback is a flagged, failing task rather than a silent omission. Callable
 (`**context` / `ti`) or XCom, and runtime-branching decorators, take the same route rather than
 emitting code that fails at runtime.
 
+The resolver consumes the pinned `airflow-to-dabs` v0.2.0 Flowx provider profile. It receives one
+flowx-produced gap envelope and cannot express graph or task-policy changes. Accepted `resolved`
+candidates contribute to mechanically validated code-attached coverage, but remain agentic and do
+not increase deterministic coverage. `needs_input`, `deferred`, and unreviewed candidates remain
+linked failing placeholders.
+
 ## Not yet supported
 
 These are absent but fail safely — routed to a linked placeholder notebook that raises

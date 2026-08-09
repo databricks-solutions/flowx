@@ -24,6 +24,10 @@ def test_create_table_sql_has_run_metadata_and_all_columns():
     assert "excluded_activities INT" in sql
     assert "reconciliation_status STRING" in sql
     assert "deterministic_coverage_pct DOUBLE" in sql
+    assert "runnable_coverage_pct DOUBLE" in sql
+    assert "unresolved_agentic_activities INT" in sql
+    assert "agentic_resolution_outcomes STRING" in sql
+    assert "agentic_provider_version STRING" in sql
     assert "finding_fingerprints STRING" in sql
     assert "complexity_size STRING" in sql
 
@@ -37,6 +41,7 @@ def test_schema_evolution_sql_adds_only_missing_metric_columns() -> None:
     assert sql.startswith("ALTER TABLE cat.sch.tbl ADD COLUMNS")
     assert "audited_activities INT" in sql
     assert "deterministic_coverage_pct DOUBLE" in sql
+    assert "runnable_coverage_pct DOUBLE" in sql
     assert "pipeline STRING" not in sql
     assert "\n  coverage_pct DOUBLE" not in sql
 
@@ -55,6 +60,9 @@ def test_insert_sql_stamps_run_metadata_and_escapes():
             "other_activities": 2,
             "deterministic_activities": 2,
             "agentic_activities": 1,
+            "unresolved_agentic_activities": 1,
+            "agentic_resolution_outcomes": '{"unreviewed":1}',
+            "agentic_provider_version": "0.2.0",
             "unsupported_activities": 0,
             "failed_activities": 0,
             "excluded_activities": 0,
@@ -62,6 +70,7 @@ def test_insert_sql_stamps_run_metadata_and_escapes():
             "migration_status": "included",
             "coverage_pct": 100.0,
             "deterministic_coverage_pct": 66.7,
+            "runnable_coverage_pct": 66.7,
             "finding_count": 1,
             "finding_fingerprints": '["abc"]',
             "complexity_score": 7,
@@ -79,6 +88,9 @@ def test_insert_sql_stamps_run_metadata_and_escapes():
             "other_activities": 1,
             "deterministic_activities": 0,
             "agentic_activities": 0,
+            "unresolved_agentic_activities": 0,
+            "agentic_resolution_outcomes": "{}",
+            "agentic_provider_version": "",
             "unsupported_activities": 1,
             "failed_activities": 0,
             "excluded_activities": 0,
@@ -86,6 +98,7 @@ def test_insert_sql_stamps_run_metadata_and_escapes():
             "migration_status": "included",
             "coverage_pct": 0.0,
             "deterministic_coverage_pct": 0.0,
+            "runnable_coverage_pct": 0.0,
             "finding_count": 0,
             "finding_fingerprints": "[]",
             "complexity_score": 3,
@@ -105,6 +118,7 @@ def test_insert_sql_stamps_run_metadata_and_escapes():
     assert "100.0" in sql
     assert "'verified_with_gaps'" in sql
     assert "'[\"abc\"]'" in sql
+    assert "'{\"unreviewed\":1}'" in sql
 
 
 class _FakeWarehouse:
@@ -255,4 +269,6 @@ def test_write_results_evolves_an_existing_legacy_schema_before_insert(tmp_path:
     assert statements[2].startswith("ALTER TABLE cat.sch.tbl ADD COLUMNS")
     assert "audited_activities INT" in statements[2]
     assert "deterministic_coverage_pct DOUBLE" in statements[2]
+    assert "runnable_coverage_pct DOUBLE" in statements[2]
+    assert "agentic_resolution_outcomes STRING" in statements[2]
     assert statements[3].startswith("INSERT INTO cat.sch.tbl")

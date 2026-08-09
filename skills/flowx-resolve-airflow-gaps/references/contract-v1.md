@@ -14,7 +14,7 @@ captured graph.
   "source_sha256": "copied from the envelope",
   "provider": {
     "name": "airflow-to-dabs",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "repository": "https://github.com/park-peter/airflow-to-dabs"
   },
   "model": {"name": "model identifier"},
@@ -59,4 +59,4 @@ automatic retry occurs.
 - Airflow Jinja is rejected. Databricks dynamic references such as `{{job.parameters.x}}`,
   `{{tasks.upstream.values.x}}`, and `{{input}}` remain valid.
 - Every source argument in the envelope has exactly one disposition and a non-empty rationale.
-- The provider identity must match the pinned `airflow-to-dabs` v0.1.0 knowledge release.
+- The provider identity must match the pinned `airflow-to-dabs` v0.2.0 knowledge release.

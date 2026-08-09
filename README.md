@@ -166,7 +166,9 @@ execution) and maps ~35 operator/sensor families to the shared IR. Highlights:
   `params={...}` → job parameters, `>>` / `<<` / `set_upstream` / TaskGroup edges.
 
 Operators without a deterministic mapping become a failing placeholder and are recorded in
-`gaps.json` for review. Airflow agentic resolution is not a supported workflow yet. Full matrix:
+`gaps.json` for review. Eligible leaf gaps can use the fingerprint-bound resolver backed by the
+pinned [`airflow-to-dabs` v0.2.0](https://github.com/park-peter/airflow-to-dabs/releases/tag/v0.2.0)
+provider profile; flowx retains ownership of parsing, graph identity, policy, IR, and packaging. Full matrix:
 [`skills/flowx-convert/sources/airflow-coverage.md`](skills/flowx-convert/sources/airflow-coverage.md).
 
 Airflow discovery independently audits DAG declarations, task candidates, dependency declarations,
@@ -184,7 +186,7 @@ to the supported static subset; flowx never imports or executes DAG modules.
 Parses the source into typed nodes and classifies each activity/operator as deterministic, agentic, or unsupported — ADF JSON from Unity Catalog volumes (or a `/Workspace` Git folder, normalizing ARM template format), or Airflow DAG `.py` modules read statically with `ast`. Airflow inventory includes audited/deterministic/agentic/failed/excluded counts, reconciliation status, stable finding fingerprints, translation-path coverage, and deterministic coverage. Produces `metadata/inventory.json` and a per-pipeline complexity report at `metadata/profile_report.csv`.
 
 ### Phase 2: Convert
-Applies deterministic translators (ADF activity registry / Airflow operator mapping), resolves dependencies, and records unresolved gaps. ADF supports the guided agentic translation workflow; Airflow currently retains failing placeholders for explicit review. Produces the shared Pipeline IR consumed unchanged by the package phase.
+Applies deterministic translators (ADF activity registry / Airflow operator mapping), resolves dependencies, and records unresolved gaps. ADF supports its guided agentic translation workflow. Airflow supports a fingerprint-bound, explicitly reviewed leaf-gap workflow whose constrained provider output is replayed against an immutable deterministic baseline before packaging. Produces the shared Pipeline IR consumed unchanged by the package phase.
 
 ### Phase 3: Package
 Converts Pipeline IR into a deployable DABs project: `databricks.yml`, per-job YAML resource files, generated Python notebooks, and setup scripts for UC volumes, secrets, and connections.

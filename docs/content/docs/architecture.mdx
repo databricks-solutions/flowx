@@ -28,7 +28,7 @@ Each activity is classified with a `TranslationStrategy`:
 * `AGENTIC` (LLM-assisted gaps)
 * `UNSUPPORTED`
 
-The reporting layer (`reporting/`) can write per-run coverage to a Unity Catalog table and publish an AI/BI dashboard. Airflow rows use independently audited candidates as the denominator and persist reconciliation status, failed/excluded counts, stable finding fingerprints, translation-path coverage, and deterministic coverage.
+The reporting layer (`reporting/`) can write per-run coverage to a Unity Catalog table and publish an AI/BI dashboard. Airflow rows use independently audited candidates as the denominator and persist reconciliation status, failed/excluded counts, stable finding fingerprints, translation-path coverage, deterministic coverage, reviewed agentic outcomes, and mechanically validated code-attached coverage. Provider-authored code remains distinct from deterministic translation and requires human review.
 
 ## Two surfaces over one core
 

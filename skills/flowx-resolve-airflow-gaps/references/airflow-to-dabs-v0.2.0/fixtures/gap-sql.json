@@ -1,0 +1,42 @@
+{
+  "contract_version": "1",
+  "gap_id": "2222222222222222",
+  "source": "airflow",
+  "pipeline_name": "retention",
+  "capture_identity": "cleanup_events",
+  "task_key": "cleanup_events",
+  "task_path": ["tasks", 0],
+  "operator": "SQLExecuteQueryOperator",
+  "operator_fqn": "airflow.providers.common.sql.operators.sql.SQLExecuteQueryOperator",
+  "source_file": "retention.py",
+  "source_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "baseline_report_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "source_span": {"line": 9, "column": 4, "end_line": 15, "end_column": 5},
+  "raw_definition": {
+    "operator": "SQLExecuteQueryOperator",
+    "source": "cleanup = SQLExecuteQueryOperator(task_id=\"cleanup_events\", conn_id=\"databricks_default\", sql=\"DELETE FROM main.ops.events WHERE processed_at < current_date() - INTERVAL 30 DAYS\", autocommit=True)"
+  },
+  "arguments": [
+    {"name": "task_id", "source_expression": "'cleanup_events'", "preserved_by_flowx": true},
+    {"name": "conn_id", "source_expression": "'databricks_default'", "preserved_by_flowx": false},
+    {
+      "name": "sql",
+      "source_expression": "'DELETE FROM main.ops.events WHERE processed_at < current_date() - INTERVAL 30 DAYS'",
+      "preserved_by_flowx": false
+    },
+    {"name": "autocommit", "source_expression": "True", "preserved_by_flowx": false}
+  ],
+  "upstream_task_keys": [],
+  "downstream_task_keys": ["vacuum_events"],
+  "dag_settings": {"schedule": null, "parameters": [], "tags": {"source": "airflow"}},
+  "reason": {
+    "code": "operator_placeholder",
+    "message": "SQLExecuteQueryOperator requires a provider-authored leaf implementation"
+  },
+  "allowed_replacement_kinds": ["notebook", "sql"],
+  "knowledge_provider": {
+    "name": "airflow-to-dabs",
+    "version": "0.2.0",
+    "repository": "https://github.com/park-peter/airflow-to-dabs"
+  }
+}

@@ -10,10 +10,16 @@ description: >
 Use this workflow only for Airflow reports whose deterministic conversion succeeded with gaps.
 Flowx owns source parsing, task identity, dependencies, task policy, IR, and packaging. This skill
 reasons about one prepared gap at a time using the migration knowledge from
-[`park-peter/airflow-to-dabs` v0.1.0](https://github.com/park-peter/airflow-to-dabs/releases/tag/v0.1.0).
+[`park-peter/airflow-to-dabs` v0.2.0](https://github.com/park-peter/airflow-to-dabs/releases/tag/v0.2.0).
 It must not parse the DAG independently or generate a second bundle.
 
-Read [`references/contract-v1.md`](references/contract-v1.md) before authoring a resolution.
+Read [`references/contract-v1.md`](references/contract-v1.md) and the pinned
+[`airflow-to-dabs-v0.2.0/PROFILE.md`](references/airflow-to-dabs-v0.2.0/PROFILE.md) before authoring a
+resolution. The profile's `../../references/*.md` knowledge paths are relative to the upstream
+v0.2.0 release. Resolve them against
+`https://github.com/park-peter/airflow-to-dabs/tree/v0.2.0/references` or an exact local checkout of
+that tag. If required knowledge is unavailable, return `needs_input` or `deferred`; never infer
+missing operator semantics.
 
 ## 1. Prepare immutable gap envelopes
 

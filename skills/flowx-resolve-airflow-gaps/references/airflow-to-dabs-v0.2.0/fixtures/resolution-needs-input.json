@@ -1,0 +1,44 @@
+{
+  "contract_version": "1",
+  "gap_id": "3333333333333333",
+  "status": "needs_input",
+  "baseline_report_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "source_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "provider": {
+    "name": "airflow-to-dabs",
+    "version": "0.2.0",
+    "repository": "https://github.com/park-peter/airflow-to-dabs"
+  },
+  "model": {"name": "fixture-model"},
+  "argument_disposition": [
+    {
+      "name": "task_id",
+      "disposition": "preserved_by_flowx",
+      "rationale": "Flowx preserves the collision-safe task identity."
+    },
+    {
+      "name": "image",
+      "disposition": "consumed",
+      "rationale": "The image identifies the runtime whose dependencies must be assessed."
+    },
+    {
+      "name": "cmds",
+      "disposition": "consumed",
+      "rationale": "The command identifies the container entrypoint that must be migrated."
+    },
+    {
+      "name": "namespace",
+      "disposition": "consumed",
+      "rationale": "The namespace is deployment context needed to locate Kubernetes dependencies."
+    },
+    {
+      "name": "secrets",
+      "disposition": "consumed",
+      "rationale": "The secret reference must be mapped to Databricks secrets or Unity Catalog."
+    }
+  ],
+  "prerequisites": [],
+  "warnings": [],
+  "semantic_deltas": [],
+  "reason": "Provide the container source or packaged application, required Python/system dependencies, registry access requirements, and the Databricks secret or Unity Catalog mappings for orders_secret."
+}

@@ -32,6 +32,9 @@ _METRIC_SQL_TYPES: dict[str, str] = {
     "other_activities": "INT",
     "deterministic_activities": "INT",
     "agentic_activities": "INT",
+    "unresolved_agentic_activities": "INT",
+    "agentic_resolution_outcomes": "STRING",
+    "agentic_provider_version": "STRING",
     "unsupported_activities": "INT",
     "failed_activities": "INT",
     "excluded_activities": "INT",
@@ -39,6 +42,7 @@ _METRIC_SQL_TYPES: dict[str, str] = {
     "migration_status": "STRING",
     "coverage_pct": "DOUBLE",
     "deterministic_coverage_pct": "DOUBLE",
+    "runnable_coverage_pct": "DOUBLE",
     "finding_count": "INT",
     "finding_fingerprints": "STRING",
     "complexity_score": "INT",
@@ -53,9 +57,17 @@ RESULTS_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 _STRING_METRICS: frozenset[str] = frozenset(
-    {"pipeline", "reconciliation_status", "migration_status", "finding_fingerprints", "complexity_size"}
+    {
+        "pipeline",
+        "agentic_resolution_outcomes",
+        "agentic_provider_version",
+        "reconciliation_status",
+        "migration_status",
+        "finding_fingerprints",
+        "complexity_size",
+    }
 )
-_FLOAT_METRICS: frozenset[str] = frozenset({"coverage_pct", "deterministic_coverage_pct"})
+_FLOAT_METRICS: frozenset[str] = frozenset({"coverage_pct", "deterministic_coverage_pct", "runnable_coverage_pct"})
 
 
 def _sql_str(value: Any) -> str:

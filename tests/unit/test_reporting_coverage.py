@@ -76,6 +76,9 @@ def test_build_coverage_rows_joins_inventory_and_csv(tmp_path: Path):
     assert alpha["unsupported_activities"] == 1
     # coverage = (det + agentic) / total = 3/4 = 75.0
     assert alpha["coverage_pct"] == 75.0
+    assert alpha["runnable_coverage_pct"] == 75.0
+    assert alpha["unresolved_agentic_activities"] == 0
+    assert alpha["agentic_resolution_outcomes"] == "{}"
     # complexity columns come from the CSV
     assert alpha["datasets"] == 2 and alpha["linked_services"] == 1
     assert alpha["collapsible_patterns"] == 1 and alpha["complexity_size"] == "M"
@@ -94,6 +97,7 @@ def test_audited_counts_drive_translation_and_deterministic_coverage(tmp_path: P
     metadata = tmp_path / "metadata"
     metadata.mkdir()
     inventory = {
+        "source": "airflow",
         "pipelines": [
             {
                 "name": "verified_with_gap",
@@ -119,7 +123,7 @@ def test_audited_counts_drive_translation_and_deterministic_coverage(tmp_path: P
                 "migration_status": "included",
                 "findings": [{"fingerprint": "def456", "severity": "failed"}],
             },
-        ]
+        ],
     }
     (metadata / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
 
@@ -130,6 +134,14 @@ def test_audited_counts_drive_translation_and_deterministic_coverage(tmp_path: P
     assert verified["audited_activities"] == 8
     assert verified["coverage_pct"] == 100.0
     assert verified["deterministic_coverage_pct"] == 87.5
+    assert verified["runnable_coverage_pct"] == 87.5
+    assert verified["unresolved_agentic_activities"] == 1
+    assert json.loads(verified["agentic_resolution_outcomes"]) == {
+        "resolved": 0,
+        "needs_input": 0,
+        "deferred": 0,
+        "unreviewed": 1,
+    }
     assert verified["finding_count"] == 1
     assert json.loads(verified["finding_fingerprints"]) == ["abc123"]
 
@@ -138,6 +150,7 @@ def test_audited_counts_drive_translation_and_deterministic_coverage(tmp_path: P
     assert failed["failed_activities"] == 1
     assert failed["coverage_pct"] == 88.9
     assert failed["deterministic_coverage_pct"] == 77.8
+    assert failed["runnable_coverage_pct"] == 77.8
     assert failed["reconciliation_status"] == "failed"
 
 
@@ -145,6 +158,7 @@ def test_excluded_activities_remain_in_coverage_denominator(tmp_path: Path) -> N
     metadata = tmp_path / "metadata"
     metadata.mkdir()
     inventory = {
+        "source": "airflow",
         "pipelines": [
             {
                 "name": "excluded",
@@ -158,7 +172,7 @@ def test_excluded_activities_remain_in_coverage_denominator(tmp_path: Path) -> N
                 "migration_status": "excluded",
                 "findings": [],
             }
-        ]
+        ],
     }
     (metadata / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
 
@@ -168,4 +182,5 @@ def test_excluded_activities_remain_in_coverage_denominator(tmp_path: Path) -> N
     assert row["excluded_activities"] == 3
     assert row["coverage_pct"] == 0.0
     assert row["deterministic_coverage_pct"] == 0.0
+    assert row["runnable_coverage_pct"] == 0.0
     assert row["migration_status"] == "excluded"

@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 
 from flowx.adapter.__main__ import main as adapter_main
+from flowx.agentic import AgenticContractError, _validate_candidate, summarize_persisted_agentic_resolutions
 from flowx.bundler.dab_writer import main as package_main
+from flowx.reporting.coverage import build_coverage_rows
 from flowx.sources.airflow.convert import main as airflow_convert
 
 
@@ -82,7 +84,7 @@ def _candidate(gap: dict, *, source: str = "print('Migrated from Airflow')\n", s
         "source_sha256": gap["source_sha256"],
         "provider": {
             "name": "airflow-to-dabs",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "repository": "https://github.com/park-peter/airflow-to-dabs",
         },
         "model": {"name": "test-model"},
@@ -205,14 +207,29 @@ def test_stage_rejects_unresolved_jinja_provider_drift_and_file_hash_mismatch(tm
     assert "unresolved Airflow Jinja" in capsys.readouterr().err
 
     wrong_provider = _candidate(gaps[0])
-    wrong_provider["provider"]["version"] = "0.2.0"
+    wrong_provider["provider"]["version"] = "0.1.0"
     assert _stage(output, wrong_provider) == 1
-    assert "pinned airflow-to-dabs v0.1.0" in capsys.readouterr().err
+    assert "pinned airflow-to-dabs v0.2.0" in capsys.readouterr().err
 
     bad_hash = _candidate(gaps[0])
     bad_hash["generated_files"][0]["sha256"] = "0" * 64
     assert _stage(output, bad_hash) == 1
     assert "sha256 does not match" in capsys.readouterr().err
+
+
+def test_pinned_v020_provider_fixtures_satisfy_the_flowx_contract() -> None:
+    root = Path(__file__).parents[2] / "skills" / "flowx-resolve-airflow-gaps" / "references" / "airflow-to-dabs-v0.2.0"
+    provider = json.loads((root / "provider.json").read_text(encoding="utf-8"))
+
+    assert provider["provider"]["version"] == "0.2.0"
+    for outcome in ("notebook", "sql", "needs-input", "deferred"):
+        gap = json.loads((root / "fixtures" / f"gap-{outcome}.json").read_text(encoding="utf-8"))
+        candidate = json.loads((root / "fixtures" / f"resolution-{outcome}.json").read_text(encoding="utf-8"))
+        manifest = {"baseline_report_sha256": gap["baseline_report_sha256"]}
+
+        resolution = _validate_candidate(candidate, gap_by_id={gap["gap_id"]: gap}, manifest=manifest)
+
+        assert resolution.gap["gap_id"] == gap["gap_id"]
 
 
 def test_apply_rebuilds_from_baseline_and_preserves_graph_policy(tmp_path: Path):
@@ -563,3 +580,94 @@ def test_package_rejects_agentic_report_tampering_before_bundle_writes(tmp_path:
 
     assert package_main(["--report", str(report), "--output-dir", str(bundle)]) == 1
     assert not (bundle / "databricks.yml").exists()
+
+
+def test_reviewed_resolution_evidence_drives_honest_runnable_coverage(tmp_path: Path) -> None:
+    _, output, gaps = _prepare(tmp_path, two_tasks=True)
+    assert _stage(output, _candidate(gaps[0]), name="resolved.json") == 0
+    assert _stage(output, _candidate(gaps[1], status="needs_input"), name="needs-input.json") == 0
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "apply",
+                "--source",
+                "airflow",
+                "--output-dir",
+                str(output),
+                "--accept-gap",
+                gaps[0]["gap_id"],
+                "--accept-gap",
+                gaps[1]["gap_id"],
+            ]
+        )
+        == 0
+    )
+    metadata = output / "metadata"
+    (metadata / "inventory.json").write_text(
+        json.dumps(
+            {
+                "source": "airflow",
+                "pipelines": [
+                    {
+                        "name": "agentic",
+                        "activities": [],
+                        "audited_activity_count": 2,
+                        "deterministic_count": 0,
+                        "agentic_count": 2,
+                        "failed_count": 0,
+                        "excluded_count": 0,
+                        "reconciliation_status": "verified_with_gaps",
+                        "migration_status": "included",
+                        "findings": [],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = summarize_persisted_agentic_resolutions(metadata / "agentic")
+    row = build_coverage_rows(metadata)[0]
+
+    assert summary == {
+        "provider_version": "0.2.0",
+        "pipelines": {"agentic": {"resolved": 1, "needs_input": 1, "deferred": 0, "unreviewed": 0}},
+    }
+    assert row["coverage_pct"] == 100.0
+    assert row["deterministic_coverage_pct"] == 0.0
+    assert row["runnable_coverage_pct"] == 50.0
+    assert row["unresolved_agentic_activities"] == 1
+    assert row["agentic_provider_version"] == "0.2.0"
+    assert row["reconciliation_status"] == "verified_with_reviewed_resolutions"
+
+
+def test_reporting_rejects_duplicate_hash_valid_agentic_evidence(tmp_path: Path) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    assert _stage(output, _candidate(gaps[0])) == 0
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "apply",
+                "--source",
+                "airflow",
+                "--output-dir",
+                str(output),
+                "--accept-gap",
+                gaps[0]["gap_id"],
+            ]
+        )
+        == 0
+    )
+    evidence = output / "metadata" / "agentic"
+    duplicated_gaps = [gaps[0], gaps[0]]
+    gaps_bytes = (json.dumps(duplicated_gaps, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    (evidence / "gaps.json").write_bytes(gaps_bytes)
+    manifest_path = evidence / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["gaps_sha256"] = hashlib.sha256(gaps_bytes).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(AgenticContractError, match="duplicate persisted gap_id"):
+        summarize_persisted_agentic_resolutions(evidence)

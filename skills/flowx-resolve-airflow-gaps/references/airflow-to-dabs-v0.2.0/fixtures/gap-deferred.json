@@ -1,0 +1,37 @@
+{
+  "contract_version": "1",
+  "gap_id": "4444444444444444",
+  "source": "airflow",
+  "pipeline_name": "branching",
+  "capture_identity": "choose_path",
+  "task_key": "choose_path",
+  "task_path": ["tasks", 1],
+  "operator": "BranchPythonOperator",
+  "operator_fqn": "airflow.operators.python.BranchPythonOperator",
+  "source_file": "branching.py",
+  "source_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+  "baseline_report_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+  "source_span": {"line": 21, "column": 4, "end_line": 25, "end_column": 5},
+  "raw_definition": {
+    "operator": "BranchPythonOperator",
+    "source": "choose = BranchPythonOperator(task_id=\"choose_path\", python_callable=choose_target, trigger_rule=\"none_failed\")"
+  },
+  "arguments": [
+    {"name": "task_id", "source_expression": "'choose_path'", "preserved_by_flowx": true},
+    {"name": "python_callable", "source_expression": "choose_target", "preserved_by_flowx": false},
+    {"name": "trigger_rule", "source_expression": "'none_failed'", "preserved_by_flowx": true}
+  ],
+  "upstream_task_keys": ["read_config"],
+  "downstream_task_keys": ["full_load", "incremental_load"],
+  "dag_settings": {"schedule": null, "parameters": [], "tags": {"source": "airflow"}},
+  "reason": {
+    "code": "operator_placeholder",
+    "message": "BranchPythonOperator requires a graph-aware branch conversion"
+  },
+  "allowed_replacement_kinds": ["notebook", "sql"],
+  "knowledge_provider": {
+    "name": "airflow-to-dabs",
+    "version": "0.2.0",
+    "repository": "https://github.com/park-peter/airflow-to-dabs"
+  }
+}

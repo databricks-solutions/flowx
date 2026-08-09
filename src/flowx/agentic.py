@@ -24,7 +24,7 @@ from flowx.sources.airflow.loader import discover_dags, load_pipelines
 
 CONTRACT_VERSION = "1"
 PROVIDER_NAME = "airflow-to-dabs"
-PROVIDER_VERSION = "0.1.0"
+PROVIDER_VERSION = "0.2.0"
 PROVIDER_REPOSITORY = "https://github.com/park-peter/airflow-to-dabs"
 
 _ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql")
@@ -126,6 +126,16 @@ class StagedResolution:
     gap: dict[str, Any]
     candidate: dict[str, Any]
     sha256: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PersistedResolutionEvidence:
+    """Validated kept evidence for one reviewed Airflow resolution run."""
+
+    provider_version: str
+    gaps: list[dict[str, Any]]
+    resolutions: list[StagedResolution]
+    expected_report: dict[str, Any]
 
 
 def prepare_airflow_resolutions(
@@ -316,6 +326,40 @@ def apply_airflow_resolutions(
 def validate_persisted_agentic_report(report: dict[str, Any], *, evidence_dir: Path) -> list[str]:
     """Replays accepted candidates from kept evidence and compares the exact expected report."""
     try:
+        evidence = _load_persisted_agentic_evidence(evidence_dir)
+    except AgenticContractError as error:
+        return [f"agentic resolution evidence is missing or invalid: {error}"]
+    if evidence.expected_report != report:
+        return ["agentic report does not match replay from its immutable baseline and accepted resolutions"]
+    return []
+
+
+def summarize_persisted_agentic_resolutions(evidence_dir: Path) -> dict[str, Any]:
+    """Returns validated per-pipeline outcomes from kept Airflow resolution evidence.
+
+    An absent evidence directory represents a deterministic-only run. Once evidence exists, every
+    file is contract- and hash-validated before any reporting metric may consume it.
+    """
+    if not evidence_dir.exists():
+        return {}
+    evidence = _load_persisted_agentic_evidence(evidence_dir)
+    pipeline_outcomes: dict[str, dict[str, int]] = {}
+    for gap in evidence.gaps:
+        pipeline = str(gap["pipeline_name"])
+        pipeline_outcomes.setdefault(pipeline, _empty_resolution_outcomes())["unreviewed"] += 1
+    for resolution in evidence.resolutions:
+        pipeline = str(resolution.gap["pipeline_name"])
+        outcomes = pipeline_outcomes.setdefault(pipeline, _empty_resolution_outcomes())
+        outcomes["unreviewed"] -= 1
+        outcomes[str(resolution.candidate["status"])] += 1
+    return {
+        "provider_version": evidence.provider_version,
+        "pipelines": pipeline_outcomes,
+    }
+
+
+def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionEvidence:
+    try:
         baseline_bytes = (evidence_dir / "baseline.json").read_bytes()
         baseline = json.loads(baseline_bytes)
         gaps_bytes = (evidence_dir / "gaps.json").read_bytes()
@@ -323,11 +367,13 @@ def validate_persisted_agentic_report(report: dict[str, Any], *, evidence_dir: P
         manifest = _read_json_object(evidence_dir / "manifest.json")
         accepted = _read_json_object(evidence_dir / "accepted_resolutions.json")
     except (OSError, json.JSONDecodeError, AgenticContractError) as error:
-        return [f"agentic resolution evidence is missing or invalid: {error}"]
+        raise AgenticContractError(str(error)) from error
+
+    _require_airflow_baseline(baseline)
     if _sha256_bytes(baseline_bytes) != manifest.get("baseline_report_sha256"):
-        return ["agentic resolution baseline hash does not match its manifest"]
+        raise AgenticContractError("agentic resolution baseline hash does not match its manifest")
     if _sha256_bytes(gaps_bytes) != manifest.get("gaps_sha256"):
-        return ["agentic gap-envelope hash does not match its manifest"]
+        raise AgenticContractError("agentic gap-envelope hash does not match its manifest")
     expected_provider = {
         "name": PROVIDER_NAME,
         "version": PROVIDER_VERSION,
@@ -338,23 +384,67 @@ def validate_persisted_agentic_report(report: dict[str, Any], *, evidence_dir: P
         or manifest.get("source") != "airflow"
         or manifest.get("provider") != expected_provider
     ):
-        return ["agentic resolution manifest has an unsupported contract, source, or provider"]
-    gap_by_id = {
-        str(gap["gap_id"]): gap for gap in gaps if isinstance(gap, dict) and isinstance(gap.get("gap_id"), str)
-    }
-    resolutions: list[StagedResolution] = []
+        raise AgenticContractError("agentic resolution manifest has an unsupported contract, source, or provider")
+    if accepted.get("contract_version") != CONTRACT_VERSION:
+        raise AgenticContractError("accepted_resolutions.json has an unsupported contract_version")
+    if not isinstance(gaps, list):
+        raise AgenticContractError("gaps.json must contain a list")
+
+    gap_by_id: dict[str, dict[str, Any]] = {}
+    for gap in gaps:
+        if not isinstance(gap, dict):
+            raise AgenticContractError("every persisted gap must be an object")
+        gap_id = gap.get("gap_id")
+        pipeline_name = gap.get("pipeline_name")
+        if not isinstance(gap_id, str) or not gap_id:
+            raise AgenticContractError("every persisted gap requires a non-empty gap_id")
+        if not isinstance(pipeline_name, str) or not pipeline_name:
+            raise AgenticContractError(f"persisted gap {gap_id!r} requires a non-empty pipeline_name")
+        if gap_id in gap_by_id:
+            raise AgenticContractError(f"duplicate persisted gap_id: {gap_id}")
+        gap_by_id[gap_id] = gap
+
     try:
-        candidates = accepted.get("candidates")
-        if not isinstance(candidates, list):
-            raise AgenticContractError("accepted_resolutions.json must contain a candidates list")
-        for candidate in candidates:
-            resolutions.append(_validate_candidate(candidate, gap_by_id=gap_by_id, manifest=manifest))
-        expected = _apply_to_baseline(baseline, resolutions)
+        source_hashes = _manifest_source_hashes(manifest)
+    except (KeyError, TypeError) as error:
+        raise AgenticContractError("agentic resolution manifest has invalid source_files") from error
+    if not source_hashes:
+        raise AgenticContractError("agentic resolution manifest has no source_files")
+    expected_gaps = _build_gap_envelopes(
+        baseline,
+        baseline_hash=str(manifest["baseline_report_sha256"]),
+        source_hashes=source_hashes,
+    )
+    if gaps != expected_gaps:
+        raise AgenticContractError("persisted gap envelopes do not match the immutable baseline")
+
+    candidates = accepted.get("candidates")
+    if not isinstance(candidates, list):
+        raise AgenticContractError("accepted_resolutions.json must contain a candidates list")
+    resolutions: list[StagedResolution] = []
+    accepted_ids: set[str] = set()
+    for candidate in candidates:
+        resolution = _validate_candidate(candidate, gap_by_id=gap_by_id, manifest=manifest)
+        gap_id = str(resolution.gap["gap_id"])
+        if gap_id in accepted_ids:
+            raise AgenticContractError(f"duplicate accepted resolution for gap_id: {gap_id}")
+        accepted_ids.add(gap_id)
+        resolutions.append(resolution)
+
+    try:
+        expected_report = _apply_to_baseline(baseline, resolutions)
     except AgenticContractError as error:
-        return [f"agentic resolution evidence failed validation: {error}"]
-    if expected != report:
-        return ["agentic report does not match replay from its immutable baseline and accepted resolutions"]
-    return []
+        raise AgenticContractError(f"agentic resolution evidence failed validation: {error}") from error
+    return PersistedResolutionEvidence(
+        provider_version=PROVIDER_VERSION,
+        gaps=gaps,
+        resolutions=resolutions,
+        expected_report=expected_report,
+    )
+
+
+def _empty_resolution_outcomes() -> dict[str, int]:
+    return {"resolved": 0, "needs_input": 0, "deferred": 0, "unreviewed": 0}
 
 
 def _require_airflow_baseline(payload: Any) -> None:
