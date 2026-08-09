@@ -126,6 +126,8 @@ class PersistedResolutionEvidence:
     provider_version: str
     gaps: list[dict[str, Any]]
     resolutions: list[StagedResolution]
+    reviewed_resolutions: list[StagedResolution]
+    decisions: list[dict[str, str]]
     expected_report: dict[str, Any]
 
 
@@ -217,7 +219,12 @@ def prepare_airflow_resolutions(
     }
 
 
-def stage_airflow_resolutions(*, output_dir: Path, candidate_paths: list[Path]) -> dict[str, Any]:
+def stage_airflow_resolutions(
+    *,
+    output_dir: Path,
+    candidate_paths: list[Path],
+    replace: bool = False,
+) -> dict[str, Any]:
     """Validates provider candidates and records their immutable hashes in the agentic workspace."""
     workspace = _workspace(output_dir)
     manifest, gaps = _load_workspace(workspace)
@@ -243,13 +250,26 @@ def stage_airflow_resolutions(*, output_dir: Path, candidate_paths: list[Path]) 
     index = _load_candidate_index(workspace, valid_gap_ids=set(gap_by_id))
     for gap_id, resolution in staged.items():
         destination = candidates_dir / f"{gap_id}.json"
-        destination.write_bytes(_json_bytes(resolution.candidate))
+        existing = index.get(gap_id)
+        if existing is not None and existing["sha256"] != resolution.sha256 and not replace:
+            raise AgenticContractError(
+                f"A different candidate is already staged for gap {gap_id}; use --replace to replace it"
+            )
+        if existing is not None and destination.exists() and _sha256_file(destination) != existing["sha256"]:
+            raise AgenticContractError(f"staged candidate was modified after validation: {gap_id}")
+        _write_json_atomic(destination, resolution.candidate)
         index[gap_id] = {
             "sha256": resolution.sha256,
             "status": resolution.candidate["status"],
         }
     _write_json(workspace / "candidate_index.json", index)
-    return {"status": "staged", "staged": sorted(staged), "candidate_count": len(index)}
+    review_manifest_path = _write_review_manifest(workspace, manifest=manifest, index=index)
+    return {
+        "status": "staged",
+        "staged": sorted(staged),
+        "candidate_count": len(index),
+        "review_manifest": str(review_manifest_path),
+    }
 
 
 def apply_airflow_resolutions(
@@ -257,13 +277,18 @@ def apply_airflow_resolutions(
     output_dir: Path,
     accepted_gap_ids: list[str] | None = None,
     accept_all: bool = False,
+    review_complete: bool = False,
+    review_manifest_path: Path | None = None,
     reset: bool = False,
     source_path: Path | None = None,
 ) -> dict[str, Any]:
     """Rebuilds an agentic report from the immutable baseline and the declarative acceptance set."""
-    if sum(bool(option) for option in (accepted_gap_ids, accept_all, reset)) != 1:
-        raise AgenticContractError("Choose exactly one of --accept-gap, --accept-all, or --reset")
+    if sum(bool(option) for option in (accepted_gap_ids, accept_all, review_complete, reset)) != 1:
+        raise AgenticContractError("Choose exactly one of --accept-gap, --accept-all, --review-complete, or --reset")
     output_dir = output_dir.resolve()
+    if reset:
+        return _reset_airflow_resolutions(output_dir)
+
     workspace = _workspace(output_dir)
     manifest, gaps = _load_workspace(workspace)
     baseline_path = workspace / "baseline.json"
@@ -282,39 +307,201 @@ def apply_airflow_resolutions(
 
     gap_by_id = {gap["gap_id"]: gap for gap in gaps}
     index = _load_candidate_index(workspace, valid_gap_ids=set(gap_by_id))
-    selected_ids = [] if reset else sorted(index) if accept_all else list(dict.fromkeys(accepted_gap_ids or []))
+    review_manifest: dict[str, Any] | None = None
+    review_manifest_bytes: bytes | None = None
+    if accept_all or review_complete:
+        if review_manifest_path is None:
+            raise AgenticContractError("--accept-all and --review-complete require --review-manifest")
+        review_manifest, review_manifest_bytes = _load_review_manifest(
+            review_manifest_path,
+            manifest=manifest,
+            index=index,
+        )
+        if not index:
+            raise AgenticContractError("A reviewed operation requires at least one staged candidate")
+    elif review_manifest_path is not None:
+        raise AgenticContractError("--review-manifest is only valid with --accept-all or --review-complete")
+
+    selected_ids = (
+        sorted(index) if accept_all else [] if review_complete else list(dict.fromkeys(accepted_gap_ids or []))
+    )
     missing = sorted(set(selected_ids) - set(index))
     if missing:
         raise AgenticContractError(f"No staged candidate exists for gap(s): {', '.join(missing)}")
 
-    selected: list[StagedResolution] = []
-    for gap_id in selected_ids:
+    reviewed_ids = sorted(index) if review_manifest is not None else selected_ids
+    reviewed: dict[str, StagedResolution] = {}
+    for gap_id in reviewed_ids:
         candidate_path = workspace / "candidates" / f"{gap_id}.json"
         candidate_bytes = candidate_path.read_bytes()
         if _sha256_bytes(candidate_bytes) != index[gap_id]["sha256"]:
             raise AgenticContractError(f"staged candidate was modified after validation: {gap_id}")
         candidate = json.loads(candidate_bytes)
-        selected.append(_validate_candidate(candidate, gap_by_id=gap_by_id, manifest=manifest))
+        reviewed[gap_id] = _validate_candidate(candidate, gap_by_id=gap_by_id, manifest=manifest)
+
+    selected = [reviewed[gap_id] for gap_id in selected_ids]
+    decisions = [
+        {
+            "gap_id": gap_id,
+            "candidate_sha256": reviewed[gap_id].sha256,
+            "decision": "accepted" if gap_id in selected_ids else "declined",
+        }
+        for gap_id in reviewed_ids
+    ]
 
     applied = _apply_to_baseline(baseline, selected)
     report_path = output_dir / ".work" / "translation_report.agentic.json"
+    _persist_agentic_evidence(
+        output_dir=output_dir,
+        material_dir=workspace,
+        baseline_bytes=baseline_bytes,
+        reviewed=list(reviewed.values()),
+        selected=selected,
+        decisions=decisions,
+        review_manifest_bytes=review_manifest_bytes,
+    )
     _write_json_atomic(report_path, applied)
-
-    evidence = output_dir / "metadata" / "agentic"
-    evidence.mkdir(parents=True, exist_ok=True)
-    (evidence / "baseline.json").write_bytes(baseline_bytes)
-    (evidence / "gaps.json").write_bytes((workspace / "gaps.json").read_bytes())
-    (evidence / "manifest.json").write_bytes((workspace / "manifest.json").read_bytes())
-    accepted_payload = {
-        "contract_version": CONTRACT_VERSION,
-        "candidates": [resolution.candidate for resolution in selected],
-    }
-    _write_json(evidence / "accepted_resolutions.json", accepted_payload)
     return {
-        "status": "reset" if reset else "applied",
+        "status": "review_complete" if review_complete else "applied",
         "accepted_gap_ids": selected_ids,
+        "declined_gap_ids": [decision["gap_id"] for decision in decisions if decision["decision"] == "declined"],
         "report_path": str(report_path),
     }
+
+
+def _reset_airflow_resolutions(output_dir: Path) -> dict[str, Any]:
+    """Restores the durable deterministic baseline without consulting mutable live source."""
+    workspace = _workspace(output_dir)
+    evidence = output_dir / "metadata" / "agentic"
+    if workspace.is_dir():
+        manifest, _ = _load_workspace(workspace)
+        material_dir = workspace
+        _verify_snapshot(workspace, manifest)
+    elif evidence.is_dir():
+        _load_persisted_agentic_evidence(evidence)
+        manifest = _read_json_object(evidence / "manifest.json")
+        material_dir = evidence
+    else:
+        raise AgenticContractError("No durable agentic baseline exists; run prepare first")
+
+    baseline_bytes = (material_dir / "baseline.json").read_bytes()
+    if _sha256_bytes(baseline_bytes) != manifest.get("baseline_report_sha256"):
+        raise AgenticContractError("The immutable deterministic baseline was modified after prepare")
+    baseline = json.loads(baseline_bytes)
+    _require_airflow_baseline(baseline)
+    _persist_agentic_evidence(
+        output_dir=output_dir,
+        material_dir=material_dir,
+        baseline_bytes=baseline_bytes,
+        reviewed=[],
+        selected=[],
+        decisions=[],
+        review_manifest_bytes=None,
+    )
+
+    if workspace.is_dir():
+        candidates = workspace / "candidates"
+        if candidates.exists():
+            shutil.rmtree(candidates)
+        candidates.mkdir()
+        _write_json(workspace / "candidate_index.json", {})
+        review_manifests = workspace / "review_manifests"
+        if review_manifests.exists():
+            shutil.rmtree(review_manifests)
+
+    report_path = output_dir / ".work" / "translation_report.agentic.json"
+    _write_json_atomic(report_path, baseline)
+    return {"status": "reset", "accepted_gap_ids": [], "declined_gap_ids": [], "report_path": str(report_path)}
+
+
+def _persist_agentic_evidence(
+    *,
+    output_dir: Path,
+    material_dir: Path,
+    baseline_bytes: bytes,
+    reviewed: list[StagedResolution],
+    selected: list[StagedResolution],
+    decisions: list[dict[str, str]],
+    review_manifest_bytes: bytes | None,
+) -> None:
+    """Keeps replayable source, baseline, candidates, and review decisions outside transient work state."""
+    metadata_dir = output_dir / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    target = metadata_dir / "agentic"
+    with tempfile.TemporaryDirectory(prefix=".agentic-evidence-", dir=metadata_dir) as temporary:
+        staging = Path(temporary) / "agentic"
+        staging.mkdir()
+        (staging / "baseline.json").write_bytes(baseline_bytes)
+        (staging / "gaps.json").write_bytes((material_dir / "gaps.json").read_bytes())
+        (staging / "manifest.json").write_bytes((material_dir / "manifest.json").read_bytes())
+        shutil.copytree(material_dir / "source", staging / "source")
+        _write_json(
+            staging / "reviewed_candidates.json",
+            {"contract_version": CONTRACT_VERSION, "candidates": [item.candidate for item in reviewed]},
+        )
+        _write_json(
+            staging / "accepted_resolutions.json",
+            {"contract_version": CONTRACT_VERSION, "candidates": [item.candidate for item in selected]},
+        )
+        _write_json(
+            staging / "review_decisions.json",
+            {"contract_version": CONTRACT_VERSION, "decisions": decisions},
+        )
+        if review_manifest_bytes is not None:
+            (staging / "review_manifest.json").write_bytes(review_manifest_bytes)
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.move(str(staging), target)
+
+
+def _review_manifest_payload(manifest: dict[str, Any], index: dict[str, dict[str, str]]) -> dict[str, Any]:
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "source": "airflow",
+        "baseline_report_sha256": manifest["baseline_report_sha256"],
+        "gaps_sha256": manifest["gaps_sha256"],
+        "provider": manifest["provider"],
+        "candidates": [
+            {"gap_id": gap_id, "sha256": index[gap_id]["sha256"], "status": index[gap_id]["status"]}
+            for gap_id in sorted(index)
+        ],
+    }
+
+
+def _write_review_manifest(
+    workspace: Path,
+    *,
+    manifest: dict[str, Any],
+    index: dict[str, dict[str, str]],
+) -> Path:
+    payload = _review_manifest_payload(manifest, index)
+    payload_bytes = _json_bytes(payload)
+    digest = _sha256_bytes(payload_bytes)
+    path = workspace / "review_manifests" / f"{digest}.json"
+    if path.exists() and path.read_bytes() != payload_bytes:
+        raise AgenticContractError("Hash-addressed review manifest contains different content")
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(payload_bytes)
+    return path
+
+
+def _load_review_manifest(
+    path: Path,
+    *,
+    manifest: dict[str, Any],
+    index: dict[str, dict[str, str]],
+) -> tuple[dict[str, Any], bytes]:
+    try:
+        payload_bytes = path.read_bytes()
+        payload = json.loads(payload_bytes)
+    except OSError as error:
+        raise AgenticContractError(f"Could not read review manifest: {error}") from error
+    except json.JSONDecodeError as error:
+        raise AgenticContractError(f"Review manifest contains invalid JSON: {error}") from error
+    expected = _review_manifest_payload(manifest, index)
+    if payload != expected:
+        raise AgenticContractError("Review manifest does not exactly match the currently staged candidate set")
+    return expected, payload_bytes
 
 
 def validate_persisted_agentic_report(report: dict[str, Any], *, evidence_dir: Path) -> list[str]:
@@ -351,6 +538,17 @@ def summarize_persisted_agentic_resolutions(evidence_dir: Path) -> dict[str, Any
             raise AgenticContractError(f"agentic resolution over-accounts pipeline {pipeline_name!r}")
         outcomes["unreviewed"] -= 1
         outcomes[str(resolution.candidate["status"])] += 1
+    accepted_ids = {resolution.gap["gap_id"] for resolution in evidence.resolutions}
+    for decision in evidence.decisions:
+        if decision["decision"] != "declined" or decision["gap_id"] in accepted_ids:
+            continue
+        resolution = next(item for item in evidence.reviewed_resolutions if item.gap["gap_id"] == decision["gap_id"])
+        pipeline_name = str(resolution.gap["pipeline_name"])
+        outcomes = pipeline_outcomes.setdefault(pipeline_name, _empty_resolution_outcomes())
+        if outcomes["unreviewed"] <= 0:
+            raise AgenticContractError(f"agentic review over-accounts pipeline {pipeline_name!r}")
+        outcomes["unreviewed"] -= 1
+        outcomes["declined"] += 1
     return {
         "provider_version": evidence.provider_version,
         "pipelines": pipeline_outcomes,
@@ -365,6 +563,8 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
         gaps = json.loads(gaps_bytes)
         manifest = _read_json_object(evidence_dir / "manifest.json")
         accepted = _read_json_object(evidence_dir / "accepted_resolutions.json")
+        reviewed = _read_json_object(evidence_dir / "reviewed_candidates.json")
+        decision_manifest = _read_json_object(evidence_dir / "review_decisions.json")
     except (OSError, json.JSONDecodeError, AgenticContractError) as error:
         raise AgenticContractError(str(error)) from error
 
@@ -386,6 +586,10 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
         raise AgenticContractError("agentic resolution manifest has an unsupported contract, source, or provider")
     if accepted.get("contract_version") != CONTRACT_VERSION:
         raise AgenticContractError("accepted_resolutions.json has an unsupported contract_version")
+    if reviewed.get("contract_version") != CONTRACT_VERSION:
+        raise AgenticContractError("reviewed_candidates.json has an unsupported contract_version")
+    if decision_manifest.get("contract_version") != CONTRACT_VERSION:
+        raise AgenticContractError("review_decisions.json has an unsupported contract_version")
     if not isinstance(gaps, list):
         raise AgenticContractError("gaps.json must contain a list")
 
@@ -409,6 +613,9 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
         raise AgenticContractError("agentic resolution manifest has invalid source_files") from error
     if not source_hashes:
         raise AgenticContractError("agentic resolution manifest has no source_files")
+    durable_source_hashes = {relative: _sha256_file(evidence_dir / "source" / relative) for relative in source_hashes}
+    if durable_source_hashes != source_hashes:
+        raise AgenticContractError("durable Airflow source snapshot does not match its manifest")
     expected_gaps = _build_gap_envelopes(
         baseline,
         baseline_hash=str(manifest["baseline_report_sha256"]),
@@ -417,9 +624,22 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
     if gaps != expected_gaps:
         raise AgenticContractError("persisted gap envelopes do not match the immutable baseline")
 
+    reviewed_candidates = reviewed.get("candidates")
     candidates = accepted.get("candidates")
+    if not isinstance(reviewed_candidates, list):
+        raise AgenticContractError("reviewed_candidates.json must contain a candidates list")
     if not isinstance(candidates, list):
         raise AgenticContractError("accepted_resolutions.json must contain a candidates list")
+    reviewed_resolutions: list[StagedResolution] = []
+    reviewed_by_id: dict[str, StagedResolution] = {}
+    for candidate in reviewed_candidates:
+        resolution = _validate_candidate(candidate, gap_by_id=gap_by_id, manifest=manifest)
+        gap_id = str(resolution.gap["gap_id"])
+        if gap_id in reviewed_by_id:
+            raise AgenticContractError(f"duplicate reviewed resolution for gap_id: {gap_id}")
+        reviewed_by_id[gap_id] = resolution
+        reviewed_resolutions.append(resolution)
+
     resolutions: list[StagedResolution] = []
     accepted_ids: set[str] = set()
     for candidate in candidates:
@@ -430,6 +650,31 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
         accepted_ids.add(gap_id)
         resolutions.append(resolution)
 
+    raw_decisions = decision_manifest.get("decisions")
+    if not isinstance(raw_decisions, list) or not all(isinstance(item, dict) for item in raw_decisions):
+        raise AgenticContractError("review_decisions.json must contain a decisions list")
+    decisions: list[dict[str, str]] = []
+    decision_ids: set[str] = set()
+    for item in raw_decisions:
+        if set(item) != {"gap_id", "candidate_sha256", "decision"}:
+            raise AgenticContractError("review decision contains unsupported fields")
+        gap_id = item.get("gap_id")
+        digest = item.get("candidate_sha256")
+        decision = item.get("decision")
+        if not isinstance(gap_id, str) or gap_id not in reviewed_by_id or gap_id in decision_ids:
+            raise AgenticContractError(f"review decision has an invalid gap_id: {gap_id!r}")
+        if digest != reviewed_by_id[gap_id].sha256:
+            raise AgenticContractError(f"review decision hash does not match candidate: {gap_id}")
+        if decision not in {"accepted", "declined"}:
+            raise AgenticContractError(f"review decision is invalid for gap: {gap_id}")
+        decision_ids.add(gap_id)
+        decisions.append({"gap_id": gap_id, "candidate_sha256": str(digest), "decision": str(decision)})
+    accepted_decision_ids = {item["gap_id"] for item in decisions if item["decision"] == "accepted"}
+    if accepted_ids != accepted_decision_ids:
+        raise AgenticContractError("accepted resolutions do not match the durable review decisions")
+    if set(reviewed_by_id) != decision_ids:
+        raise AgenticContractError("review decisions do not cover every persisted reviewed candidate")
+
     try:
         expected_report = _apply_to_baseline(baseline, resolutions)
     except AgenticContractError as error:
@@ -438,12 +683,14 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
         provider_version=PROVIDER_VERSION,
         gaps=gaps,
         resolutions=resolutions,
+        reviewed_resolutions=reviewed_resolutions,
+        decisions=decisions,
         expected_report=expected_report,
     )
 
 
 def _empty_resolution_outcomes() -> dict[str, int]:
-    return {"resolved": 0, "needs_input": 0, "deferred": 0, "unreviewed": 0}
+    return {"resolved": 0, "needs_input": 0, "deferred": 0, "declined": 0, "unreviewed": 0}
 
 
 def _require_airflow_baseline(payload: Any) -> None:

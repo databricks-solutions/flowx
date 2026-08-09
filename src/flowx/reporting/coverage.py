@@ -140,7 +140,7 @@ def build_coverage_rows(metadata_dir: Path) -> list[dict[str, Any]]:
                 )
                 if not isinstance(outcomes, dict) or any(
                     not isinstance(outcomes.get(key), int)
-                    for key in ("resolved", "needs_input", "deferred", "unreviewed")
+                    for key in ("resolved", "needs_input", "deferred", "declined", "unreviewed")
                 ):
                     raise AgenticContractError(f"invalid agentic resolution outcomes for pipeline {name!r}")
                 if sum(outcomes.values()) != agentic:
@@ -149,7 +149,7 @@ def build_coverage_rows(metadata_dir: Path) -> list[dict[str, Any]]:
                         f"{agentic} agentic activities in pipeline {name!r}"
                     )
             else:
-                outcomes = {"resolved": 0, "needs_input": 0, "deferred": 0, "unreviewed": agentic}
+                outcomes = {"resolved": 0, "needs_input": 0, "deferred": 0, "declined": 0, "unreviewed": agentic}
             resolved_agentic = outcomes["resolved"]
             unresolved_agentic = agentic - resolved_agentic
             runnable_coverage = _runnable_coverage_pct(deterministic, resolved_agentic, total)

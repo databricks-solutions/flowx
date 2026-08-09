@@ -262,8 +262,14 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
         args += ["--accept-gap", gap_id]
     if p.get("accept_all"):
         args.append("--accept-all")
+    if p.get("review_complete"):
+        args.append("--review-complete")
+    if p.get("review_manifest"):
+        args += ["--review-manifest", p["review_manifest"]]
     if p.get("reset"):
         args.append("--reset")
+    if p.get("replace"):
+        args.append("--replace")
 
     raw_candidate_paths = p.get("candidate_paths") or []
     candidate_paths = [raw_candidate_paths] if isinstance(raw_candidate_paths, str) else list(raw_candidate_paths)
@@ -537,7 +543,8 @@ def build_server() -> FastMCP:
         - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
           merge ADF agent results. Airflow's legacy name-based merge is disabled; use resolve_agentic.
         - "resolve_agentic": source(req: "airflow"), action(req: prepare | stage | apply), output_dir,
-          airflow_source_path, report_path, candidates, accept_gap | accept_gaps, accept_all, reset —
+          airflow_source_path, report_path, candidates, replace, accept_gap | accept_gaps, accept_all,
+          review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.

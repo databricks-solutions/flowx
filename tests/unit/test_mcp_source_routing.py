@@ -158,6 +158,23 @@ def test_resolve_agentic_stage_materializes_inline_candidate(captured):
     assert result["ok"] is True
 
 
+def test_resolve_agentic_forwards_review_contract_flags(captured):
+    result = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "apply",
+            "output_dir": "/tmp/out",
+            "review_complete": True,
+            "review_manifest": "/tmp/review.json",
+        }
+    )
+
+    argv = _argv(captured, "resolve-agentic")
+    assert "--review-complete" in argv
+    assert argv[argv.index("--review-manifest") + 1] == "/tmp/review.json"
+    assert result["ok"] is True
+
+
 def test_resolve_agentic_rejects_adf_without_invoking_adapter(captured):
     result = server._cmd_resolve_agentic({"source": "adf", "action": "prepare", "output_dir": "/tmp/out"})
 

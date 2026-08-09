@@ -140,6 +140,7 @@ def test_audited_counts_drive_translation_and_deterministic_coverage(tmp_path: P
         "resolved": 0,
         "needs_input": 0,
         "deferred": 0,
+        "declined": 0,
         "unreviewed": 1,
     }
     assert verified["finding_count"] == 1

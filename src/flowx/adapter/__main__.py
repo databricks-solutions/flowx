@@ -117,12 +117,18 @@ def _run_resolve_agentic(args: argparse.Namespace) -> int:
                 dbt_mode=args.dbt_mode,
             )
         elif args.action == "stage":
-            payload = stage_airflow_resolutions(output_dir=args.output_dir, candidate_paths=args.candidate)
+            payload = stage_airflow_resolutions(
+                output_dir=args.output_dir,
+                candidate_paths=args.candidate,
+                replace=args.replace,
+            )
         else:
             payload = apply_airflow_resolutions(
                 output_dir=args.output_dir,
                 accepted_gap_ids=args.accept_gap,
                 accept_all=args.accept_all,
+                review_complete=args.review_complete,
+                review_manifest_path=args.review_manifest,
                 reset=args.reset,
                 source_path=args.source_path,
             )
@@ -429,12 +435,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Provider-authored AgenticResolution JSON to validate and stage. Repeatable.",
     )
     resolve_agentic.add_argument(
+        "--replace",
+        action="store_true",
+        help="Replace a different candidate already staged for the same gap.",
+    )
+    resolve_agentic.add_argument(
         "--accept-gap",
         action="append",
         default=[],
         help="Prepared gap fingerprint to accept. Repeatable; the full allowlist is replayed from baseline.",
     )
-    resolve_agentic.add_argument("--accept-all", action="store_true", help="Accept all already-staged candidates.")
+    resolve_agentic.add_argument(
+        "--accept-all",
+        action="store_true",
+        help="Accept all candidates in an exact prior --review-manifest.",
+    )
+    resolve_agentic.add_argument(
+        "--review-complete",
+        action="store_true",
+        help="Record every candidate in an exact prior review manifest as reviewed and declined.",
+    )
+    resolve_agentic.add_argument(
+        "--review-manifest",
+        type=Path,
+        default=None,
+        help="Hash-bound staged-candidate manifest returned by stage.",
+    )
     resolve_agentic.add_argument("--reset", action="store_true", help="Restore the immutable deterministic baseline.")
     resolve_agentic.add_argument(
         "--dbt-mode",

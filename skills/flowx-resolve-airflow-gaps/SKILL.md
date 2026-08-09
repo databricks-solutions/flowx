@@ -71,7 +71,9 @@ SQL named parameters. Comments may mention Airflow for provenance.
 
 Stage validates fingerprints, source/report hashes, the pinned provider version, argument
 disposition, generated-file hashes, Python imports, templates, and the constrained replacement
-schema. Tampering after staging is a hard failure.
+schema. Tampering after staging is a hard failure. Identical content is idempotent; use `--replace`
+to replace different content for an already-staged gap. Stage returns an immutable, hash-addressed
+review-manifest path for the complete staged candidate set.
 
 MCP accepts candidate objects inline with `action="stage"` and `candidates=[...]`.
 
@@ -88,15 +90,30 @@ provider version, and model provenance. Apply only the fingerprints the user acc
 ```
 
 `--accept-all` is only for replaying candidates already staged in a prior step; never combine it
-with live candidate generation. Apply always rebuilds from the immutable deterministic baseline,
+with live candidate generation. It requires `--review-manifest <path>` and rejects the operation if
+the reviewed candidate IDs or hashes no longer exactly match the staged set. Apply always rebuilds from the immutable deterministic baseline,
 then proves task count, location, keys, dependencies, policy, and enclosing control flow are
 unchanged. It writes `.work/translation_report.agentic.json` and keeps accepted evidence under
 `metadata/agentic/` so package pruning does not destroy provenance.
 
+To decline every staged candidate after reviewing that exact set, use:
+
+```bash
+"$PY" -m flowx.adapter resolve-agentic apply \
+  --source airflow \
+  --output-dir <output_dir> \
+  --review-complete \
+  --review-manifest <manifest-returned-by-stage>
+```
+
+This records the staged candidates as declined. Prepared gaps without a staged candidate remain
+unreviewed; the flag makes no claim about artifacts that did not exist.
+
 Use a reduced `--accept-gap` allowlist to reject selected candidates while retaining others. Use
 `--reset` to discard all accepted resolutions and start over from the deterministic baseline. A
-source edit after prepare is a hard failure: rerun convert and prepare instead of applying stale
-results.
+normal apply after a source edit is a hard failure: rerun convert and prepare instead of applying
+stale results. Reset is the recovery path and restores the durable baseline even after source drift
+or normal `.work/` pruning.
 
 Package the reviewed report explicitly:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -128,21 +129,36 @@ def _candidate(gap: dict, *, source: str = "print('Migrated from Airflow')\n", s
     return candidate
 
 
-def _stage(output: Path, candidate: dict, *, name: str = "candidate.json") -> int:
+def _stage(output: Path, candidate: dict, *, name: str = "candidate.json", replace: bool = False) -> int:
     candidate_path = output / name
     candidate_path.write_text(json.dumps(candidate, indent=2), encoding="utf-8")
-    return adapter_main(
-        [
-            "resolve-agentic",
-            "stage",
-            "--source",
-            "airflow",
-            "--output-dir",
-            str(output),
-            "--candidate",
-            str(candidate_path),
-        ]
-    )
+    args = [
+        "resolve-agentic",
+        "stage",
+        "--source",
+        "airflow",
+        "--output-dir",
+        str(output),
+        "--candidate",
+        str(candidate_path),
+    ]
+    if replace:
+        args.append("--replace")
+    return adapter_main(args)
+
+
+def _review_manifest(output: Path) -> Path:
+    index = json.loads((output / ".work" / "agentic" / "candidate_index.json").read_text(encoding="utf-8"))
+    expected = [
+        {"gap_id": gap_id, "sha256": entry["sha256"], "status": entry["status"]}
+        for gap_id, entry in sorted(index.items())
+    ]
+    matches = []
+    for path in (output / ".work" / "agentic" / "review_manifests").glob("*.json"):
+        if json.loads(path.read_text(encoding="utf-8"))["candidates"] == expected:
+            matches.append(path)
+    assert len(matches) == 1
+    return matches[0]
 
 
 def _load_tasks(report: Path) -> dict[str, dict]:
@@ -813,7 +829,7 @@ def test_apply_rejects_staged_candidate_tampering(tmp_path: Path, capsys):
 
 
 def test_apply_rejects_malformed_candidate_index(tmp_path: Path, capsys):
-    _, output, _ = _prepare(tmp_path)
+    _, output, gaps = _prepare(tmp_path)
     index = output / ".work" / "agentic" / "candidate_index.json"
     index.write_text(
         json.dumps({"../../outside": {"sha256": "0" * 64, "status": "resolved"}}),
@@ -821,7 +837,16 @@ def test_apply_rejects_malformed_candidate_index(tmp_path: Path, capsys):
     )
 
     exit_code = adapter_main(
-        ["resolve-agentic", "apply", "--source", "airflow", "--output-dir", str(output), "--reset"]
+        [
+            "resolve-agentic",
+            "apply",
+            "--source",
+            "airflow",
+            "--output-dir",
+            str(output),
+            "--accept-gap",
+            gaps[0]["gap_id"],
+        ]
     )
 
     assert exit_code == 1
@@ -857,7 +882,19 @@ def test_reduced_allowlist_restores_unaccepted_placeholder_and_reset_restores_al
         assert _stage(output, _candidate(gap), name=f"candidate-{index}.json") == 0
 
     assert (
-        adapter_main(["resolve-agentic", "apply", "--source", "airflow", "--output-dir", str(output), "--accept-all"])
+        adapter_main(
+            [
+                "resolve-agentic",
+                "apply",
+                "--source",
+                "airflow",
+                "--output-dir",
+                str(output),
+                "--accept-all",
+                "--review-manifest",
+                str(_review_manifest(output)),
+            ]
+        )
         == 0
     )
     applied_report = output / ".work" / "translation_report.agentic.json"
@@ -886,6 +923,107 @@ def test_reduced_allowlist_restores_unaccepted_placeholder_and_reset_restores_al
         adapter_main(["resolve-agentic", "apply", "--source", "airflow", "--output-dir", str(output), "--reset"]) == 0
     )
     assert {task["type"] for task in _load_tasks(applied_report).values()} == {"PlaceholderActivity"}
+
+
+def test_accept_all_requires_an_exact_prior_review_manifest(tmp_path: Path, capsys) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    assert _stage(output, _candidate(gaps[0])) == 0
+
+    assert (
+        adapter_main(["resolve-agentic", "apply", "--source", "airflow", "--output-dir", str(output), "--accept-all"])
+        == 1
+    )
+    assert "require --review-manifest" in capsys.readouterr().err
+
+    stale = _review_manifest(output)
+    changed = _candidate(gaps[0], source="print('replacement')")
+    assert _stage(output, changed) == 1
+    assert "use --replace" in capsys.readouterr().err
+    assert _stage(output, changed, replace=True) == 0
+
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "apply",
+                "--source",
+                "airflow",
+                "--output-dir",
+                str(output),
+                "--accept-all",
+                "--review-manifest",
+                str(stale),
+            ]
+        )
+        == 1
+    )
+    assert "does not exactly match" in capsys.readouterr().err
+
+
+def test_review_complete_declines_exact_staged_set_and_leaves_unstaged_gaps_unreviewed(tmp_path: Path) -> None:
+    _, output, gaps = _prepare(tmp_path, two_tasks=True)
+    assert _stage(output, _candidate(gaps[0])) == 0
+
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "apply",
+                "--source",
+                "airflow",
+                "--output-dir",
+                str(output),
+                "--review-complete",
+                "--review-manifest",
+                str(_review_manifest(output)),
+            ]
+        )
+        == 0
+    )
+
+    report = output / ".work" / "translation_report.agentic.json"
+    assert {task["type"] for task in _load_tasks(report).values()} == {"PlaceholderActivity"}
+    evidence = output / "metadata" / "agentic"
+    decisions = json.loads((evidence / "review_decisions.json").read_text(encoding="utf-8"))["decisions"]
+    assert decisions == [
+        {
+            "gap_id": gaps[0]["gap_id"],
+            "candidate_sha256": decisions[0]["candidate_sha256"],
+            "decision": "declined",
+        }
+    ]
+    outcomes = summarize_persisted_agentic_resolutions(evidence)["pipelines"]["agentic"]
+    assert outcomes == {"resolved": 0, "needs_input": 0, "deferred": 0, "declined": 1, "unreviewed": 1}
+
+
+def test_reset_uses_durable_baseline_after_source_change_and_work_pruning(tmp_path: Path) -> None:
+    source, output, gaps = _prepare(tmp_path)
+    assert _stage(output, _candidate(gaps[0])) == 0
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "apply",
+                "--source",
+                "airflow",
+                "--output-dir",
+                str(output),
+                "--accept-gap",
+                gaps[0]["gap_id"],
+            ]
+        )
+        == 0
+    )
+    source.write_text(source.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    shutil.rmtree(output / ".work")
+
+    assert (
+        adapter_main(["resolve-agentic", "apply", "--source", "airflow", "--output-dir", str(output), "--reset"]) == 0
+    )
+
+    report = output / ".work" / "translation_report.agentic.json"
+    assert _load_tasks(report)["pod"]["type"] == "PlaceholderActivity"
+    assert (output / "metadata" / "agentic" / "source" / "dag.py").exists()
 
 
 @pytest.mark.parametrize("status", ["needs_input", "deferred"])
@@ -1059,7 +1197,7 @@ def test_reviewed_resolution_evidence_drives_honest_runnable_coverage(tmp_path: 
 
     assert summary == {
         "provider_version": "0.2.0",
-        "pipelines": {"agentic": {"resolved": 1, "needs_input": 1, "deferred": 0, "unreviewed": 0}},
+        "pipelines": {"agentic": {"resolved": 1, "needs_input": 1, "deferred": 0, "declined": 0, "unreviewed": 0}},
     }
     assert row["coverage_pct"] == 100.0
     assert row["deterministic_coverage_pct"] == 0.0
@@ -1129,6 +1267,7 @@ def test_reporting_keeps_non_resolver_source_gaps_unreviewed(tmp_path: Path) -> 
         "resolved": 1,
         "needs_input": 0,
         "deferred": 0,
+        "declined": 0,
         "unreviewed": 1,
     }
     assert row["unresolved_agentic_activities"] == 1
