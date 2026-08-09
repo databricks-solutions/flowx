@@ -356,3 +356,37 @@ def test_unconsumed_operator_arguments_become_placeholder() -> None:
     assert classified["task_id"]["rationale"] == "capture_identity"
     assert classified["bash_command"]["rationale"] == "operator_adapter"
     assert classified["pool"]["status"] == "unconsumed"
+
+
+def test_unlowerable_retry_policy_becomes_placeholder(tmp_path: Path) -> None:
+    source = tmp_path / "dynamic_retry.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='dynamic_retry') as dag:\n"
+        "    BashOperator(task_id='work', bash_command='echo hi', retries=get_retries())\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(source)
+
+    assert isinstance(pipeline.tasks[0], PlaceholderActivity)
+    finding = next(item for item in pipeline.not_translatable if item["code"] == "unrepresented_task_policy")
+    assert finding["details"]["arguments"] == ["retries"]
+
+
+def test_dynamic_trigger_rule_becomes_placeholder(tmp_path: Path) -> None:
+    source = tmp_path / "dynamic_trigger.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='dynamic_trigger') as dag:\n"
+        "    BashOperator(task_id='work', bash_command='echo hi', trigger_rule=get_rule())\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(source)
+
+    assert isinstance(pipeline.tasks[0], PlaceholderActivity)
+    finding = next(item for item in pipeline.not_translatable if item["code"] == "unsupported_trigger_rule")
+    assert finding["details"]["task_key"] == "work"

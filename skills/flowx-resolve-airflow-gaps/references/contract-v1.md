@@ -3,6 +3,10 @@
 The provider receives a `GapEnvelope` produced by flowx. It does not receive authority to alter the
 captured graph.
 
+`capture_identity` is flowx's source-capture identity and may differ from the collision-safe
+Databricks `task_key`. `task_path` identifies the exact placeholder location, including a nested
+`for_each` body; providers must copy neither field into the replacement payload.
+
 ## Resolution shape
 
 ```json
@@ -55,8 +59,10 @@ automatic retry occurs.
 - Generated file paths are relative and cannot contain `..`.
 - Every generated file is inline and hash-bound; external workspace paths are not accepted.
 - Python payloads may mention Airflow in comments but may not contain `import airflow` or
-  `from airflow ...` statements.
+  `from airflow ...` statements. They must start with `# Databricks notebook source` so the bundle
+  imports them as notebooks rather than ordinary Python files.
 - Airflow Jinja is rejected. Databricks dynamic references such as `{{job.parameters.x}}`,
-  `{{tasks.upstream.values.x}}`, and `{{input}}` remain valid.
+  `{{tasks.upstream.values.x}}`, and `{{input}}` are valid in replacement parameter values, not in
+  uploaded notebook or SQL source files; source files must read widgets or SQL named parameters.
 - Every source argument in the envelope has exactly one disposition and a non-empty rationale.
 - The provider identity must match the pinned `airflow-to-dabs` v0.2.0 knowledge release.

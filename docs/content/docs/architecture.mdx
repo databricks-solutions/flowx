@@ -59,7 +59,7 @@ The unified `flowx.adapter` CLI is the single contract. Both surfaces go through
 | `mcp/runner.py`   | Subprocess bridge to `flowx.adapter` with artifact summarizers (for running translation without the `mcp` dependency) |
 | `mcp/__main__.py` | `python -m flowx.mcp` entry point (stdio default, `--http` for hosting)                                               |
 
-The `flowx` tool's `command` selects the adapter operation: `inputs`, `discover`, `convert`, `merge_agentic`, `inspect`, `apply_answers`, `materialize_lookup`, `workspace_paths`, `package`, `migrate`, `record_results`, and `install_dashboard` (with `parameters` carrying that command's arguments).
+The `flowx` tool's `command` selects the adapter operation: `inputs`, `discover`, `convert`, `merge_agentic` (ADF only), `resolve_agentic` (Airflow only), `inspect`, `apply_answers`, `materialize_lookup`, `workspace_paths`, `package`, `migrate`, `record_results`, and `install_dashboard` (with `parameters` carrying that command's arguments).
 
 ## Deployment topology
 

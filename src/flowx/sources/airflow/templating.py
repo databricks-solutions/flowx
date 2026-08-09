@@ -286,6 +286,34 @@ def retry_policy(dag_default_args: dict[str, ast.expr], task_kwargs: dict[str, a
     return result
 
 
+def unrepresented_retry_policy_arguments(
+    dag_default_args: dict[str, ast.expr],
+    task_kwargs: dict[str, ast.expr],
+) -> list[str]:
+    """Returns supplied retry/timeout settings that cannot be lowered exactly."""
+
+    def supplied(key: str) -> ast.expr | None:
+        return task_kwargs.get(key, dag_default_args.get(key))
+
+    unresolved: list[str] = []
+    retries = supplied("retries")
+    if retries is not None and not (
+        isinstance(retries, ast.Constant)
+        and (
+            retries.value is None
+            or (isinstance(retries.value, int) and not isinstance(retries.value, bool) and retries.value >= 0)
+        )
+    ):
+        unresolved.append("retries")
+    for name in ("retry_delay", "execution_timeout"):
+        value = supplied(name)
+        if value is None or (isinstance(value, ast.Constant) and value.value is None):
+            continue
+        if _timedelta_seconds(value) is None:
+            unresolved.append(name)
+    return unresolved
+
+
 def email_on_failure(dag_default_args: dict[str, ast.expr], task_kwargs: dict[str, ast.expr]) -> list[str]:
     """Returns email recipients when email_on_failure is set (for a job-level notification note).
 
@@ -343,7 +371,19 @@ def _trigger_rule_name(task_kwargs: dict[str, ast.expr]) -> str | None:
 
 def trigger_rule_mapping(task_kwargs: dict[str, ast.expr]) -> TriggerRuleMapping:
     """Classifies an Airflow trigger rule as exact, approximate, or unsupported."""
-    rule = _trigger_rule_name(task_kwargs) or "all_success"
+    trigger_rule = task_kwargs.get("trigger_rule")
+    if trigger_rule is None:
+        rule = "all_success"
+    else:
+        resolved_rule = _trigger_rule_name(task_kwargs)
+        if resolved_rule is None:
+            return TriggerRuleMapping(
+                rule=ast.unparse(trigger_rule),
+                outcome=None,
+                status="unsupported",
+                message="The trigger rule cannot be resolved statically.",
+            )
+        rule = resolved_rule
     if rule == "none_failed_min_one_success":
         return TriggerRuleMapping(
             rule=rule,

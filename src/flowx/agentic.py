@@ -48,20 +48,10 @@ _COMMON_TASK_FIELDS = (
 )
 _FLOWX_OWNED_ARGUMENTS = {
     "task_id",
-    "retries",
-    "retry_delay",
-    "execution_timeout",
-    "trigger_rule",
-    "depends_on_past",
-    "wait_for_downstream",
-    "pool",
-    "pool_slots",
-    "priority_weight",
-    "queue",
 }
 _NESTED_TASK_FIELDS = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
 _AIRFLOW_TEMPLATE = re.compile(r"{{\s*([^{}]+?)\s*}}|{%\s*([^{}]+?)\s*%}")
-_DAB_TEMPLATE_PREFIXES = ("job.", "tasks.", "input", "backfill.")
+_DAB_TEMPLATE_PREFIXES = ("job.", "tasks.", "input.", "backfill.")
 
 
 class AgenticContractError(ValueError):
@@ -74,6 +64,7 @@ class GapEnvelope:
 
     gap_id: str
     pipeline_name: str
+    capture_identity: str
     task_key: str
     task_path: list[str | int]
     operator: str
@@ -95,7 +86,7 @@ class GapEnvelope:
             "gap_id": self.gap_id,
             "source": "airflow",
             "pipeline_name": self.pipeline_name,
-            "capture_identity": self.task_key,
+            "capture_identity": self.capture_identity,
             "task_key": self.task_key,
             "task_path": self.task_path,
             "operator": self.operator,
@@ -242,7 +233,10 @@ def stage_airflow_resolutions(*, output_dir: Path, candidate_paths: list[Path]) 
         except json.JSONDecodeError as error:
             raise AgenticContractError(f"Candidate {path} contains invalid JSON: {error}") from error
         resolution = _validate_candidate(candidate, gap_by_id=gap_by_id, manifest=manifest)
-        staged[resolution.gap["gap_id"]] = resolution
+        gap_id = str(resolution.gap["gap_id"])
+        if gap_id in staged:
+            raise AgenticContractError(f"Duplicate candidate supplied for gap_id: {gap_id}")
+        staged[gap_id] = resolution
 
     candidates_dir = workspace / "candidates"
     candidates_dir.mkdir(exist_ok=True)
@@ -344,12 +338,17 @@ def summarize_persisted_agentic_resolutions(evidence_dir: Path) -> dict[str, Any
         return {}
     evidence = _load_persisted_agentic_evidence(evidence_dir)
     pipeline_outcomes: dict[str, dict[str, int]] = {}
-    for gap in evidence.gaps:
-        pipeline = str(gap["pipeline_name"])
-        pipeline_outcomes.setdefault(pipeline, _empty_resolution_outcomes())["unreviewed"] += 1
+    for pipeline in _pipeline_list(evidence.expected_report):
+        name = str(pipeline["name"])
+        audit = pipeline.get("audit") or {}
+        outcomes = _empty_resolution_outcomes()
+        outcomes["unreviewed"] = int(audit.get("agentic_count", 0))
+        pipeline_outcomes[name] = outcomes
     for resolution in evidence.resolutions:
-        pipeline = str(resolution.gap["pipeline_name"])
-        outcomes = pipeline_outcomes.setdefault(pipeline, _empty_resolution_outcomes())
+        pipeline_name = str(resolution.gap["pipeline_name"])
+        outcomes = pipeline_outcomes.setdefault(pipeline_name, _empty_resolution_outcomes())
+        if outcomes["unreviewed"] <= 0:
+            raise AgenticContractError(f"agentic resolution over-accounts pipeline {pipeline_name!r}")
         outcomes["unreviewed"] -= 1
         outcomes[str(resolution.candidate["status"])] += 1
     return {
@@ -484,33 +483,63 @@ def _build_gap_envelopes(
             source_hash = next(iter(source_hashes.values()))
         if source_hash is None:
             raise AgenticContractError(f"No source snapshot hash matches pipeline {pipeline.get('name')!r}")
-        findings = {
-            (finding.get("details") or {}).get("task_key"): finding
-            for finding in pipeline.get("not_translatable") or []
-            if isinstance(finding, dict) and finding.get("code") == "operator_placeholder"
-        }
+        pipeline_findings = [finding for finding in pipeline.get("not_translatable") or [] if isinstance(finding, dict)]
+        findings: dict[tuple[str | int, ...], dict[str, Any]] = {}
+        for finding in pipeline_findings:
+            if finding.get("code") != "operator_placeholder":
+                continue
+            task_path = (finding.get("details") or {}).get("task_path")
+            if not isinstance(task_path, list) or not all(isinstance(item, (str, int)) for item in task_path):
+                raise AgenticContractError("Operator placeholder finding is missing its captured task path")
+            path_key = tuple(task_path)
+            if path_key in findings:
+                raise AgenticContractError(f"Duplicate operator placeholder finding at task path: {task_path}")
+            findings[path_key] = finding
         tasks = list(_walk_tasks(pipeline.get("tasks") or []))
         downstream = _downstream_index([task for _, task in tasks])
         for task_path, task in tasks:
-            if task.get("type") != "PlaceholderActivity" or str(task.get("task_key", "")).startswith("__flowx_"):
+            if task.get("type") != "PlaceholderActivity" or task.get("original_type") == "AirflowSourceSemantics":
                 continue
-            finding = findings.get(task.get("task_key"))
-            if not finding or not finding.get("fingerprint"):
-                continue
+            matched_finding = findings.get(task_path)
+            if not matched_finding or not matched_finding.get("fingerprint"):
+                raise AgenticContractError(f"Placeholder at task path {list(task_path)} has no bound finding")
             raw_definition = dict(task.get("raw_definition") or {})
             operator = str(raw_definition.get("operator") or task.get("original_type") or "UnknownOperator")
+            finding_details = matched_finding.get("details") or {}
+            capture_identity = finding_details.get("capture_id")
+            if not isinstance(capture_identity, str) or not capture_identity:
+                raise AgenticContractError(f"Placeholder at task path {list(task_path)} has no capture identity")
+            flowx_owned_arguments = set(_FLOWX_OWNED_ARGUMENTS)
+            if task.get("max_retries") is not None:
+                flowx_owned_arguments.add("retries")
+            if task.get("min_retry_interval_millis") is not None:
+                flowx_owned_arguments.add("retry_delay")
+            if task.get("timeout_seconds") is not None:
+                flowx_owned_arguments.add("execution_timeout")
+            related_findings = [
+                item for item in pipeline_findings if (item.get("details") or {}).get("capture_id") == capture_identity
+            ]
+            if not any(item.get("code") == "unsupported_trigger_rule" for item in related_findings):
+                flowx_owned_arguments.add("trigger_rule")
             envelope = GapEnvelope(
-                gap_id=str(finding["fingerprint"]),
+                gap_id=str(matched_finding["fingerprint"]),
                 pipeline_name=str(pipeline["name"]),
+                capture_identity=capture_identity,
                 task_key=str(task["task_key"]),
                 task_path=list(task_path),
                 operator=operator,
                 source_file=str(source_file),
                 source_sha256=source_hash,
                 baseline_report_sha256=baseline_hash,
-                source_span={key: int(finding.get(key, 0)) for key in ("line", "column", "end_line", "end_column")},
+                source_span={
+                    key: int(matched_finding.get(key, 0)) for key in ("line", "column", "end_line", "end_column")
+                },
                 raw_definition=raw_definition,
-                arguments=_extract_arguments(raw_definition, operator=operator),
+                arguments=_extract_arguments(
+                    raw_definition,
+                    operator=operator,
+                    flowx_owned_arguments=flowx_owned_arguments,
+                ),
                 upstream_task_keys=[str(item.get("task_key")) for item in task.get("depends_on") or []],
                 downstream_task_keys=downstream.get(str(task["task_key"]), []),
                 dag_settings={
@@ -519,16 +548,36 @@ def _build_gap_envelopes(
                     "tags": pipeline.get("tags"),
                 },
                 reason={
-                    "code": str(finding.get("code", "operator_placeholder")),
-                    "message": str(finding.get("message", "")),
+                    "code": str(matched_finding.get("code", "operator_placeholder")),
+                    "message": str(task.get("comment") or matched_finding.get("message", "")),
                 },
             )
             envelopes.append(envelope.as_dict())
-    return sorted(envelopes, key=lambda item: (item["pipeline_name"], item["task_path"]))
+    ordered = sorted(envelopes, key=lambda item: (item["pipeline_name"], item["task_path"]))
+    gap_ids = [item["gap_id"] for item in ordered]
+    if len(gap_ids) != len(set(gap_ids)):
+        raise AgenticContractError("Prepared Airflow gaps contain duplicate fingerprints")
+    return ordered
 
 
-def _extract_arguments(raw_definition: dict[str, Any], *, operator: str) -> list[dict[str, Any]]:
-    source = raw_definition.get("source")
+def _extract_arguments(
+    raw_definition: dict[str, Any],
+    *,
+    operator: str,
+    flowx_owned_arguments: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    owned = _FLOWX_OWNED_ARGUMENTS if flowx_owned_arguments is None else flowx_owned_arguments
+    bound_source = raw_definition.get("bound_source")
+    invocation = raw_definition.get("invocation")
+    source = (
+        bound_source
+        if isinstance(bound_source, str) and bound_source.strip()
+        else invocation
+        if isinstance(invocation, str) and invocation.strip()
+        else raw_definition.get("source")
+    )
+    if operator.startswith("@") and not (isinstance(invocation, str) and invocation.strip()):
+        source = None
     arguments: list[dict[str, Any]] = []
     if isinstance(source, str) and source.strip():
         try:
@@ -543,25 +592,25 @@ def _extract_arguments(raw_definition: dict[str, Any], *, operator: str) -> list
                 for index, value in enumerate(call.args):
                     name = f"$star{index}" if isinstance(value, ast.Starred) else f"$arg{index}"
                     expression = ast.unparse(value.value if isinstance(value, ast.Starred) else value)
-                    arguments.append(_argument(name, expression))
+                    arguments.append(_argument(name, expression, owned))
                 kwargs_index = 0
                 for keyword in call.keywords:
                     keyword_name = keyword.arg
                     if keyword_name is None:
                         keyword_name = f"$kwargs{kwargs_index}"
                         kwargs_index += 1
-                    arguments.append(_argument(keyword_name, ast.unparse(keyword.value)))
+                    arguments.append(_argument(keyword_name, ast.unparse(keyword.value), owned))
     mapping = raw_definition.get("mapping")
     if isinstance(mapping, str) and mapping:
-        arguments.append(_argument("$mapping", mapping))
+        arguments.append(_argument("$mapping", mapping, owned))
     return arguments
 
 
-def _argument(name: str, expression: str) -> dict[str, Any]:
+def _argument(name: str, expression: str, flowx_owned_arguments: set[str]) -> dict[str, Any]:
     return {
         "name": name,
         "source_expression": expression,
-        "preserved_by_flowx": name in _FLOWX_OWNED_ARGUMENTS,
+        "preserved_by_flowx": name in flowx_owned_arguments,
     }
 
 
@@ -691,8 +740,13 @@ def _validate_replacement(candidate: dict[str, Any], gap: dict[str, Any]) -> Non
         raise AgenticContractError("Generated file content must be non-empty")
     if generated.get("sha256") != _sha256_bytes(content.encode("utf-8")):
         raise AgenticContractError("Generated file sha256 does not match its content")
-    _reject_unresolved_templates({"replacement": replacement, "generated_files": files})
+    _reject_unresolved_templates(replacement)
+    _reject_generated_file_templates(content)
     if kind == "notebook":
+        lines = content.splitlines()
+        first_line = lines[0] if lines else ""
+        if first_line != "# Databricks notebook source":
+            raise AgenticContractError("Generated notebook requires the Databricks notebook source marker")
         try:
             module = ast.parse(content)
         except SyntaxError as error:
@@ -891,7 +945,7 @@ def _reject_unresolved_templates(value: Any) -> None:
     if isinstance(value, str):
         for match in _AIRFLOW_TEMPLATE.finditer(value):
             expression = (match.group(1) or match.group(2) or "").strip()
-            if not expression.startswith(_DAB_TEMPLATE_PREFIXES):
+            if expression != "input" and not expression.startswith(_DAB_TEMPLATE_PREFIXES):
                 raise AgenticContractError(f"Generated payload contains unresolved Airflow Jinja: {match.group(0)}")
     elif isinstance(value, dict):
         for item in value.values():
@@ -899,6 +953,18 @@ def _reject_unresolved_templates(value: Any) -> None:
     elif isinstance(value, list):
         for item in value:
             _reject_unresolved_templates(item)
+
+
+def _reject_generated_file_templates(content: str) -> None:
+    """Rejects templates in uploaded source files, where Jobs cannot interpolate them."""
+    for match in _AIRFLOW_TEMPLATE.finditer(content):
+        expression = (match.group(1) or match.group(2) or "").strip()
+        if expression == "input" or expression.startswith(_DAB_TEMPLATE_PREFIXES):
+            raise AgenticContractError(
+                "Generated file content cannot contain Databricks dynamic references; "
+                "pass them through replacement parameters"
+            )
+        raise AgenticContractError(f"Generated payload contains unresolved Airflow Jinja: {match.group(0)}")
 
 
 def _pipeline_list(payload: Any) -> list[dict[str, Any]]:

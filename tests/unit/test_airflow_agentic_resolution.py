@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import flowx.agentic as agentic_contract
 from flowx.adapter.__main__ import main as adapter_main
 from flowx.agentic import AgenticContractError, _validate_candidate, summarize_persisted_agentic_resolutions
 from flowx.bundler.dab_writer import main as package_main
@@ -62,7 +63,32 @@ def _prepare(tmp_path: Path, *, two_tasks: bool = False) -> tuple[Path, Path, di
     return source, output, gaps
 
 
+def _prepare_source(source: Path, output: Path) -> list[dict]:
+    assert airflow_convert(["--source-dir", str(source), "--output-dir", str(output)]) == 0
+    report = output / ".work" / "translation_report.json"
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "prepare",
+                "--source",
+                "airflow",
+                "--source-path",
+                str(source),
+                "--report",
+                str(report),
+                "--output-dir",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    return json.loads((output / ".work" / "agentic" / "gaps.json").read_text(encoding="utf-8"))
+
+
 def _candidate(gap: dict, *, source: str = "print('Migrated from Airflow')\n", status: str = "resolved") -> dict:
+    if not source.startswith("# Databricks notebook source\n"):
+        source = "# Databricks notebook source\n" + source
     generated_file = {
         "path": "task.py",
         "language": "python",
@@ -245,6 +271,180 @@ def test_placeholder_findings_bind_capture_identity_to_source(
     assert all(item["details"]["capture_id"] for item in findings)
 
 
+def test_source_expanded_placeholders_have_unique_gap_fingerprints(tmp_path: Path) -> None:
+    source = tmp_path / "loop.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "with DAG(dag_id='loop') as dag:\n"
+        "    for index in range(2):\n"
+        "        KubernetesPodOperator(task_id=f'pod_{index}', image='python:3.12')\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(source)
+    findings = [item for item in pipeline.not_translatable if item["code"] == "operator_placeholder"]
+    gaps = _prepare_source(source, tmp_path / "output")
+
+    assert [item["details"]["source_task_id"] for item in findings] == ["pod_0", "pod_1"]
+    assert len({item["fingerprint"] for item in findings}) == 2
+    assert len({gap["gap_id"] for gap in gaps}) == 2
+
+
+def test_gap_fingerprint_is_stable_when_an_unrelated_source_gap_changes_task_path(tmp_path: Path) -> None:
+    source = tmp_path / "stable.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "with DAG(dag_id='stable') as dag:\n"
+        "    KubernetesPodOperator(task_id='pod', image='python:3.12')\n",
+        encoding="utf-8",
+    )
+    original = next(
+        item for item in load_airflow_dag(source).not_translatable if item["code"] == "operator_placeholder"
+    )
+
+    source.write_text(
+        "from airflow import DAG\n"
+        "with DAG(dag_id='stable', max_active_runs=1) as dag:\n"
+        "    KubernetesPodOperator(task_id='pod', image='python:3.12')\n",
+        encoding="utf-8",
+    )
+    changed = next(item for item in load_airflow_dag(source).not_translatable if item["code"] == "operator_placeholder")
+
+    assert original["details"]["task_path"] == ["tasks", 0]
+    assert changed["details"]["task_path"] == ["tasks", 1]
+    assert changed["fingerprint"] == original["fingerprint"]
+
+
+def test_nested_and_top_level_task_key_collision_keeps_gap_identity_distinct(tmp_path: Path) -> None:
+    source = tmp_path / "nested_collision.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "with DAG(dag_id='nested_collision') as dag:\n"
+        "    top = KubernetesPodOperator(task_id='pod_iteration', image='python:3.12')\n"
+        "    mapped = KubernetesPodOperator.partial(task_id='pod', image='python:3.12').expand(env=['prod'])\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(source)
+    findings = [item for item in pipeline.not_translatable if item["code"] == "operator_placeholder"]
+    gaps = _prepare_source(source, tmp_path / "output")
+
+    assert [item["details"]["source_task_id"] for item in findings] == ["pod_iteration", "pod"]
+    assert len({item["fingerprint"] for item in findings}) == 2
+    assert len({tuple(gap["task_path"]) for gap in gaps}) == 2
+    assert {gap["capture_identity"] for gap in gaps} == {"top", "mapped"}
+
+
+def test_gap_envelope_carries_bound_helper_arguments(tmp_path: Path) -> None:
+    source = tmp_path / "helper.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "def make(task_id, image):\n"
+        "    return KubernetesPodOperator(task_id=task_id, image=image)\n"
+        "with DAG(dag_id='helper') as dag:\n"
+        "    pod = make('helper_pod', 'python:3.12')\n",
+        encoding="utf-8",
+    )
+
+    gap = _prepare_source(source, tmp_path / "output")[0]
+    arguments = {item["name"]: item for item in gap["arguments"]}
+
+    assert arguments["task_id"]["source_expression"] == "'helper_pod'"
+    assert arguments["image"]["source_expression"] == "'python:3.12'"
+
+
+def test_gap_envelope_carries_statically_bound_operator_arguments(tmp_path: Path) -> None:
+    source = tmp_path / "constants.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "IMAGE = 'python:3.12'\n"
+        "with DAG(dag_id='constants') as dag:\n"
+        "    pod = KubernetesPodOperator(task_id='pod', image=IMAGE)\n",
+        encoding="utf-8",
+    )
+
+    gap = _prepare_source(source, tmp_path / "output")[0]
+    arguments = {item["name"]: item for item in gap["arguments"]}
+
+    assert arguments["image"]["source_expression"] == "'python:3.12'"
+    assert "image=IMAGE" in gap["raw_definition"]["source"]
+
+
+def test_taskflow_gap_arguments_come_from_invocation_not_callable_body(tmp_path: Path) -> None:
+    source = tmp_path / "taskflow.py"
+    source.write_text(
+        "from airflow.decorators import dag, task\n"
+        "@task.branch\n"
+        "def choose(value):\n"
+        "    print(value)\n"
+        "    return 'next'\n"
+        "@dag(dag_id='taskflow')\n"
+        "def workflow():\n"
+        "    choose('selected')\n"
+        "workflow()\n",
+        encoding="utf-8",
+    )
+
+    gap = _prepare_source(source, tmp_path / "output")[0]
+
+    assert gap["arguments"] == [{"name": "$arg0", "source_expression": "'selected'", "preserved_by_flowx": False}]
+
+
+def test_only_actually_preserved_policy_arguments_are_flowx_owned(tmp_path: Path) -> None:
+    source = tmp_path / "policy.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='policy') as dag:\n"
+        "    BashOperator(task_id='work', bash_command='echo hi', retries=2, pool='critical', trigger_rule='always')\n",
+        encoding="utf-8",
+    )
+
+    gap = _prepare_source(source, tmp_path / "output")[0]
+    arguments = {item["name"]: item["preserved_by_flowx"] for item in gap["arguments"]}
+
+    assert arguments == {
+        "task_id": True,
+        "bash_command": False,
+        "retries": True,
+        "pool": False,
+        "trigger_rule": False,
+    }
+
+
+def test_classic_mapped_placeholder_preserves_retry_policy_claimed_by_flowx(tmp_path: Path) -> None:
+    source = tmp_path / "mapped_policy.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "with DAG(dag_id='mapped_policy') as dag:\n"
+        "    pod = KubernetesPodOperator.partial(task_id='pod', retries=2).expand(image=['a', 'b'])\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(source)
+    inner = pipeline.tasks[0].inner_activities[0]
+    gap = _prepare_source(source, tmp_path / "output")[0]
+    arguments = {item["name"]: item for item in gap["arguments"]}
+
+    assert inner.max_retries == 2
+    assert arguments["retries"]["preserved_by_flowx"] is True
+
+
+def test_unlowered_dynamic_retry_policy_is_not_claimed_as_preserved(tmp_path: Path) -> None:
+    source = tmp_path / "dynamic_policy.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "with DAG(dag_id='dynamic_policy') as dag:\n"
+        "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12', retries=get_retries())\n",
+        encoding="utf-8",
+    )
+
+    gap = _prepare_source(source, tmp_path / "output")[0]
+    arguments = {item["name"]: item for item in gap["arguments"]}
+
+    assert arguments["retries"]["preserved_by_flowx"] is False
+
+
 def test_resolve_agentic_is_explicitly_airflow_only(tmp_path: Path, capsys):
     exit_code = adapter_main(
         [
@@ -322,6 +522,67 @@ def test_stage_rejects_unresolved_jinja_provider_drift_and_file_hash_mismatch(tm
     assert "sha256 does not match" in capsys.readouterr().err
 
 
+def test_stage_rejects_python_script_without_databricks_notebook_marker(tmp_path: Path, capsys) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    candidate = _candidate(gaps[0], source="print('plain script')\n")
+    content = "print('plain script')\n"
+    candidate["generated_files"][0]["content"] = content
+    candidate["generated_files"][0]["sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    assert _stage(output, candidate) == 1
+    assert "Databricks notebook source marker" in capsys.readouterr().err
+
+
+def test_stage_rejects_duplicate_candidates_for_one_gap(tmp_path: Path, capsys) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text(json.dumps(_candidate(gaps[0], source="print('first')\n")), encoding="utf-8")
+    second.write_text(json.dumps(_candidate(gaps[0], source="print('second')\n")), encoding="utf-8")
+
+    exit_code = adapter_main(
+        [
+            "resolve-agentic",
+            "stage",
+            "--source",
+            "airflow",
+            "--output-dir",
+            str(output),
+            "--candidate",
+            str(first),
+            "--candidate",
+            str(second),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "duplicate candidate" in capsys.readouterr().err.lower()
+    assert not list((output / ".work" / "agentic" / "candidates").iterdir())
+
+
+def test_stage_requires_dynamic_references_in_task_parameters_not_source_files(tmp_path: Path, capsys) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    source = "print('{{job.parameters.env}}')\n"
+    candidate = _candidate(gaps[0], source=source)
+    candidate["replacement"]["base_parameters"] = {"env": "{{job.parameters.env}}"}
+
+    assert _stage(output, candidate) == 1
+    assert "cannot contain Databricks dynamic references" in capsys.readouterr().err
+
+    valid = _candidate(gaps[0], source="print(dbutils.widgets.get('env'))\n")
+    valid["replacement"]["base_parameters"] = {"env": "{{job.parameters.env}}"}
+    assert _stage(output, valid) == 0
+
+
+def test_stage_does_not_misclassify_airflow_input_names_as_dynamic_references(tmp_path: Path, capsys) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    candidate = _candidate(gaps[0])
+    candidate["replacement"]["base_parameters"] = {"path": "{{ input_file }}"}
+
+    assert _stage(output, candidate) == 1
+    assert "unresolved Airflow Jinja" in capsys.readouterr().err
+
+
 def test_pinned_v020_provider_fixtures_satisfy_the_flowx_contract() -> None:
     root = Path(__file__).parents[2] / "skills" / "flowx-resolve-airflow-gaps" / "references" / "airflow-to-dabs-v0.2.0"
     provider = json.loads((root / "provider.json").read_text(encoding="utf-8"))
@@ -373,6 +634,50 @@ def test_apply_rebuilds_from_baseline_and_preserves_graph_policy(tmp_path: Path)
     assert (output / "metadata" / "agentic" / "accepted_resolutions.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("task_key", "HIJACKED"),
+        ("depends_on", [{"task_key": "missing"}]),
+        ("max_retries", 99),
+    ],
+)
+def test_post_apply_proof_rejects_graph_or_policy_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    field: str,
+    value: object,
+) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    assert _stage(output, _candidate(gaps[0])) == 0
+    original = agentic_contract._build_replacement
+
+    def mutated_replacement(placeholder: dict, candidate: dict) -> dict:
+        task = original(placeholder, candidate)
+        task[field] = value
+        return task
+
+    monkeypatch.setattr(agentic_contract, "_build_replacement", mutated_replacement)
+
+    exit_code = adapter_main(
+        [
+            "resolve-agentic",
+            "apply",
+            "--source",
+            "airflow",
+            "--output-dir",
+            str(output),
+            "--accept-gap",
+            gaps[0]["gap_id"],
+        ]
+    )
+
+    assert exit_code == 1
+    assert "changed task identity, dependencies, or policy" in capsys.readouterr().err
+    assert not (output / ".work" / "translation_report.agentic.json").exists()
+
+
 def test_apply_supports_sql_leaf_payload(tmp_path: Path):
     _, output, gaps = _prepare(tmp_path)
     candidate = _candidate(gaps[0])
@@ -408,6 +713,23 @@ def test_apply_supports_sql_leaf_payload(tmp_path: Path):
     assert task["type"] == "SqlActivity"
     assert task["sql"] == sql
     assert task["warehouse_ref"] == "${var.warehouse_id}"
+    report = output / ".work" / "translation_report.agentic.json"
+    assert (
+        package_main(
+            [
+                "--report",
+                str(report),
+                "--output-dir",
+                str(output),
+                "--no-download-workspace-files",
+            ]
+        )
+        == 0
+    )
+    resource = (output / "resources" / "agentic.yml").read_text(encoding="utf-8")
+    assert "sql_task:" in resource
+    assert "../src/sql/pod.sql" in resource
+    assert (output / "src" / "sql" / "pod.sql").read_text(encoding="utf-8") == sql
 
 
 def test_nested_for_each_resolution_preserves_enclosing_control_flow(tmp_path: Path):
@@ -745,6 +1067,71 @@ def test_reviewed_resolution_evidence_drives_honest_runnable_coverage(tmp_path: 
     assert row["unresolved_agentic_activities"] == 1
     assert row["agentic_provider_version"] == "0.2.0"
     assert row["reconciliation_status"] == "verified_with_reviewed_resolutions"
+
+
+def test_reporting_keeps_non_resolver_source_gaps_unreviewed(tmp_path: Path) -> None:
+    source = tmp_path / "mixed_gaps.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "with DAG(dag_id='mixed_gaps') as dag:\n"
+        "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12')\n"
+        "    for item in runtime_values:\n"
+        "        KubernetesPodOperator(task_id=f'dynamic_{item}', image='python:3.12')\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output"
+    gaps = _prepare_source(source, output)
+    assert len(gaps) == 1
+    assert _stage(output, _candidate(gaps[0])) == 0
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "apply",
+                "--source",
+                "airflow",
+                "--output-dir",
+                str(output),
+                "--accept-gap",
+                gaps[0]["gap_id"],
+            ]
+        )
+        == 0
+    )
+    baseline = json.loads((output / ".work" / "agentic" / "baseline.json").read_text(encoding="utf-8"))
+    metadata = output / "metadata"
+    (metadata / "inventory.json").write_text(
+        json.dumps(
+            {
+                "source": "airflow",
+                "pipelines": [
+                    {
+                        "name": "mixed_gaps",
+                        "activities": [],
+                        "audited_activity_count": baseline["audit"]["audited_activity_count"],
+                        "deterministic_count": baseline["audit"]["deterministic_count"],
+                        "agentic_count": baseline["audit"]["agentic_count"],
+                        "failed_count": baseline["audit"]["failed_count"],
+                        "excluded_count": 0,
+                        "reconciliation_status": baseline["reconciliation_status"],
+                        "migration_status": "included",
+                        "findings": baseline["not_translatable"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    row = build_coverage_rows(metadata)[0]
+
+    assert json.loads(row["agentic_resolution_outcomes"]) == {
+        "resolved": 1,
+        "needs_input": 0,
+        "deferred": 0,
+        "unreviewed": 1,
+    }
+    assert row["unresolved_agentic_activities"] == 1
 
 
 def test_reporting_rejects_duplicate_hash_valid_agentic_evidence(tmp_path: Path) -> None:

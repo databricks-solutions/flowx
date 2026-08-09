@@ -41,6 +41,7 @@ def finding(
     severity: str,
     candidate: AuditCandidate | None = None,
     details: dict[str, Any] | None = None,
+    identity_discriminator: str | None = None,
 ) -> dict[str, Any]:
     """Builds a stable, serializable reconciliation finding."""
     line = candidate.line if candidate else 0
@@ -48,6 +49,8 @@ def finding(
     end_line = candidate.end_line if candidate else 0
     end_column = candidate.end_column if candidate else 0
     identity = f"{source_file}:{line}:{column}:{end_line}:{end_column}:{code}"
+    if identity_discriminator:
+        identity = f"{identity}:{identity_discriminator}"
     return {
         "fingerprint": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
         "code": code,

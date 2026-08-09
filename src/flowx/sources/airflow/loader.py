@@ -2202,6 +2202,14 @@ def _load_airflow_module(
         return dbt_key_remap.get(key, key)
 
     tasks: list[Activity] = []
+    placeholder_capture_ids: dict[int, str] = {}
+    helper_expansion_ids = {str(item["capture_id"]) for item in visitor.helper_expansions}
+
+    def append_task(activity: Activity, capture_id: str) -> None:
+        for placeholder in _iter_placeholders([activity]):
+            placeholder_capture_ids[id(placeholder)] = capture_id
+        tasks.append(activity)
+
     semantic_findings: list[dict[str, Any]] = []
     argument_proofs = [
         {
@@ -2233,8 +2241,9 @@ def _load_airflow_module(
         depends_on = [Dependency(task_key=k, outcome=outcome) for k in sorted(dep_keys)] or None
 
         if operator in ops.COSMOS_CONSTRUCTS:
-            tasks.append(
-                _build_dbt_factory(task_id, task_key, [kwargs], depends_on, dbt_mode, operator_types=[operator])
+            append_task(
+                _build_dbt_factory(task_id, task_key, [kwargs], depends_on, dbt_mode, operator_types=[operator]),
+                var,
             )
             continue
         if operator in ops.DBT_CLI_OPERATORS:
@@ -2246,7 +2255,7 @@ def _load_airflow_module(
             # any that are downstream of the factory itself (a sandwiched task, which would cycle).
             factory_depends_on = [Dependency(task_key=k, outcome=outcome) for k in sorted(factory_dep_keys)] or None
             dbt_kwargs = [visitor.operators[v][2] for v in dbt_vars]
-            tasks.append(
+            append_task(
                 _build_dbt_factory(
                     task_id,
                     task_key,
@@ -2254,12 +2263,18 @@ def _load_airflow_module(
                     factory_depends_on,
                     dbt_mode,
                     operator_types=[visitor.operators[dbt_var][1] for dbt_var in dbt_vars],
-                )
+                ),
+                var,
             )
             continue
 
         call_node = visitor.calls.get(var)
-        call_source = ast.get_source_segment(source, call_node) or "" if call_node is not None else ""
+        if call_node is None:
+            call_source = ""
+        elif var in helper_expansion_ids:
+            call_source = ast.unparse(call_node)
+        else:
+            call_source = ast.get_source_segment(source, call_node) or ""
         ctx = ops.OperatorContext(
             task_id=task_id,
             task_key=task_key,
@@ -2286,6 +2301,7 @@ def _load_airflow_module(
                     code="unsupported_trigger_rule",
                     message=(f"Task {task_id!r} uses trigger_rule {trigger_mapping.rule!r}; {trigger_mapping.message}"),
                     task_key=task_key,
+                    capture_id=var,
                 )
             )
         elif trigger_mapping.status == "approximate":
@@ -2299,6 +2315,7 @@ def _load_airflow_module(
                         f"{trigger_mapping.outcome}. {trigger_mapping.message}"
                     ),
                     task_key=task_key,
+                    capture_id=var,
                 )
             )
         unconsumed = ops.unconsumed_kwargs(operator, kwargs)
@@ -2317,14 +2334,30 @@ def _load_airflow_module(
                     code="unconsumed_operator_arguments",
                     message=f"Task {task_id!r} has unconsumed operator argument(s): {names}.",
                     task_key=task_key,
+                    capture_id=var,
                     arguments=sorted(unconsumed),
                 )
             )
-        # Stamp DAG/task retry + timeout policy (per-task kwargs override default_args).
-        policy = templating.retry_policy(visitor.default_args, kwargs)
-        activity.max_retries = policy.get("max_retries")
-        activity.timeout_seconds = policy.get("timeout_seconds")
-        activity.min_retry_interval_millis = policy.get("min_retry_interval_millis")
+        unrepresented_policy = templating.unrepresented_retry_policy_arguments(visitor.default_args, kwargs)
+        if unrepresented_policy:
+            names = ", ".join(unrepresented_policy)
+            activity = ops.build_placeholder_with_comment(
+                ctx,
+                f"Airflow task policy argument(s) {names} cannot be represented statically; "
+                "resolve the policy before migration.",
+            )
+            activity.depends_on = depends_on
+            semantic_findings.append(
+                _semantic_finding(
+                    source_file or dag_path.name,
+                    visitor.calls.get(var),
+                    code="unrepresented_task_policy",
+                    message=f"Task {task_id!r} has unrepresented retry/timeout policy argument(s): {names}.",
+                    task_key=task_key,
+                    capture_id=var,
+                    arguments=unrepresented_policy,
+                )
+            )
         # Convert Airflow Jinja in the activity's parameter fields to DAB refs; collect params.
         referenced_params |= _convert_activity_templates(activity)
         unresolved_templates = _unresolved_activity_templates(activity)
@@ -2343,11 +2376,14 @@ def _load_airflow_module(
                     code="unresolved_airflow_template",
                     message=f"Task {task_id!r} contains unresolved Airflow template expression(s): {expressions}.",
                     task_key=task_key,
+                    capture_id=var,
                     expressions=sorted(unresolved_templates),
                 )
             )
 
-        if var in visitor.mapped:
+        is_mapped = var in visitor.mapped
+        mapped_names: list[str] = []
+        if is_mapped:
             mapped_names = visitor.expand_kwargs.get(var) or []
             partial_note = (
                 " The mapping also contains .partial() fixed arguments." if var in visitor.partial_mapped else ""
@@ -2368,13 +2404,26 @@ def _load_airflow_module(
                         "but the generated inner task cannot bind them safely."
                     ),
                     task_key=task_key,
+                    capture_id=var,
                     arguments=mapped_names,
                     has_partial=var in visitor.partial_mapped,
                 )
             )
-            tasks.append(_wrap_in_for_each(activity, task_id, task_key, depends_on, kwargs, mapped_names))
+
+        # Stamp policy only after every semantic guard has selected the final leaf activity.
+        policy = templating.retry_policy(visitor.default_args, kwargs)
+        activity.max_retries = policy.get("max_retries")
+        activity.timeout_seconds = policy.get("timeout_seconds")
+        activity.min_retry_interval_millis = policy.get("min_retry_interval_millis")
+        if isinstance(activity, PlaceholderActivity) and call_node is not None:
+            raw_definition = dict(activity.raw_definition or {})
+            raw_definition["bound_source"] = ast.unparse(call_node)
+            activity.raw_definition = raw_definition
+
+        if is_mapped:
+            append_task(_wrap_in_for_each(activity, task_id, task_key, depends_on, kwargs, mapped_names), var)
         else:
-            tasks.append(activity)
+            append_task(activity, var)
 
     # TaskFlow @task instances: emit each as a notebook that reads upstream return values via
     # dbutils.jobs.taskValues, calls the decorated function, and sets its own return value.
@@ -2410,17 +2459,21 @@ def _load_airflow_module(
                 },
             )
             placeholder.depends_on = depends_on
-            tasks.append(placeholder)
+            append_task(placeholder, var)
             continue
         activity = _build_taskflow_task(tf, var_to_task_key, functions, source, task_key)
         activity.depends_on = depends_on
+        if isinstance(activity, PlaceholderActivity):
+            raw_definition = dict(activity.raw_definition or {})
+            raw_definition["invocation"] = ast.get_source_segment(source, visitor.capture_source_nodes[var]) or ""
+            activity.raw_definition = raw_definition
         referenced_params |= _convert_activity_templates(activity)
         if var in visitor.mapped and isinstance(activity, NotebookActivity):
             # .expand(param=[literal list]) -> a for_each_task iterating the callable notebook; the
             # inner notebook reads the mapped parameter from the per-iteration `item` widget.
-            tasks.append(_wrap_taskflow_in_for_each(activity, tf, task_key, depends_on))
+            append_task(_wrap_taskflow_in_for_each(activity, tf, task_key, depends_on), var)
         else:
-            tasks.append(activity)
+            append_task(activity, var)
 
     # @task_group invocations: a group is a sub-pipeline of tasks with no single-task lowering, so
     # emit a placeholder + gap (never silently drop the whole group) for the agentic round to expand.
@@ -2444,10 +2497,11 @@ def _load_airflow_module(
             raw_definition={
                 "operator": "@task_group",
                 "source": ast.get_source_segment(source, group_func) if group_func is not None else "",
+                "invocation": ast.get_source_segment(source, visitor.capture_source_nodes[var]) or "",
             },
         )
         placeholder.depends_on = depends_on
-        tasks.append(placeholder)
+        append_task(placeholder, var)
 
     # Declare every job parameter -- those referenced in templates plus any from the DAG's
     # params={...} -- each with a default (Databricks requires one): the params={...} default when
@@ -2483,6 +2537,7 @@ def _load_airflow_module(
         sensor_lift_proof=sensor_lift_proof,
         argument_proofs=argument_proofs,
         expected_ir_edges=expected_ir_edges,
+        placeholder_capture_ids=placeholder_capture_ids,
     )
 
 
@@ -2510,6 +2565,7 @@ def _semantic_finding(
     code: str,
     message: str,
     task_key: str,
+    capture_id: str,
     **details: Any,
 ) -> dict[str, Any]:
     """Builds a stable gap finding for a captured task-level semantic limitation."""
@@ -2521,7 +2577,7 @@ def _semantic_finding(
         occurrence=1,
         end_line=getattr(node, "end_lineno", 0),
         end_column=getattr(node, "end_col_offset", 0),
-        details={"task_key": task_key, **details},
+        details={"task_key": task_key, "capture_id": capture_id, **details},
     )
     return source_audit.finding(
         source_file=source_file,
@@ -2532,15 +2588,24 @@ def _semantic_finding(
     )
 
 
+def _iter_placeholders_with_paths(
+    tasks: list[Activity],
+    path: tuple[str | int, ...] = ("tasks",),
+) -> list[tuple[tuple[str | int, ...], PlaceholderActivity]]:
+    """Returns placeholders with their stable serialized Pipeline IR paths."""
+    placeholders: list[tuple[tuple[str | int, ...], PlaceholderActivity]] = []
+    for index, task in enumerate(tasks):
+        task_path = (*path, index)
+        if isinstance(task, PlaceholderActivity):
+            placeholders.append((task_path, task))
+        if isinstance(task, ForEachActivity):
+            placeholders.extend(_iter_placeholders_with_paths(task.inner_activities, (*task_path, "inner_activities")))
+    return placeholders
+
+
 def _iter_placeholders(tasks: list[Activity]) -> list[PlaceholderActivity]:
     """Returns placeholders in top-level and Airflow-generated for_each tasks."""
-    placeholders: list[PlaceholderActivity] = []
-    for task in tasks:
-        if isinstance(task, PlaceholderActivity):
-            placeholders.append(task)
-        if isinstance(task, ForEachActivity):
-            placeholders.extend(_iter_placeholders(task.inner_activities))
-    return placeholders
+    return [placeholder for _, placeholder in _iter_placeholders_with_paths(tasks)]
 
 
 def _reconcile_pipeline(
@@ -2556,6 +2621,7 @@ def _reconcile_pipeline(
     sensor_lift_proof: dict[str, Any] | None,
     argument_proofs: list[dict[str, Any]],
     expected_ir_edges: set[tuple[str, str]],
+    placeholder_capture_ids: dict[int, str],
 ) -> Pipeline:
     """Reconciles an independent source audit with captured graph and emitted IR."""
     findings: list[dict[str, Any]] = list(semantic_findings)
@@ -2938,19 +3004,18 @@ def _reconcile_pipeline(
             }
         )
 
-    placeholders = [
-        placeholder
-        for placeholder in _iter_placeholders(pipeline.tasks)
+    blocking_gaps = [*unsupported_settings, *unresolved]
+    placeholder_entries = [
+        (
+            ("tasks", int(task_path[1]) + 1, *task_path[2:]) if blocking_gaps else task_path,
+            placeholder,
+        )
+        for task_path, placeholder in _iter_placeholders_with_paths(pipeline.tasks)
         if not placeholder.task_key.startswith("__flowx_")
     ]
-    capture_by_placeholder_key: dict[str, str] = {}
-    for capture_id, task_key in expected_key_by_capture.items():
-        capture_by_placeholder_key[task_key] = capture_id
-        if capture_id in visitor.mapped:
-            capture_by_placeholder_key[f"{task_key}_iteration"] = capture_id
-
-    for placeholder in placeholders:
-        placeholder_capture_id = capture_by_placeholder_key.get(placeholder.task_key)
+    placeholders = [placeholder for _, placeholder in placeholder_entries]
+    for task_path, placeholder in placeholder_entries:
+        placeholder_capture_id = placeholder_capture_ids.get(id(placeholder))
         if placeholder_capture_id is None:
             findings.append(
                 source_audit.finding(
@@ -2958,7 +3023,11 @@ def _reconcile_pipeline(
                     code="operator_placeholder_capture_mismatch",
                     severity="failed",
                     message=(f"Placeholder task {placeholder.task_key!r} has no captured Airflow task identity."),
-                    details={"task_key": placeholder.task_key, "operator": placeholder.original_type},
+                    details={
+                        "task_key": placeholder.task_key,
+                        "operator": placeholder.original_type,
+                        "task_path": list(task_path),
+                    },
                 )
             )
             continue
@@ -2993,11 +3062,15 @@ def _reconcile_pipeline(
                     "operator": placeholder.original_type,
                     "capture_id": placeholder_capture_id,
                     "source_task_id": source_task_id(placeholder_capture_id),
+                    "task_path": list(task_path),
                 },
+                identity_discriminator=json.dumps(
+                    [pipeline.name, source_task_id(placeholder_capture_id)],
+                    separators=(",", ":"),
+                ),
             )
         )
 
-    blocking_gaps = [*unsupported_settings, *unresolved]
     if blocking_gaps:
         placeholder_key = "__flowx_source_gaps"
         gap_task = PlaceholderActivity(

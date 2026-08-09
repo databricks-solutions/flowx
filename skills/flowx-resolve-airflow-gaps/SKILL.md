@@ -56,7 +56,9 @@ state the specific semantic loss. Never include task names, task keys, dependenc
 timeouts, clusters, schedules, or other graph/policy fields in the replacement.
 
 Generated code must be self-contained, contain no Airflow import statements, and contain no
-unresolved Airflow Jinja. Comments may mention Airflow for provenance.
+template expressions. Python notebooks must start with `# Databricks notebook source`. Put
+Databricks dynamic references in replacement parameters and read them through notebook widgets or
+SQL named parameters. Comments may mention Airflow for provenance.
 
 ## 3. Stage candidates
 
