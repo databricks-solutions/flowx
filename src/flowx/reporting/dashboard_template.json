@@ -8,13 +8,14 @@
         "SUM(audited_activities) AS audited_activities, ",
         "SUM(deterministic_activities) AS deterministic_activities, ",
         "SUM(agentic_activities) AS agentic_activities, ",
-        "SUM(unresolved_agentic_activities) AS unresolved_agentic_activities, ",
+        "SUM(resolved_agentic_count) AS resolved_agentic_count, ",
+        "SUM(unresolved_agentic_count) AS unresolved_agentic_count, ",
         "SUM(unsupported_activities) AS unsupported_activities, ",
         "SUM(failed_activities) AS failed_activities, ",
         "SUM(excluded_activities) AS excluded_activities, ",
         "ROUND(100.0*(SUM(deterministic_activities)+SUM(agentic_activities))/NULLIF(SUM(audited_activities),0),1) AS coverage_pct, ",
         "ROUND(100.0*SUM(deterministic_activities)/NULLIF(SUM(audited_activities),0),1) AS deterministic_coverage_pct, ",
-        "ROUND(100.0*(SUM(deterministic_activities)+SUM(agentic_activities)-SUM(unresolved_agentic_activities))/NULLIF(SUM(audited_activities),0),1) AS runnable_coverage_pct ",
+        "ROUND(100.0*(SUM(deterministic_activities)+SUM(resolved_agentic_count))/NULLIF(SUM(audited_activities),0),1) AS code_attached_coverage_pct ",
         "FROM {{RESULTS_TABLE}} ",
         "WHERE run_id = (SELECT run_id FROM {{RESULTS_TABLE}} ORDER BY run_date DESC LIMIT 1)"
       ]
@@ -33,13 +34,13 @@
       "name": "latest_pipelines",
       "displayName": "Pipeline coverage (latest run)",
       "queryLines": [
-        "SELECT pipeline, audited_activities, deterministic_activities, agentic_activities, unresolved_agentic_activities, ",
+        "SELECT pipeline, audited_activities, deterministic_activities, agentic_activities, resolved_agentic_count, unresolved_agentic_count, ",
         "unsupported_activities, failed_activities, excluded_activities, reconciliation_status, ",
-        "migration_status, coverage_pct, deterministic_coverage_pct, runnable_coverage_pct, ",
+        "migration_status, coverage_pct, deterministic_coverage_pct, code_attached_coverage_pct, ",
         "agentic_resolution_outcomes, agentic_provider_version, finding_count, collapsible_patterns, complexity_size ",
         "FROM {{RESULTS_TABLE}} ",
         "WHERE run_id = (SELECT run_id FROM {{RESULTS_TABLE}} ORDER BY run_date DESC LIMIT 1) ",
-        "ORDER BY runnable_coverage_pct ASC, audited_activities DESC"
+        "ORDER BY code_attached_coverage_pct ASC, audited_activities DESC"
       ]
     },
     {
@@ -49,7 +50,7 @@
         "SELECT DATE_TRUNC('SECOND', run_date) AS run_ts, ",
         "ROUND(100.0*(SUM(deterministic_activities)+SUM(agentic_activities))/NULLIF(SUM(audited_activities),0),1) AS coverage_pct, ",
         "ROUND(100.0*SUM(deterministic_activities)/NULLIF(SUM(audited_activities),0),1) AS deterministic_coverage_pct, ",
-        "ROUND(100.0*(SUM(deterministic_activities)+SUM(agentic_activities)-SUM(unresolved_agentic_activities))/NULLIF(SUM(audited_activities),0),1) AS runnable_coverage_pct, ",
+        "ROUND(100.0*(SUM(deterministic_activities)+SUM(resolved_agentic_count))/NULLIF(SUM(audited_activities),0),1) AS code_attached_coverage_pct, ",
         "SUM(audited_activities) AS audited_activities, SUM(failed_activities) AS failed_activities, ",
         "SUM(excluded_activities) AS excluded_activities ",
         "FROM {{RESULTS_TABLE}} ",
@@ -85,7 +86,7 @@
             "name": "subtitle",
             "multilineTextboxSpec": {
               "lines": [
-                "Code-attached coverage counts deterministic and reviewed provider code that passed mechanical validation. It does not certify semantic correctness."
+                "Code attached — deterministic or reviewed agentic; semantic correctness not verified"
               ]
             }
           },
@@ -146,8 +147,8 @@
                   "datasetName": "latest_summary",
                   "fields": [
                     {
-                      "name": "runnable_coverage_pct",
-                      "expression": "`runnable_coverage_pct`"
+                      "name": "code_attached_coverage_pct",
+                      "expression": "`code_attached_coverage_pct`"
                     }
                   ],
                   "disaggregated": true
@@ -159,7 +160,7 @@
               "widgetType": "counter",
               "encodings": {
                 "value": {
-                  "fieldName": "runnable_coverage_pct",
+                  "fieldName": "code_attached_coverage_pct",
                   "displayName": "Code-attached %"
                 }
               },
@@ -404,8 +405,8 @@
                       "expression": "`run_ts`"
                     },
                     {
-                      "name": "runnable_coverage_pct",
-                      "expression": "`runnable_coverage_pct`"
+                      "name": "code_attached_coverage_pct",
+                      "expression": "`code_attached_coverage_pct`"
                     }
                   ],
                   "disaggregated": true
@@ -424,7 +425,7 @@
                   "displayName": "Run"
                 },
                 "y": {
-                  "fieldName": "runnable_coverage_pct",
+                  "fieldName": "code_attached_coverage_pct",
                   "scale": {
                     "type": "quantitative"
                   },
@@ -470,8 +471,12 @@
                       "expression": "`agentic_activities`"
                     },
                     {
-                      "name": "unresolved_agentic_activities",
-                      "expression": "`unresolved_agentic_activities`"
+                      "name": "resolved_agentic_count",
+                      "expression": "`resolved_agentic_count`"
+                    },
+                    {
+                      "name": "unresolved_agentic_count",
+                      "expression": "`unresolved_agentic_count`"
                     },
                     {
                       "name": "failed_activities",
@@ -494,8 +499,8 @@
                       "expression": "`coverage_pct`"
                     },
                     {
-                      "name": "runnable_coverage_pct",
-                      "expression": "`runnable_coverage_pct`"
+                      "name": "code_attached_coverage_pct",
+                      "expression": "`code_attached_coverage_pct`"
                     },
                     {
                       "name": "agentic_resolution_outcomes",
@@ -540,7 +545,11 @@
                     "displayName": "Agentic"
                   },
                   {
-                    "fieldName": "unresolved_agentic_activities",
+                    "fieldName": "resolved_agentic_count",
+                    "displayName": "Resolved agentic"
+                  },
+                  {
+                    "fieldName": "unresolved_agentic_count",
                     "displayName": "Unresolved agentic"
                   },
                   {
@@ -564,7 +573,7 @@
                     "displayName": "Translation path %"
                   },
                   {
-                    "fieldName": "runnable_coverage_pct",
+                    "fieldName": "code_attached_coverage_pct",
                     "displayName": "Code-attached %"
                   },
                   {

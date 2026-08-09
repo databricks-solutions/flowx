@@ -116,7 +116,7 @@ def _candidate(gap: dict, *, source: str = "print('Migrated from Airflow')\n", s
         "request_sha256": gap["request_sha256"],
         "provider": {
             "name": "airflow-to-dabs",
-            "version": "0.2.0",
+            "version": "0.2.1",
             "repository": "https://github.com/park-peter/airflow-to-dabs",
         },
         "model": {"name": "test-model"},
@@ -191,29 +191,32 @@ def test_prepare_writes_versioned_fingerprint_bound_gap_without_changing_report(
     assert image["normalized_value"] == "python:3.11"
     assert (output / ".work" / "agentic" / "baseline.json").exists()
     assert (output / ".work" / "agentic" / "source" / "dag.py").read_bytes() == source.read_bytes()
-    assert (output / ".work" / "agentic" / "provider" / "PROFILE.md").exists()
+    assert (output / ".work" / "agentic" / "provider" / "providers" / "flowx-gap-resolver" / "PROFILE.md").exists()
 
 
 def test_prepare_can_select_one_gap_for_the_caller_without_losing_workspace_gaps(tmp_path: Path) -> None:
     source, output, gaps = _prepare(tmp_path, two_tasks=True)
     report = output / ".work" / "translation_report.json"
 
-    assert adapter_main(
-        [
-            "resolve-agentic",
-            "prepare",
-            "--source",
-            "airflow",
-            "--source-path",
-            str(source),
-            "--report",
-            str(report),
-            "--output-dir",
-            str(output),
-            "--gap-id",
-            gaps[0]["gap_id"],
-        ]
-    ) == 0
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "prepare",
+                "--source",
+                "airflow",
+                "--source-path",
+                str(source),
+                "--report",
+                str(report),
+                "--output-dir",
+                str(output),
+                "--gap-id",
+                gaps[0]["gap_id"],
+            ]
+        )
+        == 0
+    )
     prepared = json.loads((output / ".work" / "agentic" / "gaps.json").read_text(encoding="utf-8"))
     manifest = json.loads((output / ".work" / "agentic" / "manifest.json").read_text(encoding="utf-8"))
     assert {gap["gap_id"] for gap in prepared} == {gap["gap_id"] for gap in gaps}
@@ -591,12 +594,21 @@ def test_stage_rejects_unresolved_jinja_provider_drift_and_file_hash_mismatch(tm
     wrong_provider = _candidate(gaps[0])
     wrong_provider["provider"]["version"] = "0.1.0"
     assert _stage(output, wrong_provider) == 1
-    assert "pinned airflow-to-dabs v0.2.0" in capsys.readouterr().err
+    assert "pinned airflow-to-dabs v0.2.1" in capsys.readouterr().err
 
     bad_hash = _candidate(gaps[0])
     bad_hash["generated_files"][0]["sha256"] = "0" * 64
     assert _stage(output, bad_hash) == 1
     assert "sha256 does not match" in capsys.readouterr().err
+
+
+def test_stage_rejects_provider_context_modified_after_prepare(tmp_path: Path, capsys) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    profile = output / ".work" / "agentic" / "provider" / "providers" / "flowx-gap-resolver" / "PROFILE.md"
+    profile.write_text(profile.read_text(encoding="utf-8") + "\nmodified\n", encoding="utf-8")
+
+    assert _stage(output, _candidate(gaps[0])) == 1
+    assert "provider context was modified after prepare" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("field", ["task_sha256", "graph_sha256", "provider_sha256", "request_sha256"])
@@ -607,6 +619,28 @@ def test_stage_rejects_stale_request_identity(tmp_path: Path, capsys, field: str
 
     assert _stage(output, candidate) == 1
     assert f"Candidate {field} does not match" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("baseline_report_sha256", "does not match the prepared baseline"),
+        ("source_sha256", "does not match its GapEnvelope"),
+        ("gap_id", "does not match a prepared gap"),
+    ],
+)
+def test_stage_rejects_stale_gap_source_and_report_identity(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    field: str,
+    message: str,
+) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    candidate = _candidate(gaps[0])
+    candidate[field] = "0" * 64
+
+    assert _stage(output, candidate) == 1
+    assert message in capsys.readouterr().err
 
 
 def test_stage_limits_artifact_size_and_allows_needs_input_disposition(tmp_path: Path, capsys) -> None:
@@ -686,12 +720,20 @@ def test_stage_does_not_misclassify_airflow_input_names_as_dynamic_references(tm
     assert "unresolved Airflow Jinja" in capsys.readouterr().err
 
 
-def test_pinned_v020_provider_fixtures_satisfy_the_flowx_contract() -> None:
-    root = Path(__file__).parents[2] / "skills" / "flowx-resolve-airflow-gaps" / "references" / "airflow-to-dabs-v0.2.0"
+def test_pinned_v021_provider_fixtures_satisfy_the_flowx_contract() -> None:
+    root = (
+        Path(__file__).parents[2]
+        / "skills"
+        / "flowx-resolve-airflow-gaps"
+        / "references"
+        / "airflow-to-dabs-v0.2.1"
+        / "providers"
+        / "flowx-gap-resolver"
+    )
     provider = json.loads((root / "provider.json").read_text(encoding="utf-8"))
 
-    assert provider["provider"]["version"] == "0.2.0"
-    for outcome in ("notebook", "sql", "needs-input", "deferred"):
+    assert provider["provider"]["version"] == "0.2.1"
+    for outcome in ("notebook", "sql", "spark-python", "needs-input", "deferred"):
         gap = json.loads((root / "fixtures" / f"gap-{outcome}.json").read_text(encoding="utf-8"))
         candidate = json.loads((root / "fixtures" / f"resolution-{outcome}.json").read_text(encoding="utf-8"))
         manifest = {"baseline_report_sha256": gap["baseline_report_sha256"]}
@@ -1101,6 +1143,34 @@ def test_accept_all_requires_an_exact_prior_review_manifest(tmp_path: Path, caps
     assert "does not exactly match" in capsys.readouterr().err
 
 
+def test_identical_stage_and_allowlist_replay_are_byte_idempotent(tmp_path: Path) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    candidate = _candidate(gaps[0])
+    assert _stage(output, candidate) == 0
+    candidate_path = output / ".work" / "agentic" / "candidates" / f"{gaps[0]['gap_id']}.json"
+    staged_bytes = candidate_path.read_bytes()
+
+    assert _stage(output, candidate) == 0
+    assert candidate_path.read_bytes() == staged_bytes
+
+    args = [
+        "resolve-agentic",
+        "apply",
+        "--source",
+        "airflow",
+        "--output-dir",
+        str(output),
+        "--accept-gap",
+        gaps[0]["gap_id"],
+    ]
+    assert adapter_main(args) == 0
+    report = output / ".work" / "translation_report.agentic.json"
+    applied_bytes = report.read_bytes()
+
+    assert adapter_main(args) == 0
+    assert report.read_bytes() == applied_bytes
+
+
 def test_review_complete_declines_exact_staged_set_and_leaves_unstaged_gaps_unreviewed(tmp_path: Path) -> None:
     _, output, gaps = _prepare(tmp_path, two_tasks=True)
     assert _stage(output, _candidate(gaps[0])) == 0
@@ -1135,6 +1205,37 @@ def test_review_complete_declines_exact_staged_set_and_leaves_unstaged_gaps_unre
     ]
     outcomes = summarize_persisted_agentic_resolutions(evidence)["pipelines"]["agentic"]
     assert outcomes == {"resolved": 0, "needs_input": 0, "deferred": 0, "declined": 1, "unreviewed": 1}
+    assert package_main(["--report", str(report), "--output-dir", str(output)]) == 0
+
+
+def test_package_replays_review_complete_evidence_before_bundle_writes(tmp_path: Path, capsys) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    assert _stage(output, _candidate(gaps[0])) == 0
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "apply",
+                "--source",
+                "airflow",
+                "--output-dir",
+                str(output),
+                "--review-complete",
+                "--review-manifest",
+                str(_review_manifest(output)),
+            ]
+        )
+        == 0
+    )
+    decisions_path = output / "metadata" / "agentic" / "review_decisions.json"
+    decisions = json.loads(decisions_path.read_text(encoding="utf-8"))
+    decisions["decisions"][0]["candidate_sha256"] = "0" * 64
+    decisions_path.write_text(json.dumps(decisions), encoding="utf-8")
+
+    report = output / ".work" / "translation_report.agentic.json"
+    assert package_main(["--report", str(report), "--output-dir", str(output)]) == 1
+    assert "review decision hash does not match candidate" in capsys.readouterr().err
+    assert not (output / "databricks.yml").exists()
 
 
 def test_reset_uses_durable_baseline_after_source_change_and_work_pruning(tmp_path: Path) -> None:
@@ -1288,7 +1389,7 @@ def test_package_rejects_agentic_report_tampering_before_bundle_writes(tmp_path:
     assert not (bundle / "databricks.yml").exists()
 
 
-def test_reviewed_resolution_evidence_drives_honest_runnable_coverage(tmp_path: Path) -> None:
+def test_reviewed_resolution_evidence_drives_honest_code_attached_coverage(tmp_path: Path) -> None:
     _, output, gaps = _prepare(tmp_path, two_tasks=True)
     assert _stage(output, _candidate(gaps[0]), name="resolved.json") == 0
     assert _stage(output, _candidate(gaps[1], status="needs_input"), name="needs-input.json") == 0
@@ -1337,14 +1438,15 @@ def test_reviewed_resolution_evidence_drives_honest_runnable_coverage(tmp_path: 
     row = build_coverage_rows(metadata)[0]
 
     assert summary == {
-        "provider_version": "0.2.0",
+        "provider_version": "0.2.1",
         "pipelines": {"agentic": {"resolved": 1, "needs_input": 1, "deferred": 0, "declined": 0, "unreviewed": 0}},
     }
     assert row["coverage_pct"] == 100.0
     assert row["deterministic_coverage_pct"] == 0.0
-    assert row["runnable_coverage_pct"] == 50.0
-    assert row["unresolved_agentic_activities"] == 1
-    assert row["agentic_provider_version"] == "0.2.0"
+    assert row["code_attached_coverage_pct"] == 50.0
+    assert row["resolved_agentic_count"] == 1
+    assert row["unresolved_agentic_count"] == 1
+    assert row["agentic_provider_version"] == "0.2.1"
     assert row["reconciliation_status"] == "verified_with_reviewed_resolutions"
 
 
@@ -1411,7 +1513,8 @@ def test_reporting_keeps_non_resolver_source_gaps_unreviewed(tmp_path: Path) -> 
         "declined": 0,
         "unreviewed": 1,
     }
-    assert row["unresolved_agentic_activities"] == 1
+    assert row["resolved_agentic_count"] == 1
+    assert row["unresolved_agentic_count"] == 1
 
 
 def test_reporting_rejects_duplicate_hash_valid_agentic_evidence(tmp_path: Path) -> None:

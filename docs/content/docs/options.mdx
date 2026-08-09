@@ -117,6 +117,8 @@ phase surfaces three optional inputs — `results_table`, `results_warehouse_id`
   audited/deterministic/agentic/failed/excluded coverage breakdown, reconciliation and migration
   status, finding fingerprints, translation-path coverage, deterministic coverage, unresolved
   agentic count, reviewed-resolution outcomes/provider version, and code-attached coverage.
+  The corresponding result columns are `resolved_agentic_count`, `unresolved_agentic_count`, and
+  `code_attached_coverage_pct`.
   Airflow's audited count remains the denominator even for failed or excluded candidates.
   Code-attached coverage counts deterministic tasks plus accepted `resolved` provider candidates;
   it means the generated code passed mechanical contract validation, not that its semantics were

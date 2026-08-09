@@ -1759,7 +1759,13 @@ def _report_reconciliation_failures(report_path: Path) -> list[str]:
                 return [f"legacy ADF translation at index {index} is missing pipeline or IR data"]
         return []
 
-    if any(
+    airflow_agentic_report = report_path.name == "translation_report.agentic.json" and any(
+        isinstance(pipeline, dict)
+        and isinstance(pipeline.get("tags"), dict)
+        and pipeline["tags"].get("source") == "airflow"
+        for pipeline in pipelines
+    )
+    if airflow_agentic_report or any(
         isinstance(pipeline, dict)
         and (
             pipeline.get("reconciliation_status") == "verified_with_reviewed_resolutions"

@@ -32,7 +32,8 @@ _METRIC_SQL_TYPES: dict[str, str] = {
     "other_activities": "INT",
     "deterministic_activities": "INT",
     "agentic_activities": "INT",
-    "unresolved_agentic_activities": "INT",
+    "resolved_agentic_count": "INT",
+    "unresolved_agentic_count": "INT",
     "agentic_resolution_outcomes": "STRING",
     "agentic_provider_version": "STRING",
     "unsupported_activities": "INT",
@@ -42,7 +43,7 @@ _METRIC_SQL_TYPES: dict[str, str] = {
     "migration_status": "STRING",
     "coverage_pct": "DOUBLE",
     "deterministic_coverage_pct": "DOUBLE",
-    "runnable_coverage_pct": "DOUBLE",
+    "code_attached_coverage_pct": "DOUBLE",
     "finding_count": "INT",
     "finding_fingerprints": "STRING",
     "complexity_score": "INT",
@@ -67,7 +68,7 @@ _STRING_METRICS: frozenset[str] = frozenset(
         "complexity_size",
     }
 )
-_FLOAT_METRICS: frozenset[str] = frozenset({"coverage_pct", "deterministic_coverage_pct", "runnable_coverage_pct"})
+_FLOAT_METRICS: frozenset[str] = frozenset({"coverage_pct", "deterministic_coverage_pct", "code_attached_coverage_pct"})
 
 
 def _sql_str(value: Any) -> str:

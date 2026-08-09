@@ -1,15 +1,15 @@
-# Flowx Airflow Gap Resolver Profile
+# flowx Airflow Gap Resolver Profile
 
-Resolve exactly one source-reconciled Airflow leaf gap supplied by Flowx. Flowx owns DAG parsing,
+Resolve exactly one source-reconciled Airflow leaf gap supplied by flowx. flowx owns DAG parsing,
 capture identity, task keys, dependencies, task policy, control flow, IR, and bundle packaging. Do
 not reopen or parse the original DAG, construct another task graph, or generate a bundle.
 
-This profile implements Flowx Airflow agentic gap contract `1` with the pinned provider identity:
+This profile implements flowx Airflow agentic gap contract `1` with the pinned provider identity:
 
 ```json
 {
   "name": "airflow-to-dabs",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "repository": "https://github.com/park-peter/airflow-to-dabs"
 }
 ```
@@ -40,7 +40,7 @@ resolution; they do not grant authority to emit jobs, triggers, clusters, pipeli
      other changes outside the leaf-only contract.
 3. Account for every envelope argument exactly once in `argument_disposition`:
    - `consumed`: the generated payload or resolution decision uses it;
-   - `preserved_by_flowx`: Flowx retains it as task identity or policy;
+   - `preserved_by_flowx`: flowx retains it as task identity or policy;
    - `ignored`: the resolution intentionally omits it and states the exact behavioral loss.
    - `needs_input`: the argument depends on a concrete fact the user must provide before resolution.
 4. Enumerate prerequisites, warnings, and semantic deltas. Never hide a dropped behavior in prose or

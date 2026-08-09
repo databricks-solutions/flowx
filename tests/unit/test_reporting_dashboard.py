@@ -22,8 +22,9 @@ def test_build_serialized_dashboard_injects_table_and_is_valid_json():
     assert "excluded_activities" in joined
     assert "reconciliation_status" in joined
     assert "deterministic_coverage_pct" in joined
-    assert "runnable_coverage_pct" in joined
-    assert "unresolved_agentic_activities" in joined
+    assert "code_attached_coverage_pct" in joined
+    assert "resolved_agentic_count" in joined
+    assert "unresolved_agentic_count" in joined
     assert "agentic_resolution_outcomes" in joined
     assert "agentic_provider_version" in joined
     assert spec["pages"][0]["pageType"] == "PAGE_TYPE_CANVAS"
@@ -31,6 +32,10 @@ def test_build_serialized_dashboard_injects_table_and_is_valid_json():
     widget_names = {w["widget"]["name"] for w in spec["pages"][0]["layout"]}
     assert {"kpi-coverage", "by-size", "coverage-trend", "pipeline-table"} <= widget_names
     assert "mechanically validated" in serialized
+    subtitle = next(item["widget"] for item in spec["pages"][0]["layout"] if item["widget"]["name"] == "subtitle")
+    assert subtitle["multilineTextboxSpec"]["lines"] == [
+        "Code attached — deterministic or reviewed agentic; semantic correctness not verified"
+    ]
 
     dataset_fields = {}
     for dataset in spec["datasets"]:

@@ -1,0 +1,63 @@
+{
+  "argument_disposition": [
+    {
+      "disposition": "preserved_by_flowx",
+      "name": "task_id",
+      "rationale": "flowx preserves the collision-safe task identity."
+    },
+    {
+      "disposition": "consumed",
+      "name": "conn_id",
+      "rationale": "The connection identifies Databricks SQL as the execution target."
+    },
+    {
+      "disposition": "consumed",
+      "name": "sql",
+      "rationale": "The captured statement is emitted as the SQL file content."
+    },
+    {
+      "disposition": "ignored",
+      "name": "autocommit",
+      "rationale": "Databricks SQL task execution does not expose the Airflow autocommit toggle."
+    }
+  ],
+  "baseline_report_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "contract_version": "1",
+  "gap_id": "2222222222222222",
+  "generated_files": [
+    {
+      "content": "DELETE FROM main.ops.events\nWHERE processed_at < current_date() - INTERVAL 30 DAYS\n",
+      "language": "sql",
+      "path": "cleanup_events.sql",
+      "sha256": "89a5ec5ce7c02bfdffa57473908407ef620918b53840d8b8ce848179790546a7"
+    }
+  ],
+  "graph_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "model": {
+    "name": "fixture-model"
+  },
+  "prerequisites": [
+    "Configure the flowx warehouse_id bundle variable for the target workspace."
+  ],
+  "provider": {
+    "name": "airflow-to-dabs",
+    "repository": "https://github.com/park-peter/airflow-to-dabs",
+    "version": "0.2.1"
+  },
+  "provider_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "replacement": {
+    "file": "cleanup_events.sql",
+    "kind": "sql",
+    "parameters": {}
+  },
+  "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "semantic_deltas": [
+    "The statement runs on the configured Databricks SQL warehouse."
+  ],
+  "source_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "status": "resolved",
+  "task_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "warnings": [
+    "Airflow autocommit behavior is not reproduced by the Databricks SQL task."
+  ]
+}

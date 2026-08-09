@@ -1,0 +1,77 @@
+{
+  "allowed_replacement_kinds": [
+    "notebook",
+    "sql",
+    "spark_python"
+  ],
+  "arguments": [
+    {
+      "name": "task_id",
+      "owner": "flowx",
+      "preserved_by_flowx": true,
+      "source_expression": "'run_custom_python'"
+    },
+    {
+      "name": "mode",
+      "normalized_value": "full",
+      "owner": "provider",
+      "preserved_by_flowx": false,
+      "source_expression": "'full'"
+    }
+  ],
+  "baseline_report_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+  "capture_identity": "run_custom_python",
+  "contract_version": "1",
+  "dag_capture_identity": "dag:orders.py:orders",
+  "dag_settings": {
+    "parameters": [],
+    "schedule": null,
+    "tags": {
+      "source": "airflow"
+    }
+  },
+  "downstream_task_keys": [
+    "publish"
+  ],
+  "finding_fingerprints": [
+    "4444444444444444"
+  ],
+  "gap_id": "4444444444444444",
+  "graph_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "knowledge_provider": {
+    "name": "airflow-to-dabs",
+    "repository": "https://github.com/park-peter/airflow-to-dabs",
+    "version": "0.2.1"
+  },
+  "operator": "CustomPythonOperator",
+  "operator_fqn": "company.airflow.operators.CustomPythonOperator",
+  "pipeline_name": "orders",
+  "provider_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "raw_definition": {
+    "operator": "CustomPythonOperator",
+    "source": "run = CustomPythonOperator(task_id='run_custom_python', mode='full')"
+  },
+  "reason": {
+    "code": "operator_placeholder",
+    "message": "CustomPythonOperator has no deterministic mapping"
+  },
+  "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "source": "airflow",
+  "source_file": "orders.py",
+  "source_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+  "source_span": {
+    "column": 4,
+    "end_column": 5,
+    "end_line": 35,
+    "line": 30
+  },
+  "task_key": "run_custom_python",
+  "task_path": [
+    "tasks",
+    3
+  ],
+  "task_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "upstream_task_keys": [
+    "prepare"
+  ]
+}

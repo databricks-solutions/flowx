@@ -1,0 +1,83 @@
+{
+  "allowed_replacement_kinds": [
+    "notebook",
+    "sql",
+    "spark_python"
+  ],
+  "arguments": [
+    {
+      "name": "task_id",
+      "preserved_by_flowx": true,
+      "source_expression": "'notify_orders'"
+    },
+    {
+      "name": "endpoint",
+      "preserved_by_flowx": false,
+      "source_expression": "'https://example.com/hooks/orders'"
+    },
+    {
+      "name": "method",
+      "preserved_by_flowx": false,
+      "source_expression": "'POST'"
+    },
+    {
+      "name": "data",
+      "preserved_by_flowx": false,
+      "source_expression": "{'event': 'orders_ready'}"
+    },
+    {
+      "name": "retries",
+      "preserved_by_flowx": true,
+      "source_expression": "2"
+    }
+  ],
+  "baseline_report_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "capture_identity": "notify_orders",
+  "contract_version": "1",
+  "dag_settings": {
+    "parameters": [],
+    "schedule": null,
+    "tags": {
+      "source": "airflow"
+    }
+  },
+  "downstream_task_keys": [],
+  "gap_id": "1111111111111111",
+  "graph_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "knowledge_provider": {
+    "name": "airflow-to-dabs",
+    "repository": "https://github.com/park-peter/airflow-to-dabs",
+    "version": "0.2.1"
+  },
+  "operator": "SimpleHttpOperator",
+  "operator_fqn": "airflow.providers.http.operators.http.SimpleHttpOperator",
+  "pipeline_name": "orders",
+  "provider_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "raw_definition": {
+    "operator": "SimpleHttpOperator",
+    "source": "notify = SimpleHttpOperator(task_id=\"notify_orders\", endpoint=\"https://example.com/hooks/orders\", method=\"POST\", data={\"event\": \"orders_ready\"}, retries=2)"
+  },
+  "reason": {
+    "code": "operator_placeholder",
+    "message": "SimpleHttpOperator requires a provider-authored leaf implementation"
+  },
+  "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "source": "airflow",
+  "source_file": "orders.py",
+  "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_span": {
+    "column": 4,
+    "end_column": 5,
+    "end_line": 24,
+    "line": 18
+  },
+  "task_key": "notify_orders",
+  "task_path": [
+    "tasks",
+    2
+  ],
+  "task_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "upstream_task_keys": [
+    "publish_orders"
+  ]
+}

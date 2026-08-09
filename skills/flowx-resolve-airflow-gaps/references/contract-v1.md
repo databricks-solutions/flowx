@@ -22,7 +22,7 @@ Databricks `task_key`. `task_path` identifies the exact placeholder location, in
   "request_sha256": "copied from the envelope",
   "provider": {
     "name": "airflow-to-dabs",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "repository": "https://github.com/park-peter/airflow-to-dabs"
   },
   "model": {"name": "model identifier"},
@@ -72,4 +72,4 @@ automatic retry occurs.
   `{{tasks.upstream.values.x}}`, and `{{input}}` are valid in replacement parameter values, not in
   uploaded notebook or SQL source files; source files must read widgets or SQL named parameters.
 - Every source argument in the envelope has exactly one disposition and a non-empty rationale.
-- The provider identity must match the pinned `airflow-to-dabs` v0.2.0 knowledge release.
+- The provider identity must match the pinned `airflow-to-dabs` v0.2.1 knowledge release.

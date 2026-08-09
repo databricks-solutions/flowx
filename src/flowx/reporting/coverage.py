@@ -33,7 +33,8 @@ COVERAGE_METRIC_COLUMNS: tuple[str, ...] = (
     "other_activities",
     "deterministic_activities",
     "agentic_activities",
-    "unresolved_agentic_activities",
+    "resolved_agentic_count",
+    "unresolved_agentic_count",
     "agentic_resolution_outcomes",
     "agentic_provider_version",
     "unsupported_activities",
@@ -43,7 +44,7 @@ COVERAGE_METRIC_COLUMNS: tuple[str, ...] = (
     "migration_status",
     "coverage_pct",
     "deterministic_coverage_pct",
-    "runnable_coverage_pct",
+    "code_attached_coverage_pct",
     "finding_count",
     "finding_fingerprints",
     "complexity_score",
@@ -75,7 +76,7 @@ def _deterministic_coverage_pct(deterministic: int, total: int) -> float:
     return round(deterministic / total * 100, 1)
 
 
-def _runnable_coverage_pct(deterministic: int, resolved: int, total: int) -> float:
+def _code_attached_coverage_pct(deterministic: int, resolved: int, total: int) -> float:
     """Mechanically code-attached coverage over audited activity candidates."""
     if total <= 0:
         return 0.0
@@ -133,11 +134,9 @@ def build_coverage_rows(metadata_dir: Path) -> list[dict[str, Any]]:
         excluded = int(pipeline.get("excluded_count", 0)) if has_audit else 0
         total = int(pipeline.get("audited_activity_count", 0)) if has_audit else len(strategies)
         if is_airflow:
+            empty_outcomes = {"resolved": 0, "needs_input": 0, "deferred": 0, "declined": 0, "unreviewed": agentic}
             if agentic_summary:
-                outcomes = resolution_pipelines.get(
-                    name,
-                    {"resolved": 0, "needs_input": 0, "deferred": 0, "unreviewed": 0},
-                )
+                outcomes = resolution_pipelines.get(name, empty_outcomes)
                 if not isinstance(outcomes, dict) or any(
                     not isinstance(outcomes.get(key), int)
                     for key in ("resolved", "needs_input", "deferred", "declined", "unreviewed")
@@ -149,14 +148,15 @@ def build_coverage_rows(metadata_dir: Path) -> list[dict[str, Any]]:
                         f"{agentic} agentic activities in pipeline {name!r}"
                     )
             else:
-                outcomes = {"resolved": 0, "needs_input": 0, "deferred": 0, "declined": 0, "unreviewed": agentic}
+                outcomes = empty_outcomes
             resolved_agentic = outcomes["resolved"]
             unresolved_agentic = agentic - resolved_agentic
-            runnable_coverage = _runnable_coverage_pct(deterministic, resolved_agentic, total)
+            code_attached_coverage = _code_attached_coverage_pct(deterministic, resolved_agentic, total)
         else:
             outcomes = {}
+            resolved_agentic = agentic
             unresolved_agentic = 0
-            runnable_coverage = _coverage_pct(deterministic, agentic, total)
+            code_attached_coverage = _coverage_pct(deterministic, agentic, total)
         findings = pipeline.get("findings", [])
         fingerprints = [
             finding["fingerprint"]
@@ -184,7 +184,8 @@ def build_coverage_rows(metadata_dir: Path) -> list[dict[str, Any]]:
                 "other_activities": _csv_int("other_activities"),
                 "deterministic_activities": deterministic,
                 "agentic_activities": agentic,
-                "unresolved_agentic_activities": unresolved_agentic,
+                "resolved_agentic_count": resolved_agentic,
+                "unresolved_agentic_count": unresolved_agentic,
                 "agentic_resolution_outcomes": json.dumps(outcomes, sort_keys=True, separators=(",", ":")),
                 "agentic_provider_version": provider_version if is_airflow else "",
                 "unsupported_activities": unsupported,
@@ -198,7 +199,7 @@ def build_coverage_rows(metadata_dir: Path) -> list[dict[str, Any]]:
                 "migration_status": pipeline.get("migration_status", "included"),
                 "coverage_pct": _coverage_pct(deterministic, agentic, total),
                 "deterministic_coverage_pct": _deterministic_coverage_pct(deterministic, total),
-                "runnable_coverage_pct": runnable_coverage,
+                "code_attached_coverage_pct": code_attached_coverage,
                 "finding_count": len(findings),
                 "finding_fingerprints": json.dumps(fingerprints, separators=(",", ":")),
                 "complexity_score": _csv_int("complexity_score"),

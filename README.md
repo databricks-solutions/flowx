@@ -167,7 +167,7 @@ execution) and maps ~35 operator/sensor families to the shared IR. Highlights:
 
 Operators without a deterministic mapping become a failing placeholder and are recorded in
 `gaps.json` for review. Eligible leaf gaps can use the fingerprint-bound resolver backed by the
-pinned [`airflow-to-dabs` v0.2.0](https://github.com/park-peter/airflow-to-dabs/releases/tag/v0.2.0)
+pinned [`airflow-to-dabs` v0.2.1](https://github.com/park-peter/airflow-to-dabs/releases/tag/v0.2.1)
 provider profile; flowx retains ownership of parsing, graph identity, policy, IR, and packaging. Full matrix:
 [`skills/flowx-convert/sources/airflow-coverage.md`](skills/flowx-convert/sources/airflow-coverage.md).
 

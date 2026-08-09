@@ -24,7 +24,7 @@ from flowx.sources.airflow.loader import discover_dags, load_pipelines
 
 CONTRACT_VERSION = "1"
 PROVIDER_NAME = "airflow-to-dabs"
-PROVIDER_VERSION = "0.2.0"
+PROVIDER_VERSION = "0.2.1"
 PROVIDER_REPOSITORY = "https://github.com/park-peter/airflow-to-dabs"
 
 _ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql", "spark_python")
@@ -174,6 +174,8 @@ def prepare_airflow_resolutions(
         raise AgenticContractError(f"No Airflow DAG files found under {source_path}")
     source_hashes = {relative: _sha256_file(path) for relative, path in source_files}
     baseline_hash = _sha256_bytes(baseline_bytes)
+    provider_source = _provider_context_path()
+    provider_sha256 = _directory_sha256(provider_source)
 
     work_dir = output_dir / ".work"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -195,7 +197,12 @@ def prepare_airflow_resolutions(
                 "Airflow source no longer reproduces the deterministic report; rerun convert before prepare"
             )
 
-        gaps = _build_gap_envelopes(baseline, baseline_hash=baseline_hash, source_hashes=source_hashes)
+        gaps = _build_gap_envelopes(
+            baseline,
+            baseline_hash=baseline_hash,
+            source_hashes=source_hashes,
+            provider_sha256=provider_sha256,
+        )
         if not gaps:
             raise AgenticContractError("The deterministic report contains no eligible Airflow leaf gaps")
         if gap_id is not None and gap_id not in {gap["gap_id"] for gap in gaps}:
@@ -206,15 +213,13 @@ def prepare_airflow_resolutions(
         (staging / "gaps.json").write_bytes(gaps_bytes)
         (staging / "candidates").mkdir()
         _copy_provider_context(staging / "provider")
+        if _directory_sha256(staging / "provider") != provider_sha256:
+            raise AgenticContractError("Pinned provider context changed while the agentic workspace was prepared")
         _write_json(staging / "candidate_index.json", {})
         manifest = {
             "contract_version": CONTRACT_VERSION,
             "source": "airflow",
-            "provider": {
-                "name": PROVIDER_NAME,
-                "version": PROVIDER_VERSION,
-                "repository": PROVIDER_REPOSITORY,
-            },
+            "provider": {**_provider_identity(), "sha256": provider_sha256},
             "source_path": str(source_path),
             "source_kind": "file" if source_path.is_file() else "directory",
             "source_files": [
@@ -611,17 +616,9 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
         raise AgenticContractError("agentic resolution baseline hash does not match its manifest")
     if _sha256_bytes(gaps_bytes) != manifest.get("gaps_sha256"):
         raise AgenticContractError("agentic gap-envelope hash does not match its manifest")
-    expected_provider = {
-        "name": PROVIDER_NAME,
-        "version": PROVIDER_VERSION,
-        "repository": PROVIDER_REPOSITORY,
-    }
-    if (
-        manifest.get("contract_version") != CONTRACT_VERSION
-        or manifest.get("source") != "airflow"
-        or manifest.get("provider") != expected_provider
-    ):
-        raise AgenticContractError("agentic resolution manifest has an unsupported contract, source, or provider")
+    if manifest.get("contract_version") != CONTRACT_VERSION or manifest.get("source") != "airflow":
+        raise AgenticContractError("agentic resolution manifest has an unsupported contract or source")
+    provider_sha256 = _validate_manifest_provider(manifest.get("provider"))
     if accepted.get("contract_version") != CONTRACT_VERSION:
         raise AgenticContractError("accepted_resolutions.json has an unsupported contract_version")
     if reviewed.get("contract_version") != CONTRACT_VERSION:
@@ -663,6 +660,7 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
         baseline,
         baseline_hash=str(manifest["baseline_report_sha256"]),
         source_hashes=source_hashes,
+        provider_sha256=provider_sha256,
     )
     if gaps != expected_gaps:
         raise AgenticContractError("persisted gap envelopes do not match the immutable baseline")
@@ -768,6 +766,7 @@ def _build_gap_envelopes(
     *,
     baseline_hash: str,
     source_hashes: dict[str, str],
+    provider_sha256: str,
 ) -> list[dict[str, Any]]:
     envelopes: list[dict[str, Any]] = []
     for pipeline in _pipeline_list(baseline):
@@ -818,11 +817,6 @@ def _build_gap_envelopes(
             if not any(item.get("code") == "unsupported_trigger_rule" for item in related_findings):
                 flowx_owned_arguments.add("trigger_rule")
             sanitized_definition = _sanitize_raw_definition(raw_definition)
-            provider = {
-                "name": PROVIDER_NAME,
-                "version": PROVIDER_VERSION,
-                "repository": PROVIDER_REPOSITORY,
-            }
             envelope = GapEnvelope(
                 gap_id=str(matched_finding["fingerprint"]),
                 pipeline_name=str(pipeline["name"]),
@@ -836,7 +830,7 @@ def _build_gap_envelopes(
                 baseline_report_sha256=baseline_hash,
                 task_sha256=_sha256_bytes(_json_bytes(task)),
                 graph_sha256=_graph_hash(pipeline),
-                provider_sha256=_sha256_bytes(_json_bytes(provider)),
+                provider_sha256=provider_sha256,
                 finding_fingerprints=sorted(
                     {str(item["fingerprint"]) for item in related_findings if isinstance(item.get("fingerprint"), str)}
                 ),
@@ -1359,13 +1353,9 @@ def _load_workspace(workspace: Path) -> tuple[dict[str, Any], list[dict[str, Any
     manifest = _read_json_object(workspace / "manifest.json")
     if manifest.get("contract_version") != CONTRACT_VERSION or manifest.get("source") != "airflow":
         raise AgenticContractError("Agentic workspace has an unsupported contract or source")
-    expected_provider = {
-        "name": PROVIDER_NAME,
-        "version": PROVIDER_VERSION,
-        "repository": PROVIDER_REPOSITORY,
-    }
-    if manifest.get("provider") != expected_provider:
-        raise AgenticContractError(f"Agentic workspace provider must be pinned to {PROVIDER_NAME} v{PROVIDER_VERSION}")
+    provider_sha256 = _validate_manifest_provider(manifest.get("provider"))
+    if _directory_sha256(workspace / "provider") != provider_sha256:
+        raise AgenticContractError("Pinned provider context was modified after prepare")
     gaps_bytes = (workspace / "gaps.json").read_bytes()
     if _sha256_bytes(gaps_bytes) != manifest.get("gaps_sha256"):
         raise AgenticContractError("Prepared GapEnvelope file was modified after prepare")
@@ -1398,6 +1388,10 @@ def _workspace(output_dir: Path) -> Path:
 
 
 def _copy_provider_context(destination: Path) -> None:
+    shutil.copytree(_provider_context_path(), destination)
+
+
+def _provider_context_path() -> Path:
     source = (
         Path(__file__).resolve().parents[2]
         / "skills"
@@ -1409,7 +1403,47 @@ def _copy_provider_context(destination: Path) -> None:
         raise AgenticContractError(
             f"provider_unavailable: pinned {PROVIDER_NAME} v{PROVIDER_VERSION} context is missing"
         )
-    shutil.copytree(source, destination)
+    return source
+
+
+def _provider_identity() -> dict[str, str]:
+    return {"name": PROVIDER_NAME, "version": PROVIDER_VERSION, "repository": PROVIDER_REPOSITORY}
+
+
+def _validate_manifest_provider(value: Any) -> str:
+    if not isinstance(value, dict) or {key: value.get(key) for key in _provider_identity()} != _provider_identity():
+        raise AgenticContractError(f"Agentic workspace provider must be pinned to {PROVIDER_NAME} v{PROVIDER_VERSION}")
+    sha256 = value.get("sha256")
+    if (
+        set(value) != {*_provider_identity(), "sha256"}
+        or not isinstance(sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", sha256)
+    ):
+        raise AgenticContractError("Agentic workspace provider pin is invalid")
+    return sha256
+
+
+def _directory_sha256(directory: Path) -> str:
+    if not directory.is_dir():
+        raise AgenticContractError(f"Pinned provider context is missing: {directory}")
+    files: list[Path] = []
+    for path in directory.rglob("*"):
+        if path.is_symlink():
+            raise AgenticContractError(f"Pinned provider context cannot contain symlinks: {path}")
+        if path.is_file():
+            files.append(path)
+    if not files:
+        raise AgenticContractError("Pinned provider context contains no files")
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda item: item.relative_to(directory).as_posix()):
+        relative = path.relative_to(directory).as_posix().encode()
+        content = path.read_bytes()
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(str(len(content)).encode())
+        digest.update(b"\0")
+        digest.update(content)
+    return digest.hexdigest()
 
 
 def _safe_relative_path(value: str) -> bool:

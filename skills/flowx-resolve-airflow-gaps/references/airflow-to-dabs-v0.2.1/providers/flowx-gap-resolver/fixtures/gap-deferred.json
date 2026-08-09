@@ -1,0 +1,76 @@
+{
+  "allowed_replacement_kinds": [
+    "notebook",
+    "sql",
+    "spark_python"
+  ],
+  "arguments": [
+    {
+      "name": "task_id",
+      "preserved_by_flowx": true,
+      "source_expression": "'choose_path'"
+    },
+    {
+      "name": "python_callable",
+      "preserved_by_flowx": false,
+      "source_expression": "choose_target"
+    },
+    {
+      "name": "trigger_rule",
+      "preserved_by_flowx": true,
+      "source_expression": "'none_failed'"
+    }
+  ],
+  "baseline_report_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+  "capture_identity": "choose_path",
+  "contract_version": "1",
+  "dag_settings": {
+    "parameters": [],
+    "schedule": null,
+    "tags": {
+      "source": "airflow"
+    }
+  },
+  "downstream_task_keys": [
+    "full_load",
+    "incremental_load"
+  ],
+  "gap_id": "4444444444444444",
+  "graph_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "knowledge_provider": {
+    "name": "airflow-to-dabs",
+    "repository": "https://github.com/park-peter/airflow-to-dabs",
+    "version": "0.2.1"
+  },
+  "operator": "BranchPythonOperator",
+  "operator_fqn": "airflow.operators.python.BranchPythonOperator",
+  "pipeline_name": "branching",
+  "provider_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "raw_definition": {
+    "operator": "BranchPythonOperator",
+    "source": "choose = BranchPythonOperator(task_id=\"choose_path\", python_callable=choose_target, trigger_rule=\"none_failed\")"
+  },
+  "reason": {
+    "code": "operator_placeholder",
+    "message": "BranchPythonOperator requires a graph-aware branch conversion"
+  },
+  "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "source": "airflow",
+  "source_file": "branching.py",
+  "source_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+  "source_span": {
+    "column": 4,
+    "end_column": 5,
+    "end_line": 25,
+    "line": 21
+  },
+  "task_key": "choose_path",
+  "task_path": [
+    "tasks",
+    1
+  ],
+  "task_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "upstream_task_keys": [
+    "read_config"
+  ]
+}

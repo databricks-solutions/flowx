@@ -548,7 +548,7 @@ def build_server() -> FastMCP:
         - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
           merge ADF agent results. Airflow's legacy name-based merge is disabled; use resolve_agentic.
         - "resolve_agentic": source(req: "airflow"), action(req: prepare | stage | apply), output_dir,
-          airflow_source_path, report_path, candidates, replace, accept_gap | accept_gaps, accept_all,
+          airflow_source_path, report_path, gap_id, candidates, replace, accept_gap | accept_gaps, accept_all,
           review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "inspect": report_path(req) — return the full translation-option schema (every option with

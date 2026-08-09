@@ -1,0 +1,78 @@
+{
+  "allowed_replacement_kinds": [
+    "notebook",
+    "sql",
+    "spark_python"
+  ],
+  "arguments": [
+    {
+      "name": "task_id",
+      "preserved_by_flowx": true,
+      "source_expression": "'cleanup_events'"
+    },
+    {
+      "name": "conn_id",
+      "preserved_by_flowx": false,
+      "source_expression": "'databricks_default'"
+    },
+    {
+      "name": "sql",
+      "preserved_by_flowx": false,
+      "source_expression": "'DELETE FROM main.ops.events WHERE processed_at < current_date() - INTERVAL 30 DAYS'"
+    },
+    {
+      "name": "autocommit",
+      "preserved_by_flowx": false,
+      "source_expression": "True"
+    }
+  ],
+  "baseline_report_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "capture_identity": "cleanup_events",
+  "contract_version": "1",
+  "dag_settings": {
+    "parameters": [],
+    "schedule": null,
+    "tags": {
+      "source": "airflow"
+    }
+  },
+  "downstream_task_keys": [
+    "vacuum_events"
+  ],
+  "gap_id": "2222222222222222",
+  "graph_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "knowledge_provider": {
+    "name": "airflow-to-dabs",
+    "repository": "https://github.com/park-peter/airflow-to-dabs",
+    "version": "0.2.1"
+  },
+  "operator": "SQLExecuteQueryOperator",
+  "operator_fqn": "airflow.providers.common.sql.operators.sql.SQLExecuteQueryOperator",
+  "pipeline_name": "retention",
+  "provider_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "raw_definition": {
+    "operator": "SQLExecuteQueryOperator",
+    "source": "cleanup = SQLExecuteQueryOperator(task_id=\"cleanup_events\", conn_id=\"databricks_default\", sql=\"DELETE FROM main.ops.events WHERE processed_at < current_date() - INTERVAL 30 DAYS\", autocommit=True)"
+  },
+  "reason": {
+    "code": "operator_placeholder",
+    "message": "SQLExecuteQueryOperator requires a provider-authored leaf implementation"
+  },
+  "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "source": "airflow",
+  "source_file": "retention.py",
+  "source_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "source_span": {
+    "column": 4,
+    "end_column": 5,
+    "end_line": 15,
+    "line": 9
+  },
+  "task_key": "cleanup_events",
+  "task_path": [
+    "tasks",
+    0
+  ],
+  "task_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "upstream_task_keys": []
+}
