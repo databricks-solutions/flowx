@@ -13,6 +13,7 @@ from flowx.agentic import AgenticContractError, _validate_candidate, summarize_p
 from flowx.bundler.dab_writer import main as package_main
 from flowx.reporting.coverage import build_coverage_rows
 from flowx.sources.airflow.convert import main as airflow_convert
+from flowx.sources.airflow.loader import load_airflow_dag
 
 
 def _write_source(tmp_path: Path, *, two_tasks: bool = False) -> Path:
@@ -138,6 +139,110 @@ def test_prepare_writes_versioned_fingerprint_bound_gap_without_changing_report(
     assert {argument["name"] for argument in gap["arguments"]} == {"task_id", "image", "retries"}
     assert (output / ".work" / "agentic" / "baseline.json").exists()
     assert (output / ".work" / "agentic" / "source" / "dag.py").read_bytes() == source.read_bytes()
+
+
+def test_gap_fingerprints_use_each_placeholder_own_source_span(tmp_path: Path) -> None:
+    source = tmp_path / "interleaved.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "with DAG(dag_id='interleaved') as dag:\n"
+        "    a_ok = BashOperator(task_id='a_ok', bash_command='echo a')\n"
+        "    b_ok = BashOperator(task_id='b_ok', bash_command='echo b')\n"
+        "    c_gap = KubernetesPodOperator(task_id='c_gap', image='python:3.12')\n"
+        "    d_ok = BashOperator(task_id='d_ok', bash_command='echo d')\n"
+        "    e_gap = KubernetesPodOperator(task_id='e_gap', image='python:3.12')\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(source)
+    findings = {
+        item["details"]["source_task_id"]: item
+        for item in pipeline.not_translatable
+        if item["code"] == "operator_placeholder"
+    }
+
+    assert {task_id: finding["line"] for task_id, finding in findings.items()} == {"c_gap": 13, "e_gap": 15}
+    assert findings["c_gap"]["fingerprint"] != findings["e_gap"]["fingerprint"]
+
+
+@pytest.mark.parametrize(
+    ("source_text", "expected"),
+    [
+        (
+            "from airflow import DAG\n"
+            "with DAG(dag_id='collision') as dag:\n"
+            "    first = KubernetesPodOperator(task_id='load.data', image='python:3.12')\n"
+            "    second = KubernetesPodOperator(task_id='load_data', image='python:3.12')\n",
+            [("load_data", "load.data", 3), ("load_data__2", "load_data", 4)],
+        ),
+        (
+            "from airflow import DAG\n"
+            "with DAG(dag_id='mapped') as dag:\n"
+            "    pod = KubernetesPodOperator.partial(task_id='pod', image='python:3.12').expand(env=['a'])\n",
+            [("pod_iteration", "pod", 3)],
+        ),
+        (
+            "from airflow import DAG\n"
+            "with DAG(dag_id='bare') as dag:\n"
+            "    KubernetesPodOperator(task_id='bare_pod', image='python:3.12')\n",
+            [("bare_pod", "bare_pod", 3)],
+        ),
+        (
+            "from airflow import DAG\n"
+            "def make(task_id):\n"
+            "    return KubernetesPodOperator(task_id=task_id, image='python:3.12')\n"
+            "with DAG(dag_id='helper') as dag:\n"
+            "    pod = make('helper_pod')\n",
+            [("helper_pod", "helper_pod", 5)],
+        ),
+        (
+            "from airflow.decorators import dag, task\n"
+            "@task.branch\n"
+            "def choose():\n"
+            "    return 'next'\n"
+            "@dag(dag_id='taskflow')\n"
+            "def workflow():\n"
+            "    choose()\n"
+            "workflow()\n",
+            [("choose", "choose", 7)],
+        ),
+        (
+            "from airflow.decorators import dag, task_group\n"
+            "@task_group\n"
+            "def grouped():\n"
+            "    pass\n"
+            "@dag(dag_id='task_group')\n"
+            "def workflow():\n"
+            "    grouped()\n"
+            "workflow()\n",
+            [("grouped_tg1", "grouped", 7)],
+        ),
+    ],
+    ids=("collision-safe-keys", "classic-mapped-inner", "bare-operator", "helper-factory", "taskflow", "task-group"),
+)
+def test_placeholder_findings_bind_capture_identity_to_source(
+    tmp_path: Path,
+    source_text: str,
+    expected: list[tuple[str, str, int]],
+) -> None:
+    source = tmp_path / "dag.py"
+    source.write_text(source_text, encoding="utf-8")
+
+    pipeline = load_airflow_dag(source)
+    findings = [item for item in pipeline.not_translatable if item["code"] == "operator_placeholder"]
+
+    assert [
+        (item["details"]["task_key"], item["details"]["source_task_id"], item["line"]) for item in findings
+    ] == expected
+    assert all(item["details"]["capture_id"] for item in findings)
 
 
 def test_resolve_agentic_is_explicitly_airflow_only(tmp_path: Path, capsys):

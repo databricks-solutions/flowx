@@ -24,7 +24,6 @@ import ast
 import copy
 import json
 import re
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -579,6 +578,7 @@ class _DagVisitor(ast.NodeVisitor):
         self._list_bindings: dict[str, list[str]] = {}
         self._capture_sequence = 0
         self.task_captures: dict[str, TaskCapture] = {}
+        self.capture_source_nodes: dict[str, ast.Call] = {}
         self.edge_captures: list[EdgeCapture] = []
         self.unclaimed_task_calls: list[ast.Call] = []
         self.unclaimed_statements: list[ast.stmt] = []
@@ -789,6 +789,7 @@ class _DagVisitor(ast.NodeVisitor):
             call=call,
             span=_span(node),
         )
+        self.capture_source_nodes[var] = node
         self._claimed_task_call_ids.add(id(node))
         callable_node = kwargs.get("python_callable")
         if isinstance(callable_node, ast.Name):
@@ -850,6 +851,7 @@ class _DagVisitor(ast.NodeVisitor):
             factory_call, var, binding=binding
         )
         if registered:
+            self.capture_source_nodes[var] = node
             self._claimed_task_call_ids.add(id(node))
             self.helper_expansions.append(
                 {
@@ -963,6 +965,7 @@ class _DagVisitor(ast.NodeVisitor):
         task = _TaskFlowTask(task_id=override_id or var, def_name=def_name, decorator=decorator)
         self.taskflow_tasks[var] = task
         self.calls[var] = call
+        self.capture_source_nodes[var] = call
         self._claimed_task_call_ids.add(id(call))
         if mapped:
             self.mapped.add(var)
@@ -1056,6 +1059,7 @@ class _DagVisitor(ast.NodeVisitor):
             self._taskgroup_counter += 1
             var = f"{def_name}__tg{self._taskgroup_counter}"
         self.taskgroup_calls[var] = (var, def_name, mapped)
+        self.capture_source_nodes[var] = call
         self._claimed_task_call_ids.add(id(call))
         if self._group_stack:
             self.groups[var] = "__".join(self._group_stack)
@@ -2596,20 +2600,35 @@ def _reconcile_pipeline(
                 )
             )
 
-    helper_claims = {
-        ("helper_factory_task", int(item["invocation_line"]), str(item["helper"])): 1
-        for item in visitor.helper_expansions
-    }
     helper_capture_ids = {str(item["capture_id"]) for item in visitor.helper_expansions}
-    capture_claims: Counter[tuple[str, int, str]] = Counter(helper_claims)
+    capture_claims: dict[tuple[str, int, int, int, int, str], list[str]] = {}
+
+    def add_capture_claim(code: str, node: ast.AST, discriminator: str, capture_id: str) -> None:
+        span = _span(node)
+        key = (code, span.line, span.column, span.end_line, span.end_column, discriminator)
+        capture_claims.setdefault(key, []).append(capture_id)
+
+    for item in visitor.helper_expansions:
+        capture_id = str(item["capture_id"])
+        add_capture_claim(
+            "helper_factory_task",
+            visitor.capture_source_nodes[capture_id],
+            str(item["helper"]),
+            capture_id,
+        )
     for capture in visitor.task_captures.values():
         if capture.capture_id not in helper_capture_ids:
-            capture_claims[("operator_task", capture.span.line, capture.operator)] += 1
+            add_capture_claim(
+                "operator_task",
+                visitor.capture_source_nodes[capture.capture_id],
+                capture.operator,
+                capture.capture_id,
+            )
     for var, taskflow_task in visitor.taskflow_tasks.items():
-        call = visitor.calls.get(var)
-        capture_claims[("taskflow_task", getattr(call, "lineno", 0), taskflow_task.def_name)] += 1
+        add_capture_claim("taskflow_task", visitor.capture_source_nodes[var], taskflow_task.def_name, var)
 
     unmatched_audit_tasks: list[source_audit.AuditCandidate] = []
+    audit_candidate_by_capture: dict[str, source_audit.AuditCandidate] = {}
     for candidate in audit.tasks:
         discriminator = str(
             candidate.details.get("operator")
@@ -2617,11 +2636,19 @@ def _reconcile_pipeline(
             or candidate.details.get("callable")
             or ""
         )
-        key = (candidate.code, candidate.line, discriminator)
-        if capture_claims[key]:
-            capture_claims[key] -= 1
-        else:
+        key = (
+            candidate.code,
+            candidate.line,
+            candidate.column,
+            candidate.end_line,
+            candidate.end_column,
+            discriminator,
+        )
+        capture_ids = capture_claims.get(key)
+        if not capture_ids:
             unmatched_audit_tasks.append(candidate)
+            continue
+        audit_candidate_by_capture[capture_ids.pop(0)] = candidate
 
     for candidate in unmatched_audit_tasks:
         findings.append(
@@ -2752,21 +2779,12 @@ def _reconcile_pipeline(
             )
         )
 
-    capture_by_location: dict[tuple[int, str], list[TaskCapture]] = {}
-    for capture in visitor.task_captures.values():
-        capture_by_location.setdefault((capture.span.line, capture.operator), []).append(capture)
     argument_failure_keys: set[str] = set()
-    audit_candidate_by_capture: dict[str, source_audit.AuditCandidate] = {}
-    for candidate in audit.tasks:
-        if candidate.code != "operator_task":
+    for capture in visitor.task_captures.values():
+        argument_candidate = audit_candidate_by_capture.get(capture.capture_id)
+        if argument_candidate is None or argument_candidate.code != "operator_task":
             continue
-        operator = str(candidate.details.get("operator", ""))
-        matches = capture_by_location.get((candidate.line, operator), [])
-        if not matches:
-            continue
-        capture = matches.pop(0)
-        audit_candidate_by_capture[capture.capture_id] = candidate
-        expected = set(candidate.details.get("kwargs", []))
+        expected = set(argument_candidate.details.get("kwargs", []))
         actual = set(visitor.operators[capture.capture_id][2])
         if expected == actual:
             continue
@@ -2781,7 +2799,7 @@ def _reconcile_pipeline(
                     f"Airflow task {capture.task_id!r} audited argument(s) {sorted(expected)}, "
                     f"but capture retained {sorted(actual)}."
                 ),
-                candidate=candidate,
+                candidate=argument_candidate,
                 details={
                     "task_key": task_key,
                     "missing": sorted(expected - actual),
@@ -2871,14 +2889,17 @@ def _reconcile_pipeline(
             )
         )
 
-    for var, task_key in var_to_task_key.items():
-        task_id = (
-            visitor.operators[var][0]
-            if var in visitor.operators
-            else visitor.taskflow_tasks[var].task_id
-            if var in visitor.taskflow_tasks
-            else visitor.taskgroup_calls[var][0]
+    def source_task_id(capture_id: str) -> str:
+        return (
+            visitor.operators[capture_id][0]
+            if capture_id in visitor.operators
+            else visitor.taskflow_tasks[capture_id].task_id
+            if capture_id in visitor.taskflow_tasks
+            else visitor.taskgroup_calls[capture_id][1]
         )
+
+    for var, task_key in var_to_task_key.items():
+        task_id = source_task_id(var)
         base = _sanitize_task_key(task_id)
         if var in visitor.groups:
             base = f"{visitor.groups[var]}__{base}"
@@ -2917,13 +2938,47 @@ def _reconcile_pipeline(
             }
         )
 
-    placeholder_by_key = {
-        placeholder.task_key: placeholder
+    placeholders = [
+        placeholder
         for placeholder in _iter_placeholders(pipeline.tasks)
         if not placeholder.task_key.startswith("__flowx_")
-    }
-    for index, placeholder in enumerate(placeholder_by_key.values()):
-        placeholder_candidate = audit.tasks[index] if index < len(audit.tasks) else None
+    ]
+    capture_by_placeholder_key: dict[str, str] = {}
+    for capture_id, task_key in expected_key_by_capture.items():
+        capture_by_placeholder_key[task_key] = capture_id
+        if capture_id in visitor.mapped:
+            capture_by_placeholder_key[f"{task_key}_iteration"] = capture_id
+
+    for placeholder in placeholders:
+        placeholder_capture_id = capture_by_placeholder_key.get(placeholder.task_key)
+        if placeholder_capture_id is None:
+            findings.append(
+                source_audit.finding(
+                    source_file=source_file,
+                    code="operator_placeholder_capture_mismatch",
+                    severity="failed",
+                    message=(f"Placeholder task {placeholder.task_key!r} has no captured Airflow task identity."),
+                    details={"task_key": placeholder.task_key, "operator": placeholder.original_type},
+                )
+            )
+            continue
+        placeholder_candidate = audit_candidate_by_capture.get(placeholder_capture_id)
+        if placeholder_candidate is None:
+            node = visitor.capture_source_nodes[placeholder_capture_id]
+            span = _span(node)
+            placeholder_candidate = source_audit.AuditCandidate(
+                kind="task",
+                code="captured_task",
+                line=span.line,
+                column=span.column,
+                occurrence=1,
+                end_line=span.end_line,
+                end_column=span.end_column,
+                details={
+                    "task_id": source_task_id(placeholder_capture_id),
+                    "operator": placeholder.original_type,
+                },
+            )
         findings.append(
             source_audit.finding(
                 source_file=source_file,
@@ -2933,7 +2988,12 @@ def _reconcile_pipeline(
                     f"Airflow task {placeholder.name!r} ({placeholder.original_type}) requires explicit migration."
                 ),
                 candidate=placeholder_candidate,
-                details={"task_key": placeholder.task_key, "operator": placeholder.original_type},
+                details={
+                    "task_key": placeholder.task_key,
+                    "operator": placeholder.original_type,
+                    "capture_id": placeholder_capture_id,
+                    "source_task_id": source_task_id(placeholder_capture_id),
+                },
             )
         )
 
@@ -2956,7 +3016,7 @@ def _reconcile_pipeline(
     gap_findings = [item for item in findings if item["severity"] == "gap"]
     status = "failed" if failed_findings else "verified_with_gaps" if gap_findings else "verified"
     failed_capture_keys = argument_failure_keys | set(missing_task_keys)
-    agentic_captured_count = len(placeholder_by_key)
+    agentic_captured_count = len(placeholders)
     deterministic_count = captured_task_count - len(failed_capture_keys) - agentic_captured_count
     agentic_count = agentic_captured_count + len(unresolved)
     failed_count = (
