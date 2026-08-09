@@ -115,6 +115,7 @@ def _run_resolve_agentic(args: argparse.Namespace) -> int:
                 report_path=args.report,
                 output_dir=args.output_dir,
                 dbt_mode=args.dbt_mode,
+                gap_id=args.gap_id,
             )
         elif args.action == "stage":
             payload = stage_airflow_resolutions(
@@ -427,6 +428,11 @@ def _build_parser() -> argparse.ArgumentParser:
     resolve_agentic.add_argument("--output-dir", type=Path, required=True, help="Shared migration output directory.")
     resolve_agentic.add_argument("--source-path", type=Path, default=None, help="Airflow DAG file or directory.")
     resolve_agentic.add_argument("--report", type=Path, default=None, help="Deterministic translation report.")
+    resolve_agentic.add_argument(
+        "--gap-id",
+        default=None,
+        help="Optional prepared gap fingerprint to return through the caller while retaining the full workspace.",
+    )
     resolve_agentic.add_argument(
         "--candidate",
         type=Path,

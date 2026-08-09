@@ -133,6 +133,7 @@ def test_resolve_agentic_prepare_routes_airflow_contract(captured):
             "airflow_source_path": "/tmp/dags",
             "report_path": "/tmp/out/.work/translation_report.json",
             "output_dir": "/tmp/out",
+            "gap_id": "abc123",
         }
     )
 
@@ -140,6 +141,7 @@ def test_resolve_agentic_prepare_routes_airflow_contract(captured):
     assert argv[:4] == ["resolve-agentic", "prepare", "--source", "airflow"]
     assert argv[argv.index("--source-path") + 1] == "/tmp/dags"
     assert argv[argv.index("--report") + 1] == "/tmp/out/.work/translation_report.json"
+    assert argv[argv.index("--gap-id") + 1] == "abc123"
     assert result["ok"] is True
 
 

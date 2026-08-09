@@ -289,6 +289,8 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             extra["python_file"] = activity.python_file
             if activity.parameters:
                 extra["parameters"] = activity.parameters
+            if activity.generated_source is not None:
+                extra["generated_source"] = activity.generated_source
         case WebActivity():
             extra["url"] = activity.url
             extra["method"] = activity.method

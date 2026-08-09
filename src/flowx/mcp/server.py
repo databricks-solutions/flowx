@@ -255,6 +255,8 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
         args += ["--report", p["report_path"]]
     if p.get("dbt_mode"):
         args += ["--dbt-mode", p["dbt_mode"]]
+    if p.get("gap_id"):
+        args += ["--gap-id", p["gap_id"]]
     accepted_gaps = p.get("accept_gap") or p.get("accept_gaps") or []
     if isinstance(accepted_gaps, str):
         accepted_gaps = [accepted_gaps]
@@ -287,7 +289,10 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
     payload = runner.parse_stdout_json(result)
     extra: dict[str, Any] = {"result": payload}
     if action == "prepare":
-        extra["gaps"] = runner.read_json(output_dir / ".work" / "agentic" / "gaps.json")
+        gaps = runner.read_json(output_dir / ".work" / "agentic" / "gaps.json")
+        if p.get("gap_id") and isinstance(gaps, list):
+            gaps = [gap for gap in gaps if isinstance(gap, dict) and gap.get("gap_id") == p["gap_id"]]
+        extra["gaps"] = gaps
     return {"ok": result.ok, "process": result.as_dict(), **extra}
 
 

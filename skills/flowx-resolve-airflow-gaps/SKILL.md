@@ -51,7 +51,7 @@ or compute assumptions cannot be preserved from the envelope alone. Do not prese
 successful example.
 
 Every source argument must appear exactly once in `argument_disposition` as `consumed`,
-`preserved_by_flowx`, or `ignored`. Every disposition needs a rationale; an ignored argument must
+`preserved_by_flowx`, `ignored`, or `needs_input`. Every disposition needs a rationale; an ignored argument must
 state the specific semantic loss. Never include task names, task keys, dependencies, retries,
 timeouts, clusters, schedules, or other graph/policy fields in the replacement.
 

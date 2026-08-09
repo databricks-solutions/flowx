@@ -11,6 +11,10 @@
   "source_file": "container_workload.py",
   "source_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
   "baseline_report_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "task_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "graph_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "provider_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
   "source_span": {"line": 14, "column": 4, "end_line": 22, "end_column": 5},
   "raw_definition": {
     "operator": "KubernetesPodOperator",

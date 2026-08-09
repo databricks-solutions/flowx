@@ -11,7 +11,7 @@
     "contract_versions": ["1"],
     "entrypoint": "PROFILE.md",
     "statuses": ["resolved", "needs_input", "deferred"],
-    "replacement_kinds": ["notebook", "sql"]
+    "replacement_kinds": ["notebook", "sql", "spark_python"]
   },
   "knowledge": [
     {

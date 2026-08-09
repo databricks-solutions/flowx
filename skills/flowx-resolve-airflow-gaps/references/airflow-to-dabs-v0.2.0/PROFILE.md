@@ -33,7 +33,7 @@ resolution; they do not grant authority to emit jobs, triggers, clusters, pipeli
 
 1. Classify the operator's intent from `operator_fqn`, `raw_definition`, and `arguments`.
 2. Decide the terminal status:
-   - `resolved`: one self-contained Python notebook or SQL file preserves the represented behavior.
+   - `resolved`: one self-contained Python notebook, SQL file, or Spark Python script preserves the represented behavior.
    - `needs_input`: a concrete deployment fact, credential mapping, runtime dependency, or semantic
      choice is required before a safe leaf implementation can be written.
    - `deferred`: a faithful migration requires graph, control-flow, schedule, compute, resource, or
@@ -42,6 +42,7 @@ resolution; they do not grant authority to emit jobs, triggers, clusters, pipeli
    - `consumed`: the generated payload or resolution decision uses it;
    - `preserved_by_flowx`: Flowx retains it as task identity or policy;
    - `ignored`: the resolution intentionally omits it and states the exact behavioral loss.
+   - `needs_input`: the argument depends on a concrete fact the user must provide before resolution.
 4. Enumerate prerequisites, warnings, and semantic deltas. Never hide a dropped behavior in prose or
    omit an argument from the disposition list.
 5. Return one `AgenticResolution` JSON object and no bundle files or graph patches.
@@ -73,6 +74,7 @@ be possible after the user supplies missing information.
 Use only these top-level fields:
 
 - always: `contract_version`, `gap_id`, `status`, `baseline_report_sha256`, `source_sha256`,
+  `task_sha256`, `graph_sha256`, `provider_sha256`, `request_sha256`,
   `provider`, `model`, `argument_disposition`, `prerequisites`, `warnings`, `semantic_deltas`;
 - `resolved`: add `replacement` and `generated_files`;
 - `needs_input` or `deferred`: add `reason` and omit `replacement` and `generated_files`.

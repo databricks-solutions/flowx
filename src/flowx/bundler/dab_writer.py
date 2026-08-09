@@ -2061,6 +2061,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             **base,
             python_file=task_ir.get("python_file", ""),
             parameters=task_ir.get("parameters"),
+            generated_source=task_ir.get("generated_source"),
         )
     if task_type == "ExecutePipelineActivity":
         return ExecutePipelineActivity(

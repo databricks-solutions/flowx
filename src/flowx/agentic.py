@@ -27,9 +27,10 @@ PROVIDER_NAME = "airflow-to-dabs"
 PROVIDER_VERSION = "0.2.0"
 PROVIDER_REPOSITORY = "https://github.com/park-peter/airflow-to-dabs"
 
-_ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql")
+_ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql", "spark_python")
 _RESOLUTION_STATUSES = {"resolved", "needs_input", "deferred"}
-_DISPOSITIONS = {"consumed", "preserved_by_flowx", "ignored"}
+_DISPOSITIONS = {"consumed", "preserved_by_flowx", "ignored", "needs_input"}
+_MAX_GENERATED_FILE_BYTES = 1024 * 1024
 _COMMON_TASK_FIELDS = (
     "name",
     "task_key",
@@ -52,6 +53,7 @@ _FLOWX_OWNED_ARGUMENTS = {
 _NESTED_TASK_FIELDS = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
 _AIRFLOW_TEMPLATE = re.compile(r"{{\s*([^{}]+?)\s*}}|{%\s*([^{}]+?)\s*%}")
 _DAB_TEMPLATE_PREFIXES = ("job.", "tasks.", "input.", "backfill.")
+_UNSET = object()
 
 
 class AgenticContractError(ValueError):
@@ -64,6 +66,7 @@ class GapEnvelope:
 
     gap_id: str
     pipeline_name: str
+    dag_capture_identity: str
     capture_identity: str
     task_key: str
     task_path: list[str | int]
@@ -71,6 +74,10 @@ class GapEnvelope:
     source_file: str
     source_sha256: str
     baseline_report_sha256: str
+    task_sha256: str
+    graph_sha256: str
+    provider_sha256: str
+    finding_fingerprints: list[str]
     source_span: dict[str, int]
     raw_definition: dict[str, Any]
     arguments: list[dict[str, Any]]
@@ -81,11 +88,17 @@ class GapEnvelope:
 
     def as_dict(self) -> dict[str, Any]:
         """Returns the public GapEnvelope v1 representation."""
-        return {
+        provider = {
+            "name": PROVIDER_NAME,
+            "version": PROVIDER_VERSION,
+            "repository": PROVIDER_REPOSITORY,
+        }
+        payload = {
             "contract_version": CONTRACT_VERSION,
             "gap_id": self.gap_id,
             "source": "airflow",
             "pipeline_name": self.pipeline_name,
+            "dag_capture_identity": self.dag_capture_identity,
             "capture_identity": self.capture_identity,
             "task_key": self.task_key,
             "task_path": self.task_path,
@@ -94,6 +107,10 @@ class GapEnvelope:
             "source_file": self.source_file,
             "source_sha256": self.source_sha256,
             "baseline_report_sha256": self.baseline_report_sha256,
+            "task_sha256": self.task_sha256,
+            "graph_sha256": self.graph_sha256,
+            "provider_sha256": self.provider_sha256,
+            "finding_fingerprints": self.finding_fingerprints,
             "source_span": self.source_span,
             "raw_definition": self.raw_definition,
             "arguments": self.arguments,
@@ -102,12 +119,10 @@ class GapEnvelope:
             "dag_settings": self.dag_settings,
             "reason": self.reason,
             "allowed_replacement_kinds": list(_ALLOWED_REPLACEMENT_KINDS),
-            "knowledge_provider": {
-                "name": PROVIDER_NAME,
-                "version": PROVIDER_VERSION,
-                "repository": PROVIDER_REPOSITORY,
-            },
+            "knowledge_provider": provider,
         }
+        payload["request_sha256"] = _sha256_bytes(_json_bytes(payload))
+        return payload
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -137,6 +152,7 @@ def prepare_airflow_resolutions(
     report_path: Path,
     output_dir: Path,
     dbt_mode: str = "static",
+    gap_id: str | None = None,
 ) -> dict[str, Any]:
     """Snapshots source and an exactly reproducible deterministic report, then emits GapEnvelope v1."""
     source_path = source_path.resolve()
@@ -182,11 +198,14 @@ def prepare_airflow_resolutions(
         gaps = _build_gap_envelopes(baseline, baseline_hash=baseline_hash, source_hashes=source_hashes)
         if not gaps:
             raise AgenticContractError("The deterministic report contains no eligible Airflow leaf gaps")
+        if gap_id is not None and gap_id not in {gap["gap_id"] for gap in gaps}:
+            raise AgenticContractError(f"No eligible Airflow gap matches --gap-id {gap_id!r}")
 
         (staging / "baseline.json").write_bytes(baseline_bytes)
         gaps_bytes = _json_bytes(gaps)
         (staging / "gaps.json").write_bytes(gaps_bytes)
         (staging / "candidates").mkdir()
+        _copy_provider_context(staging / "provider")
         _write_json(staging / "candidate_index.json", {})
         manifest = {
             "contract_version": CONTRACT_VERSION,
@@ -204,6 +223,7 @@ def prepare_airflow_resolutions(
             "dbt_mode": dbt_mode,
             "baseline_report_sha256": baseline_hash,
             "gaps_sha256": _sha256_bytes(gaps_bytes),
+            "requested_gap_id": gap_id,
         }
         _write_json(staging / "manifest.json", manifest)
         if target.exists():
@@ -215,6 +235,7 @@ def prepare_airflow_resolutions(
         "contract_version": CONTRACT_VERSION,
         "provider_version": PROVIDER_VERSION,
         "gap_count": len(gaps),
+        "requested_gap_id": gap_id,
         "workspace": str(target),
     }
 
@@ -269,6 +290,23 @@ def stage_airflow_resolutions(
         "staged": sorted(staged),
         "candidate_count": len(index),
         "review_manifest": str(review_manifest_path),
+        "review": [
+            {
+                "gap_id": gap_id,
+                "status": resolution.candidate["status"],
+                "provider": resolution.candidate["provider"],
+                "model": resolution.candidate["model"],
+                "argument_disposition": resolution.candidate["argument_disposition"],
+                "prerequisites": resolution.candidate["prerequisites"],
+                "warnings": resolution.candidate["warnings"],
+                "semantic_deltas": resolution.candidate["semantic_deltas"],
+                "replacement": resolution.candidate.get("replacement"),
+                "generated_files": resolution.candidate.get("generated_files", []),
+                "reason": resolution.candidate.get("reason"),
+                "candidate_sha256": resolution.sha256,
+            }
+            for gap_id, resolution in sorted(staged.items())
+        ],
     }
 
 
@@ -613,7 +651,12 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
         raise AgenticContractError("agentic resolution manifest has invalid source_files") from error
     if not source_hashes:
         raise AgenticContractError("agentic resolution manifest has no source_files")
-    durable_source_hashes = {relative: _sha256_file(evidence_dir / "source" / relative) for relative in source_hashes}
+    try:
+        durable_source_hashes = {
+            relative: _sha256_file(evidence_dir / "source" / relative) for relative in source_hashes
+        }
+    except OSError as error:
+        raise AgenticContractError(f"durable Airflow source snapshot is missing: {error}") from error
     if durable_source_hashes != source_hashes:
         raise AgenticContractError("durable Airflow source snapshot does not match its manifest")
     expected_gaps = _build_gap_envelopes(
@@ -698,8 +741,14 @@ def _require_airflow_baseline(payload: Any) -> None:
     for pipeline in pipelines:
         if not isinstance(pipeline, dict) or (pipeline.get("tags") or {}).get("source") != "airflow":
             raise AgenticContractError("resolve-agentic requires a canonical Airflow translation report")
-        if pipeline.get("reconciliation_status") == "failed":
-            raise AgenticContractError("Agentic resolution cannot repair a failed source-reconciliation report")
+        status = pipeline.get("reconciliation_status")
+        if status not in {"verified", "verified_with_gaps", "excluded"}:
+            raise AgenticContractError(
+                f"Agentic resolution requires a successfully reconciled deterministic report, got {status!r}"
+            )
+        audit = pipeline.get("audit")
+        if not isinstance(audit, dict) or "audited_activity_count" not in audit or "transformations" not in audit:
+            raise AgenticContractError("Airflow deterministic report is missing source-audit metadata")
 
 
 def _rebuild_airflow_report(source_path: Path, baseline: dict[str, Any], *, dbt_mode: str) -> dict[str, Any]:
@@ -768,9 +817,16 @@ def _build_gap_envelopes(
             ]
             if not any(item.get("code") == "unsupported_trigger_rule" for item in related_findings):
                 flowx_owned_arguments.add("trigger_rule")
+            sanitized_definition = _sanitize_raw_definition(raw_definition)
+            provider = {
+                "name": PROVIDER_NAME,
+                "version": PROVIDER_VERSION,
+                "repository": PROVIDER_REPOSITORY,
+            }
             envelope = GapEnvelope(
                 gap_id=str(matched_finding["fingerprint"]),
                 pipeline_name=str(pipeline["name"]),
+                dag_capture_identity=f"dag:{source_file}:{pipeline['name']}",
                 capture_identity=capture_identity,
                 task_key=str(task["task_key"]),
                 task_path=list(task_path),
@@ -778,12 +834,18 @@ def _build_gap_envelopes(
                 source_file=str(source_file),
                 source_sha256=source_hash,
                 baseline_report_sha256=baseline_hash,
+                task_sha256=_sha256_bytes(_json_bytes(task)),
+                graph_sha256=_graph_hash(pipeline),
+                provider_sha256=_sha256_bytes(_json_bytes(provider)),
+                finding_fingerprints=sorted(
+                    {str(item["fingerprint"]) for item in related_findings if isinstance(item.get("fingerprint"), str)}
+                ),
                 source_span={
                     key: int(matched_finding.get(key, 0)) for key in ("line", "column", "end_line", "end_column")
                 },
-                raw_definition=raw_definition,
+                raw_definition=sanitized_definition,
                 arguments=_extract_arguments(
-                    raw_definition,
+                    sanitized_definition,
                     operator=operator,
                     flowx_owned_arguments=flowx_owned_arguments,
                 ),
@@ -854,11 +916,20 @@ def _extract_arguments(
 
 
 def _argument(name: str, expression: str, flowx_owned_arguments: set[str]) -> dict[str, Any]:
-    return {
+    preserved = name in flowx_owned_arguments
+    argument = {
         "name": name,
         "source_expression": expression,
-        "preserved_by_flowx": name in flowx_owned_arguments,
+        "owner": "flowx" if preserved else "provider",
+        "preserved_by_flowx": preserved,
     }
+    try:
+        literal = ast.literal_eval(expression)
+    except (ValueError, SyntaxError):
+        literal = _UNSET
+    if literal is not _UNSET and _is_json_literal(literal):
+        argument["normalized_value"] = literal
+    return argument
 
 
 def _validate_candidate(
@@ -875,6 +946,10 @@ def _validate_candidate(
         "status",
         "baseline_report_sha256",
         "source_sha256",
+        "task_sha256",
+        "graph_sha256",
+        "provider_sha256",
+        "request_sha256",
         "provider",
         "model",
         "argument_disposition",
@@ -900,6 +975,9 @@ def _validate_candidate(
         raise AgenticContractError("Candidate baseline_report_sha256 does not match the prepared baseline")
     if candidate.get("source_sha256") != gap.get("source_sha256"):
         raise AgenticContractError("Candidate source_sha256 does not match its GapEnvelope")
+    for field in ("task_sha256", "graph_sha256", "provider_sha256", "request_sha256"):
+        if candidate.get(field) != gap.get(field):
+            raise AgenticContractError(f"Candidate {field} does not match its GapEnvelope")
     provider = candidate.get("provider")
     expected_provider = {
         "name": PROVIDER_NAME,
@@ -919,6 +997,8 @@ def _validate_candidate(
             raise AgenticContractError(f"Candidate {field} must be a list of strings")
     _validate_argument_disposition(candidate.get("argument_disposition"), gap)
     if status == "resolved":
+        if any(item.get("disposition") == "needs_input" for item in candidate["argument_disposition"]):
+            raise AgenticContractError("Resolved candidate cannot retain a needs_input argument disposition")
         _validate_replacement(candidate, gap)
     else:
         if not isinstance(candidate.get("reason"), str) or not candidate["reason"].strip():
@@ -965,8 +1045,11 @@ def _validate_replacement(candidate: dict[str, Any], gap: dict[str, Any]) -> Non
     if not isinstance(file_name, str) or not _safe_relative_path(file_name):
         raise AgenticContractError("Replacement file must be a safe relative path")
     parameters_field = "base_parameters" if kind == "notebook" else "parameters"
-    parameters = replacement.get(parameters_field, {})
-    if not isinstance(parameters, dict) or not all(
+    parameters = replacement.get(parameters_field, [] if kind == "spark_python" else {})
+    if kind == "spark_python":
+        if not isinstance(parameters, list) or not all(isinstance(value, str) for value in parameters):
+            raise AgenticContractError("Replacement parameters must be a list of strings for spark_python")
+    elif not isinstance(parameters, dict) or not all(
         isinstance(key, str) and isinstance(val, str) for key, val in parameters.items()
     ):
         raise AgenticContractError(f"Replacement {parameters_field} must be a string-to-string object")
@@ -979,20 +1062,22 @@ def _validate_replacement(candidate: dict[str, Any], gap: dict[str, Any]) -> Non
         raise AgenticContractError("Generated file contains unsupported fields")
     if generated.get("path") != file_name:
         raise AgenticContractError("Replacement file does not match generated_files.path")
-    expected_language = "python" if kind == "notebook" else "sql"
+    expected_language = "sql" if kind == "sql" else "python"
     if generated.get("language") != expected_language:
         raise AgenticContractError(f"Generated file language must be {expected_language!r}")
     content = generated.get("content")
     if not isinstance(content, str) or not content.strip():
         raise AgenticContractError("Generated file content must be non-empty")
+    if len(content.encode("utf-8")) > _MAX_GENERATED_FILE_BYTES:
+        raise AgenticContractError(f"Generated file exceeds the {_MAX_GENERATED_FILE_BYTES}-byte contract limit")
     if generated.get("sha256") != _sha256_bytes(content.encode("utf-8")):
         raise AgenticContractError("Generated file sha256 does not match its content")
     _reject_unresolved_templates(replacement)
     _reject_generated_file_templates(content)
-    if kind == "notebook":
+    if kind in {"notebook", "spark_python"}:
         lines = content.splitlines()
         first_line = lines[0] if lines else ""
-        if first_line != "# Databricks notebook source":
+        if kind == "notebook" and first_line != "# Databricks notebook source":
             raise AgenticContractError("Generated notebook requires the Databricks notebook source marker")
         try:
             module = ast.parse(content)
@@ -1077,10 +1162,20 @@ def _build_replacement(placeholder: dict[str, Any], candidate: dict[str, Any]) -
         )
         if replacement.get("base_parameters"):
             task["base_parameters"] = dict(replacement["base_parameters"])
-    else:
+    elif replacement["kind"] == "sql":
         task.update({"type": "SqlActivity", "sql": generated["content"], "warehouse_ref": "${var.warehouse_id}"})
         if replacement.get("parameters"):
             task["parameters"] = dict(replacement["parameters"])
+    else:
+        task.update(
+            {
+                "type": "SparkPythonActivity",
+                "python_file": f"scripts/{placeholder['task_key']}.py",
+                "generated_source": generated["content"],
+            }
+        )
+        if replacement.get("parameters"):
+            task["parameters"] = list(replacement["parameters"])
     return task
 
 
@@ -1302,9 +1397,78 @@ def _workspace(output_dir: Path) -> Path:
     return output_dir.resolve() / ".work" / "agentic"
 
 
+def _copy_provider_context(destination: Path) -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "flowx-resolve-airflow-gaps"
+        / "references"
+        / f"airflow-to-dabs-v{PROVIDER_VERSION}"
+    )
+    if not source.is_dir():
+        raise AgenticContractError(
+            f"provider_unavailable: pinned {PROVIDER_NAME} v{PROVIDER_VERSION} context is missing"
+        )
+    shutil.copytree(source, destination)
+
+
 def _safe_relative_path(value: str) -> bool:
     path = Path(value)
     return bool(value) and not path.is_absolute() and ".." not in path.parts and value == path.as_posix()
+
+
+def _is_json_literal(value: Any) -> bool:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return True
+    if isinstance(value, list):
+        return all(_is_json_literal(item) for item in value)
+    if isinstance(value, tuple):
+        return all(_is_json_literal(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _is_json_literal(item) for key, item in value.items())
+    return False
+
+
+_SENSITIVE_ARGUMENT = re.compile(
+    r"(?:password|passwd|token|secret|credential|private[_-]?key|access[_-]?key)",
+    re.IGNORECASE,
+)
+
+
+class _SecretLiteralRedactor(ast.NodeTransformer):
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        for keyword in node.keywords:
+            if keyword.arg is not None and _SENSITIVE_ARGUMENT.search(keyword.arg):
+                keyword.value = ast.Constant(value="<redacted>")
+        return node
+
+
+def _sanitize_python_source(value: str) -> str:
+    try:
+        module = ast.parse(textwrap.dedent(value))
+    except SyntaxError:
+        return re.sub(
+            r"(?i)((?:password|passwd|token|secret|credential|private[_-]?key|access[_-]?key)\s*=\s*)"
+            r"(['\"]).*?\2",
+            r"\1'<redacted>'",
+            value,
+        )
+    redacted = _SecretLiteralRedactor().visit(module)
+    ast.fix_missing_locations(redacted)
+    return ast.unparse(redacted)
+
+
+def _sanitize_raw_definition(value: Any, *, key: str = "") -> Any:
+    if _SENSITIVE_ARGUMENT.search(key):
+        return "<redacted>"
+    if isinstance(value, dict):
+        return {item_key: _sanitize_raw_definition(item, key=str(item_key)) for item_key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_raw_definition(item) for item in value]
+    if isinstance(value, str) and key in {"source", "bound_source", "invocation", "mapping"}:
+        return _sanitize_python_source(value)
+    return value
 
 
 def _call_name(node: ast.expr) -> str:

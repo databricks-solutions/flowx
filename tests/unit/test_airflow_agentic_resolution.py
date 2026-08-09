@@ -110,6 +110,10 @@ def _candidate(gap: dict, *, source: str = "print('Migrated from Airflow')\n", s
         "status": status,
         "baseline_report_sha256": gap["baseline_report_sha256"],
         "source_sha256": gap["source_sha256"],
+        "task_sha256": gap["task_sha256"],
+        "graph_sha256": gap["graph_sha256"],
+        "provider_sha256": gap["provider_sha256"],
+        "request_sha256": gap["request_sha256"],
         "provider": {
             "name": "airflow-to-dabs",
             "version": "0.2.0",
@@ -178,9 +182,58 @@ def test_prepare_writes_versioned_fingerprint_bound_gap_without_changing_report(
     assert gap["task_key"] == "pod"
     assert gap["operator"] == "KubernetesPodOperator"
     assert gap["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert gap["dag_capture_identity"] == "dag:dag.py:agentic"
+    assert gap["finding_fingerprints"] == [gap["gap_id"]]
+    assert all(len(gap[field]) == 64 for field in ("task_sha256", "graph_sha256", "provider_sha256", "request_sha256"))
     assert {argument["name"] for argument in gap["arguments"]} == {"task_id", "image", "retries"}
+    assert {argument["owner"] for argument in gap["arguments"]} == {"flowx", "provider"}
+    image = next(argument for argument in gap["arguments"] if argument["name"] == "image")
+    assert image["normalized_value"] == "python:3.11"
     assert (output / ".work" / "agentic" / "baseline.json").exists()
     assert (output / ".work" / "agentic" / "source" / "dag.py").read_bytes() == source.read_bytes()
+    assert (output / ".work" / "agentic" / "provider" / "PROFILE.md").exists()
+
+
+def test_prepare_can_select_one_gap_for_the_caller_without_losing_workspace_gaps(tmp_path: Path) -> None:
+    source, output, gaps = _prepare(tmp_path, two_tasks=True)
+    report = output / ".work" / "translation_report.json"
+
+    assert adapter_main(
+        [
+            "resolve-agentic",
+            "prepare",
+            "--source",
+            "airflow",
+            "--source-path",
+            str(source),
+            "--report",
+            str(report),
+            "--output-dir",
+            str(output),
+            "--gap-id",
+            gaps[0]["gap_id"],
+        ]
+    ) == 0
+    prepared = json.loads((output / ".work" / "agentic" / "gaps.json").read_text(encoding="utf-8"))
+    manifest = json.loads((output / ".work" / "agentic" / "manifest.json").read_text(encoding="utf-8"))
+    assert {gap["gap_id"] for gap in prepared} == {gap["gap_id"] for gap in gaps}
+    assert manifest["requested_gap_id"] == gaps[0]["gap_id"]
+
+
+def test_prepare_redacts_sensitive_constructor_literals(tmp_path: Path) -> None:
+    source = tmp_path / "secret.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "with DAG(dag_id='secret') as dag:\n"
+        "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12', api_token='do-not-copy')\n",
+        encoding="utf-8",
+    )
+
+    gap = _prepare_source(source, tmp_path / "output")[0]
+
+    serialized = json.dumps(gap)
+    assert "do-not-copy" not in serialized
+    assert "<redacted>" in serialized
 
 
 def test_gap_fingerprints_use_each_placeholder_own_source_span(tmp_path: Path) -> None:
@@ -403,7 +456,15 @@ def test_taskflow_gap_arguments_come_from_invocation_not_callable_body(tmp_path:
 
     gap = _prepare_source(source, tmp_path / "output")[0]
 
-    assert gap["arguments"] == [{"name": "$arg0", "source_expression": "'selected'", "preserved_by_flowx": False}]
+    assert gap["arguments"] == [
+        {
+            "name": "$arg0",
+            "source_expression": "'selected'",
+            "normalized_value": "selected",
+            "owner": "provider",
+            "preserved_by_flowx": False,
+        }
+    ]
 
 
 def test_only_actually_preserved_policy_arguments_are_flowx_owned(tmp_path: Path) -> None:
@@ -536,6 +597,32 @@ def test_stage_rejects_unresolved_jinja_provider_drift_and_file_hash_mismatch(tm
     bad_hash["generated_files"][0]["sha256"] = "0" * 64
     assert _stage(output, bad_hash) == 1
     assert "sha256 does not match" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("field", ["task_sha256", "graph_sha256", "provider_sha256", "request_sha256"])
+def test_stage_rejects_stale_request_identity(tmp_path: Path, capsys, field: str) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    candidate = _candidate(gaps[0])
+    candidate[field] = "0" * 64
+
+    assert _stage(output, candidate) == 1
+    assert f"Candidate {field} does not match" in capsys.readouterr().err
+
+
+def test_stage_limits_artifact_size_and_allows_needs_input_disposition(tmp_path: Path, capsys) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    oversized = _candidate(gaps[0], source="x = '" + "a" * (1024 * 1024) + "'\n")
+
+    assert _stage(output, oversized) == 1
+    assert "exceeds the 1048576-byte contract limit" in capsys.readouterr().err
+
+    unresolved = _candidate(gaps[0], status="needs_input")
+    provider_argument = next(
+        item for item in unresolved["argument_disposition"] if item["disposition"] != "preserved_by_flowx"
+    )
+    provider_argument["disposition"] = "needs_input"
+    provider_argument["rationale"] = "The deployment-specific value must be supplied."
+    assert _stage(output, unresolved) == 0
 
 
 def test_stage_rejects_python_script_without_databricks_notebook_marker(tmp_path: Path, capsys) -> None:
@@ -746,6 +833,60 @@ def test_apply_supports_sql_leaf_payload(tmp_path: Path):
     assert "sql_task:" in resource
     assert "../src/sql/pod.sql" in resource
     assert (output / "src" / "sql" / "pod.sql").read_text(encoding="utf-8") == sql
+
+
+def test_apply_supports_spark_python_leaf_payload(tmp_path: Path) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    candidate = _candidate(gaps[0])
+    source = "print('spark python')\n"
+    candidate["replacement"] = {"kind": "spark_python", "file": "task.py", "parameters": ["--mode", "full"]}
+    candidate["generated_files"] = [
+        {
+            "path": "task.py",
+            "language": "python",
+            "content": source,
+            "sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        }
+    ]
+    assert _stage(output, candidate) == 0
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "apply",
+                "--source",
+                "airflow",
+                "--output-dir",
+                str(output),
+                "--accept-gap",
+                gaps[0]["gap_id"],
+            ]
+        )
+        == 0
+    )
+
+    report = output / ".work" / "translation_report.agentic.json"
+    task = _load_tasks(report)["pod"]
+    assert task["type"] == "SparkPythonActivity"
+    assert task["generated_source"] == source
+    assert task["parameters"] == ["--mode", "full"]
+    assert (
+        package_main(
+            [
+                "--report",
+                str(report),
+                "--output-dir",
+                str(output),
+                "--no-download-workspace-files",
+                "--keep-intermediates",
+            ]
+        )
+        == 0
+    )
+    resource = (output / "resources" / "agentic.yml").read_text(encoding="utf-8")
+    assert "spark_python_task:" in resource
+    assert "../src/scripts/pod.py" in resource
+    assert (output / "src" / "scripts" / "pod.py").read_text(encoding="utf-8") == source
 
 
 def test_nested_for_each_resolution_preserves_enclosing_control_flow(tmp_path: Path):
