@@ -1,11 +1,8 @@
 # Airflow Agentic Gap Contract v1
 
-The provider receives a `GapEnvelope` produced by flowx. It does not receive authority to alter the
-captured graph.
+The provider receives a `GapEnvelope` produced by flowx. It does not receive authority to alter the captured graph.
 
-`capture_identity` is flowx's source-capture identity and may differ from the collision-safe
-Databricks `task_key`. `task_path` identifies the exact placeholder location, including a nested
-`for_each` body; providers must copy neither field into the replacement payload.
+`capture_identity` is flowx's source-capture identity and may differ from the collision-safe Databricks `task_key`. `task_path` identifies the exact placeholder location, including a nested `for_each` body; providers must copy neither field into the replacement payload.
 
 ## Resolution shape
 
@@ -48,28 +45,19 @@ Databricks `task_key`. `task_path` identifies the exact placeholder location, in
 }
 ```
 
-SQL uses `{"kind": "sql", "file": "task.sql", "parameters": {}}` and a single generated file
-whose language is `sql`.
+SQL uses `{"kind": "sql", "file": "task.sql", "parameters": {}}` and a single generated file whose language is `sql`.
 
-Spark Python uses `{"kind": "spark_python", "file": "task.py", "parameters": ["--arg", "value"]}`
-and a single generated Python file. It is emitted as a Databricks `spark_python_task`.
+Spark Python uses `{"kind": "spark_python", "file": "task.py", "parameters": ["--arg", "value"]}` and a single generated Python file. It is emitted as a Databricks `spark_python_task`.
 
-`needs_input` and `deferred` omit `replacement` and `generated_files` and add a non-empty `reason`.
-They are terminal reviewed outcomes: the linked `NotImplementedError` placeholder remains and no
-automatic retry occurs.
+`needs_input` and `deferred` omit `replacement` and `generated_files` and add a non-empty `reason`. They are terminal reviewed outcomes: the linked `NotImplementedError` placeholder remains and no automatic retry occurs.
 
 ## Hard boundaries
 
 - Only `notebook`, `sql`, and `spark_python` leaf replacements are allowed in v1.
-- The replacement cannot express `name`, `task_key`, `depends_on`, retries, timeouts, compute,
-  libraries, schedules, or control-flow fields.
+- The replacement cannot express `name`, `task_key`, `depends_on`, retries, timeouts, compute, libraries, schedules, or control-flow fields.
 - Generated file paths are relative and cannot contain `..`.
 - Every generated file is inline and hash-bound; external workspace paths are not accepted.
-- Python payloads may mention Airflow in comments but may not contain `import airflow` or
-  `from airflow ...` statements. Notebook payloads must start with `# Databricks notebook source`;
-  Spark Python scripts are ordinary valid Python files.
-- Airflow Jinja is rejected. Databricks dynamic references such as `{{job.parameters.x}}`,
-  `{{tasks.upstream.values.x}}`, and `{{input}}` are valid in replacement parameter values, not in
-  uploaded notebook or SQL source files; source files must read widgets or SQL named parameters.
+- Python payloads may mention Airflow in comments but may not contain `import airflow` or `from airflow ...` statements. Notebook payloads must start with `# Databricks notebook source`; Spark Python scripts are ordinary valid Python files.
+- Airflow Jinja is rejected. Databricks dynamic references such as `{{job.parameters.x}}`, `{{tasks.upstream.values.x}}`, and `{{input}}` are valid in replacement parameter values, not in uploaded notebook or SQL source files; source files must read widgets or SQL named parameters.
 - Every source argument in the envelope has exactly one disposition and a non-empty rationale.
 - The provider identity must match the pinned `airflow-to-dabs` v0.2.1 knowledge release.

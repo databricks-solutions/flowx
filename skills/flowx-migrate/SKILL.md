@@ -96,9 +96,7 @@ To accept all defaults and skip the prompts, pass `"interactive": false`. (Re-ca
 
 For step-by-step control, run the commands in order (the app reuses `output_dir` across calls, so
 only `discover` needs the source input). `source` ("adf" | "airflow") is required for
-discover/convert and for `inputs discover`/`inputs convert`; for Airflow, swap `adf_definitions` for
-`airflow_source_path`. `merge_agentic` is ADF-only. `package` and `inputs package` are
-source-independent:
+discover/convert and for `inputs discover`/`inputs convert`; for Airflow, swap `adf_definitions` for `airflow_source_path`. `merge_agentic` is ADF-only. `package` and `inputs package` are source-independent:
 
 ```
 flowx(command="inputs", parameters={"phase": "discover", "source": "adf"})  # source req for discover/convert
@@ -111,10 +109,7 @@ flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema"
 flowx(command="record_results", parameters={...}) / flowx(command="install_dashboard", parameters={...})
 ```
 
-For an Airflow report with eligible leaf placeholders, use the `flowx-resolve-airflow-gaps` skill
-between convert and package. It calls `resolve_agentic` with `action="prepare"`, stages one or more
-provider candidates, and applies only the gap fingerprints the user explicitly accepts. Package
-must then receive `<output_dir>/.work/translation_report.agentic.json` as `report_path`.
+For an Airflow report with eligible leaf placeholders, use the `flowx-resolve-airflow-gaps` skill between convert and package. It calls `resolve_agentic` with `action="prepare"`, stages one or more provider candidates, and applies only the gap fingerprints the user explicitly accepts. Package must then receive `<output_dir>/.work/translation_report.agentic.json` as `report_path`.
 
 The server's `output_dir` is ephemeral and not reachable from your workspace, so **have `migrate`/
 `package` write the DAB to the target via the SDK** — pass `"output_volume_path": "/Volumes/…"` or

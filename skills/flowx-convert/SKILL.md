@@ -20,8 +20,7 @@ phase 2 of the flowx migration workflow; it produces a transient translation rep
 
 Translation is **source-specific** (ADF activity translators vs. Airflow operator mapping), so this
 skill routes to the right source guide. The shared mechanics — how to run the phase, the report
-contract, and the `inspect`/`modify` machinery — live here. The legacy `merge_agentic` command is
-ADF-only; Airflow uses `resolve-agentic prepare|stage|apply` instead.
+contract, and the `inspect`/`modify` machinery — live here. The legacy `merge_agentic` command is ADF-only; Airflow uses `resolve-agentic prepare|stage|apply` instead.
 
 ## Step 1 — Identify the source (required)
 
@@ -36,8 +35,7 @@ There is no default source. Every phase invocation passes `--source <name>` expl
 ## Step 2 — Follow the source guide
 
 Read the matching `sources/<source>.md` and follow it. ADF has a rich deterministic-first +
-agentic-gap flow with just-in-time configuration. Airflow converts deterministically first and may
-then use the separately reviewed, fingerprint-bound `flowx-resolve-airflow-gaps` workflow.
+agentic-gap flow with just-in-time configuration. Airflow converts deterministically first and may then use the separately reviewed, fingerprint-bound `flowx-resolve-airflow-gaps` workflow.
 
 ## How to run this phase — MCP tool or venv CLI
 
@@ -66,15 +64,13 @@ across ADF and Airflow.
 
 ## Shared adapter commands
 
-`inspect` and `modify` operate on the report rather than raw source definitions. The ADF guide uses
-them heavily; Airflow currently needs only the base conversion:
+`inspect` and `modify` operate on the report rather than raw source definitions. The ADF guide uses them heavily; Airflow currently needs only the base conversion:
 
 - `inspect <report>` — emit the full just-in-time option schema (each option annotated with a
   `show_when` condition). Walk it locally; ask an option only when its `show_when` is satisfied.
 - `modify <report> --output-dir <dir> --answer OPTION_ID=VALUE ...` — validate and apply collected
   answers, writing `.work/translation_report.stamped.json` + `metadata/configuration.json`.
-- `merge_agentic --report <report> --agentic-results <dir>` — **ADF only**. Fold agent-produced
-  per-activity translations into an ADF report. Airflow's legacy name-based merge is disabled.
+- `merge_agentic --report <report> --agentic-results <dir>` — **ADF only**. Fold agent-produced per-activity translations into an ADF report. Airflow's legacy name-based merge is disabled.
 
 ## Output artifacts (shared, transient under `<output_dir>/.work/`)
 

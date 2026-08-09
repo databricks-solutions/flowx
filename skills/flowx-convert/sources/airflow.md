@@ -3,11 +3,9 @@
 Source guide for `--source airflow`. Translate parsed Airflow DAGs into Databricks IR. See the
 parent `SKILL.md` for how to run the phase and the report contract.
 
-Airflow translation is **deterministic-first**. The static parse maps ~35 operator/sensor families
-directly to IR (Tier 1-3). Operators with no deterministic mapping become
+Airflow translation is **deterministic-first**. The static parse maps ~35 operator/sensor families directly to IR (Tier 1-3). Operators with no deterministic mapping become
 `PlaceholderActivity` tasks and are recorded in `gaps.json` with their raw source for review. The
-placeholder remains a deliberate runtime failure until it is resolved manually or through the
-fingerprint-bound `flowx-resolve-airflow-gaps` workflow.
+placeholder remains a deliberate runtime failure until it is resolved manually or through the fingerprint-bound `flowx-resolve-airflow-gaps` workflow.
 
 **Before converting, check [`sources/airflow-coverage.md`](airflow-coverage.md)** — the verified
 support matrix (classic operators, TaskFlow, sensors, TaskGroups, dbt factory) and the constructs
@@ -42,10 +40,7 @@ PythonOperator callable or BashOperator command, carrying `generated_source`) or
 
 If convert wrote `<output_dir>/.work/gaps.json`, each entry describes an unmapped construct whose
 generated Job task points to a notebook that raises `NotImplementedError`. Review every gap before
-deployment. The shared `merge_agentic` command is disabled for Airflow and rejects
-`--source airflow`; keep the placeholder, exclude the DAG, or invoke the
-`flowx-resolve-airflow-gaps` skill. That workflow binds one leaf resolution to the finding
-fingerprint and revalidates graph and policy invariants before package.
+deployment. The shared `merge_agentic` command is disabled for Airflow and rejects `--source airflow`; keep the placeholder, exclude the DAG, or invoke the `flowx-resolve-airflow-gaps` skill. That workflow binds one leaf resolution to the finding fingerprint and revalidates graph and policy invariants before package.
 
 ## Step 4 — Proceed to package
 
