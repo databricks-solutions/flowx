@@ -53,6 +53,31 @@ _FLOWX_OWNED_ARGUMENTS = {
 _NESTED_TASK_FIELDS = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
 _AIRFLOW_TEMPLATE = re.compile(r"{{\s*([^{}]+?)\s*}}|{%\s*([^{}]+?)\s*%}")
 _DAB_TEMPLATE_PREFIXES = ("job.", "tasks.", "input.", "backfill.")
+_NOTEBOOK_PARAMETER_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
+_RESERVED_NOTEBOOK_PARAMETER_KEYS = frozenset(
+    {
+        *_COMMON_TASK_FIELDS,
+        "condition_task",
+        "dbt_task",
+        "disable_auto_optimization",
+        "email_notifications",
+        "environment_key",
+        "for_each_task",
+        "job_cluster_key",
+        "new_cluster",
+        "notebook_task",
+        "notification_settings",
+        "pipeline_task",
+        "python_wheel_task",
+        "retry_on_timeout",
+        "run_if",
+        "run_job_task",
+        "spark_jar_task",
+        "spark_python_task",
+        "sql_task",
+        "webhook_notifications",
+    }
+)
 _UNSET = object()
 
 
@@ -1047,6 +1072,8 @@ def _validate_replacement(candidate: dict[str, Any], gap: dict[str, Any]) -> Non
         isinstance(key, str) and isinstance(val, str) for key, val in parameters.items()
     ):
         raise AgenticContractError(f"Replacement {parameters_field} must be a string-to-string object")
+    if kind == "notebook":
+        _validate_notebook_parameter_keys(parameters)
     files = candidate.get("generated_files")
     if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict):
         raise AgenticContractError("Resolved v1 candidate requires exactly one inline generated file")
@@ -1077,15 +1104,118 @@ def _validate_replacement(candidate: dict[str, Any], gap: dict[str, Any]) -> Non
             module = ast.parse(content)
         except SyntaxError as error:
             raise AgenticContractError(f"Generated notebook is not valid Python: {error}") from error
-        for node in ast.walk(module):
-            if isinstance(node, ast.Import) and any(
-                alias.name == "airflow" or alias.name.startswith("airflow.") for alias in node.names
+        _reject_airflow_imports(module)
+
+
+def _validate_notebook_parameter_keys(parameters: dict[str, str]) -> None:
+    for key in parameters:
+        if not _NOTEBOOK_PARAMETER_KEY.fullmatch(key):
+            raise AgenticContractError(f"Unsafe notebook base_parameters key: {key!r}")
+        normalized = key.casefold()
+        if normalized.startswith("__flowx") or normalized in _RESERVED_NOTEBOOK_PARAMETER_KEYS:
+            raise AgenticContractError(f"Reserved notebook base_parameters key: {key!r}")
+
+
+def _reject_airflow_imports(module: ast.AST) -> None:
+    pending = [module]
+    while pending:
+        tree = pending.pop()
+        nodes = list(ast.walk(tree))
+        importlib_names = {"importlib"}
+        import_module_names: set[str] = set()
+        builtins_names = {"builtins"}
+        builtin_import_names = {"__import__"}
+        execution_names = {"exec", "eval"}
+
+        for node in nodes:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if _is_airflow_module(alias.name):
+                        raise AgenticContractError("Generated notebook must not import Airflow")
+                    if alias.name == "importlib":
+                        importlib_names.add(alias.asname or alias.name)
+                    elif alias.name == "builtins":
+                        builtins_names.add(alias.asname or alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                if _is_airflow_module(node.module):
+                    raise AgenticContractError("Generated notebook must not import Airflow")
+                for alias in node.names:
+                    bound_name = alias.asname or alias.name
+                    if node.module == "importlib" and alias.name == "import_module":
+                        import_module_names.add(bound_name)
+                    elif node.module == "builtins" and alias.name == "__import__":
+                        builtin_import_names.add(bound_name)
+                    elif node.module == "builtins" and alias.name in {"exec", "eval"}:
+                        execution_names.add(bound_name)
+
+        for node in nodes:
+            if not isinstance(node, ast.Call):
+                continue
+            target = node.func
+            literal = _literal_call_argument(node)
+            if literal is None:
+                continue
+            if _is_module_import_call(
+                target,
+                importlib_names,
+                import_module_names,
+                builtins_names,
+                builtin_import_names,
             ):
-                raise AgenticContractError("Generated notebook must not import Airflow")
-            if isinstance(node, ast.ImportFrom) and (
-                node.module == "airflow" or str(node.module).startswith("airflow.")
-            ):
-                raise AgenticContractError("Generated notebook must not import Airflow")
+                if _is_airflow_module(literal):
+                    raise AgenticContractError("Generated notebook must not import Airflow")
+                continue
+            if _is_execution_call(target, execution_names, builtins_names):
+                try:
+                    pending.append(ast.parse(literal, mode="exec"))
+                except SyntaxError:
+                    continue
+
+
+def _is_airflow_module(value: str | None) -> bool:
+    return value == "airflow" or bool(value and value.startswith("airflow."))
+
+
+def _literal_call_argument(node: ast.Call) -> str | None:
+    value: ast.AST | None = node.args[0] if node.args else None
+    if value is None:
+        for keyword in node.keywords:
+            if keyword.arg in {"name", "source", "object"}:
+                value = keyword.value
+                break
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    return None
+
+
+def _is_module_import_call(
+    target: ast.expr,
+    importlib_names: set[str],
+    import_module_names: set[str],
+    builtins_names: set[str],
+    builtin_import_names: set[str],
+) -> bool:
+    if isinstance(target, ast.Name):
+        return target.id in import_module_names or target.id in builtin_import_names
+    return (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and (
+            (target.attr == "import_module" and target.value.id in importlib_names)
+            or (target.attr == "__import__" and target.value.id in builtins_names)
+        )
+    )
+
+
+def _is_execution_call(target: ast.expr, execution_names: set[str], builtins_names: set[str]) -> bool:
+    if isinstance(target, ast.Name):
+        return target.id in execution_names
+    return (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id in builtins_names
+        and target.attr in {"exec", "eval"}
+    )
 
 
 def _apply_to_baseline(baseline: dict[str, Any], resolutions: list[StagedResolution]) -> dict[str, Any]:

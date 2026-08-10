@@ -63,6 +63,7 @@ class _TaskFlowTask:
     task_id: str
     def_name: str
     decorator: str
+    is_async: bool = False
     positional_deps: dict[int, str] = field(default_factory=dict)
     keyword_deps: dict[str, str] = field(default_factory=dict)
     positional_values: dict[int, str] = field(default_factory=dict)
@@ -373,6 +374,123 @@ def _construct_name(node: ast.expr, aliases: dict[str, str]) -> str:
     return canonical.rsplit(".", 1)[-1] if canonical else ""
 
 
+def _airflow_generation(module: ast.Module) -> str:
+    """Infers version-specific authoring syntax only when imports are unambiguous."""
+    imported_modules: list[str] = []
+    for statement in module.body:
+        if isinstance(statement, ast.Import):
+            imported_modules.extend(item.name for item in statement.names)
+        elif isinstance(statement, ast.ImportFrom) and statement.module:
+            imported_modules.append(statement.module)
+    if any(name == "airflow.sdk" or name.startswith("airflow.sdk.") for name in imported_modules) or any(
+        name == "airflow.providers.standard" or name.startswith("airflow.providers.standard.")
+        for name in imported_modules
+    ):
+        return "3"
+    legacy_module = re.compile(r"^airflow\.(?:operators|sensors)\.[^.]+_(?:operator|sensor)$")
+    if any(name.startswith("airflow.contrib.") or legacy_module.fullmatch(name) for name in imported_modules):
+        return "1.10"
+    return "unknown"
+
+
+def _asset_definitions(module: ast.Module, aliases: dict[str, str]) -> dict[str, ast.Call]:
+    """Returns module-level Asset/Dataset objects that a DAG schedule may reference."""
+    definitions: dict[str, ast.Call] = {}
+    for statement in module.body:
+        if not (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and isinstance(statement.value, ast.Call)
+        ):
+            continue
+        if _construct_name(statement.value.func, aliases) in {"Asset", "Dataset"}:
+            definitions[statement.targets[0].id] = statement.value
+    return definitions
+
+
+def _asset_table_name(call: ast.Call) -> str | None:
+    kwargs = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
+    extra = ops.literal_value(kwargs.get("extra"))
+    if isinstance(extra, dict):
+        table_name = extra.get("databricks_table")
+        if isinstance(table_name, str) and table_name.strip():
+            return table_name.strip()
+    uri = ops.literal_str(call.args[0]) if call.args else ops.literal_str(kwargs.get("uri"))
+    prefix = "x-databricks-table:"
+    if uri and uri.startswith(prefix):
+        table_name = uri[len(prefix) :].lstrip("/").strip()
+        return table_name or None
+    return None
+
+
+def _asset_expression(
+    node: ast.expr,
+    aliases: dict[str, str],
+    definitions: dict[str, ast.Call],
+) -> tuple[list[str], str, str | None] | None:
+    if isinstance(node, ast.Name):
+        definition = definitions.get(node.id)
+        return _asset_expression(definition, aliases, definitions) if definition is not None else None
+    if isinstance(node, ast.Call) and _construct_name(node.func, aliases) in {"Asset", "Dataset"}:
+        table_name = _asset_table_name(node)
+        return ([table_name], "leaf", None) if table_name else ([], "leaf", "unresolved_asset_schedule")
+    if isinstance(node, (ast.List, ast.Tuple)):
+        children = [_asset_expression(item, aliases, definitions) for item in node.elts]
+        if not children or any(child is None for child in children):
+            return None
+        resolved = [child for child in children if child is not None]
+        error = next((child[2] for child in resolved if child[2] is not None), None)
+        if error:
+            return [], "all", error
+        if any(child[1] == "any" for child in resolved):
+            return [], "all", "unsupported_asset_schedule_expression"
+        return [table for child in resolved for table in child[0]], "all", None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.BitAnd, ast.BitOr)):
+        left = _asset_expression(node.left, aliases, definitions)
+        right = _asset_expression(node.right, aliases, definitions)
+        if left is None or right is None:
+            return None
+        error = left[2] or right[2]
+        mode = "all" if isinstance(node.op, ast.BitAnd) else "any"
+        if error:
+            return [], mode, error
+        if any(child_mode not in {"leaf", mode} for child_mode in (left[1], right[1])):
+            return [], mode, "unsupported_asset_schedule_expression"
+        return [*left[0], *right[0]], mode, None
+    return None
+
+
+def _asset_schedule_from_node(
+    node: ast.expr,
+    aliases: dict[str, str],
+    definitions: dict[str, ast.Call],
+) -> tuple[dict[str, object] | None, str | None]:
+    if any(
+        isinstance(candidate, ast.Call) and _construct_name(candidate.func, aliases) == "AssetOrTimeSchedule"
+        for candidate in ast.walk(node)
+    ):
+        return None, "unsupported_asset_or_time_schedule"
+    expression = _asset_expression(node, aliases, definitions)
+    if expression is None:
+        return None, "unsupported_dag_schedule"
+    table_names, mode, error = expression
+    if error:
+        return None, error
+    table_names = list(dict.fromkeys(table_names))
+    if not table_names:
+        return None, "unresolved_asset_schedule"
+    return (
+        {
+            "kind": "table_update",
+            "table_names": table_names,
+            "condition": "ANY_UPDATED" if mode in {"leaf", "any"} else "ALL_UPDATED",
+            "pause_status": "UNPAUSED",
+        },
+        None,
+    )
+
+
 def _safe_static_value(node: ast.expr, constants: dict[str, Any]) -> Any:
     """Evaluates the small literal expression subset used by static DAG factories."""
     if isinstance(node, ast.Constant):
@@ -563,6 +681,8 @@ class _DagVisitor(ast.NodeVisitor):
 
     def __init__(self, module: ast.Module, *, target_dag_variable: str | None = None) -> None:
         self._aliases = _import_aliases(module)
+        self.airflow_generation = _airflow_generation(module)
+        self.asset_definitions = _asset_definitions(module, self._aliases)
         self._target_dag_variable = target_dag_variable
         # Classic python_callable resolution starts at module scope. Nested functions are only visible
         # from their lexical parent and must never overwrite a same-named module function.
@@ -617,9 +737,9 @@ class _DagVisitor(ast.NodeVisitor):
         self.partial_mapped: set[str] = set()
         # Disambiguates synthetic vars for operators instantiated without an assignment.
         self._bare_operator_counter = 0
-        # TaskFlow: function name -> (FunctionDef, decorator dotted-name) for @task-decorated defs.
+        # TaskFlow: function name -> (definition, decorator dotted-name) for @task-decorated defs.
         # Pre-scanned so a @task def defined after the @dag body that uses it is still resolved.
-        self.taskflow_defs: dict[str, tuple[ast.FunctionDef, str]] = {}
+        self.taskflow_defs: dict[str, tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]] = {}
         # @task_group def names -- a group is a sub-pipeline, not a single renderable task, so an
         # invocation routes to a placeholder + gap rather than being expanded here.
         self.taskgroup_defs: set[str] = set()
@@ -646,7 +766,11 @@ class _DagVisitor(ast.NodeVisitor):
         self.is_taskflow_dag: bool = False
 
     def functions(self) -> dict[str, ast.FunctionDef]:
-        taskflow = {name: definition for name, (definition, _decorator) in self.taskflow_defs.items()}
+        taskflow = {
+            name: definition
+            for name, (definition, _decorator) in self.taskflow_defs.items()
+            if isinstance(definition, ast.FunctionDef)
+        }
         return {**self._functions, **taskflow}
 
     def functions_for(self, task_var: str) -> dict[str, ast.FunctionDef]:
@@ -699,6 +823,11 @@ class _DagVisitor(ast.NodeVisitor):
             if is_dag_definition:
                 self._dag_scope_depth -= 1
             self._scope_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        """Claims native async TaskFlow definitions without treating their bodies as DAG structure."""
+        if self._dag_scope_depth:
+            self._claimed_statement_ids.add(id(node))
 
     def visit_Assign(self, node: ast.Assign) -> None:
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call):
@@ -961,8 +1090,13 @@ class _DagVisitor(ast.NodeVisitor):
         def_name, mapped, override_id = self._taskflow_def_name(call)
         if def_name is None:
             return False
-        _fn, decorator = self.taskflow_defs[def_name]
-        task = _TaskFlowTask(task_id=override_id or var, def_name=def_name, decorator=decorator)
+        function, decorator = self.taskflow_defs[def_name]
+        task = _TaskFlowTask(
+            task_id=override_id or var,
+            def_name=def_name,
+            decorator=decorator,
+            is_async=isinstance(function, ast.AsyncFunctionDef),
+        )
         self.taskflow_tasks[var] = task
         self.calls[var] = call
         self.capture_source_nodes[var] = call
@@ -1219,6 +1353,8 @@ class _DagVisitor(ast.NodeVisitor):
         kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
         self.dag_id = ops.literal_str(kwargs.get("dag_id"))
         self._apply_dag_kwargs(kwargs)
+        if self.airflow_generation == "1.10" and not {"schedule", "schedule_interval"} & kwargs.keys():
+            self.unresolved_constructs.append(("ambiguous_airflow_1_10_default_schedule", call))
 
     def _apply_dag_kwargs(self, kwargs: dict[str, ast.expr]) -> None:
         self.captured_dag_settings.update(kwargs)
@@ -1512,15 +1648,15 @@ def _mapping_chain_args(node: ast.expr) -> list[ast.expr]:
     return args
 
 
-def _iter_functions(module: ast.Module) -> list[ast.FunctionDef]:
-    """All FunctionDefs in *module*, including those nested inside a ``@dag`` function body.
+def _iter_functions(module: ast.Module) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """All function definitions, including those nested inside a ``@dag`` function body.
 
     TaskFlow ``@task`` defs are often nested inside the ``@dag`` function, so a top-level-only scan
-    would miss them. Async defs are skipped (flowx renders sync notebooks).
+    would miss them. Async definitions are captured so they can become explicit agentic leaf gaps.
     """
-    found: list[ast.FunctionDef] = []
+    found: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
     for node in ast.walk(module):
-        if isinstance(node, ast.FunctionDef):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             found.append(node)
     return found
 
@@ -1628,7 +1764,7 @@ _ALL_AIRFLOW_DECORATORS = _DAG_DECORATORS | _TASK_DECORATORS | _TASK_GROUP_DECOR
 
 
 def _has_decorator(
-    func: ast.FunctionDef,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
     names: frozenset[str],
     aliases: dict[str, str] | None = None,
 ) -> bool:
@@ -2125,6 +2261,30 @@ def _load_airflow_module(
     # mid-DAG (an ordering gate, not the DAG's entry condition), the sensor is retained as a polling
     # task instead of being silently dropped.
     schedule = _schedule_from_interval(visitor.schedule_interval, node=visitor.schedule_node, timezone=visitor.timezone)
+    schedule_proof: dict[str, Any] | None = None
+    schedule_node = visitor.schedule_node
+    explicit_none_schedule = isinstance(schedule_node, ast.Constant) and schedule_node.value is None
+    if schedule is None and schedule_node is not None and not explicit_none_schedule:
+        schedule, schedule_gap = _asset_schedule_from_node(schedule_node, visitor._aliases, visitor.asset_definitions)
+        if schedule is not None:
+            schedule_span = _span(schedule_node)
+            table_names = schedule["table_names"]
+            condition = schedule["condition"]
+            assert isinstance(table_names, list)
+            assert isinstance(condition, str)
+            schedule_proof = {
+                "code": "asset_schedule_lowered",
+                "table_names": list(table_names),
+                "condition": condition,
+                "source_span": {
+                    "line": schedule_span.line,
+                    "column": schedule_span.column,
+                    "end_line": schedule_span.end_line,
+                    "end_column": schedule_span.end_column,
+                },
+            }
+        elif schedule_gap is not None:
+            visitor.unresolved_constructs.append((schedule_gap, schedule_node))
     has_schedule = schedule is not None
 
     # Dummy/Empty operators are structural and can be removed after dependency rewiring.
@@ -2432,6 +2592,32 @@ def _load_airflow_module(
         dep_keys = {var_to_task_key[u] for u in upstreams.get(var, []) if u in var_to_task_key}
         dep_keys.discard(task_key)
         depends_on = [Dependency(task_key=k) for k in sorted(dep_keys)] or None
+        definition, _decorator = visitor.taskflow_defs[tf.def_name]
+        if tf.is_async:
+            mapping_call = visitor.calls.get(var)
+            raw_definition = {
+                "operator": "@task.async.expand" if var in visitor.mapped else "@task.async",
+                "source": ast.get_source_segment(source, definition) or "",
+                "invocation": ast.get_source_segment(source, visitor.capture_source_nodes[var]) or "",
+            }
+            if mapping_call is not None and var in visitor.mapped:
+                raw_definition["mapping"] = ast.get_source_segment(source, mapping_call) or ""
+            activity = PlaceholderActivity(
+                name=tf.task_id,
+                task_key=task_key,
+                original_type="@task.async.expand" if var in visitor.mapped else "@task.async",
+                comment=(
+                    f"Native async TaskFlow callable {tf.def_name!r} requires an async-aware Databricks "
+                    "implementation; resolve this captured leaf without changing its graph identity."
+                ),
+                raw_definition=raw_definition,
+            )
+            activity.depends_on = depends_on
+            if var in visitor.mapped and tf.expand_items_json is not None:
+                append_task(_wrap_taskflow_in_for_each(activity, tf, task_key, depends_on), var)
+            else:
+                append_task(activity, var)
+            continue
         if var in visitor.mapped and tf.expand_items_json is None:
             # .expand over a non-literal iterable (e.g. an upstream task's output) can't be lowered to
             # a static for_each inputs array -- route to the agentic-gap round instead of silently
@@ -2535,6 +2721,7 @@ def _load_airflow_module(
         dbt_vars=dbt_vars,
         semantic_findings=semantic_findings,
         sensor_lift_proof=sensor_lift_proof,
+        schedule_proof=schedule_proof,
         argument_proofs=argument_proofs,
         expected_ir_edges=expected_ir_edges,
         placeholder_capture_ids=placeholder_capture_ids,
@@ -2619,6 +2806,7 @@ def _reconcile_pipeline(
     dbt_vars: list[str],
     semantic_findings: list[dict[str, Any]],
     sensor_lift_proof: dict[str, Any] | None,
+    schedule_proof: dict[str, Any] | None,
     argument_proofs: list[dict[str, Any]],
     expected_ir_edges: set[tuple[str, str]],
     placeholder_capture_ids: dict[int, str],
@@ -2645,6 +2833,8 @@ def _reconcile_pipeline(
     )
     if sensor_lift_proof is not None:
         transformations.append(sensor_lift_proof)
+    if schedule_proof is not None:
+        transformations.append(schedule_proof)
     captured_task_count = len(visitor.operators) + len(visitor.taskflow_tasks) + len(visitor.taskgroup_calls)
 
     unresolved = list(audit.unresolved)
@@ -2944,13 +3134,38 @@ def _reconcile_pipeline(
             )
         )
 
+    unresolved_messages = {
+        "unresolved_asset_schedule": (
+            "An Airflow Asset/Dataset schedule lacks an explicit Databricks table mapping. Add "
+            "extra={'databricks_table': '<catalog>.<schema>.<table>'} or use an "
+            "x-databricks-table: URI."
+        ),
+        "unsupported_asset_or_time_schedule": (
+            "Airflow AssetOrTimeSchedule combines time and asset triggers, but a Databricks Job can "
+            "use only one job-level trigger."
+        ),
+        "unsupported_asset_schedule_expression": (
+            "The Airflow Asset/Dataset boolean expression cannot be represented by one Databricks "
+            "ANY_UPDATED or ALL_UPDATED table trigger."
+        ),
+        "unsupported_dag_schedule": (
+            "The Airflow DAG schedule or timetable has no proven static Databricks Jobs mapping."
+        ),
+        "ambiguous_airflow_1_10_default_schedule": (
+            "This DAG uses strong Airflow 1.10 syntax and omits schedule_interval. Historical default "
+            "schedule and catchup behavior cannot be inferred safely without the deployed Airflow version."
+        ),
+    }
     for candidate in unresolved:
         findings.append(
             source_audit.finding(
                 source_file=source_file,
                 code=candidate.code,
                 severity="gap",
-                message="Dynamic Airflow control flow could not be expanded safely by the static parser.",
+                message=unresolved_messages.get(
+                    candidate.code,
+                    "Dynamic Airflow control flow could not be expanded safely by the static parser.",
+                ),
                 candidate=candidate,
             )
         )
@@ -3163,7 +3378,7 @@ def _wrap_in_for_each(
 
 
 def _wrap_taskflow_in_for_each(
-    activity: NotebookActivity,
+    activity: Activity,
     tf: _TaskFlowTask,
     task_key: str,
     depends_on: list[Dependency] | None,

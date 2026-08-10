@@ -57,7 +57,8 @@ Spark Python uses `{"kind": "spark_python", "file": "task.py", "parameters": ["-
 - The replacement cannot express `name`, `task_key`, `depends_on`, retries, timeouts, compute, libraries, schedules, or control-flow fields.
 - Generated file paths are relative and cannot contain `..`.
 - Every generated file is inline and hash-bound; external workspace paths are not accepted.
-- Python payloads may mention Airflow in comments but may not contain `import airflow` or `from airflow ...` statements. Notebook payloads must start with `# Databricks notebook source`; Spark Python scripts are ordinary valid Python files.
+- Python payloads may mention Airflow in comments, docstrings, and other inert string literals but may not import Airflow through import statements or statically identifiable dynamic imports with literal module names or executed source. This validation enforces runtime compatibility and hygiene; it is not a Python security sandbox, and every accepted payload remains reviewed arbitrary Python. Notebook payloads must start with `# Databricks notebook source`; Spark Python scripts are ordinary valid Python files.
+- Notebook `base_parameters` keys must use letters, digits, underscores, dots, and hyphens, starting with a letter or underscore. Flowx-owned names beginning with `__flowx` and Databricks task identity, graph, policy, and task-type field names are reserved case-insensitively.
 - Airflow Jinja is rejected. Databricks dynamic references such as `{{job.parameters.x}}`, `{{tasks.upstream.values.x}}`, and `{{input}}` are valid in replacement parameter values, not in uploaded notebook or SQL source files; source files must read widgets or SQL named parameters.
 - Every source argument in the envelope has exactly one disposition and a non-empty rationale.
 - The provider identity must match the pinned `airflow-to-dabs` v0.2.1 knowledge release.

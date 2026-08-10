@@ -555,15 +555,75 @@ def test_stage_rejects_graph_identity_fields(tmp_path: Path, capsys):
     assert not list((output / ".work" / "agentic" / "candidates").glob("*.json"))
 
 
-def test_stage_rejects_airflow_import_but_allows_airflow_in_comments(tmp_path: Path, capsys):
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib\nimportlib.import_module('airflow')\n",
+        "import importlib as imports\nimports.import_module('airflow.providers.cncf.kubernetes')\n",
+        "from importlib import import_module\nimport_module('airflow')\n",
+        "from importlib import import_module as load_module\nload_module('airflow.models')\n",
+        "__import__('airflow')\n",
+        "import builtins\nbuiltins.__import__('airflow.providers.amazon')\n",
+        "from builtins import __import__ as load_module\nload_module('airflow')\n",
+        "exec('import airflow')\n",
+        "eval(\"__import__('airflow.providers.google')\")\n",
+    ],
+)
+def test_stage_rejects_literal_dynamic_airflow_imports(tmp_path: Path, capsys, source: str) -> None:
+    _, output, gaps = _prepare(tmp_path)
+
+    assert _stage(output, _candidate(gaps[0], source=source)) == 1
+    assert "must not import Airflow" in capsys.readouterr().err
+
+
+def test_stage_rejects_airflow_import_but_allows_airflow_in_nonexecuted_text(tmp_path: Path, capsys) -> None:
     _, output, gaps = _prepare(tmp_path)
     bad = _candidate(gaps[0], source="# Airflow provenance\nfrom airflow import DAG\n")
 
     assert _stage(output, bad) == 1
     assert "must not import Airflow" in capsys.readouterr().err
 
-    good = _candidate(gaps[0], source="# Migrated from Airflow\nprint('ok')\n")
-    assert _stage(output, good) == 0
+    for source in (
+        "# import airflow documents migration provenance\nprint('ok')\n",
+        '"""The source DAG used import airflow."""\nprint(\'ok\')\n',
+        "message = 'import airflow'\nprint(message)\n",
+        "import importlib\nimportlib.import_module('airflowish')\n",
+    ):
+        assert _stage(output, _candidate(gaps[0], source=source), replace=True) == 0
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "task_key",
+        "depends_on",
+        "__flowx_op_args",
+        "__FLOWX_custom",
+        "",
+        " ",
+        "line\nbreak",
+        "{{job.parameters.env}}",
+    ],
+)
+def test_stage_rejects_unsafe_notebook_parameter_keys(tmp_path: Path, capsys, key: str) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    candidate = _candidate(gaps[0])
+    candidate["replacement"]["base_parameters"] = {key: "value"}
+
+    assert _stage(output, candidate) == 1
+    assert "notebook base_parameters key" in capsys.readouterr().err
+
+
+def test_stage_accepts_safe_notebook_parameter_keys(tmp_path: Path) -> None:
+    _, output, gaps = _prepare(tmp_path)
+    candidate = _candidate(gaps[0])
+    candidate["replacement"]["base_parameters"] = {
+        "env": "dev",
+        "input-path": "/Volumes/input",
+        "config.env": "prod",
+    }
+
+    assert _stage(output, candidate) == 0
 
 
 def test_stage_requires_complete_argument_disposition_and_ignored_rationale(tmp_path: Path, capsys):

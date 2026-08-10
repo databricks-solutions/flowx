@@ -95,7 +95,8 @@ class _SourceAuditor(ast.NodeVisitor):
         self.taskflow_defs = {
             node.name
             for node in ast.walk(module)
-            if isinstance(node, ast.FunctionDef) and _has_decorator(node, _TASK_DECORATORS, self.aliases)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _has_decorator(node, _TASK_DECORATORS, self.aliases)
         }
         self.dag_defs = {
             node.name
@@ -133,6 +134,12 @@ class _SourceAuditor(ast.NodeVisitor):
             for statement in node.body:
                 if not isinstance(statement, ast.FunctionDef):
                     self.visit(statement)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        """Treats decorated async callables as TaskFlow definitions, not DAG-body statements."""
+        if node.name in self.taskflow_defs:
+            return
+        self.generic_visit(node)
 
     def visit_With(self, node: ast.With) -> None:
         for item in node.items:
@@ -403,7 +410,11 @@ def _decorator_name(node: ast.expr, aliases: dict[str, str]) -> str:
     return canonical
 
 
-def _has_decorator(function: ast.FunctionDef, names: set[str], aliases: dict[str, str]) -> bool:
+def _has_decorator(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    names: set[str],
+    aliases: dict[str, str],
+) -> bool:
     return any(_decorator_name(decorator, aliases) in names for decorator in function.decorator_list)
 
 

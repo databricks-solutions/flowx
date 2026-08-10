@@ -35,7 +35,7 @@ Read the prepared envelope rather than reopening or reparsing the DAG. Return on
 
 Every source argument must appear exactly once in `argument_disposition` as `consumed`, `preserved_by_flowx`, `ignored`, or `needs_input`. Every disposition needs a rationale; an ignored argument must state the specific semantic loss. Never include task names, task keys, dependencies, retries, timeouts, clusters, schedules, or other graph/policy fields in the replacement.
 
-Generated code must be self-contained, contain no Airflow import statements, and contain no template expressions. Python notebooks must start with `# Databricks notebook source`. Put Databricks dynamic references in replacement parameters and read them through notebook widgets or SQL named parameters. Comments may mention Airflow for provenance.
+Generated code must be self-contained, must not import Airflow through import statements or literal dynamic imports, and must contain no template expressions. Python notebooks must start with `# Databricks notebook source`. Put Databricks dynamic references in replacement parameters and read them through notebook widgets or SQL named parameters. Notebook parameter keys must avoid Flowx and Databricks task-schema namespaces. Comments, docstrings, and inert strings may mention Airflow for provenance; static validation is runtime hygiene, not a Python security sandbox.
 
 ## 3. Stage candidates
 

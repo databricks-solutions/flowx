@@ -11,6 +11,7 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 
 | Construct | Result |
 | --- | --- |
+| Airflow authoring versions | Airflow 3 `airflow.sdk` and `airflow.providers.standard` imports, modern Airflow 2 imports, and strong Airflow 1.10 legacy operator/sensor imports are resolved statically without importing Airflow. |
 | `PythonOperator` (classic) | Notebook task; callable `def` preserved, transitive helpers/constants/non-Airflow imports carried, `op_args`/`op_kwargs` passed as JSON widgets, return value via `dbutils.jobs.taskValues.set`. |
 | `PythonVirtualenvOperator` / `ExternalPythonOperator` | Notebook task with a `%pip install` cell for `requirements`. |
 | `BranchPythonOperator` / `ShortCircuitOperator` | Failing placeholder + review gap (runtime branch selection can't be lowered statically). |
@@ -21,7 +22,7 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 | `TriggerDagRunOperator` | `run_job_task` referencing the target DAG by sanitized job name. |
 | `EmailOperator` | Placeholder recommending job-level email notifications. |
 | dbt CLI operators (`DbtRun/Test/Seed/Snapshot/Build/Deps`) and Cosmos `DbtDag` / `DbtTaskGroup` | Single `DbtFactoryActivity`, **static explosion** (default) or **PyDABs** (`--dbt-mode pydabs`); see [dbt factory](#dbt-factory-mode). |
-| **TaskFlow API** (`@dag`, `@task`, `@task.virtualenv`) | Canonical, aliased, and qualified Airflow decorators are resolved statically. Each `@task` invocation → a task; implicit XCom data flow (`transform(extract())`) → a notebook that reads upstream return values via `dbutils.jobs.taskValues.get`, calls the function, and publishes its own. `@task.branch` / `@task.short_circuit`, or a callable reading task context/XCom, route to a placeholder + gap. |
+| **TaskFlow API** (`@dag`, `@task`, `@task.virtualenv`) | Canonical, aliased, and qualified Airflow decorators are resolved statically. Each synchronous `@task` invocation → a task; implicit XCom data flow (`transform(extract())`) → a notebook that reads upstream return values via `dbutils.jobs.taskValues.get`, calls the function, and publishes its own. Native async `@task` callables, `@task.branch` / `@task.short_circuit`, or a callable reading task context/XCom route to a linked placeholder + agentic leaf gap. |
 | File sensors (`S3KeySensor`, `GCSObjectExistenceSensor`, `FileSensor`, `HdfsSensor`, `WebHdfsSensor`) | With no schedule, a root sensor whose descendants cover every non-sensor task → `file_arrival` trigger; otherwise a `dbutils.fs` polling notebook task. |
 | Table/SQL sensors (`DatabricksPartitionSensor`, `DatabricksSqlSensor`, `DatabricksSQLStatementsSensor`, `SqlSensor`) | With no schedule, a root literal-table sensor whose descendants cover every non-sensor task → `table_update` trigger; otherwise a `spark.sql` polling notebook task. |
 | `ExternalTaskSensor` | Placeholder explaining logical-run-aware migration options; polling the latest Databricks job run is not equivalent to Airflow's matching logical run. |
@@ -33,7 +34,7 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 | Dependencies | `>>` / `<<` chains (incl. list/tuple fan-out and inline TaskFlow calls) and `set_upstream` / `set_downstream`. |
 | **TaskGroups** (context-manager `with TaskGroup(...)`) | Static nesting → task-key namespacing (`group__subgroup__task`); group-level edges (`group_a >> group_b`, `task >> group`) expand to leaf→root edges between member tasks. |
 | **`@task_group`** (decorator form) | Placeholder + gap with dependency edges preserved; a decorator group is a sub-pipeline flowx doesn't lower deterministically. |
-| Schedule | Cron `schedule_interval` → Quartz (Unix DOW 0–6 → Quartz 1–7); exact sub-hour `timedelta` → Quartz, longer intervals → periodic, `@continuous` → continuous mode. |
+| Schedule | Cron `schedule_interval` → Quartz (Unix DOW 0–6 → Quartz 1–7); exact sub-hour `timedelta` → Quartz, longer intervals → periodic, `@continuous` → continuous mode. Airflow 3 Asset/Dataset lists and uniform `&` / `|` expressions map to `ALL_UPDATED` / `ANY_UPDATED` table triggers when each asset declares `extra={"databricks_table": "catalog.schema.table"}` or an `x-databricks-table:` URI. |
 | `trigger_rule` | Exact supported rules map to `run_if`; `none_failed_min_one_success` maps to `NONE_FAILED` with the all-skipped delta recorded. Rules without an equivalent become linked placeholders. |
 | Job parameters | `params={...}` / `Param(default=...)` → job parameters with defaults; `{{ params.x }}` / `{{ var.value.x }}` / `{{ dag_run.conf['x'] }}` → `{{job.parameters.x}}`. |
 | `Variable.get` in a callable | Rewritten to `dbutils.widgets.get`; a callable using an Airflow `Connection` object routes to a placeholder because one secret string cannot preserve the object API. |
@@ -63,6 +64,8 @@ decisions.
 - **Dynamic DAG factories** — classic DAG factories outside the documented single-declaration shape,
   non-literal factory arguments, and non-literal `dag_id` overrides fail reconciliation and block
   package output rather than emitting a filename-derived empty Job.
+- **Unresolved Airflow 3 schedules** — `AssetOrTimeSchedule`, mixed Asset boolean expressions, custom timetables, and Assets without explicit Databricks table metadata become `AirflowSourceSemantics` gaps. Job-level trigger and schedule changes are outside the leaf-only agentic contract.
+- **Ambiguous Airflow 1.10 schedule defaults** — assigned DAGs and legacy imports are supported, but a DAG using strong 1.10 syntax that omits `schedule_interval` becomes an `AirflowSourceSemantics` gap because historical default schedule and catchup behavior cannot be inferred safely from source alone.
 - **Sensors beyond the mapped families** (`S3PrefixSensor`, custom sensors, etc.) → placeholder + gap.
   A file sensor with a non-literal path, or a table/SQL sensor with no literal `sql` / `table_name`,
   also falls back to a placeholder.
