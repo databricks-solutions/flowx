@@ -19,6 +19,7 @@ jobs:
         run: sed -i 's|https://pypi-proxy\.dev\.databricks\.com/simple|https://pypi.org/simple|g' uv.lock
       - run: uv sync --frozen --extra mcp
       - run: make test
+      - run: make integration
       - name: Verify requirements.txt is in sync with the lockfile
         run: |
           make requirements
