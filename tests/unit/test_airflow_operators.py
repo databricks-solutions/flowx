@@ -599,6 +599,25 @@ def test_dummy_rewire_bridges_dependencies():
     assert [d.task_key for d in tasks["b"].depends_on] == ["a"]  # bridged through dropped gate
 
 
+def test_structural_only_dag_emits_completion_sentinel():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.empty import EmptyOperator\n"
+        "with DAG(dag_id='structural_only') as dag:\n"
+        "    start = EmptyOperator(task_id='start')\n"
+        "    end = EmptyOperator(task_id='end')\n"
+        "    start >> end\n"
+    )
+
+    assert p.reconciliation_status == "verified"
+    assert len(p.tasks) == 1
+    sentinel = p.tasks[0]
+    assert isinstance(sentinel, NotebookActivity)
+    assert sentinel.task_key == "__flowx_empty_dag"
+    assert "completed without executable tasks" in (sentinel.generated_source or "")
+    assert any(item["code"] == "empty_dag_sentinel_emitted" for item in p.audit["transformations"])
+
+
 def test_cosmos_dbt_task_group_becomes_dbt_factory():
     p = _load(
         "from airflow import DAG\n"
@@ -1826,6 +1845,87 @@ def test_taskflow_expand_literal_list_becomes_for_each():
     assert "dbutils.widgets.get('item')" in inner.generated_source
     assert "item=_expand_item" in inner.generated_source
     compile(inner.generated_source, "<proc>", "exec")
+
+
+def test_taskflow_mapped_output_consumer_becomes_placeholder():
+    p = _load(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def add_one(value):\n"
+        "    return value + 1\n"
+        "@task\n"
+        "def total(values):\n"
+        "    return sum(values)\n"
+        "@dag(dag_id='mapped_output')\n"
+        "def pipeline():\n"
+        "    added = add_one.expand(value=[1, 2, 3])\n"
+        "    total(added)\n"
+        "pipeline()\n"
+    )
+
+    tasks = _by_key(p)
+    assert isinstance(tasks["added"], ForEachActivity)
+    assert isinstance(tasks["total"], PlaceholderActivity)
+    assert [dependency.task_key for dependency in tasks["total"].depends_on or []] == ["added"]
+    assert p.reconciliation_status == "verified_with_gaps"
+    assert any(finding["code"] == "taskflow_mapped_output_unavailable" for finding in p.not_translatable)
+
+
+def test_airflow_non_execution_metadata_does_not_create_runtime_gap():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(\n"
+        "    dag_id='metadata',\n"
+        "    tags=['demo', 'daily'],\n"
+        "    description='Customer-facing description',\n"
+        "    doc_md='Long Airflow documentation',\n"
+        "    default_args={'owner': 'data-platform'},\n"
+        ") as dag:\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work')\n"
+    )
+
+    assert p.reconciliation_status == "verified"
+    assert p.description == "Customer-facing description"
+    assert p.tags["airflow_tag_1"] == "demo"
+    assert p.tags["airflow_tag_2"] == "daily"
+    assert p.tags["airflow_owner"] == "data-platform"
+    assert any(
+        item["code"] == "dag_setting_ignored" and item["setting"] == "doc_md" for item in p.audit["transformations"]
+    )
+    assert not any(finding["code"] == "unsupported_dag_setting" for finding in p.not_translatable)
+
+
+def test_positional_dag_id_is_preserved_as_job_identity_metadata():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG('positional_dag') as dag:\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work')\n"
+    )
+
+    assert p.name == "positional_dag"
+    assert p.tags["dag_id"] == "positional_dag"
+
+
+def test_airflow_tags_respect_the_databricks_job_tag_limit():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        f"with DAG(dag_id='many_tags', tags={[f'tag_{index}' for index in range(30)]!r}, "
+        "catchup=True, default_args={'owner': 'data-platform'}) as dag:\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work')\n"
+    )
+
+    assert len(p.tags) == 25
+    assert p.tags["source"] == "airflow"
+    assert p.tags["dag_id"] == "many_tags"
+    assert p.tags["airflow_catchup"] == "true"
+    assert p.tags["airflow_owner"] == "data-platform"
+    assert any(
+        item["code"] == "dag_setting_partially_mapped" and item["setting"] == "tags"
+        for item in p.audit["transformations"]
+    )
 
 
 def test_taskflow_partial_expand_gap_carries_the_mapping_call():

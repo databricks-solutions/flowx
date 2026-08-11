@@ -24,6 +24,10 @@ def test_clean_job_has_no_findings():
     assert check_job("p", job) == []
 
 
+def test_empty_job_is_flagged():
+    assert "empty_job" in _codes(check_job("p", {"name": "p", "tasks": []}))
+
+
 def test_duplicate_job_parameter_flagged():
     job = {"parameters": [{"name": "region", "default": "us"}, {"name": "region", "default": "us"}], "tasks": []}
     assert "duplicate_job_parameter" in _codes(check_job("p", job))

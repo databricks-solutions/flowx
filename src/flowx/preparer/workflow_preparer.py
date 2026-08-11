@@ -69,6 +69,8 @@ class PreparedWorkflow:
     # renders as ``schedule:`` / ``trigger:`` on the emitted DAB job.
     schedule: dict[str, Any] | None = None
     source: str | None = None
+    description: str | None = None
+    tags: dict[str, str] = field(default_factory=dict)
 
 
 # The DAB job ``run_if`` vocabulary. Airflow maps ``trigger_rule`` straight to one of these
@@ -410,6 +412,7 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
             )
         )
 
+    is_airflow = pipeline.tags.get("source") == "airflow"
     return PreparedWorkflow(
         name=pipeline.name,
         tasks=all_tasks,
@@ -423,6 +426,8 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         parameter_approximations=list(artifacts.parameter_approximations),
         schedule=pipeline.schedule,
         source=str(pipeline.tags.get("source")) if pipeline.tags.get("source") else None,
+        description=pipeline.description if is_airflow else None,
+        tags=dict(pipeline.tags) if is_airflow else {},
     )
 
 

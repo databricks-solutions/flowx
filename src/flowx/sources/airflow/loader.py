@@ -44,6 +44,10 @@ from flowx.sources.airflow import callable_notebook, templating
 from flowx.sources.airflow import operators as ops
 from flowx.utils import normalize_task_key
 
+_EDGE_MODIFIER_CONSTRUCTS = frozenset({"Label"})
+_NON_EXECUTION_DAG_SETTINGS = frozenset({"tags", "description", "doc_md", "dag_display_name", "default_args.owner"})
+_DATABRICKS_JOB_TAG_LIMIT = 25
+
 
 @dataclass(slots=True)
 class _TaskFlowTask:
@@ -63,6 +67,7 @@ class _TaskFlowTask:
     task_id: str
     def_name: str
     decorator: str
+    source_reference: str
     is_async: bool = False
     positional_deps: dict[int, str] = field(default_factory=dict)
     keyword_deps: dict[str, str] = field(default_factory=dict)
@@ -723,6 +728,9 @@ class _DagVisitor(ast.NodeVisitor):
         # DAG-level params={...} defaults (param name -> literal default), so emitted job parameters
         # carry a Databricks-required default rather than an empty placeholder.
         self.dag_params: dict[str, Any] = {}
+        self.dag_description: str | None = None
+        self.dag_user_tags: list[str] = []
+        self.dag_owner: str | None = None
         # task variable name -> TaskGroup id prefix (for task-key namespacing)
         self.groups: dict[str, str] = {}
         self._group_stack: list[str] = []
@@ -844,7 +852,7 @@ class _DagVisitor(ast.NodeVisitor):
             elif self._register_helper_factory_call(node.value, internal_var, binding=var):
                 self._claimed_statement_ids.add(id(node))
                 pass
-            elif self._register_taskflow_call(node.value, internal_var):
+            elif self._register_taskflow_call(node.value, internal_var, source_reference=var):
                 self._task_bindings[var] = internal_var
                 self._claimed_statement_ids.add(id(node))
                 pass  # a `x = mytask(...)` TaskFlow invocation, captured with var as its key
@@ -1079,7 +1087,7 @@ class _DagVisitor(ast.NodeVisitor):
             return func.id, mapped, override_id
         return None, mapped, override_id
 
-    def _register_taskflow_call(self, call: ast.Call, var: str) -> bool:
+    def _register_taskflow_call(self, call: ast.Call, var: str, *, source_reference: str | None = None) -> bool:
         """Records a TaskFlow ``@task`` invocation as a task instance keyed by *var*.
 
         Binds each call argument that references (or nests) another ``@task`` to that upstream task
@@ -1095,6 +1103,7 @@ class _DagVisitor(ast.NodeVisitor):
             task_id=override_id or var,
             def_name=def_name,
             decorator=decorator,
+            source_reference=source_reference or var,
             is_async=isinstance(function, ast.AsyncFunctionDef),
         )
         self.taskflow_tasks[var] = task
@@ -1215,7 +1224,7 @@ class _DagVisitor(ast.NodeVisitor):
             if def_name is not None:
                 self._taskflow_counter += 1
                 synthetic = f"{def_name}__tf{self._taskflow_counter}"
-                self._register_taskflow_call(arg, synthetic)
+                self._register_taskflow_call(arg, synthetic, source_reference=def_name)
                 return synthetic
         return None
 
@@ -1351,7 +1360,8 @@ class _DagVisitor(ast.NodeVisitor):
 
     def _read_dag_kwargs(self, call: ast.Call) -> None:
         kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
-        self.dag_id = ops.literal_str(kwargs.get("dag_id"))
+        positional_dag_id = ops.literal_str(call.args[0]) if call.args else None
+        self.dag_id = ops.literal_str(kwargs.get("dag_id")) or positional_dag_id
         self._apply_dag_kwargs(kwargs)
         if self.airflow_generation == "1.10" and not {"schedule", "schedule_interval"} & kwargs.keys():
             self.unresolved_constructs.append(("ambiguous_airflow_1_10_default_schedule", call))
@@ -1364,6 +1374,10 @@ class _DagVisitor(ast.NodeVisitor):
         )
         self.timezone = _extract_timezone(kwargs.get("start_date")) or _extract_timezone(kwargs.get("timezone"))
         self.catchup = ops.literal_value(kwargs.get("catchup")) is True
+        self.dag_description = ops.literal_str(kwargs.get("description"))
+        tags = ops.literal_value(kwargs.get("tags"))
+        if isinstance(tags, (list, tuple)) and all(isinstance(tag, str) for tag in tags):
+            self.dag_user_tags = list(tags)
         # default_args is a dict literal of DAG-wide task settings (retries, timeouts, email).
         default_args = kwargs.get("default_args")
         if isinstance(default_args, ast.Dict):
@@ -1373,6 +1387,9 @@ class _DagVisitor(ast.NodeVisitor):
                 if isinstance(key, ast.Constant) and isinstance(key.value, str)
             }
             self.captured_dag_settings.update(f"default_args.{name}" for name in self.default_args)
+            owner = self.default_args.get("owner")
+            if owner is not None:
+                self.dag_owner = ops.literal_str(owner)
         # params={...} supplies DAG parameter defaults; each value is a literal or a Param(default=...).
         params = kwargs.get("params")
         if isinstance(params, ast.Dict):
@@ -1432,7 +1449,7 @@ class _DagVisitor(ast.NodeVisitor):
                 if task_var in self.taskflow_tasks:
                     self._taskflow_counter += 1
                     task_var = f"{def_name}__tf{self._taskflow_counter}"
-                self._register_taskflow_call(value, task_var)
+                self._register_taskflow_call(value, task_var, source_reference=def_name)
                 self._claimed_statement_ids.add(id(node))
             elif self._register_bare_operator_call(value) is not None:
                 self._claimed_statement_ids.add(id(node))
@@ -1500,13 +1517,25 @@ class _DagVisitor(ast.NodeVisitor):
 
     def _collect_shift_expression(self, node: ast.expr) -> list[str]:
         """Collects each shift edge recursively and returns the expression's chain result."""
+        tasks, _is_modifier = self._collect_shift_operand(node)
+        return tasks
+
+    def _collect_shift_operand(self, node: ast.expr) -> tuple[list[str], bool]:
+        """Collects a shift operand while treating Airflow edge metadata as transparent."""
         if not isinstance(node, ast.BinOp) or not isinstance(node.op, (ast.RShift, ast.LShift)):
-            return self._shift_position_names(node)
-        left = self._collect_shift_expression(node.left)
-        right = self._collect_shift_expression(node.right)
+            is_modifier = (
+                isinstance(node, ast.Call) and _construct_name(node.func, self._aliases) in _EDGE_MODIFIER_CONSTRUCTS
+            )
+            return self._shift_position_names(node), is_modifier
+        left, left_is_modifier = self._collect_shift_operand(node.left)
+        right, right_is_modifier = self._collect_shift_operand(node.right)
+        if right_is_modifier:
+            return left, left_is_modifier
+        if left_is_modifier:
+            return right, right_is_modifier
         upstream, downstream = (left, right) if isinstance(node.op, ast.RShift) else (right, left)
         self._add_edges(upstream, downstream, node)
-        return right
+        return right, False
 
     def _shift_position_names(self, node: ast.expr) -> list[str]:
         # A shift-chain position resolves to task vars. An inline TaskFlow call (`extract()`) is
@@ -1516,10 +1545,12 @@ class _DagVisitor(ast.NodeVisitor):
         if isinstance(node, ast.Call):
             def_name, _mapped, _override = self._taskflow_def_name(node)
             if def_name is not None:
-                self._taskflow_counter += 1
-                synthetic = f"{def_name}__tf{self._taskflow_counter}"
-                self._register_taskflow_call(node, synthetic)
-                return [synthetic]
+                task_var = def_name
+                if task_var in self.taskflow_tasks:
+                    self._taskflow_counter += 1
+                    task_var = f"{def_name}__tf{self._taskflow_counter}"
+                self._register_taskflow_call(node, task_var, source_reference=def_name)
+                return [task_var]
             # An inline classic operator (`Op(...) >> Op(...)` with no assignments) is still a task.
             bare_var = self._register_bare_operator_call(node)
             if bare_var is not None:
@@ -2621,6 +2652,47 @@ def _load_airflow_module(
             else:
                 append_task(activity, var)
             continue
+        mapped_output_dependencies = sorted(
+            {
+                dependency
+                for dependency in [*tf.positional_deps.values(), *tf.keyword_deps.values()]
+                if dependency in visitor.mapped
+            }
+        )
+        if mapped_output_dependencies:
+            placeholder = PlaceholderActivity(
+                name=tf.task_id,
+                task_key=task_key,
+                original_type=f"@{tf.decorator}",
+                comment=(
+                    "Airflow aggregates mapped TaskFlow return values for downstream XCom consumers, but "
+                    "Databricks For each tasks do not expose nested task values to downstream tasks. "
+                    "Materialize and aggregate the mapped results explicitly."
+                ),
+                raw_definition={
+                    "operator": f"@{tf.decorator}",
+                    "source": ast.get_source_segment(source, definition) or "",
+                    "invocation": ast.get_source_segment(source, visitor.capture_source_nodes[var]) or "",
+                    "mapped_upstreams": [var_to_task_key[dependency] for dependency in mapped_output_dependencies],
+                },
+            )
+            placeholder.depends_on = depends_on
+            append_task(placeholder, var)
+            semantic_findings.append(
+                _semantic_finding(
+                    source_file or dag_path.name,
+                    visitor.calls.get(var),
+                    code="taskflow_mapped_output_unavailable",
+                    message=(
+                        f"Task {tf.task_id!r} consumes mapped TaskFlow output that Databricks For each "
+                        "tasks cannot expose as an aggregate."
+                    ),
+                    task_key=task_key,
+                    capture_id=var,
+                    upstream_task_keys=[var_to_task_key[dependency] for dependency in mapped_output_dependencies],
+                )
+            )
+            continue
         if var in visitor.mapped and tf.expand_items_json is None:
             # .expand over a non-literal iterable (e.g. an upstream task's output) can't be lowered to
             # a static for_each inputs array -- route to the agentic-gap round instead of silently
@@ -2706,9 +2778,19 @@ def _load_airflow_module(
         # Airflow catchup=True has no DABs schedule setting; it maps to running a native Databricks
         # backfill, which overrides the reserved logical-date parameter per replayed window.
         tags["airflow_catchup"] = "true"
+    if visitor.dag_owner:
+        tags["airflow_owner"] = visitor.dag_owner
+    available_user_tags = _DATABRICKS_JOB_TAG_LIMIT - len(tags)
+    tags.update(
+        {
+            f"airflow_tag_{index}": value
+            for index, value in enumerate(visitor.dag_user_tags[:available_user_tags], start=1)
+        }
+    )
     expected_ir_edges = {(dependency.task_key, task.task_key) for task in tasks for dependency in task.depends_on or []}
     pipeline = Pipeline(
         name=visitor.dag_id or Path(dag_path).stem,
+        description=visitor.dag_description,
         tasks=tasks,
         parameters=parameters,
         schedule=schedule,
@@ -2744,6 +2826,11 @@ _SUPPORTED_DAG_SETTINGS = frozenset(
         "default_args.retries",
         "default_args.retry_delay",
         "default_args.execution_timeout",
+        "tags",
+        "description",
+        "doc_md",
+        "dag_display_name",
+        "default_args.owner",
     }
 )
 
@@ -2987,7 +3074,12 @@ def _reconcile_pipeline(
 
     def source_reference(capture_id: str) -> str:
         capture = visitor.task_captures.get(capture_id)
-        return capture.variable if capture is not None else capture_id.split("__L", 1)[0]
+        if capture is not None:
+            return capture.variable
+        taskflow = visitor.taskflow_tasks.get(capture_id)
+        if taskflow is not None:
+            return taskflow.source_reference
+        return capture_id.split("__L", 1)[0]
 
     audited_edge_identities = sorted(
         (str(candidate.details["upstream"]), str(candidate.details["downstream"]))
@@ -3137,6 +3229,47 @@ def _reconcile_pipeline(
             )
         )
 
+    for candidate in audit.settings:
+        name = str(candidate.details.get("name"))
+        if name not in _NON_EXECUTION_DAG_SETTINGS:
+            continue
+        emitted_user_tag_count = sum(key.startswith("airflow_tag_") for key in pipeline.tags)
+        partially_mapped = name == "tags" and emitted_user_tag_count < len(visitor.dag_user_tags)
+        mapped = (
+            (name == "tags" and bool(visitor.dag_user_tags))
+            or (name == "description" and visitor.dag_description is not None)
+            or (name == "default_args.owner" and visitor.dag_owner is not None)
+        )
+        transformations.append(
+            {
+                "code": (
+                    "dag_setting_partially_mapped"
+                    if partially_mapped
+                    else "dag_setting_mapped"
+                    if mapped
+                    else "dag_setting_ignored"
+                ),
+                "setting": name,
+                "target": {
+                    "tags": "job.tags",
+                    "description": "job.description",
+                    "default_args.owner": "job.tags.airflow_owner",
+                }.get(name),
+                "rationale": (
+                    "databricks_jobs_support_at_most_25_tags"
+                    if partially_mapped
+                    else "preserved_as_databricks_job_metadata"
+                    if mapped
+                    else "non_execution_metadata_has_no_required_runtime_effect"
+                ),
+                **(
+                    {"source_count": len(visitor.dag_user_tags), "emitted_count": emitted_user_tag_count}
+                    if name == "tags"
+                    else {}
+                ),
+            }
+        )
+
     unresolved_messages = {
         "unresolved_asset_schedule": (
             "An Airflow Asset/Dataset schedule lacks an explicit Databricks table mapping. Add "
@@ -3223,6 +3356,27 @@ def _reconcile_pipeline(
                 "code": "dbt_chain_collapsed",
                 "capture_ids": list(dbt_vars),
                 "task_key": var_to_task_key.get(dbt_vars[0], ""),
+            }
+        )
+
+    if not pipeline.tasks and not any(item["severity"] == "failed" for item in findings):
+        pipeline.tasks.append(
+            NotebookActivity(
+                name="Airflow DAG completion",
+                task_key="__flowx_empty_dag",
+                notebook_path="notebooks/__flowx_empty_dag.py",
+                generated_source=(
+                    "# Databricks notebook source\n"
+                    "# This DAG contained no executable tasks after structural operators were rewired.\n"
+                    "print('Airflow DAG completed without executable tasks.')\n"
+                ),
+            )
+        )
+        transformations.append(
+            {
+                "code": "empty_dag_sentinel_emitted",
+                "task_key": "__flowx_empty_dag",
+                "rationale": "preserve_a_runnable_job_for_a_structural_or_empty_airflow_dag",
             }
         )
 

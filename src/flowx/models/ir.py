@@ -606,6 +606,7 @@ class Pipeline:
 
     Attributes:
         name: Logical pipeline name.
+        description: Human-readable workflow description.
         parameters: Pipeline parameter definitions.
         schedule: Serialized schedule definition, if any.
         tasks: Ordered list of translated activities.
@@ -617,6 +618,7 @@ class Pipeline:
     """
 
     name: str
+    description: str | None = None
     parameters: list[dict[str, Any]] | None = None
     schedule: dict[str, Any] | None = None
     tasks: list[Activity] = field(default_factory=list)

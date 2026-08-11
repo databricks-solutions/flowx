@@ -220,6 +220,55 @@ def test_source_edge_identity_mismatch_fails_reconciliation(tmp_path: Path, monk
     assert finding["details"]["captured_edges"] == [["second", "first"]]
 
 
+def test_label_edge_modifier_preserves_every_dependency_segment(tmp_path: Path) -> None:
+    dag_path = tmp_path / "labels.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "from airflow.utils.edgemodifier import Label\n"
+        "with DAG(dag_id='labels') as dag:\n"
+        "    upstream = BashOperator(task_id='upstream', bash_command='echo upstream')\n"
+        "    downstream = BashOperator(task_id='downstream', bash_command='echo downstream')\n"
+        "    terminal = BashOperator(task_id='terminal', bash_command='echo terminal')\n"
+        "    upstream >> Label('successful path') >> downstream >> terminal\n",
+        encoding="utf-8",
+    )
+
+    pipeline = airflow_loader.load_airflow_dag(dag_path)
+    tasks = {task.task_key: task for task in pipeline.tasks}
+
+    assert pipeline.reconciliation_status == "verified"
+    assert [dependency.task_key for dependency in tasks["downstream"].depends_on or []] == ["upstream"]
+    assert [dependency.task_key for dependency in tasks["terminal"].depends_on or []] == ["downstream"]
+    assert pipeline.audit["audited_edge_count"] == 2
+    assert pipeline.audit["captured_edge_count"] == 2
+
+
+def test_bare_taskflow_shift_uses_source_identity_in_reconciliation(tmp_path: Path) -> None:
+    dag_path = tmp_path / "taskflow_edges.py"
+    dag_path.write_text(
+        "from airflow.decorators import dag, task\n"
+        "@task\n"
+        "def upstream():\n"
+        "    return 1\n"
+        "@task\n"
+        "def downstream():\n"
+        "    return 2\n"
+        "@dag(dag_id='taskflow_edges')\n"
+        "def build():\n"
+        "    upstream() >> downstream()\n"
+        "build()\n",
+        encoding="utf-8",
+    )
+
+    pipeline = airflow_loader.load_airflow_dag(dag_path)
+    downstream = next(task for task in pipeline.tasks if task.task_key.startswith("downstream"))
+
+    assert pipeline.reconciliation_status == "verified"
+    assert [dependency.task_key for dependency in downstream.depends_on or []] == ["upstream"]
+    assert not any(finding["code"] == "edge_identity_mismatch" for finding in pipeline.not_translatable)
+
+
 def test_captured_edge_removed_from_ir_fails_reconciliation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dag_path = tmp_path / "missing_ir_edge.py"
     dag_path.write_text(_SIMPLE_DAG, encoding="utf-8")
@@ -331,8 +380,9 @@ def test_uninvoked_module_helper_body_does_not_create_a_task(tmp_path: Path) -> 
     pipeline = airflow_loader.load_airflow_dag(dag_path)
 
     assert pipeline.reconciliation_status == "verified"
-    assert pipeline.tasks == []
     assert pipeline.audit["audited_activity_count"] == 0
+    assert [task.task_key for task in pipeline.tasks] == ["__flowx_empty_dag"]
+    assert any(item["code"] == "empty_dag_sentinel_emitted" for item in pipeline.audit["transformations"])
 
 
 def test_unresolved_construct_is_classified_in_coverage(tmp_path: Path) -> None:

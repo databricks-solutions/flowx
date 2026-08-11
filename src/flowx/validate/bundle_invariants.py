@@ -99,6 +99,15 @@ def check_job(job_key: str, job: dict[str, Any]) -> list[BundleFinding]:
     findings: list[BundleFinding] = []
     where = f"job '{job_key}'"
 
+    if not job.get("tasks"):
+        findings.append(
+            BundleFinding(
+                code="empty_job",
+                location=where,
+                message="A Lakeflow Job must contain at least one executable task.",
+            )
+        )
+
     # 1. No duplicate job-parameter names.
     param_names = [param.get("name") for param in (job.get("parameters") or []) if isinstance(param, dict)]
     duplicate_params = sorted({name for name in param_names if name is not None and param_names.count(name) > 1})

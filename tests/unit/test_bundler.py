@@ -64,6 +64,34 @@ def _workflow_with_secrets(name: str = "secret_workflow") -> PreparedWorkflow:
     return wf
 
 
+def test_airflow_job_metadata_is_emitted(tmp_path):
+    pipeline = Pipeline(
+        name="airflow_metadata",
+        description="Customer-facing description",
+        tags={
+            "source": "airflow",
+            "dag_id": "airflow_metadata",
+            "airflow_tag_1": "demo",
+            "airflow_owner": "data-platform",
+        },
+        tasks=[
+            NotebookActivity(
+                name="work",
+                task_key="work",
+                notebook_path="work.py",
+                generated_source="# Databricks notebook source\nprint('work')\n",
+            )
+        ],
+    )
+
+    write_bundle(prepare_workflow(pipeline), tmp_path)
+    resource = yaml.safe_load((tmp_path / "resources" / "airflow_metadata.yml").read_text(encoding="utf-8"))
+    job = resource["resources"]["jobs"]["airflow_metadata"]
+
+    assert job["description"] == "Customer-facing description"
+    assert job["tags"] == pipeline.tags
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------

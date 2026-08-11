@@ -874,6 +874,7 @@ def _build_gap_envelopes(
                     "schedule": pipeline.get("schedule"),
                     "parameters": pipeline.get("parameters"),
                     "tags": pipeline.get("tags"),
+                    "description": pipeline.get("description"),
                 },
                 reason={
                     "code": str(matched_finding.get("code", "operator_placeholder")),

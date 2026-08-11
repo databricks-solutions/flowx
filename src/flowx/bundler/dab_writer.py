@@ -1559,6 +1559,10 @@ def _build_job_resource(
         "name": workflow.name,
         "tasks": workflow.tasks,
     }
+    if workflow.description:
+        job_def["description"] = workflow.description
+    if workflow.tags:
+        job_def["tags"] = dict(workflow.tags)
 
     if attach_clusters:
         _bind_cluster_to_notebook_tasks(workflow.tasks)
@@ -1898,6 +1902,7 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         parameters.append(entry)
     pipeline = Pipeline(
         name=pipeline_dict.get("name", "unknown"),
+        description=pipeline_dict.get("description"),
         tasks=activities,
         parameters=parameters or None,
         translation_configuration=_reconstruct_configuration(pipeline_dict.get("translation_configuration")),

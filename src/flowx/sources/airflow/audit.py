@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+_EDGE_MODIFIER_CONSTRUCTS = frozenset({"Label"})
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuditCandidate:
@@ -314,13 +316,23 @@ class _SourceAuditor(ast.NodeVisitor):
         return []
 
     def _audit_shift(self, node: ast.expr) -> list[str]:
+        references, _is_modifier = self._audit_shift_operand(node)
+        return references
+
+    def _audit_shift_operand(self, node: ast.expr) -> tuple[list[str], bool]:
+        """Audits a shift operand while treating Airflow edge metadata as transparent."""
         if not isinstance(node, ast.BinOp) or not isinstance(node.op, (ast.RShift, ast.LShift)):
-            return self._audit_position(node)
-        left = self._audit_shift(node.left)
-        right = self._audit_shift(node.right)
+            is_modifier = isinstance(node, ast.Call) and _leaf(node.func, self.aliases) in _EDGE_MODIFIER_CONSTRUCTS
+            return self._audit_position(node), is_modifier
+        left, left_is_modifier = self._audit_shift_operand(node.left)
+        right, right_is_modifier = self._audit_shift_operand(node.right)
+        if right_is_modifier:
+            return left, left_is_modifier
+        if left_is_modifier:
+            return right, right_is_modifier
         upstreams, downstreams = (left, right) if isinstance(node.op, ast.RShift) else (right, left)
         self._add_edges(node, upstreams, downstreams, "shift")
-        return right
+        return right, False
 
     def _call_reference(self, call: ast.Call) -> str:
         operator, keywords, _mapped = _operator_call(call, self.aliases)

@@ -68,6 +68,8 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
         "migration_status": pipeline.migration_status,
         "audit": dict(pipeline.audit),
     }
+    if pipeline.description is not None:
+        result["description"] = pipeline.description
     if pipeline.translation_configuration is not None:
         result["translation_configuration"] = configuration_to_dict(pipeline.translation_configuration)
     return result
@@ -417,6 +419,7 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
     return {
         "__class__": "Pipeline",
         "name": pipeline.name,
+        "description": pipeline.description,
         "parameters": pipeline.parameters,
         "schedule": pipeline.schedule,
         "tags": pipeline.tags,
