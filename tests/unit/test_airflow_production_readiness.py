@@ -268,7 +268,8 @@ def test_unresolved_jinja_in_generated_source_becomes_placeholder() -> None:
     assert any(finding["code"] == "unresolved_airflow_template" for finding in pipeline.not_translatable)
 
 
-def test_unsupported_and_approximate_trigger_rules_are_explicit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rule", ["none_failed_min_one_success", "none_failed_or_skipped"])
+def test_unsupported_and_approximate_trigger_rules_are_explicit(tmp_path: Path, rule: str) -> None:
     unsupported = load_airflow_dag(_REPROS / "t23_tr2.py")
     assert all(isinstance(unsupported.tasks[index], PlaceholderActivity) for index in (1, 2, 3))
 
@@ -279,7 +280,7 @@ def test_unsupported_and_approximate_trigger_rules_are_explicit(tmp_path: Path) 
         "with DAG(dag_id='rules') as dag:\n"
         "    up = BashOperator(task_id='up', bash_command='echo up')\n"
         "    down = BashOperator(task_id='down', bash_command='echo down', "
-        "trigger_rule='none_failed_min_one_success')\n"
+        f"trigger_rule={rule!r})\n"
         "    up >> down\n",
         encoding="utf-8",
     )

@@ -135,7 +135,7 @@ class Prereqs:
     # manifest_path, note}). The user must `pip install databricks-dbt-factory` before deploy.
     pydabs_dbt_factories: list[dict[str, Any]] = field(default_factory=list)
     # Airflow catchup=True jobs; each entry is the SetupTask config dict ({pipeline}). History is
-    # replayed via a native Databricks backfill overriding the run_date parameter, not a DABs setting.
+    # replayed via a native Databricks backfill overriding the reserved Airflow date parameter.
     airflow_backfills: list[dict[str, Any]] = field(default_factory=list)
 
     def is_empty(self) -> bool:
@@ -695,8 +695,8 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
             "The DAG(s) below set `catchup=True`, so Airflow backfilled missed intervals.  There is "
             "no equivalent DABs schedule setting.  To replay history, run a "
             "[native Databricks backfill](https://docs.databricks.com/aws/en/jobs/backfill-jobs), which "
-            "overrides the `run_date` job parameter with `{{backfill.iso_date}}` per replayed window "
-            "(the run_date parameter is emitted for exactly this reason)."
+            "overrides the `__flowx_airflow_run_date` job parameter with `{{backfill.iso_date}}` per "
+            "replayed window (the parameter is emitted for exactly this reason)."
         )
         lines.append("")
         for entry in sorted(prereqs.airflow_backfills, key=lambda config: config.get("pipeline", "")):

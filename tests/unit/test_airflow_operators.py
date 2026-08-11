@@ -5,6 +5,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from flowx.models.ir import (
     DbtFactoryActivity,
     ForEachActivity,
@@ -207,21 +209,23 @@ def test_bash_operator_macros_thread_through_shell_env_vars():
     task = _by_key(p)["run"]
     assert isinstance(task, NotebookActivity)
     # Macros converted to shell variables; the raw {{ ... }} is gone from the %sh cell.
-    assert "--date $run_date" in task.generated_source
-    assert "--env $env" in task.generated_source
+    assert "--date ${__flowx_airflow_run_date}" in task.generated_source
+    assert "--env ${env}" in task.generated_source
     assert "{{ ds }}" not in task.generated_source
     # The widgets are declared and exported to the environment before the %sh cell.
-    assert "os.environ['run_date'] = dbutils.widgets.get('run_date')" in task.generated_source
+    assert (
+        "os.environ['__flowx_airflow_run_date'] = dbutils.widgets.get('__flowx_airflow_run_date')"
+    ) in task.generated_source
     compile("\n".join(task.generated_source.split("# MAGIC %sh")[0].splitlines()), "<pre>", "exec")
     # Each widget must be BOUND to its job parameter: an unbound widget is backfilled with an empty
     # string by the bundler, so the command would silently run with blank values.
     assert task.base_parameters == {
-        "run_date": "{{job.parameters.run_date}}",
+        "__flowx_airflow_run_date": "{{job.parameters.__flowx_airflow_run_date}}",
         "env": "{{job.parameters.env}}",
     }
     # run_date declared as a job parameter with the schedule-aware default (backfill-overridable).
     params = {param["name"]: param["default"] for param in p.parameters}
-    assert params["run_date"] == "{{job.trigger.time.iso_date}}"
+    assert params["__flowx_airflow_run_date"] == "{{job.trigger.time.iso_date}}"
     assert params["env"] == ""
 
 
@@ -249,9 +253,9 @@ def test_bash_operator_run_id_macro_defaults_to_run_id_ref():
         "    t = BashOperator(task_id='run', bash_command='echo {{ run_id }}')\n"
     )
     task = _by_key(p)["run"]
-    assert "echo $run_id" in task.generated_source
+    assert "echo ${__flowx_airflow_run_id}" in task.generated_source
     params = {param["name"]: param["default"] for param in p.parameters}
-    assert params["run_id"] == "{{job.run_id}}"
+    assert params["__flowx_airflow_run_id"] == "{{job.run_id}}"
 
 
 def test_bash_operator_wrapping_spark_submit_becomes_spark_task():
@@ -1047,19 +1051,19 @@ def test_jinja_macros_convert_to_dab_refs_and_collect_params():
     # values is still converted to DAB refs. {{ ds }} routes through a run_date job parameter (so a
     # native backfill can override it), not an inline start_time ref.
     kwargs_json = task.base_parameters["__flowx_op_kwargs"]
-    assert "{{job.parameters.run_date}}" in kwargs_json
+    assert "{{job.parameters.__flowx_airflow_run_date}}" in kwargs_json
     assert "{{job.parameters.env}}" in kwargs_json
-    # Referenced params are declared with a (Databricks-required) default; run_date defaults to the
-    # scheduled trigger time on a cron job. The internal __flowx_ widget is NOT declared.
+    # Referenced params are declared with Databricks-required defaults; the reserved logical-date
+    # parameter defaults to the scheduled trigger time on a cron job.
     assert p.parameters == [
+        {"name": "__flowx_airflow_run_date", "default": "{{job.trigger.time.iso_date}}"},
         {"name": "env", "default": ""},
-        {"name": "run_date", "default": "{{job.trigger.time.iso_date}}"},
     ]
 
 
 def test_execution_date_on_event_triggered_job_defaults_to_start_time():
     # A cron+sensor collapses to a file_arrival trigger -- no scheduled trigger time exists, so the
-    # run_date parameter approximates with the run start time (still overridable by a backfill).
+    # The reserved execution-date parameter approximates with the run start time.
     p = _load(
         "from airflow import DAG\n"
         "from airflow.operators.python import PythonOperator\n"
@@ -1071,7 +1075,7 @@ def test_execution_date_on_event_triggered_job_defaults_to_start_time():
         "    wait >> t\n"
     )
     assert (p.schedule or {}).get("kind") == "file_arrival"
-    assert p.parameters == [{"name": "execution_date", "default": "{{job.start_time.iso_datetime}}"}]
+    assert p.parameters == [{"name": "__flowx_airflow_execution_date", "default": "{{job.start_time.iso_datetime}}"}]
 
 
 def test_catchup_true_tags_pipeline_for_native_backfill():
@@ -1096,8 +1100,7 @@ def test_catchup_false_leaves_no_backfill_tag():
     assert "airflow_catchup" not in p.tags
 
 
-def test_dag_param_named_run_date_keeps_user_default():
-    # An explicit params={'run_date': ...} default wins over the schedule-aware backfill default.
+def test_dag_param_named_run_date_remains_distinct_from_logical_date():
     p = _load(
         "from airflow import DAG\n"
         "from airflow.models.param import Param\n"
@@ -1106,8 +1109,24 @@ def test_dag_param_named_run_date_keeps_user_default():
         "with DAG(dag_id='d', schedule_interval='0 6 * * *', params={'run_date': Param('2024-01-01')}) as dag:\n"
         "    t = PythonOperator(task_id='t', python_callable=w, op_kwargs={'date': '{{ ds }}'})\n"
     )
-    run_date = next(param for param in p.parameters if param["name"] == "run_date")
-    assert run_date["default"] == "2024-01-01"
+    parameters = {param["name"]: param["default"] for param in p.parameters}
+    assert parameters["run_date"] == "2024-01-01"
+    assert parameters["__flowx_airflow_run_date"] == "{{job.trigger.time.iso_date}}"
+    task = _by_key(p)["t"]
+    assert "{{job.parameters.__flowx_airflow_run_date}}" in task.base_parameters["__flowx_op_kwargs"]
+
+
+def test_sql_embedded_string_template_becomes_placeholder():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = SQLExecuteQueryOperator(task_id='report', sql=\"SELECT 'partition_{{ ds }}'\")\n"
+    )
+
+    task = _by_key(p)["report"]
+    assert isinstance(task, PlaceholderActivity)
+    assert any(finding["code"] == "unresolved_airflow_template" for finding in p.not_translatable)
 
 
 def test_unsupported_airflow_macro_becomes_placeholder():
@@ -1450,9 +1469,80 @@ def test_variable_get_rewritten_to_widget_and_declared_as_param():
         "    t = PythonOperator(task_id='ingest', python_callable=ingest)\n"
     )
     task = _by_key(p)["ingest"]
-    assert 'dbutils.widgets.get("target_env")' in task.generated_source
+    assert 'dbutils.widgets.get("__flowx_airflow_variable_target_env")' in task.generated_source
     assert "Variable.get" not in task.generated_source
-    assert {"name": "target_env", "default": ""} in (p.parameters or [])
+    assert {"name": "__flowx_airflow_variable_target_env", "default": ""} in (p.parameters or [])
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "Variable.get('target_env', 'prod')",
+        "Variable.get('target_env', default_var='prod')",
+        "Variable.get('target_env', deserialize_json=True)",
+        "Variable.get(variable_name)",
+    ],
+)
+def test_variable_get_forms_that_need_airflow_runtime_become_placeholders(expression: str):
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "from airflow.models import Variable\n"
+        "variable_name = 'target_env'\n"
+        "def ingest():\n"
+        f"    print({expression})\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='ingest', python_callable=ingest)\n"
+    )
+
+    task = _by_key(p)["ingest"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "Variable.get" in task.comment
+
+
+def test_aliased_airflow_runtime_import_in_callable_becomes_placeholder():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "from airflow.models import Variable as AirflowVariable\n"
+        "def ingest():\n"
+        "    print(AirflowVariable.get('target_env'))\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='ingest', python_callable=ingest)\n"
+    )
+
+    task = _by_key(p)["ingest"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "Airflow runtime import" in task.comment
+
+
+def test_function_local_airflow_import_becomes_placeholder():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def ingest():\n"
+        "    from airflow.models import Variable\n"
+        "    print(Variable.get('target_env'))\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='ingest', python_callable=ingest)\n"
+    )
+
+    task = _by_key(p)["ingest"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "Airflow runtime import" in task.comment
+
+
+def test_reserved_flowx_dag_parameter_becomes_an_explicit_gap():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d', params={'__flowx_airflow_run_date': 'spoofed'}) as dag:\n"
+        "    t = BashOperator(task_id='t', bash_command='echo ok')\n"
+    )
+
+    assert p.reconciliation_status == "verified_with_gaps"
+    assert any(item["code"] == "reserved_airflow_parameter_name" for item in p.not_translatable)
+    assert "__flowx_airflow_run_date" not in {param["name"] for param in p.parameters or []}
 
 
 def test_connection_get_becomes_placeholder_for_connection_object_mapping():

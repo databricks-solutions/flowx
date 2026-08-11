@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+from collections.abc import Sequence
 
 from flowx.sources.airflow import templating
 
@@ -166,7 +167,12 @@ def render_definitions(func: ast.FunctionDef, source: str, *, note: str) -> str:
 
     prelude = "\n".join(lines) + "\n"
     # Rewrite Variable.get / BaseHook.get_connection in the emitted definitions.
-    rewritten, _params, _notes = templating.rewrite_airflow_calls(prelude)
+    variable_binding = imports.get("Variable")
+    rewrite_variable = variable_binding is not None and variable_binding[1] in _AIRFLOW_IMPORT_ROOTS
+    rewritten, _params, _notes = templating.rewrite_airflow_calls(
+        prelude,
+        rewrite_variable=rewrite_variable,
+    )
     return rewritten
 
 
@@ -276,9 +282,83 @@ def airflow_runtime_reason(func: ast.FunctionDef, source: str) -> str | None:
     connections = sorted(templating.airflow_connection_names(closure_source))
     if connections:
         return f"callable reads Airflow connection '{connections[0]}' as a Connection object"
+    import_reason = _airflow_runtime_import_reason(
+        module,
+        enclosing_statements,
+        closure_nodes,
+    )
+    if import_reason is not None:
+        return import_reason
     unresolved_names = _unresolved_closure_names(func, source)
     if unresolved_names:
         return f"captures nonliteral closure '{unresolved_names[0]}'"
+    return None
+
+
+def _airflow_runtime_import_reason(
+    module: ast.Module,
+    enclosing_statements: list[ast.stmt],
+    closure_nodes: Sequence[ast.AST],
+) -> str | None:
+    """Returns why an Airflow-bound name in emitted callable code cannot run without Airflow."""
+    for closure_node in closure_nodes:
+        for imported in ast.walk(closure_node):
+            if isinstance(imported, ast.Import):
+                roots = {alias.name.split(".")[0] for alias in imported.names}
+            elif isinstance(imported, ast.ImportFrom):
+                roots = {(imported.module or "").split(".")[0]}
+            else:
+                continue
+            unavailable = sorted(roots & _AIRFLOW_IMPORT_ROOTS)
+            if unavailable:
+                return f"callable contains Airflow runtime import {unavailable[0]!r}"
+    imports = _import_bindings(module, enclosing_statements)
+    decorator_name_ids = {
+        id(name)
+        for closure_node in closure_nodes
+        for function in ast.walk(closure_node)
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for decorator in function.decorator_list
+        for name in ast.walk(decorator)
+        if isinstance(name, ast.Name)
+    }
+    loaded_names = [
+        name
+        for closure_node in closure_nodes
+        for name in ast.walk(closure_node)
+        if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load) and id(name) not in decorator_name_ids
+    ]
+    airflow_names = {
+        name.id for name in loaded_names if name.id in imports and imports[name.id][1] in _AIRFLOW_IMPORT_ROOTS
+    }
+    if "Variable" in airflow_names:
+        supported_variable_ids: set[int] = set()
+        for closure_node in closure_nodes:
+            for call in (node for node in ast.walk(closure_node) if isinstance(node, ast.Call)):
+                function = call.func
+                if not (
+                    isinstance(function, ast.Attribute)
+                    and function.attr == "get"
+                    and isinstance(function.value, ast.Name)
+                    and function.value.id == "Variable"
+                ):
+                    continue
+                supported_variable_ids.add(id(function.value))
+                literal_key = (
+                    call.args[0].value
+                    if len(call.args) == 1
+                    and not call.keywords
+                    and isinstance(call.args[0], ast.Constant)
+                    and isinstance(call.args[0].value, str)
+                    else None
+                )
+                if literal_key is None or not literal_key.isascii() or not literal_key.isidentifier():
+                    return "callable calls Variable.get() with a dynamic key or Airflow-only options"
+        if any(name.id == "Variable" and id(name) not in supported_variable_ids for name in loaded_names):
+            return "callable uses Airflow Variable outside the supported Variable.get('literal_name') form"
+        airflow_names.remove("Variable")
+    if airflow_names:
+        return f"callable uses Airflow runtime import {sorted(airflow_names)[0]!r}"
     return None
 
 

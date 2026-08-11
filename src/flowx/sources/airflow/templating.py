@@ -15,13 +15,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-# Airflow date/time macros carrying the run's *logical date* -> a named job parameter (not an inline
-# time ref), so a native Databricks backfill can override the parameter per replayed window with
-# {{backfill.iso_date}}. Each maps to (parameter_name, time_field); the loader assigns the parameter a
-# schedule-aware default (see `date_param_default`). ``ds_nodash``/``ts_nodash`` have no dashless
-# dynamic-value form, so they are intentionally NOT mapped -- they're left untouched (surfaced as an
-# unresolved reference) rather than emitting an invalid ref.
-_DATE_MACRO_PARAM: dict[str, tuple[str, str]] = {
+FLOWX_INTERNAL_PARAMETER_PREFIX = "__flowx_"
+FLOWX_AIRFLOW_PARAMETER_PREFIX = "__flowx_airflow_"
+AIRFLOW_RUN_ID_PARAMETER = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}run_id"
+
+# Airflow date/time macros carry the run's logical date through reserved job parameters so native
+# Databricks backfills can override them without colliding with user-defined DAG parameters.
+_DATE_MACRO_FIELDS: dict[str, tuple[str, str]] = {
     "ds": ("run_date", "iso_date"),
     "ts": ("run_timestamp", "iso_datetime"),
     "data_interval_start": ("data_interval_start", "iso_datetime"),
@@ -30,8 +30,10 @@ _DATE_MACRO_PARAM: dict[str, tuple[str, str]] = {
     "logical_date": ("logical_date", "iso_datetime"),
 }
 
-# job parameter name -> its time field, so the loader can default each to the right granularity.
-DATE_PARAM_FIELDS: dict[str, str] = {param: field for param, field in _DATE_MACRO_PARAM.values()}
+# Job parameter name -> dynamic-value time field.
+DATE_PARAM_FIELDS: dict[str, str] = {
+    f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}{suffix}": field for suffix, field in _DATE_MACRO_FIELDS.values()
+}
 
 # Non-date macros with an exact Databricks equivalent, mapped inline (no backfill relevance).
 _MACRO_TO_DAB_REF: dict[str, str] = {
@@ -56,56 +58,90 @@ def date_param_default(field: str, schedule: dict[str, object] | None) -> str:
 def macro_param_default(name: str, schedule: dict[str, object] | None) -> str | None:
     """Returns the Databricks-required default for a macro-derived job parameter, or None.
 
-    A logical-date parameter (``run_date`` etc.) gets its schedule-aware time ref; ``run_id`` gets the
-    inline run-id ref (bash/env-var threading forces even ``run_id`` through a job parameter, and its
-    default must resolve to the run id rather than an empty string). Any other name is not
-    macro-derived, so this returns None and the caller falls back to its own default.
+    Reserved logical-date parameters get schedule-aware time refs. The reserved run-id parameter gets
+    the inline run-id ref because shell and SQL tasks must bind it through a named value. Other names
+    are not macro-derived, so the caller supplies their default.
     """
     field = DATE_PARAM_FIELDS.get(name)
     if field is not None:
         return date_param_default(field, schedule)
-    if name == "run_id":
+    if name == AIRFLOW_RUN_ID_PARAMETER:
         return _MACRO_TO_DAB_REF["run_id"]
     return None
 
 
-# {{ params.X }} / {{ var.value.X }} / {{ dag_run.conf['X'] }} -> {{job.parameters.X}}
-_PARAM_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"^params\.([A-Za-z_][A-Za-z0-9_]*)$"),
-    re.compile(r"^params\[['\"]([^'\"]+)['\"]\]$"),
-    re.compile(r"^var\.value\.([A-Za-z_][A-Za-z0-9_]*)$"),
-    re.compile(r"^dag_run\.conf\[['\"]([^'\"]+)['\"]\]$"),
+_PARAM_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("parameter", re.compile(r"^params\.([A-Za-z_][A-Za-z0-9_]*)$")),
+    ("parameter", re.compile(r"^params\[['\"]([^'\"]+)['\"]\]$")),
+    ("variable", re.compile(r"^var\.value\.([A-Za-z_][A-Za-z0-9_]*)$")),
+    ("conf", re.compile(r"^dag_run\.conf\[['\"]([^'\"]+)['\"]\]$")),
 ]
 
 _JINJA = re.compile(r"\{\{\s*(.*?)\s*\}\}")
+_PARAMETER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@dataclass(frozen=True, slots=True)
+class _TemplateBinding:
+    """One recognized Airflow expression and its collision-free Databricks binding."""
+
+    name: str
+    value_ref: str
+    job_parameter: str | None
+
+
+def _job_parameter_ref(name: str) -> str:
+    return "{{job.parameters." + name + "}}"
+
+
+def _airflow_parameter(namespace: str, name: str) -> str:
+    return f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}{namespace}_{name}"
+
+
+def _template_binding(expression: str) -> _TemplateBinding | None:
+    date_macro = _DATE_MACRO_FIELDS.get(expression)
+    if date_macro is not None:
+        name = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}{date_macro[0]}"
+        return _TemplateBinding(name=name, value_ref=_job_parameter_ref(name), job_parameter=name)
+    if expression in _MACRO_TO_DAB_REF:
+        return _TemplateBinding(
+            name=AIRFLOW_RUN_ID_PARAMETER,
+            value_ref=_MACRO_TO_DAB_REF[expression],
+            job_parameter=None,
+        )
+    for namespace, pattern in _PARAM_PATTERNS:
+        match = pattern.match(expression)
+        if match is None:
+            continue
+        source_name = match.group(1)
+        if not _PARAMETER_NAME.fullmatch(source_name):
+            return None
+        if namespace == "parameter":
+            if source_name.startswith(FLOWX_INTERNAL_PARAMETER_PREFIX):
+                return None
+            name = source_name
+        else:
+            name = _airflow_parameter(namespace, source_name)
+        return _TemplateBinding(name=name, value_ref=_job_parameter_ref(name), job_parameter=name)
+    return None
 
 
 def convert_template(value: str) -> tuple[str, set[str]]:
     """Converts Airflow Jinja in *value* to DAB dynamic-value references.
 
-    Returns ``(converted_value, referenced_param_names)``.  A logical-date macro (``ds``,
-    ``execution_date``, ...) maps to ``{{job.parameters.run_date}}`` (etc.) so a native backfill can
-    override it; ``params.X`` / ``var.value.X`` / ``dag_run.conf['X']`` map to ``{{job.parameters.X}}``;
-    ``run_id`` maps to its inline ref. Referenced parameter names are reported so the pipeline can
-    declare them. An unrecognised expression is left as-is (so nothing is silently corrupted).
+    Airflow-owned values use the reserved ``__flowx_airflow_`` namespace, while ``params.X`` retains
+    the user-visible job parameter name. This keeps logical dates, Variables, run configuration, and
+    user parameters distinct even when their source names match. Unknown expressions stay unchanged.
     """
     params: set[str] = set()
 
     def _sub(match: re.Match[str]) -> str:
-        expr = match.group(1).strip()
-        if expr in _DATE_MACRO_PARAM:
-            name, _ = _DATE_MACRO_PARAM[expr]
-            params.add(name)
-            return "{{job.parameters." + name + "}}"
-        if expr in _MACRO_TO_DAB_REF:
-            return _MACRO_TO_DAB_REF[expr]
-        for pattern in _PARAM_PATTERNS:
-            m = pattern.match(expr)
-            if m:
-                name = m.group(1)
-                params.add(name)
-                return "{{job.parameters." + name + "}}"
-        return match.group(0)  # unknown expression: leave untouched
+        binding = _template_binding(match.group(1).strip())
+        if binding is None:
+            return match.group(0)
+        if binding.job_parameter is not None:
+            params.add(binding.job_parameter)
+        return binding.value_ref
 
     return _JINJA.sub(_sub, value), params
 
@@ -114,75 +150,189 @@ _SQL_IDENTIFIER_CONTEXT = re.compile(
     r"(?:\bFROM|\bJOIN|\bINTO|\bUPDATE|\bTABLE|\bVIEW|\bSCHEMA|\bCATALOG)\s*$",
     re.IGNORECASE,
 )
+_SQL_TYPED_LITERAL_CONTEXT = re.compile(r"\b(?:DATE|INTERVAL|TIME|TIMESTAMP)\s*$", re.IGNORECASE)
+_SQL_UNSAFE_MARKER_ADJACENCY = frozenset("._")
+
+
+@dataclass(frozen=True, slots=True)
+class _SqlQuotedSpan:
+    start: int
+    end: int
+    delimiter: str
+    terminated: bool
+
+
+def _sql_quoted_spans(sql: str) -> list[_SqlQuotedSpan]:
+    """Returns SQL quoted regions while ignoring quotes inside line and block comments."""
+    spans: list[_SqlQuotedSpan] = []
+    index = 0
+    while index < len(sql):
+        if sql.startswith("--", index):
+            newline = sql.find("\n", index + 2)
+            index = len(sql) if newline < 0 else newline + 1
+            continue
+        if sql.startswith("/*", index):
+            closing = sql.find("*/", index + 2)
+            index = len(sql) if closing < 0 else closing + 2
+            continue
+        delimiter = sql[index]
+        if delimiter not in ("'", '"', "`"):
+            index += 1
+            continue
+        start = index
+        index += 1
+        terminated = False
+        while index < len(sql):
+            if sql[index] != delimiter:
+                index += 1
+                continue
+            if index + 1 < len(sql) and sql[index + 1] == delimiter:
+                index += 2
+                continue
+            index += 1
+            terminated = True
+            break
+        spans.append(_SqlQuotedSpan(start=start, end=index, delimiter=delimiter, terminated=terminated))
+    return spans
+
+
+def _sql_marker_has_unsafe_adjacency(sql: str, start: int, end: int) -> bool:
+    """Returns whether replacing this expression would splice a marker into an SQL token."""
+
+    def unsafe(character: str) -> bool:
+        return character.isalnum() or character in _SQL_UNSAFE_MARKER_ADJACENCY
+
+    return (start > 0 and unsafe(sql[start - 1])) or (end < len(sql) and unsafe(sql[end]))
 
 
 def convert_sql_template(sql: str) -> tuple[str, dict[str, str]]:
     """Rewrites Airflow Jinja in *sql* to ``:name`` markers + a ``sql_task.parameters`` map.
 
-    Databricks requires dynamic references in a ``sql_task`` to be passed through named parameters,
-    not interpolated into the SQL text. A logical-date macro ``{{ ds }}`` -> ``:run_date`` with
-    ``{"run_date": "{{job.parameters.run_date}}"}`` (a job parameter, so a native backfill can override
-    it); ``{{ params.x }}`` -> ``:x`` with ``{"x": "{{job.parameters.x}}"}``; ``run_id`` binds to its
-    inline ref. Unknown expressions are left untouched.
+    Databricks parameter markers are expressions, not text substitution. A macro that occupies an
+    entire single-quoted literal therefore replaces the quotes as well. A macro embedded inside a
+    string, quoted identifier, or adjacent SQL token remains unresolved so the loader emits a gap
+    instead of changing its meaning.
 
     Returns ``(sql_with_markers, parameters)``.
     """
     parameters: dict[str, str] = {}
+    quoted_spans = _sql_quoted_spans(sql)
 
-    def _marker(name: str, match: re.Match[str]) -> str:
+    def _marker(name: str, start: int) -> str:
         marker = f":{name}"
-        return f"IDENTIFIER({marker})" if _SQL_IDENTIFIER_CONTEXT.search(sql[: match.start()]) else marker
+        return f"IDENTIFIER({marker})" if _SQL_IDENTIFIER_CONTEXT.search(sql[:start]) else marker
 
-    def _sub(match: re.Match[str]) -> str:
-        expr = match.group(1).strip()
-        if expr in _DATE_MACRO_PARAM:
-            name, _ = _DATE_MACRO_PARAM[expr]
-            parameters[name] = "{{job.parameters." + name + "}}"
-            return _marker(name, match)
-        if expr in _MACRO_TO_DAB_REF:
-            parameters["run_id"] = _MACRO_TO_DAB_REF[expr]
-            return _marker("run_id", match)
-        for pattern in _PARAM_PATTERNS:
-            m = pattern.match(expr)
-            if m:
-                name = m.group(1)
-                parameters[name] = "{{job.parameters." + name + "}}"
-                return _marker(name, match)
-        return match.group(0)
-
-    return _JINJA.sub(_sub, sql), parameters
+    parts: list[str] = []
+    cursor = 0
+    for match in _JINJA.finditer(sql):
+        binding = _template_binding(match.group(1).strip())
+        if binding is None:
+            continue
+        quoted = next(
+            (span for span in quoted_spans if span.start < match.start() and match.end() <= span.end),
+            None,
+        )
+        replacement_start = match.start()
+        replacement_end = match.end()
+        if quoted is not None:
+            whole_single_literal = (
+                quoted.delimiter == "'"
+                and quoted.terminated
+                and match.start() == quoted.start + 1
+                and match.end() == quoted.end - 1
+                and not _SQL_IDENTIFIER_CONTEXT.search(sql[: quoted.start])
+                and not _SQL_TYPED_LITERAL_CONTEXT.search(sql[: quoted.start])
+                and not (quoted.start > 0 and (sql[quoted.start - 1].isalnum() or sql[quoted.start - 1] == "_"))
+            )
+            if not whole_single_literal:
+                continue
+            replacement_start = quoted.start
+            replacement_end = quoted.end
+        elif _sql_marker_has_unsafe_adjacency(sql, match.start(), match.end()):
+            continue
+        parts.append(sql[cursor:replacement_start])
+        parts.append(_marker(binding.name, replacement_start))
+        cursor = replacement_end
+        parameters[binding.name] = binding.value_ref
+    parts.append(sql[cursor:])
+    return "".join(parts), parameters
 
 
 def convert_shell_template(command: str) -> tuple[str, dict[str, str]]:
     """Rewrites Airflow Jinja in a bash command to ``$NAME`` shell variable references.
 
-    A DAB dynamic-value ref (``{{job.parameters.X}}``) only resolves in a task *parameter* value, not
-    inside ``%sh`` notebook source, so a bash macro can't be replaced inline. Instead each recognised
-    macro becomes a ``$name`` shell variable the runner notebook exports from a widget of the same
-    name. ``{{ ds }}`` -> ``$run_date``; ``{{ params.x }}`` -> ``$x``; ``run_id`` -> ``$run_id``.
-    Unknown expressions are left untouched.
+    A DAB dynamic-value ref resolves in a task parameter, not inside ``%sh`` source. Each recognized
+    macro therefore becomes a braced shell variable exported from a widget. Braces preserve adjacent
+    text, and a macro inside single quotes temporarily exits that quote so the variable still expands.
 
     Returns ``(command_with_shell_vars, {name: dynamic_value_ref})`` where each ref is what the widget
     of that name must resolve to (a job parameter, or an inline ref for run_id).
     """
     bindings: dict[str, str] = {}
 
+    def _quote_context(position: int) -> tuple[str | None, int | None]:
+        quote: str | None = None
+        quote_start: int | None = None
+        index = 0
+        while index < position:
+            character = command[index]
+            if (
+                quote is None
+                and character == "#"
+                and (index == 0 or command[index - 1].isspace() or command[index - 1] in ";|&()")
+            ):
+                newline = command.find("\n", index + 1)
+                index = position if newline < 0 else newline + 1
+                continue
+            if character == "\\" and quote != "'":
+                index += 2
+                continue
+            if character in ("'", '"'):
+                if quote is None:
+                    quote = character
+                    quote_start = index
+                elif quote == character:
+                    quote = None
+                    quote_start = None
+            index += 1
+        return quote, quote_start
+
+    def _inside_quoted_heredoc(position: int) -> bool:
+        delimiter: str | None = None
+        strip_tabs = False
+        for line in command[:position].splitlines():
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if delimiter is not None:
+                if candidate == delimiter:
+                    delimiter = None
+                    strip_tabs = False
+                continue
+            match = re.search(r"<<(-?)\s*(['\"])([A-Za-z_][A-Za-z0-9_]*)\2", line)
+            if match is not None:
+                strip_tabs = bool(match.group(1))
+                delimiter = match.group(3)
+        return delimiter is not None
+
+    def _escaped(position: int) -> bool:
+        backslashes = 0
+        index = position - 1
+        while index >= 0 and command[index] == "\\":
+            backslashes += 1
+            index -= 1
+        return backslashes % 2 == 1
+
     def _sub(match: re.Match[str]) -> str:
-        expr = match.group(1).strip()
-        if expr in _DATE_MACRO_PARAM:
-            name, _ = _DATE_MACRO_PARAM[expr]
-            bindings[name] = "{{job.parameters." + name + "}}"
-            return f"${name}"
-        if expr in _MACRO_TO_DAB_REF:
-            bindings["run_id"] = _MACRO_TO_DAB_REF[expr]
-            return "$run_id"
-        for pattern in _PARAM_PATTERNS:
-            m = pattern.match(expr)
-            if m:
-                name = m.group(1)
-                bindings[name] = "{{job.parameters." + name + "}}"
-                return f"${name}"
-        return match.group(0)
+        binding = _template_binding(match.group(1).strip())
+        if binding is None:
+            return match.group(0)
+        quote, quote_start = _quote_context(match.start())
+        if _inside_quoted_heredoc(match.start()) or (quote != "'" and _escaped(match.start())):
+            return match.group(0)
+        if quote == "'" and quote_start is not None and quote_start > 0 and command[quote_start - 1] == "$":
+            return match.group(0)
+        bindings[binding.name] = binding.value_ref
+        variable = f"${{{binding.name}}}"
+        return f"'\"{variable}\"'" if quote == "'" else variable
 
     return _JINJA.sub(_sub, command), bindings
 
@@ -354,8 +504,9 @@ _TRIGGER_RULE_TO_RUN_IF: dict[str, str | None] = {
     "one_failed": "AT_LEAST_ONE_FAILED",
     "one_success": "AT_LEAST_ONE_SUCCESS",
     "none_failed": "NONE_FAILED",
-    "none_failed_or_skipped": "NONE_FAILED",
 }
+
+_APPROXIMATE_NONE_FAILED_RULES = frozenset({"none_failed_min_one_success", "none_failed_or_skipped"})
 
 _UNSUPPORTED_TRIGGER_RULES = frozenset({"always", "dummy", "none_skipped", "all_skipped", "one_done"})
 
@@ -384,7 +535,7 @@ def trigger_rule_mapping(task_kwargs: dict[str, ast.expr]) -> TriggerRuleMapping
                 message="The trigger rule cannot be resolved statically.",
             )
         rule = resolved_rule
-    if rule == "none_failed_min_one_success":
+    if rule in _APPROXIMATE_NONE_FAILED_RULES:
         return TriggerRuleMapping(
             rule=rule,
             outcome="NONE_FAILED",
@@ -413,8 +564,8 @@ def trigger_rule_outcome(task_kwargs: dict[str, ast.expr]) -> str | None:
 # Airflow Variable / Connection calls in notebook bodies
 # --------------------------------------------------------------------------------------
 
-# Variable.get("x") / Variable.get('x', default) -> dbutils.widgets.get("x") (a job parameter).
-_VARIABLE_GET = re.compile(r"""Variable\.get\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*(?:,[^)]*)?\)""")
+# Variable.get("x") / Variable.get('x', default) -> a reserved job-parameter widget.
+_VARIABLE_GET = re.compile(r"""(?<![A-Za-z0-9_])Variable\.get\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\)""")
 # BaseHook.get_connection("c") / Connection.get_connection_from_secrets("c") -> flagged (needs a
 # secret-scope decision), rewritten to a dbutils.secrets.get with a placeholder scope.
 _CONNECTION_GET = re.compile(
@@ -427,11 +578,11 @@ def airflow_connection_names(source: str) -> set[str]:
     return set(_CONNECTION_GET.findall(source))
 
 
-def rewrite_airflow_calls(source: str) -> tuple[str, set[str], list[str]]:
+def rewrite_airflow_calls(source: str, *, rewrite_variable: bool = True) -> tuple[str, set[str], list[str]]:
     """Rewrites Airflow Variable/Connection calls in notebook-body *source*.
 
-    - ``Variable.get("x")`` -> ``dbutils.widgets.get("x")`` (a job parameter; ``x`` is
-      reported so the pipeline declares it and the notebook reads it as a widget).
+    - ``Variable.get("x")`` -> ``dbutils.widgets.get("__flowx_airflow_variable_x")``. The reserved
+      name prevents an Airflow Variable from colliding with a DAG parameter of the same name.
     - ``BaseHook.get_connection("c")`` -> ``dbutils.secrets.get(scope="<c>_scope", key="...")``
       with a note (connections need a manual secret-scope / UC-connection decision).
 
@@ -442,7 +593,7 @@ def rewrite_airflow_calls(source: str) -> tuple[str, set[str], list[str]]:
     notes: list[str] = []
 
     def _var(match: re.Match[str]) -> str:
-        name = match.group(1)
+        name = _airflow_parameter("variable", match.group(1))
         params.add(name)
         return f'dbutils.widgets.get("{name}")'
 
@@ -454,6 +605,6 @@ def rewrite_airflow_calls(source: str) -> tuple[str, set[str], list[str]]:
         )
         return f'dbutils.secrets.get(scope="{conn}_scope", key="value")  # TODO: set real scope/key'
 
-    rewritten = _VARIABLE_GET.sub(_var, source)
+    rewritten = _VARIABLE_GET.sub(_var, source) if rewrite_variable else source
     rewritten = _CONNECTION_GET.sub(_conn, rewritten)
     return rewritten, params, notes
