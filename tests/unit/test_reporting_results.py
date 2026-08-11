@@ -64,7 +64,7 @@ def test_insert_sql_stamps_run_metadata_and_escapes():
             "resolved_agentic_count": 0,
             "unresolved_agentic_count": 1,
             "agentic_resolution_outcomes": '{"unreviewed":1}',
-            "agentic_provider_version": "0.2.1",
+            "agentic_provider_version": "0.2.2",
             "unsupported_activities": 0,
             "failed_activities": 0,
             "excluded_activities": 0,

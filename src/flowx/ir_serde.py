@@ -70,6 +70,12 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
     }
     if pipeline.description is not None:
         result["description"] = pipeline.description
+    if pipeline.timeout_seconds is not None:
+        result["timeout_seconds"] = pipeline.timeout_seconds
+    if pipeline.email_notifications:
+        result["email_notifications"] = {
+            event: list(recipients) for event, recipients in pipeline.email_notifications.items()
+        }
     if pipeline.translation_configuration is not None:
         result["translation_configuration"] = configuration_to_dict(pipeline.translation_configuration)
     return result
@@ -422,6 +428,8 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
         "description": pipeline.description,
         "parameters": pipeline.parameters,
         "schedule": pipeline.schedule,
+        "timeout_seconds": pipeline.timeout_seconds,
+        "email_notifications": pipeline.email_notifications,
         "tags": pipeline.tags,
         "tasks": [activity_to_debug_dict(task) for task in pipeline.tasks],
         "not_translatable": list(pipeline.not_translatable),

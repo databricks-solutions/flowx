@@ -378,6 +378,23 @@ class TestScheduleEmission:
         assert job["schedule"]["timezone_id"] == "Europe/Madrid"
         assert job["schedule"]["pause_status"] == "UNPAUSED"
 
+    def test_airflow_job_policy_is_emitted(self, tmp_path):
+        pipeline = Pipeline(
+            name="airflow_policy",
+            tasks=[WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10)],
+            tags={"source": "airflow"},
+            timeout_seconds=1800,
+            email_notifications={"on_failure": ["alerts@example.com"]},
+        )
+
+        workflow = prepare_workflow(pipeline)
+        write_bundle(workflow, tmp_path)
+        resource_file = next((tmp_path / "resources").glob("*.yml"))
+        job = next(iter(yaml.safe_load(resource_file.read_text())["resources"]["jobs"].values()))
+
+        assert job["timeout_seconds"] == 1800
+        assert job["email_notifications"] == {"on_failure": ["alerts@example.com"]}
+
     def test_periodic_trigger_emitted(self, tmp_path):
         """SCHED3-002: periodic schedule spec renders as trigger.periodic."""
         pipeline = Pipeline(

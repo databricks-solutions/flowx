@@ -12,11 +12,11 @@
     "fixtures/resolution-deferred.json"
   ],
   "flowx_pin": {
-    "commit": "75196aef85ebb2736b926f2d4db13ec7d5c2551c",
-    "content_sha256": "e1e7395204b3f2759722b9320cea08c6b58284a48fd8062686b36bf676b657fd",
+    "commit": "6a940cbb11ac2edd8e028853865f386002a003f0",
+    "content_sha256": "46215e950028f31a157f68fd7a9dade78e3cd7486b59217f17d9811e3b73618e",
     "contract_version": "1",
     "repository": "https://github.com/park-peter/airflow-to-dabs",
-    "tag": "v0.2.1"
+    "tag": "v0.2.2"
   },
   "interface": {
     "contract_versions": [
@@ -66,6 +66,6 @@
   "provider": {
     "name": "airflow-to-dabs",
     "repository": "https://github.com/park-peter/airflow-to-dabs",
-    "version": "0.2.1"
+    "version": "0.2.2"
   }
 }

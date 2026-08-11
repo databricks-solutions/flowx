@@ -383,22 +383,71 @@ def unresolved_jinja_expressions(value: Any) -> set[str]:
 # --------------------------------------------------------------------------------------
 
 
-def _timedelta_seconds(node: ast.expr | None) -> int | None:
-    """Parses a ``timedelta(...)`` AST call into total seconds (keyword args only)."""
+def timedelta_seconds(node: ast.expr | None) -> int | None:
+    """Parses a statically numeric ``timedelta(...)`` call into positive whole seconds."""
     if not isinstance(node, ast.Call):
         return None
     func = node.func
     name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
     if name != "timedelta":
         return None
-    units = {"weeks": 604800, "days": 86400, "hours": 3600, "minutes": 60, "seconds": 1, "milliseconds": 0.001}
+
+    units = {
+        "weeks": 604800,
+        "days": 86400,
+        "hours": 3600,
+        "minutes": 60,
+        "seconds": 1,
+        "milliseconds": 0.001,
+        "microseconds": 0.000001,
+    }
+    positional_names = ("days", "seconds", "microseconds", "milliseconds", "minutes", "hours", "weeks")
+    if len(node.args) > len(positional_names) or any(keyword.arg is None for keyword in node.keywords):
+        return None
+
+    values: dict[str, float] = {}
+    for unit, argument in zip(positional_names, node.args):
+        try:
+            value = ast.literal_eval(argument)
+        except (ValueError, SyntaxError):
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        values[unit] = float(value)
+    for keyword in node.keywords:
+        if keyword.arg not in units or keyword.arg in values:
+            return None
+        try:
+            value = ast.literal_eval(keyword.value)
+        except (ValueError, SyntaxError):
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        values[keyword.arg] = float(value)
+
     total = 0.0
-    for kw in node.keywords:
-        if kw.arg in units and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, (int, float)):
-            total += kw.value.value * units[kw.arg]
+    for unit, value in values.items():
+        total += value * units[unit]
     # Round a sub-second total UP to 1s rather than truncating to 0 -- a sub-second timeout/retry_delay
     # is better preserved as 1s than silently dropped (int(0.5) == 0 would read as "unset").
     return math.ceil(total) if total > 0 else None
+
+
+def literal_email_recipients(node: ast.expr | None) -> list[str] | None:
+    """Returns statically declared email recipients, or ``None`` for a dynamic value."""
+    if node is None:
+        return []
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, SyntaxError):
+        return None
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple)) and all(isinstance(recipient, str) for recipient in value):
+        return [recipient for recipient in value if recipient]
+    return None
 
 
 def _literal_int(node: ast.expr | None) -> int | None:
@@ -425,11 +474,11 @@ def retry_policy(dag_default_args: dict[str, ast.expr], task_kwargs: dict[str, a
     if retries is not None and retries > 0:
         result["max_retries"] = retries
 
-    timeout = _timedelta_seconds(pick("execution_timeout"))
+    timeout = timedelta_seconds(pick("execution_timeout"))
     if timeout is not None:
         result["timeout_seconds"] = timeout
 
-    retry_delay = _timedelta_seconds(pick("retry_delay"))
+    retry_delay = timedelta_seconds(pick("retry_delay"))
     if retry_delay is not None:
         result["min_retry_interval_millis"] = retry_delay * 1000
 
@@ -459,26 +508,9 @@ def unrepresented_retry_policy_arguments(
         value = supplied(name)
         if value is None or (isinstance(value, ast.Constant) and value.value is None):
             continue
-        if _timedelta_seconds(value) is None:
+        if timedelta_seconds(value) is None:
             unresolved.append(name)
     return unresolved
-
-
-def email_on_failure(dag_default_args: dict[str, ast.expr], task_kwargs: dict[str, ast.expr]) -> list[str]:
-    """Returns email recipients when email_on_failure is set (for a job-level notification note).
-
-    TODO: not wired up yet -- the shared IR has no email-notification field, so carrying these through
-    to a job's ``email_notifications`` needs an IR addition (tracked separately).
-    """
-    on_failure = task_kwargs.get("email_on_failure", dag_default_args.get("email_on_failure"))
-    if isinstance(on_failure, ast.Constant) and on_failure.value is False:
-        return []
-    email_node = task_kwargs.get("email", dag_default_args.get("email"))
-    if isinstance(email_node, ast.Constant) and isinstance(email_node.value, str):
-        return [email_node.value]
-    if isinstance(email_node, ast.List):
-        return [e.value for e in email_node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
-    return []
 
 
 # --------------------------------------------------------------------------------------

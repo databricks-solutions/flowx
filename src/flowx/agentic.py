@@ -24,7 +24,7 @@ from flowx.sources.airflow.loader import discover_dags, load_pipelines
 
 CONTRACT_VERSION = "1"
 PROVIDER_NAME = "airflow-to-dabs"
-PROVIDER_VERSION = "0.2.1"
+PROVIDER_VERSION = "0.2.2"
 PROVIDER_REPOSITORY = "https://github.com/park-peter/airflow-to-dabs"
 
 _ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql", "spark_python")
@@ -872,6 +872,8 @@ def _build_gap_envelopes(
                 downstream_task_keys=downstream.get(str(task["task_key"]), []),
                 dag_settings={
                     "schedule": pipeline.get("schedule"),
+                    "timeout_seconds": pipeline.get("timeout_seconds"),
+                    "email_notifications": pipeline.get("email_notifications"),
                     "parameters": pipeline.get("parameters"),
                     "tags": pipeline.get("tags"),
                     "description": pipeline.get("description"),
@@ -1524,11 +1526,7 @@ def _copy_provider_context(destination: Path) -> None:
 
 def _provider_context_path() -> Path:
     source = (
-        Path(__file__).resolve().parents[2]
-        / "skills"
-        / "flowx-resolve-airflow-gaps"
-        / "references"
-        / f"airflow-to-dabs-v{PROVIDER_VERSION}"
+        Path(__file__).resolve().parents[2] / "skills" / "flowx-resolve-airflow-gaps" / "references" / "airflow-to-dabs"
     )
     if not source.is_dir():
         raise AgenticContractError(

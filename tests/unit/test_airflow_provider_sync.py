@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[2]
 SCRIPT = ROOT / "scripts" / "sync_airflow_provider.py"
-PROVIDER = ROOT / "skills" / "flowx-resolve-airflow-gaps" / "references" / "airflow-to-dabs-v0.2.1"
+PROVIDER = ROOT / "skills" / "flowx-resolve-airflow-gaps" / "references" / "airflow-to-dabs"
 
 
 def _check(destination: Path) -> subprocess.CompletedProcess[str]:
@@ -28,9 +28,9 @@ def test_committed_airflow_provider_pin_is_valid() -> None:
     assert result.returncode == 0, result.stderr
     pin = json.loads(result.stdout)
     assert pin == {
-        "commit": "75196aef85ebb2736b926f2d4db13ec7d5c2551c",
-        "content_sha256": "e1e7395204b3f2759722b9320cea08c6b58284a48fd8062686b36bf676b657fd",
-        "tag": "v0.2.1",
+        "commit": "6a940cbb11ac2edd8e028853865f386002a003f0",
+        "content_sha256": "46215e950028f31a157f68fd7a9dade78e3cd7486b59217f17d9811e3b73618e",
+        "tag": "v0.2.2",
     }
 
 

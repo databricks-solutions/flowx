@@ -234,15 +234,24 @@ Common `default_args` fields and their DABs equivalents:
 | `owner` | *(no direct mapping -- do not auto-map identity; document intended run identity in MIGRATION_NOTES.md)* |
 | `retries` | `max_retries` on task |
 | `retry_delay` | `min_retry_interval_millis` on task |
-| `email` | `email_notifications.on_failure` |
-| `email_on_failure` | `email_notifications.on_failure` |
-| `email_on_retry` | *(no direct equivalent, note in migration notes)* |
-| `depends_on_past` | *(no direct equivalent, note in migration notes)* |
+| `email` | Job `email_notifications.on_failure`; record a delta when Airflow used task-level or SLA delivery because a Databricks run can finish as succeeded-with-failures without sending `on_failure`. |
+| `email_on_failure` | Job `email_notifications.on_failure`, subject to the task-vs-job delivery delta above. |
+| `email_on_retry` | `False` is a no-op; active retry notifications have no Jobs event equivalent and must be noted in migration notes. Preserve any independently enabled failure notification. |
+| `depends_on_past` | `False` is a no-op; `True` has no cross-run task dependency equivalent and must be noted in migration notes. `max_concurrent_runs: 1` prevents overlap but does not preserve prior-run success semantics. |
+| `env` | An empty mapping is a no-op. Otherwise bind each value explicitly into the migrated task and move credentials or connection-derived values to Databricks secrets; never inline them. |
 | `start_date` | *(not needed -- DABs jobs start when deployed)* |
 | `end_date` | *(no direct equivalent -- pause the schedule manually)* |
 | `execution_timeout` | `timeout_seconds` on task |
 | `sla` | *(no direct equivalent -- use monitoring/alerts)* |
 | `catchup` | `catchup=True` → use native [Databricks backfill](https://docs.databricks.com/aws/en/jobs/backfill-jobs) to replay history (requires `{{ ds }}` mapped to a job parameter — see the execution-date section); `catchup=False` (the Airflow 3 default) → no backfill. Note the expectation in MIGRATION_NOTES.md. |
+
+Related DAG-level settings:
+
+| Airflow DAG setting | DABs Equivalent |
+|---|---|
+| `dagrun_timeout` | A static positive `timedelta` maps to Job `timeout_seconds`. Dynamic values require manual resolution. |
+| `sla_miss_callback` | `None` is a no-op. An active arbitrary callback has no direct mapping; configure a Job `health.rules` `RUN_DURATION_SECONDS` threshold plus email/webhook notification when that preserves the intent, otherwise migrate the callback explicitly. |
+| `max_consecutive_failed_dag_runs` | `0` is a no-op. A positive automatic-pause threshold has no Jobs equivalent and requires external monitoring/control; do not substitute `max_concurrent_runs`, which governs overlap rather than failure history. |
 
 ---
 

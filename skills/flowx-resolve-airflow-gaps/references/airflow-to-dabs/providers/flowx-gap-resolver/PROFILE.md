@@ -9,7 +9,7 @@ This profile implements flowx Airflow agentic gap contract `1` with the pinned p
 ```json
 {
   "name": "airflow-to-dabs",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "repository": "https://github.com/park-peter/airflow-to-dabs"
 }
 ```

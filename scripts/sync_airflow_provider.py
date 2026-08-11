@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 REPOSITORY = "https://github.com/park-peter/airflow-to-dabs"
-DEFAULT_TAG = "v0.2.1"
+DEFAULT_TAG = "v0.2.2"
 PROVIDER_PATH = PurePosixPath("providers/flowx-gap-resolver/provider.json")
 PIN_FIELD = "flowx_pin"
 
@@ -186,7 +186,7 @@ def main() -> int:
         / "skills"
         / "flowx-resolve-airflow-gaps"
         / "references"
-        / f"airflow-to-dabs-{DEFAULT_TAG}",
+        / "airflow-to-dabs",
     )
     parser.add_argument(
         "--check", action="store_true", help="Verify the committed provider pin without network access."

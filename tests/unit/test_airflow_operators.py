@@ -1191,6 +1191,21 @@ def test_subsecond_timeout_rounds_up_not_dropped():
     assert _by_key(p)["t"].timeout_seconds == 1
 
 
+def test_timedelta_positional_arguments_are_preserved():
+    p = _load(
+        "from datetime import timedelta\n"
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def w():\n    pass\n"
+        "with DAG(dag_id='d', dagrun_timeout=timedelta(1, 30), "
+        "default_args={'execution_timeout': timedelta(0, 45)}) as dag:\n"
+        "    t = PythonOperator(task_id='t', python_callable=w)\n"
+    )
+
+    assert p.timeout_seconds == 86430
+    assert _by_key(p)["t"].timeout_seconds == 45
+
+
 def test_per_task_retries_override_default_args():
     p = _load(
         "from airflow import DAG\n"
@@ -1894,6 +1909,150 @@ def test_airflow_non_execution_metadata_does_not_create_runtime_gap():
         item["code"] == "dag_setting_ignored" and item["setting"] == "doc_md" for item in p.audit["transformations"]
     )
     assert not any(finding["code"] == "unsupported_dag_setting" for finding in p.not_translatable)
+
+
+def test_airflow_dagrun_timeout_and_failure_email_map_to_job_policy():
+    p = _load(
+        "import datetime\n"
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(\n"
+        "    dag_id='job_policy',\n"
+        "    dagrun_timeout=datetime.timedelta(minutes=45),\n"
+        "    default_args={\n"
+        "        'email': ['alerts@example.com'],\n"
+        "        'email_on_failure': True,\n"
+        "        'email_on_retry': False,\n"
+        "    },\n"
+        ") as dag:\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work')\n"
+    )
+
+    assert p.reconciliation_status == "verified"
+    assert p.timeout_seconds == 2700
+    assert p.email_notifications == {"on_failure": ["alerts@example.com"]}
+    assert {
+        (item["setting"], item["code"])
+        for item in p.audit["transformations"]
+        if item.get("setting") in {"dagrun_timeout", "default_args.email", "default_args.email_on_failure"}
+    } == {
+        ("dagrun_timeout", "dag_setting_mapped"),
+        ("default_args.email", "dag_setting_mapped"),
+        ("default_args.email_on_failure", "dag_setting_mapped"),
+    }
+
+
+def test_airflow_disabled_default_args_are_intentional_noops():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(\n"
+        "    dag_id='disabled_defaults',\n"
+        "    max_consecutive_failed_dag_runs=0,\n"
+        "    sla_miss_callback=None,\n"
+        "    default_args={\n"
+        "        'depends_on_past': False,\n"
+        "        'email': ['unused@example.com'],\n"
+        "        'email_on_failure': False,\n"
+        "        'email_on_retry': False,\n"
+        "        'env': {},\n"
+        "    },\n"
+        ") as dag:\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work')\n"
+    )
+
+    assert p.reconciliation_status == "verified"
+    assert p.email_notifications == {}
+    ignored = {item["setting"] for item in p.audit["transformations"] if item.get("code") == "dag_setting_ignored"}
+    assert {
+        "max_consecutive_failed_dag_runs",
+        "sla_miss_callback",
+        "default_args.depends_on_past",
+        "default_args.email",
+        "default_args.email_on_failure",
+        "default_args.email_on_retry",
+        "default_args.env",
+    } <= ignored
+    assert not any(finding["code"] == "unsupported_dag_setting" for finding in p.not_translatable)
+
+
+def test_airflow_sla_email_target_is_preserved_but_remains_an_explicit_gap():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "def notify(*args):\n"
+        "    return None\n"
+        "with DAG(\n"
+        "    dag_id='sla_email',\n"
+        "    sla_miss_callback=notify,\n"
+        "    default_args={'email': 'alerts@example.com'},\n"
+        ") as dag:\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work')\n"
+    )
+
+    assert p.email_notifications == {"on_failure": ["alerts@example.com"]}
+    assert p.reconciliation_status == "verified_with_gaps"
+    finding = next(
+        item
+        for item in p.not_translatable
+        if item["code"] == "unsupported_dag_setting" and item["details"]["name"] == "default_args.email"
+    )
+    assert "SLA email" in finding["message"]
+    assert any(
+        item["code"] == "dag_setting_partially_mapped" and item["setting"] == "default_args.email"
+        for item in p.audit["transformations"]
+    )
+
+
+def test_airflow_retry_email_accounts_for_task_level_retries():
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(\n"
+        "    dag_id='task_retry_email',\n"
+        "    default_args={'email': 'ops@example.com', 'email_on_retry': True},\n"
+        ") as dag:\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work', retries=2)\n"
+    )
+
+    assert p.email_notifications == {"on_failure": ["ops@example.com"]}
+    assert p.reconciliation_status == "verified_with_gaps"
+    findings = {
+        item["details"]["name"]: item for item in p.not_translatable if item["code"] == "unsupported_dag_setting"
+    }
+    assert "retry notification" in findings["default_args.email"]["message"]
+    assert "retry notification" in findings["default_args.email_on_retry"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("dag_argument", "expected_reason"),
+    [
+        ("default_args={'depends_on_past': True}", "prior DAG run"),
+        ("max_consecutive_failed_dag_runs=3", "automatically pause"),
+        ("sla_miss_callback=notify", "SLA callback"),
+        ("default_args={'env': {'TOKEN': '{{ conn.api.password }}'}}", "task environment"),
+        (
+            "default_args={'email': 'ops@example.com', 'email_on_retry': True, 'retries': 1}",
+            "retry notification",
+        ),
+        ("dagrun_timeout=runtime_timeout", "static positive timedelta"),
+    ],
+)
+def test_airflow_unrepresentable_dag_runtime_semantics_remain_blocking_gaps(dag_argument, expected_reason):
+    p = _load(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "runtime_timeout = object()\n"
+        "def notify(*args):\n"
+        "    return None\n"
+        f"with DAG(dag_id='runtime_semantics', {dag_argument}) as dag:\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work')\n"
+    )
+
+    assert p.reconciliation_status == "verified_with_gaps"
+    assert p.tasks[0].task_key == "__flowx_source_gaps"
+    finding = next(item for item in p.not_translatable if item["code"] == "unsupported_dag_setting")
+    assert expected_reason in finding["message"]
 
 
 def test_positional_dag_id_is_preserved_as_job_identity_metadata():

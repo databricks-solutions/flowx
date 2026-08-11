@@ -1563,6 +1563,12 @@ def _build_job_resource(
         job_def["description"] = workflow.description
     if workflow.tags:
         job_def["tags"] = dict(workflow.tags)
+    if workflow.timeout_seconds is not None:
+        job_def["timeout_seconds"] = workflow.timeout_seconds
+    if workflow.email_notifications:
+        job_def["email_notifications"] = {
+            event: list(recipients) for event, recipients in workflow.email_notifications.items()
+        }
 
     if attach_clusters:
         _bind_cluster_to_notebook_tasks(workflow.tasks)
@@ -1900,6 +1906,31 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
             else:
                 entry["default"] = normalize_value(str(default_value))
         parameters.append(entry)
+    timeout_seconds = pipeline_dict.get("timeout_seconds")
+    if timeout_seconds is not None and (
+        isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0
+    ):
+        raise ValueError("Pipeline timeout_seconds must be a positive integer")
+    raw_email_notifications = pipeline_dict.get("email_notifications") or {}
+    if not isinstance(raw_email_notifications, dict):
+        raise ValueError("Pipeline email_notifications must be an object")
+    email_notifications: dict[str, list[str]] = {}
+    allowed_email_events = {
+        "on_start",
+        "on_success",
+        "on_failure",
+        "on_duration_warning_threshold_exceeded",
+        "on_streaming_backlog_exceeded",
+    }
+    for event, recipients in raw_email_notifications.items():
+        if (
+            event not in allowed_email_events
+            or not isinstance(recipients, list)
+            or not all(isinstance(recipient, str) and recipient for recipient in recipients)
+        ):
+            raise ValueError(f"Invalid Pipeline email notification entry: {event!r}")
+        email_notifications[str(event)] = list(recipients)
+
     pipeline = Pipeline(
         name=pipeline_dict.get("name", "unknown"),
         description=pipeline_dict.get("description"),
@@ -1907,6 +1938,8 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         parameters=parameters or None,
         translation_configuration=_reconstruct_configuration(pipeline_dict.get("translation_configuration")),
         schedule=pipeline_dict.get("schedule"),
+        timeout_seconds=timeout_seconds,
+        email_notifications=email_notifications,
         tags=dict(pipeline_dict.get("tags") or {}),
         not_translatable=list(pipeline_dict.get("not_translatable") or []),
         reconciliation_status=pipeline_dict.get("reconciliation_status"),

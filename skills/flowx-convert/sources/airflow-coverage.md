@@ -37,6 +37,7 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 | Schedule | Cron `schedule_interval` → Quartz (Unix DOW 0–6 → Quartz 1–7); exact sub-hour `timedelta` → Quartz, longer intervals → periodic, `@continuous` → continuous mode. Airflow 3 Asset/Dataset lists and uniform `&` / `|` expressions map to `ALL_UPDATED` / `ANY_UPDATED` table triggers when each asset declares `extra={"databricks_table": "catalog.schema.table"}` or an `x-databricks-table:` URI. |
 | `trigger_rule` | Exact supported rules map to `run_if`; `none_failed_min_one_success` and its legacy `none_failed_or_skipped` spelling map to `NONE_FAILED` with the all-skipped delta recorded. Rules without an equivalent become linked placeholders. |
 | Job parameters | `params={...}` / `Param(default=...)` → job parameters with defaults. User `params.x` keeps the name `x`; logical-date macros, `var.value.x`, `dag_run.conf['x']`, and `run_id` use collision-free `__flowx_airflow_*` bindings. User parameter names beginning with `__flowx_` become explicit gaps. |
+| Job policy | Static positive `dagrun_timeout` → Job `timeout_seconds`; static failure recipients → Job `email_notifications.on_failure`. Explicitly disabled `depends_on_past`, retry/failure email, SLA callback, auto-pause, and empty environment settings are recorded as intentional no-ops. |
 | `Variable.get` in a callable | `Variable.get('literal_name')` is rewritten to a collision-free `__flowx_airflow_variable_*` widget. Dynamic keys, Airflow defaults/deserialization options, other Airflow runtime imports, and Airflow `Connection` objects route to placeholders rather than emitting notebooks that require Airflow. |
 | Multiple DAGs | Every DAG, including multiple declarations and repeated static `@dag` factory invocations in one Python file, becomes a sibling job in one shared Airflow bundle so `TriggerDagRunOperator` resource references resolve. Narrow classic factories shaped as one DAG declaration followed by `return dag` are expanded with statically bindable arguments. |
 
@@ -46,7 +47,7 @@ safe fallback is a flagged, failing task rather than a silent omission. Callable
 (`**context` / `ti`) or XCom, and runtime-branching decorators, take the same route rather than
 emitting code that fails at runtime.
 
-The resolver consumes the pinned `airflow-to-dabs` v0.2.1 Flowx provider profile. It receives one flowx-produced gap envelope and cannot express graph or task-policy changes. Accepted `resolved` candidates contribute to mechanically validated code-attached coverage, but remain agentic and do not increase deterministic coverage. `needs_input`, `deferred`, and unreviewed candidates remain linked failing placeholders.
+The resolver consumes the pinned `airflow-to-dabs` v0.2.2 Flowx provider profile. It receives one flowx-produced gap envelope and cannot express graph or task-policy changes. Accepted `resolved` candidates contribute to mechanically validated code-attached coverage, but remain agentic and do not increase deterministic coverage. `needs_input`, `deferred`, and unreviewed candidates remain linked failing placeholders.
 
 ## Not yet supported
 
@@ -66,6 +67,7 @@ decisions.
   package output rather than emitting a filename-derived empty Job.
 - **Unresolved Airflow 3 schedules** — `AssetOrTimeSchedule`, mixed Asset boolean expressions, custom timetables, and Assets without explicit Databricks table metadata become `AirflowSourceSemantics` gaps. Job-level trigger and schedule changes are outside the leaf-only agentic contract.
 - **Ambiguous Airflow 1.10 schedule defaults** — assigned DAGs and legacy imports are supported, but a DAG using strong 1.10 syntax that omits `schedule_interval` becomes an `AirflowSourceSemantics` gap because historical default schedule and catchup behavior cannot be inferred safely from source alone.
+- **Cross-run and operational policy** — active `depends_on_past`, `max_consecutive_failed_dag_runs`, `sla_miss_callback`, retry-email events, dynamic `dagrun_timeout`, and non-empty `default_args.env` have no exact leaf-only Jobs mapping. Each becomes a source-semantics placeholder with a setting-specific remediation message; failure recipients and any independently representable Job timeout remain preserved.
 - **Unsafe inline template contexts** — SQL Jinja embedded in a string, quoted identifier, typed literal, or adjacent identifier fragment and shell Jinja in a non-expanding quoted heredoc, ANSI-C quote, or escaped position route to a placeholder instead of emitting a value with changed lexical semantics.
 - **Sensors beyond the mapped families** (`S3PrefixSensor`, custom sensors, etc.) → placeholder + gap.
   A file sensor with a non-literal path, or a table/SQL sensor with no literal `sql` / `table_name`,

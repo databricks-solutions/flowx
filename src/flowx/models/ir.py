@@ -609,6 +609,8 @@ class Pipeline:
         description: Human-readable workflow description.
         parameters: Pipeline parameter definitions.
         schedule: Serialized schedule definition, if any.
+        timeout_seconds: Maximum execution time for one workflow run.
+        email_notifications: Job-level email recipients grouped by notification event.
         tasks: Ordered list of translated activities.
         tags: System and user-defined tags.
         not_translatable: Entries describing properties that could not be translated.
@@ -621,6 +623,8 @@ class Pipeline:
     description: str | None = None
     parameters: list[dict[str, Any]] | None = None
     schedule: dict[str, Any] | None = None
+    timeout_seconds: int | None = None
+    email_notifications: dict[str, list[str]] = field(default_factory=dict)
     tasks: list[Activity] = field(default_factory=list)
     tags: dict[str, str] = field(default_factory=dict)
     not_translatable: list[dict[str, Any]] = field(default_factory=list)

@@ -68,6 +68,8 @@ class PreparedWorkflow:
     # C-10 (SCHED-001): serialised schedule / trigger spec the bundler
     # renders as ``schedule:`` / ``trigger:`` on the emitted DAB job.
     schedule: dict[str, Any] | None = None
+    timeout_seconds: int | None = None
+    email_notifications: dict[str, list[str]] = field(default_factory=dict)
     source: str | None = None
     description: str | None = None
     tags: dict[str, str] = field(default_factory=dict)
@@ -425,6 +427,8 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         pipeline_resources=list(artifacts.pipeline_resources),
         parameter_approximations=list(artifacts.parameter_approximations),
         schedule=pipeline.schedule,
+        timeout_seconds=pipeline.timeout_seconds if is_airflow else None,
+        email_notifications=dict(pipeline.email_notifications) if is_airflow else {},
         source=str(pipeline.tags.get("source")) if pipeline.tags.get("source") else None,
         description=pipeline.description if is_airflow else None,
         tags=dict(pipeline.tags) if is_airflow else {},

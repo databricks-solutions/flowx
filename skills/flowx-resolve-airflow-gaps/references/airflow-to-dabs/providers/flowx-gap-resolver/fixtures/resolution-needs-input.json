@@ -37,7 +37,7 @@
   "provider": {
     "name": "airflow-to-dabs",
     "repository": "https://github.com/park-peter/airflow-to-dabs",
-    "version": "0.2.1"
+    "version": "0.2.2"
   },
   "provider_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
   "reason": "Provide the container source or packaged application, required Python/system dependencies, registry access requirements, and the Databricks secret or Unity Catalog mappings for orders_secret.",
