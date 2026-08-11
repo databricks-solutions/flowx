@@ -19,7 +19,7 @@ The provider receives a `GapEnvelope` produced by flowx. It does not receive aut
   "request_sha256": "copied from the envelope",
   "provider": {
     "name": "airflow-to-dabs",
-    "version": "0.2.2",
+    "version": "copied from GapEnvelope.provider.version",
     "repository": "https://github.com/park-peter/airflow-to-dabs"
   },
   "model": {"name": "model identifier"},
@@ -61,4 +61,4 @@ Spark Python uses `{"kind": "spark_python", "file": "task.py", "parameters": ["-
 - Notebook `base_parameters` keys must use letters, digits, underscores, dots, and hyphens, starting with a letter or underscore. Flowx-owned names beginning with `__flowx` and Databricks task identity, graph, policy, and task-type field names are reserved case-insensitively.
 - Airflow Jinja is rejected. Databricks dynamic references such as `{{job.parameters.x}}`, `{{tasks.upstream.values.x}}`, and `{{input}}` are valid in replacement parameter values, not in uploaded notebook or SQL source files; source files must read widgets or SQL named parameters.
 - Every source argument in the envelope has exactly one disposition and a non-empty rationale.
-- The provider identity must match the pinned `airflow-to-dabs` v0.2.2 knowledge release.
+- The provider identity must match `GapEnvelope.provider` and the prepared workspace's pinned knowledge release.

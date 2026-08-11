@@ -5,7 +5,7 @@ description: Resolve source-reconciled Airflow leaf gaps through the fingerprint
 
 # Resolve Airflow Leaf Gaps
 
-Use this workflow only for Airflow reports whose deterministic conversion succeeded with gaps. Flowx owns source parsing, task identity, dependencies, task policy, IR, and packaging. This skill reasons about one prepared gap at a time using the migration knowledge from [`park-peter/airflow-to-dabs` v0.2.2](https://github.com/park-peter/airflow-to-dabs/releases/tag/v0.2.2). It must not parse the DAG independently or generate a second bundle.
+Use this workflow only for Airflow reports whose deterministic conversion succeeded with gaps. Flowx owns source parsing, task identity, dependencies, task policy, IR, and packaging. This skill reasons about one prepared gap at a time using the pinned migration knowledge from [`park-peter/airflow-to-dabs`](https://github.com/park-peter/airflow-to-dabs/tree/main/providers/flowx-gap-resolver). It must not parse the DAG independently or generate a second bundle.
 
 Read [`references/contract-v1.md`](references/contract-v1.md) and the pinned [`airflow-to-dabs/providers/flowx-gap-resolver/PROFILE.md`](references/airflow-to-dabs/providers/flowx-gap-resolver/PROFILE.md) before authoring a resolution. The profile and every referenced knowledge file are vendored from the exact upstream tag and commit under `references/airflow-to-dabs/`. If required knowledge is unavailable, return `needs_input` or `deferred`; never infer missing operator semantics.
 

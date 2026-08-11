@@ -27,11 +27,25 @@ def test_committed_airflow_provider_pin_is_valid() -> None:
 
     assert result.returncode == 0, result.stderr
     pin = json.loads(result.stdout)
+    manifest = json.loads((PROVIDER / "providers" / "flowx-gap-resolver" / "provider.json").read_text())
     assert pin == {
-        "commit": "6a940cbb11ac2edd8e028853865f386002a003f0",
-        "content_sha256": "46215e950028f31a157f68fd7a9dade78e3cd7486b59217f17d9811e3b73618e",
-        "tag": "v0.2.2",
+        "commit": manifest["flowx_pin"]["commit"],
+        "content_sha256": manifest["flowx_pin"]["content_sha256"],
+        "tag": manifest["flowx_pin"]["tag"],
     }
+    assert pin["tag"] == f"v{manifest['provider']['version']}"
+
+
+def test_airflow_provider_sync_requires_an_explicit_tag() -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--source", str(ROOT)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--tag is required unless --check is used" in result.stderr
 
 
 def test_airflow_provider_pin_rejects_modified_content(tmp_path: Path) -> None:

@@ -14,7 +14,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 REPOSITORY = "https://github.com/park-peter/airflow-to-dabs"
-DEFAULT_TAG = "v0.2.2"
 PROVIDER_PATH = PurePosixPath("providers/flowx-gap-resolver/provider.json")
 PIN_FIELD = "flowx_pin"
 
@@ -178,7 +177,7 @@ def verify_provider(destination: Path) -> dict[str, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, help="Exact local airflow-to-dabs checkout used for synchronization.")
-    parser.add_argument("--tag", default=DEFAULT_TAG)
+    parser.add_argument("--tag", help="Exact upstream release tag to vendor.")
     parser.add_argument(
         "--destination",
         type=Path,
@@ -194,13 +193,15 @@ def main() -> int:
     args = parser.parse_args()
     if not args.check and args.source is None:
         parser.error("--source is required unless --check is used")
+    if not args.check and args.tag is None:
+        parser.error("--tag is required unless --check is used")
     try:
         result = (
             verify_provider(args.destination)
             if args.check
             else sync_provider(
                 checkout=args.source.resolve() if args.source else Path(),
-                tag=args.tag,
+                tag=str(args.tag),
                 destination=args.destination,
             )
         )

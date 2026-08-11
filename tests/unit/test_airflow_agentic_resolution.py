@@ -114,11 +114,7 @@ def _candidate(gap: dict, *, source: str = "print('Migrated from Airflow')\n", s
         "graph_sha256": gap["graph_sha256"],
         "provider_sha256": gap["provider_sha256"],
         "request_sha256": gap["request_sha256"],
-        "provider": {
-            "name": "airflow-to-dabs",
-            "version": "0.2.2",
-            "repository": "https://github.com/park-peter/airflow-to-dabs",
-        },
+        "provider": agentic_contract._provider_identity(),
         "model": {"name": "test-model"},
         "argument_disposition": dispositions,
         "prerequisites": [],
@@ -654,7 +650,7 @@ def test_stage_rejects_unresolved_jinja_provider_drift_and_file_hash_mismatch(tm
     wrong_provider = _candidate(gaps[0])
     wrong_provider["provider"]["version"] = "0.1.0"
     assert _stage(output, wrong_provider) == 1
-    assert "pinned airflow-to-dabs v0.2.2" in capsys.readouterr().err
+    assert "Candidate provider must match pinned airflow-to-dabs" in capsys.readouterr().err
 
     bad_hash = _candidate(gaps[0])
     bad_hash["generated_files"][0]["sha256"] = "0" * 64
@@ -780,7 +776,7 @@ def test_stage_does_not_misclassify_airflow_input_names_as_dynamic_references(tm
     assert "unresolved Airflow Jinja" in capsys.readouterr().err
 
 
-def test_pinned_v022_provider_fixtures_satisfy_the_flowx_contract() -> None:
+def test_pinned_provider_fixtures_satisfy_the_flowx_contract() -> None:
     root = (
         Path(__file__).parents[2]
         / "skills"
@@ -792,7 +788,7 @@ def test_pinned_v022_provider_fixtures_satisfy_the_flowx_contract() -> None:
     )
     provider = json.loads((root / "provider.json").read_text(encoding="utf-8"))
 
-    assert provider["provider"]["version"] == "0.2.2"
+    assert provider["provider"] == agentic_contract._provider_identity()
     for outcome in ("notebook", "sql", "spark-python", "needs-input", "deferred"):
         gap = json.loads((root / "fixtures" / f"gap-{outcome}.json").read_text(encoding="utf-8"))
         candidate = json.loads((root / "fixtures" / f"resolution-{outcome}.json").read_text(encoding="utf-8"))
@@ -1498,7 +1494,7 @@ def test_reviewed_resolution_evidence_drives_honest_code_attached_coverage(tmp_p
     row = build_coverage_rows(metadata)[0]
 
     assert summary == {
-        "provider_version": "0.2.2",
+        "provider_version": agentic_contract._provider_identity()["version"],
         "pipelines": {"agentic": {"resolved": 1, "needs_input": 1, "deferred": 0, "declined": 0, "unreviewed": 0}},
     }
     assert row["coverage_pct"] == 100.0
@@ -1506,7 +1502,7 @@ def test_reviewed_resolution_evidence_drives_honest_code_attached_coverage(tmp_p
     assert row["code_attached_coverage_pct"] == 50.0
     assert row["resolved_agentic_count"] == 1
     assert row["unresolved_agentic_count"] == 1
-    assert row["agentic_provider_version"] == "0.2.2"
+    assert row["agentic_provider_version"] == agentic_contract._provider_identity()["version"]
     assert row["reconciliation_status"] == "verified_with_reviewed_resolutions"
 
 

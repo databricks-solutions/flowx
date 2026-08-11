@@ -24,7 +24,6 @@ from flowx.sources.airflow.loader import discover_dags, load_pipelines
 
 CONTRACT_VERSION = "1"
 PROVIDER_NAME = "airflow-to-dabs"
-PROVIDER_VERSION = "0.2.2"
 PROVIDER_REPOSITORY = "https://github.com/park-peter/airflow-to-dabs"
 
 _ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql", "spark_python")
@@ -113,11 +112,7 @@ class GapEnvelope:
 
     def as_dict(self) -> dict[str, Any]:
         """Returns the public GapEnvelope v1 representation."""
-        provider = {
-            "name": PROVIDER_NAME,
-            "version": PROVIDER_VERSION,
-            "repository": PROVIDER_REPOSITORY,
-        }
+        provider = _provider_identity()
         payload = {
             "contract_version": CONTRACT_VERSION,
             "gap_id": self.gap_id,
@@ -263,7 +258,7 @@ def prepare_airflow_resolutions(
     return {
         "status": "prepared",
         "contract_version": CONTRACT_VERSION,
-        "provider_version": PROVIDER_VERSION,
+        "provider_version": _provider_identity()["version"],
         "gap_count": len(gaps),
         "requested_gap_id": gap_id,
         "workspace": str(target),
@@ -746,7 +741,7 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
     except AgenticContractError as error:
         raise AgenticContractError(f"agentic resolution evidence failed validation: {error}") from error
     return PersistedResolutionEvidence(
-        provider_version=PROVIDER_VERSION,
+        provider_version=_provider_identity()["version"],
         gaps=gaps,
         resolutions=resolutions,
         reviewed_resolutions=reviewed_resolutions,
@@ -1001,13 +996,11 @@ def _validate_candidate(
         if candidate.get(field) != gap.get(field):
             raise AgenticContractError(f"Candidate {field} does not match its GapEnvelope")
     provider = candidate.get("provider")
-    expected_provider = {
-        "name": PROVIDER_NAME,
-        "version": PROVIDER_VERSION,
-        "repository": PROVIDER_REPOSITORY,
-    }
+    expected_provider = _provider_identity()
     if provider != expected_provider:
-        raise AgenticContractError(f"Candidate provider must match pinned {PROVIDER_NAME} v{PROVIDER_VERSION}")
+        raise AgenticContractError(
+            f"Candidate provider must match pinned {PROVIDER_NAME} v{expected_provider['version']}"
+        )
     model = candidate.get("model")
     if not isinstance(model, dict) or not isinstance(model.get("name"), str) or not model["name"].strip():
         raise AgenticContractError("Candidate model provenance requires a non-empty model.name")
@@ -1263,7 +1256,7 @@ def _apply_to_baseline(baseline: dict[str, Any], resolutions: list[StagedResolut
             )
         pipeline.setdefault("audit", {})["agentic_resolution"] = {
             "contract_version": CONTRACT_VERSION,
-            "provider_version": PROVIDER_VERSION,
+            "provider_version": _provider_identity()["version"],
             "validation_status": "verified",
             "baseline_graph_sha256": baseline_graph,
             "merged_graph_sha256": merged_graph,
@@ -1529,22 +1522,43 @@ def _provider_context_path() -> Path:
         Path(__file__).resolve().parents[2] / "skills" / "flowx-resolve-airflow-gaps" / "references" / "airflow-to-dabs"
     )
     if not source.is_dir():
-        raise AgenticContractError(
-            f"provider_unavailable: pinned {PROVIDER_NAME} v{PROVIDER_VERSION} context is missing"
-        )
+        raise AgenticContractError(f"provider_unavailable: pinned {PROVIDER_NAME} context is missing")
     return source
 
 
 def _provider_identity() -> dict[str, str]:
-    return {"name": PROVIDER_NAME, "version": PROVIDER_VERSION, "repository": PROVIDER_REPOSITORY}
+    manifest_path = _provider_context_path() / "providers" / "flowx-gap-resolver" / "provider.json"
+    try:
+        manifest = _read_json_object(manifest_path)
+    except (OSError, json.JSONDecodeError, AgenticContractError) as error:
+        raise AgenticContractError(f"provider_unavailable: pinned {PROVIDER_NAME} manifest is invalid") from error
+    provider = manifest.get("provider")
+    pin = manifest.get("flowx_pin")
+    if not isinstance(provider, dict) or not isinstance(pin, dict):
+        raise AgenticContractError(f"provider_unavailable: pinned {PROVIDER_NAME} identity is invalid")
+    version = provider.get("version")
+    if (
+        not isinstance(version, str)
+        or not version
+        or provider.get("name") != PROVIDER_NAME
+        or provider.get("repository") != PROVIDER_REPOSITORY
+        or pin.get("repository") != PROVIDER_REPOSITORY
+        or pin.get("tag") != f"v{version}"
+        or pin.get("contract_version") != CONTRACT_VERSION
+    ):
+        raise AgenticContractError(f"provider_unavailable: pinned {PROVIDER_NAME} identity is invalid")
+    return {"name": PROVIDER_NAME, "version": version, "repository": PROVIDER_REPOSITORY}
 
 
 def _validate_manifest_provider(value: Any) -> str:
-    if not isinstance(value, dict) or {key: value.get(key) for key in _provider_identity()} != _provider_identity():
-        raise AgenticContractError(f"Agentic workspace provider must be pinned to {PROVIDER_NAME} v{PROVIDER_VERSION}")
+    expected_provider = _provider_identity()
+    if not isinstance(value, dict) or {key: value.get(key) for key in expected_provider} != expected_provider:
+        raise AgenticContractError(
+            f"Agentic workspace provider must be pinned to {PROVIDER_NAME} v{expected_provider['version']}"
+        )
     sha256 = value.get("sha256")
     if (
-        set(value) != {*_provider_identity(), "sha256"}
+        set(value) != {*expected_provider, "sha256"}
         or not isinstance(sha256, str)
         or not re.fullmatch(r"[0-9a-f]{64}", sha256)
     ):
