@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from flowx.models.ir import DbtFactoryActivity, Dependency, NotebookActivity, Pipeline
 from flowx.preparer.workflow_preparer import prepare_activity, prepare_workflow
 
@@ -42,14 +44,15 @@ def _pydabs_activity(tmp_path, **overrides):
     (project / "dbt_project.yml").write_text("name: demo\nprofile: demo\n")
     (project / "target" / "manifest.json").write_text(json.dumps({"nodes": {}}))
     (profiles / "profiles.yml").write_text("demo:\n  target: dev\n  outputs: {}\n")
-    return _dbt_activity(
+    kwargs = dict(
         nodes=[],
         render_mode="pydabs",
         project_dir=str(project),
         profiles_dir=str(profiles),
         manifest_path=str(project / "target" / "manifest.json"),
-        **overrides,
     )
+    kwargs.update(overrides)
+    return _dbt_activity(**kwargs)
 
 
 def test_static_parent_task_is_run_job_hop():
@@ -173,14 +176,53 @@ def test_pydabs_emits_hook_module_and_no_inner_job(tmp_path):
     assert "load_resources" in hook.content
     assert "from databricks_dbt_factory.Utils import read_dbt_manifest" in hook.content
     assert "DbtFactory(task_factories" in hook.content
-    # 0.3.1 dropped SpecsHandler; the manifest reader is a module-level Utils function.
+    # The supported factory API exposes the manifest reader as a module-level Utils function.
     assert "SpecsHandler" not in hook.content
     assert "read_dbt_manifest(MANIFEST_PATH)" in hook.content
     runner = next(nb for nb in prepared.notebooks if nb.relative_path == "notebooks/run_dbt_command.py")
     assert "dbt_commands" in runner.content
+    assert "dbt_commands parameter is required" in runner.content
     assert "project_directory" in runner.content
     assert "profiles_directory" in runner.content
+    assert "urlparse" in runner.content
+    assert "DBT_TARGET_PATH" in runner.content
+    assert "partial_parse.msgpack" in runner.content
+    assert "shutil.rmtree" in runner.content
+    compile(runner.content, runner.relative_path, "exec")
     assert "run_job_task" in prepared.task
+
+
+@pytest.mark.parametrize(
+    "reserved_options",
+    [
+        {"selectors": ["tag:daily"]},
+        {"exclude_selectors": ["tag:slow"]},
+        {"variables": {"region": "west"}},
+    ],
+)
+def test_pydabs_reserved_factory_options_fall_back_to_static(tmp_path, reserved_options):
+    prepared = prepare_activity(_pydabs_activity(tmp_path, nodes=_NODES, **reserved_options))
+
+    assert len(prepared.inner_workflows) == 1
+    assert {task["task_key"] for task in prepared.inner_workflows[0].tasks} == {
+        "seed_codes",
+        "model_stg",
+        "model_fct",
+        "test_stg",
+    }
+    assert not any(task.type == "pydabs_dbt_factory" for task in prepared.setup_tasks)
+
+
+def test_pydabs_keeps_supported_target_and_full_refresh_options(tmp_path):
+    prepared = prepare_activity(
+        _pydabs_activity(tmp_path, target="prod", full_refresh=True, resource_types=["model", "test"])
+    )
+
+    hook = next(notebook for notebook in prepared.notebooks if notebook.relative_path.endswith("_dbt_job.py"))
+    assert "'model': '--target prod --full-refresh'" in hook.content
+    assert "'test': '--target prod'" in hook.content
+    assert "--exclude" not in hook.content
+    assert "--vars" not in hook.content
 
 
 def test_pydabs_records_setup_task(tmp_path):
@@ -272,7 +314,8 @@ def test_pydabs_bundle_wires_python_resources_and_setup(tmp_path):
     assert (tmp_path / "resources" / "__init__.py").exists()
     assert not (tmp_path / "src" / "resources").exists()
     pyproject = (tmp_path / "pyproject.toml").read_text()
-    assert "databricks-dbt-factory==0.3.1" in pyproject
+    assert 'requires-python = ">=3.10,<3.13"' in pyproject
+    assert "databricks-dbt-factory==0.3.3" in pyproject
     assert "dbt-databricks==1.12.2" in pyproject
     setup = (tmp_path / "SETUP.md").read_text()
     assert "dbt factory (PyDABs mode)" in setup
@@ -289,6 +332,7 @@ def test_pydabs_copies_available_dbt_project_into_bundle(tmp_path):
     (project / "models" / "orders.sql").write_text("select 1\n")
     (project / "target").mkdir()
     (project / "target" / "manifest.json").write_text(json.dumps({"nodes": {}}))
+    (project / "target" / "partial_parse.msgpack").write_bytes(b"prebuilt-dbt-graph")
     profiles = tmp_path / "profiles"
     profiles.mkdir()
     (profiles / "profiles.yml").write_text("demo:\n  target: dev\n  outputs: {}\n")
@@ -309,3 +353,4 @@ def test_pydabs_copies_available_dbt_project_into_bundle(tmp_path):
 
     assert (output / "src" / "dbt_project" / "dbt_project.yml").exists()
     assert (output / "src" / "dbt_project" / "models" / "orders.sql").exists()
+    assert (output / "src" / "dbt_project" / "target" / "partial_parse.msgpack").read_bytes() == b"prebuilt-dbt-graph"

@@ -12,8 +12,8 @@
     "fixtures/resolution-deferred.json"
   ],
   "flowx_pin": {
-    "commit": "867abee838a0734ff7f7878b04402ee08ff7f3d3",
-    "content_sha256": "3cc9cd3c8fa9253f7485f73216d31b0847f6fbeab4df15042bc7ab2ef6f4751e",
+    "commit": "dee6efe51b6264025dd69ee136b81029c15c1dbc",
+    "content_sha256": "87ee069f050eacc34db7c186770805fa3a9c83744120632b4753f673b809f7ae",
     "contract_version": "1",
     "repository": "https://github.com/park-peter/airflow-to-dabs",
     "tag": "v0.2.3"

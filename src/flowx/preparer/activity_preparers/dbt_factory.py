@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 _RUNNER_RELATIVE_PATH = "notebooks/run_dbt_command.py"
 _DBT_PROJECT_RELATIVE_PATH = "dbt_project"
 _DBT_PROFILES_RELATIVE_PATH = "dbt_profiles"
+_DBT_FACTORY_VERSION = "0.3.3"
 _EXCLUDED_DBT_PATH_PARTS = {".git", ".venv", "__pycache__", "logs", "target"}
 
 
@@ -70,6 +71,14 @@ def _dbt_source_artifacts(activity: DbtFactoryActivity) -> list[DabNotebook]:
                 binary_content=manifest_path.read_bytes(),
             )
         )
+        partial_parse_path = manifest_path.parent / "partial_parse.msgpack"
+        if partial_parse_path.is_file():
+            artifacts.append(
+                DabNotebook(
+                    relative_path=f"{_DBT_PROJECT_RELATIVE_PATH}/target/partial_parse.msgpack",
+                    binary_content=partial_parse_path.read_bytes(),
+                )
+            )
     return artifacts
 
 
@@ -79,10 +88,10 @@ def _pydabs_pyproject_source() -> str:
         "[project]\n"
         'name = "flowx-dbt-bundle"\n'
         'version = "0.1.0"\n'
-        'requires-python = ">=3.10"\n'
+        'requires-python = ">=3.10,<3.13"\n'
         "dependencies = [\n"
         '    "databricks-bundles>=1.0.0,<2.0.0",\n'
-        '    "databricks-dbt-factory==0.3.1",\n'
+        f'    "databricks-dbt-factory=={_DBT_FACTORY_VERSION}",\n'
         '    "dbt-databricks==1.12.2",\n'
         '    "dbt-core==1.11.12",\n'
         "]\n"
@@ -90,13 +99,8 @@ def _pydabs_pyproject_source() -> str:
 
 
 def _pydabs_options_by_resource_type(activity: DbtFactoryActivity) -> dict[str, str]:
-    """Returns shell-safe dbt options for each generated task-factory type."""
+    """Returns factory-compatible dbt options for each generated task-factory type."""
     common = ["--target", activity.target]
-    for selector in activity.exclude_selectors:
-        common.extend(("--exclude", selector))
-    if activity.variables is not None:
-        variables = json.dumps(activity.variables) if isinstance(activity.variables, dict) else activity.variables
-        common.extend(("--vars", variables))
     options: dict[str, str] = {}
     for resource_type in activity.resource_types or ["model", "seed", "snapshot", "test"]:
         tokens = [*common]
@@ -207,17 +211,25 @@ def _pydabs_runner_notebook_source() -> str:
         "# Databricks notebook source\n\n"
         "import json\n"
         "import os\n"
-        "import shlex\n\n"
+        "import shlex\n"
+        "import shutil\n"
+        "import tempfile\n"
+        "from urllib.parse import urlparse\n\n"
         "from dbt.cli.main import dbtRunner\n\n"
         "dbutils.widgets.text('dbt_commands', '')\n"
         "dbutils.widgets.text('project_directory', '')\n"
         "dbutils.widgets.text('profiles_directory', '')\n\n"
-        "commands = json.loads(dbutils.widgets.get('dbt_commands'))\n"
+        "dbt_commands = dbutils.widgets.get('dbt_commands')\n"
         "project_directory = dbutils.widgets.get('project_directory')\n"
-        "profiles_directory = dbutils.widgets.get('profiles_directory')\n"
+        "profiles_directory = dbutils.widgets.get('profiles_directory')\n\n"
+        "if not dbt_commands:\n"
+        "    raise ValueError('dbt_commands parameter is required')\n"
+        "commands = json.loads(dbt_commands)\n\n"
         "context = dbutils.notebook.entry_point.getDbutils().notebook().getContext()\n"
         "os.environ['DBT_ACCESS_TOKEN'] = context.apiToken().get()\n"
-        "os.environ['DBT_HOST'] = context.apiUrl().get()\n\n"
+        "api_url = context.apiUrl().get()\n"
+        "parsed_url = urlparse(api_url)\n"
+        "os.environ['DBT_HOST'] = parsed_url.netloc or parsed_url.path.strip('/')\n\n"
         "if project_directory:\n"
         "    notebook_dir = os.path.dirname('/Workspace' + context.notebookPath().get())\n"
         "    project_path = (\n"
@@ -226,18 +238,40 @@ def _pydabs_runner_notebook_source() -> str:
         "        else os.path.normpath(os.path.join(notebook_dir, project_directory))\n"
         "    )\n"
         "    os.chdir(project_path)\n\n"
-        "runner = dbtRunner()\n"
-        "for command in commands:\n"
-        "    command = command.strip()\n"
-        "    if command.startswith('dbt '):\n"
-        "        command = command[4:]\n"
-        "    arguments = shlex.split(command)\n"
-        "    if profiles_directory:\n"
-        "        arguments.extend(['--profiles-dir', profiles_directory])\n"
-        "    result = runner.invoke(arguments)\n"
-        "    if not result.success:\n"
-        "        detail = result.exception or result.result or '(no further details)'\n"
-        "        raise RuntimeError(f\"dbt command failed: dbt {' '.join(arguments)}\\n{detail}\")\n"
+        "local_dir = tempfile.mkdtemp(prefix='dbt_local_')\n"
+        "os.environ['DBT_TARGET_PATH'] = local_dir\n"
+        "os.environ['DBT_LOG_PATH'] = local_dir\n\n"
+        "manifest = None\n"
+        "prebuilt_manifest_path = os.path.join('target', 'partial_parse.msgpack')\n"
+        "if os.path.exists(prebuilt_manifest_path):\n"
+        "    try:\n"
+        "        from dbt.contracts.graph.manifest import Manifest\n\n"
+        "        with open(prebuilt_manifest_path, 'rb') as manifest_file:\n"
+        "            manifest = Manifest.from_msgpack(manifest_file.read())\n"
+        "        manifest.build_flat_graph()\n"
+        "        print(f'[dbt-factory] using pre-built manifest from {prebuilt_manifest_path}')\n"
+        "    except Exception as error:\n"
+        "        print(f'[dbt-factory] pre-built manifest unavailable; dbt will parse the project: {error}')\n"
+        "        manifest = None\n\n"
+        "try:\n"
+        "    runner = dbtRunner(manifest=manifest)\n"
+        "    for command in commands:\n"
+        "        command = command.strip()\n"
+        "        if command.startswith('dbt '):\n"
+        "            command = command[4:]\n"
+        "        arguments = shlex.split(command)\n"
+        "        if profiles_directory:\n"
+        "            arguments.extend(['--profiles-dir', profiles_directory])\n"
+        "        result = runner.invoke(arguments)\n"
+        "        if not result.success:\n"
+        "            detail = result.exception or result.result or '(no further details)'\n"
+        "            raise RuntimeError(f\"dbt command failed: dbt {' '.join(arguments)}\\n{detail}\")\n"
+        "finally:\n"
+        "    os.environ.pop('DBT_ACCESS_TOKEN', None)\n"
+        "    os.environ.pop('DBT_HOST', None)\n"
+        "    os.environ.pop('DBT_TARGET_PATH', None)\n"
+        "    os.environ.pop('DBT_LOG_PATH', None)\n"
+        "    shutil.rmtree(local_dir, ignore_errors=True)\n"
     )
 
 
@@ -438,7 +472,7 @@ def prepare(activity: DbtFactoryActivity, *, scope: str = "") -> PreparedActivit
         if missing_inputs:
             return _prepare_missing_inputs(activity, missing_inputs)
     if activity.render_mode == "pydabs":
-        if activity.selectors:
+        if activity.selectors or activity.exclude_selectors or activity.variables is not None:
             return _prepare_static(activity, _nodes_from_activity(activity))
         return _prepare_pydabs(activity)
     nodes = _nodes_from_activity(activity)

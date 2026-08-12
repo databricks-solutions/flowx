@@ -73,8 +73,9 @@ decisions.
   A file sensor with a non-literal path, or a table/SQL sensor with no literal `sql` / `table_name`,
   also falls back to a placeholder.
 - **Dynamic dbt configuration.** Project/profile paths, selectors, excludes, vars, and full-refresh
-  flags must be statically visible. Missing project, profile, or manifest inputs produce a failing
-  setup-required placeholder rather than a partially deployable dbt job.
+  flags must be statically visible. Selectors, excludes, and vars are rendered by static explosion
+  only; in `--dbt-mode pydabs` they force a static fallback. Missing project, profile, or manifest
+  inputs produce a failing setup-required placeholder rather than a partially deployable dbt job.
 
 ## dbt factory mode
 
@@ -90,8 +91,9 @@ mode with `--dbt-mode {static,pydabs}` on the convert phase (default `static`).
   `resources/__init__.py` package marker) at the bundle root, registers it under `databricks.yml`
   `python.resources`, generates a pinned uv `pyproject.toml` plus the dbt-factory-compatible runner,
   and copies the project/profile/manifest inputs. `bundle deploy` runs the hook to build the dbt job.
-  A source `--select` restriction falls back to static explosion so the generated per-node commands
-  can preserve dbt selector intersection semantics.
+  A source selector, exclusion, or `--vars` restriction falls back to static explosion: the factory
+  owns resource selection and parse context, so it rejects those options in the per-task dbt
+  commands. Static explosion applies them to the generated per-node commands instead.
 
 ## Priority for remaining follow-ups
 

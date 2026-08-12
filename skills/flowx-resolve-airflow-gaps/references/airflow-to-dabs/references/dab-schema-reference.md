@@ -689,7 +689,7 @@ dependencies:
   - dbt-core==1.11.12           # pin dbt-core too, not just the adapter
 ```
 
-For dbt factory mode, pin **both** `dbt-databricks` and `dbt-core` to the exact versions in the bundle venv. `dbt-databricks` alone allows a `dbt-core` range, but the factory glue imports the local `dbt-core` for its selector-exactness check — the runtime environment must resolve the identical `dbt-core` for that guarantee to hold.
+For dbt factory mode, pin **both** `dbt-databricks` and `dbt-core` to the exact versions in the bundle venv. `dbt-databricks` alone allows a `dbt-core` range, but the runner injects a parse cache produced by the local `dbt-core` — the runtime environment must resolve the identical `dbt-core` version.
 
 ---
 

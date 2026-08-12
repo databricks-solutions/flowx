@@ -501,7 +501,9 @@ class DbtFactoryActivity(Activity):
     - ``pydabs`` (opt-in): emit a PyDABs hook module that calls
       ``databricks-dbt-factory`` at ``bundle deploy`` time, so the dbt job
       tracks the project automatically (at the cost of being invisible to
-      static coverage until deploy).
+      static coverage until deploy). Workloads carrying selectors, exclusions,
+      or vars use the static renderer because the factory owns resource
+      selection and parse context.
 
     Attributes:
         project_dir: Path to the dbt project (relative to the bundle root).

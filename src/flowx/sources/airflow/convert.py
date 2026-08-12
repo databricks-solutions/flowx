@@ -39,7 +39,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=("static", "pydabs"),
         default="static",
         help="dbt-factory render mode: 'static' (inner job of per-node tasks, default) or 'pydabs' "
-        "(a deploy-time PyDABs hook that builds the dbt job from the live manifest).",
+        "(a deploy-time PyDABs hook that builds the dbt job from the live manifest; source selectors, exclusions, "
+        "or vars use the static renderer).",
     )
     parser.add_argument(
         "--merge-agentic",
