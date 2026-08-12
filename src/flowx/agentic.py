@@ -11,12 +11,13 @@ import ast
 import copy
 import hashlib
 import json
+import posixpath
 import re
 import shutil
 import tempfile
 import textwrap
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from flowx.ir_serde import pipeline_to_dict
@@ -25,6 +26,8 @@ from flowx.sources.airflow.loader import discover_dags, load_pipelines
 CONTRACT_VERSION = "1"
 PROVIDER_NAME = "airflow-to-dabs"
 PROVIDER_REPOSITORY = "https://github.com/park-peter/airflow-to-dabs"
+_PROVIDER_MANIFEST_PATH = PurePosixPath("providers/flowx-gap-resolver/provider.json")
+_PROVIDER_PIN_FIELD = "flowx_pin"
 
 _ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql", "spark_python")
 _RESOLUTION_STATUSES = {"resolved", "needs_input", "deferred"}
@@ -110,9 +113,9 @@ class GapEnvelope:
     dag_settings: dict[str, Any]
     reason: dict[str, str]
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self, *, provider: dict[str, str] | None = None) -> dict[str, Any]:
         """Returns the public GapEnvelope v1 representation."""
-        provider = _provider_identity()
+        provider = _provider_identity() if provider is None else provider
         payload = {
             "contract_version": CONTRACT_VERSION,
             "gap_id": self.gap_id,
@@ -789,6 +792,7 @@ def _build_gap_envelopes(
     provider_sha256: str,
 ) -> list[dict[str, Any]]:
     envelopes: list[dict[str, Any]] = []
+    provider = _provider_identity()
     for pipeline in _pipeline_list(baseline):
         if pipeline.get("migration_status") == "excluded":
             continue
@@ -878,7 +882,7 @@ def _build_gap_envelopes(
                     "message": str(task.get("comment") or matched_finding.get("message", "")),
                 },
             )
-            envelopes.append(envelope.as_dict())
+            envelopes.append(envelope.as_dict(provider=provider))
     ordered = sorted(envelopes, key=lambda item: (item["pipeline_name"], item["task_path"]))
     gap_ids = [item["gap_id"] for item in ordered]
     if len(gap_ids) != len(set(gap_ids)):
@@ -1526,27 +1530,125 @@ def _provider_context_path() -> Path:
     return source
 
 
+def _provider_release_version(tag: Any) -> str:
+    if not isinstance(tag, str) or re.fullmatch(r"v[0-9A-Za-z][0-9A-Za-z.+-]*", tag) is None:
+        raise AgenticContractError(f"provider release tag is invalid: {tag!r}")
+    return tag[1:]
+
+
+def _resolve_provider_path(base: PurePosixPath, relative: str) -> PurePosixPath:
+    if not relative or PurePosixPath(relative).is_absolute():
+        raise AgenticContractError(f"provider manifest contains an unsafe path: {relative!r}")
+    normalized = PurePosixPath(posixpath.normpath((base / relative).as_posix()))
+    if normalized.as_posix() == ".." or normalized.as_posix().startswith("../"):
+        raise AgenticContractError(f"provider manifest path escapes its root: {relative!r}")
+    return normalized
+
+
+def _provider_allowlisted_paths(manifest: dict[str, Any]) -> set[PurePosixPath]:
+    base = _PROVIDER_MANIFEST_PATH.parent
+    interface = manifest.get("interface")
+    if not isinstance(interface, dict) or interface.get("contract_versions") != [CONTRACT_VERSION]:
+        raise AgenticContractError(f"provider manifest must declare contract version {CONTRACT_VERSION}")
+    paths = {
+        _PROVIDER_MANIFEST_PATH,
+        _resolve_provider_path(base, str(interface.get("entrypoint", ""))),
+    }
+    knowledge = manifest.get("knowledge")
+    fixtures = manifest.get("fixtures")
+    if not isinstance(knowledge, list) or not isinstance(fixtures, list):
+        raise AgenticContractError("provider manifest knowledge and fixtures must be lists")
+    for item in knowledge:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise AgenticContractError("every provider knowledge entry requires a path")
+        paths.add(_resolve_provider_path(base, item["path"]))
+    for item in fixtures:
+        if not isinstance(item, str):
+            raise AgenticContractError("every provider fixture entry must be a path string")
+        paths.add(_resolve_provider_path(base, item))
+    return paths
+
+
+def _canonical_provider_bytes(path: PurePosixPath, data: bytes, *, strip_pin: bool = False) -> bytes:
+    if path.suffix != ".json":
+        return data
+    try:
+        value = json.loads(data)
+    except json.JSONDecodeError as error:
+        raise AgenticContractError(f"provider file {path} contains invalid JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise AgenticContractError(f"provider file {path} must contain a JSON object")
+    if strip_pin:
+        value.pop(_PROVIDER_PIN_FIELD, None)
+    return _json_bytes(value)
+
+
+def _provider_content_digest(root: Path, manifest: dict[str, Any]) -> str:
+    allowlisted = _provider_allowlisted_paths(manifest)
+    actual: set[PurePosixPath] = set()
+    for local_path in root.rglob("*"):
+        if local_path.is_symlink():
+            raise AgenticContractError(f"provider context cannot contain symlinks: {local_path.relative_to(root)}")
+        if local_path.is_file():
+            actual.add(PurePosixPath(local_path.relative_to(root).as_posix()))
+    unexpected = sorted(actual - allowlisted, key=lambda item: item.as_posix())
+    if unexpected:
+        raise AgenticContractError(
+            "provider context contains files outside its manifest allowlist: "
+            + ", ".join(path.as_posix() for path in unexpected)
+        )
+
+    files: dict[PurePosixPath, bytes] = {}
+    for relative_path in sorted(allowlisted, key=lambda item: item.as_posix()):
+        local = root / relative_path.as_posix()
+        if not local.is_file():
+            raise AgenticContractError(f"provider reference is missing: {relative_path.as_posix()}")
+        data = local.read_bytes()
+        canonical = _canonical_provider_bytes(relative_path, data)
+        if data != canonical:
+            raise AgenticContractError(f"provider JSON is not canonical: {relative_path.as_posix()}")
+        files[relative_path] = _canonical_provider_bytes(
+            relative_path,
+            data,
+            strip_pin=relative_path == _PROVIDER_MANIFEST_PATH,
+        )
+
+    digest = hashlib.sha256()
+    for relative_path in sorted(files, key=lambda item: item.as_posix()):
+        content = files[relative_path]
+        digest.update(relative_path.as_posix().encode())
+        digest.update(b"\0")
+        digest.update(str(len(content)).encode())
+        digest.update(b"\0")
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def _provider_identity() -> dict[str, str]:
-    manifest_path = _provider_context_path() / "providers" / "flowx-gap-resolver" / "provider.json"
+    root = _provider_context_path()
+    manifest_path = root / _PROVIDER_MANIFEST_PATH.as_posix()
     try:
         manifest = _read_json_object(manifest_path)
+        provider = manifest.get("provider")
+        pin = manifest.get(_PROVIDER_PIN_FIELD)
+        if not isinstance(provider, dict) or not isinstance(pin, dict):
+            raise AgenticContractError("identity is invalid")
+        version = _provider_release_version(pin.get("tag"))
+        declared_version = provider.get("version")
+        if (
+            provider.get("name") != PROVIDER_NAME
+            or provider.get("repository") != PROVIDER_REPOSITORY
+            or pin.get("repository") != PROVIDER_REPOSITORY
+            or pin.get("contract_version") != CONTRACT_VERSION
+            or (declared_version is not None and declared_version != version)
+            or re.fullmatch(r"[0-9a-f]{40}", str(pin.get("commit", ""))) is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(pin.get("content_sha256", ""))) is None
+        ):
+            raise AgenticContractError("identity is invalid")
+        if _provider_content_digest(root, manifest) != pin["content_sha256"]:
+            raise AgenticContractError("content digest does not match the pinned release")
     except (OSError, json.JSONDecodeError, AgenticContractError) as error:
-        raise AgenticContractError(f"provider_unavailable: pinned {PROVIDER_NAME} manifest is invalid") from error
-    provider = manifest.get("provider")
-    pin = manifest.get("flowx_pin")
-    if not isinstance(provider, dict) or not isinstance(pin, dict):
-        raise AgenticContractError(f"provider_unavailable: pinned {PROVIDER_NAME} identity is invalid")
-    version = provider.get("version")
-    if (
-        not isinstance(version, str)
-        or not version
-        or provider.get("name") != PROVIDER_NAME
-        or provider.get("repository") != PROVIDER_REPOSITORY
-        or pin.get("repository") != PROVIDER_REPOSITORY
-        or pin.get("tag") != f"v{version}"
-        or pin.get("contract_version") != CONTRACT_VERSION
-    ):
-        raise AgenticContractError(f"provider_unavailable: pinned {PROVIDER_NAME} identity is invalid")
+        raise AgenticContractError(f"provider_unavailable: pinned {PROVIDER_NAME} {error}") from error
     return {"name": PROVIDER_NAME, "version": version, "repository": PROVIDER_REPOSITORY}
 
 

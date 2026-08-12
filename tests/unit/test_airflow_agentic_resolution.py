@@ -787,11 +787,17 @@ def test_pinned_provider_fixtures_satisfy_the_flowx_contract() -> None:
         / "flowx-gap-resolver"
     )
     provider = json.loads((root / "provider.json").read_text(encoding="utf-8"))
+    provider_identity = agentic_contract._provider_identity()
 
-    assert provider["provider"] == agentic_contract._provider_identity()
+    assert provider["provider"] == {
+        "name": provider_identity["name"],
+        "repository": provider_identity["repository"],
+    }
     for outcome in ("notebook", "sql", "spark-python", "needs-input", "deferred"):
         gap = json.loads((root / "fixtures" / f"gap-{outcome}.json").read_text(encoding="utf-8"))
         candidate = json.loads((root / "fixtures" / f"resolution-{outcome}.json").read_text(encoding="utf-8"))
+        gap["knowledge_provider"] = provider_identity
+        candidate["provider"] = provider_identity
         manifest = {"baseline_report_sha256": gap["baseline_report_sha256"]}
 
         resolution = _validate_candidate(candidate, gap_by_id={gap["gap_id"]: gap}, manifest=manifest)

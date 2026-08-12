@@ -1,6 +1,6 @@
 # Hadoop/HDFS to Databricks Migration Guide
 
-Reference for converting on-prem Airflow DAGs that orchestrate Spark jobs on Hadoop/YARN clusters to Databricks Asset Bundles. Covers HDFS path conversion, YARN Spark config cleanup, Hive metastore migration, data ingestion alternatives, and detection of `spark-submit` commands embedded in BashOperator/SSHOperator tasks.
+Reference for converting on-prem Airflow DAGs that orchestrate Spark jobs on Hadoop/YARN clusters to Databricks Declarative Automation Bundles (formerly Databricks Asset Bundles; DABs). Covers HDFS path conversion, YARN Spark config cleanup, Hive metastore migration, data ingestion alternatives, and detection of `spark-submit` commands embedded in BashOperator/SSHOperator tasks.
 
 ---
 

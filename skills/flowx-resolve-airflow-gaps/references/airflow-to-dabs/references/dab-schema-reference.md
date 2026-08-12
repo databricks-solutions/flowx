@@ -1,4 +1,4 @@
-# Databricks Asset Bundles YAML Schema Reference
+# Databricks Declarative Automation Bundles YAML Schema Reference
 
 Condensed reference for generating DABs configuration files. Covers all task types, triggers, clusters, and job-level configuration supported as of Jan 2026.
 
@@ -85,6 +85,8 @@ resources:
         team: data-engineering
         source: airflow-migration
       max_concurrent_runs: 1
+      queue:
+        enabled: true        # Required by this skill for file-arrival jobs.
       timeout_seconds: 3600
 
       # Schedule (see Schedule section below)
@@ -561,12 +563,16 @@ Event-driven triggers (mutually exclusive with `schedule`).
 ### File Arrival
 
 ```yaml
+queue:
+  enabled: true                                          # Prevent triggered runs from being skipped at concurrency limits.
 trigger:
   file_arrival:
     url: "s3://bucket/path/"                             # Required. UC external location or volume URL.
     min_time_between_triggers_seconds: 60                # Optional.
     wait_after_last_change_seconds: 60                   # Optional. Minimum allowed is 60.
 ```
+
+File-arrival triggers recurse through subdirectories and only new arrivals start runs. Ingestion must discover the same root recursively, and deployment needs a manual bootstrap run for existing files. Preserve the source sensor's filename/glob predicate in Auto Loader or custom discovery because the trigger URL is a prefix.
 
 ### Table Update
 

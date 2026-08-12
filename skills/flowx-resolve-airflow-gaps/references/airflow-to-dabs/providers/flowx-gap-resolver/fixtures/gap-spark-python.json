@@ -41,7 +41,7 @@
   "knowledge_provider": {
     "name": "airflow-to-dabs",
     "repository": "https://github.com/park-peter/airflow-to-dabs",
-    "version": "0.2.2"
+    "version": "<PINNED_PROVIDER_VERSION>"
   },
   "operator": "CustomPythonOperator",
   "operator_fqn": "company.airflow.operators.CustomPythonOperator",

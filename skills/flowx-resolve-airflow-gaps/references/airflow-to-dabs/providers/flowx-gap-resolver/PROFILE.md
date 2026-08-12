@@ -4,15 +4,16 @@ Resolve exactly one source-reconciled Airflow leaf gap supplied by flowx. flowx 
 capture identity, task keys, dependencies, task policy, control flow, IR, and bundle packaging. Do
 not reopen or parse the original DAG, construct another task graph, or generate a bundle.
 
-This profile implements flowx Airflow agentic gap contract `1` with the pinned provider identity:
+This profile implements flowx Airflow agentic gap contract `1`. The provider identity is:
 
 ```json
 {
   "name": "airflow-to-dabs",
-  "version": "0.2.2",
   "repository": "https://github.com/park-peter/airflow-to-dabs"
 }
 ```
+
+The consumer pins a release by tag, commit, and content digest. Report that pinned version in the `provider` block of every resolution.
 
 ## Inputs
 

@@ -1,6 +1,6 @@
 # Airflow Schedule and Trigger Mapping Reference
 
-Maps Airflow scheduling mechanisms (cron expressions, presets, sensors) to Databricks Asset Bundles schedule and trigger configurations.
+Maps Airflow scheduling mechanisms (cron expressions, presets, sensors) to Databricks Declarative Automation Bundles schedule and trigger configurations (formerly Databricks Asset Bundles; DABs).
 
 ---
 
@@ -117,19 +117,27 @@ wait_for_data = S3KeySensor(
 )
 ```
 
-**DABs:**
+**Bundle job resource excerpt:**
 
 ```yaml
-trigger:
-  file_arrival:
-    url: s3://landing-zone/data/
-    min_time_between_triggers_seconds: 60
-    wait_after_last_change_seconds: 60
+process_landing_job:
+  queue:
+    enabled: true
+  trigger:
+    file_arrival:
+      url: s3://landing-zone/data/
+      min_time_between_triggers_seconds: 60
+      wait_after_last_change_seconds: 60
 ```
 
 **Key differences:**
+
 - Airflow sensors are task-level (block one task). DABs triggers are job-level (start the whole job).
 - Move the sensor to the job trigger. Downstream tasks that depended on the sensor now just run as the first task(s) in the job.
+- Always set `queue.enabled: true` on a file-arrival job so an arrival detected while the job is at its concurrency limit waits instead of producing a skipped run.
+- A file-arrival trigger is recursive: it watches new files in every subdirectory below `url`. Configure Auto Loader or any custom discovery code to scan the same root recursively, and preserve the original sensor's filename/glob filtering in the ingestion task. If the ingestion code lists only the top-level directory while the trigger watches descendants, nested arrivals can start runs that never process those files.
+- Only new arrivals trigger a run. Files already present when the trigger is created do not bootstrap the job. Add a deployment action to `MIGRATION_NOTES.md`: run the job once manually to process existing files, normally with Auto Loader `cloudFiles.includeExistingFiles=true` and a durable checkpoint, then let the trigger handle later arrivals.
+- Point `url` at a Unity Catalog external location or volume and enable managed file events when available. A trigger URL is a prefix rather than the original wildcard, so record any broadened trigger scope and enforce the original suffix/glob in ingestion.
 
 ---
 
@@ -202,7 +210,7 @@ both `Dataset(...)` (Airflow 2) and `Asset(...)` (Airflow 3). See `references/ai
 | `schedule=[asset_a, asset_b]` (list — Airflow: ALL updated) | `trigger.table_update` on both tables with `condition: ALL_UPDATED`. |
 | `schedule=(asset_a \| asset_b)` (OR) | `trigger.table_update` with `condition: ANY_UPDATED`. |
 | `schedule=(asset_a & asset_b)` (AND) | `trigger.table_update` with `condition: ALL_UPDATED`. |
-| `AssetOrTimeSchedule(timetable=..., assets=...)` (time **and** asset) | **Flag** — a single Lakeflow job takes either a `schedule` **or** a trigger, not both as a clean 1:1. Choose the dominant intent (or split), and record the tradeoff in `MIGRATION_NOTES.md`. |
+| `AssetOrTimeSchedule(timetable=..., assets=...)` / `DatasetOrTimeSchedule(...)` (time **and** asset) | **Flag and emit a manual job. Do not emit either arm automatically.** A single Lakeflow job takes either a `schedule` or a trigger, not both as a clean 1:1. Generate neither `schedule` nor `trigger` until the user chooses the time arm, the asset arm, or split jobs; record that required decision in `MIGRATION_NOTES.md`. |
 | Custom `Timetable` subclass | Flag for manual review and map to `schedule` or `trigger` based on business intent. |
 | `@continuous` | Use job-level `continuous` (not periodic trigger). |
 

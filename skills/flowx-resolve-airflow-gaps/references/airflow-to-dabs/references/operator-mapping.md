@@ -1,6 +1,6 @@
 # Airflow Operator to DABs Task Type Mapping
 
-Authoritative reference for converting Apache Airflow operators to Databricks Asset Bundles (DABs) job task types. All task types confirmed supported in DABs YAML as of Jan 2026.
+Authoritative reference for converting Apache Airflow operators to Databricks Declarative Automation Bundles job task types (formerly Databricks Asset Bundles; DABs). Task and trigger fields are checked against current Databricks documentation and the Databricks CLI bundle schema during validation.
 
 ---
 
@@ -39,6 +39,22 @@ mapping**. A `conn_id` name or host string is a **hint only** — surface it as 
 review**. **Never export or inline credentials** — auth becomes a UC connection (federation/Connect)
 or `dbutils.secrets` (connector notebook), created out-of-band.
 
+**Unresolved executable identifiers fail closed.** Never turn a suggestive `conn_id`, host, filename, bare table, or surrounding example into a guessed catalog/schema/table FQN, external-location URL, connection name, warehouse ID, job ID, or other executable value. Emit a **required bundle variable with no default** and use its substitution at the execution site, or use a deliberately invalid `<REQUIRED_...>` placeholder when that resource cannot accept a variable. List the missing value and its source of truth in `MIGRATION_NOTES.md`. Do not emit plausible defaults such as `main.default.<table>` or a catalog inferred from `snowflake_conn_id`; a generated project must stop before deployment rather than run against the wrong object.
+
+```yaml
+variables:
+  source_table_fqn:
+    description: Required three-level Unity Catalog source table
+
+resources:
+  jobs:
+    consumer_job:
+      trigger:
+        table_update:
+          table_names:
+            - "${var.source_table_fqn}"
+```
+
 **Lakeflow Connect eligibility** (all must hold, else flag): recurring ingestion/replication; a
 connector exists for the source; **Connect can create and own the destination streaming table** (it
 fails if the destination already exists — an existing target needs a new landing table + downstream
@@ -56,9 +72,9 @@ Applies across all tiers and to **any Airflow version** — deferrability has ex
 worker-efficiency mechanism (release a worker slot while waiting) and does **not** change what the task
 does, so **ignore the deferrability and map the underlying operation normally**:
 
-- Drop `deferrable=True` / the `*DeferrableOperator` suffix, triggerer configuration, and `poke_interval`.
+- Drop `deferrable=True` / the `*DeferrableOperator` suffix and triggerer configuration.
 - Keep task **timeout** and **retry** settings where they apply.
-- Generate **no polling** — Lakeflow owns waiting/queueing/triggers natively (sensors → job triggers).
+- **A sensor that converts to a job-level trigger generates no polling** and drops `poke_interval` — Lakeflow owns waiting/queueing/triggers natively. A sensor that stays a task (mid-graph, an arbitrary predicate, or a return value consumed downstream — see the Tier-3 sensor sections) keeps its polling loop and its `poke_interval` at every `mode`/`deferrable` setting.
 - Preserve **wait-for-completion** behavior **only** when Databricks submits to an external system via a
   notebook/wheel and the original operator waited; `wait_for_completion=False` → submit and return.
 - The `[operators] default_deferrable` config only affects operators that support switching modes — it
@@ -219,8 +235,34 @@ plain `notebook_task`:
 | `@task.virtualenv` / `@task.external_python` | `notebook_task`; **flag** the environment/deps — recreate via a serverless environment or `%pip install`, record in `MIGRATION_NOTES.md`. |
 | `@task.sensor` | Tier-3 job-level trigger **only** when it is a *root* sensor whose `PokeReturnValue` output is unused; otherwise **flag** or keep the polling logic in a notebook. |
 | `@task.run_if` / `@task.skip_if` | The predicate is arbitrary runtime context, but Lakeflow `run_if` evaluates only **upstream task states**. Map a status-equivalent predicate to `run_if`; map other predicates through a `condition_task`; **flag** anything not reducible to either. |
-| `@setup` / `@teardown` | **Flag** — no native Lakeflow setup/teardown lifecycle. Emit as ordinary first/last tasks and note the semantic loss. |
+| `@setup` / `@teardown` | **Flag** — no native Lakeflow setup/teardown lifecycle. Emit as ordinary first/last tasks only with explicit `depends_on`/`run_if`, and document both semantic losses: Airflow schedules teardown only after its setup succeeds; an ordinary teardown failure affects the Lakeflow job result unless explicitly redesigned, while Airflow excludes teardown failure from DAG-run status by default unless configured otherwise. |
 | `@task.kubernetes` / `@task.docker` / other provider `@task.*` | **Flag** — route through the matching Tier-2/Tier-4 operator rule (`KubernetesPodOperator`, `DockerOperator`, …). |
+
+**Retained file-sensor discovery.** When an `@task.sensor` or `PythonSensor` returns a file collection consumed downstream, preserve the source callable's listing semantics instead of replacing it with a shallow directory read. **Recursive prefix listings must remain recursive**; for example, an object-store hook's `list_keys(prefix=...)` includes nested keys, while one `dbutils.fs.ls()` call returns only direct children. Generate a recursive walk or an equivalent paginated object-store/Auto Loader listing, retain the original glob/suffix filters, sorting, timeout, and size guard, and document any intentional scope change.
+
+```python
+MAX_FILES = 10_000          # walk bound; raising past this is a failure
+LISTING_TIMEOUT_SECONDS = 300
+
+def list_files_recursive(root: str) -> list[str]:
+    deadline = time.monotonic() + LISTING_TIMEOUT_SECONDS
+    pending, files = [root], []
+    while pending:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"Listing {root} exceeded {LISTING_TIMEOUT_SECONDS}s")
+        for entry in dbutils.fs.ls(pending.pop()):
+            # A directory entry's path ends in "/" on every dbutils implementation;
+            # entry.isDir() is absent from the SDK/Connect FileInfo.
+            if entry.path.endswith("/"):
+                pending.append(entry.path)
+            else:
+                files.append(entry.path)
+                if len(files) > MAX_FILES:
+                    raise RuntimeError(f"{root} exceeds {MAX_FILES} files; narrow the prefix")
+    return sorted(files)
+```
+
+Call `list_files_recursive(source_path)` inside every polling attempt, then apply the source predicate (for example, `path.endswith(".json")`) and enforce the 48 KiB task-value limit before publishing the collection. Keep the walk in a `notebook_task` so `dbutils.fs` is available. Do not replace the helper with a one-level list comprehension over `dbutils.fs.ls(source_path)`. If direct object-store pagination is required to preserve metadata or scale, use the cloud SDK with secrets/identity instead of `dbutils.fs.ls()`.
 
 ---
 
@@ -544,9 +586,9 @@ COPY_OPTIONS ('force' = 'true')
 
 ### SQLExecuteQueryOperator
 
-`SQLExecuteQueryOperator` is connection-agnostic. Its **DABs task type is `sql_task` only when the
-resolved connection targets Databricks SQL**; otherwise apply the source-aware classification step
-above.
+**DABs task type:** `sql_task` when the resolved connection targets Databricks SQL; otherwise routed by the source-aware classification step above.
+
+`SQLExecuteQueryOperator` is connection-agnostic, so the resolved connection decides the mapping.
 
 - **Databricks SQL connection** → `sql_task` (the mapping shown below). If SQL is inline, extract it to a
   `.sql` file and reference via `sql_task.file.path`; if it references an existing Databricks SQL query,
@@ -746,7 +788,7 @@ Fall back to a single `dbt_task` when:
 
 **dbt Cloud (`DbtCloudRunJobOperator`) is NOT a `dbt_task` fallback** — `dbt_task` runs dbt Core and cannot trigger a dbt Cloud job. Route it to Tier 4 (notebook calling the dbt Cloud API, or migrate the project to Databricks).
 
-For factory mode, generate the artifacts described in **dbt factory mode — generated artifacts** under the cosmos section in Tier 2 (the mechanics are identical for CLI operators; extract `project_dir`, `profiles_dir`, `target`, `vars`, and selectors from the operator arguments instead of cosmos configs). Multiple dbt operator tasks over the same project (e.g. `dbt_seed >> dbt_run >> dbt_test`) collapse into ONE factory job with ONE `run_job_task` hop — the manifest explosion already covers seeds, models, snapshots, and tests, with ordering derived from the dbt DAG instead of the coarse seed→run→test chain. Note the semantic shift in `MIGRATION_NOTES.md`: tests run after each model and gate downstream nodes, instead of one test phase at the end.
+For factory mode, generate the artifacts described in **dbt factory mode — generated artifacts** under the cosmos section in Tier 2 (the mechanics are identical for CLI operators; extract `project_dir`, `profiles_dir`, `target`, `vars`, and selectors from the operator arguments instead of cosmos configs). Multiple dbt operator tasks over the same project (e.g. `dbt_seed >> dbt_run >> dbt_test`) collapse into ONE factory job with ONE `run_job_task` hop — the manifest explosion already covers seeds, models, snapshots, and tests, with ordering derived from the dbt DAG instead of the coarse seed→run→test chain. Note both semantic shifts in `MIGRATION_NOTES.md`: tests run after each model and gate downstream nodes instead of one test phase at the end, and the coarse Airflow stages' separate retry envelopes are replaced by per-node Lakeflow repair while the `run_job_task` hop itself must not retry the entire generated job.
 
 #### Fallback mapping: single `dbt_task`
 
@@ -874,6 +916,8 @@ ssh_spark = SSHOperator(
 
 These operators require reasoning about intent to determine the best DABs equivalent.
 
+**Retry-boundary rule.** Whenever a mapping consolidates multiple Airflow tasks, mapped stages, or lifecycle steps into one Lakeflow task or one `run_job_task` hop, compare the retry boundaries before and after conversion. Add a **collapsed retry envelope** entry to `MIGRATION_NOTES.md` naming the original per-task retries, the new larger rerun unit, and any side effects that could repeat. Do not silently copy one task's retry count onto a consolidated hop.
+
 ---
 
 ### BranchPythonOperator / ShortCircuitOperator
@@ -942,6 +986,54 @@ branch = BranchPythonOperator(
   notebook_task:
     notebook_path: ../src/full_pipeline.py
 ```
+
+---
+
+### BranchDateTimeOperator
+
+**DABs task type:** evaluator `notebook_task` + `condition_task` + `depends_on.outcome`
+
+Preserve `target_lower`, `target_upper`, `follow_task_ids_if_true`, `follow_task_ids_if_false`, and `use_task_logical_date`. Generate a small evaluator notebook that computes an inclusive, timezone-aware range test and writes a string task value such as `in_range=true|false`; route both branch lists through one `condition_task`. Preserve Airflow's time-only rollover rule: when `target_lower` is later than `target_upper`, treat the upper bound as the following day. When `use_task_logical_date=True`, define a `logical_datetime` job parameter (default `{{job.trigger.time.iso_datetime}}` for a scheduled job and overridable with `{{backfill.iso_datetime}}`) rather than using a date-only value, so scheduled runs and native backfills preserve time-of-day semantics. When it is false, use `{{job.start_time.iso_datetime}}` as an evaluator parameter. A missing or dynamic range bound is manual review; never substitute today's date.
+
+`logical_datetime` is the full-precision form of the same logical instant the DAG-wide `run_date` parameter carries. When a DAG needs both, declare `logical_datetime` and derive `run_date` from its date part rather than defaulting the two independently, and give both the same backfill override so a replayed window moves them together. A `logical_datetime` left at the scheduled default while `run_date` is overridden evaluates the branch against the wrong window for the entire replay.
+
+```yaml
+- task_key: evaluate_datetime_branch
+  notebook_task:
+    notebook_path: ../src/evaluate_datetime_branch.py
+    base_parameters:
+      logical_datetime: "{{job.parameters.logical_datetime}}"
+
+- task_key: choose_datetime_branch
+  depends_on:
+    - task_key: evaluate_datetime_branch
+  condition_task:
+    left: "{{tasks.evaluate_datetime_branch.values.in_range}}"
+    op: EQUAL_TO
+    right: "true"
+```
+
+Record any loss when Airflow branch IDs select more than two independent downstream sets or when downstream trigger rules depend on Airflow skip propagation.
+
+---
+
+### BranchDayOfWeekOperator
+
+**DABs task type:** evaluator `notebook_task` + `condition_task` + `depends_on.outcome`
+
+Preserve `week_day`, `use_task_logical_date`, DAG timezone, and both branch lists. The evaluator parses the same logical parameter the DAG already declares — `logical_datetime` when the DAG has one, otherwise `run_date` — when `use_task_logical_date=True`, or the job start timestamp otherwise, converts it to the DAG timezone, computes the weekday, and writes `matches_day=true|false`. Do not rewrite this branch as a cron schedule unless it is a root task and changing the entire DAG's run cadence is explicitly acceptable; a mid-DAG branch controls only part of the graph.
+
+```yaml
+- task_key: choose_weekday_branch
+  depends_on:
+    - task_key: evaluate_weekday_branch
+  condition_task:
+    left: "{{tasks.evaluate_weekday_branch.values.matches_day}}"
+    op: EQUAL_TO
+    right: "true"
+```
+
+Normalize Airflow weekday enum/string values in the evaluator and flag dynamic `week_day` expressions or branch fan-out that cannot be represented by a single boolean outcome.
 
 ---
 
@@ -1581,6 +1673,44 @@ Airflow sensors that wait for external conditions map to DABs job-level triggers
 
 ---
 
+### BashSensor
+
+**DABs equivalent:** supported job-level trigger when the command is a provably equivalent root condition; otherwise a polling `notebook_task`
+
+`BashSensor` is an arbitrary shell predicate: exit code `0` succeeds and any other code is retried until timeout. Do not convert it to `file_arrival` merely because the command contains a path. Use a job-level file/table trigger only when the command is a root sensor, its output is unused, and its complete predicate is exactly a supported external arrival/update condition with a resolved location or table. Otherwise extract the command into a notebook loop using `subprocess.run`, preserving environment parameters, `poke_interval`, timeout, failure output, and the original success-code contract. A constant `exit 0` succeeds on the first probe; a constant nonzero command still waits to timeout. Preserve `soft_fail=False` by raising on timeout. `soft_fail=True` raises `AirflowSkipException`, and under the default `all_success` trigger rule that skip propagates to the whole downstream subgraph, so **always** gate on the result: complete the poller with `sensor_satisfied=false` and emit a `condition_task` on that value that gates every downstream task the sensor fed. Record the state change in `MIGRATION_NOTES.md` (Lakeflow shows a success plus a false condition where Airflow showed a skip). Reject destructive or side-effecting predicates for automatic polling and flag them for redesign.
+
+```yaml
+- task_key: wait_for_shell_condition
+  timeout_seconds: 3600
+  notebook_task:
+    notebook_path: ../src/wait_for_shell_condition.py
+    base_parameters:
+      poke_interval_seconds: "60"
+```
+
+The notebook task remains in the original graph; only a true root-trigger conversion removes the sensor task. Record that notebook polling consumes compute and consider replacing the external contract with a file/table event.
+
+---
+
+### PythonSensor
+
+**DABs equivalent:** supported job-level trigger when the callable is a provably equivalent root condition; otherwise a polling `notebook_task`
+
+Extract and inspect the `python_callable`, `op_args`, and `op_kwargs`. Convert to `trigger.file_arrival` or `trigger.table_update` only when the root callable is wholly reducible to that resolved external event and its return/XCom value is unused. An arbitrary Python predicate, a mid-graph sensor, or a `PokeReturnValue` consumed downstream stays as a notebook that polls until truthy, preserving `poke_interval`, timeout, parameters, exception behavior, and any returned value through `dbutils.jobs.taskValues`. A callable that always returns true succeeds on its first probe; one that always returns false still waits to timeout. Preserve `soft_fail=False` by raising on timeout. `soft_fail=True` raises `AirflowSkipException`, and under the default `all_success` trigger rule that skip propagates to the whole downstream subgraph, so **always** gate on the result: complete the poller with `sensor_satisfied=false` and emit a `condition_task` on that value that gates every downstream task the sensor fed. Record the state change in `MIGRATION_NOTES.md` (Lakeflow shows a success plus a false condition where Airflow showed a skip). Airflow context, Connections, and Variables must become explicit job parameters, required bundle variables, UC connections, or secrets; unresolved dependencies are manual review.
+
+```yaml
+- task_key: wait_for_python_condition
+  timeout_seconds: 3600
+  notebook_task:
+    notebook_path: ../src/wait_for_python_condition.py
+    base_parameters:
+      poke_interval_seconds: "60"
+```
+
+Do not assume that a constant-looking example callable is safe to run only once: preserve polling unless event equivalence is proven.
+
+---
+
 ### DatabricksSqlSensor / DatabricksSQLStatementsSensor
 
 **DABs equivalent:** `depends_on`, `trigger.table_update`, or polling task (intent-dependent)
@@ -1683,6 +1813,8 @@ wait_for_data = HdfsSensor(
 **DABs YAML (job-level trigger):**
 
 ```yaml
+queue:
+  enabled: true
 trigger:
   file_arrival:
     url: s3://datalake-bucket/data/landing/
@@ -1719,6 +1851,8 @@ resources:
   jobs:
     process_upload_job:
       name: process-upload-job
+      queue:
+        enabled: true
       trigger:
         file_arrival:
           url: s3://data-landing/incoming/
@@ -1728,6 +1862,8 @@ resources:
           notebook_task:
             notebook_path: ../src/process_upload.py
 ```
+
+Apply the complete file-arrival contract from `references/schedule-trigger-mapping.md`: the trigger and ingestion discovery recurse over the same root, the ingestion task preserves the original key/glob filter, and `MIGRATION_NOTES.md` requires an initial manual run for existing files. Keep `queue.enabled: true` on every generated file-arrival job.
 
 ---
 

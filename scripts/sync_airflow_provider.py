@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import posixpath
+import re
 import shutil
 import subprocess
 import tempfile
@@ -20,6 +21,25 @@ PIN_FIELD = "flowx_pin"
 
 class ProviderSyncError(ValueError):
     """Raised when provider source or vendored content violates the pin contract."""
+
+
+def _release_version(tag: Any) -> str:
+    if not isinstance(tag, str) or re.fullmatch(r"v[0-9A-Za-z][0-9A-Za-z.+-]*", tag) is None:
+        raise ProviderSyncError(f"Provider release tag is invalid: {tag!r}")
+    return tag[1:]
+
+
+def _validate_provider_identity(provider: dict[str, Any], *, tag: str) -> None:
+    identity = provider.get("provider")
+    if (
+        not isinstance(identity, dict)
+        or identity.get("name") != "airflow-to-dabs"
+        or identity.get("repository") != REPOSITORY
+    ):
+        raise ProviderSyncError("Provider manifest has an unsupported identity")
+    version = identity.get("version")
+    if version is not None and version != _release_version(tag):
+        raise ProviderSyncError(f"Provider version {version!r} does not match tag {tag!r}")
 
 
 def _json_object(data: bytes, *, label: str) -> dict[str, Any]:
@@ -92,12 +112,13 @@ def _git_output(checkout: Path, *args: str) -> bytes:
 
 
 def sync_provider(*, checkout: Path, tag: str, destination: Path) -> dict[str, str]:
+    _release_version(tag)
     commit = _git_output(checkout, "rev-parse", f"{tag}^{{commit}}").decode().strip()
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ProviderSyncError(f"Provider tag {tag!r} did not resolve to a commit")
     provider_data = _git_output(checkout, "show", f"{commit}:{PROVIDER_PATH.as_posix()}")
     provider = _json_object(provider_data, label=PROVIDER_PATH.as_posix())
-    version = str((provider.get("provider") or {}).get("version", ""))
-    if version != tag.removeprefix("v"):
-        raise ProviderSyncError(f"Provider version {version!r} does not match tag {tag!r}")
+    _validate_provider_identity(provider, tag=tag)
 
     source_files: dict[PurePosixPath, bytes] = {}
     for path in _allowlisted_paths(provider):
@@ -137,9 +158,9 @@ def verify_provider(destination: Path) -> dict[str, str]:
         raise ProviderSyncError("Vendored provider.json is missing flowx_pin metadata")
     if pin.get("repository") != REPOSITORY or pin.get("contract_version") != "1":
         raise ProviderSyncError("Vendored provider pin has an unsupported repository or contract")
-    version = str((provider.get("provider") or {}).get("version", ""))
-    if pin.get("tag") != f"v{version}":
-        raise ProviderSyncError("Vendored provider version does not match its pinned tag")
+    tag = pin.get("tag")
+    _release_version(tag)
+    _validate_provider_identity(provider, tag=tag)
 
     allowlisted_paths = set(_allowlisted_paths(provider))
     actual_paths: set[PurePosixPath] = set()
@@ -169,9 +190,9 @@ def verify_provider(destination: Path) -> dict[str, str]:
     if pin.get("content_sha256") != content_digest:
         raise ProviderSyncError("Vendored provider content digest does not match flowx_pin metadata")
     commit = pin.get("commit")
-    if not isinstance(commit, str) or len(commit) != 40:
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise ProviderSyncError("Vendored provider pin has an invalid commit")
-    return {"tag": str(pin["tag"]), "commit": commit, "content_sha256": content_digest}
+    return {"tag": tag, "commit": commit, "content_sha256": content_digest}
 
 
 def main() -> int:

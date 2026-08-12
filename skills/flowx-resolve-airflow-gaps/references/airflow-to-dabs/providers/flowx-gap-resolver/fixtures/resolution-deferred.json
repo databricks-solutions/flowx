@@ -27,7 +27,7 @@
   "provider": {
     "name": "airflow-to-dabs",
     "repository": "https://github.com/park-peter/airflow-to-dabs",
-    "version": "0.2.2"
+    "version": "<PINNED_PROVIDER_VERSION>"
   },
   "provider_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
   "reason": "A faithful branch migration requires condition tasks and downstream dependency rewrites, which are outside the leaf-only provider contract.",
