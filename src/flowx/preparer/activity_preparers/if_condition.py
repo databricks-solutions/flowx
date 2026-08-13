@@ -41,7 +41,6 @@ def inject_outcome_dependency(tasks: list[dict[str, Any]], condition_key: str, o
         outcome: ``"true"`` or ``"false"``.
     """
     branch_keys = {task.get("task_key") for task in tasks}
-    outcome_dep = {"task_key": condition_key, "outcome": outcome}
     for task in tasks:
         deps = list(task.get("depends_on") or [])
         refers_to_branch_sibling = any(dep.get("task_key") in branch_keys for dep in deps)
@@ -49,7 +48,11 @@ def inject_outcome_dependency(tasks: list[dict[str, Any]], condition_key: str, o
             continue
         if any(dep.get("task_key") == condition_key and dep.get("outcome") == outcome for dep in deps):
             continue
-        task["depends_on"] = [outcome_dep, *deps]
+        # Build a fresh dict per task -- never share one object across branch roots. A shared dict is
+        # serialised by PyYAML as a YAML anchor/alias (&id/*id); generated bundles should stay
+        # anchor-free, since a strict package pre-flight can reject anchors as invariant violations
+        # (issue #34).
+        task["depends_on"] = [{"task_key": condition_key, "outcome": outcome}, *deps]
 
 
 def prepare(activity: IfConditionActivity, *, scope: str = "") -> PreparedActivity:
