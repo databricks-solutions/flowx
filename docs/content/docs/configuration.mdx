@@ -1,6 +1,6 @@
 ---
-title: Translation options
-description: Control flowx's translation behavior and outputs
+title: Configuration
+description: Control flowx's translation behavior and outputs.
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
@@ -129,6 +129,17 @@ The weighted score is `sum(activity weights) + #datasets + #linked_services + #c
 - Databricks-native (notebook/jar/python/job) = **1** (simplest)
 - control-flow / parameter-setting (ForEach/If/Switch/SetVariable/AppendVariable/Filter/Wait/Until) = **2**
 - all other activities (Copy/Web/Lookup/etc.) = **3** (hardest)
+
+## Translation report
+
+During translation, flowx writes a transient `translation_report.json` under
+`<output_dir>/.work/` (default `./flowx_output/.work/`). It lists every activity, its
+translation strategy, warnings raised during translation, and the location of any generated
+artifacts. Review the translation report for any warnings, unsupported resources, or to-do
+items before deploying to your Databricks workspace.
+
+The `package` phase prunes `.work/` after building the bundle. Pass `--keep-intermediates` to
+retain it.
 
 ## Coverage results table & dashboard (Genie Code)
 
