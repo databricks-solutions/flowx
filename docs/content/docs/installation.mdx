@@ -43,7 +43,7 @@ user or for all users within a workspace.
 To add flowx skills for a single user, copy the skills from the flowx folder to your `.assistant` folder:
 
 ```bash
-databricks workspace <FLOWX_DIRECTORY> skills /Users/<EMAIL_ADDRESS>/.assistant/skills
+databricks workspace import-dir skills /Users/<EMAIL_ADDRESS>/.assistant/skills
 ```
 </Tab>
 
@@ -102,7 +102,7 @@ Ask Genie Code *"What flowx MCP tools are available?"*. You should see the singl
 and other flowx skills.
 
 <Callout type="info" title="Troubleshooting the flowx MCP app">
-If Genie Code does not have access to the flowx MCP tool, open the your app's health endpoint at `<APP URL>/`. This should
+If Genie Code does not have access to the flowx MCP tool, open your app's health endpoint at `<APP URL>/`. This should
 return `{"status":"ok"}`). If you cannot access the health endpoint, verify the deployment steps and redeploy the app.
 </Callout>
 </Step>
@@ -110,8 +110,8 @@ return `{"status":"ok"}`). If you cannot access the health endpoint, verify the 
 
 ## Installing flowx for Claude Code
 
-flowx can also be installed with local agent harnesses (e.g. Claude Code) as an agent skills plugin. Skills can from a Python 
-virtual environment or locally-hosted MCP server.
+flowx can also be installed with local agent harnesses (e.g. Claude Code) as an agent skills plugin. Skills can run commands 
+from a Python virtual environment or locally-hosted MCP server.
 
 <Steps>
 <Step>
@@ -157,11 +157,11 @@ The environment is created once and reused. No `uv` is required for plugin users
 ### Verify
 
 Open Claude Code and ask *"What flowx skills do you have available?"*. You should see a list of skills (e.g. `flowx-setup`, 
-`flowx-migrate`). You can now run `/flowx:flowx-migrate`, `/flowx:flowx-discover`, and other flows skills.
+`flowx-migrate`). You can now run `/flowx:flowx-migrate`, `/flowx:flowx-discover`, and other flowx skills.
 
 <Callout type="warn" title="Troubleshooting missing dependencies">
 If calling a skill raises a `ModuleNotFoundError`, the virtual environment is missing or incomplete. Ensure Python is installed
-in your environment and that you have access to a Python package registry for installing depenedencies, then re-run `/flowx:flowx-setup`.
+in your environment and that you have access to a Python package registry for installing dependencies, then re-run `/flowx:flowx-setup`.
 </Callout>
 </Step>
 </Steps>
