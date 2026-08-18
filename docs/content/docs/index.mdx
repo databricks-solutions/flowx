@@ -5,22 +5,18 @@ description: What flowx is and where to start.
 
 ## Motivation
 
-Orchestration should be treated as a first class citizen during migrations. Because orchestrators drive the execution of data pipelines, 
-their configuration can impact data processing results as much as the logic being orchestrated. While significant tooling exists for code 
-conversion and data reconciliation, migrating from legacy orchestration systems is often manual, time-consuming, and prone to risk.
-
 flowx was created to automate migrations of data pipelines between various orchestrators. It provides a robust, tested set of capabilities 
 to parse existing data pipeline definitions, create migration artifacts, and convert data pipeline definitions to Databricks' [Lakeflow jobs framework](https://docs.databricks.com/aws/en/jobs/).
 
 ## How flowx works
 
-flowx is a set of agent skills and deterministic translators. Skills tell agentic tools (e.g. Databricks Genie Code, Claude Code, or any
+flowx is a set of agent skills and deterministic translators. Skills tell agent tools (e.g. Databricks Genie Code, Claude Code, or any
 agent that supports the open [Agent Skills](https://agentskills.io/) format) how to call deterministic translators that parse, translate, and generate Databricks resources.
 
 Translation runs in three phases:
 
-1. `discover` parses Azure Resource Manager templates (e.g. for Data Factory pipelines, datasets, linked services, and triggers) into an execution 
-tree, builds an inventory, and emits a per-pipeline complexity report (`metadata/profile_report.csv`).
+1. `discover` parses the input pipeline configuration (e.g. ARM templates for Data Factory pipelines, datasets, linked services, and triggers) 
+into an execution tree, builds an inventory, and emits a per-pipeline complexity report (`metadata/profile_report.csv`).
 2. `convert` processes the inventory and converts each activity into a Databricks-compatible intermediate representation. *Deterministic 
 activities* are translated by Python handlers while *agentic activities* are handed off to an LLM-assisted translator with the right context. 
 *Unsupported activities* are flagged as explicit gaps.
@@ -33,5 +29,5 @@ All three phases write into one shared output directory (default `./flowx_output
 
 - **[Architecture](/flowx/docs/architecture)** &mdash; understand how flowx is deployed and how it translates
 - **[Installation](/flowx/docs/installation)** &mdash; install the flowx plugin in your agentic tool of choice.
-- **[Usage Guide](/flowx/docs/guide)** &mdash; an end-to-end walkthrough from raw ADF JSON to a deployable bundle.
-- **[Options](/flowx/docs/options)** &mdash; reference documenting options for customizing output when translating pipelines with flowx.
+- **[Usage Guide](/flowx/docs/guide)** &mdash; run an end-to-end conversion from raw ADF JSON to a deployable bundle.
+- **[Configuration](/flowx/docs/configuration)** &mdash; reference documenting options for customizing output when translating pipelines with flowx.
