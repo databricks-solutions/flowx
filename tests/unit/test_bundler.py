@@ -98,6 +98,13 @@ class TestWriteBundle:
         assert "dev" in content["targets"]
         assert "prod" in content["targets"]
 
+    def test_databricks_yml_sync_includes_src(self, tmp_path):
+        """databricks.yml forces src/** into the sync set so a gitignored output dir still uploads notebooks."""
+        wf = _simple_workflow("my_pipeline")
+        write_bundle(wf, tmp_path)
+        content = yaml.safe_load((tmp_path / "databricks.yml").read_text())
+        assert content["sync"]["include"] == ["src/**"]
+
     def test_job_resource_yml_exists(self, tmp_path):
         """A job resource YAML is created under resources/."""
         wf = _simple_workflow("my_job")
