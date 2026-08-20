@@ -74,3 +74,32 @@ class TestSecretsUnion:
         assert "key_from_notebook" in md
         assert "scope_from_workflow" in md
         assert "key_from_workflow" in md
+
+
+class TestSkippedPipelines:
+    """PR #6: skipped malformed report entries surface in SETUP.md instead of aborting package."""
+
+    def test_setup_md_lists_skipped_pipelines(self):
+        """SETUP.md documents every skipped pipeline so a dropped entry is not silent."""
+        prereqs = build_prereqs(
+            notebooks=[],
+            tasks=[],
+            known_bundle_jobs=set(),
+            skipped_pipelines=["orphaned_pipeline", "index 3 (not a JSON object)"],
+        )
+        md = render_setup_md(prereqs, bundle_name="test_bundle")
+        assert "Skipped pipelines" in md
+        # Names are stored bare and backtick-wrapped by the renderer (no repr quotes).
+        assert "- `orphaned_pipeline`" in md
+        assert "- `index 3 (not a JSON object)`" in md
+        assert "'orphaned_pipeline'" not in md
+
+    def test_skipped_pipelines_make_prereqs_non_empty(self):
+        """A report with only skipped entries must still render a non-empty SETUP.md."""
+        prereqs = build_prereqs(
+            notebooks=[],
+            tasks=[],
+            known_bundle_jobs=set(),
+            skipped_pipelines=["index 0"],
+        )
+        assert not prereqs.is_empty()

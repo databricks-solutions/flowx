@@ -82,7 +82,7 @@ def test_package_loads_multi_pipeline_report():
         work.mkdir(parents=True)
         report_path = work / "translation_report.json"
         report_path.write_text(json.dumps(report), encoding="utf-8")
-        workflows = _load_report(report_path)
+        workflows, _ = _load_report(report_path)
         assert [w.name for w in workflows] == ["first", "second"]
         assert package_main(["--output-dir", str(out)]) == 0
 

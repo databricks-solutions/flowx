@@ -137,6 +137,10 @@ class Prereqs:
     # Airflow catchup=True jobs; each entry is the SetupTask config dict ({pipeline}). History is
     # replayed via a native Databricks backfill overriding the reserved Airflow date parameter.
     airflow_backfills: list[dict[str, Any]] = field(default_factory=list)
+    # Report entries dropped by _load_report because they were not a dict with 'name' and 'tasks'.
+    # Each entry is a human-readable identifier (the pipeline name, or ``index N`` when unnamed) so a
+    # skipped pipeline is surfaced rather than silently missing from the bundle.
+    skipped_pipelines: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         """Return ``True`` when nothing needs to happen before ``bundle run``."""
@@ -158,6 +162,7 @@ class Prereqs:
             and not self.neutralized_conditions
             and not self.pydabs_dbt_factories
             and not self.airflow_backfills
+            and not self.skipped_pipelines
         )
 
 
@@ -371,6 +376,7 @@ def build_prereqs(
     neutralized_conditions: list[dict[str, str]] | None = None,
     pydabs_dbt_factories: list[dict[str, Any]] | None = None,
     airflow_backfills: list[dict[str, Any]] | None = None,
+    skipped_pipelines: list[str] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
 
@@ -420,6 +426,7 @@ def build_prereqs(
         neutralized_conditions=list(neutralized_conditions or []),
         pydabs_dbt_factories=list(pydabs_dbt_factories or []),
         airflow_backfills=list(airflow_backfills or []),
+        skipped_pipelines=list(skipped_pipelines or []),
     )
 
 
@@ -812,6 +819,22 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
             module = entry.get("hook_module", "")
             manifest = entry.get("manifest_path", "")
             lines.append(f"| `{job_key}` | `{module}:load_resources` | `{manifest}` |")
+        lines.append("")
+
+    if prereqs.skipped_pipelines:
+        lines.append("## Skipped pipelines")
+        lines.append("")
+        lines.append(
+            "The translation report contained the following entries that flowx could not turn "
+            "into a bundle (each was not a pipeline object with both `name` and `tasks`). They were "
+            "skipped so the valid pipelines could still be generated. This usually signals a "
+            "corrupt or truncated report — re-run `convert` for these pipelines and package again."
+        )
+        lines.append("")
+        for skipped in prereqs.skipped_pipelines:
+            # Backtick-wrap so pipeline names read cleanly and stay unambiguous in
+            # Markdown even when they contain spaces or Markdown-special characters.
+            lines.append(f"- `{skipped}`")
         lines.append("")
 
     return "\n".join(lines)
