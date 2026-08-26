@@ -84,6 +84,7 @@ def write_bundle(
     catalog: str = "main",
     schema: str = "default",
     bundle_name: str | None = None,
+    skipped_pipelines: list[str] | None = None,
 ) -> list[Path]:
     """Writes all DAB files to output_dir.
 
@@ -93,6 +94,8 @@ def write_bundle(
         catalog: Default target catalog name.
         schema: Default target schema name.
         bundle_name: Optional bundle name (defaults to workflow name).
+        skipped_pipelines: Report-level entries _load_report could not package
+            (surfaced in SETUP.md so a dropped pipeline is documented, not silent).
 
     Returns:
         List of absolute paths to all created files.
@@ -289,6 +292,7 @@ def write_bundle(
         manual_schedule_time_of_day=manual_schedule_time_of_day_configs,
         manual_credentials=manual_credential_configs,
         neutralized_conditions=list(_neutralized_conditions),
+        skipped_pipelines=list(skipped_pipelines or []),
     )
     setup_path = output_dir / "SETUP.md"
     setup_path.write_text(render_setup_md(prereqs, bundle_name=effective_name), encoding="utf-8")
@@ -328,7 +332,9 @@ def main(argv: list[str] | None = None) -> int:
     """Package-phase entry point for DAB bundle generation.
 
     Returns a process exit code so the adapter can run this phase in-process (instead of spawning a
-    second interpreter) and still propagate failures.
+    second interpreter) and still propagate failures: ``0`` on success, ``1`` when the report has no
+    translated pipelines, ``2`` when workspace-file auth is required but unavailable, and ``3`` when
+    every entry in the report was malformed (nothing left to package).
     """
     parser = argparse.ArgumentParser(
         description="Generate a Databricks Declarative Automation Bundle from a translation report.",
@@ -413,9 +419,23 @@ def main(argv: list[str] | None = None) -> int:
             enable_workspace_downloads(True)
 
     print(f"Loading translation report: {args.report}")
-    workflows = _load_report(args.report)
+    workflows, skipped_pipelines = _load_report(args.report)
+    if skipped_pipelines:
+        print(
+            f"Warning: skipped {len(skipped_pipelines)} malformed pipeline "
+            f"entr{'y' if len(skipped_pipelines) == 1 else 'ies'} in the report "
+            f"(see SETUP.md 'Skipped pipelines'): {', '.join(skipped_pipelines)}",
+            file=sys.stderr,
+        )
 
     if not workflows:
+        # Distinguish "every entry was malformed" (something to fix) from a genuinely empty report.
+        if skipped_pipelines:
+            print(
+                "No valid pipelines to package: every entry in the report was malformed.",
+                file=sys.stderr,
+            )
+            return 3
         print("No translated pipelines found in the report.", file=sys.stderr)
         return 1
 
@@ -433,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
             catalog=args.catalog,
             schema=args.schema,
             bundle_name=effective_bundle_name,
+            skipped_pipelines=skipped_pipelines,
         )
         all_created.extend(created)
         print(f"  [{index + 1}/{len(workflows)}] {workflow.name}: {len(created)} files")
@@ -635,6 +656,17 @@ def _build_databricks_yml(
         "include": [
             "resources/*.yml",
         ],
+        # Force the generated notebook sources into the deploy sync set. DABs derives its
+        # sync set by honoring .gitignore, and the default output dir (./flowx_output) is
+        # commonly gitignored, which would otherwise make `bundle deploy` upload zero files
+        # and leave the job's notebooks missing. A nested .gitignore negation can't recover
+        # this (git won't re-include a path under an excluded parent), so sync.include is the
+        # only reliable override. Harmless when the dir isn't ignored.
+        "sync": {
+            "include": [
+                "src/**",
+            ],
+        },
         "targets": {
             "dev": {
                 "mode": "development",
@@ -1350,24 +1382,28 @@ def _normalize_base_parameters(
     return resolved
 
 
-def _load_report(report_path: Path) -> list[PreparedWorkflow]:
+def _load_report(report_path: Path) -> tuple[list[PreparedWorkflow], list[str]]:
     """Loads a translation report and reconstruct PreparedWorkflow objects.
 
     Args:
         report_path: Path to the translation report JSON file.
 
     Returns:
-        List of PreparedWorkflow objects, one per pipeline.
+        A ``(workflows, skipped)`` tuple: one PreparedWorkflow per pipeline, plus the
+        labels of any ``{"pipelines": [...]}`` entries that were skipped (not raised)
+        because they were malformed. The caller surfaces ``skipped`` in SETUP.md so a
+        dropped pipeline is documented rather than silently missing.
     """
     with open(report_path, encoding="utf-8") as report_file:
         report = json.load(report_file)
 
     workflows: list[PreparedWorkflow] = []
+    skipped: list[str] = []
 
     if "tasks" in report and "name" in report:
         workflow = _pipeline_dict_to_workflow(report)
         workflows.append(workflow)
-        return workflows
+        return workflows, skipped
 
     if "translations" in report:
         # Aggregated translation_report.json: ``translations`` is a flat list of {pipeline, ir, status}.
@@ -1403,10 +1439,38 @@ def _load_report(report_path: Path) -> list[PreparedWorkflow]:
                 pipeline_dict["schedule"] = pipeline_schedules[pipeline_name]
             workflow = _pipeline_dict_to_workflow(pipeline_dict)
             workflows.append(workflow)
-        return workflows
+        return workflows, skipped
+
+    if "pipelines" in report and isinstance(report["pipelines"], list):
+        # Aggregated report written by engine.py / modify ({"pipelines": [...]}): one dict per
+        # pipeline, each already in the single-pipeline {"name", "tasks", ...} IR shape. Route each
+        # through the same machinery the single-pipeline branch uses. Mirrors the adapter's
+        # _load_pipelines (adapter/__main__.py) so both report consumers agree on this shape.
+        for index, pipeline_dict in enumerate(report["pipelines"]):
+            if isinstance(pipeline_dict, dict) and "tasks" in pipeline_dict and "name" in pipeline_dict:
+                workflows.append(_pipeline_dict_to_workflow(pipeline_dict))
+            else:
+                # PR #6: a non-conforming entry (corruption / an internal bug) is skipped so the other
+                # valid pipelines still convert. Record each offender rather than dropping it silently —
+                # the caller surfaces the returned skip list in every bundle's SETUP.md.
+                name = pipeline_dict.get("name") if isinstance(pipeline_dict, dict) else None
+                if name:
+                    # Store the bare name; renderers quote/backtick it for their medium
+                    # (SETUP.md wraps it in backticks). Avoids leaking Python repr quotes.
+                    skipped.append(str(name))
+                else:
+                    # Enrich the label with hints about what went wrong so users can debug.
+                    if not isinstance(pipeline_dict, dict):
+                        hint = "not a JSON object"
+                    elif "tasks" in pipeline_dict:
+                        hint = "has tasks, missing name"
+                    else:
+                        hint = "missing name/tasks"
+                    skipped.append(f"index {index} ({hint})")
+        return workflows, skipped
 
     # Empty or unrecognised report shape — nothing to do.
-    return workflows
+    return workflows, skipped
 
 
 def _pipeline_dict_to_workflow(pipeline_dict: dict[str, Any]) -> PreparedWorkflow:

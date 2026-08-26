@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import json
+
 import yaml
 
-from flowx.bundler.dab_writer import write_bundle
+from flowx.bundler.dab_writer import (
+    _load_report,
+    write_bundle,
+)
+from flowx.bundler.dab_writer import main as dab_main
 from flowx.models.dab import SecretInstruction, SetupTask
 from flowx.models.ir import (
     CopyActivity,
@@ -173,6 +179,12 @@ class TestWriteBundle:
                         if dep.get("task_key") == "switch1_case_a" and dep.get("outcome") == "true":
                             gated_on_true += 1
         assert gated_on_true == 2, f"both case roots must gate on the case 'true' outcome, got {gated_on_true}"
+    def test_databricks_yml_sync_includes_src(self, tmp_path):
+        """databricks.yml forces src/** into the sync set so a gitignored output dir still uploads notebooks."""
+        wf = _simple_workflow("my_pipeline")
+        write_bundle(wf, tmp_path)
+        content = yaml.safe_load((tmp_path / "databricks.yml").read_text())
+        assert content["sync"]["include"] == ["src/**"]
 
     def test_job_resource_yml_exists(self, tmp_path):
         """A job resource YAML is created under resources/."""
@@ -302,10 +314,6 @@ class TestWriteBundle:
         documented ``translation_report.json`` aggregated format would have
         hit ``NameError`` the first time a notebook task was emitted.
         """
-        import json
-
-        from flowx.bundler.dab_writer import _load_report
-
         report = {
             "translations": [
                 {
@@ -338,11 +346,261 @@ class TestWriteBundle:
         report_path = tmp_path / "translation_report.json"
         report_path.write_text(json.dumps(report))
 
-        workflows = _load_report(report_path)
+        workflows, _ = _load_report(report_path)
         assert len(workflows) == 1
         assert workflows[0].name == "agg_pipeline"
         task_keys = {task["task_key"] for task in workflows[0].tasks}
         assert task_keys == {"pause", "run_nb"}
+
+    def test_load_report_handles_pipelines_format(self, tmp_path):
+        """``_load_report`` accepts the ``{"pipelines": [...]}`` aggregated report.
+
+        Regression: ``convert``/``modify`` serialize multi-pipeline reports under a
+        top-level ``"pipelines"`` key (engine.py: ``{"pipelines": all_pipeline_dicts}``),
+        but ``_load_report`` only understood the single-pipeline and legacy
+        ``"translations"`` shapes and silently returned ``[]`` for this one -- so
+        ``package`` aborted with "No translated pipelines found" for any factory with
+        more than one pipeline.
+        """
+        report = {
+            "pipelines": [
+                {
+                    "name": "pipeline_a",
+                    "tasks": [
+                        {
+                            "type": "WaitActivity",
+                            "name": "Pause",
+                            "task_key": "pause",
+                            "wait_time_seconds": 5,
+                        },
+                    ],
+                },
+                {
+                    "name": "pipeline_b",
+                    "tasks": [
+                        {
+                            "type": "NotebookActivity",
+                            "name": "Run NB",
+                            "task_key": "run_nb",
+                            "notebook_path": "/Shared/etl/run",
+                        },
+                    ],
+                },
+            ]
+        }
+        report_path = tmp_path / "translation_report.json"
+        report_path.write_text(json.dumps(report))
+
+        workflows, _ = _load_report(report_path)
+        assert len(workflows) == 2
+        assert {wf.name for wf in workflows} == {"pipeline_a", "pipeline_b"}
+        by_name = {wf.name: wf for wf in workflows}
+        assert {task["task_key"] for task in by_name["pipeline_a"].tasks} == {"pause"}
+        assert {task["task_key"] for task in by_name["pipeline_b"].tasks} == {"run_nb"}
+
+    def test_load_report_skips_malformed_pipelines_entry(self, tmp_path):
+        """A malformed ``"pipelines"`` entry is skipped so valid pipelines still convert.
+
+        PR #6 review: aborting the whole run because one entry is malformed drops
+        every other valid pipeline in the report. Instead, ``_load_report`` keeps
+        the well-formed pipelines and records each skipped entry (surfaced in
+        SETUP.md downstream) rather than raising.
+        """
+        report = {
+            "pipelines": [
+                {
+                    "name": "pipeline_ok",
+                    "tasks": [
+                        {
+                            "type": "WaitActivity",
+                            "name": "Pause",
+                            "task_key": "pause",
+                            "wait_time_seconds": 5,
+                        },
+                    ],
+                },
+                {"name": "no_tasks_here"},  # missing "tasks"
+                {"tasks": []},  # missing "name"
+                "not-even-a-dict",  # not a dict at all
+            ]
+        }
+        report_path = tmp_path / "translation_report.json"
+        report_path.write_text(json.dumps(report))
+
+        workflows, skipped_pipelines = _load_report(report_path)
+
+        # The one valid pipeline still produces a workflow.
+        assert [wf.name for wf in workflows] == ["pipeline_ok"]
+
+        # Every offender is recorded so SETUP.md can name it (collect-all, not fail-fast).
+        skipped = " ".join(skipped_pipelines)
+        assert "no_tasks_here" in skipped
+        assert "index 2" in skipped
+        assert "index 3" in skipped
+
+        # Named entries are stored bare — no Python repr quotes leak into the label.
+        assert "no_tasks_here" in skipped_pipelines
+        assert "'no_tasks_here'" not in skipped
+
+    def test_load_report_enriches_skip_labels_with_hints(self, tmp_path):
+        """Skipped pipeline entries are labeled with hints about what went wrong.
+
+        PR #6 polish: when a pipeline entry is missing a name, recording just
+        ``"index N"`` tells the user nothing about what the entry contained.
+        Enrich the label to hint at what field is missing or wrong:
+        - If it has tasks but no name: ``index N (has tasks, missing name)``
+        - If it has neither: ``index N (missing name/tasks)``
+        - If it's not a dict: ``index N (not a JSON object)``
+        - If it has a name: record the bare name (no Python ``repr`` quotes);
+          renderers wrap it for their medium (SETUP.md uses backticks).
+        """
+        report = {
+            "pipelines": [
+                {
+                    "name": "pipeline_ok",
+                    "tasks": [
+                        {
+                            "type": "WaitActivity",
+                            "name": "Pause",
+                            "task_key": "pause",
+                            "wait_time_seconds": 5,
+                        },
+                    ],
+                },
+                # Case 1: missing name but has tasks
+                {"tasks": [{"type": "WaitActivity", "name": "P", "task_key": "p", "wait_time_seconds": 1}]},
+                # Case 2: missing both name and tasks
+                {"other_field": "value"},
+                # Case 3: not a dict at all
+                "not-even-a-dict",
+            ]
+        }
+        report_path = tmp_path / "translation_report.json"
+        report_path.write_text(json.dumps(report))
+
+        workflows, skipped_pipelines = _load_report(report_path)
+
+        # One valid pipeline.
+        assert [wf.name for wf in workflows] == ["pipeline_ok"]
+
+        # Check enriched skip labels.
+        assert len(skipped_pipelines) == 3
+        # Index 1: has tasks, missing name
+        assert "index 1" in skipped_pipelines[0]
+        assert "has tasks" in skipped_pipelines[0]
+        assert "missing name" in skipped_pipelines[0]
+        # Index 2: missing both name and tasks
+        assert "index 2" in skipped_pipelines[1]
+        assert "missing name/tasks" in skipped_pipelines[1]
+        # Index 3: not a dict
+        assert "index 3" in skipped_pipelines[2]
+        assert "not a JSON object" in skipped_pipelines[2]
+
+    def test_package_main_writes_skipped_section_and_continues(self, tmp_path):
+        """``package`` skips a malformed entry, still writes valid bundles, and notes the skip."""
+        report = {
+            "pipelines": [
+                {
+                    "name": "pipeline_ok",
+                    "tasks": [
+                        {
+                            "type": "WaitActivity",
+                            "name": "Pause",
+                            "task_key": "pause",
+                            "wait_time_seconds": 5,
+                        },
+                    ],
+                },
+                {"name": "no_tasks_here"},
+            ]
+        }
+        report_path = tmp_path / "translation_report.json"
+        report_path.write_text(json.dumps(report))
+        out_dir = tmp_path / "out"
+
+        exit_code = dab_main(
+            [
+                "--report",
+                str(report_path),
+                "--output-dir",
+                str(out_dir),
+                "--no-download-workspace-files",
+            ]
+        )
+
+        # Valid pipeline was written, so package succeeds.
+        assert exit_code == 0
+        setup_md = (out_dir / "SETUP.md").read_text(encoding="utf-8")
+        assert "Skipped pipelines" in setup_md
+        assert "no_tasks_here" in setup_md
+
+    def test_package_main_repeats_skipped_section_in_every_bundle(self, tmp_path):
+        """Each bundle in a multi-pipeline run carries the skip note.
+
+        Bundles are consumed independently (one per pipeline directory), so the
+        dropped-pipeline warning is intentionally repeated in every bundle's
+        SETUP.md rather than written to a single shared location.
+        """
+        report = {
+            "pipelines": [
+                {
+                    "name": "pipeline_a",
+                    "tasks": [
+                        {"type": "WaitActivity", "name": "Pause", "task_key": "pause", "wait_time_seconds": 5},
+                    ],
+                },
+                {
+                    "name": "pipeline_b",
+                    "tasks": [
+                        {"type": "WaitActivity", "name": "Hold", "task_key": "hold", "wait_time_seconds": 5},
+                    ],
+                },
+                {"name": "no_tasks_here"},  # malformed -> skipped
+            ]
+        }
+        report_path = tmp_path / "translation_report.json"
+        report_path.write_text(json.dumps(report))
+        out_dir = tmp_path / "out"
+
+        exit_code = dab_main(
+            [
+                "--report",
+                str(report_path),
+                "--output-dir",
+                str(out_dir),
+                "--no-download-workspace-files",
+            ]
+        )
+
+        assert exit_code == 0
+        # Two valid pipelines -> one bundle subdirectory each, both naming the skipped entry.
+        for pipeline_name in ("pipeline_a", "pipeline_b"):
+            setup_md = (out_dir / pipeline_name / "SETUP.md").read_text(encoding="utf-8")
+            assert "Skipped pipelines" in setup_md
+            assert "no_tasks_here" in setup_md
+
+    def test_package_main_returns_nonzero_when_all_entries_skipped(self, tmp_path):
+        """``package`` fails when every pipeline entry is malformed (nothing to write)."""
+        report = {
+            "pipelines": [
+                {"name": "no_tasks_here"},
+                "not-even-a-dict",
+            ]
+        }
+        report_path = tmp_path / "translation_report.json"
+        report_path.write_text(json.dumps(report))
+
+        exit_code = dab_main(
+            [
+                "--report",
+                str(report_path),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--no-download-workspace-files",
+            ]
+        )
+
+        assert exit_code != 0
 
 
 class TestScheduleEmission:
@@ -552,10 +810,6 @@ class TestAggregatedReportPipelineParameters:
     """Change pipeline-parameters-and-variables-round-trip (P0): VAR-001."""
 
     def test_load_report_carries_pipeline_parameters(self, tmp_path):
-        import json
-
-        from flowx.bundler.dab_writer import _load_report
-
         report = {
             "translations": [
                 {
@@ -574,7 +828,7 @@ class TestAggregatedReportPipelineParameters:
         report_path = tmp_path / "translation_report.json"
         report_path.write_text(json.dumps(report))
 
-        workflows = _load_report(report_path)
+        workflows, _ = _load_report(report_path)
         assert len(workflows) == 1
         wf = workflows[0]
         # Pipeline-level parameters must survive round-trip.
@@ -587,10 +841,6 @@ class TestAggregatedReportSchedule:
     """Change fix-aggregated-report-propagates-schedule (P0): SCHED3-001."""
 
     def test_load_report_carries_pipeline_schedule(self, tmp_path):
-        import json
-
-        from flowx.bundler.dab_writer import _load_report
-
         schedule_spec = {
             "kind": "cron",
             "quartz_cron_expression": "0 0 2 ? * * *",
@@ -615,7 +865,7 @@ class TestAggregatedReportSchedule:
         report_path = tmp_path / "translation_report.json"
         report_path.write_text(json.dumps(report))
 
-        workflows = _load_report(report_path)
+        workflows, _ = _load_report(report_path)
         assert len(workflows) == 1
         wf = workflows[0]
         assert wf.schedule is not None
@@ -624,10 +874,6 @@ class TestAggregatedReportSchedule:
 
     def test_load_report_carries_pipeline_schedule_from_ir(self, tmp_path):
         """Older single-pipeline reports nest schedule under ``ir.schedule``."""
-        import json
-
-        from flowx.bundler.dab_writer import _load_report
-
         schedule_spec = {
             "kind": "cron",
             "quartz_cron_expression": "0 0 4 ? * MON,TUE,WED,THU,FRI *",
@@ -652,7 +898,7 @@ class TestAggregatedReportSchedule:
         report_path = tmp_path / "translation_report.json"
         report_path.write_text(json.dumps(report))
 
-        workflows = _load_report(report_path)
+        workflows, _ = _load_report(report_path)
         assert len(workflows) == 1
         assert workflows[0].schedule is not None
         assert workflows[0].schedule["quartz_cron_expression"].startswith("0 0 4")

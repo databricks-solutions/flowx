@@ -906,7 +906,7 @@ class TestRunJobPreparer:
 
         report_path = tmp_path / "rj.json"
         report_path.write_text(json.dumps(pipeline_dict))
-        workflows = _load_report(report_path)
+        workflows, _ = _load_report(report_path)
         bundle_dir = tmp_path / "bundle"
         bundle_dir.mkdir()
         write_bundle(workflows[0], bundle_dir)
@@ -1146,7 +1146,7 @@ class TestSwitchPreparer:
         }
         report_path = tmp_path / "switch.json"
         report_path.write_text(json.dumps(pipeline_dict))
-        workflows = _load_report(report_path)
+        workflows, _ = _load_report(report_path)
         bundle_dir = tmp_path / "bundle"
         bundle_dir.mkdir()
         write_bundle(workflows[0], bundle_dir)

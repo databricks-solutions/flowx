@@ -131,6 +131,10 @@ class Prereqs:
     # C-43 (CF5-001 / CF5-002): condition_task operands blanked because they referenced a task in another
     # job ({task_key, field, original_ref}); a blanked operand is always-true, so the user must re-wire it.
     neutralized_conditions: list[dict[str, str]] = field(default_factory=list)
+    # PR #6: report entries dropped by _load_report because they were not a dict with 'name' and 'tasks'.
+    # Each entry is a human-readable identifier (the pipeline name, or ``index N`` when unnamed) so a
+    # skipped pipeline is surfaced rather than silently missing from the bundle.
+    skipped_pipelines: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         """Return ``True`` when nothing needs to happen before ``bundle run``."""
@@ -150,6 +154,7 @@ class Prereqs:
             and not self.manual_schedule_time_of_day
             and not self.manual_credentials
             and not self.neutralized_conditions
+            and not self.skipped_pipelines
         )
 
 
@@ -361,6 +366,7 @@ def build_prereqs(
     manual_schedule_time_of_day: list[dict[str, Any]] | None = None,
     manual_credentials: list[dict[str, Any]] | None = None,
     neutralized_conditions: list[dict[str, str]] | None = None,
+    skipped_pipelines: list[str] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
 
@@ -408,6 +414,7 @@ def build_prereqs(
         manual_schedule_time_of_day=list(manual_schedule_time_of_day or []),
         manual_credentials=list(manual_credentials or []),
         neutralized_conditions=list(neutralized_conditions or []),
+        skipped_pipelines=list(skipped_pipelines or []),
     )
 
 
@@ -758,6 +765,22 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
         for endpoint in prereqs.network_endpoints:
             label = kind_label.get(endpoint.kind, endpoint.kind)
             lines.append(f"| {label} | `{endpoint.target}` | {endpoint.notes} |")
+        lines.append("")
+
+    if prereqs.skipped_pipelines:
+        lines.append("## Skipped pipelines")
+        lines.append("")
+        lines.append(
+            "The translation report contained the following entries that flowx could not turn "
+            "into a bundle (each was not a pipeline object with both `name` and `tasks`). They were "
+            "skipped so the valid pipelines could still be generated. This usually signals a "
+            "corrupt or truncated report — re-run `convert` for these pipelines and package again."
+        )
+        lines.append("")
+        for skipped in prereqs.skipped_pipelines:
+            # Backtick-wrap so pipeline names read cleanly and stay unambiguous in
+            # Markdown even when they contain spaces or Markdown-special characters.
+            lines.append(f"- `{skipped}`")
         lines.append("")
 
     return "\n".join(lines)
