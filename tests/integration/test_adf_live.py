@@ -21,7 +21,7 @@ import yaml
 
 from flowx.bundler.dab_writer import write_bundle
 from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
-from flowx.translator.engine import translate_pipeline
+from flowx.sources.adf.translate import translate_pipeline
 
 SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
 RESOURCE_GROUP = "flowx-rg"
@@ -138,7 +138,7 @@ def adf_export_dir(tmp_path_factory):
 @pytest.fixture(scope="module")
 def live_definitions(adf_export_dir):
     """Load all exported ADF definitions."""
-    from flowx.parser.adf_loader import load_adf_definitions
+    from flowx.sources.adf.loader import load_adf_definitions
 
     return load_adf_definitions(adf_export_dir)
 

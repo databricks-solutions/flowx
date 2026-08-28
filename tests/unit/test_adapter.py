@@ -94,7 +94,7 @@ def _query_delta_copy(name: str = "copy_query") -> CopyActivity:
 
     The query analysis fields the translator normally stamps are
     included here so the IR is shaped exactly as it would be after
-    ``flowx.translator.engine`` runs against this Copy.
+    ``flowx.sources.adf.translate`` runs against this Copy.
     """
     return CopyActivity(
         **_make_base(name),
@@ -502,7 +502,7 @@ class TestTranslationSession:
 class TestSerializationRoundtrip:
     def test_configuration_survive_json_roundtrip(self):
         from flowx.bundler.dab_writer import pipeline_dict_to_ir
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline = Pipeline(
             name="p", tasks=[_delta_copy(), NotebookActivity(**_make_base("nb"), notebook_path="/Shared/x")]
@@ -513,7 +513,7 @@ class TestSerializationRoundtrip:
             use_lakeflow_connectors="lakeflow_connect",
         )
         stamped = apply_configuration(pipeline, prefs)
-        roundtripped, _ = pipeline_dict_to_ir(json.loads(json.dumps(_pipeline_to_dict(stamped), default=str)))
+        roundtripped, _ = pipeline_dict_to_ir(json.loads(json.dumps(pipeline_to_dict(stamped), default=str)))
         assert roundtripped.translation_configuration.copy_activity_paradigm is CopyActivityParadigm.SDP
         assert roundtripped.tasks[0].target_format == "sdp"
         assert roundtripped.tasks[0].use_lakeflow_connector is True
@@ -527,14 +527,14 @@ class TestMigrationInputSession:
     def test_discover_session_lists_expected_options(self):
         from flowx.adapter import MigrationInputSession
 
-        session = MigrationInputSession(phase="discover")
+        session = MigrationInputSession(phase="discover", source="adf")
         ids = [q.option_id for q in session.pending().options]
         assert ids == ["adf_source_path", "adf_resource_url", "output_dir"]
 
     def test_convert_session_lists_expected_options(self):
         from flowx.adapter import MigrationInputSession
 
-        session = MigrationInputSession(phase="convert")
+        session = MigrationInputSession(phase="convert", source="adf")
         ids = [q.option_id for q in session.pending().options]
         assert "inventory_path" in ids
         assert "adf_source_path" in ids
@@ -555,7 +555,7 @@ class TestMigrationInputSession:
     def test_answer_records_value_and_drops_from_pending(self):
         from flowx.adapter import MigrationInputSession
 
-        session = MigrationInputSession(phase="discover")
+        session = MigrationInputSession(phase="discover", source="adf")
         session.answer("adf_source_path", "/Volumes/main/default/adf")
         ids = [q.option_id for q in session.pending().options]
         assert "adf_source_path" not in ids
@@ -563,7 +563,7 @@ class TestMigrationInputSession:
     def test_answer_rejects_unknown_option(self):
         from flowx.adapter import MigrationInputSession
 
-        session = MigrationInputSession(phase="discover")
+        session = MigrationInputSession(phase="discover", source="adf")
         with pytest.raises(ValueError, match="Unknown input option"):
             session.answer("not_a_field", "x")
 
@@ -580,7 +580,7 @@ class TestMigrationInputSession:
     def test_collected_omits_required_when_missing(self):
         from flowx.adapter import MigrationInputSession
 
-        session = MigrationInputSession(phase="discover")
+        session = MigrationInputSession(phase="discover", source="adf")
         collected = session.collected()
         assert "adf_source_path" not in collected
         assert collected["output_dir"] == "./flowx_output"
@@ -588,7 +588,7 @@ class TestMigrationInputSession:
 
 class TestWorkspacePathsCli:
     def test_workspace_paths_detects_notebook_paths(self, tmp_path: Path):
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline = Pipeline(
             name="p",
@@ -598,9 +598,9 @@ class TestWorkspacePathsCli:
             ],
         )
         report_path = tmp_path / "report.json"
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         out = tmp_path / "ws.json"
-        exit_code = adapter_cli_main(["workspace-paths", str(report_path), "--out", str(out)])
+        exit_code = adapter_cli_main(["workspace-paths", str(report_path), "--source", "adf", "--out", str(out)])
         assert exit_code == 0
         payload = json.loads(out.read_text())
         assert payload["paths"] == ["/Shared/team/a", "/Shared/team/b"]
@@ -608,26 +608,26 @@ class TestWorkspacePathsCli:
         assert payload["suggested_hosts"] == []
 
     def test_workspace_paths_reports_no_auth_when_paths_empty(self, tmp_path: Path):
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline = Pipeline(name="p", tasks=[_delta_copy()])
         report_path = tmp_path / "report.json"
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         out = tmp_path / "ws.json"
-        adapter_cli_main(["workspace-paths", str(report_path), "--out", str(out)])
+        adapter_cli_main(["workspace-paths", str(report_path), "--source", "adf", "--out", str(out)])
         payload = json.loads(out.read_text())
         assert payload["paths"] == []
         assert payload["needs_auth"] is False
 
     def test_workspace_paths_suggests_host_from_databricks_linked_service(self, tmp_path: Path):
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline = Pipeline(
             name="p",
             tasks=[NotebookActivity(**_make_base("nb"), notebook_path="/Shared/team/x")],
         )
         report_path = tmp_path / "report.json"
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         source_dir = tmp_path / "source"
         (source_dir / "linked_services").mkdir(parents=True)
         (source_dir / "linked_services" / "LS_AzureDatabricks.json").write_text(
@@ -642,19 +642,47 @@ class TestWorkspacePathsCli:
             json.dumps({"name": "LS_Other", "properties": {"type": "AzureSqlDatabase"}})
         )
         out = tmp_path / "ws.json"
-        adapter_cli_main(["workspace-paths", str(report_path), "--source-dir", str(source_dir), "--out", str(out)])
+        adapter_cli_main(
+            ["workspace-paths", str(report_path), "--source", "adf", "--source-dir", str(source_dir), "--out", str(out)]
+        )
         payload = json.loads(out.read_text())
         assert payload["suggested_hosts"] == ["https://adb-1234.5.azuredatabricks.net"]
+
+    def test_workspace_paths_rejects_unknown_source(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+        from flowx.ir_serde import pipeline_to_dict
+
+        report_path = tmp_path / "report.json"
+        report_path.write_text(json.dumps(pipeline_to_dict(Pipeline(name="p", tasks=[_delta_copy()]))))
+        exit_code = adapter_cli_main(["workspace-paths", str(report_path), "--source", "typo"])
+        assert exit_code == 2
+        assert "not recognized" in capsys.readouterr().err.lower()
 
 
 class TestInputsCli:
     def test_inputs_emits_discover_options(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
-        exit_code = adapter_cli_main(["inputs", "discover"])
+        exit_code = adapter_cli_main(["inputs", "discover", "--source", "adf"])
         assert exit_code == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["phase"] == "discover"
         ids = [q["option_id"] for q in payload["options"]]
         assert ids == ["adf_source_path", "adf_resource_url", "output_dir"]
+
+    def test_inputs_requires_source_for_discover(self, capsys: pytest.CaptureFixture[str]):
+        # discover prompts are source-specific; no default source -> clear error, exit 2.
+        exit_code = adapter_cli_main(["inputs", "discover"])
+        assert exit_code == 2
+        assert "source" in capsys.readouterr().err.lower()
+
+    def test_inputs_rejects_unknown_source(self, capsys: pytest.CaptureFixture[str]):
+        # An unrecognised source is a clean usage error (exit 2), not an uncaught ValueError traceback.
+        exit_code = adapter_cli_main(["inputs", "discover", "--source", "typo"])
+        assert exit_code == 2
+        assert "not recognized" in capsys.readouterr().err.lower()
+
+    def test_inputs_package_ignores_missing_source(self, capsys: pytest.CaptureFixture[str]):
+        # package is source-independent: no --source needed, and it succeeds.
+        exit_code = adapter_cli_main(["inputs", "package"])
+        assert exit_code == 0
 
     def test_inputs_writes_to_file(self, tmp_path: Path):
         out = tmp_path / "options.json"
@@ -668,11 +696,11 @@ class TestInputsCli:
 
 class TestCli:
     def test_inspect_emits_pending_options(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline = Pipeline(name="p", tasks=[_delta_copy()])
         report_path = tmp_path / "report.json"
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         exit_code = adapter_cli_main(["inspect", str(report_path)])
         assert exit_code == 0
         payload = json.loads(capsys.readouterr().out)
@@ -681,11 +709,11 @@ class TestCli:
         assert OPTION_COPY_ACTIVITY_PARADIGM in option_ids
 
     def test_modify_stamps_configuration(self, tmp_path: Path):
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline = Pipeline(name="p", tasks=[_delta_copy()])
         report_path = tmp_path / "report.json"
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         out_path = tmp_path / "modified.json"
         exit_code = adapter_cli_main(
             [
@@ -735,12 +763,12 @@ class TestCli:
         assert rows == [{"table_name": "orders"}, {"table_name": "customers"}]
 
     def test_modify_threads_lookup_values_into_metadata_driven_motif(self, tmp_path: Path):
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         motif = _metadata_driven_motif()
         pipeline = Pipeline(name="p", tasks=[motif])
         report_path = tmp_path / "report.json"
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         out_path = tmp_path / "modified.json"
         exit_code = adapter_cli_main(
             [
@@ -767,11 +795,11 @@ class TestCli:
         assert motif_task["lookup_values"] == [{"source_table": "orders"}]
 
     def test_modify_rejects_invalid_answer(self, tmp_path: Path):
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline = Pipeline(name="p", tasks=[_delta_copy()])
         report_path = tmp_path / "report.json"
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         out_path = tmp_path / "modified.json"
         exit_code = adapter_cli_main(
             ["modify", str(report_path), "--answer", "copy_activity_paradigm=yaml", "--out", str(out_path)]
@@ -779,12 +807,12 @@ class TestCli:
         assert exit_code == 2
 
     def test_modify_output_dir_convention_writes_work_and_metadata(self, tmp_path: Path):
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline = Pipeline(name="p", tasks=[_delta_copy()])
         report_path = tmp_path / ".work" / "translation_report.json"
         report_path.parent.mkdir(parents=True)
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         exit_code = adapter_cli_main(
             ["modify", str(report_path), "--output-dir", str(tmp_path), "--answer", "copy_activity_paradigm=sdp"]
         )
@@ -795,19 +823,19 @@ class TestCli:
         assert config == {"copy_activity_paradigm": "sdp"}
 
     def test_modify_requires_output_dir_or_out(self, tmp_path: Path):
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline = Pipeline(name="p", tasks=[_delta_copy()])
         report_path = tmp_path / "report.json"
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         exit_code = adapter_cli_main(["modify", str(report_path), "--answer", "copy_activity_paradigm=sdp"])
         assert exit_code == 2
 
     def test_inspect_emits_full_schema_with_show_when(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
         """inspect returns the whole option tree at once; follow-ups carry a show_when condition
         the agent evaluates locally (no per-follow-up round trip)."""
+        from flowx.ir_serde import pipeline_to_dict
         from flowx.models.ir import CopyActivity, Dependency, WebActivity
-        from flowx.translator.engine import _pipeline_to_dict
 
         copy = CopyActivity(name="Load", task_key="load")
         notify = WebActivity(
@@ -819,7 +847,7 @@ class TestCli:
         )
         pipeline = Pipeline(name="p", tasks=[copy, notify])
         report_path = tmp_path / "report.json"
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
 
         assert adapter_cli_main(["inspect", str(report_path)]) == 0
         options = {o["option_id"]: o for o in json.loads(capsys.readouterr().out)["pipelines"][0]["options"]}
@@ -835,11 +863,11 @@ class TestCli:
         assert [c["value"] for c in options["notify_destination"]["choices"]][0] == "keep"
 
     def test_inspect_rejects_malformed_answer(self, tmp_path: Path):
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline = Pipeline(name="p", tasks=[_delta_copy()])
         report_path = tmp_path / "report.json"
-        report_path.write_text(json.dumps(_pipeline_to_dict(pipeline)))
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
         # Missing '=' -> validation error -> exit 2.
         assert adapter_cli_main(["inspect", str(report_path), "--answer", "no_equals_sign"]) == 2
 

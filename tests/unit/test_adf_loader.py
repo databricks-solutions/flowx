@@ -6,7 +6,7 @@ from flowx.models.adf_ast import (
     AdfDefinitions,
     TranslationStrategy,
 )
-from flowx.parser.adf_loader import (
+from flowx.sources.adf.loader import (
     AGENTIC_TYPES,
     DETERMINISTIC_TYPES,
     _normalize_arm,

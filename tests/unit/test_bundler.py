@@ -73,6 +73,34 @@ def _workflow_with_secrets(name: str = "secret_workflow") -> PreparedWorkflow:
     return wf
 
 
+def test_airflow_job_metadata_is_emitted(tmp_path):
+    pipeline = Pipeline(
+        name="airflow_metadata",
+        description="Customer-facing description",
+        tags={
+            "source": "airflow",
+            "dag_id": "airflow_metadata",
+            "airflow_tag_1": "demo",
+            "airflow_owner": "data-platform",
+        },
+        tasks=[
+            NotebookActivity(
+                name="work",
+                task_key="work",
+                notebook_path="work.py",
+                generated_source="# Databricks notebook source\nprint('work')\n",
+            )
+        ],
+    )
+
+    write_bundle(prepare_workflow(pipeline), tmp_path)
+    resource = yaml.safe_load((tmp_path / "resources" / "airflow_metadata.yml").read_text(encoding="utf-8"))
+    job = resource["resources"]["jobs"]["airflow_metadata"]
+
+    assert job["description"] == "Customer-facing description"
+    assert job["tags"] == pipeline.tags
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -306,6 +334,67 @@ class TestWriteBundle:
         assert not (first_dir / "WARNINGS.md").exists()
         assert not (second_dir / "WARNINGS.md").exists()
 
+    def test_cross_bundle_job_reference_uses_declared_job_id_variable(self, tmp_path):
+        workflow = PreparedWorkflow(
+            name="parent",
+            tasks=[
+                {
+                    "task_key": "call_child",
+                    "run_job_task": {"job_id": "${resources.jobs.child.id}"},
+                }
+            ],
+            notebooks=[],
+            secrets=[],
+            setup_tasks=[],
+        )
+
+        write_bundle(workflow, tmp_path)
+
+        config = yaml.safe_load((tmp_path / "databricks.yml").read_text())
+        resource = yaml.safe_load((tmp_path / "resources" / "parent.yml").read_text())
+        task = resource["resources"]["jobs"]["parent"]["tasks"][0]
+        setup = (tmp_path / "SETUP.md").read_text()
+        assert "child_job_id" in config["variables"]
+        assert task["run_job_task"]["job_id"] == "${var.child_job_id}"
+        assert "`child_job_id`" in setup
+        assert "`child`" in setup
+
+        second_output = tmp_path / "second"
+        write_bundle(workflow, second_output)
+        second_config = yaml.safe_load((second_output / "databricks.yml").read_text())
+        assert "child_job_id" in second_config["variables"]
+
+    def test_python_resource_job_reference_remains_a_resource_substitution(self, tmp_path):
+        workflow = PreparedWorkflow(
+            name="parent",
+            tasks=[
+                {
+                    "task_key": "call_dbt",
+                    "run_job_task": {"job_id": "${resources.jobs.generated_dbt.id}"},
+                }
+            ],
+            notebooks=[],
+            secrets=[],
+            setup_tasks=[
+                SetupTask(
+                    type="pydabs_dbt_factory",
+                    config={
+                        "hook_module": "resources.generated_dbt_job",
+                        "job_key": "generated_dbt",
+                    },
+                )
+            ],
+        )
+
+        write_bundle(workflow, tmp_path)
+
+        config = yaml.safe_load((tmp_path / "databricks.yml").read_text())
+        resource = yaml.safe_load((tmp_path / "resources" / "parent.yml").read_text())
+        task = resource["resources"]["jobs"]["parent"]["tasks"][0]
+        assert task["run_job_task"]["job_id"] == "${resources.jobs.generated_dbt.id}"
+        assert "generated_dbt_job_id" not in config["variables"]
+        assert "## Cross-bundle job references" not in (tmp_path / "SETUP.md").read_text()
+
     def test_load_report_handles_aggregated_translations_format(self, tmp_path):
         """``_load_report`` accepts the multi-pipeline aggregated report.
 
@@ -496,12 +585,18 @@ class TestWriteBundle:
         assert "index 3" in skipped_pipelines[2]
         assert "not a JSON object" in skipped_pipelines[2]
 
-    def test_package_main_writes_skipped_section_and_continues(self, tmp_path):
-        """``package`` skips a malformed entry, still writes valid bundles, and notes the skip."""
+    def test_package_main_fails_closed_on_malformed_entry(self, tmp_path):
+        """A malformed report entry aborts packaging even when a valid pipeline is present.
+
+        Packaging is a fail-closed reconciliation boundary: rather than ship a partial bundle of
+        only the well-formed pipelines, a report carrying an unreconcilable entry is rejected and
+        nothing is written.
+        """
         report = {
             "pipelines": [
                 {
                     "name": "pipeline_ok",
+                    "tags": {"source": "adf"},
                     "tasks": [
                         {
                             "type": "WaitActivity",
@@ -528,34 +623,28 @@ class TestWriteBundle:
             ]
         )
 
-        # Valid pipeline was written, so package succeeds.
-        assert exit_code == 0
-        setup_md = (out_dir / "SETUP.md").read_text(encoding="utf-8")
-        assert "Skipped pipelines" in setup_md
-        assert "no_tasks_here" in setup_md
+        assert exit_code != 0
+        assert not (out_dir / "databricks.yml").exists()
 
-    def test_package_main_repeats_skipped_section_in_every_bundle(self, tmp_path):
-        """Each bundle in a multi-pipeline run carries the skip note.
-
-        Bundles are consumed independently (one per pipeline directory), so the
-        dropped-pipeline warning is intentionally repeated in every bundle's
-        SETUP.md rather than written to a single shared location.
-        """
+    def test_package_main_fails_closed_on_malformed_entry_in_batch(self, tmp_path):
+        """One malformed entry aborts a whole multi-pipeline batch; no per-pipeline bundle is written."""
         report = {
             "pipelines": [
                 {
                     "name": "pipeline_a",
+                    "tags": {"source": "adf"},
                     "tasks": [
                         {"type": "WaitActivity", "name": "Pause", "task_key": "pause", "wait_time_seconds": 5},
                     ],
                 },
                 {
                     "name": "pipeline_b",
+                    "tags": {"source": "adf"},
                     "tasks": [
                         {"type": "WaitActivity", "name": "Hold", "task_key": "hold", "wait_time_seconds": 5},
                     ],
                 },
-                {"name": "no_tasks_here"},  # malformed -> skipped
+                {"name": "no_tasks_here"},
             ]
         }
         report_path = tmp_path / "translation_report.json"
@@ -572,12 +661,9 @@ class TestWriteBundle:
             ]
         )
 
-        assert exit_code == 0
-        # Two valid pipelines -> one bundle subdirectory each, both naming the skipped entry.
+        assert exit_code != 0
         for pipeline_name in ("pipeline_a", "pipeline_b"):
-            setup_md = (out_dir / pipeline_name / "SETUP.md").read_text(encoding="utf-8")
-            assert "Skipped pipelines" in setup_md
-            assert "no_tasks_here" in setup_md
+            assert not (out_dir / pipeline_name).exists()
 
     def test_package_main_returns_nonzero_when_all_entries_skipped(self, tmp_path):
         """``package`` fails when every pipeline entry is malformed (nothing to write)."""
@@ -629,6 +715,23 @@ class TestScheduleEmission:
         assert job["schedule"]["timezone_id"] == "Europe/Madrid"
         assert job["schedule"]["pause_status"] == "UNPAUSED"
 
+    def test_airflow_job_policy_is_emitted(self, tmp_path):
+        pipeline = Pipeline(
+            name="airflow_policy",
+            tasks=[WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10)],
+            tags={"source": "airflow"},
+            timeout_seconds=1800,
+            email_notifications={"on_failure": ["alerts@example.com"]},
+        )
+
+        workflow = prepare_workflow(pipeline)
+        write_bundle(workflow, tmp_path)
+        resource_file = next((tmp_path / "resources").glob("*.yml"))
+        job = next(iter(yaml.safe_load(resource_file.read_text())["resources"]["jobs"].values()))
+
+        assert job["timeout_seconds"] == 1800
+        assert job["email_notifications"] == {"on_failure": ["alerts@example.com"]}
+
     def test_periodic_trigger_emitted(self, tmp_path):
         """SCHED3-002: periodic schedule spec renders as trigger.periodic."""
         pipeline = Pipeline(
@@ -653,6 +756,19 @@ class TestScheduleEmission:
         assert job["trigger"]["periodic"]["unit"] == "DAYS"
         # The cron-style schedule block must NOT appear for periodic specs.
         assert "schedule" not in job
+
+    def test_continuous_mode_emitted(self, tmp_path):
+        pipeline = Pipeline(
+            name="continuous_job",
+            tasks=[WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10)],
+            schedule={"kind": "continuous", "pause_status": "UNPAUSED"},
+        )
+        write_bundle(prepare_workflow(pipeline), tmp_path)
+        resource_file = next((tmp_path / "resources").glob("*.yml"))
+        job = next(iter(yaml.safe_load(resource_file.read_text())["resources"]["jobs"].values()))
+        assert job["continuous"] == {"pause_status": "UNPAUSED"}
+        assert "schedule" not in job
+        assert "trigger" not in job
 
     def test_trigger_parameter_overrides_mutate_job_parameter_defaults(self, tmp_path):
         """SCHED3-003: schedule.parameter_overrides mutates matching
@@ -689,6 +805,28 @@ class TestScheduleEmission:
         params = {p["name"]: p["default"] for p in job["parameters"]}
         assert params["negocio"] == "GLP"
         assert params["applicationName"] == "app0001"
+
+    def test_job_parameter_defaults_are_strings(self, tmp_path):
+        pipeline = Pipeline(
+            name="typed_parameters",
+            tasks=[WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10)],
+            parameters=[
+                {"name": "threshold", "default": 10},
+                {"name": "enabled", "default": True},
+                {"name": "settings", "default": {"mode": "fast"}},
+            ],
+        )
+
+        write_bundle(prepare_workflow(pipeline), tmp_path)
+
+        resource_file = next((tmp_path / "resources").glob("*.yml"))
+        job = next(iter(yaml.safe_load(resource_file.read_text())["resources"]["jobs"].values()))
+        defaults = {parameter["name"]: parameter["default"] for parameter in job["parameters"]}
+        assert defaults == {
+            "threshold": "10",
+            "enabled": "true",
+            "settings": '{"mode": "fast"}',
+        }
 
     def test_file_arrival_trigger_emitted(self, tmp_path):
         pipeline = Pipeline(
@@ -783,6 +921,23 @@ class TestStripDanglingTaskValueRefs:
         assert "Conditions neutralized to always-true" in md
         assert "{{tasks._init_continue.values.continue}}" in md
         assert "`branch`" in md
+
+    def test_airflow_backfill_renders_setup_section(self):
+        # An Airflow catchup=True DAG surfaces a native-backfill section in SETUP.md so the
+        # run_date override path is documented rather than silently lost.
+        from flowx.bundler.prereqs_writer import build_prereqs, render_setup_md
+
+        prereqs = build_prereqs(
+            notebooks=[],
+            tasks=[],
+            known_bundle_jobs=set(),
+            airflow_backfills=[{"pipeline": "daily_etl"}],
+        )
+        assert not prereqs.is_empty()
+        md = render_setup_md(prereqs, bundle_name="b")
+        assert "Backfill (Airflow catchup)" in md
+        assert "{{backfill.iso_date}}" in md
+        assert "`daily_etl`" in md
 
     def test_recurses_into_for_each_task_body(self):
         from flowx.bundler.dab_writer import _strip_dangling_task_value_refs

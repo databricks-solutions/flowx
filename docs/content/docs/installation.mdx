@@ -180,7 +180,7 @@ If you hit a `ModuleNotFoundError` while running a phase, the venv is missing or
 ```bash
 export PYTHONPATH="<plugin_dir>/src"
 PY="$(cat <plugin_dir>/.migration-venv)"
-"$PY" -m flowx.adapter inputs discover
+"$PY" -m flowx.adapter inputs discover --source adf   # or --source airflow
 ```
 </Step>
 </Steps>

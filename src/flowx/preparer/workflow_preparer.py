@@ -11,6 +11,7 @@ from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
     CopyActivity,
+    DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
     FilterActivity,
@@ -25,6 +26,7 @@ from flowx.models.ir import (
     SetVariableActivity,
     SparkJarActivity,
     SparkPythonActivity,
+    SqlActivity,
     SwitchActivity,
     UnsupportedActivity,
     WaitActivity,
@@ -66,13 +68,31 @@ class PreparedWorkflow:
     # C-10 (SCHED-001): serialised schedule / trigger spec the bundler
     # renders as ``schedule:`` / ``trigger:`` on the emitted DAB job.
     schedule: dict[str, Any] | None = None
+    timeout_seconds: int | None = None
+    email_notifications: dict[str, list[str]] = field(default_factory=dict)
+    source: str | None = None
+    description: str | None = None
+    tags: dict[str, str] = field(default_factory=dict)
+
+
+# The DAB job ``run_if`` vocabulary. Airflow maps ``trigger_rule`` straight to one of these
+# constants (see flowx.sources.airflow.templating), so they arrive as dependency outcomes and are
+# passed through here. ADF's outcome vocabulary (Succeeded/Failed/Completed/Skipped) is disjoint.
+_DAB_RUN_IF: frozenset[str] = frozenset(
+    {"ALL_SUCCESS", "ALL_DONE", "AT_LEAST_ONE_FAILED", "ALL_FAILED", "NONE_FAILED", "AT_LEAST_ONE_SUCCESS"}
+)
 
 
 def run_if_from_adf_outcomes(outcomes: list[str | None]) -> str | None:
-    """Maps a set of ADF dependency-edge outcomes to a single DAB ``run_if``."""
+    """Maps a set of dependency-edge outcomes to a single DAB ``run_if`` (None = ALL_SUCCESS)."""
     normalised = [outcome for outcome in outcomes if outcome]
     if not normalised:
         return None
+    # A DAB run_if constant (Airflow trigger_rule) passes through directly. A task's edges share one
+    # trigger_rule, so these are uniform; the default ALL_SUCCESS collapses to None (no run_if key).
+    dab = [outcome for outcome in normalised if outcome in _DAB_RUN_IF]
+    if dab:
+        return None if dab[0] == "ALL_SUCCESS" else dab[0]
     if any(outcome in ("Completed", "Skipped") for outcome in normalised):
         return "ALL_DONE"
     if any(outcome == "Failed" for outcome in normalised):
@@ -124,6 +144,7 @@ def prepare_activity(
         append_variable,
         copy,
         databricks_job,
+        dbt_factory,
         delete,
         execute_pipeline,
         filter,
@@ -135,6 +156,7 @@ def prepare_activity(
         set_variable,
         spark_jar,
         spark_python,
+        sql,
         switch,
         wait,
         web_activity,
@@ -144,6 +166,7 @@ def prepare_activity(
         NotebookActivity: notebook.prepare,
         SparkJarActivity: spark_jar.prepare,
         SparkPythonActivity: spark_python.prepare,
+        SqlActivity: sql.prepare,
         CopyActivity: copy.prepare,
         LookupActivity: lookup.prepare,
         WebActivity: web_activity.prepare,
@@ -158,6 +181,7 @@ def prepare_activity(
         SwitchActivity: switch.prepare,
         WaitActivity: wait.prepare,
         MotifActivity: motif.prepare,
+        DbtFactoryActivity: dbt_factory.prepare,
     }
 
     preparer_fn = dispatch.get(type(activity))
@@ -229,19 +253,19 @@ def _prepare_placeholder(activity: Activity) -> PreparedActivity:
     notebook_name = f"{activity.task_key}.py"
     notebook_path = f"notebooks/{notebook_name}"
 
-    # When the activity is an agentic gap (e.g. Until), embed its full ADF/ARM
-    # JSON so the agentic handler can translate it directly from source.
-    arm_block = ""
+    # When the activity is an agentic gap, embed its raw source definition (ADF/ARM JSON for the ADF
+    # source, the operator source for Airflow) so the agentic handler can translate it directly.
+    source_block = ""
     if raw_definition is not None:
         import json as _json
 
-        arm_lines = _json.dumps(raw_definition, indent=2).splitlines()
-        arm_block = (
+        source_lines = _json.dumps(raw_definition, indent=2).splitlines()
+        source_block = (
             "# MAGIC\n"
-            "# MAGIC An agent should translate this activity from the ADF/ARM JSON below,\n"
+            "# MAGIC An agent should translate this activity from the source definition below,\n"
             "# MAGIC then replace the `raise NotImplementedError` cell with the generated code.\n"
             "# MAGIC\n"
-            "# MAGIC ```json\n" + "".join(f"# MAGIC {line}\n" for line in arm_lines) + "# MAGIC ```\n"
+            "# MAGIC ```json\n" + "".join(f"# MAGIC {line}\n" for line in source_lines) + "# MAGIC ```\n"
         )
 
     content = (
@@ -249,9 +273,9 @@ def _prepare_placeholder(activity: Activity) -> PreparedActivity:
         "# MAGIC %md\n"
         f"# MAGIC # Placeholder: {activity.name}\n"
         "# MAGIC\n"
-        f"# MAGIC Original ADF activity type: **{original_type}**\n"
+        f"# MAGIC Original source activity type: **{original_type}**\n"
         "# MAGIC\n"
-        f"# MAGIC {comment}\n" + arm_block + "\n# COMMAND ----------\n\n"
+        f"# MAGIC {comment}\n" + source_block + "\n# COMMAND ----------\n\n"
         f"raise NotImplementedError(\"Activity '{activity.name}' ({original_type}) needs agentic translation.\")\n"
     )
 
@@ -356,6 +380,11 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
             )
         )
 
+    # Airflow catchup=True has no DABs schedule setting; surface that history is replayed via a native
+    # Databricks backfill, which overrides the run_date job parameter with {{backfill.iso_date}}.
+    if pipeline.tags.get("airflow_catchup") == "true":
+        setup_tasks_out.append(SetupTask(type="airflow_backfill", config={"pipeline": pipeline.name}))
+
     # C-39 (LSC4-004): ADF auth modes with no Databricks equivalent (MSI, CredentialReference) make the
     # default_cluster fall back to single_user_name: ${workspace.current_user.userName}; flag it via SetupTask.
     seen_auth: set[tuple[str, str]] = set()
@@ -385,6 +414,7 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
             )
         )
 
+    is_airflow = pipeline.tags.get("source") == "airflow"
     return PreparedWorkflow(
         name=pipeline.name,
         tasks=all_tasks,
@@ -397,6 +427,11 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         pipeline_resources=list(artifacts.pipeline_resources),
         parameter_approximations=list(artifacts.parameter_approximations),
         schedule=pipeline.schedule,
+        timeout_seconds=pipeline.timeout_seconds if is_airflow else None,
+        email_notifications=dict(pipeline.email_notifications) if is_airflow else {},
+        source=str(pipeline.tags.get("source")) if pipeline.tags.get("source") else None,
+        description=pipeline.description if is_airflow else None,
+        tags=dict(pipeline.tags) if is_airflow else {},
     )
 
 

@@ -131,7 +131,13 @@ class Prereqs:
     # C-43 (CF5-001 / CF5-002): condition_task operands blanked because they referenced a task in another
     # job ({task_key, field, original_ref}); a blanked operand is always-true, so the user must re-wire it.
     neutralized_conditions: list[dict[str, str]] = field(default_factory=list)
-    # PR #6: report entries dropped by _load_report because they were not a dict with 'name' and 'tasks'.
+    # dbt-factory PyDABs hooks; each entry is the SetupTask config dict ({hook_module, job_key,
+    # manifest_path, note}). The user must `pip install databricks-dbt-factory` before deploy.
+    pydabs_dbt_factories: list[dict[str, Any]] = field(default_factory=list)
+    # Airflow catchup=True jobs; each entry is the SetupTask config dict ({pipeline}). History is
+    # replayed via a native Databricks backfill overriding the reserved Airflow date parameter.
+    airflow_backfills: list[dict[str, Any]] = field(default_factory=list)
+    # Report entries dropped by _load_report because they were not a dict with 'name' and 'tasks'.
     # Each entry is a human-readable identifier (the pipeline name, or ``index N`` when unnamed) so a
     # skipped pipeline is surfaced rather than silently missing from the bundle.
     skipped_pipelines: list[str] = field(default_factory=list)
@@ -154,6 +160,8 @@ class Prereqs:
             and not self.manual_schedule_time_of_day
             and not self.manual_credentials
             and not self.neutralized_conditions
+            and not self.pydabs_dbt_factories
+            and not self.airflow_backfills
             and not self.skipped_pipelines
         )
 
@@ -366,6 +374,8 @@ def build_prereqs(
     manual_schedule_time_of_day: list[dict[str, Any]] | None = None,
     manual_credentials: list[dict[str, Any]] | None = None,
     neutralized_conditions: list[dict[str, str]] | None = None,
+    pydabs_dbt_factories: list[dict[str, Any]] | None = None,
+    airflow_backfills: list[dict[str, Any]] | None = None,
     skipped_pipelines: list[str] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
@@ -414,6 +424,8 @@ def build_prereqs(
         manual_schedule_time_of_day=list(manual_schedule_time_of_day or []),
         manual_credentials=list(manual_credentials or []),
         neutralized_conditions=list(neutralized_conditions or []),
+        pydabs_dbt_factories=list(pydabs_dbt_factories or []),
+        airflow_backfills=list(airflow_backfills or []),
         skipped_pipelines=list(skipped_pipelines or []),
     )
 
@@ -518,11 +530,11 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
         lines.append("")
         lines.append(
             "Each row below describes a `run_job_task` that invokes a job **not** "
-            "defined in this bundle. flowx emitted a bundle variable for each "
-            "one (`${var.<name>}`) so `databricks bundle validate` passes. "
-            "Before running, populate the variable with the numeric job ID the "
-            "target pipeline was deployed under — either set a `default:` in "
-            '`databricks.yml` or pass `--var "<name>=<job_id>"` at deploy time.'
+            "defined in this bundle. flowx replaced each external resource reference "
+            "with a declared bundle variable (`${var.<name>}`). Before validating, "
+            "deploying, or running the bundle, populate the variable with the numeric "
+            "job ID the target pipeline was deployed under — either set a `default:` "
+            'in `databricks.yml` or pass `--var "<name>=<job_id>"` to the bundle command.'
         )
         lines.append("")
         lines.append("| Variable | Target pipeline |")
@@ -683,6 +695,21 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
             lines.append(f"| `{pipeline}` | `{frequency}` | `{interval}` | `{tod_spec}` |")
         lines.append("")
 
+    if prereqs.airflow_backfills:
+        lines.append("## Backfill (Airflow catchup)")
+        lines.append("")
+        lines.append(
+            "The DAG(s) below set `catchup=True`, so Airflow backfilled missed intervals.  There is "
+            "no equivalent DABs schedule setting.  To replay history, run a "
+            "[native Databricks backfill](https://docs.databricks.com/aws/en/jobs/backfill-jobs), which "
+            "overrides the `__flowx_airflow_run_date` job parameter with `{{backfill.iso_date}}` per "
+            "replayed window (the parameter is emitted for exactly this reason)."
+        )
+        lines.append("")
+        for entry in sorted(prereqs.airflow_backfills, key=lambda config: config.get("pipeline", "")):
+            lines.append(f"- `{entry.get('pipeline', '')}`")
+        lines.append("")
+
     if prereqs.manual_credentials:
         lines.append("## Manual credential setup")
         lines.append("")
@@ -765,6 +792,33 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
         for endpoint in prereqs.network_endpoints:
             label = kind_label.get(endpoint.kind, endpoint.kind)
             lines.append(f"| {label} | `{endpoint.target}` | {endpoint.notes} |")
+        lines.append("")
+
+    if prereqs.pydabs_dbt_factories:
+        lines.append("## dbt factory (PyDABs mode)")
+        lines.append("")
+        lines.append(
+            "This bundle builds its dbt job(s) at deploy time via a PyDABs hook. `databricks.yml` "
+            "already registers each hook under `python.resources`; complete the environment so "
+            "`databricks bundle deploy` can run them:"
+        )
+        lines.append("")
+        lines.append("1. Synchronize the generated Python project into the bundle's `python.venv_path`:")
+        lines.append("   The generated `pyproject.toml` pins `databricks-dbt-factory`, PyDABs, and dbt.")
+        lines.append("")
+        lines.append("```bash")
+        lines.append("uv sync")
+        lines.append("```")
+        lines.append("")
+        lines.append("2. Ensure each dbt project's `manifest.json` exists (run `dbt parse`/`dbt compile`).")
+        lines.append("")
+        lines.append("| dbt job | Hook module | Manifest |")
+        lines.append("|---|---|---|")
+        for entry in prereqs.pydabs_dbt_factories:
+            job_key = entry.get("job_key", "")
+            module = entry.get("hook_module", "")
+            manifest = entry.get("manifest_path", "")
+            lines.append(f"| `{job_key}` | `{module}:load_resources` | `{manifest}` |")
         lines.append("")
 
     if prereqs.skipped_pipelines:

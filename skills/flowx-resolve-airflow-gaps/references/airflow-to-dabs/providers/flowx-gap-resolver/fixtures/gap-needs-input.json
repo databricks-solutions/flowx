@@ -1,0 +1,85 @@
+{
+  "allowed_replacement_kinds": [
+    "notebook",
+    "sql",
+    "spark_python"
+  ],
+  "arguments": [
+    {
+      "name": "task_id",
+      "preserved_by_flowx": true,
+      "source_expression": "'run_container'"
+    },
+    {
+      "name": "image",
+      "preserved_by_flowx": false,
+      "source_expression": "'registry.example.com/orders:7'"
+    },
+    {
+      "name": "cmds",
+      "preserved_by_flowx": false,
+      "source_expression": "['python', '/app/run.py']"
+    },
+    {
+      "name": "namespace",
+      "preserved_by_flowx": false,
+      "source_expression": "'data'"
+    },
+    {
+      "name": "secrets",
+      "preserved_by_flowx": false,
+      "source_expression": "[orders_secret]"
+    }
+  ],
+  "baseline_report_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "capture_identity": "run_container",
+  "contract_version": "1",
+  "dag_settings": {
+    "parameters": [],
+    "schedule": null,
+    "tags": {
+      "source": "airflow"
+    }
+  },
+  "downstream_task_keys": [
+    "publish_results"
+  ],
+  "gap_id": "3333333333333333",
+  "graph_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "knowledge_provider": {
+    "name": "airflow-to-dabs",
+    "repository": "https://github.com/park-peter/airflow-to-dabs",
+    "version": "<PINNED_PROVIDER_VERSION>"
+  },
+  "operator": "KubernetesPodOperator",
+  "operator_fqn": "airflow.providers.cncf.kubernetes.operators.pod.KubernetesPodOperator",
+  "pipeline_name": "container_workload",
+  "provider_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "raw_definition": {
+    "operator": "KubernetesPodOperator",
+    "source": "run = KubernetesPodOperator(task_id=\"run_container\", image=\"registry.example.com/orders:7\", cmds=[\"python\", \"/app/run.py\"], namespace=\"data\", secrets=[orders_secret])"
+  },
+  "reason": {
+    "code": "operator_placeholder",
+    "message": "KubernetesPodOperator requires deployment-specific migration decisions"
+  },
+  "request_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "source": "airflow",
+  "source_file": "container_workload.py",
+  "source_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "source_span": {
+    "column": 4,
+    "end_column": 5,
+    "end_line": 22,
+    "line": 14
+  },
+  "task_key": "run_container",
+  "task_path": [
+    "tasks",
+    1
+  ],
+  "task_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "upstream_task_keys": [
+    "build_inputs"
+  ]
+}

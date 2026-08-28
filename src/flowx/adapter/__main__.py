@@ -1,9 +1,9 @@
 """Unified CLI entry point that the flowx skills and MCP tools drive via subprocesses.
 
 Exposes stateless subcommands -- the ``discover``/``convert``/``package`` phase runners plus
-``inspect``, ``modify``, ``inputs``, ``materialize-lookup``, ``workspace-paths``, ``record-results``,
-and ``install-dashboard`` -- so each agent turn runs as an independent process holding no session
-state across user prompts.
+``inspect``, ``modify``, ``resolve-agentic``, ``inputs``, ``materialize-lookup``, ``workspace-paths``,
+``record-results``, and ``install-dashboard`` -- so each agent turn runs as an independent process
+holding no session state across user prompts.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from flowx.adapter.constants import MOTIF_CONSOLIDATE_OPTION_PREFIX
+from flowx.adapter.constants import MOTIF_CONSOLIDATE_OPTION_PREFIX, PHASE_PACKAGE
 from flowx.adapter.models import (
     DEFAULT_CONFIGURATION,
     CopyActivityParadigm,
@@ -39,21 +39,20 @@ from flowx.adapter.operations import (
     provision_notification_destinations,
     validate_answer,
 )
+from flowx.adapter.session import MigrationInputSession
+from flowx.sources import available_sources, get_source
 
 # bundler.dab_writer + translator.engine (sqlglot) are imported lazily inside inspect/modify only, so
 # the cheap commands (inputs, phase pass-throughs, materialize-lookup, workspace-paths) skip ~0.15s of
 # unused import cost on every adapter subprocess.
 
-# Maps the unified phase runner subcommands to the module CLI they forward to.
-_PHASE_MODULES: dict[str, str] = {
-    "discover": "flowx.parser.adf_loader",
-    "convert": "flowx.translator.engine",
-    "package": "flowx.bundler.dab_writer",
-}
-# Aliases so the inputs option ids double as CLI flags on the phase runners.
-_PHASE_FLAG_ALIASES: dict[str, str] = {
-    "--adf-source-path": "--source-dir",
-}
+# The package phase is source-independent: it consumes the shared Pipeline IR every
+# source produces, so it routes to one module regardless of --source.
+_PACKAGE_MODULE = "flowx.bundler.dab_writer"
+
+# Generic source-path flag the phase runners accept; each source also accepts its own
+# alias (e.g. --adf-source-path). Both normalise to the phase CLI's --source-dir.
+_SOURCE_PATH_FLAG = "--source-path"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         Exit code (0 on success, non-zero on usage or runtime errors).
     """
     raw_args = list(sys.argv[1:]) if argv is None else list(argv)
-    if raw_args and raw_args[0] in _PHASE_MODULES:
+    if raw_args and raw_args[0] in ("discover", "convert", "package"):
         # Phase runners are pure pass-through to the underlying phase CLI;
         # bypass argparse so forwarded --flags aren't misparsed at this level.
         return _run_phase(raw_args[0], raw_args[1:])
@@ -84,12 +83,61 @@ def main(argv: list[str] | None = None) -> int:
         return _run_inputs(args)
     if args.command == "workspace-paths":
         return _run_workspace_paths(args)
+    if args.command == "resolve-agentic":
+        return _run_resolve_agentic(args)
     if args.command == "record-results":
         return _run_record_results(args)
     if args.command == "install-dashboard":
         return _run_install_dashboard(args)
     parser.print_help(sys.stderr)
     return 2
+
+
+def _run_resolve_agentic(args: argparse.Namespace) -> int:
+    """Runs the fingerprint-bound agentic resolution workflow for Airflow leaf gaps."""
+    if args.source != "airflow":
+        print("resolve-agentic is not enabled for ADF; ADF uses the legacy merge path.", file=sys.stderr)
+        return 2
+    from flowx.agentic import (
+        AgenticContractError,
+        apply_airflow_resolutions,
+        prepare_airflow_resolutions,
+        stage_airflow_resolutions,
+    )
+
+    try:
+        if args.action == "prepare":
+            if args.source_path is None or args.report is None:
+                print("resolve-agentic prepare requires --source-path and --report.", file=sys.stderr)
+                return 2
+            payload = prepare_airflow_resolutions(
+                source_path=args.source_path,
+                report_path=args.report,
+                output_dir=args.output_dir,
+                dbt_mode=args.dbt_mode,
+                gap_id=args.gap_id,
+            )
+        elif args.action == "stage":
+            payload = stage_airflow_resolutions(
+                output_dir=args.output_dir,
+                candidate_paths=args.candidate,
+                replace=args.replace,
+            )
+        else:
+            payload = apply_airflow_resolutions(
+                output_dir=args.output_dir,
+                accepted_gap_ids=args.accept_gap,
+                accept_all=args.accept_all,
+                review_complete=args.review_complete,
+                review_manifest_path=args.review_manifest,
+                reset=args.reset,
+                source_path=args.source_path,
+            )
+    except (AgenticContractError, OSError, json.JSONDecodeError) as error:
+        print(f"Agentic resolution failed: {error}", file=sys.stderr)
+        return 1
+    _emit_json(payload, None)
+    return 0
 
 
 def _run_record_results(args: argparse.Namespace) -> int:
@@ -146,12 +194,26 @@ def _run_workspace_paths(args: argparse.Namespace) -> int:
             and ``out``.
 
     Returns:
-        ``0`` on success.  The command always succeeds when the report
-        can be read; missing or unreadable inputs simply produce empty
-        path / host lists so the skill can detect the no-op case.
+        ``0`` on success, or ``2`` when ``--source`` names an unknown source.
+        Otherwise the command succeeds when the report can be read; missing or
+        unreadable inputs simply produce empty path / host lists so the skill
+        can detect the no-op case.
     """
+    if args.source not in available_sources():
+        print(
+            f"--source {args.source!r} is not recognized; choose one of: {', '.join(available_sources())}",
+            file=sys.stderr,
+        )
+        return 2
     paths = collect_workspace_artifact_paths(args.report)
-    suggested_hosts = detect_databricks_hosts(args.source_dir) if args.source_dir else []
+    suggested_hosts: list[str] = []
+    if args.source_dir:
+        if args.source == "airflow":
+            from flowx.sources.airflow.loader import detect_hosts
+
+            suggested_hosts = detect_hosts(args.source_dir)
+        else:
+            suggested_hosts = detect_databricks_hosts(args.source_dir)
     payload = {
         "paths": paths,
         "suggested_hosts": suggested_hosts,
@@ -165,15 +227,24 @@ def _run_inputs(args: argparse.Namespace) -> int:
     """Implements the ``inputs`` subcommand.
 
     Args:
-        args: Parsed CLI namespace carrying ``phase`` and ``out``.
+        args: Parsed CLI namespace carrying ``phase``, ``source``, and ``out``.
 
     Returns:
-        ``0`` on success.  The CLI never raises here because the phase
-        argument is constrained by argparse.
+        ``0`` on success, or ``2`` when the discover/convert phase is missing
+        the required ``--source``.
     """
-    from flowx.adapter.session import MigrationInputSession
-
-    session = MigrationInputSession(phase=args.phase)
+    source = getattr(args, "source", None)
+    # discover/convert prompts are source-specific and need a known source; package is
+    # source-independent. Validate here so a missing or unknown source is a clean usage error
+    # rather than an uncaught ValueError from session.pending().
+    if args.phase != PHASE_PACKAGE and source not in available_sources():
+        problem = "is required" if source is None else f"{source!r} is not recognized"
+        print(
+            f"--source {problem} for the {args.phase} phase; choose one of: {', '.join(available_sources())}",
+            file=sys.stderr,
+        )
+        return 2
+    session = MigrationInputSession(phase=args.phase, source=source)
     pending = session.pending()
     payload = {
         "phase": pending.phase,
@@ -283,18 +354,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "workspace-paths",
         help=(
             "Detect absolute workspace paths in a stamped report and suggest "
-            "Databricks workspace hosts from the ADF linked services."
+            "Databricks workspace hosts from the source (ADF linked services / Airflow DAGs)."
         ),
     )
     workspace_paths.add_argument("report", type=Path, help="Path to the translation report or pipeline IR JSON.")
+    workspace_paths.add_argument(
+        "--source",
+        required=True,
+        help="Migration source (adf | airflow); selects how workspace hosts are detected.",
+    )
     workspace_paths.add_argument(
         "--source-dir",
         type=Path,
         default=None,
         help=(
-            "Optional path to the ADF JSON export directory.  When supplied, "
-            "the command reads ``linked_services/*.json`` to suggest the "
-            "workspace host that ``databricks auth login --host`` should use."
+            "Optional path to the source. For adf, the JSON export dir (reads "
+            "``linked_services/*.json``); for airflow, a DAG file/dir (scans DAG source for "
+            "workspace hosts). Used to suggest the host for ``databricks auth login --host``."
         ),
     )
     workspace_paths.add_argument(
@@ -312,6 +388,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "phase",
         choices=("discover", "convert", "package"),
         help="Migration phase whose input prompts the agent should surface.",
+    )
+    inputs.add_argument(
+        "--source",
+        default=None,
+        help="Migration source (adf | airflow); required for discover/convert, unused for package.",
     )
     inputs.add_argument(
         "--out",
@@ -336,6 +417,62 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Destination path for the lookup-values JSON list.",
+    )
+
+    resolve_agentic = subparsers.add_parser(
+        "resolve-agentic",
+        help="Prepare, validate, and apply fingerprint-bound Airflow leaf-gap resolutions.",
+    )
+    resolve_agentic.add_argument("action", choices=("prepare", "stage", "apply"))
+    resolve_agentic.add_argument("--source", required=True, help="Must be airflow; ADF uses merge_agentic.")
+    resolve_agentic.add_argument("--output-dir", type=Path, required=True, help="Shared migration output directory.")
+    resolve_agentic.add_argument("--source-path", type=Path, default=None, help="Airflow DAG file or directory.")
+    resolve_agentic.add_argument("--report", type=Path, default=None, help="Deterministic translation report.")
+    resolve_agentic.add_argument(
+        "--gap-id",
+        default=None,
+        help="Optional prepared gap fingerprint to return through the caller while retaining the full workspace.",
+    )
+    resolve_agentic.add_argument(
+        "--candidate",
+        type=Path,
+        action="append",
+        default=[],
+        help="Provider-authored AgenticResolution JSON to validate and stage. Repeatable.",
+    )
+    resolve_agentic.add_argument(
+        "--replace",
+        action="store_true",
+        help="Replace a different candidate already staged for the same gap.",
+    )
+    resolve_agentic.add_argument(
+        "--accept-gap",
+        action="append",
+        default=[],
+        help="Prepared gap fingerprint to accept. Repeatable; the full allowlist is replayed from baseline.",
+    )
+    resolve_agentic.add_argument(
+        "--accept-all",
+        action="store_true",
+        help="Accept all candidates in an exact prior --review-manifest.",
+    )
+    resolve_agentic.add_argument(
+        "--review-complete",
+        action="store_true",
+        help="Record every candidate in an exact prior review manifest as reviewed and declined.",
+    )
+    resolve_agentic.add_argument(
+        "--review-manifest",
+        type=Path,
+        default=None,
+        help="Hash-bound staged-candidate manifest returned by stage.",
+    )
+    resolve_agentic.add_argument("--reset", action="store_true", help="Restore the immutable deterministic baseline.")
+    resolve_agentic.add_argument(
+        "--dbt-mode",
+        choices=("static", "pydabs"),
+        default="static",
+        help="Airflow dbt conversion mode used to reproduce the deterministic report during prepare.",
     )
 
     record = subparsers.add_parser(
@@ -390,43 +527,111 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Workspace folder for the dashboard (defaults to the current user's home).",
     )
 
-    # Unified phase runners: `adapter <phase> -- <flags>` forwards to the phase CLI (one entry point);
-    # --adf-source-path is accepted as an alias of the loader/translator --source-dir flag.
+    # Unified phase runners: `adapter <phase> --source <name> -- <flags>` routes discover/convert
+    # to the named source's phase module. --source is required for those phases (no default);
+    # package is source-independent. --source-path (and each source's own alias, e.g.
+    # --adf-source-path) normalise to --source-dir.
     for _phase in ("discover", "convert", "package"):
         _runner = subparsers.add_parser(
             _phase,
-            help=f"Run the {_phase} phase (forwards flags to the underlying phase CLI).",
+            help=f"Run the {_phase} phase (routes to the --source's phase module; forwards remaining flags).",
         )
         _runner.add_argument(
             "forward",
             nargs=argparse.REMAINDER,
-            help="Flags forwarded to the phase CLI (e.g. --adf-source-path/--source-dir, --output-dir, --pipeline).",
+            help=(
+                "Flags forwarded to the phase CLI (e.g. --source adf|airflow, "
+                "--source-path/--source-dir, --output-dir, --pipeline)."
+            ),
         )
 
     return parser
 
 
-def _run_phase(phase: str, forward: list[str]) -> int:
-    """Forward a phase runner subcommand to the underlying phase module, **in-process**.
+def _split_source(forward: list[str]) -> tuple[str | None, list[str]]:
+    """Extracts ``--source <name>`` (or ``--source=<name>``) from *forward*.
 
-    ``python -m flowx.adapter discover --adf-source-path X --output-dir Y`` runs
-    ``flowx.parser.adf_loader.main(["--source-dir", "X", "--output-dir", "Y"])`` in this same
-    interpreter -- no second ``python -m`` spawn. The module's ``main(argv)`` reuses the existing,
-    tested phase CLI surface, so there is a single entry point with no argument-surface duplication.
-    Collapsing the former double-spawn (adapter process -> module process) shaves an interpreter
-    start + re-import off every ``discover``/``convert``/``package`` call.
+    Returns ``(source_name, remaining_tokens)``, where ``source_name`` is
+    ``None`` when no ``--source`` was supplied.  ``--source`` is required for
+    the discover/convert phases (there is no default source); the caller
+    reports the error.
+    """
+    source: str | None = None
+    remaining: list[str] = []
+    tokens = list(forward or [])
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--source":
+            if index + 1 < len(tokens):
+                source = tokens[index + 1]
+                index += 2
+                continue
+            index += 1
+            continue
+        if token.startswith("--source="):
+            source = token.split("=", 1)[1]
+            index += 1
+            continue
+        remaining.append(token)
+        index += 1
+    return source, remaining
+
+
+def _run_phase(phase: str, forward: list[str]) -> int:
+    """Forward a phase runner subcommand to the source's phase module, **in-process**.
+
+    ``python -m flowx.adapter discover --source airflow --source-path X --output-dir Y`` runs
+    ``flowx.sources.airflow.discover.main(["--source-dir", "X", "--output-dir", "Y"])`` in this same
+    interpreter -- no second ``python -m`` spawn.  ``--source`` is required for discover/convert
+    (no default: the user must choose a source); ``package`` is source-independent and always routes
+    to the shared bundler.  The generic ``--source-path`` and each source's own alias normalise to
+    the phase CLI's ``--source-dir``.
 
     Args:
         phase: One of ``"discover"`` / ``"convert"`` / ``"package"``.
         forward: Tokens after the phase name (flags for the phase CLI).
 
     Returns:
-        The phase's exit code (0 on success).
+        The phase's exit code (0 on success), or 2 when ``--source`` is missing
+        or names an unknown source.
     """
     import importlib
 
-    module = importlib.import_module(_PHASE_MODULES[phase])
-    mapped = [_PHASE_FLAG_ALIASES.get(token, token) for token in (forward or [])]
+    source_name, remaining = _split_source(forward)
+
+    if phase == "package":
+        module_path = _PACKAGE_MODULE
+        aliases: dict[str, str] = {}
+    else:
+        if source_name is None:
+            print(
+                f"--source is required for the {phase} phase; choose one of: {', '.join(available_sources())}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            source = get_source(source_name)
+        except KeyError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+        module_path = source.discover_module if phase == "discover" else source.convert_module
+        aliases = {_SOURCE_PATH_FLAG: "--source-dir", source.source_path_flag: "--source-dir"}
+
+    module = importlib.import_module(module_path)
+
+    # Alias both the bare form (`--source-path X`) and the equals form (`--source-path=X`) so a
+    # documented alias works either way; the phase module only knows `--source-dir`.
+    def _alias(token: str) -> str:
+        if token in aliases:
+            return aliases[token]
+        if token.startswith("--") and "=" in token:
+            flag, value = token.split("=", 1)
+            if flag in aliases:
+                return f"{aliases[flag]}={value}"
+        return token
+
+    mapped = [_alias(token) for token in remaining]
     try:
         return module.main(mapped) or 0
     except SystemExit as exit_signal:  # e.g. argparse usage error -> parser.error() raises SystemExit
@@ -562,9 +767,9 @@ def _run_modify(args: argparse.Namespace) -> int:
         provisioned_pipelines.append(provisioned)
         for message in messages:
             print(message, file=sys.stderr)
-    from flowx.translator.engine import _pipeline_to_dict  # lazy: heavy import (sqlglot)
+    from flowx.ir_serde import pipeline_to_dict
 
-    modified = [_pipeline_to_dict(pipeline) for pipeline in provisioned_pipelines]
+    modified = [pipeline_to_dict(pipeline) for pipeline in provisioned_pipelines]
     _write_modified_report(args.report, modified, stamped_out)
 
     # Persist the collected answers as the kept configuration record.
