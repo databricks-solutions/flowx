@@ -14,8 +14,11 @@ from flowx.bundler.dab_writer import main as dab_main
 from flowx.models.dab import SecretInstruction, SetupTask
 from flowx.models.ir import (
     CopyActivity,
+    IfConditionActivity,
     NotebookActivity,
     Pipeline,
+    SwitchActivity,
+    SwitchCase,
     WaitActivity,
 )
 from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
@@ -98,6 +101,84 @@ class TestWriteBundle:
         assert "dev" in content["targets"]
         assert "prod" in content["targets"]
 
+    def test_condition_fanout_emits_no_yaml_anchor(self, tmp_path):
+        """Issue #34: an IfCondition/Switch branch that fans out to >=2 root tasks must not leak a
+        YAML anchor/alias into the emitted bundle. ``inject_outcome_dependency`` must build a fresh
+        ``depends_on`` dict per branch root; sharing one object makes PyYAML serialise it as
+        ``&id001``/``*id001`` -- benign, valid YAML, but PR #13's package pre-flight rejects
+        ``yaml_anchor`` as a fatal violation and aborts the whole batch (0 bundles)."""
+        pipeline = Pipeline(
+            name="condition_fanout",
+            tasks=[
+                IfConditionActivity(
+                    name="If_Condition1",
+                    task_key="if_condition1",
+                    op="EQUAL_TO",
+                    left="@pipeline().x",
+                    right="1",
+                    if_true_activities=[
+                        WaitActivity(name="TrueWaitA", task_key="true_wait_a", wait_time_seconds=1),
+                        WaitActivity(name="TrueWaitB", task_key="true_wait_b", wait_time_seconds=2),
+                    ],
+                    if_false_activities=[],
+                ),
+            ],
+        )
+        write_bundle(prepare_workflow(pipeline), tmp_path)
+        resource_files = list((tmp_path / "resources").glob("*.yml"))
+        combined = "\n".join(path.read_text() for path in resource_files)
+        assert "&id" not in combined and "*id" not in combined, f"YAML anchor leaked:\n{combined}"
+        # The fix must preserve semantics: both branch roots still gate on the condition's "true" outcome.
+        gated_on_true = 0
+        for path in resource_files:
+            doc = yaml.safe_load(path.read_text()) or {}
+            jobs = (doc.get("resources") or {}).get("jobs") or {}
+            for job in jobs.values():
+                for task in job.get("tasks") or []:
+                    for dep in task.get("depends_on") or []:
+                        if dep.get("task_key") == "if_condition1" and dep.get("outcome") == "true":
+                            gated_on_true += 1
+        assert gated_on_true == 2, f"both branch roots must gate on the true outcome, got {gated_on_true}"
+
+    def test_switch_fanout_emits_no_yaml_anchor(self, tmp_path):
+        """Issue #34 (Switch path): Switch routes its branch gating through the same
+        ``inject_outcome_dependency`` helper as IfCondition, so a Switch case that fans out to >=2
+        tasks must likewise emit no YAML anchor/alias into the bundle."""
+        pipeline = Pipeline(
+            name="switch_fanout",
+            tasks=[
+                SwitchActivity(
+                    name="Switch1",
+                    task_key="switch1",
+                    on_expression="@pipeline().sel",
+                    cases=[
+                        SwitchCase(
+                            value="a",
+                            activities=[
+                                WaitActivity(name="CaseA1", task_key="case_a1", wait_time_seconds=1),
+                                WaitActivity(name="CaseA2", task_key="case_a2", wait_time_seconds=2),
+                            ],
+                        )
+                    ],
+                    default_activities=[],
+                ),
+            ],
+        )
+        write_bundle(prepare_workflow(pipeline), tmp_path)
+        resource_files = list((tmp_path / "resources").glob("*.yml"))
+        combined = "\n".join(path.read_text() for path in resource_files)
+        assert "&id" not in combined and "*id" not in combined, f"YAML anchor leaked:\n{combined}"
+        # The fix must preserve semantics: both case roots still gate on the case condition's "true" outcome.
+        gated_on_true = 0
+        for path in resource_files:
+            doc = yaml.safe_load(path.read_text()) or {}
+            jobs = (doc.get("resources") or {}).get("jobs") or {}
+            for job in jobs.values():
+                for task in job.get("tasks") or []:
+                    for dep in task.get("depends_on") or []:
+                        if dep.get("task_key") == "switch1_case_a" and dep.get("outcome") == "true":
+                            gated_on_true += 1
+        assert gated_on_true == 2, f"both case roots must gate on the case 'true' outcome, got {gated_on_true}"
     def test_databricks_yml_sync_includes_src(self, tmp_path):
         """databricks.yml forces src/** into the sync set so a gitignored output dir still uploads notebooks."""
         wf = _simple_workflow("my_pipeline")
