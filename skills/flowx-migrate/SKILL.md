@@ -1,31 +1,42 @@
 ---
 name: flowx-migrate
 description: >
-  End-to-end migration of Azure Data Factory pipelines to Databricks Lakeflow Jobs.
-  Orchestrates discover, convert, and package phases in sequence.
+  End-to-end migration of a source orchestrator's pipelines (Azure Data Factory, Apache Airflow)
+  to Databricks Lakeflow Jobs. Orchestrates discover, convert, and package phases in sequence.
 triggers:
-  - "migrate ADF"
   - "migrate pipelines"
+  - "migrate ADF"
+  - "migrate airflow"
   - "ADF to Databricks"
+  - "airflow to Databricks"
   - "migrate to Lakeflow"
-  - "ADF migration"
-  - "convert ADF to Lakeflow"
   - "migrate data factory"
 ---
 
-# End-to-End ADF to Databricks Migration
+# End-to-End Source to Databricks Migration
 
-Orchestrate the complete migration of Azure Data Factory pipelines to Databricks Lakeflow Jobs via Declarative Automation Bundles. This skill runs all three phases in sequence: discover, convert, package.
+Orchestrate the complete migration of a source orchestrator's pipelines to Databricks Lakeflow Jobs
+via Declarative Automation Bundles. This skill runs all three phases in sequence: discover, convert,
+package.
 
 ## Context
 
 This is the top-level orchestration skill. It runs the full migration pipeline:
 
-1. **Discover** — Parse ADF JSON exports into a typed inventory
-2. **Convert** — Convert ADF activities to Databricks IR (deterministic + agentic)
+1. **Discover** — Parse the source's definitions into a typed inventory
+2. **Convert** — Convert the source's tasks to Databricks IR (deterministic + agentic)
 3. **Package** — Generate Databricks Declarative Automation Bundles for deployment
 
 Each phase builds on the output of the previous phase. The user is shown a summary and asked to confirm before proceeding to the next phase.
+
+## Step 0 — Identify the source (required)
+
+Ask which orchestrator the user is migrating **from**, or infer it from the input: **Azure Data
+Factory / Fabric DF** (`--source adf`) or **Apache Airflow** (`--source airflow`). There is no
+default. Pass `--source <name>` to the discover and convert phases (package is source-independent).
+The discover/convert skills route to the matching `sources/<source>.md` guide for source-specific
+detail; the invocations below show ADF but apply to any source by swapping `--source` and the
+source path (`--adf-source-path` / `--airflow-source-path`, both aliases of `--source-path`).
 
 ## How to run this skill — MCP tools or venv CLI
 
@@ -47,6 +58,7 @@ phase:
 
 ```
 flowx(command="migrate", parameters={
+  "source": "adf",
   "adf_definitions": {"pipeline/Foo.json": {...}, "linkedService/Bar.json": {...}, ...},
   "output_dir": ..., "catalog": ..., "schema": ..., "pipeline": "<optional>"})
 ```
@@ -83,18 +95,21 @@ To accept all defaults and skip the prompts, pass `"interactive": false`. (Re-ca
 > `mcp-flowx` app's service principal read on the source and write on the output target.
 
 For step-by-step control, run the commands in order (the app reuses `output_dir` across calls, so
-only `discover` needs `adf_definitions`):
+only `discover` needs the source input). `source` ("adf" | "airflow") is required for
+discover/convert and for `inputs discover`/`inputs convert`; for Airflow, swap `adf_definitions` for `airflow_source_path`. `merge_agentic` is ADF-only. `package` and `inputs package` are source-independent:
 
 ```
-flowx(command="inputs", parameters={"phase": "discover" | "convert" | "package"})  # learn each phase's inputs
-flowx(command="discover", parameters={"adf_definitions": {...}, "output_dir": ..., "pipeline": ...})
-flowx(command="convert", parameters={"output_dir": ..., "pipeline": ...})
-flowx(command="merge_agentic", parameters={"report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # if agentic results
+flowx(command="inputs", parameters={"phase": "discover", "source": "adf"})  # source req for discover/convert
+flowx(command="discover", parameters={"source": "adf", "adf_definitions": {...}, "output_dir": ..., "pipeline": ...})
+flowx(command="convert", parameters={"source": "adf", "output_dir": ..., "pipeline": ...})
+flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # ADF only, if agentic results
 flowx(command="inspect", parameters={"report_path": ...})
 flowx(command="apply_answers", parameters={"report_path": ..., "answers": [...], "output_dir": ...})
 flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema": ...})
 flowx(command="record_results", parameters={...}) / flowx(command="install_dashboard", parameters={...})
 ```
+
+For an Airflow report with eligible leaf placeholders, use the `flowx-resolve-airflow-gaps` skill between convert and package. It calls `resolve_agentic` with `action="prepare"`, stages one or more provider candidates, and applies only the gap fingerprints the user explicitly accepts. Package must then receive `<output_dir>/.work/translation_report.agentic.json` as `report_path`.
 
 The server's `output_dir` is ephemeral and not reachable from your workspace, so **have `migrate`/
 `package` write the DAB to the target via the SDK** — pass `"output_volume_path": "/Volumes/…"` or
@@ -117,7 +132,7 @@ interpreter (from the marker file `<plugin_dir>/.migration-venv`) and `src/` on 
 ```bash
 export PYTHONPATH="<plugin_dir>/src"
 PY="$(cat <plugin_dir>/.migration-venv)"
-"$PY" -m flowx.adapter inputs discover
+"$PY" -m flowx.adapter inputs discover --source adf   # or --source airflow
 ```
 
 If Python or pip is missing, `bootstrap.sh` prints a warning telling the user what to install — relay
@@ -133,9 +148,9 @@ Before invoking discover, run the adapter inputs subcommand once per
 phase so the agent surfaces the matching free-text prompts:
 
 ```bash
-"$PY" -m flowx.adapter inputs discover
-"$PY" -m flowx.adapter inputs convert
-"$PY" -m flowx.adapter inputs package
+"$PY" -m flowx.adapter inputs discover --source adf   # or --source airflow
+"$PY" -m flowx.adapter inputs convert --source adf     # or --source airflow
+"$PY" -m flowx.adapter inputs package                  # source-independent
 ```
 
 Each response carries the options for that phase plus their descriptions and
@@ -164,7 +179,9 @@ Example prompt:
 
 ### Step 2 — Phase 1: Discover
 
-Invoke the `flowx:flowx-discover` skill with the ADF source path and `--output-dir <output_dir>` (the shared migration dir). Profile writes `<output_dir>/metadata/{inventory.json, profile_report.csv, <pipeline>.arm.json}`.
+Invoke the `flowx:flowx-discover` skill with `--source <source>`, the source path, and
+`--output-dir <output_dir>` (the shared migration dir). Discover routes to its `sources/<source>.md`
+guide and writes `<output_dir>/metadata/{inventory.json, profile_report.csv}` (plus `<pipeline>.arm.json` for ADF).
 
 Wait for discover to complete and present the inventory summary:
 
@@ -197,7 +214,8 @@ If the user says yes, proceed to step 4.
 ### Step 4 — Phase 2: Convert
 
 Invoke the `flowx:flowx-convert` skill with:
-- ADF source dir: the original ADF source path (same `--source-dir` as discover)
+- `--source <source>`: the same source discover used
+- Source path: the original source path (same one discover used)
 - Output dir: the same shared `<output_dir>` (convert writes its report to `<output_dir>/.work/`)
 
 Wait for the translation to complete and present the summary:
@@ -297,7 +315,8 @@ the bundle would need to download:
 ```bash
 "$PY" -m flowx.adapter workspace-paths \
   <output_dir>/.work/translation_report.stamped.json \
-  --source-dir <adf_source_path>
+  --source adf \
+  --source-dir <source_path>
 ```
 
 When the response carries `needs_auth: true`:

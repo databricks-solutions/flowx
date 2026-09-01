@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from flowx.models.adf_ast import AdfDefinitions
 from flowx.models.ir import PlaceholderActivity
-from flowx.parser.adf_loader import _parse_pipeline_json
-from flowx.translator.engine import translate_pipeline
+from flowx.sources.adf.loader import _parse_pipeline_json
+from flowx.sources.adf.translate import translate_pipeline
 
 _DEFS = AdfDefinitions(pipelines=[], datasets={}, linked_services={}, triggers=[])
 

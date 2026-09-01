@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import sys
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,7 @@ from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
     CopyActivity,
+    DbtFactoryActivity,
     DeleteActivity,
     Dependency,
     ExecutePipelineActivity,
@@ -44,6 +47,7 @@ from flowx.models.ir import (
     SetVariableActivity,
     SparkJarActivity,
     SparkPythonActivity,
+    SqlActivity,
     SwitchActivity,
     SwitchCase,
     UnsupportedActivity,
@@ -76,6 +80,7 @@ _cross_bundle_variables: dict[str, str] = {}
 _neutralized_conditions: list[dict[str, str]] = []
 
 _WIDGET_REFERENCE = re.compile(r"""dbutils\.widgets\.get\(\s*["']([^"']+)["']\s*\)""")
+_JOB_RESOURCE_ID_REFERENCE = re.compile(r"\$\{resources\.jobs\.([^.}]+)\.id\}")
 
 
 def write_bundle(
@@ -84,6 +89,7 @@ def write_bundle(
     catalog: str = "main",
     schema: str = "default",
     bundle_name: str | None = None,
+    skipped_pipelines: list[str] | None = None,
 ) -> list[Path]:
     """Writes all DAB files to output_dir.
 
@@ -93,6 +99,8 @@ def write_bundle(
         catalog: Default target catalog name.
         schema: Default target schema name.
         bundle_name: Optional bundle name (defaults to workflow name).
+        skipped_pipelines: Report-level entries _load_report could not package
+            (surfaced in SETUP.md so a dropped pipeline is documented, not silent).
 
     Returns:
         List of absolute paths to all created files.
@@ -103,12 +111,16 @@ def write_bundle(
     _cross_bundle_variables.clear()
     _neutralized_conditions.clear()
 
+    workflow = copy.deepcopy(workflow)
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     created_files: list[Path] = []
     resource_key = normalize_task_key(workflow.name)
     effective_name = bundle_name or resource_key
+    known_bundle_jobs = _known_bundle_job_keys(workflow, resource_key)
+    _rewrite_cross_bundle_job_references(workflow, known_bundle_jobs)
 
     # Bind clusters across the parent and inner workflows up front to decide whether databricks.yml needs
     # cluster tunables at all. Binding is idempotent, so _build_job_resource re-checking these is harmless.
@@ -121,8 +133,17 @@ def write_bundle(
 
     pipeline_resources = _collect_pipeline_resources(workflow)
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
+    # sql_task references ${var.warehouse_id}; declare it (no default -> user supplies at deploy).
+    if _bundle_uses_sql_task(workflow):
+        pipeline_variable_declarations.setdefault(
+            "warehouse_id", {"description": "SQL warehouse id for sql_task queries"}
+        )
     hoisted_global_variables = _collect_hoisted_global_variables(workflow)
     extra_variable_declarations = {**pipeline_variable_declarations, **hoisted_global_variables}
+
+    # dbt-factory PyDABs hooks: each `resources.<key>_dbt_job:load_resources` module must be
+    # registered under the `python.resources` block so `bundle deploy` runs it to build the dbt job.
+    pydabs_resource_entries = _collect_pydabs_resource_entries(workflow)
 
     # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id
     #    defaults come from the ADF linked-service configs; when every task is serverless, they're omitted.
@@ -136,6 +157,7 @@ def write_bundle(
         node_type_id=inferred_node_type_id,
         include_cluster_variables=bundle_uses_classic_cluster,
         extra_variables=extra_variable_declarations,
+        pydabs_resources=pydabs_resource_entries,
     )
     databricks_yml_path.write_text(
         yaml.dump(
@@ -204,10 +226,25 @@ def write_bundle(
         )
         created_files.append(resource_yml_path.resolve())
 
-    # 3. Write generated notebooks
+    # 3. Write generated notebooks. PyDABs hook modules (relative_path under ``resources/``) are
+    #    Python resources the bundle imports as ``resources.<module>`` from the bundle root, so they
+    #    go to output_dir; all other generated notebooks go under ``src/``.
     src_dir = output_dir / "src"
+
+    def _write_generated(notebooks: list[DabNotebook]) -> None:
+        root_artifacts = [
+            notebook
+            for notebook in notebooks
+            if notebook.relative_path.startswith("resources/") or notebook.relative_path == "pyproject.toml"
+        ]
+        rest = [notebook for notebook in notebooks if notebook not in root_artifacts]
+        if rest:
+            created_files.extend(write_notebooks(rest, src_dir))
+        if root_artifacts:
+            created_files.extend(write_notebooks(root_artifacts, output_dir))
+
     if workflow.notebooks:
-        created_files.extend(write_notebooks(workflow.notebooks, src_dir))
+        _write_generated(workflow.notebooks)
 
     # 4. Generate and write setup notebooks (create-scope, create-volume, etc.) — the executable
     #    provisioning artifacts; SETUP.md (below) is the human-readable companion.
@@ -223,7 +260,7 @@ def write_bundle(
     # Collect notebooks from inner workflows
     for inner in workflow.inner_workflows:
         if inner.notebooks:
-            created_files.extend(write_notebooks(inner.notebooks, src_dir))
+            _write_generated(inner.notebooks)
         inner_setup = generate_setup_tasks(
             secrets=inner.secrets,
             setup_tasks=inner.setup_tasks,
@@ -244,7 +281,7 @@ def write_bundle(
     parameter_approximations = list(workflow.parameter_approximations)
     for inner in workflow.inner_workflows:
         parameter_approximations.extend(inner.parameter_approximations)
-    known_bundle_jobs = {resource_key} | {normalize_task_key(inner.name) for inner in workflow.inner_workflows}
+    known_bundle_jobs = _known_bundle_job_keys(workflow, resource_key)
     # manual_parameters was collected above (before YAML emission) so broken values are stripped on disk too.
     # VAREX3-003: manual_variable_rollup SetupTasks from workflow_preparer surface in SETUP.md so the user
     # knows where to add a roll-up notebook.
@@ -260,7 +297,12 @@ def write_bundle(
         task.config for task in workflow.setup_tasks if task.type == "manual_schedule_time_of_day"
     ]
     manual_credential_configs = [task.config for task in workflow.setup_tasks if task.type == "manual_credential"]
+    airflow_backfill_configs = [task.config for task in workflow.setup_tasks if task.type == "airflow_backfill"]
+    pydabs_dbt_factory_configs = [task.config for task in workflow.setup_tasks if task.type == "pydabs_dbt_factory"]
     for inner in workflow.inner_workflows:
+        pydabs_dbt_factory_configs.extend(
+            task.config for task in inner.setup_tasks if task.type == "pydabs_dbt_factory"
+        )
         dynamic_dispatch_configs.extend(
             task.config for task in inner.setup_tasks if task.type == "dynamic_notebook_dispatch"
         )
@@ -295,6 +337,9 @@ def write_bundle(
         manual_credentials=manual_credential_configs,
         neutralized_conditions=list(_neutralized_conditions),
         hoisted_global_variables=hoisted_global_variables,
+        pydabs_dbt_factories=pydabs_dbt_factory_configs,
+        airflow_backfills=airflow_backfill_configs,
+        skipped_pipelines=list(skipped_pipelines or []),
     )
     setup_path = output_dir / "SETUP.md"
     setup_path.write_text(render_setup_md(prereqs, bundle_name=effective_name), encoding="utf-8")
@@ -334,7 +379,9 @@ def main(argv: list[str] | None = None) -> int:
     """Package-phase entry point for DAB bundle generation.
 
     Returns a process exit code so the adapter can run this phase in-process (instead of spawning a
-    second interpreter) and still propagate failures.
+    second interpreter) and still propagate failures: ``0`` on success, ``1`` when the report has no
+    translated pipelines, ``2`` when workspace-file auth is required but unavailable, and ``3`` when
+    every entry in the report was malformed (nothing left to package).
     """
     parser = argparse.ArgumentParser(
         description="Generate a Databricks Declarative Automation Bundle from a translation report.",
@@ -404,6 +451,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: Report file not found: {args.report}", file=sys.stderr)
         return 1
 
+    report_failures = _report_reconciliation_failures(args.report)
+    if report_failures:
+        print("Error: translation report preflight failed; no bundle files were written.", file=sys.stderr)
+        for failure in report_failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+
     if args.profile:
         set_profile(args.profile)
 
@@ -419,29 +473,113 @@ def main(argv: list[str] | None = None) -> int:
             enable_workspace_downloads(True)
 
     print(f"Loading translation report: {args.report}")
-    workflows = _load_report(args.report)
+    workflows, skipped_pipelines = _load_report(args.report)
+    if skipped_pipelines:
+        print(
+            f"Warning: skipped {len(skipped_pipelines)} malformed pipeline "
+            f"entr{'y' if len(skipped_pipelines) == 1 else 'ies'} in the report "
+            f"(see SETUP.md 'Skipped pipelines'): {', '.join(skipped_pipelines)}",
+            file=sys.stderr,
+        )
 
     if not workflows:
+        # Distinguish "every entry was malformed" (something to fix) from a genuinely empty report.
+        if skipped_pipelines:
+            print(
+                "No valid pipelines to package: every entry in the report was malformed.",
+                file=sys.stderr,
+            )
+            return 3
         print("No translated pipelines found in the report.", file=sys.stderr)
         return 1
 
-    all_created: list[Path] = []
-    for index, workflow in enumerate(workflows):
-        if len(workflows) > 1:
-            workflow_dir = args.output_dir / normalize_task_key(workflow.name)
-        else:
-            workflow_dir = args.output_dir
+    shared_airflow_bundle = len(workflows) > 1 and all(workflow.source == "airflow" for workflow in workflows)
+    from flowx.validate.bundle_invariants import check_bundle_dir, format_result
 
-        effective_bundle_name = args.bundle_name if len(workflows) == 1 else None
-        created = write_bundle(
-            workflow=workflow,
-            output_dir=workflow_dir,
-            catalog=args.catalog,
-            schema=args.schema,
-            bundle_name=effective_bundle_name,
+    # Render and validate away from the destination. This keeps a reconciliation or structural
+    # failure from leaving a partially-written bundle in the migration directory.
+    args.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".flowx-preflight-", dir=args.output_dir.parent) as temporary:
+        staging_root = Path(temporary)
+        if shared_airflow_bundle:
+            write_bundle(
+                workflow=_combine_airflow_workflows(workflows),
+                output_dir=staging_root,
+                catalog=args.catalog,
+                schema=args.schema,
+                bundle_name=args.bundle_name or normalize_task_key(args.output_dir.name),
+            )
+            staged_dirs = [staging_root]
+        else:
+            staged_dirs = []
+            for workflow in workflows:
+                workflow_dir = staging_root / normalize_task_key(workflow.name) if len(workflows) > 1 else staging_root
+                write_bundle(
+                    workflow=workflow,
+                    output_dir=workflow_dir,
+                    catalog=args.catalog,
+                    schema=args.schema,
+                    bundle_name=args.bundle_name if len(workflows) == 1 else None,
+                )
+                staged_dirs.append(workflow_dir)
+        preflight_violations = 0
+        for bundle_dir in staged_dirs:
+            result = check_bundle_dir(bundle_dir)
+            if not result.ok or result.warnings:
+                print(format_result(result), file=sys.stderr)
+            preflight_violations += len(result.violations)
+        if preflight_violations:
+            print(
+                f"Error: package preflight found {preflight_violations} bundle-invariant violation(s); "
+                "no bundle files were written.",
+                file=sys.stderr,
+            )
+            return 1
+
+    all_created: list[Path] = []
+    if shared_airflow_bundle:
+        combined = _combine_airflow_workflows(workflows)
+        all_created.extend(
+            write_bundle(
+                workflow=combined,
+                output_dir=args.output_dir,
+                catalog=args.catalog,
+                schema=args.schema,
+                bundle_name=args.bundle_name or normalize_task_key(args.output_dir.name),
+                skipped_pipelines=skipped_pipelines,
+            )
         )
-        all_created.extend(created)
-        print(f"  [{index + 1}/{len(workflows)}] {workflow.name}: {len(created)} files")
+        print(f"  [1/1] {len(workflows)} Airflow DAG jobs: {len(all_created)} files")
+    else:
+        for index, workflow in enumerate(workflows):
+            workflow_dir = (
+                args.output_dir / normalize_task_key(workflow.name) if len(workflows) > 1 else args.output_dir
+            )
+            effective_bundle_name = args.bundle_name if len(workflows) == 1 else None
+            created = write_bundle(
+                workflow=workflow,
+                output_dir=workflow_dir,
+                catalog=args.catalog,
+                schema=args.schema,
+                bundle_name=effective_bundle_name,
+                skipped_pipelines=skipped_pipelines,
+            )
+            all_created.extend(created)
+            print(f"  [{index + 1}/{len(workflows)}] {workflow.name}: {len(created)} files")
+
+    # Tier-0 structural check over the emitted bundle(s): duplicate task keys / job params,
+    # dangling depends_on, undeclared {{job.parameters.X}}, leaked YAML anchors. Source-agnostic.
+    bundle_dirs = (
+        [args.output_dir]
+        if shared_airflow_bundle or len(workflows) == 1
+        else [args.output_dir / normalize_task_key(workflow.name) for workflow in workflows]
+    )
+    invariant_violations = 0
+    for bundle_dir in bundle_dirs:
+        result = check_bundle_dir(bundle_dir)
+        if not result.ok or result.warnings:
+            print(format_result(result), file=sys.stderr)
+        invariant_violations += len(result.violations)
 
     if not args.keep_intermediates:
         work_dir = args.output_dir / ".work"
@@ -452,12 +590,139 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Pruned transient {work_dir}")
 
     print(f"\nBundle generation complete: {len(all_created)} files written to {args.output_dir}")
+    if invariant_violations:
+        print(
+            f"\nWARNING: {invariant_violations} bundle-invariant violation(s) above — "
+            "fix before `databricks bundle validate`.",
+            file=sys.stderr,
+        )
     print("\nNext steps:")
     print("  1. Review the generated notebooks in src/")
     print("  2. Run the setup notebooks to create secrets and volumes")
     print("  3. Validate the bundle: databricks bundle validate")
     print("  4. Deploy: databricks bundle deploy -t dev")
-    return 0
+    return 1 if invariant_violations else 0
+
+
+def _combine_airflow_workflows(workflows: list[PreparedWorkflow]) -> PreparedWorkflow:
+    """Combines Airflow DAG workflows into one bundle containing one job per DAG."""
+    namespaced = [_namespace_workflow_assets(workflow) for workflow in workflows]
+    primary = namespaced[0]
+    inner_workflows = list(primary.inner_workflows)
+    for workflow in namespaced[1:]:
+        nested = list(workflow.inner_workflows)
+        workflow.inner_workflows = []
+        inner_workflows.append(workflow)
+        inner_workflows.extend(nested)
+    primary.inner_workflows = inner_workflows
+    return primary
+
+
+def _rewrite_cross_bundle_job_references(workflow: PreparedWorkflow, known_bundle_jobs: set[str]) -> None:
+    """Uses bundle variables for ``run_job_task`` targets defined outside this bundle."""
+    workflows = [workflow, *workflow.inner_workflows]
+    for current in workflows:
+        for task in _iter_tasks_recursively(current.tasks):
+            run_job = task.get("run_job_task")
+            if not isinstance(run_job, dict):
+                continue
+            job_id = run_job.get("job_id")
+            match = _JOB_RESOURCE_ID_REFERENCE.fullmatch(job_id) if isinstance(job_id, str) else None
+            if match is None:
+                continue
+            target_job = match.group(1)
+            if target_job in known_bundle_jobs:
+                continue
+            variable_name = f"{normalize_task_key(target_job)}_job_id"
+            suffix = 2
+            while variable_name in _cross_bundle_variables and _cross_bundle_variables[variable_name] != target_job:
+                variable_name = f"{normalize_task_key(target_job)}_job_id_{suffix}"
+                suffix += 1
+            _cross_bundle_variables[variable_name] = target_job
+            run_job["job_id"] = f"${{var.{variable_name}}}"
+
+
+def _known_bundle_job_keys(workflow: PreparedWorkflow, resource_key: str) -> set[str]:
+    """Returns static and Python-generated job resource keys owned by this bundle."""
+    keys = {resource_key} | {normalize_task_key(inner.name) for inner in workflow.inner_workflows}
+    for current in [workflow, *workflow.inner_workflows]:
+        keys.update(
+            str(setup_task.config["job_key"])
+            for setup_task in current.setup_tasks
+            if setup_task.type == "pydabs_dbt_factory" and setup_task.config.get("job_key")
+        )
+    return keys
+
+
+def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
+    """Namespaces generated source files by DAG while preserving workspace paths."""
+    cloned = copy.deepcopy(workflow)
+    prefix = normalize_task_key(cloned.name)
+    replacements: dict[str, str] = {}
+    pydabs_hooks: dict[str, tuple[str, str, str]] = {}
+
+    nested_workflows = [cloned, *cloned.inner_workflows]
+    for nested in nested_workflows:
+        for setup_task in nested.setup_tasks:
+            if setup_task.type != "pydabs_dbt_factory":
+                continue
+            module = str(setup_task.config["hook_module"])
+            module_name = module.removeprefix("resources.")
+            namespaced_module_name = normalize_task_key(f"{prefix}__{module_name}")
+            namespaced_module = f"resources.{namespaced_module_name}"
+            original_job_key = str(setup_task.config["job_key"])
+            namespaced_job_key = normalize_task_key(f"{prefix}__{original_job_key}")
+            original_hook_path = f"resources/{module_name}.py"
+            namespaced_hook_path = f"resources/{namespaced_module_name}.py"
+            pydabs_hooks[original_hook_path] = (namespaced_hook_path, original_job_key, namespaced_job_key)
+            setup_task.config["hook_module"] = namespaced_module
+            setup_task.config["job_key"] = namespaced_job_key
+            setup_task.config["manifest_path"] = f"src/{prefix}/dbt_project/target/manifest.json"
+            replacements[f"${{resources.jobs.{original_job_key}.id}}"] = f"${{resources.jobs.{namespaced_job_key}.id}}"
+
+        for notebook in nested.notebooks:
+            original_path = notebook.relative_path
+            if original_path in pydabs_hooks:
+                namespaced_path, original_job_key, namespaced_job_key = pydabs_hooks[original_path]
+                notebook.relative_path = namespaced_path
+                notebook.content = notebook.content.replace(original_job_key, namespaced_job_key)
+                notebook.content = notebook.content.replace("src/notebooks/", f"src/{prefix}/notebooks/")
+                notebook.content = notebook.content.replace("src/dbt_project", f"src/{prefix}/dbt_project")
+                notebook.content = notebook.content.replace("src/dbt_profiles", f"src/{prefix}/dbt_profiles")
+                continue
+            if original_path.startswith("resources/") or original_path == "pyproject.toml":
+                continue
+            notebook.relative_path = f"{prefix}/{original_path}"
+            replacements[f"../src/{original_path}"] = f"../src/{notebook.relative_path}"
+            replacements[f"src/{original_path}"] = f"src/{notebook.relative_path}"
+
+    for inner in cloned.inner_workflows:
+        original_key = normalize_task_key(inner.name)
+        inner.name = f"{prefix}__{inner.name}"
+        replacements[f"${{resources.jobs.{original_key}.id}}"] = (
+            f"${{resources.jobs.{normalize_task_key(inner.name)}.id}}"
+        )
+
+    _replace_strings(cloned.tasks, replacements)
+    for inner in cloned.inner_workflows:
+        _replace_strings(inner.tasks, replacements)
+    return cloned
+
+
+def _replace_strings(value: Any, replacements: dict[str, str]) -> Any:
+    """Replaces generated path and resource references recursively in place."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            value[key] = _replace_strings(item, replacements)
+        return value
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            value[index] = _replace_strings(item, replacements)
+        return value
+    if isinstance(value, str):
+        for original, replacement in replacements.items():
+            value = value.replace(original, replacement)
+    return value
 
 
 def _warn(task_key: str, message: str) -> None:
@@ -577,6 +842,7 @@ def _build_databricks_yml(
     node_type_id: str = _DEFAULT_NODE_TYPE_ID,
     include_cluster_variables: bool = True,
     extra_variables: dict[str, Any] | None = None,
+    pydabs_resources: list[str] | None = None,
 ) -> dict[str, Any]:
     """Builds the root ``databricks.yml`` configuration as a dict.
 
@@ -595,6 +861,9 @@ def _build_databricks_yml(
         extra_variables: Additional variable declarations (name -> DAB
             declaration dict) to merge into the ``variables`` block, e.g.
             the source-side variables a Lakeflow Connect pipeline references.
+        pydabs_resources: ``python.resources`` entries (``<module>:load_resources``)
+            for dbt-factory PyDABs hooks. When present, a ``python:`` block is
+            emitted so ``bundle deploy`` runs each hook to build its dbt job.
 
     Returns:
         Dict ready for YAML serialization.
@@ -633,7 +902,7 @@ def _build_databricks_yml(
                 "the default here."
             ),
         }
-    return {
+    config: dict[str, Any] = {
         "bundle": {
             "name": bundle_name,
         },
@@ -641,18 +910,34 @@ def _build_databricks_yml(
         "include": [
             "resources/*.yml",
         ],
-        "targets": {
-            "dev": {
-                "mode": "development",
-            },
-            "staging": {
-                "mode": "production",
-            },
-            "prod": {
-                "mode": "production",
-            },
+        # Force the generated notebook sources into the deploy sync set. DABs derives its
+        # sync set by honoring .gitignore, and the default output dir (./flowx_output) is
+        # commonly gitignored, which would otherwise make `bundle deploy` upload zero files
+        # and leave the job's notebooks missing. A nested .gitignore negation can't recover
+        # this (git won't re-include a path under an excluded parent), so sync.include is the
+        # only reliable override. Harmless when the dir isn't ignored.
+        "sync": {
+            "include": [
+                "src/**",
+            ],
         },
     }
+    if pydabs_resources:
+        # PyDABs hooks build dbt jobs at deploy time; venv_path points at the project's own venv
+        # (created by `make setup` / `uv sync`), which must have `databricks-dbt-factory` installed.
+        config["python"] = {"venv_path": ".venv", "resources": list(pydabs_resources)}
+    config["targets"] = {
+        "dev": {
+            "mode": "development",
+        },
+        "staging": {
+            "mode": "production",
+        },
+        "prod": {
+            "mode": "production",
+        },
+    }
+    return config
 
 
 def _build_default_job_clusters(
@@ -768,6 +1053,24 @@ def _collect_pipeline_resources(workflow: PreparedWorkflow) -> list[dict[str, An
     for inner in workflow.inner_workflows:
         resources.extend(inner.pipeline_resources)
     return resources
+
+
+def _collect_pydabs_resource_entries(workflow: PreparedWorkflow) -> list[str]:
+    """Returns the ``python.resources`` entries for every dbt-factory PyDABs hook in *workflow*.
+
+    Each ``pydabs_dbt_factory`` SetupTask carries a ``hook_module`` (e.g.
+    ``resources.orders_dbt_job``); the databricks.yml ``python.resources`` list needs
+    ``<hook_module>:load_resources`` so ``bundle deploy`` runs the hook to build the dbt job.
+    """
+    entries: list[str] = []
+    for wf in [workflow, *workflow.inner_workflows]:
+        for task in wf.setup_tasks:
+            if task.type == "pydabs_dbt_factory":
+                module = task.config.get("hook_module")
+                if module:
+                    entries.append(f"{module}:load_resources")
+    # De-dup while preserving order.
+    return list(dict.fromkeys(entries))
 
 
 def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
@@ -966,6 +1269,12 @@ def _any_task_uses_classic_cluster(tasks: list[dict[str, Any]]) -> bool:
     return any(task.get("job_cluster_key") for task in _iter_tasks_recursively(tasks))
 
 
+def _bundle_uses_sql_task(workflow: PreparedWorkflow) -> bool:
+    """Return True if any task (parent or inner workflow) is a sql_task."""
+    task_lists = [workflow.tasks, *(inner.tasks for inner in workflow.inner_workflows)]
+    return any("sql_task" in task for tasks in task_lists for task in _iter_tasks_recursively(tasks))
+
+
 def _bind_cluster_to_notebook_tasks(tasks: list[dict[str, Any]]) -> None:
     """Binds notebook tasks to the cluster their compute_mode marker dictates.
 
@@ -1111,6 +1420,9 @@ def _apply_schedule_to_job(job_def: dict[str, Any], spec: dict[str, Any]) -> Non
         # malformed schedule.  SETUP.md picks it up downstream.
         job_def["schedule_setup_note"] = spec
         return
+    if kind == "continuous":
+        job_def["continuous"] = {"pause_status": spec.get("pause_status", "UNPAUSED")}
+        return
     if kind == "periodic":
         # SCHED3-002: Day/Week/Month with interval > 1 maps to trigger.periodic.
         trigger_block: dict[str, Any] = {
@@ -1127,6 +1439,18 @@ def _apply_schedule_to_job(job_def: dict[str, Any], spec: dict[str, Any]) -> Non
         trigger_block = {
             "file_arrival": {"url": spec.get("url", "")},
         }
+        if spec.get("pause_status"):
+            trigger_block["pause_status"] = spec["pause_status"]
+        job_def["trigger"] = trigger_block
+        return
+    if kind == "table_update":
+        table_update: dict[str, Any] = {
+            "table_names": list(spec.get("table_names") or []),
+            "condition": spec.get("condition", "ANY_UPDATED"),
+        }
+        if spec.get("min_time_between_triggers_seconds"):
+            table_update["min_time_between_triggers_seconds"] = spec["min_time_between_triggers_seconds"]
+        trigger_block = {"table_update": table_update}
         if spec.get("pause_status"):
             trigger_block["pause_status"] = spec["pause_status"]
         job_def["trigger"] = trigger_block
@@ -1303,6 +1627,16 @@ def _build_job_resource(
         "name": workflow.name,
         "tasks": workflow.tasks,
     }
+    if workflow.description:
+        job_def["description"] = workflow.description
+    if workflow.tags:
+        job_def["tags"] = dict(workflow.tags)
+    if workflow.timeout_seconds is not None:
+        job_def["timeout_seconds"] = workflow.timeout_seconds
+    if workflow.email_notifications:
+        job_def["email_notifications"] = {
+            event: list(recipients) for event, recipients in workflow.email_notifications.items()
+        }
 
     if attach_clusters:
         _bind_cluster_to_notebook_tasks(workflow.tasks)
@@ -1328,10 +1662,7 @@ def _build_job_resource(
             seen_param_names.add(name)
             entry: dict[str, Any] = {"name": name}
             default = parameter.get("default")
-            if default is not None:
-                # Databricks job-parameter defaults are strings; JSON-encode
-                # Array / Object defaults so the YAML carries valid JSON.
-                entry["default"] = json.dumps(default) if isinstance(default, (list, dict)) else default
+            entry["default"] = default if isinstance(default, str) else json.dumps(default)
             normalized_parameters.append(entry)
         job_def["parameters"] = normalized_parameters
 
@@ -1345,7 +1676,8 @@ def _build_job_resource(
         if overrides and job_def.get("parameters"):
             for entry in job_def["parameters"]:
                 if entry.get("name") in overrides:
-                    entry["default"] = overrides[entry["name"]]
+                    override = overrides[entry["name"]]
+                    entry["default"] = override if isinstance(override, str) else json.dumps(override)
 
     return {
         "resources": {
@@ -1385,24 +1717,30 @@ def _normalize_base_parameters(
     return resolved
 
 
-def _load_report(report_path: Path) -> list[PreparedWorkflow]:
+def _load_report(report_path: Path) -> tuple[list[PreparedWorkflow], list[str]]:
     """Loads a translation report and reconstruct PreparedWorkflow objects.
 
     Args:
         report_path: Path to the translation report JSON file.
 
     Returns:
-        List of PreparedWorkflow objects, one per pipeline.
+        A ``(workflows, skipped)`` tuple: one PreparedWorkflow per pipeline, plus the
+        labels of any ``{"pipelines": [...]}`` entries that were skipped (not raised)
+        because they were malformed. The caller surfaces ``skipped`` in SETUP.md so a
+        dropped pipeline is documented rather than silently missing.
     """
     with open(report_path, encoding="utf-8") as report_file:
         report = json.load(report_file)
 
     workflows: list[PreparedWorkflow] = []
+    skipped: list[str] = []
 
     if "tasks" in report and "name" in report:
+        if report.get("migration_status") == "excluded":
+            return workflows, skipped
         workflow = _pipeline_dict_to_workflow(report)
         workflows.append(workflow)
-        return workflows
+        return workflows, skipped
 
     if "translations" in report:
         # Aggregated translation_report.json: ``translations`` is a flat list of {pipeline, ir, status}.
@@ -1438,10 +1776,176 @@ def _load_report(report_path: Path) -> list[PreparedWorkflow]:
                 pipeline_dict["schedule"] = pipeline_schedules[pipeline_name]
             workflow = _pipeline_dict_to_workflow(pipeline_dict)
             workflows.append(workflow)
-        return workflows
+        return workflows, skipped
+
+    if "pipelines" in report and isinstance(report["pipelines"], list):
+        # Aggregated report written by engine.py / modify ({"pipelines": [...]}): one dict per
+        # pipeline, each already in the single-pipeline {"name", "tasks", ...} IR shape. Route each
+        # through the same machinery the single-pipeline branch uses. Mirrors the adapter's
+        # _load_pipelines (adapter/__main__.py) so both report consumers agree on this shape.
+        for index, pipeline_dict in enumerate(report["pipelines"]):
+            if isinstance(pipeline_dict, dict) and "tasks" in pipeline_dict and "name" in pipeline_dict:
+                # Excluded pipelines (e.g. --exclude-dag) emit no Job by design; drop them without
+                # recording a skip, since they are intentionally absent rather than malformed.
+                if pipeline_dict.get("migration_status") == "excluded":
+                    continue
+                workflows.append(_pipeline_dict_to_workflow(pipeline_dict))
+            else:
+                # A non-conforming entry (corruption / an internal bug) is skipped so the other
+                # valid pipelines still convert. Record each offender rather than dropping it silently —
+                # the caller surfaces the returned skip list in every bundle's SETUP.md.
+                name = pipeline_dict.get("name") if isinstance(pipeline_dict, dict) else None
+                if name:
+                    # Store the bare name; renderers quote/backtick it for their medium
+                    # (SETUP.md wraps it in backticks). Avoids leaking Python repr quotes.
+                    skipped.append(str(name))
+                else:
+                    # Enrich the label with hints about what went wrong so users can debug.
+                    if not isinstance(pipeline_dict, dict):
+                        hint = "not a JSON object"
+                    elif "tasks" in pipeline_dict:
+                        hint = "has tasks, missing name"
+                    else:
+                        hint = "missing name/tasks"
+                    skipped.append(f"index {index} ({hint})")
+        return workflows, skipped
 
     # Empty or unrecognised report shape — nothing to do.
-    return workflows
+    return workflows, skipped
+
+
+def _report_reconciliation_failures(report_path: Path) -> list[str]:
+    """Returns report-shape, source-contract, and reconciliation failures.
+
+    Packaging is a security boundary for source reconciliation. A malformed report or an
+    unrecognized status must fail closed rather than falling through as an empty/safe report.
+    """
+    try:
+        with report_path.open(encoding="utf-8") as handle:
+            report = json.load(handle)
+    except json.JSONDecodeError as error:
+        return [f"translation report contains invalid JSON: {error}"]
+    except OSError as error:
+        return [f"translation report could not be read: {error}"]
+
+    if not isinstance(report, dict):
+        return ["translation report must be a top-level object"]
+
+    shape_keys = [key for key in ("tasks", "pipelines", "translations") if key in report]
+    if not shape_keys:
+        return ["translation report does not match a recognized report shape"]
+    if len(shape_keys) > 1:
+        return [f"translation report contains ambiguous report shapes: {', '.join(shape_keys)}"]
+
+    shape = shape_keys[0]
+    if shape == "pipelines":
+        if not isinstance(report["pipelines"], list):
+            return ["translation report pipelines must be a list"]
+        if not report["pipelines"]:
+            return ["translation report pipelines must contain at least one pipeline"]
+        pipelines = report["pipelines"]
+    elif shape == "tasks":
+        pipelines = [report]
+    else:
+        if report.get("source") not in {None, "adf"}:
+            return ["legacy ADF translations report cannot declare a non-ADF source"]
+        translations = report["translations"]
+        if not isinstance(translations, list) or not translations:
+            return ["legacy ADF translations must be a non-empty list"]
+        for index, translation in enumerate(translations):
+            if not isinstance(translation, dict):
+                return [f"legacy ADF translation at index {index} must be an object"]
+            if not isinstance(translation.get("pipeline"), str) or not isinstance(translation.get("ir"), dict):
+                return [f"legacy ADF translation at index {index} is missing pipeline or IR data"]
+        return []
+
+    airflow_agentic_report = report_path.name == "translation_report.agentic.json" and any(
+        isinstance(pipeline, dict)
+        and isinstance(pipeline.get("tags"), dict)
+        and pipeline["tags"].get("source") == "airflow"
+        for pipeline in pipelines
+    )
+    if airflow_agentic_report or any(
+        isinstance(pipeline, dict)
+        and (
+            pipeline.get("reconciliation_status") == "verified_with_reviewed_resolutions"
+            or (
+                isinstance(pipeline.get("audit"), dict)
+                and isinstance(pipeline["audit"].get("agentic_resolution"), dict)
+            )
+        )
+        for pipeline in pipelines
+    ):
+        from flowx.agentic import validate_persisted_agentic_report
+
+        output_dir = report_path.parent.parent if report_path.parent.name == ".work" else report_path.parent
+        agentic_failures = validate_persisted_agentic_report(
+            report,
+            evidence_dir=output_dir / "metadata" / "agentic",
+        )
+        if agentic_failures:
+            return agentic_failures
+
+    failures: list[str] = []
+    airflow_statuses = {"verified", "verified_with_gaps", "verified_with_reviewed_resolutions", "failed"}
+    required_airflow_audit_fields = {"source_file", "audited_activity_count", "transformations"}
+    for index, pipeline in enumerate(pipelines):
+        label = f"pipeline[{index}]"
+        if not isinstance(pipeline, dict):
+            failures.append(f"{label}: pipeline must be an object")
+            continue
+        name = pipeline.get("name")
+        if not isinstance(name, str) or not name:
+            failures.append(f"{label}: pipeline name must be a non-empty string")
+            continue
+        label = name
+        if not isinstance(pipeline.get("tasks"), list):
+            failures.append(f"{label}: pipeline tasks must be a list")
+            continue
+        tags = pipeline.get("tags")
+        source = tags.get("source") if isinstance(tags, dict) else None
+        if source not in {"adf", "airflow"}:
+            failures.append(f"{label}: pipeline tags.source must be 'adf' or 'airflow'")
+            continue
+
+        status = pipeline.get("reconciliation_status")
+        if source == "adf":
+            if status not in {None, "not_applicable"}:
+                failures.append(f"{label}: unknown reconciliation_status {status!r} for ADF")
+            continue
+
+        audit = pipeline.get("audit")
+        if not isinstance(audit, dict) or not required_airflow_audit_fields.issubset(audit):
+            failures.append(f"{label}: Airflow source-audit metadata is missing or incomplete")
+            continue
+        migration_status = pipeline.get("migration_status", "included")
+        if migration_status not in {"included", "excluded"}:
+            failures.append(f"{label}: unknown migration_status {migration_status!r} for Airflow")
+            continue
+        if status == "excluded":
+            if migration_status != "excluded":
+                failures.append(f"{label}: reconciliation_status 'excluded' requires migration_status 'excluded'")
+            continue
+        if status not in airflow_statuses:
+            failures.append(f"{label}: unknown reconciliation_status {status!r} for Airflow")
+            continue
+        if migration_status == "excluded" or status != "failed":
+            continue
+
+        findings = [
+            finding
+            for finding in pipeline.get("not_translatable") or []
+            if isinstance(finding, dict) and finding.get("severity") == "failed"
+        ]
+        if findings:
+            failures.extend(
+                f"{pipeline.get('name', 'unknown')}: {finding.get('code', 'reconciliation_failed')} - "
+                f"{finding.get('message', '')}"
+                for finding in findings
+            )
+        else:
+            failures.append(f"{pipeline.get('name', 'unknown')}: reconciliation_failed")
+    return failures
 
 
 def _pipeline_dict_to_workflow(pipeline_dict: dict[str, Any]) -> PreparedWorkflow:
@@ -1492,13 +1996,46 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
             else:
                 entry["default"] = normalize_value(str(default_value))
         parameters.append(entry)
+    timeout_seconds = pipeline_dict.get("timeout_seconds")
+    if timeout_seconds is not None and (
+        isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0
+    ):
+        raise ValueError("Pipeline timeout_seconds must be a positive integer")
+    raw_email_notifications = pipeline_dict.get("email_notifications") or {}
+    if not isinstance(raw_email_notifications, dict):
+        raise ValueError("Pipeline email_notifications must be an object")
+    email_notifications: dict[str, list[str]] = {}
+    allowed_email_events = {
+        "on_start",
+        "on_success",
+        "on_failure",
+        "on_duration_warning_threshold_exceeded",
+        "on_streaming_backlog_exceeded",
+    }
+    for event, recipients in raw_email_notifications.items():
+        if (
+            event not in allowed_email_events
+            or not isinstance(recipients, list)
+            or not all(isinstance(recipient, str) and recipient for recipient in recipients)
+        ):
+            raise ValueError(f"Invalid Pipeline email notification entry: {event!r}")
+        email_notifications[str(event)] = list(recipients)
+
     pipeline = Pipeline(
         name=pipeline_dict.get("name", "unknown"),
+        description=pipeline_dict.get("description"),
         tasks=activities,
         parameters=parameters or None,
         translation_configuration=_reconstruct_configuration(pipeline_dict.get("translation_configuration")),
         schedule=pipeline_dict.get("schedule"),
         bundle_variables=pipeline_dict.get("bundle_variables") or {},
+        timeout_seconds=timeout_seconds,
+        email_notifications=email_notifications,
+        tags=dict(pipeline_dict.get("tags") or {}),
+        not_translatable=list(pipeline_dict.get("not_translatable") or []),
+        reconciliation_status=pipeline_dict.get("reconciliation_status"),
+        migration_status=pipeline_dict.get("migration_status", "included"),
+        audit=dict(pipeline_dict.get("audit") or {}),
     )
     return pipeline, parameters
 
@@ -1624,6 +2161,29 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             notebook_path_unresolved=bool(task_ir.get("notebook_path_unresolved", False)),
             notebook_path_expression=task_ir.get("notebook_path_expression"),
             unresolved_libraries=list(task_ir.get("unresolved_libraries") or []),
+            generated_source=task_ir.get("generated_source"),
+        )
+    if task_type == "DbtFactoryActivity":
+        return DbtFactoryActivity(
+            **base,
+            project_dir=task_ir.get("project_dir", "."),
+            profiles_dir=task_ir.get("profiles_dir", "dbt_profiles"),
+            target=task_ir.get("target", "dev"),
+            manifest_path=task_ir.get("manifest_path"),
+            render_mode=task_ir.get("render_mode", "static"),
+            selectors=list(task_ir.get("selectors") or []),
+            exclude_selectors=list(task_ir.get("exclude_selectors") or []),
+            variables=task_ir.get("variables"),
+            full_refresh=bool(task_ir.get("full_refresh", False)),
+            resource_types=list(task_ir.get("resource_types") or []),
+            nodes=list(task_ir.get("nodes") or []),
+        )
+    if task_type == "SqlActivity":
+        return SqlActivity(
+            **base,
+            sql=task_ir.get("sql", ""),
+            parameters=task_ir.get("parameters"),
+            warehouse_ref=task_ir.get("warehouse_ref", "${var.warehouse_id}"),
         )
     if task_type == "SparkJarActivity":
         return SparkJarActivity(
@@ -1636,6 +2196,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             **base,
             python_file=task_ir.get("python_file", ""),
             parameters=task_ir.get("parameters"),
+            generated_source=task_ir.get("generated_source"),
         )
     if task_type == "ExecutePipelineActivity":
         return ExecutePipelineActivity(
@@ -1722,6 +2283,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             original_type=task_ir.get("original_type", task_type),
             notebook_path=task_ir.get("notebook_path", "/UNSUPPORTED_ADF_ACTIVITY"),
             comment=task_ir.get("comment"),
+            raw_definition=task_ir.get("raw_definition"),
         )
     return PlaceholderActivity(
         **base,

@@ -79,7 +79,9 @@ def stub_adapter(monkeypatch):
 
 
 def test_first_call_returns_full_schema_without_packaging(stub_adapter, tmp_path: Path):
-    result = server._cmd_migrate({"adf_source_path": str(tmp_path / "adf"), "output_dir": str(tmp_path / "out")})
+    result = server._cmd_migrate(
+        {"source": "adf", "adf_source_path": str(tmp_path / "adf"), "output_dir": str(tmp_path / "out")}
+    )
     assert result["status"] == "needs_input"
     # The whole tree (including the conditional slack follow-up) is returned up front.
     option_ids = {o["option_id"] for pipe in result["pending_options"] for o in pipe["options"]}
@@ -98,6 +100,7 @@ def test_resume_with_answers_applies_and_packages_once(stub_adapter, tmp_path: P
 
     result = server._cmd_migrate(
         {
+            "source": "adf",
             "adf_source_path": str(tmp_path / "adf"),
             "output_dir": str(out),
             "answers": ["notify_destination=slack", "notify_slack_url=https://hooks.slack.com/x"],
@@ -111,7 +114,12 @@ def test_resume_with_answers_applies_and_packages_once(stub_adapter, tmp_path: P
 
 def test_interactive_false_skips_prompt_and_packages(stub_adapter, tmp_path: Path):
     result = server._cmd_migrate(
-        {"adf_source_path": str(tmp_path / "adf"), "output_dir": str(tmp_path / "out"), "interactive": False}
+        {
+            "source": "adf",
+            "adf_source_path": str(tmp_path / "adf"),
+            "output_dir": str(tmp_path / "out"),
+            "interactive": False,
+        }
     )
     assert result["status"] == "completed"
     assert stub_adapter == ["discover", "convert", "package"]  # no inspect, no pause

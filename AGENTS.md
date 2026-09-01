@@ -17,7 +17,7 @@ bootstrap a self-contained virtual environment with pip via the `setup` skill or
 bash scripts/bootstrap.sh   # creates the venv, pip-installs requirements.txt, writes .migration-venv
 # then run plugin code with src/ on PYTHONPATH, using the interpreter from the marker file:
 PY="$(cat .migration-venv)"
-PYTHONPATH=src "$PY" -m flowx.adapter inputs discover
+PYTHONPATH=src "$PY" -m flowx.adapter inputs discover --source adf   # or --source airflow
 ```
 
 `bootstrap.sh` creates the venv at `/Workspace/Users/<current user>/.migration-skills` when running
