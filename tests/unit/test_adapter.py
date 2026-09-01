@@ -700,6 +700,30 @@ class TestInputsCli:
 
 
 class TestCli:
+    def test_deploy_dispatches_to_deployer(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """`adapter deploy` routes to the deployer with parsed flags and returns its exit code."""
+        import flowx.bundler.deployer as deployer
+
+        captured: dict[str, Any] = {}
+
+        def fake_run(output_dir, *, target, profile, dry_run, allow_missing_deps):
+            captured.update(
+                output_dir=output_dir,
+                target=target,
+                profile=profile,
+                dry_run=dry_run,
+                allow_missing_deps=allow_missing_deps,
+            )
+            return 0
+
+        monkeypatch.setattr(deployer, "run", fake_run)
+        exit_code = adapter_cli_main(["deploy", "--output-dir", str(tmp_path), "--target", "prod", "--dry-run"])
+        assert exit_code == 0
+        assert captured["output_dir"] == tmp_path
+        assert captured["target"] == "prod"
+        assert captured["dry_run"] is True
+        assert captured["allow_missing_deps"] is False
+
     def test_inspect_emits_pending_options(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
         from flowx.ir_serde import pipeline_to_dict
 

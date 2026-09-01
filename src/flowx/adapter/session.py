@@ -20,11 +20,12 @@ from flowx.adapter.constants import (
     INPUT_BUNDLE_NAME,
     INPUT_CATALOG,
     INPUT_DATABRICKS_PROFILE,
-    INPUT_GLOBAL_PARAMETER_RESOLUTION,
+    INPUT_GROUP_SPEC,
     INPUT_INSTALL_DASHBOARD,
     INPUT_INVENTORY_PATH,
     INPUT_OUTPUT_BUNDLE_PATH,
     INPUT_OUTPUT_DIR,
+    INPUT_PACKAGING_MODE,
     INPUT_RESULTS_TABLE,
     INPUT_RESULTS_WAREHOUSE,
     INPUT_SCHEMA,
@@ -370,6 +371,31 @@ _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
         option_id=INPUT_BUNDLE_NAME,
         prompt="Bundle name override?",
         description="Defaults to the first translated pipeline's resource key when blank.",
+        default="",
+        required=False,
+    ),
+    MigrationInputOption(
+        option_id=INPUT_PACKAGING_MODE,
+        prompt="How should pipelines be packaged into bundles?",
+        description=(
+            "One of ``per-pipeline`` (default — one Databricks Asset Bundle per ADF pipeline), "
+            "``single`` (all pipelines in one bundle), or ``per-group`` (group pipelines into "
+            "bundles by their Run Pipeline call graph, or by an explicit --group-spec). Forwarded "
+            "to ``package`` as ``--packaging-mode``. For a single-pipeline migration every mode is "
+            "equivalent."
+        ),
+        default="per-pipeline",
+        required=False,
+    ),
+    MigrationInputOption(
+        option_id=INPUT_GROUP_SPEC,
+        prompt="Path to a pipeline->group spec (only for --packaging-mode per-group with explicit groups)?",
+        description=(
+            "Optional. JSON/YAML file mapping pipelines to group names (``{pipeline: group}`` or "
+            "``{group: [pipelines]}``). When set, package is run with ``--packaging-mode per-group "
+            "--group-by spec --group-spec <path>``. Leave blank to infer groups from the Run "
+            "Pipeline call graph."
+        ),
         default="",
         required=False,
     ),

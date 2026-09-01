@@ -1,9 +1,9 @@
 """Unified CLI entry point that the flowx skills and MCP tools drive via subprocesses.
 
 Exposes stateless subcommands -- the ``discover``/``convert``/``package`` phase runners plus
-``inspect``, ``modify``, ``resolve-agentic``, ``inputs``, ``materialize-lookup``, ``workspace-paths``,
-``record-results``, and ``install-dashboard`` -- so each agent turn runs as an independent process
-holding no session state across user prompts.
+``inspect``, ``modify``, ``inputs``, ``materialize-lookup``, ``workspace-paths``, ``record-results``,
+``install-dashboard``, and ``deploy`` -- so each agent turn runs as an independent process holding no
+session state across user prompts.
 """
 
 from __future__ import annotations
@@ -89,55 +89,27 @@ def main(argv: list[str] | None = None) -> int:
         return _run_record_results(args)
     if args.command == "install-dashboard":
         return _run_install_dashboard(args)
+    if args.command == "deploy":
+        return _run_deploy(args)
     parser.print_help(sys.stderr)
     return 2
 
 
-def _run_resolve_agentic(args: argparse.Namespace) -> int:
-    """Runs the fingerprint-bound agentic resolution workflow for Airflow leaf gaps."""
-    if args.source != "airflow":
-        print("resolve-agentic is not enabled for ADF; ADF uses the legacy merge path.", file=sys.stderr)
-        return 2
-    from flowx.agentic import (
-        AgenticContractError,
-        apply_airflow_resolutions,
-        prepare_airflow_resolutions,
-        stage_airflow_resolutions,
-    )
+def _run_deploy(args: argparse.Namespace) -> int:
+    """Implements ``deploy``: deploy per-pipeline bundles in dependency order.
 
-    try:
-        if args.action == "prepare":
-            if args.source_path is None or args.report is None:
-                print("resolve-agentic prepare requires --source-path and --report.", file=sys.stderr)
-                return 2
-            payload = prepare_airflow_resolutions(
-                source_path=args.source_path,
-                report_path=args.report,
-                output_dir=args.output_dir,
-                dbt_mode=args.dbt_mode,
-                gap_id=args.gap_id,
-            )
-        elif args.action == "stage":
-            payload = stage_airflow_resolutions(
-                output_dir=args.output_dir,
-                candidate_paths=args.candidate,
-                replace=args.replace,
-            )
-        else:
-            payload = apply_airflow_resolutions(
-                output_dir=args.output_dir,
-                accepted_gap_ids=args.accept_gap,
-                accept_all=args.accept_all,
-                review_complete=args.review_complete,
-                review_manifest_path=args.review_manifest,
-                reset=args.reset,
-                source_path=args.source_path,
-            )
-    except (AgenticContractError, OSError, json.JSONDecodeError) as error:
-        print(f"Agentic resolution failed: {error}", file=sys.stderr)
-        return 1
-    _emit_json(payload, None)
-    return 0
+    Local-CLI only — shells out to ``databricks bundle deploy`` / ``summary``, which are not
+    available on Databricks serverless / Genie Code. Returns the deployer's exit code.
+    """
+    from flowx.bundler.deployer import run as run_deploy
+
+    return run_deploy(
+        args.output_dir,
+        target=args.target,
+        profile=args.profile,
+        dry_run=args.dry_run,
+        allow_missing_deps=args.allow_missing_deps,
+    )
 
 
 def _run_record_results(args: argparse.Namespace) -> int:
@@ -527,10 +499,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Workspace folder for the dashboard (defaults to the current user's home).",
     )
 
-    # Unified phase runners: `adapter <phase> --source <name> -- <flags>` routes discover/convert
-    # to the named source's phase module. --source is required for those phases (no default);
-    # package is source-independent. --source-path (and each source's own alias, e.g.
-    # --adf-source-path) normalise to --source-dir.
+    deploy = subparsers.add_parser(
+        "deploy",
+        help="Deploy per-pipeline bundles in dependency order, wiring cross-bundle job ids (local CLI).",
+    )
+    deploy.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("./flowx_output"),
+        help="Directory holding the per-pipeline bundle subdirectories.",
+    )
+    deploy.add_argument("--target", type=str, default="dev", help="Bundle target to deploy (default: dev).")
+    deploy.add_argument("--profile", type=str, default=None, help="Databricks CLI profile for deploy and summary.")
+    deploy.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the dependency order and deploy commands without deploying.",
+    )
+    deploy.add_argument(
+        "--allow-missing-deps",
+        action="store_true",
+        help=(
+            "Order and attempt to deploy even when a bundle references a callee absent from the output "
+            "dir. The missing ${var.<callee>} is declared without a default, so that bundle's deploy "
+            "still fails until you supply the value manually (edit its databricks.yml default or "
+            "`databricks bundle deploy --var <callee>=<job_id>` per SETUP.md); this flag only unblocks "
+            "the ordering, not the deploy."
+        ),
+    )
+
+    # Unified phase runners: `adapter <phase> -- <flags>` forwards to the phase CLI (one entry point);
+    # --adf-source-path is accepted as an alias of the loader/translator --source-dir flag.
     for _phase in ("discover", "convert", "package"):
         _runner = subparsers.add_parser(
             _phase,
