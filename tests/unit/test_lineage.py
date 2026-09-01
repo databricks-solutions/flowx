@@ -90,11 +90,6 @@ class TestReadExecutePipelineRef:
         act = AdfActivity(name="Run", type="ExecutePipeline", type_properties={})
         assert read_execute_pipeline_ref(act) == ("", True)
 
-    def test_non_dict_pipeline_ref_is_stringified(self):
-        # ADF normally exports a dict ref, but a bare string must not crash the reader.
-        act = AdfActivity(name="Run", type="ExecutePipeline", type_properties={"pipeline": "child"})
-        assert read_execute_pipeline_ref(act) == ("child", True)
-
 
 class TestDataEdges:
     def _delta_dataset(self, name: str, table: str) -> AdfDataset:

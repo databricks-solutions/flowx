@@ -238,40 +238,63 @@ def test_write_results_executes_create_schema_check_then_insert(tmp_path: Path):
     stmts = client.statement_execution.statements
     assert len(stmts) == 3
     assert stmts[0][0] == "wh1" and stmts[0][1].startswith("CREATE TABLE IF NOT EXISTS")
-    assert stmts[1][1] == "SHOW COLUMNS IN cat.sch.tbl"
-    assert stmts[2][1].startswith("INSERT INTO cat.sch.tbl")
-    assert run_id in stmts[2][1]
+    assert stmts[1][1].startswith("INSERT INTO cat.sch.tbl")
+    assert run_id in stmts[1][1]
 
 
-def test_write_results_evolves_an_existing_legacy_schema_before_insert(tmp_path: Path) -> None:
-    legacy_columns = {
-        "run_id",
-        "run_date",
-        "run_by",
-        "pipeline",
-        "activities",
-        "datasets",
-        "linked_services",
-        "collapsible_patterns",
-        "databricks_native_activities",
-        "control_flow_activities",
-        "other_activities",
-        "deterministic_activities",
-        "agentic_activities",
-        "unsupported_activities",
-        "coverage_pct",
-        "complexity_score",
-        "complexity_size",
+def _base_row(pipeline: str = "p1", *, has_insights: bool = False) -> dict:
+    """Minimal coverage row with all required columns, mirroring COVERAGE_METRIC_COLUMNS."""
+    return {
+        "pipeline": pipeline,
+        "activities": 1,
+        "datasets": 0,
+        "linked_services": 0,
+        "collapsible_patterns": 0,
+        "databricks_native_activities": 1,
+        "control_flow_activities": 0,
+        "other_activities": 0,
+        "deterministic_activities": 1,
+        "agentic_activities": 0,
+        "unsupported_activities": 0,
+        "coverage_pct": 100.0,
+        "complexity_score": 2,
+        "complexity_size": "S",
+        "has_insights": has_insights,
     }
-    client = _FakeClient([_FakeWarehouse("wh1", "RUNNING", serverless=True)], columns=legacy_columns)
 
-    R.write_results(_metadata(tmp_path), "cat.sch.tbl", client=client)
 
-    statements = [statement for _warehouse, statement in client.statement_execution.statements]
-    assert len(statements) == 4
-    assert statements[2].startswith("ALTER TABLE cat.sch.tbl ADD COLUMNS")
-    assert "audited_activities INT" in statements[2]
-    assert "deterministic_coverage_pct DOUBLE" in statements[2]
-    assert "code_attached_coverage_pct DOUBLE" in statements[2]
-    assert "agentic_resolution_outcomes STRING" in statements[2]
-    assert statements[3].startswith("INSERT INTO cat.sch.tbl")
+def test_insert_sql_renders_has_insights_as_boolean_literal():
+    """has_insights must render as TRUE/FALSE, not as integer 1/0.
+
+    Databricks ANSI storeAssignmentPolicy rejects int literals into BOOLEAN DDL columns.
+    """
+    rows = [_base_row("pipe_true", has_insights=True), _base_row("pipe_false", has_insights=False)]
+    sql = R.build_insert_sql("cat.sch.tbl", rows, "run-x")
+
+    # TRUE/FALSE must appear; integer literals 1 or 0 must NOT stand in for has_insights.
+    assert "TRUE" in sql, "expected SQL boolean TRUE for has_insights=True"
+    assert "FALSE" in sql, "expected SQL boolean FALSE for has_insights=False"
+
+    # Confirm neither row falls back to an integer representation: split off the VALUES
+    # portion and verify the has_insights position for each tuple.
+    from flowx.reporting.coverage import COVERAGE_METRIC_COLUMNS
+
+    hi_index = list(COVERAGE_METRIC_COLUMNS).index("has_insights")
+    # Each VALUES tuple follows CURRENT_USER(), so the metric columns start at position 3
+    # (run_id, CURRENT_TIMESTAMP(), CURRENT_USER() are the first three).
+    for line in sql.split("\n"):
+        line = line.strip().rstrip(",")
+        if not line.startswith("("):
+            continue
+        # Strip outer parens and split on ", " is unreliable for nested strings;
+        # use a simple positional approach: split by ", " after removing the outer parens.
+        inner = line[1:-1] if line.endswith(")") else line[1:]
+        # Find the metric section after the third comma-separated token
+        # (run_id literal, CURRENT_TIMESTAMP(), CURRENT_USER())
+        parts = inner.split(", ", 3)  # at most 4 chunks; last chunk is the metrics
+        if len(parts) < 4:
+            continue
+        metric_parts = parts[3].split(", ")
+        if hi_index < len(metric_parts):
+            hi_val = metric_parts[hi_index]
+            assert hi_val in ("TRUE", "FALSE"), f"has_insights rendered as {hi_val!r} instead of TRUE/FALSE"

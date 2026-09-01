@@ -195,9 +195,6 @@ def _activity_dataset_refs(activity: AdfActivity, *, produced: bool) -> Iterator
 
 
 def _build_data_edges(definitions: AdfDefinitions) -> list[DataEdge]:
-    # TODO: the producer x consumer join below is O(producers x consumers). Fine for
-    # today's factories; if one ever has thousands of same-signature endpoints, bucket
-    # producers/consumers by (identity or path_signature) and join within buckets.
     producers: list[_DatasetEndpoint] = []
     consumers: list[_DatasetEndpoint] = []
     for pipeline in definitions.pipelines:

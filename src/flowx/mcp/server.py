@@ -492,9 +492,36 @@ def _cmd_install_dashboard(p: dict[str, Any]) -> dict[str, Any]:
     return {"ok": result.ok, "result": runner.parse_stdout_json(result), "process": result.as_dict()}
 
 
+def _parse_enrich_violations(stderr: str) -> list[str]:
+    """Extract the '  - <violation>' lines the adapter's enrich prints on failure."""
+    return [line[4:] for line in stderr.splitlines() if line.startswith("  - ")]
+
+
+def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
+    output_dir = p.get("output_dir", "./flowx_output")
+    insights = p.get("insights")
+    insights_path = p.get("insights_path")
+    if insights is None and not insights_path:
+        return {"ok": False, "error": "Provide 'insights' (inline dict) or 'insights_path'."}
+    tmp: str | None = None
+    try:
+        if insights is not None:
+            tmp = runner.materialize_json(insights)
+            insights_path = tmp
+        args: list[Any] = ["enrich", "--output-dir", output_dir, "--insights-path", insights_path]
+        result = runner.run_adapter(args)
+        out = Path(output_dir)
+        violations = _parse_enrich_violations(result.stderr) if not result.ok else None
+        return _phase_result(result, out, inventory=runner.summarize_inventory(out), violations=violations)
+    finally:
+        if tmp:
+            runner.cleanup_materialized(tmp)
+
+
 _COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "inputs": _cmd_inputs,
     "discover": _cmd_discover,
+    "enrich": _cmd_enrich,
     "convert": _cmd_convert,
     "merge_agentic": _cmd_merge_agentic,
     "resolve_agentic": _cmd_resolve_agentic,
@@ -539,18 +566,15 @@ def build_server() -> FastMCP:
         Airflow reads ``airflow_source_path`` (a DAG .py file or directory). ``package`` is
         source-independent (it consumes the translation report).
 
-        - "inputs": phase(req: "discover"|"convert"|"package"), source(req for discover/convert) —
-          list a phase's input prompts.
-        - "discover": source(req), one ADF source key | airflow_source_path (req), output_dir,
-          pipeline, exclude_dag | exclude_dags (Airflow, repeatable list) — parse and audit definitions.
-        - "convert": source(req), (one ADF source key | airflow_source_path), output_dir, pipeline,
-          exclude_dag | exclude_dags (Airflow, repeatable list).
-        - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
-          merge ADF agent results. Airflow's legacy name-based merge is disabled; use resolve_agentic.
-        - "resolve_agentic": source(req: "airflow"), action(req: prepare | stage | apply), output_dir,
-          airflow_source_path, report_path, gap_id, candidates, replace, accept_gap | accept_gaps, accept_all,
-          review_complete, review_manifest, reset —
-          prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
+        - "inputs": phase(req: "discover"|"convert"|"package") — list a phase's input prompts.
+        - "discover": one of adf_volume_path | adf_workspace_path | adf_definitions | adf_source_path
+          (req), output_dir, pipeline — parse ADF JSON, classify activities.
+        - "enrich": output_dir(req), one of insights(inline dict) | insights_path — validate + merge
+          agent-authored insights into metadata/inventory.json (returns {ok:false, ...} without writing
+          on validation failure).
+        - "convert": output_dir, (adf_volume_path | adf_workspace_path | adf_definitions |
+          adf_source_path), pipeline.
+        - "merge_agentic": report_path(req), agentic_results_dir(req), output_path — merge agent results.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
