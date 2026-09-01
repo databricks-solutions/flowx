@@ -204,15 +204,45 @@ def materialize_adf_definitions(definitions: dict[str, Any]) -> str:
     return str(base)
 
 
-def cleanup_materialized(source: str) -> None:
-    """Remove a temp tree created by :func:`materialize_adf_definitions`.
+def materialize_json(obj: Any) -> str:
+    """Write a JSON-serialisable object to a temp file and return its path.
 
-    Accepts either the returned directory or the single-file path (whose parent temp dir is
-    removed). Only paths under the system temp dir are deleted, as a safety guard.
+    Lets the MCP server pass an inline ``insights`` dict to the adapter's
+    ``enrich`` subcommand (which reads from ``--insights-path``). Clean up with
+    :func:`cleanup_materialized`.
     """
+    fd, path = tempfile.mkstemp(prefix="flowx-insights-", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(obj, handle)
+    return path
+
+
+_TEMP_DIR_PREFIXES = ("flowx-adf-", "flowx-vol-", "flowx-ws-")
+
+
+def cleanup_materialized(source: str) -> None:
+    """Remove a temp tree/file created by :func:`materialize_adf_definitions`,
+    :func:`download_volume_dir`, :func:`download_workspace_dir`, or :func:`materialize_json`.
+
+    Accepts a temp directory path (from the ``mkdtemp`` helpers), a single-file path
+    inside such a directory (the single ARM-template case, whose parent temp dir is
+    removed), or a standalone temp file created directly in the system temp root
+    (from :func:`materialize_json`, whose file alone is removed -- never its parent).
+    Only paths under the system temp dir and carrying one of our prefixes are deleted,
+    as a safety guard.
+    """
+    tmp_root = str(Path(tempfile.gettempdir()).resolve())
     path = Path(source)
+    # A standalone temp file we created directly in the temp root (materialize_json):
+    # remove just the file -- never its parent, which is the shared system temp root.
+    if path.is_file() and path.name.startswith("flowx-insights-"):
+        if str(path.resolve()).startswith(tmp_root):
+            path.unlink(missing_ok=True)
+        return
+    # Otherwise the temp dir to remove is the path itself (a mkdtemp dir) or, for the
+    # single ARM-template case, the file's parent temp dir.
     target = path if path.is_dir() else path.parent
-    if str(target.resolve()).startswith(str(Path(tempfile.gettempdir()).resolve())):
+    if target.name.startswith(_TEMP_DIR_PREFIXES) and str(target.resolve()).startswith(tmp_root):
         shutil.rmtree(target, ignore_errors=True)
 
 

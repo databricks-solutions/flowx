@@ -87,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_resolve_agentic(args)
     if args.command == "record-results":
         return _run_record_results(args)
+    if args.command == "enrich":
+        return _run_enrich(args)
     if args.command == "install-dashboard":
         return _run_install_dashboard(args)
     parser.print_help(sys.stderr)
@@ -160,6 +162,51 @@ def _run_record_results(args: argparse.Namespace) -> int:
         print("No pipelines found to record.", file=sys.stderr)
         return 1
     print(f"Recorded {rows} pipeline row(s) to {args.results_table} (run_id={run_id}).")
+    return 0
+
+
+def _run_enrich(args: argparse.Namespace) -> int:
+    """Implements ``enrich``: validate + merge agent-authored insights into inventory.json.
+
+    Returns 0 on success, 1 on any failure (missing inventory, unreadable/absent/
+    both payload sources, or validation violations).
+    """
+    from flowx.parser.pipeline_insights import enrich_inventory
+
+    metadata_dir = args.output_dir / "metadata"
+    if not (metadata_dir / "inventory.json").exists():
+        print(f"No inventory.json under {metadata_dir}; run the discover phase first.", file=sys.stderr)
+        return 1
+
+    inline: dict[str, Any] | None = None
+    if args.insights is not None:
+        try:
+            inline = json.loads(args.insights)
+        except json.JSONDecodeError as error:
+            print(f"Invalid --insights JSON: {error}", file=sys.stderr)
+            return 1
+    if (inline is None) == (args.insights_path is None):
+        print("Provide exactly one of --insights (inline JSON) or --insights-path.", file=sys.stderr)
+        return 1
+
+    try:
+        result = enrich_inventory(args.output_dir, insights=inline, insights_path=args.insights_path)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Failed to enrich inventory: {error}", file=sys.stderr)
+        return 1
+
+    if not result["ok"]:
+        for violation in result["violations"]:
+            print(f"  - {violation}", file=sys.stderr)
+        print(
+            f"Insights validation failed ({len(result['violations'])} violation(s)); inventory not modified.",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"Enriched inventory: {result['pipeline_insights']} pipeline insight(s), "
+        f"{result['relationships']} relationship(s)."
+    )
     return 0
 
 
@@ -496,6 +543,29 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="SQL warehouse id for the write. Auto-detected (prefers running serverless) when omitted.",
+    )
+
+    enrich = subparsers.add_parser(
+        "enrich",
+        help="Validate and merge agent-authored insights into metadata/inventory.json.",
+    )
+    enrich.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Migration output directory (reads/writes metadata/inventory.json).",
+    )
+    enrich.add_argument(
+        "--insights-path",
+        type=Path,
+        default=None,
+        help="Path to a JSON file holding the insights object.",
+    )
+    enrich.add_argument(
+        "--insights",
+        type=str,
+        default=None,
+        help="Insights object as an inline JSON string (convenience for direct CLI use).",
     )
 
     dashboard = subparsers.add_parser(

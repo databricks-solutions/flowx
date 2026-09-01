@@ -8,7 +8,7 @@ from flowx.models.adf_ast import AdfActivity, AdfDefinitions
 from flowx.models.ir import Activity, ExecutePipelineActivity, TranslationContext
 from flowx.parser.expression_parser import resolve_expression
 from flowx.parser.lineage import read_execute_pipeline_ref
-from flowx.sources.adf.translators.resolve import resolve_field
+from flowx.translator.activity_translators.resolve import resolve_field
 
 
 def translate(
