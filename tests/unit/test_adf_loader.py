@@ -463,3 +463,81 @@ class TestClearStaleOutputs:
         """Clearing a directory with no orchestra artifacts is a no-op (no error)."""
         clear_stale_outputs(tmp_path)
         assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# AdfDefinitions.get_pipeline
+# ---------------------------------------------------------------------------
+
+
+class TestGetPipeline:
+    def test_get_pipeline_exact_and_case_insensitive(self, adf_definitions):
+        first = adf_definitions.pipelines[0]
+        assert adf_definitions.get_pipeline(first.name) is first
+        assert adf_definitions.get_pipeline(first.name.upper()) is first
+        assert adf_definitions.get_pipeline("no_such_pipeline") is None
+        assert adf_definitions.get_pipeline(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Lineage models
+# ---------------------------------------------------------------------------
+
+
+class TestLineageModels:
+    def test_lineage_defaults_to_empty_lists(self):
+        from flowx.models.adf_ast import Lineage
+
+        lin = Lineage()
+        assert lin.control_edges == []
+        assert lin.data_edges == []
+
+    def test_control_and_data_edges_construct(self):
+        from flowx.models.adf_ast import ControlEdge, DataEdge
+
+        ce = ControlEdge(caller_pipeline="P", callee_pipeline="C", activity_name="Run C")
+        assert ce.wait_on_completion is True
+        de = DataEdge(
+            dataset_name="ds",
+            identity="s.t",
+            producer_pipeline="P",
+            producer_activity="w",
+            consumer_pipeline="Q",
+            consumer_activity="r",
+        )
+        assert de.identity == "s.t"
+
+
+# ---------------------------------------------------------------------------
+# Inventory serialization (lineage)
+# ---------------------------------------------------------------------------
+
+
+class TestInventorySerialization:
+    def test_inventory_dict_has_lineage(self, adf_definitions):
+        from flowx.parser.adf_loader import _inventory_to_dict, build_inventory
+
+        inv = build_inventory(adf_definitions)
+        d = _inventory_to_dict(inv, source_dir="/tmp/src")
+        assert "lineage" in d
+        assert isinstance(d["lineage"]["control_edges"], list)
+        assert isinstance(d["lineage"]["data_edges"], list)
+
+    def test_lineage_edges_serialize_expected_keys(self, adf_definitions):
+        from flowx.parser.adf_loader import _inventory_to_dict, build_inventory
+
+        inv = build_inventory(adf_definitions)
+        d = _inventory_to_dict(inv, source_dir="/tmp/src")
+        control = {(e["caller_pipeline"], e["callee_pipeline"]) for e in d["lineage"]["control_edges"]}
+        assert ("pipeline_execute_pipeline_nested", "pipeline_copy_sql_to_delta") in control
+        for e in d["lineage"]["control_edges"]:
+            assert set(e) == {"caller_pipeline", "callee_pipeline", "activity_name", "wait_on_completion"}
+
+    def test_empty_inventory_emits_empty_lists_not_null(self):
+        from flowx.models.adf_ast import AdfDefinitions
+        from flowx.parser.adf_loader import _inventory_to_dict, build_inventory
+
+        defs = AdfDefinitions(pipelines=[], datasets={}, linked_services={}, triggers=[])
+        inv = build_inventory(defs)
+        d = _inventory_to_dict(inv, source_dir="/tmp/src")
+        assert d["lineage"] == {"control_edges": [], "data_edges": []}
