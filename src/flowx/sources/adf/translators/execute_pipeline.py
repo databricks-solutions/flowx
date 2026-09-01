@@ -7,6 +7,7 @@ from typing import Any
 from flowx.models.adf_ast import AdfActivity, AdfDefinitions
 from flowx.models.ir import Activity, ExecutePipelineActivity, TranslationContext
 from flowx.parser.expression_parser import resolve_expression
+from flowx.parser.lineage import read_execute_pipeline_ref
 from flowx.sources.adf.translators.resolve import resolve_field
 
 
@@ -30,11 +31,8 @@ def translate(
     type_properties = activity.type_properties or {}
 
     pipeline_ref = type_properties.get("pipeline", {})
-    pipeline_name = (
-        resolve_field(pipeline_ref.get("referenceName", ""), context)
-        if isinstance(pipeline_ref, dict)
-        else str(pipeline_ref)
-    )
+    raw_reference_name, wait_on_completion = read_execute_pipeline_ref(activity)
+    pipeline_name = resolve_field(raw_reference_name, context) if isinstance(pipeline_ref, dict) else raw_reference_name
 
     raw_parameters = type_properties.get("parameters") or {}
     parameters: dict[str, str] = {}
@@ -43,8 +41,6 @@ def translate(
         resolved_value = _resolve_execute_pipeline_parameter(name, value, context, approximations)
         if resolved_value is not None:
             parameters[name] = resolved_value
-
-    wait_on_completion = type_properties.get("waitOnCompletion", True)
 
     if approximations:
         # Stamp the approximations onto the activity so the bundler can
