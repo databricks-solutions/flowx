@@ -75,6 +75,8 @@ intermediates under `.work/` (pruned by `package`).
 | `models/dab.py` | DAB output schema types |
 | `parser/adf_loader.py` | Parses ADF exports, produces `metadata/inventory.json` + `metadata/profile_report.csv` |
 | `parser/expression_parser.py` | Translates ADF expressions (@activity, @pipeline, @variables) |
+| `parser/dataset_resolvers.py` | Shared deterministic dataset-identity resolvers (schema.table / storage path), used by convert and discover |
+| `parser/lineage.py` | Deterministic control + data lineage extraction (`build_lineage`) surfaced in the inventory |
 | `translator/engine.py` | Registry dispatch, topological sort, context threading |
 | `translator/activity_translators/` | One module per deterministic activity type (16 total) |
 | `preparer/workflow_preparer.py` | Orchestrates activity preparers |

@@ -27,8 +27,10 @@ from flowx.models.adf_ast import (
     AdfVariable,
     Inventory,
     InventoryItem,
+    Lineage,
     TranslationStrategy,
 )
+from flowx.parser.lineage import build_lineage
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +244,7 @@ def build_inventory(definitions: AdfDefinitions) -> Inventory:
         agentic_count=agentic,
         unsupported_count=unsupported,
         pipeline_count=len(definitions.pipelines),
+        lineage=build_lineage(definitions),
     )
 
 
@@ -771,6 +774,36 @@ def _classify_activities(
 # ---------------------------------------------------------------------------
 
 
+def _lineage_to_dict(lineage: "Lineage | None") -> dict[str, list[dict[str, Any]]]:
+    """Serialise a Lineage to JSON-friendly lists (empty lists, never null)."""
+    control = lineage.control_edges if lineage else []
+    data = lineage.data_edges if lineage else []
+    return {
+        "control_edges": [
+            {
+                "caller_pipeline": e.caller_pipeline,
+                "callee_pipeline": e.callee_pipeline,
+                "activity_name": e.activity_name,
+                "wait_on_completion": e.wait_on_completion,
+            }
+            for e in control
+        ],
+        "data_edges": [
+            {
+                "dataset_name": e.dataset_name,
+                "identity": e.identity,
+                "producer_pipeline": e.producer_pipeline,
+                "producer_activity": e.producer_activity,
+                "consumer_pipeline": e.consumer_pipeline,
+                "consumer_activity": e.consumer_activity,
+                "match_kind": e.match_kind,
+                "match_key": e.match_key,
+            }
+            for e in data
+        ],
+    }
+
+
 def _inventory_to_dict(inventory: Inventory, source_dir: str) -> dict[str, Any]:
     """Serialise an :class:`Inventory` to a JSON-friendly dictionary.
 
@@ -807,6 +840,7 @@ def _inventory_to_dict(inventory: Inventory, source_dir: str) -> dict[str, Any]:
             "unsupported_count": inventory.unsupported_count,
             "coverage_pct": coverage_pct,
         },
+        "lineage": _lineage_to_dict(inventory.lineage),
     }
 
 

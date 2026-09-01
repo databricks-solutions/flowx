@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 
 class TranslationStrategy(Enum):
@@ -292,6 +292,19 @@ class AdfDefinitions:
                 return value
         return None
 
+    def get_pipeline(self, name: str | None) -> AdfPipeline | None:
+        """Case-insensitive pipeline lookup; see :meth:`get_dataset`."""
+        if not name:
+            return None
+        lowered = name.lower()
+        ci_fallback = None
+        for pipeline in self.pipelines:
+            if pipeline.name == name:
+                return pipeline
+            if ci_fallback is None and pipeline.name.lower() == lowered:
+                ci_fallback = pipeline
+        return ci_fallback
+
 
 # ---------------------------------------------------------------------------
 # Inventory / classification
@@ -334,3 +347,56 @@ class Inventory:
     agentic_count: int = 0
     unsupported_count: int = 0
     pipeline_count: int = 0
+    lineage: Lineage | None = None
+
+
+# ---------------------------------------------------------------------------
+# Lineage graphs
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True, kw_only=True)
+class ControlEdge:
+    """A cross-pipeline ExecutePipeline call edge (caller -> callee)."""
+
+    caller_pipeline: str
+    callee_pipeline: str
+    activity_name: str
+    wait_on_completion: bool = True
+
+
+@dataclass(slots=True, kw_only=True)
+class DataEdge:
+    """A dataset producer -> consumer relationship across activities/pipelines.
+
+    Attributes:
+        dataset_name: Producer-side ADF dataset name (provenance only; the join
+            is on ``match_key``, not this name).
+        identity: Resolved physical identity (``schema.table`` / storage path)
+            when ``match_kind == "identity"``; ``None`` otherwise.
+        match_kind: How producer and consumer were matched:
+            ``"identity"`` -- both resolve to the same physical asset (high
+            confidence); ``"expression"`` -- both build the same normalized
+            path signature from parameterized expressions (structural match,
+            value unknown at discover time -- lower confidence).
+        match_key: The value the join was made on -- the resolved identity for
+            ``"identity"`` edges, or the normalized path signature for
+            ``"expression"`` edges. Lets consumers see exactly what coupled them.
+    """
+
+    dataset_name: str
+    identity: str | None
+    producer_pipeline: str
+    producer_activity: str
+    consumer_pipeline: str
+    consumer_activity: str
+    match_kind: Literal["identity", "expression"] = "identity"
+    match_key: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class Lineage:
+    """Deterministic lineage graphs extracted from the parsed definitions."""
+
+    control_edges: list[ControlEdge] = field(default_factory=list)
+    data_edges: list[DataEdge] = field(default_factory=list)
