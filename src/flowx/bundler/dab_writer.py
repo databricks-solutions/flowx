@@ -1542,6 +1542,84 @@ def _strip_dangling_task_value_refs(
     return neutralized
 
 
+# NOTE: This is a package-time *safety net*, not the ideal fix. The real gap is upstream in the convert
+# phase: when the translator resolves ``@activity('P').output`` / ``@variables('X')`` into a
+# ``{{tasks.P.values.*}}`` reference, it stores the value in the IR but does not promote that data-flow
+# reference into a control-flow ``Activity.depends_on`` edge (unlike the ForEach/Switch/IfCondition
+# bridges, which self-wire their edge at synthesis time). So the edge is often missing by the time we
+# emit YAML. Backfilling here keeps ``bundle deploy`` from being rejected; wiring the edge in the
+# translator would make this a redundant belt-and-suspenders check. See discussion on issue #27.
+def _backfill_task_value_dependencies(tasks: list[dict[str, Any]]) -> int:
+    """Adds a ``depends_on`` edge for every ``{{tasks.P.values.*}}`` reference.
+
+    Databricks rejects a job whose task references ``{{tasks.P.values.Y}}`` when
+    ``P`` is not a (transitive) dependency of the referencing task
+    (``INVALID_PARAMETER_VALUE: Task 'P' must be a dependency of task 'T'``).
+
+    flowx rewrites ADF ``@variables('X')`` / ``@activity('Y').output`` into such
+    task-value references (e.g. synthesised ``_init_<var>`` tasks and the
+    IfCondition/Switch/ForEach bridge tasks) but does not always add the matching
+    dependency edge.  This pass walks every task's ``condition_task.{left,right}``
+    and ``notebook_task.base_parameters`` and, for each referenced producer that
+    exists in this job's task list but is not already a *direct* dependency of the
+    consumer, appends ``{"task_key": P}`` to the consumer's ``depends_on``.
+
+    Runs *after* :func:`_strip_dangling_task_value_refs`, so refs to producers
+    absent from the bundle have already been blanked and are not seen here.
+    Operates within a single job scope; ``for_each_task.task`` bodies are handled
+    against their own sibling set because inner-body task keys are local to the
+    parent task list.  Returns the number of edges added.
+    """
+    added = 0
+
+    def _referenced_producers(task: dict[str, Any]) -> set[str]:
+        producers: set[str] = set()
+
+        def scan(value: Any) -> None:
+            if isinstance(value, str):
+                producers.update(_TASK_VALUE_REF.findall(value))
+            elif isinstance(value, dict):
+                for item in value.values():
+                    scan(item)
+            elif isinstance(value, list):
+                for item in value:
+                    scan(item)
+
+        notebook_task = task.get("notebook_task") or {}
+        scan(notebook_task.get("base_parameters"))
+        condition_task = task.get("condition_task") or {}
+        scan(condition_task.get("left"))
+        scan(condition_task.get("right"))
+        return producers
+
+    def process(scope_tasks: list[dict[str, Any]]) -> None:
+        nonlocal added
+        sibling_keys = {t.get("task_key", "") for t in scope_tasks}
+        sibling_keys.discard("")
+        for task in scope_tasks:
+            self_key = task.get("task_key", "")
+            existing = {
+                dep.get("task_key")
+                for dep in (task.get("depends_on") or [])
+                if isinstance(dep, dict)
+            }
+            for producer in sorted(_referenced_producers(task)):
+                if producer == self_key or producer in existing or producer not in sibling_keys:
+                    continue
+                deps = list(task.get("depends_on") or [])
+                deps.append({"task_key": producer})
+                task["depends_on"] = deps
+                existing.add(producer)
+                added += 1
+            # Recurse into for_each bodies against their own sibling scope.
+            for_each = task.get("for_each_task")
+            if for_each and isinstance(for_each.get("task"), dict):
+                process([for_each["task"]])
+
+    process(tasks)
+    return added
+
+
 def _collect_all_task_keys(tasks: list[dict[str, Any]]) -> set[str]:
     """Collects every task_key reachable from the job's top-level task list."""
     keys: set[str] = set()
@@ -1622,6 +1700,10 @@ def _build_job_resource(
     _neutralized_conditions.extend(
         _strip_dangling_task_value_refs(workflow.tasks, _collect_all_task_keys(workflow.tasks))
     )
+    # A task-value producer must be a dependency of any task that references it, or
+    # Databricks rejects the job at create time. Backfill the missing edges for refs
+    # to producers that survived the dangling-ref strip above.
+    _backfill_task_value_dependencies(workflow.tasks)
 
     job_def: dict[str, Any] = {
         "name": workflow.name,
