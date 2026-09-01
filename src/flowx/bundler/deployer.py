@@ -2,15 +2,15 @@
 
 flowx emits **one Databricks Asset Bundle per ADF pipeline**. When pipeline A calls pipeline B via
 ``ExecutePipeline``, the generated ``run_job_task.job_id`` references B — a job that lives in B's own
-bundle. ``_rewrite_cross_bundle_run_job_refs`` (see :mod:`flowx.bundler.dab_writer`) rewrites those
-out-of-bundle references to ``${var.<B>}`` and declares a matching bundle variable, so each bundle is
-deploy-valid on its own; the operator otherwise has to discover B's numeric job id and pass it by hand.
+bundle. ``_rewrite_cross_bundle_job_references`` (see :mod:`flowx.bundler.dab_writer`) rewrites those
+out-of-bundle references to ``${var.<B>_job_id}`` and declares a matching bundle variable, so each
+bundle is deploy-valid on its own; the operator otherwise has to discover B's numeric job id by hand.
 
 This module automates that. It **discovers** the bundles under an output directory (no manifest
-needed), reads each bundle's job resource keys and its ``${var.<callee>}`` cross-bundle dependencies
-straight from the generated YAML, topologically orders them (callees first), and deploys each with
-``databricks bundle deploy``. After every deploy it reads the deployed job id from
-``databricks bundle summary -o json`` and injects it into callers via ``--var "<callee>=<id>"``.
+needed), reads each bundle's job resource keys and its ``${var.<callee>_job_id}`` cross-bundle
+dependencies straight from the generated YAML, topologically orders them (callees first), and deploys
+each with ``databricks bundle deploy``. After every deploy it reads the deployed job id from
+``databricks bundle summary -o json`` and injects it into callers via ``--var "<callee>_job_id=<id>"``.
 
 Numeric ids (not names) are captured and injected, so dev-mode ``[dev <user>]`` job-name prefixes are
 irrelevant — this works identically for ``dev`` and ``prod`` targets.
@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -274,6 +275,17 @@ def run(
     output_dir = Path(output_dir)
     if not output_dir.is_dir():
         print(f"Error: output directory not found: {output_dir}", file=sys.stderr)
+        return 1
+
+    # A real deploy shells out to the `databricks` CLI; fail with an actionable message rather than an
+    # uncaught FileNotFoundError if it isn't on PATH. Skipped for --dry-run, which never invokes it.
+    if not dry_run and shutil.which("databricks") is None:
+        print(
+            "Error: the `databricks` CLI was not found on PATH. This is a local-CLI operation "
+            "(`databricks bundle deploy`/`summary`); install the CLI, or use --dry-run to preview the "
+            "deploy order without deploying.",
+            file=sys.stderr,
+        )
         return 1
 
     try:

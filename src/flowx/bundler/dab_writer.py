@@ -24,7 +24,6 @@ from flowx.bundler.constants import (
 )
 from flowx.bundler.inner_job_params import normalize_value
 from flowx.bundler.notebook_writer import write_notebooks
-from flowx.bundler.pipeline_graph import CROSS_BUNDLE_JOB_ID_REF as _CROSS_BUNDLE_JOB_ID_REF
 from flowx.bundler.prereqs_writer import ManualParameter, build_prereqs, render_setup_md
 from flowx.bundler.setup_generator import generate_setup_tasks
 from flowx.models.dab import DabNotebook, SecretInstruction, SetupTask
@@ -2048,46 +2047,6 @@ def _strip_dangling_task_value_refs(
         visit(task)
 
     return neutralized
-
-
-def _rewrite_cross_bundle_run_job_refs(
-    tasks: list[dict[str, Any]],
-    known_bundle_jobs: set[str],
-    cross_bundle_variables: dict[str, str],
-) -> None:
-    """Rewrites ``run_job_task`` refs to jobs outside this bundle into ``${var.X}``.
-
-    An ExecutePipeline activity is emitted as ``run_job_task.job_id =
-    ${resources.jobs.X.id}`` (see ``execute_pipeline.prepare``).  That resolves
-    only when job ``X`` is a resource in *this* bundle.  In a multi-pipeline
-    migration each ADF pipeline becomes its **own** bundle, so a reference to a
-    sibling pipeline points at a resource node that does not exist here and
-    ``bundle deploy`` fails with ``no such node "resources.jobs.X"``.
-
-    For every ``run_job_task.job_id`` whose target is not in *known_bundle_jobs*,
-    rewrite it to ``${var.X}`` and register ``X`` in *cross_bundle_variables* so
-    the ``databricks.yml`` builder declares a matching bundle variable (the user
-    supplies the numeric job id at deploy time, per SETUP.md).  Recurses into
-    ``for_each_task.task`` bodies.  The rewritten refs are surfaced to the
-    operator via *cross_bundle_variables* (declared in ``databricks.yml`` and
-    listed in SETUP.md), so this mutates in place and returns nothing.
-    """
-
-    def visit(task: dict[str, Any]) -> None:
-        run_job = task.get("run_job_task")
-        if isinstance(run_job, dict):
-            match = _CROSS_BUNDLE_JOB_ID_REF.fullmatch(str(run_job.get("job_id", "")))
-            if match:
-                target = match.group(1)
-                if target not in known_bundle_jobs:
-                    run_job["job_id"] = f"${{var.{target}}}"
-                    cross_bundle_variables[target] = target
-        for_each = task.get("for_each_task")
-        if for_each and isinstance(for_each.get("task"), dict):
-            visit(for_each["task"])
-
-    for task in tasks:
-        visit(task)
 
 
 def _collect_all_task_keys(tasks: list[dict[str, Any]]) -> set[str]:

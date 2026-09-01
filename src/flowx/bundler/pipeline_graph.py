@@ -30,8 +30,9 @@ from flowx.utils import normalize_task_key
 if TYPE_CHECKING:
     from flowx.preparer.workflow_preparer import PreparedWorkflow
 
-# The ref shape execute_pipeline.prepare emits: ${resources.jobs.<callee>.id}. Shared with
-# dab_writer._rewrite_cross_bundle_run_job_refs (imported there) so the two never drift.
+# The ref shape execute_pipeline.prepare emits: ${resources.jobs.<callee>.id}. Used here to read the
+# Run Pipeline call graph off the prepared task trees *before* dab_writer rewrites cross-bundle refs
+# to ${var.<callee>_job_id} (see _rewrite_cross_bundle_job_references).
 CROSS_BUNDLE_JOB_ID_REF = re.compile(r"\$\{resources\.jobs\.([^.]+)\.id\}")
 
 

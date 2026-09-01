@@ -229,6 +229,22 @@ def test_empty_output_dir_returns_error(tmp_path):
     assert run(tmp_path) == 1
 
 
+def test_missing_databricks_cli_reports_cleanly(tmp_path, monkeypatch, capsys):
+    # A real deploy needs the `databricks` CLI on PATH; if it's absent, run() must return 1 with an
+    # actionable message rather than an uncaught FileNotFoundError from subprocess.
+    _make_bundle(tmp_path, "a", jobs=["a"])
+    monkeypatch.setattr(deployer.shutil, "which", lambda _name: None)
+    assert run(tmp_path) == 1
+    assert "databricks` CLI was not found" in capsys.readouterr().err
+
+
+def test_missing_databricks_cli_does_not_block_dry_run(tmp_path, monkeypatch):
+    # --dry-run never shells out, so a missing CLI must not stop it.
+    _make_bundle(tmp_path, "a", jobs=["a"])
+    monkeypatch.setattr(deployer.shutil, "which", lambda _name: None)
+    assert run(tmp_path, dry_run=True) == 0
+
+
 def test_cycle_returns_error(tmp_path, monkeypatch):
     _make_bundle(tmp_path, "a", jobs=["a"], deps=["b"])
     _make_bundle(tmp_path, "b", jobs=["b"], deps=["a"])
