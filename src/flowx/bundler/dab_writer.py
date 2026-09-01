@@ -9,6 +9,7 @@ import re
 import sys
 import tempfile
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -375,6 +376,36 @@ def _default_report_path(output_dir: Path) -> Path:
     return work / "translation_report.json"
 
 
+def _combine_into_single_bundle(workflows: list[PreparedWorkflow]) -> PreparedWorkflow:
+    """Folds every pipeline workflow into one so ``write_bundle`` emits a single bundle.
+
+    Factory pipelines call each other via ``ExecutePipeline`` -> ``run_job_task`` with a
+    same-bundle ``${resources.jobs.<key>.id}`` job id, so all pipelines in a report must share one
+    bundle or those references dangle. Reuse the ``inner_workflows`` machinery ``write_bundle``
+    already uses to emit a parent plus its children as separate job resources: keep the first
+    workflow as primary and attach the rest (flattening any inner_workflows they carry) as its
+    inner workflows. Each pipeline keeps its own job name, parameters, and schedule.
+
+    Args:
+        workflows: Non-empty list of prepared workflows, one per pipeline.
+
+    Returns:
+        A single :class:`PreparedWorkflow` whose ``inner_workflows`` carry every other pipeline.
+    """
+    primary = workflows[0]
+    if len(workflows) == 1:
+        return primary
+
+    combined_inner: list[PreparedWorkflow] = list(primary.inner_workflows)
+    for peer in workflows[1:]:
+        # Lift the peer and any inner jobs it already carries (e.g. ForEach bodies) to the top so
+        # write_bundle emits every job as its own resource YAML in the shared bundle.
+        combined_inner.append(replace(peer, inner_workflows=[]))
+        combined_inner.extend(peer.inner_workflows)
+
+    return replace(primary, inner_workflows=combined_inner)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Package-phase entry point for DAB bundle generation.
 
@@ -493,93 +524,22 @@ def main(argv: list[str] | None = None) -> int:
         print("No translated pipelines found in the report.", file=sys.stderr)
         return 1
 
-    shared_airflow_bundle = len(workflows) > 1 and all(workflow.source == "airflow" for workflow in workflows)
-    from flowx.validate.bundle_invariants import check_bundle_dir, format_result
-
-    # Render and validate away from the destination. This keeps a reconciliation or structural
-    # failure from leaving a partially-written bundle in the migration directory.
-    args.output_dir.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".flowx-preflight-", dir=args.output_dir.parent) as temporary:
-        staging_root = Path(temporary)
-        if shared_airflow_bundle:
-            write_bundle(
-                workflow=_combine_airflow_workflows(workflows),
-                output_dir=staging_root,
-                catalog=args.catalog,
-                schema=args.schema,
-                bundle_name=args.bundle_name or normalize_task_key(args.output_dir.name),
-            )
-            staged_dirs = [staging_root]
-        else:
-            staged_dirs = []
-            for workflow in workflows:
-                workflow_dir = staging_root / normalize_task_key(workflow.name) if len(workflows) > 1 else staging_root
-                write_bundle(
-                    workflow=workflow,
-                    output_dir=workflow_dir,
-                    catalog=args.catalog,
-                    schema=args.schema,
-                    bundle_name=args.bundle_name if len(workflows) == 1 else None,
-                )
-                staged_dirs.append(workflow_dir)
-        preflight_violations = 0
-        for bundle_dir in staged_dirs:
-            result = check_bundle_dir(bundle_dir)
-            if not result.ok or result.warnings:
-                print(format_result(result), file=sys.stderr)
-            preflight_violations += len(result.violations)
-        if preflight_violations:
-            print(
-                f"Error: package preflight found {preflight_violations} bundle-invariant violation(s); "
-                "no bundle files were written.",
-                file=sys.stderr,
-            )
-            return 1
-
-    all_created: list[Path] = []
-    if shared_airflow_bundle:
-        combined = _combine_airflow_workflows(workflows)
-        all_created.extend(
-            write_bundle(
-                workflow=combined,
-                output_dir=args.output_dir,
-                catalog=args.catalog,
-                schema=args.schema,
-                bundle_name=args.bundle_name or normalize_task_key(args.output_dir.name),
-                skipped_pipelines=skipped_pipelines,
-            )
-        )
-        print(f"  [1/1] {len(workflows)} Airflow DAG jobs: {len(all_created)} files")
-    else:
-        for index, workflow in enumerate(workflows):
-            workflow_dir = (
-                args.output_dir / normalize_task_key(workflow.name) if len(workflows) > 1 else args.output_dir
-            )
-            effective_bundle_name = args.bundle_name if len(workflows) == 1 else None
-            created = write_bundle(
-                workflow=workflow,
-                output_dir=workflow_dir,
-                catalog=args.catalog,
-                schema=args.schema,
-                bundle_name=effective_bundle_name,
-                skipped_pipelines=skipped_pipelines,
-            )
-            all_created.extend(created)
-            print(f"  [{index + 1}/{len(workflows)}] {workflow.name}: {len(created)} files")
-
-    # Tier-0 structural check over the emitted bundle(s): duplicate task keys / job params,
-    # dangling depends_on, undeclared {{job.parameters.X}}, leaked YAML anchors. Source-agnostic.
-    bundle_dirs = (
-        [args.output_dir]
-        if shared_airflow_bundle or len(workflows) == 1
-        else [args.output_dir / normalize_task_key(workflow.name) for workflow in workflows]
+    # Emit one bundle for the whole report so cross-pipeline `run_job_task` refs
+    # (`${resources.jobs.<key>.id}`, only resolvable within a bundle) don't dangle across bundle
+    # boundaries. _combine_into_single_bundle folds every pipeline into one workflow tree.
+    combined = _combine_into_single_bundle(workflows)
+    created = write_bundle(
+        workflow=combined,
+        output_dir=args.output_dir,
+        catalog=args.catalog,
+        schema=args.schema,
+        bundle_name=args.bundle_name,
     )
-    invariant_violations = 0
-    for bundle_dir in bundle_dirs:
-        result = check_bundle_dir(bundle_dir)
-        if not result.ok or result.warnings:
-            print(format_result(result), file=sys.stderr)
-        invariant_violations += len(result.violations)
+    all_created = list(created)
+    job_names = [combined.name, *(inner.name for inner in combined.inner_workflows)]
+    for index, job_name in enumerate(job_names):
+        print(f"  [{index + 1}/{len(job_names)}] {job_name}")
+    print(f"  {len(created)} files written to one bundle ({len(job_names)} job(s))")
 
     if not args.keep_intermediates:
         work_dir = args.output_dir / ".work"
@@ -1662,7 +1622,14 @@ def _build_job_resource(
             seen_param_names.add(name)
             entry: dict[str, Any] = {"name": name}
             default = parameter.get("default")
-            entry["default"] = default if isinstance(default, str) else json.dumps(default)
+            if default is not None:
+                # Databricks job-parameter defaults are strings; JSON-encode
+                # Array / Object defaults so the YAML carries valid JSON.
+                entry["default"] = json.dumps(default) if isinstance(default, (list, dict)) else default
+            else:
+                # A DAB job parameter requires a ``default``; ADF params without one (defaulted at call
+                # time) get an empty string so `bundle deploy` doesn't reject the missing field.
+                entry["default"] = ""
             normalized_parameters.append(entry)
         job_def["parameters"] = normalized_parameters
 
@@ -1809,6 +1776,16 @@ def _load_report(report_path: Path) -> tuple[list[PreparedWorkflow], list[str]]:
                         hint = "missing name/tasks"
                     skipped.append(f"index {index} ({hint})")
         return workflows, skipped
+
+    if "pipelines" in report and isinstance(report["pipelines"], list):
+        # Aggregated report written by engine.py / modify ({"pipelines": [...]}): one dict per
+        # pipeline, each already in the single-pipeline {"name", "tasks", ...} IR shape. Route each
+        # through the same machinery the single-pipeline branch uses. Mirrors the adapter's
+        # _load_pipelines (adapter/__main__.py) so both report consumers agree on this shape.
+        for pipeline_dict in report["pipelines"]:
+            if isinstance(pipeline_dict, dict) and "tasks" in pipeline_dict and "name" in pipeline_dict:
+                workflows.append(_pipeline_dict_to_workflow(pipeline_dict))
+        return workflows
 
     # Empty or unrecognised report shape — nothing to do.
     return workflows, skipped

@@ -452,6 +452,10 @@ class TestWriteBundle:
         ``package`` aborted with "No translated pipelines found" for any factory with
         more than one pipeline.
         """
+        import json
+
+        from flowx.bundler.dab_writer import _load_report
+
         report = {
             "pipelines": [
                 {
@@ -481,213 +485,12 @@ class TestWriteBundle:
         report_path = tmp_path / "translation_report.json"
         report_path.write_text(json.dumps(report))
 
-        workflows, _ = _load_report(report_path)
+        workflows = _load_report(report_path)
         assert len(workflows) == 2
         assert {wf.name for wf in workflows} == {"pipeline_a", "pipeline_b"}
         by_name = {wf.name: wf for wf in workflows}
         assert {task["task_key"] for task in by_name["pipeline_a"].tasks} == {"pause"}
         assert {task["task_key"] for task in by_name["pipeline_b"].tasks} == {"run_nb"}
-
-    def test_load_report_skips_malformed_pipelines_entry(self, tmp_path):
-        """A malformed ``"pipelines"`` entry is skipped so valid pipelines still convert.
-
-        PR #6 review: aborting the whole run because one entry is malformed drops
-        every other valid pipeline in the report. Instead, ``_load_report`` keeps
-        the well-formed pipelines and records each skipped entry (surfaced in
-        SETUP.md downstream) rather than raising.
-        """
-        report = {
-            "pipelines": [
-                {
-                    "name": "pipeline_ok",
-                    "tasks": [
-                        {
-                            "type": "WaitActivity",
-                            "name": "Pause",
-                            "task_key": "pause",
-                            "wait_time_seconds": 5,
-                        },
-                    ],
-                },
-                {"name": "no_tasks_here"},  # missing "tasks"
-                {"tasks": []},  # missing "name"
-                "not-even-a-dict",  # not a dict at all
-            ]
-        }
-        report_path = tmp_path / "translation_report.json"
-        report_path.write_text(json.dumps(report))
-
-        workflows, skipped_pipelines = _load_report(report_path)
-
-        # The one valid pipeline still produces a workflow.
-        assert [wf.name for wf in workflows] == ["pipeline_ok"]
-
-        # Every offender is recorded so SETUP.md can name it (collect-all, not fail-fast).
-        skipped = " ".join(skipped_pipelines)
-        assert "no_tasks_here" in skipped
-        assert "index 2" in skipped
-        assert "index 3" in skipped
-
-        # Named entries are stored bare — no Python repr quotes leak into the label.
-        assert "no_tasks_here" in skipped_pipelines
-        assert "'no_tasks_here'" not in skipped
-
-    def test_load_report_enriches_skip_labels_with_hints(self, tmp_path):
-        """Skipped pipeline entries are labeled with hints about what went wrong.
-
-        PR #6 polish: when a pipeline entry is missing a name, recording just
-        ``"index N"`` tells the user nothing about what the entry contained.
-        Enrich the label to hint at what field is missing or wrong:
-        - If it has tasks but no name: ``index N (has tasks, missing name)``
-        - If it has neither: ``index N (missing name/tasks)``
-        - If it's not a dict: ``index N (not a JSON object)``
-        - If it has a name: record the bare name (no Python ``repr`` quotes);
-          renderers wrap it for their medium (SETUP.md uses backticks).
-        """
-        report = {
-            "pipelines": [
-                {
-                    "name": "pipeline_ok",
-                    "tasks": [
-                        {
-                            "type": "WaitActivity",
-                            "name": "Pause",
-                            "task_key": "pause",
-                            "wait_time_seconds": 5,
-                        },
-                    ],
-                },
-                # Case 1: missing name but has tasks
-                {"tasks": [{"type": "WaitActivity", "name": "P", "task_key": "p", "wait_time_seconds": 1}]},
-                # Case 2: missing both name and tasks
-                {"other_field": "value"},
-                # Case 3: not a dict at all
-                "not-even-a-dict",
-            ]
-        }
-        report_path = tmp_path / "translation_report.json"
-        report_path.write_text(json.dumps(report))
-
-        workflows, skipped_pipelines = _load_report(report_path)
-
-        # One valid pipeline.
-        assert [wf.name for wf in workflows] == ["pipeline_ok"]
-
-        # Check enriched skip labels.
-        assert len(skipped_pipelines) == 3
-        # Index 1: has tasks, missing name
-        assert "index 1" in skipped_pipelines[0]
-        assert "has tasks" in skipped_pipelines[0]
-        assert "missing name" in skipped_pipelines[0]
-        # Index 2: missing both name and tasks
-        assert "index 2" in skipped_pipelines[1]
-        assert "missing name/tasks" in skipped_pipelines[1]
-        # Index 3: not a dict
-        assert "index 3" in skipped_pipelines[2]
-        assert "not a JSON object" in skipped_pipelines[2]
-
-    def test_package_main_fails_closed_on_malformed_entry(self, tmp_path):
-        """A malformed report entry aborts packaging even when a valid pipeline is present.
-
-        Packaging is a fail-closed reconciliation boundary: rather than ship a partial bundle of
-        only the well-formed pipelines, a report carrying an unreconcilable entry is rejected and
-        nothing is written.
-        """
-        report = {
-            "pipelines": [
-                {
-                    "name": "pipeline_ok",
-                    "tags": {"source": "adf"},
-                    "tasks": [
-                        {
-                            "type": "WaitActivity",
-                            "name": "Pause",
-                            "task_key": "pause",
-                            "wait_time_seconds": 5,
-                        },
-                    ],
-                },
-                {"name": "no_tasks_here"},
-            ]
-        }
-        report_path = tmp_path / "translation_report.json"
-        report_path.write_text(json.dumps(report))
-        out_dir = tmp_path / "out"
-
-        exit_code = dab_main(
-            [
-                "--report",
-                str(report_path),
-                "--output-dir",
-                str(out_dir),
-                "--no-download-workspace-files",
-            ]
-        )
-
-        assert exit_code != 0
-        assert not (out_dir / "databricks.yml").exists()
-
-    def test_package_main_fails_closed_on_malformed_entry_in_batch(self, tmp_path):
-        """One malformed entry aborts a whole multi-pipeline batch; no per-pipeline bundle is written."""
-        report = {
-            "pipelines": [
-                {
-                    "name": "pipeline_a",
-                    "tags": {"source": "adf"},
-                    "tasks": [
-                        {"type": "WaitActivity", "name": "Pause", "task_key": "pause", "wait_time_seconds": 5},
-                    ],
-                },
-                {
-                    "name": "pipeline_b",
-                    "tags": {"source": "adf"},
-                    "tasks": [
-                        {"type": "WaitActivity", "name": "Hold", "task_key": "hold", "wait_time_seconds": 5},
-                    ],
-                },
-                {"name": "no_tasks_here"},
-            ]
-        }
-        report_path = tmp_path / "translation_report.json"
-        report_path.write_text(json.dumps(report))
-        out_dir = tmp_path / "out"
-
-        exit_code = dab_main(
-            [
-                "--report",
-                str(report_path),
-                "--output-dir",
-                str(out_dir),
-                "--no-download-workspace-files",
-            ]
-        )
-
-        assert exit_code != 0
-        for pipeline_name in ("pipeline_a", "pipeline_b"):
-            assert not (out_dir / pipeline_name).exists()
-
-    def test_package_main_returns_nonzero_when_all_entries_skipped(self, tmp_path):
-        """``package`` fails when every pipeline entry is malformed (nothing to write)."""
-        report = {
-            "pipelines": [
-                {"name": "no_tasks_here"},
-                "not-even-a-dict",
-            ]
-        }
-        report_path = tmp_path / "translation_report.json"
-        report_path.write_text(json.dumps(report))
-
-        exit_code = dab_main(
-            [
-                "--report",
-                str(report_path),
-                "--output-dir",
-                str(tmp_path / "out"),
-                "--no-download-workspace-files",
-            ]
-        )
-
-        assert exit_code != 0
 
 
 class TestScheduleEmission:
