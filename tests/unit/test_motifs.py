@@ -250,3 +250,65 @@ class TestCollapser:
         assert downstream_keys == {motif.task_key}, (
             f"Downstream task should be rewired to point at the motif, got {downstream_keys}"
         )
+
+    def test_collapse_two_matches_of_same_motif_are_both_kept(self):
+        """Regression (#22): two matches of the same motif in one pipeline must both survive.
+
+        The collapser used to dedupe by ``motif_id`` and ``continue``-skip any
+        further match of an already-inserted motif, which dropped the second
+        group's activities entirely and left dangling ``depends_on`` edges
+        (invalid dependency graph at deploy). Each distinct match must now
+        collapse into its own node with a unique ``task_key``
+        (``motif_<id>`` and ``motif_<id>_2``) and no activity may be dropped.
+        """
+        from flowx.models.motifs import DetectedMotif
+
+        pipeline = Pipeline(
+            name="test",
+            tasks=[
+                _ir_activity("GetTableList1"),
+                _ir_activity("ForEachTable1", depends_on=["GetTableList1"]),
+                _ir_activity("GetTableList2"),
+                _ir_activity("ForEachTable2", depends_on=["GetTableList2"]),
+                _ir_activity("PostProcessing", depends_on=["ForEachTable2"]),
+            ],
+        )
+        detected1 = DetectedMotif(
+            definition=MOTIF_METADATA_DRIVEN_BULK_COPY,
+            matched_activities=["GetTableList1", "ForEachTable1"],
+            source_type_hint="database",
+        )
+        detected2 = DetectedMotif(
+            definition=MOTIF_METADATA_DRIVEN_BULK_COPY,
+            matched_activities=["GetTableList2", "ForEachTable2"],
+            source_type_hint="database",
+        )
+        result = collapse_motifs(pipeline, [detected1, detected2])
+
+        # Both matches collapse into their own node -- neither is dropped.
+        motif_tasks = [t for t in result.tasks if isinstance(t, MotifActivity)]
+        assert len(motif_tasks) == 2, "Both matches of the same motif must produce a node"
+
+        # Unique, deterministic task_keys assigned in pipeline.tasks order.
+        motif_keys = [t.task_key for t in motif_tasks]
+        assert motif_keys == ["motif_metadata_driven_bulk_copy", "motif_metadata_driven_bulk_copy_2"], (
+            f"Duplicate matches must get unique task_keys, got {motif_keys}"
+        )
+
+        # No claimed activity leaked through as a standalone task, and nothing was dropped:
+        # 2 collapsed motifs + the single unclaimed PostProcessing task.
+        remaining_names = [t.name for t in result.tasks]
+        assert "PostProcessing" in remaining_names
+        for claimed in ("GetTableList1", "ForEachTable1", "GetTableList2", "ForEachTable2"):
+            assert claimed not in remaining_names, f"{claimed} should be collapsed, not left standalone"
+        collapsed = set()
+        for m in motif_tasks:
+            collapsed.update(m.matched_activity_names)
+        assert collapsed == {"GetTableList1", "ForEachTable1", "GetTableList2", "ForEachTable2"}
+
+        # The downstream dep on the second group is rewired to that group's motif node (no dangling edge).
+        post = next(t for t in result.tasks if t.name == "PostProcessing")
+        post_keys = {dep.task_key for dep in post.depends_on or []}
+        assert post_keys == {"motif_metadata_driven_bulk_copy_2"}, (
+            f"Downstream task must be rewired to the second motif, got {post_keys}"
+        )

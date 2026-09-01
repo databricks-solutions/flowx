@@ -38,7 +38,15 @@ def collapse_motifs(
     # _rewire_dependencies can match Dependency.task_key (also sanitised); raw names would miss edges.
     motif_task_keys: dict[str, str] = {}
 
-    inserted_motifs: set[str] = set()
+    # Track how many times each motif_id has been inserted so multiple distinct matches of the same
+    # motif (e.g. two File Existence Validation groups in one pipeline) get unique task_keys instead of
+    # colliding. Keyed by the match's *contents* (the frozenset of its matched activity names, which is
+    # unique per match because activities are claimed exactly once) so we insert each group exactly once
+    # while still recording *every* member's task_key -> motif mapping for dependency rewiring. Content
+    # keying is deliberate: an object-identity key (id(detected)) would silently break if
+    # _find_motif_for_activity is ever changed to return a fresh object per call.
+    inserted_matches: dict[frozenset[str], str] = {}
+    motif_id_counts: dict[str, int] = {}
     for task in pipeline.tasks:
         if task.name in claimed_names:
             detected = _find_motif_for_activity(task.name, motifs)
@@ -46,18 +54,27 @@ def collapse_motifs(
                 new_tasks.append(task)
                 continue
 
-            motif_id = detected.definition.motif_id
-            if motif_id in inserted_motifs:
-                continue
-            inserted_motifs.add(motif_id)
+            match_id = frozenset(detected.matched_activities)
+            existing_key = inserted_matches.get(match_id)
+            if existing_key is None:
+                # First activity of this match: mint a unique task_key and insert the motif node once.
+                # The occurrence suffix (`""`, `_2`, `_3`, ...) is assigned in `pipeline.tasks` iteration
+                # order, so a motif's task_key is stable only as long as that order is deterministic
+                # (it is: `pipeline.tasks` is an ordered list built once by the translator). If detection
+                # or task ordering is ever parallelised/reordered, these keys would shift between runs.
+                motif_id = detected.definition.motif_id
+                occurrence = motif_id_counts.get(motif_id, 0)
+                motif_id_counts[motif_id] = occurrence + 1
+                suffix = "" if occurrence == 0 else f"_{occurrence + 1}"
+                motif_activity = _build_motif_activity(detected, tasks_by_name, task_key_suffix=suffix)
+                new_tasks.append(motif_activity)
+                inserted_matches[match_id] = motif_activity.task_key
+                existing_key = motif_activity.task_key
 
-            motif_activity = _build_motif_activity(detected, tasks_by_name)
-            new_tasks.append(motif_activity)
-
-            for matched_name in detected.matched_activities:
-                matched_task = tasks_by_name.get(matched_name)
-                if matched_task is not None:
-                    motif_task_keys[matched_task.task_key] = motif_activity.task_key
+                for matched_name in detected.matched_activities:
+                    matched_task = tasks_by_name.get(matched_name)
+                    if matched_task is not None:
+                        motif_task_keys[matched_task.task_key] = existing_key
         else:
             new_tasks.append(task)
 
@@ -94,11 +111,16 @@ def _find_motif_for_activity(
 def _build_motif_activity(
     motif: DetectedMotif,
     tasks_by_name: dict[str, Activity],
+    task_key_suffix: str = "",
 ) -> MotifActivity:
-    """Builds a MotifActivity from a detected motif and the original tasks."""
+    """Builds a MotifActivity from a detected motif and the original tasks.
+
+    ``task_key_suffix`` disambiguates multiple matches of the same motif in one
+    pipeline so their task_keys don't collide (which would drop a match).
+    """
     definition = motif.definition
 
-    task_key = f"motif_{definition.motif_id}"
+    task_key = f"motif_{definition.motif_id}{task_key_suffix}"
     display_name = definition.display_name
 
     original_activities = [tasks_by_name[name] for name in motif.matched_activities if name in tasks_by_name]
