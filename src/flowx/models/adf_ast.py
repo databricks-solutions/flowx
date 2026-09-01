@@ -136,6 +136,11 @@ class AdfActivity:
         if_true_activities: Activities to run when an IfCondition evaluates to true.
         if_false_activities: Activities to run when an IfCondition evaluates to false.
         activities: Child activities for ForEach / Until containers.
+        switch_cases: Per-case child activities for a Switch, keyed by case value
+            (``cases[].value`` -> that case's ``activities``). Preserves case
+            grouping; use :func:`switch_child_activities` for a flat view.
+        switch_default_activities: A Switch's ``defaultActivities`` (the branch
+            taken when no case matches).
     """
 
     name: str
@@ -149,8 +154,24 @@ class AdfActivity:
     if_true_activities: list[AdfActivity] | None = None
     if_false_activities: list[AdfActivity] | None = None
     activities: list[AdfActivity] | None = None  # ForEach, Until
+    switch_cases: dict[str, list[AdfActivity]] | None = None  # Switch cases[].value -> activities
+    switch_default_activities: list[AdfActivity] | None = None  # Switch defaultActivities
     # Original ADF/ARM activity JSON, retained so agentic handlers can translate from the source.
     raw: dict[str, Any] | None = None
+
+    def switch_child_activities(self) -> list[AdfActivity]:
+        """Flat list of all Switch children (every case's activities + defaults).
+
+        Empty for non-Switch activities. Used by inventory/lineage walkers that
+        only need to descend into children, not preserve case grouping.
+        """
+        children: list[AdfActivity] = []
+        if self.switch_cases:
+            for case_activities in self.switch_cases.values():
+                children.extend(case_activities)
+        if self.switch_default_activities:
+            children.extend(self.switch_default_activities)
+        return children
 
 
 # ---------------------------------------------------------------------------

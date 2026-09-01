@@ -263,6 +263,97 @@ class TestParsePipeline:
 
 
 # ---------------------------------------------------------------------------
+# Switch case / default nesting (regression: activities inside a Switch were
+# invisible to the parser, so inventory counts and lineage walks dropped them)
+# ---------------------------------------------------------------------------
+
+
+def _switch_pipeline_json() -> dict:
+    """A pipeline whose Switch nests activities in cases and the default branch,
+    including an ExecutePipeline (a lineage edge) hidden inside a case."""
+    return {
+        "name": "switch_pipeline",
+        "properties": {
+            "activities": [
+                {"name": "SetVar", "type": "SetVariable", "typeProperties": {}},
+                {
+                    "name": "RouteByEnv",
+                    "type": "Switch",
+                    "typeProperties": {
+                        "on": {"value": "@variables('env')", "type": "Expression"},
+                        "cases": [
+                            {
+                                "value": "prod",
+                                "activities": [
+                                    {"name": "ProdNotebook", "type": "DatabricksNotebook", "typeProperties": {}},
+                                    {
+                                        "name": "RunProdChild",
+                                        "type": "ExecutePipeline",
+                                        "typeProperties": {"pipeline": {"referenceName": "child_prod"}},
+                                    },
+                                ],
+                            },
+                            {
+                                "value": "dev",
+                                "activities": [
+                                    {"name": "DevNotebook", "type": "DatabricksNotebook", "typeProperties": {}},
+                                ],
+                            },
+                        ],
+                        "defaultActivities": [
+                            {"name": "UnknownEnvNotebook", "type": "DatabricksNotebook", "typeProperties": {}},
+                        ],
+                    },
+                },
+            ],
+        },
+    }
+
+
+class TestSwitchNesting:
+    def test_parse_populates_switch_cases_and_default(self):
+        """parse_activity captures cases[].activities (keyed by value) + defaultActivities."""
+        pipeline = _parse_pipeline_json(_switch_pipeline_json())
+        switch = next(a for a in pipeline.activities if a.type == "Switch")
+        assert switch.switch_cases is not None
+        assert set(switch.switch_cases) == {"prod", "dev"}
+        assert [a.name for a in switch.switch_cases["prod"]] == ["ProdNotebook", "RunProdChild"]
+        assert [a.name for a in switch.switch_cases["dev"]] == ["DevNotebook"]
+        assert switch.switch_default_activities is not None
+        assert [a.name for a in switch.switch_default_activities] == ["UnknownEnvNotebook"]
+
+    def test_switch_child_activities_flattens_all_branches(self):
+        """The helper returns every case activity plus the defaults, flat."""
+        pipeline = _parse_pipeline_json(_switch_pipeline_json())
+        switch = next(a for a in pipeline.activities if a.type == "Switch")
+        names = {a.name for a in switch.switch_child_activities()}
+        assert names == {"ProdNotebook", "RunProdChild", "DevNotebook", "UnknownEnvNotebook"}
+        # A non-Switch activity yields an empty list, never raises.
+        setvar = next(a for a in pipeline.activities if a.type == "SetVariable")
+        assert setvar.switch_child_activities() == []
+
+    def test_inventory_counts_switch_nested_activities(self):
+        """build_inventory descends into Switch cases: the 4 nested activities are
+        counted, not just the 2 top-level ones (SetVar + Switch)."""
+        defs = AdfDefinitions(pipelines=[_parse_pipeline_json(_switch_pipeline_json())])
+        inv = build_inventory(defs)
+        names = [i.activity_name for i in inv.items if i.pipeline_name == "switch_pipeline"]
+        # 2 top-level + 3 case activities + 1 default = 6
+        assert len(names) == 6
+        for expected in ("SetVar", "RouteByEnv", "ProdNotebook", "RunProdChild", "DevNotebook", "UnknownEnvNotebook"):
+            assert expected in names
+
+    def test_lineage_walk_reaches_executepipeline_inside_switch(self):
+        """The ExecutePipeline nested in a Switch case is reachable by the activity
+        walker -- i.e. its control edge is no longer dropped."""
+        from flowx.parser.adf_loader import _walk_activities
+
+        pipeline = _parse_pipeline_json(_switch_pipeline_json())
+        walked = {a.name for a in _walk_activities(pipeline.activities)}
+        assert "RunProdChild" in walked
+
+
+# ---------------------------------------------------------------------------
 # ARM template normalization
 # ---------------------------------------------------------------------------
 
