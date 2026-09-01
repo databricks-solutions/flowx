@@ -1390,7 +1390,17 @@ def _rewrite_post_branch_dependencies(tasks: list[dict[str, Any]]) -> None:
                 seen_keys.add(key)
                 deduped.append(dep)
             task["depends_on"] = deduped
-            task.setdefault("run_if", "AT_LEAST_ONE_SUCCESS")
+            # A join after an ADF IfCondition must reproduce the container's
+            # ``dependsOn [Succeeded]`` semantics: it runs when the *taken*
+            # branch did not fail, and skips when it did.  Because exactly one
+            # branch executes, the other branch's terminals are SKIPPED.
+            # ``NONE_FAILED`` treats SKIPPED as non-failing (so the untaken
+            # branch never blocks the join) but treats FAILED as blocking (so a
+            # failure in the taken branch propagates).  ``AT_LEAST_ONE_SUCCESS``
+            # is wrong here: a sibling success (e.g. a ForEach inputs-bridge)
+            # masks a taken-branch failure, letting the join run when ADF would
+            # have skipped it.
+            task.setdefault("run_if", "NONE_FAILED")
 
 
 _TASK_VALUE_REF = re.compile(r"\{\{tasks\.([^.]+)\.values\.[^}]+\}\}")

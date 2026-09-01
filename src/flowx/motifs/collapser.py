@@ -73,10 +73,7 @@ def collapse_motifs(
         tasks=new_tasks,
         tags=pipeline.tags,
         not_translatable=pipeline.not_translatable,
-        reconciliation_status=pipeline.reconciliation_status,
-        migration_status=pipeline.migration_status,
-        audit=dict(pipeline.audit),
-        translation_configuration=pipeline.translation_configuration,
+        synthesized_variable_init_keys=pipeline.synthesized_variable_init_keys,
     )
 
 

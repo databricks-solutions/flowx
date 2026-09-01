@@ -616,11 +616,10 @@ class Pipeline:
         tasks: Ordered list of translated activities.
         tags: System and user-defined tags.
         not_translatable: Entries describing properties that could not be translated.
-        bundle_variables: DAB bundle-variable declarations (name -> ``{"description", "default"}``)
-            for factory globals hoisted under the ``bundle_variable`` resolution policy.
-        reconciliation_status: Source-audit result for this pipeline.
-        migration_status: Whether the pipeline is included or explicitly excluded.
-        audit: Source-audit counts and transformation ledger.
+        synthesized_variable_init_keys: Task keys of the SetVariable tasks the
+            translator synthesises for default-valued variables. Tracked
+            explicitly so dead-init pruning acts only on translator-generated
+            tasks and never touches a customer-authored task.
     """
 
     name: str
@@ -636,7 +635,7 @@ class Pipeline:
     migration_status: str = "included"
     audit: dict[str, Any] = field(default_factory=dict)
     translation_configuration: TranslationConfiguration | None = None
-    bundle_variables: dict[str, dict[str, Any]] = field(default_factory=dict)
+    synthesized_variable_init_keys: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True, slots=True)
