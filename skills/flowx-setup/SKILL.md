@@ -128,7 +128,7 @@ skills run Python with that interpreter and `src/` on `PYTHONPATH`. Resolve it f
 ```bash
 export PYTHONPATH="<plugin_dir>/src"
 PY="$(cat <plugin_dir>/.migration-venv)"
-"$PY" -m flowx.adapter inputs discover
+"$PY" -m flowx.adapter inputs discover --source adf   # or --source airflow
 ```
 
 `$PY` resolves to `<plugin_dir>/.venv/bin/python` (on Windows, `<plugin_dir>\.venv\Scripts\python.exe`).

@@ -52,9 +52,13 @@ def prepare(activity: SparkPythonActivity, *, scope: str = "") -> PreparedActivi
         filename = f"{activity.task_key}.py"
     script_rel_path = f"scripts/{filename}"
 
-    downloaded = download_dbfs_file(original_path)
+    downloaded = None if activity.generated_source is not None else download_dbfs_file(original_path)
     content = (
-        downloaded.decode("utf-8") if downloaded is not None else _python_placeholder(original_path, activity.name)
+        activity.generated_source
+        if activity.generated_source is not None
+        else downloaded.decode("utf-8")
+        if downloaded is not None
+        else _python_placeholder(original_path, activity.name)
     )
     notebooks = [
         DabNotebook(

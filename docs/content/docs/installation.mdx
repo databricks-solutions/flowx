@@ -159,10 +159,13 @@ The environment is created once and reused. No `uv` is required for plugin users
 Open Claude Code and ask *"What flowx skills do you have available?"*. You should see a list of skills (e.g. `flowx-setup`, 
 `flowx-migrate`). You can now run `/flowx:flowx-migrate`, `/flowx:flowx-discover`, and other flowx skills.
 
-<Callout type="warn" title="Troubleshooting missing dependencies">
-If calling a skill raises a `ModuleNotFoundError`, the virtual environment is missing or incomplete. Ensure Python is installed
-in your environment and that you have access to a Python package registry for installing dependencies, then re-run `/flowx:flowx-setup`.
-</Callout>
+If you hit a `ModuleNotFoundError` while running a phase, the venv is missing or incomplete — re-run `/flowx:flowx-setup`. Every Python command the skills run uses the interpreter recorded in `<plugin_dir>/.migration-venv`, with `src/` on `PYTHONPATH`:
+
+```bash
+export PYTHONPATH="<plugin_dir>/src"
+PY="$(cat <plugin_dir>/.migration-venv)"
+"$PY" -m flowx.adapter inputs discover --source adf   # or --source airflow
+```
 </Step>
 </Steps>
 
