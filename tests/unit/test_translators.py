@@ -1715,16 +1715,16 @@ class TestGlobalParameterResolution:
         assert notebook_task.libraries == [{"jar": "/Volumes/my.jar"}]
 
     def test_bundle_variables_survive_report_round_trip(self):
-        """bundle_variables serialize via _pipeline_to_dict and reconstruct via pipeline_dict_to_ir."""
+        """bundle_variables serialize via ir_serde.pipeline_to_dict and reconstruct via pipeline_dict_to_ir."""
         import json
 
         from flowx.bundler.dab_writer import pipeline_dict_to_ir
-        from flowx.translator.engine import _pipeline_to_dict
+        from flowx.ir_serde import pipeline_to_dict
 
         pipeline, definitions = self._pipeline_with_global()
         report = translate_pipeline(pipeline, definitions, global_parameter_resolution="bundle_variable")
         # Full JSON round-trip, mirroring how the convert report reaches the package phase.
-        serialized = json.loads(json.dumps(_pipeline_to_dict(report.pipeline), default=str))
+        serialized = json.loads(json.dumps(pipeline_to_dict(report.pipeline), default=str))
         reconstructed, _ = pipeline_dict_to_ir(serialized)
         assert reconstructed.bundle_variables == report.pipeline.bundle_variables
         assert reconstructed.bundle_variables["libPath"]["default"] == "/Volumes/my.jar"

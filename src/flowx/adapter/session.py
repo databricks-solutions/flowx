@@ -298,7 +298,7 @@ def _discover_options(source: str) -> tuple[MigrationInputOption, ...]:
 def _convert_options(source: str) -> tuple[MigrationInputOption, ...]:
     """Convert-phase input prompts for *source*."""
     spec = _SOURCE_PATH_OPTION[source]
-    return (
+    options = [
         MigrationInputOption(
             option_id=INPUT_INVENTORY_PATH,
             prompt="Path to the inventory.json from the discover phase?",
@@ -313,18 +313,23 @@ def _convert_options(source: str) -> tuple[MigrationInputOption, ...]:
             required=True,
         ),
         _OUTPUT_DIR_OPTION,
-        MigrationInputOption(
-            option_id=INPUT_GLOBAL_PARAMETER_RESOLUTION,
-            prompt="How should factory global parameters be resolved?",
-            description=(
-                "Applies to every pipeline. 'literal' bakes each @pipeline().globalParameters.X value in as a "
-                "literal; 'bundle_variable' emits ${var.X} and declares the global as a DAB bundle variable with "
-                "the factory value as its default, so it can be changed at deploy time."
-            ),
-            default="literal",
-            required=False,
-        ),
-    )
+    ]
+    if source == "adf":
+        options.append(
+            MigrationInputOption(
+                option_id=INPUT_GLOBAL_PARAMETER_RESOLUTION,
+                prompt="How should factory global parameters be resolved?",
+                description=(
+                    "Applies to every pipeline. 'literal' bakes each @pipeline().globalParameters.X value in as a "
+                    "literal; 'bundle_variable' emits ${var.X} and declares the global as a DAB bundle variable "
+                    "with the factory value as its default, so it can be changed at deploy time."
+                ),
+                default="literal",
+                required=False,
+            )
+        )
+    return tuple(options)
+
 
 _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
     MigrationInputOption(

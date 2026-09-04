@@ -535,7 +535,8 @@ class TestMigrationInputSession:
         from flowx.adapter import MigrationInputSession
 
         session = MigrationInputSession(phase="convert", source="adf")
-        ids = [q.option_id for q in session.pending().options]
+        options = session.pending().options
+        ids = [o.option_id for o in options]
         assert "inventory_path" in ids
         assert "adf_source_path" in ids
         assert "global_parameter_resolution" in ids

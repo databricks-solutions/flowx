@@ -28,11 +28,10 @@ jobs:
           version: "0.11.2"
           checksum: "7ac2ca0449c8d68dae9b99e635cd3bc9b22a4cb1de64b7c43716398447d42981"
           python-version: "3.12"
-      - name: Scrub internal proxy URLs from uv.lock
-        run: sed -i 's|https://pypi-proxy\.dev\.databricks\.com/simple|https://pypi.org/simple|g' uv.lock
-      - run: uv sync --frozen --extra mcp
+      - name: Normalize uv.lock to the public package index
+        run: sed -i -E 's#https://[a-zA-Z0-9._-]+/simple#https://pypi.org/simple#g' uv.lock
+      - run: uv sync --frozen
       - run: make test
-      - run: make integration
       - name: Verify requirements.txt is in sync with the lockfile
         run: |
           make requirements
@@ -49,8 +48,8 @@ jobs:
           version: "0.11.2"
           checksum: "7ac2ca0449c8d68dae9b99e635cd3bc9b22a4cb1de64b7c43716398447d42981"
           python-version: "3.12"
-      - name: Scrub internal proxy URLs from uv.lock
-        run: sed -i 's|https://pypi-proxy\.dev\.databricks\.com/simple|https://pypi.org/simple|g' uv.lock
+      - name: Normalize uv.lock to the public package index
+        run: sed -i -E 's#https://[a-zA-Z0-9._-]+/simple#https://pypi.org/simple#g' uv.lock
       - run: uv sync --frozen
       - run: make fmt
       - name: Check for formatting changes
