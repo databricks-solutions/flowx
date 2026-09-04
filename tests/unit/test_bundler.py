@@ -207,6 +207,7 @@ class TestWriteBundle:
                         if dep.get("task_key") == "switch1_case_a" and dep.get("outcome") == "true":
                             gated_on_true += 1
         assert gated_on_true == 2, f"both case roots must gate on the case 'true' outcome, got {gated_on_true}"
+
     def test_databricks_yml_sync_includes_src(self, tmp_path):
         """databricks.yml forces src/** into the sync set so a gitignored output dir still uploads notebooks."""
         wf = _simple_workflow("my_pipeline")
