@@ -131,6 +131,17 @@ def write_bundle(
         _any_task_uses_classic_cluster(inner.tasks) for inner in workflow.inner_workflows
     )
 
+    # Rewrite run_job_task refs to sibling-bundle jobs (${resources.jobs.X.id} where X is not a job in
+    # this bundle) into ${var.X}, registering each so _build_databricks_yml declares the variable. Must
+    # run before databricks.yml and the resource YAML are written below, or the ref points at a
+    # non-existent resource node and `bundle deploy` fails ("no such node resources.jobs.X").
+    _known_bundle_jobs_for_rewrite = {normalize_task_key(workflow.name)} | {
+        normalize_task_key(inner.name) for inner in workflow.inner_workflows
+    }
+    _rewrite_cross_bundle_run_job_refs(workflow.tasks, _known_bundle_jobs_for_rewrite, _cross_bundle_variables)
+    for inner in workflow.inner_workflows:
+        _rewrite_cross_bundle_run_job_refs(inner.tasks, _known_bundle_jobs_for_rewrite, _cross_bundle_variables)
+
     pipeline_resources = _collect_pipeline_resources(workflow)
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
     # sql_task references ${var.warehouse_id}; declare it (no default -> user supplies at deploy).
@@ -1540,6 +1551,49 @@ def _strip_dangling_task_value_refs(
         visit(task)
 
     return neutralized
+
+
+_CROSS_BUNDLE_JOB_ID_REF = re.compile(r"\$\{resources\.jobs\.([^.]+)\.id\}")
+
+
+def _rewrite_cross_bundle_run_job_refs(
+    tasks: list[dict[str, Any]],
+    known_bundle_jobs: set[str],
+    cross_bundle_variables: dict[str, str],
+) -> None:
+    """Rewrites ``run_job_task`` refs to jobs outside this bundle into ``${var.X}``.
+
+    An ExecutePipeline activity is emitted as ``run_job_task.job_id =
+    ${resources.jobs.X.id}`` (see ``execute_pipeline.prepare``).  That resolves
+    only when job ``X`` is a resource in *this* bundle.  In a multi-pipeline
+    migration each ADF pipeline becomes its **own** bundle, so a reference to a
+    sibling pipeline points at a resource node that does not exist here and
+    ``bundle deploy`` fails with ``no such node "resources.jobs.X"``.
+
+    For every ``run_job_task.job_id`` whose target is not in *known_bundle_jobs*,
+    rewrite it to ``${var.X}`` and register ``X`` in *cross_bundle_variables* so
+    the ``databricks.yml`` builder declares a matching bundle variable (the user
+    supplies the numeric job id at deploy time, per SETUP.md).  Recurses into
+    ``for_each_task.task`` bodies.  The rewritten refs are surfaced to the
+    operator via *cross_bundle_variables* (declared in ``databricks.yml`` and
+    listed in SETUP.md), so this mutates in place and returns nothing.
+    """
+
+    def visit(task: dict[str, Any]) -> None:
+        run_job = task.get("run_job_task")
+        if isinstance(run_job, dict):
+            match = _CROSS_BUNDLE_JOB_ID_REF.fullmatch(str(run_job.get("job_id", "")))
+            if match:
+                target = match.group(1)
+                if target not in known_bundle_jobs:
+                    run_job["job_id"] = f"${{var.{target}}}"
+                    cross_bundle_variables[target] = target
+        for_each = task.get("for_each_task")
+        if for_each and isinstance(for_each.get("task"), dict):
+            visit(for_each["task"])
+
+    for task in tasks:
+        visit(task)
 
 
 def _collect_all_task_keys(tasks: list[dict[str, Any]]) -> set[str]:
