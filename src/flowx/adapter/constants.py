@@ -29,6 +29,7 @@ PHASE_PACKAGE: Final[str] = "package"
 
 INPUT_ADF_SOURCE_PATH: Final[str] = "adf_source_path"
 INPUT_ADF_RESOURCE_URL: Final[str] = "adf_resource_url"
+INPUT_AIRFLOW_SOURCE_PATH: Final[str] = "airflow_source_path"
 INPUT_OUTPUT_DIR: Final[str] = "output_dir"
 INPUT_INVENTORY_PATH: Final[str] = "inventory_path"
 INPUT_GLOBAL_PARAMETER_RESOLUTION: Final[str] = "global_parameter_resolution"

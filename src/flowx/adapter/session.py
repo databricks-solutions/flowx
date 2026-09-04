@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from flowx.adapter.constants import (
     INPUT_ADF_RESOURCE_URL,
     INPUT_ADF_SOURCE_PATH,
+    INPUT_AIRFLOW_SOURCE_PATH,
     INPUT_BUNDLE_NAME,
     INPUT_CATALOG,
     INPUT_DATABRICKS_PROFILE,
@@ -240,76 +241,95 @@ class TranslationSession:
         return consolidations
 
 
-_DISCOVER_OPTIONS: tuple[MigrationInputOption, ...] = (
-    MigrationInputOption(
-        option_id=INPUT_ADF_SOURCE_PATH,
-        prompt="Where are the ADF JSON exports?",
-        description=(
+# Per-source description of the source path the discover/convert phases read.
+_SOURCE_PATH_OPTION: dict[str, dict[str, str]] = {
+    "adf": {
+        "option_id": INPUT_ADF_SOURCE_PATH,
+        "prompt": "Where are the ADF JSON exports?",
+        "description": (
             "Unity Catalog volume path (``/Volumes/<catalog>/<schema>/<volume>``) "
             "or a local directory containing the ADF ARM/JSON export."
         ),
-        required=True,
+    },
+    "airflow": {
+        "option_id": INPUT_AIRFLOW_SOURCE_PATH,
+        "prompt": "Where are the Airflow DAG files?",
+        "description": "A DAG ``.py`` file or a local directory of DAG modules to migrate.",
+    },
+}
+
+_OUTPUT_DIR_OPTION = MigrationInputOption(
+    option_id=INPUT_OUTPUT_DIR,
+    prompt="Which migration output directory should flowx use?",
+    description=(
+        "Single shared migration directory used by every phase (default ``./flowx_output``). "
+        "Discover writes ``metadata/inventory.json`` and ``metadata/profile_report.csv`` into it."
     ),
-    MigrationInputOption(
-        option_id=INPUT_ADF_RESOURCE_URL,
-        prompt="ADF resource URL?",
-        description=(
-            "Azure portal URL of the source Data Factory.  Captured for "
-            "traceability and surfaced in the generated bundle README; "
-            "leave blank when the source is exported from a local copy."
-        ),
-        default="",
-        required=False,
-    ),
-    MigrationInputOption(
-        option_id=INPUT_OUTPUT_DIR,
-        prompt="Which migration output directory should flowx use?",
-        description=(
-            "Single shared migration directory used by every phase (default ``./flowx_output``). "
-            "Discover writes ``metadata/inventory.json``, ``metadata/profile_report.csv``, and the "
-            "verbatim ``metadata/<pipeline>.arm.json`` into it."
-        ),
-        default="./flowx_output",
-        required=False,
-    ),
+    default="./flowx_output",
+    required=False,
 )
 
-_CONVERT_OPTIONS: tuple[MigrationInputOption, ...] = (
-    MigrationInputOption(
-        option_id=INPUT_INVENTORY_PATH,
-        prompt="Path to the inventory.json from the discover phase?",
-        description="Inventory produced by the discover phase (under the shared migration dir's metadata/).",
-        default="./flowx_output/metadata/inventory.json",
-        required=False,
-    ),
-    MigrationInputOption(
-        option_id=INPUT_ADF_SOURCE_PATH,
-        prompt="Path to the ADF JSON exports?",
-        description="Same source directory the discover phase consumed; needed for cross-references.",
-        required=True,
-    ),
-    MigrationInputOption(
-        option_id=INPUT_OUTPUT_DIR,
-        prompt="Which migration output directory should flowx use?",
-        description=(
-            "The same shared migration directory the discover phase used (default ``./flowx_output``). "
-            "Convert writes its transient report and IR to the directory's ``.work/`` subfolder."
+
+def _discover_options(source: str) -> tuple[MigrationInputOption, ...]:
+    """Discover-phase input prompts for *source* (source-path prompt varies by source)."""
+    spec = _SOURCE_PATH_OPTION[source]
+    options = [
+        MigrationInputOption(
+            option_id=spec["option_id"], prompt=spec["prompt"], description=spec["description"], required=True
+        )
+    ]
+    if source == "adf":
+        options.append(
+            MigrationInputOption(
+                option_id=INPUT_ADF_RESOURCE_URL,
+                prompt="ADF resource URL?",
+                description=(
+                    "Azure portal URL of the source Data Factory.  Captured for traceability and "
+                    "surfaced in the generated bundle README; leave blank when exported from a local copy."
+                ),
+                default="",
+                required=False,
+            )
+        )
+    options.append(_OUTPUT_DIR_OPTION)
+    return tuple(options)
+
+
+def _convert_options(source: str) -> tuple[MigrationInputOption, ...]:
+    """Convert-phase input prompts for *source*."""
+    spec = _SOURCE_PATH_OPTION[source]
+    options = [
+        MigrationInputOption(
+            option_id=INPUT_INVENTORY_PATH,
+            prompt="Path to the inventory.json from the discover phase?",
+            description="Inventory produced by the discover phase (under the shared migration dir's metadata/).",
+            default="./flowx_output/metadata/inventory.json",
+            required=False,
         ),
-        default="./flowx_output",
-        required=False,
-    ),
-    MigrationInputOption(
-        option_id=INPUT_GLOBAL_PARAMETER_RESOLUTION,
-        prompt="How should factory global parameters be resolved?",
-        description=(
-            "Applies to every pipeline. 'literal' bakes each @pipeline().globalParameters.X value in as a "
-            "literal; 'bundle_variable' emits ${var.X} and declares the global as a DAB bundle variable with "
-            "the factory value as its default, so it can be changed at deploy time."
+        MigrationInputOption(
+            option_id=spec["option_id"],
+            prompt=spec["prompt"],
+            description="Same source the discover phase consumed; needed for cross-references.",
+            required=True,
         ),
-        default="literal",
-        required=False,
-    ),
-)
+        _OUTPUT_DIR_OPTION,
+    ]
+    if source == "adf":
+        options.append(
+            MigrationInputOption(
+                option_id=INPUT_GLOBAL_PARAMETER_RESOLUTION,
+                prompt="How should factory global parameters be resolved?",
+                description=(
+                    "Applies to every pipeline. 'literal' bakes each @pipeline().globalParameters.X value in as a "
+                    "literal; 'bundle_variable' emits ${var.X} and declares the global as a DAB bundle variable "
+                    "with the factory value as its default, so it can be changed at deploy time."
+                ),
+                default="literal",
+                required=False,
+            )
+        )
+    return tuple(options)
+
 
 _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
     MigrationInputOption(
@@ -397,11 +417,18 @@ _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
     ),
 )
 
-_OPTIONS_BY_PHASE: dict[str, tuple[MigrationInputOption, ...]] = {
-    PHASE_DISCOVER: _DISCOVER_OPTIONS,
-    PHASE_CONVERT: _CONVERT_OPTIONS,
-    PHASE_PACKAGE: _PACKAGE_OPTIONS,
-}
+_SUPPORTED_PHASES: frozenset[str] = frozenset({PHASE_DISCOVER, PHASE_CONVERT, PHASE_PACKAGE})
+
+
+def _options_for(phase: str, source: str | None) -> tuple[MigrationInputOption, ...]:
+    """Returns the input options for *phase*; discover/convert need a known source (else ``ValueError``)."""
+    if phase == PHASE_PACKAGE:
+        return _PACKAGE_OPTIONS
+    if source not in _SOURCE_PATH_OPTION:
+        raise ValueError(
+            f"--source is required for the {phase} phase; choose one of: {', '.join(sorted(_SOURCE_PATH_OPTION))}"
+        )
+    return _discover_options(source) if phase == PHASE_DISCOVER else _convert_options(source)
 
 
 class UnknownMigrationPhaseError(ValueError):
@@ -421,21 +448,24 @@ class MigrationInputSession:
 
     Attributes:
         phase: One of ``"discover"``, ``"convert"``, ``"package"``.
+        source: Migration source (``"adf"`` / ``"airflow"``); words the
+            source-path prompt for the discover/convert phases. Required for
+            those phases (there is no default source); unused for ``package``.
     """
 
     phase: str
+    source: str | None = None
     _answers: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validates that *phase* is one of the supported migration phases.
 
         Raises:
-            UnknownMigrationPhaseError: When *phase* is not registered in
-                :data:`_OPTIONS_BY_PHASE`.
+            UnknownMigrationPhaseError: When *phase* is not a supported phase.
         """
-        if self.phase not in _OPTIONS_BY_PHASE:
+        if self.phase not in _SUPPORTED_PHASES:
             raise UnknownMigrationPhaseError(
-                f"Unknown migration phase {self.phase!r}; expected one of {sorted(_OPTIONS_BY_PHASE)}"
+                f"Unknown migration phase {self.phase!r}; expected one of {sorted(_SUPPORTED_PHASES)}"
             )
 
     def pending(self) -> PendingMigrationInputs:
@@ -444,8 +474,12 @@ class MigrationInputSession:
         Returns:
             A :class:`PendingMigrationInputs` with the unanswered
             options for ``self.phase`` in registration order.
+
+        Raises:
+            ValueError: When the discover/convert phase has a missing or
+                unrecognised ``source`` (there is no default source).
         """
-        options = [option for option in _OPTIONS_BY_PHASE[self.phase] if option.option_id not in self._answers]
+        options = [option for option in _options_for(self.phase, self.source) if option.option_id not in self._answers]
         return PendingMigrationInputs(phase=self.phase, options=options)
 
     def answer(self, option_id: str, value: str) -> None:
@@ -457,9 +491,10 @@ class MigrationInputSession:
 
         Raises:
             ValueError: When *option_id* is not a known input for the
-                session's phase.
+                session's phase, or when the discover/convert phase has a
+                missing or unrecognised ``source`` (there is no default source).
         """
-        if not any(option.option_id == option_id for option in _OPTIONS_BY_PHASE[self.phase]):
+        if not any(option.option_id == option_id for option in _options_for(self.phase, self.source)):
             raise ValueError(f"Unknown input option {option_id!r} for phase {self.phase!r}")
         self._answers[option_id] = value
 
@@ -470,10 +505,12 @@ class MigrationInputSession:
             answers: Mapping of option_id to the caller-supplied value.
 
         Raises:
-            ValueError: When any pair references an unknown option.
-                No answers are recorded when the call raises.
+            ValueError: When any pair references an unknown option, or when
+                the discover/convert phase has a missing or unrecognised
+                ``source`` (there is no default source). No answers are
+                recorded when the call raises.
         """
-        known_ids = {option.option_id for option in _OPTIONS_BY_PHASE[self.phase]}
+        known_ids = {option.option_id for option in _options_for(self.phase, self.source)}
         unknown = set(answers) - known_ids
         if unknown:
             raise ValueError(f"Unknown input options for phase {self.phase!r}: {sorted(unknown)}")
@@ -488,9 +525,13 @@ class MigrationInputSession:
             the option's ``default`` value (which may be the empty
             string) is used.  Required options whose answers are
             missing are omitted so the caller can detect them.
+
+        Raises:
+            ValueError: When the discover/convert phase has a missing or
+                unrecognised ``source`` (there is no default source).
         """
         collected: dict[str, str] = {}
-        for option in _OPTIONS_BY_PHASE[self.phase]:
+        for option in _options_for(self.phase, self.source):
             if option.option_id in self._answers:
                 collected[option.option_id] = self._answers[option.option_id]
             elif option.default is not None:

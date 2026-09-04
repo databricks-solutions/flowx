@@ -1,8 +1,16 @@
 # flowx
 
-ADF to Databricks Lakeflow Jobs translator, delivered as agent skills.
+Orchestrator-to-Databricks Lakeflow Jobs translator, delivered as agent skills.
 
-flowx converts Azure Data Factory (ADF) pipeline definitions into Databricks Lakeflow Jobs packaged as Declarative Automation Bundles (DABs). It deterministically translates known activity types and falls back to agentic (LLM-assisted) translation for complex or rare types. flowx runs as a set of [agent skills](skills/) usable from Databricks Genie Code, Claude Code, or any tool that supports the Agent Skills standard.
+flowx converts a source orchestrator's pipelines — **Azure Data Factory (ADF)** or **Apache
+Airflow** — into Databricks Lakeflow Jobs packaged as Declarative Automation Bundles (DABs). It
+deterministically translates known activity/operator types and falls back to agentic (LLM-assisted)
+translation for complex or rare types. flowx runs as a set of [agent skills](skills/) usable from
+Databricks Genie Code, Claude Code, or any tool that supports the Agent Skills standard.
+
+Both sources emit the same source-neutral Pipeline IR, so the convert-configuration and package
+phases are shared; only discovery and translation are source-specific. Pick the source with
+`--source {adf,airflow}` (required for discover/convert; package is source-independent).
 
 ## Architecture
 
@@ -10,25 +18,25 @@ flowx converts Azure Data Factory (ADF) pipeline definitions into Databricks Lak
                          flowx Pipeline
                          ==================
 
-  ADF JSON (UC Volumes / Workspace)
+  ADF ARM/JSON (UC Volumes / Workspace)   |   Airflow DAG .py files
+                          \               |              /
+                           v              v             v
+  +---------------------------------------------------------------+
+  |  1. DISCOVER   sources/<adf|airflow>/  -> metadata/inventory.json
+  |                (ADF: ARM/JSON parse; Airflow: static ast parse)
+  +---------------------------------------------------------------+
         |
         v
-  +------------------+
-  |  1. DISCOVER     |    Parse ADF ARM/JSON exports
-  |  adf_loader.py   | -> Typed AST -> metadata/inventory.json
-  +------------------+
+  +---------------------------------------------------------------+
+  |  2. CONVERT    sources/<adf|airflow>/  -> shared Pipeline IR
+  |                (deterministic mappings + agentic gaps)
+  +---------------------------------------------------------------+
         |
         v
-  +------------------+
-  |  2. CONVERT      |    Registry dispatch + topological sort
-  |  engine.py       | -> Pipeline IR (deterministic + agentic gaps)
-  +------------------+
-        |
-        v
-  +------------------+
-  |  3. PACKAGE      |    IR -> DAB YAML + notebooks + setup scripts
-  |  dab_writer.py   | -> Deployable DABs project
-  +------------------+
+  +---------------------------------------------------------------+
+  |  3. PACKAGE    bundler/dab_writer.py (source-independent)
+  |                IR -> DAB YAML + notebooks + setup scripts
+  +---------------------------------------------------------------+
         |
         v
   databricks bundle validate / deploy
@@ -88,7 +96,7 @@ Run the end-to-end migration:
 Or run individual phases:
 
 ```
-/flowx:flowx-discover    # Parse ADF JSON, produce inventory + complexity report
+/flowx:flowx-discover    # Parse the source (ADF JSON / Airflow DAGs), produce inventory + complexity report
 /flowx:flowx-convert     # Deterministic + agentic translation
 /flowx:flowx-package     # Generate DABs project
 ```
@@ -160,13 +168,45 @@ agent using LLM-assisted reasoning from the activity's ARM JSON.
 | Script | LLM-assisted (agentic) |
 | Until | LLM-assisted (agentic) |
 
+## Supported Airflow Operators
+
+The Airflow source parses DAG `.py` modules **statically** (via `ast`, no Airflow install or DAG
+execution) and maps ~35 operator/sensor families to the shared IR. Highlights:
+
+- **Compute / scripts** — `PythonOperator` (callable → runnable notebook with transitive deps),
+  `BashOperator` / `SSHOperator` (incl. `spark-submit` lift), `SparkSubmitOperator`, the Databricks
+  provider operators, and SQL operators (`DatabricksSql*`, `SQLExecuteQueryOperator`, `HiveOperator`,
+  …) → `sql_task`.
+- **TaskFlow API** — `@dag` / `@task`; implicit XCom data flow lowers to `dbutils.jobs.taskValues`.
+  `@task.expand([literal])` → `for_each_task`; non-literal / `.partial().expand()` / `@task_group` →
+  a linked placeholder notebook that raises `NotImplementedError`.
+- **Sensors** — file/table/time sensors → job triggers or polling notebooks; `ExternalTaskSensor` →
+  cross-DAG wait; Http/Python/DateTime → polling tasks.
+- **dbt** — dbt CLI operators and astronomer-cosmos `DbtDag` / `DbtTaskGroup` → a dbt-factory job
+  (static per-node explosion by default, or PyDABs via `--dbt-mode pydabs`).
+- **Scheduling & semantics** — cron → Quartz, `timedelta` → periodic, `trigger_rule` → `run_if`,
+  `params={...}` → job parameters, `>>` / `<<` / `set_upstream` / TaskGroup edges.
+
+Operators without a deterministic mapping become a failing placeholder and are recorded in
+`gaps.json` for review. Eligible leaf gaps can use the fingerprint-bound resolver backed by the pinned [`airflow-to-dabs`](https://github.com/park-peter/airflow-to-dabs/tree/main/providers/flowx-gap-resolver) provider profile; flowx retains ownership of parsing, graph identity, policy, IR, and packaging. Full matrix:
+[`skills/flowx-convert/sources/airflow-coverage.md`](skills/flowx-convert/sources/airflow-coverage.md).
+
+Airflow discovery independently audits DAG declarations, task candidates, dependency declarations,
+DAG settings, mapped calls, and operator arguments before comparing them with captured IR. An
+included DAG is `verified` when every audited construct has a proven translation,
+`verified_with_gaps` when every unsupported construct is linked to a runnable-failure placeholder,
+or `failed` when reconciliation finds unexplained loss. Failed reconciliation exits nonzero and
+blocks package writes. `--exclude-dag <dag_id>` is repeatable; excluded DAGs emit no Job but remain
+visible with zero translated activities in inventory and coverage reporting. This guarantee applies
+to the supported static subset; flowx never imports or executes DAG modules.
+
 ## How It Works
 
 ### Phase 1: Discover
-Reads ADF JSON definitions from Unity Catalog volumes (or a `/Workspace` Git folder), normalizes ARM template format, parses into typed AST nodes, and classifies each activity as deterministic, agentic, or unsupported. Produces `metadata/inventory.json` and a per-pipeline complexity report at `metadata/profile_report.csv`.
+Parses the source into typed nodes and classifies each activity/operator as deterministic, agentic, or unsupported — ADF JSON from Unity Catalog volumes (or a `/Workspace` Git folder, normalizing ARM template format), or Airflow DAG `.py` modules read statically with `ast`. Airflow inventory includes audited/deterministic/agentic/failed/excluded counts, reconciliation status, stable finding fingerprints, translation-path coverage, and deterministic coverage. Produces `metadata/inventory.json` and a per-pipeline complexity report at `metadata/profile_report.csv`.
 
 ### Phase 2: Convert
-Applies deterministic translators via registry dispatch, resolves dependencies through topological sort, and threads immutable `TranslationContext` through control-flow visitors. Agentic gaps are flagged for LLM-assisted translation. Produces Pipeline IR.
+Applies deterministic translators (ADF activity registry / Airflow operator mapping), resolves dependencies, and records unresolved gaps. ADF supports its guided agentic translation workflow. Airflow supports a fingerprint-bound, explicitly reviewed leaf-gap workflow whose constrained provider output is replayed against an immutable deterministic baseline before packaging. Produces the shared Pipeline IR consumed unchanged by the package phase.
 
 ### Phase 3: Package
 Converts Pipeline IR into a deployable DABs project: `databricks.yml`, per-job YAML resource files, generated Python notebooks, and setup scripts for UC volumes, secrets, and connections.
@@ -180,7 +220,7 @@ flowx_output/
   databricks.yml              # Bundle configuration (package)
   resources/
     jobs/
-      <pipeline_name>.yml     # One job per ADF pipeline
+      <pipeline_name>.yml     # One Job per included ADF pipeline or Airflow DAG
   src/
     notebooks/
       <pipeline_name>/
@@ -209,11 +249,12 @@ for deployment (SDK notebook or CLI script) and Genie Code registration.
 ## Development
 
 ```bash
-make dev          # Install dependencies (uses uv)
-make test         # Run unit tests
-make integration  # Run integration tests
-make fmt          # Format + lint (ruff + mypy)
-make clean        # Remove build artifacts
+make dev               # Install dependencies (uses uv)
+make test              # Run unit tests
+make integration       # Run integration tests (excludes the live-Azure suite; gates CI)
+make integration-live  # Also run tests needing live ADF access (az login + factory access)
+make fmt               # Format + lint (ruff + mypy)
+make clean             # Remove build artifacts
 ```
 
 ### Prerequisites

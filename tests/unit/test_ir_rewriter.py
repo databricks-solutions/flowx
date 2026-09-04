@@ -15,7 +15,7 @@ from flowx.models.ir import (
     SwitchCase,
     WebActivity,
 )
-from flowx.parser.ir_rewriter import rewrite_pipeline_expressions
+from flowx.sources.adf.ir_rewriter import rewrite_pipeline_expressions
 
 
 def _base(task_key: str, name: str | None = None) -> dict[str, object]:

@@ -8,7 +8,7 @@ from flowx.models.adf_ast import (
     AdfDefinitions,
     TranslationStrategy,
 )
-from flowx.parser.adf_loader import (
+from flowx.sources.adf.loader import (
     AGENTIC_TYPES,
     DETERMINISTIC_TYPES,
     _find_arm_parameters_file,
@@ -449,7 +449,7 @@ class TestClearStaleOutputs:
         assert not (tmp_path / "WARNINGS.md").exists()
 
     def test_preserves_unrelated_files(self, tmp_path):
-        """Only orchestra-managed entries are removed; unrelated files stay put."""
+        """Only flowx-managed entries are removed; unrelated files stay put."""
         (tmp_path / "notes.txt").write_text("keep me", encoding="utf-8")
         (tmp_path / "user_data").mkdir()
         (tmp_path / "user_data" / "keep.csv").write_text("a,b", encoding="utf-8")
@@ -460,6 +460,6 @@ class TestClearStaleOutputs:
         assert (tmp_path / "user_data" / "keep.csv").exists()
 
     def test_idempotent_on_empty_dir(self, tmp_path):
-        """Clearing a directory with no orchestra artifacts is a no-op (no error)."""
+        """Clearing a directory with no flowx artifacts is a no-op (no error)."""
         clear_stale_outputs(tmp_path)
         assert list(tmp_path.iterdir()) == []

@@ -258,13 +258,13 @@ class TestGenerateLookupNotebook:
                 "container": "configext",
                 "folder_path": "lookups",
                 "file_name": "tables.json",
-                "linked_service_url": "https://datahub01textcfdls.dfs.core.windows.net",
+                "linked_service_url": "https://examplelake.dfs.core.windows.net",
             },
         )
         content = generate_lookup_notebook(activity)
         _assert_valid_python(content, "read_cfg (abfss rewrite)")
-        assert "abfss://configext@datahub01textcfdls.dfs.core.windows.net" in content
-        assert "https://datahub01textcfdls" not in content
+        assert "abfss://configext@examplelake.dfs.core.windows.net" in content
+        assert "https://examplelake" not in content
 
     def test_file_source_lookup_emits_spark_read(self):
         """Change lookup-file-dataset-support (P0): JsonSource + firstRowOnly=False."""
