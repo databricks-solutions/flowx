@@ -12,7 +12,7 @@ databricks-sdk==0.110.0
     # via databricks-flowx
 google-auth==2.53.0
     # via databricks-sdk
-idna==3.15
+idna==3.19
     # via requests
 protobuf==6.33.6
     # via databricks-sdk
