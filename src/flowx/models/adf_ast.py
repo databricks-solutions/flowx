@@ -160,10 +160,15 @@ class AdfActivity:
     raw: dict[str, Any] | None = None
 
     def switch_child_activities(self) -> list[AdfActivity]:
-        """Flat list of all Switch children (every case's activities + defaults).
+        """Gets a flat list of all child activities of a Switch activity.
+        Includes every case's activities and defaults.
 
-        Empty for non-Switch activities. Used by inventory/lineage walkers that
-        only need to descend into children, not preserve case grouping.
+        Note:
+            Empty for non-Switch activities. Used by inventory/lineage walkers that
+            only need to descend into children, not preserve case grouping.
+
+        Returns:
+            A flat list of all child activities.
         """
         children: list[AdfActivity] = []
         if self.switch_cases:

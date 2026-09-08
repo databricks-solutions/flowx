@@ -346,7 +346,7 @@ class TestSwitchNesting:
     def test_lineage_walk_reaches_executepipeline_inside_switch(self):
         """The ExecutePipeline nested in a Switch case is reachable by the activity
         walker -- i.e. its control edge is no longer dropped."""
-        from flowx.parser.adf_loader import _walk_activities
+        from flowx.sources.adf.loader import _walk_activities
 
         pipeline = _parse_pipeline_json(_switch_pipeline_json())
         walked = {a.name for a in _walk_activities(pipeline.activities)}
