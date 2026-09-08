@@ -138,6 +138,7 @@ def write_bundle(
         pipeline_variable_declarations.setdefault(
             "warehouse_id", {"description": "SQL warehouse id for sql_task queries"}
         )
+
     hoisted_global_variables = _collect_hoisted_global_variables(workflow)
     extra_variable_declarations = {**pipeline_variable_declarations, **hoisted_global_variables}
 

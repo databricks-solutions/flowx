@@ -68,6 +68,8 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
         "migration_status": pipeline.migration_status,
         "audit": dict(pipeline.audit),
     }
+    if pipeline.bundle_variables:
+        result["bundle_variables"] = pipeline.bundle_variables
     if pipeline.description is not None:
         result["description"] = pipeline.description
     if pipeline.timeout_seconds is not None:
@@ -76,8 +78,6 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
         result["email_notifications"] = {
             event: list(recipients) for event, recipients in pipeline.email_notifications.items()
         }
-    if pipeline.bundle_variables:
-        result["bundle_variables"] = pipeline.bundle_variables
     if pipeline.translation_configuration is not None:
         result["translation_configuration"] = configuration_to_dict(pipeline.translation_configuration)
     return result

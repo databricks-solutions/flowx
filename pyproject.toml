@@ -30,7 +30,7 @@ dependencies = [
 # Install with `pip install -e .[mcp]` to host the flowx MCP tools
 # (locally over stdio, or as a streamable-HTTP server / Databricks App).
 mcp = [
-    "mcp>=1.12",
+    "mcp>=1.12,<2",
     "uvicorn>=0.30",
     "starlette>=0.40",
 ]
