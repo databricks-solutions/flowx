@@ -386,6 +386,8 @@ def parse_activity(data: dict[str, Any]) -> AdfActivity:
     if_true_activities: list[AdfActivity] | None = None
     if_false_activities: list[AdfActivity] | None = None
     child_activities: list[AdfActivity] | None = None
+    switch_cases: dict[str, list[AdfActivity]] | None = None
+    switch_default_activities: list[AdfActivity] | None = None
 
     if type_properties:
         raw_if_true = type_properties.get("ifTrueActivities")
@@ -397,6 +399,22 @@ def parse_activity(data: dict[str, Any]) -> AdfActivity:
         raw_children = type_properties.get("activities")
         if raw_children:
             child_activities = [parse_activity(raw_activity) for raw_activity in raw_children]
+        # Switch: cases[].activities (keyed by case value) + defaultActivities. Without
+        # this, a Switch's nested activities never enter the AST, so inventory counts and
+        # lineage edges silently drop everything inside a Switch case.
+        raw_cases = type_properties.get("cases")
+        if raw_cases:
+            parsed_cases: dict[str, list[AdfActivity]] = {}
+            for raw_case in raw_cases:
+                case_value = str(raw_case.get("value", ""))
+                case_activities = [parse_activity(raw_activity) for raw_activity in raw_case.get("activities", [])]
+                if case_activities:
+                    parsed_cases[case_value] = case_activities
+            if parsed_cases:
+                switch_cases = parsed_cases
+        raw_default = type_properties.get("defaultActivities")
+        if raw_default:
+            switch_default_activities = [parse_activity(raw_activity) for raw_activity in raw_default]
 
     return AdfActivity(
         name=name,
@@ -410,6 +428,8 @@ def parse_activity(data: dict[str, Any]) -> AdfActivity:
         if_true_activities=if_true_activities,
         if_false_activities=if_false_activities,
         activities=child_activities,
+        switch_cases=switch_cases,
+        switch_default_activities=switch_default_activities,
         raw=data,
     )
 
@@ -764,6 +784,9 @@ def _classify_activities(
             _classify_activities(pipeline_name, activity.if_false_activities, items)
         if activity.activities:
             _classify_activities(pipeline_name, activity.activities, items)
+        switch_children = activity.switch_child_activities()
+        if switch_children:
+            _classify_activities(pipeline_name, switch_children, items)
 
 
 # ---------------------------------------------------------------------------
@@ -819,7 +842,12 @@ def _walk_activities(activities: list[AdfActivity]):
     """Yields every activity in *activities*, descending into container children."""
     for activity in activities:
         yield activity
-        for child in (activity.if_true_activities, activity.if_false_activities, activity.activities):
+        for child in (
+            activity.if_true_activities,
+            activity.if_false_activities,
+            activity.activities,
+            activity.switch_child_activities(),
+        ):
             if child:
                 yield from _walk_activities(child)
 

@@ -621,6 +621,9 @@ class Pipeline:
         audit: Source-audit counts and transformation ledger.
         bundle_variables: DAB bundle-variable declarations (name -> ``{"description", "default"}``)
             for factory globals hoisted under the ``bundle_variable`` resolution policy.
+        reconciliation_status: Source-audit result for this pipeline.
+        migration_status: Whether the pipeline is included or explicitly excluded.
+        audit: Source-audit counts and transformation ledger.
     """
 
     name: str
