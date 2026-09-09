@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from flowx.adapter.__main__ import main as adapter_cli_main
-from flowx.mcp import runner as mcp_runner
-from flowx.mcp.server import _cmd_enrich
-from flowx.models.adf_ast import (
+pytest.importorskip("mcp")
+
+from flowx.adapter.__main__ import main as adapter_cli_main  # noqa: E402
+from flowx.mcp import runner as mcp_runner  # noqa: E402
+from flowx.mcp.server import _cmd_enrich  # noqa: E402
+from flowx.models.adf_ast import (  # noqa: E402
     Insights,
     LineageEdgeRef,
     PipelineInsight,
@@ -18,16 +20,16 @@ from flowx.models.adf_ast import (
     RecommendedPattern,
     SystemRecommendation,
 )
-from flowx.parser.adf_loader import (
-    _inventory_to_dict,
-    build_inventory,
-    load_adf_definitions,
-)
-from flowx.parser.pipeline_insights import (
+from flowx.parser.pipeline_insights import (  # noqa: E402
     enrich_inventory,
     load_insights,
     merge_into_inventory,
     validate_insights,
+)
+from flowx.sources.adf.loader import (  # noqa: E402
+    _inventory_to_dict,
+    build_inventory,
+    load_adf_definitions,
 )
 
 

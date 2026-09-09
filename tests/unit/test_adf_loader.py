@@ -515,7 +515,7 @@ class TestLineageModels:
 
 class TestInventorySerialization:
     def test_inventory_dict_has_lineage(self, adf_definitions):
-        from flowx.parser.adf_loader import _inventory_to_dict, build_inventory
+        from flowx.sources.adf.loader import _inventory_to_dict, build_inventory
 
         inv = build_inventory(adf_definitions)
         d = _inventory_to_dict(inv, source_dir="/tmp/src")
@@ -524,7 +524,7 @@ class TestInventorySerialization:
         assert isinstance(d["lineage"]["data_edges"], list)
 
     def test_lineage_edges_serialize_expected_keys(self, adf_definitions):
-        from flowx.parser.adf_loader import _inventory_to_dict, build_inventory
+        from flowx.sources.adf.loader import _inventory_to_dict, build_inventory
 
         inv = build_inventory(adf_definitions)
         d = _inventory_to_dict(inv, source_dir="/tmp/src")
@@ -535,7 +535,7 @@ class TestInventorySerialization:
 
     def test_empty_inventory_emits_empty_lists_not_null(self):
         from flowx.models.adf_ast import AdfDefinitions
-        from flowx.parser.adf_loader import _inventory_to_dict, build_inventory
+        from flowx.sources.adf.loader import _inventory_to_dict, build_inventory
 
         defs = AdfDefinitions(pipelines=[], datasets={}, linked_services={}, triggers=[])
         inv = build_inventory(defs)

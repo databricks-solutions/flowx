@@ -238,8 +238,9 @@ def test_write_results_executes_create_schema_check_then_insert(tmp_path: Path):
     stmts = client.statement_execution.statements
     assert len(stmts) == 3
     assert stmts[0][0] == "wh1" and stmts[0][1].startswith("CREATE TABLE IF NOT EXISTS")
-    assert stmts[1][1].startswith("INSERT INTO cat.sch.tbl")
-    assert run_id in stmts[1][1]
+    assert stmts[1][1] == "SHOW COLUMNS IN cat.sch.tbl"
+    assert stmts[2][1].startswith("INSERT INTO cat.sch.tbl")
+    assert run_id in stmts[2][1]
 
 
 def _base_row(pipeline: str = "p1", *, has_insights: bool = False) -> dict:

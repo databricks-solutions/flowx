@@ -58,7 +58,18 @@ RESULTS_COLUMNS: tuple[tuple[str, str], ...] = (
     *((col, _METRIC_SQL_TYPES[col]) for col in COVERAGE_METRIC_COLUMNS),
 )
 
-_STRING_METRICS: frozenset[str] = frozenset({"pipeline", "complexity_size"})
+_STRING_METRICS: frozenset[str] = frozenset(
+    {
+        "pipeline",
+        "agentic_resolution_outcomes",
+        "agentic_provider_version",
+        "reconciliation_status",
+        "migration_status",
+        "finding_fingerprints",
+        "complexity_size",
+    }
+)
+_FLOAT_METRICS: frozenset[str] = frozenset({"coverage_pct", "deterministic_coverage_pct", "code_attached_coverage_pct"})
 _BOOL_METRICS: frozenset[str] = frozenset({"has_insights"})
 
 
@@ -73,7 +84,7 @@ def _metric_value_sql(column: str, value: Any) -> str:
         return _sql_str(value)
     if column in _BOOL_METRICS:
         return "TRUE" if value else "FALSE"
-    if column == "coverage_pct":
+    if column in _FLOAT_METRICS:
         return repr(float(value or 0))
     return str(int(value or 0))
 

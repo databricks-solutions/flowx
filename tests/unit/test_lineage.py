@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from flowx.models.adf_ast import AdfActivity, AdfDataset, AdfDatasetReference, AdfDefinitions, AdfPipeline
-from flowx.parser.adf_loader import load_adf_definitions
 from flowx.parser.lineage import build_lineage, read_execute_pipeline_ref
+from flowx.sources.adf.loader import load_adf_definitions
 
 
 def _ep(name: str, callee: str, *, wait: bool = True) -> AdfActivity:
@@ -89,6 +89,11 @@ class TestReadExecutePipelineRef:
     def test_defaults_wait_true_and_empty_name(self):
         act = AdfActivity(name="Run", type="ExecutePipeline", type_properties={})
         assert read_execute_pipeline_ref(act) == ("", True)
+
+    def test_non_dict_pipeline_ref_is_stringified(self):
+        # ADF normally exports a dict ref, but a bare string must not crash the reader.
+        act = AdfActivity(name="Run", type="ExecutePipeline", type_properties={"pipeline": "child"})
+        assert read_execute_pipeline_ref(act) == ("child", True)
 
 
 class TestDataEdges:
