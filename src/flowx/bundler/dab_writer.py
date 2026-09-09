@@ -1599,11 +1599,7 @@ def _backfill_task_value_dependencies(tasks: list[dict[str, Any]]) -> int:
         sibling_keys.discard("")
         for task in scope_tasks:
             self_key = task.get("task_key", "")
-            existing = {
-                dep.get("task_key")
-                for dep in (task.get("depends_on") or [])
-                if isinstance(dep, dict)
-            }
+            existing = {dep.get("task_key") for dep in (task.get("depends_on") or []) if isinstance(dep, dict)}
             for producer in sorted(_referenced_producers(task)):
                 if producer == self_key or producer in existing or producer not in sibling_keys:
                     continue
