@@ -238,16 +238,24 @@ system*. Author that judgment now and merge it into `inventory.json` under an
 1. **Read** the just-written `inventory.json` (`pipelines`, `lineage`, `summary`)
    and `profile_report.csv`. **Then, before authoring, deep-dive the source.**
    The inventory is a deterministic skeleton (types, strategy, control edges); the
-   *why* and *how* — queries, Switch conditions, notebook paths, dataset
-   parameters — live only in the verbatim ARM. The `metadata/` folder holds one
-   `*.arm.json` file per pipeline; each file is a **flat single-pipeline object**
-   shaped `{"name": "<pipeline>", "properties": {"activities": [...], ...}}` (no
-   `resources[]` array, no top-level `type`). To inspect a pipeline, **glob
-   `metadata/*.arm.json` and match on each file's top-level `"name"` field** — do
-   **not** construct a filename from the pipeline name (names are slugified and
-   lossy, so a built path can miss or collide). The activities are under
-   `properties.activities` (recurse into nested `ForEach`/`If`/`Switch` bodies).
-   Read the ARM for any pipeline you write an insight or relationship about.
+   *why* and *how* — queries, branch conditions, notebook paths, parameters — live
+   only in the verbatim source artifacts. **Which artifact depends on `--source`:**
+   - **ADF** — the `metadata/` folder holds one `*.arm.json` file per pipeline;
+     each is a **flat single-pipeline object** shaped `{"name": "<pipeline>",
+     "properties": {"activities": [...], ...}}` (no `resources[]` array, no
+     top-level `type`). To inspect a pipeline, **glob `metadata/*.arm.json` and
+     match on each file's top-level `"name"` field** — do **not** construct a
+     filename from the pipeline name (names are slugified and lossy, so a built
+     path can miss or collide). Activities are under `properties.activities`
+     (recurse into nested `ForEach`/`If`/`Switch` bodies).
+   - **Airflow** — the inventory is built from the parsed DAGs; the *why* and *how*
+     live in the **DAG source** (the `.py` files under the `--source-path` you
+     discovered from) — task callables, operator arguments, templated params, and
+     `set_upstream` / `>>` dependencies. Read the DAG module for any pipeline you
+     write about; recurse into `TaskGroup`s and dynamically mapped (`.expand`)
+     tasks.
+
+   Read the source for any pipeline you write an insight or relationship about.
 2. **Author** an `insights` object:
    - `overview` — the whole factory as one system, plus the single biggest
      migration steer.
@@ -318,10 +326,13 @@ system*. Author that judgment now and merge it into `inventory.json` under an
        **verify** a connector's status in the docs/release notes (e.g. the Lakeflow
        Connect SQL Server connector) rather than assuming GA.
 
-       **Recognized-pattern vocabulary — a reference menu, NOT an allowlist.** Common
-       ADF→Databricks target patterns with **current** product names. Use it to stay
-       grounded and consistent, but reach past it whenever the holistic view calls for a
-       better or newer fit:
+       **Recognized-pattern vocabulary — a reference menu, NOT an allowlist.** Target
+       patterns with **current** product names; use it to stay grounded and consistent,
+       but reach past it whenever the holistic view calls for a better or newer fit. The
+       **target (right side) is source-neutral Databricks**; the **left side is keyed by
+       `--source`** — use the table matching the source you discovered from.
+
+       *ADF constructs → Databricks:*
 
        | Pipeline does… | Simplifying target — `simplification_pattern: true` (rank first) | Fallback — `false` |
        |---|---|---|
@@ -337,6 +348,20 @@ system*. Author that judgment now and merge it into `inventory.json` under an
        | Custom logging / observability tier | **system tables (`system.lakeflow.*`) + native job notifications + AI/BI dashboard** | — |
        | Run-state / control tables | Lakeflow job & task run state + `dbutils.jobs.taskValues` | — |
        | Clone family (many near-identical pipelines) | one **parameterized Lakeflow Job** invoked N times | — |
+
+       *Airflow operators → Databricks:*
+
+       | DAG uses… | Simplifying target — `simplification_pattern: true` (rank first) | Fallback — `false` |
+       |---|---|---|
+       | DB extract via `MsSqlOperator` / `JdbcOperator` / custom hook | **Lakeflow Connect** managed connector (change-tracking/CDC → Delta) | JDBC read + `MERGE INTO` |
+       | Incremental load w/ XCom or Variable watermark | **Lakeflow Declarative Pipelines `AUTO CDC`** | Delta `MERGE INTO` + `dbutils.jobs.taskValues` |
+       | File sensor + load (`*FileSensor` → transform) | **Auto Loader** (`cloudFiles`, file-notification mode) | — |
+       | `SparkSubmitOperator` / `DatabricksSubmitRunOperator` | native **Lakeflow Job** task (notebook / JAR / Python) | — |
+       | `PythonOperator` glue / bespoke script | notebook or Python task in a **Lakeflow Job** | — |
+       | `TriggerDagRunOperator` / `ExternalTaskSensor` fan-out | **Lakeflow Jobs** run-job task + job parameters | — |
+       | Dynamic task mapping (`.expand`) over a list | **Lakeflow Jobs** for-each task | — |
+       | `BashOperator` shelling out to a script | native task (notebook / Python) driven by job parameters | — |
+       | Custom logging / observability via XComs or a side table | **system tables (`system.lakeflow.*`) + native job notifications + AI/BI dashboard** | — |
 
        **Emit current names, not legacy ones:** Lakeflow Jobs (was Databricks
        Workflows), Lakeflow Declarative Pipelines (was Delta Live Tables/DLT), `AUTO CDC`
@@ -407,7 +432,8 @@ system*. Author that judgment now and merge it into `inventory.json` under an
        deterministic phase did **not** record as an edge, by any mechanism. Set
        `edge_identity` to a short descriptor of what couples the two pipelines
        (e.g. the shared table/asset, or the nature of the dependency), and **you
-       must** supply `evidence` (the concrete ARM observation behind it) and
+       must** supply `evidence` (the concrete source observation behind it — the ARM
+       activity for ADF, the DAG code for Airflow) and
        `confidence` (`high` / `medium` / `low`). Report only couplings you can
        actually evidence; do not invent them.
 
@@ -421,7 +447,7 @@ system*. Author that judgment now and merge it into `inventory.json` under an
 
      **Inferred covers several sub-cases — do not restrict it to any one:**
      - *Data-in-code:* one pipeline's notebook writes a table another's notebook
-       reads (no ADF dataset, so `data_edges` never saw it).
+       reads (no declared dataset, so `data_edges` never saw it).
      - *Ordering dependency:* a producer→consumer hand-off expressed only as
        sibling `dependsOn` inside a parent orchestrator, which the deterministic
        phase did not emit as a cross-pipeline edge.

@@ -12,7 +12,7 @@ pytest.importorskip("mcp")
 from flowx.adapter.__main__ import main as adapter_cli_main  # noqa: E402
 from flowx.mcp import runner as mcp_runner  # noqa: E402
 from flowx.mcp.server import _cmd_enrich  # noqa: E402
-from flowx.models.adf_ast import (  # noqa: E402
+from flowx.models.insights import (  # noqa: E402
     Insights,
     LineageEdgeRef,
     PipelineInsight,
