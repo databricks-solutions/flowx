@@ -38,6 +38,10 @@ Read `<output_dir>/metadata/inventory.json` (`"source": "airflow"`). Each pipeli
 tasks with a `strategy`. `metadata/profile_report.csv` carries one row per DAG (`pipeline`,
 `activities`, `complexity_size`).
 
+Airflow inventories do **not** yet carry a `lineage` block (deterministic cross-pipeline lineage is
+ADF-only today), so in the shared insights step cross-DAG relationships use **`inferred`** edges
+rather than `control` / `data` annotations.
+
 ## Step 4 — Present the summary
 
 ```
@@ -49,6 +53,11 @@ Total tasks:        8
   Agentic:          1
 Coverage:           87.5%
 ```
+
+Then, after the shared insights step has enriched `inventory.json`, surface the authored judgment so
+the user sees *what the DAGs do*, not just coverage numbers: print the factory `overview`, and for
+each `pipeline_insights` entry its `pattern_name` / `intent` and its top `recommended_patterns`
+(ranked simplification-first).
 
 ## Step 5 — Detail agentic tasks
 

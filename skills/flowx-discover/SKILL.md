@@ -2,8 +2,9 @@
 name: flowx-discover
 description: >
   Parse a source orchestrator's pipeline definitions (Azure Data Factory, Apache Airflow) into a
-  typed inventory that classifies every task as deterministic, agentic, or unsupported. Phase 1 of
-  the flowx migration workflow; routes to a source-specific guide.
+  typed inventory that classifies every task as deterministic, agentic, or unsupported, then author
+  agentic insights (intent, ranked target patterns, cross-pipeline relationships) over it. Phase 1
+  of the flowx migration workflow; routes to a source-specific guide.
 triggers:
   - "discover pipelines"
   - "discover ADF"
@@ -58,187 +59,36 @@ Both paths are the same across sources; only `--source` and the source path diff
   `--source-path` is the generic flag (each source also accepts its own alias, e.g.
   `--adf-source-path`); both normalise to the phase's `--source-dir`. `--source` is required.
 
-## Workflow
+## Output artifacts (shared across sources)
 
-Follow these steps in order:
+All under the shared `<output_dir>/metadata/` folder:
 
-### Step 1 — Determine the ADF source path
-
-Ask the user for the location of their ADF JSON exports. Accept either:
-- A Unity Catalog volume path (e.g., `/Volumes/main/default/adf_export`)
-- A local directory path (e.g., `./adf_export/` or `/tmp/adf_json/`)
-
-The directory should contain subdirectories or files for:
-- `pipeline/` or `pipelines/` — pipeline definition JSON files
-- `dataset/` or `datasets/` — dataset definition JSON files (optional)
-- `linkedService/` or `linked_services/` — linked service JSON files (optional)
-- `trigger/` or `triggers/` — trigger definition JSON files (optional)
-
-### Step 2 — Download from UC volumes if needed
-
-If the source path starts with `/Volumes/`, the files live in a Unity Catalog volume and must be downloaded to a local temp directory first.
-
-Use the `databricks-execution-compute` skill to run the following on the Databricks workspace:
-
-```python
-import os, json, shutil, tempfile
-
-volume_path = "<user_provided_volume_path>"
-local_dir = tempfile.mkdtemp(prefix="adf_ingest_")
-
-# Copy from volume to local
-for root, dirs, files in os.walk(volume_path):
-    for f in files:
-        if f.endswith(".json"):
-            src = os.path.join(root, f)
-            rel = os.path.relpath(src, volume_path)
-            dst = os.path.join(local_dir, rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
-
-print(f"Downloaded ADF files to: {local_dir}")
-```
-
-Alternatively, use the Databricks CLI:
-```bash
-databricks fs cp -r "dbfs:<volume_path>" "<local_temp_dir>" --overwrite
-```
-
-Set the working source directory to the local temp path for subsequent steps.
-
-### Step 3 — Run the deterministic parser
-
-Run the discover phase via the adapter's unified phase runner (recommended):
-
-```bash
-"$PY" -m flowx.adapter discover \
-  --adf-source-path <source_path> \
-  --output-dir <output_dir> \
-  [--pipeline <pipeline_name>]
-```
-
-`--adf-source-path` is accepted as an alias of `--source-dir` (it matches the
-`adf_source_path` input option). This forwards to, and is equivalent to, running
-the loader directly:
-
-```bash
-"$PY" -m flowx.parser.adf_loader \
-  --source-dir <source_path> --output-dir <output_dir> [--pipeline <pipeline_name>]
-```
-
-Where:
-- `<plugin_dir>` is the root of the flowx plugin (the directory containing `src/`)
-- `<source_path>` is the local directory containing ADF JSON files
-- `<output_dir>` is the **single shared migration output directory** used by all three phases
-  (default: `./flowx_output`). Discover writes its artifacts into the `metadata/` subfolder.
-- `<pipeline_name>` (optional) — when provided, filters to only the named pipeline. When omitted, all pipelines in the source directory are included.
-
-**Always pass `--pipeline` when the user has specified a specific pipeline to migrate.** This ensures the inventory and all downstream phases are scoped to only that pipeline.
-
-This produces, under `<output_dir>/metadata/`:
-- `inventory.json` — the classified activity inventory
-- `profile_report.csv` — one row per pipeline with a complexity assessment (see Step 4b)
-- `<pipeline>.arm.json` — the verbatim original ADF/ARM source for each pipeline (provenance)
-
-### Step 4 — Read and validate the inventory
-
-Read the generated `<output_dir>/metadata/inventory.json` file. It has this structure:
-
-```json
-{
-  "source_dir": "/path/to/adf/json",
-  "generated_at": "2026-04-07T12:00:00Z",
-  "pipelines": [
-    {
-      "name": "PipelineName",
-      "file": "pipeline/PipelineName.json",
-      "activities": [
-        {
-          "name": "CopyFromBlob",
-          "type": "Copy",
-          "strategy": "deterministic",
-          "translator": "copy.py"
-        },
-        {
-          "name": "RunDataFlow",
-          "type": "ExecuteDataFlow",
-          "strategy": "agentic"
-        }
-      ]
-    }
-  ],
-  "summary": {
-    "pipeline_count": 12,
-    "activity_count": 47,
-    "deterministic_count": 35,
-    "agentic_count": 10,
-    "unsupported_count": 2,
-    "coverage_pct": 95.7
-  },
-  "lineage": {
-    "control_edges": [
-      {
-        "caller_pipeline": "ETL_Main",
-        "callee_pipeline": "Load_Dim_Customer",
-        "activity_name": "Run Customer Load",
-        "wait_on_completion": true
-      }
-    ],
-    "data_edges": [
-      {
-        "dataset_name": "curated_customer",
-        "identity": "abfss://curated/customer",
-        "producer_pipeline": "Load_Dim_Customer",
-        "producer_activity": "WriteCustomer",
-        "consumer_pipeline": "Build_Sales_Mart",
-        "consumer_activity": "ReadCustomer",
-        "match_kind": "identity",
-        "match_key": "abfss://curated/customer"
-      }
-    ]
-  }
-}
-```
-
-The `lineage` block records the cross-pipeline edges the discover phase
-recovered — `control_edges` (one pipeline invokes another via ExecutePipeline;
-identified by `activity_name`) and `data_edges` (one pipeline writes a dataset
-another reads; identified by `match_key`). Step 5 annotates these edges, so it
-depends on this block being present. When a factory has no edges of a kind, its
-list is empty (`[]`).
-
-### Step 4b — Review the complexity report
-
-`<output_dir>/metadata/profile_report.csv` carries one row per pipeline with a migration-complexity
-assessment. Columns:
-
-| Column | Meaning |
+| File | Description |
 |---|---|
-| `pipeline` | Pipeline name |
-| `activities` | Total activities (including nested ForEach/If/Switch children) |
-| `datasets` | Distinct datasets the pipeline references |
-| `linked_services` | Distinct linked services (activity-level + via referenced datasets) |
-| `collapsible_patterns` | Number of motif patterns detected (auto-collapsible during convert) |
-| `databricks_native_activities` | Notebook / SparkJar / SparkPython / Job activities (simplest) |
-| `control_flow_activities` | ForEach / If / Switch / SetVariable / AppendVariable / Filter / Wait / Until |
-| `other_activities` | Everything else — Copy, Web, Lookup, agentic types (hardest) |
-| `complexity_score` | Weighted score: native×1 + control×2 + other×3 + datasets + linked_services + collapsible_patterns |
-| `complexity_size` | T-shirt size from the score: **S** ≤5, **M** ≤15, **L** ≤30, **XL** >30 |
+| `metadata/inventory.json` | Classified activity inventory (later enriched with agentic `insights`) for the convert phase |
+| `metadata/profile_report.csv` | Per-pipeline complexity report (counts + T-shirt size) |
+| `metadata/<pipeline>.arm.json` | (ADF) Verbatim original source for each pipeline (provenance) |
 
-Use it to set expectations: S/M pipelines are largely deterministic; L/XL pipelines (many "other"
-activities, datasets, or linked services) warrant closer review and more agentic translation.
+The inventory classifies every task into one of three strategies:
 
-### Step 5 — Author and merge agentic insights
+- **Deterministic** — a built-in translator exists; converted without an LLM.
+- **Agentic** — requires LLM-assisted translation from the source definition.
+- **Unsupported** — no known translation path; needs manual intervention.
 
-The deterministic inventory records *what* each pipeline contains; it cannot
-record *what the factory is trying to do* or *how the pipelines relate as a
-system*. Author that judgment now and merge it into `inventory.json` under an
-`insights` key. This always runs.
+After classification, discovery also **authors agentic insights** over the inventory and merges
+them under an `insights` key — see *Author and merge agentic insights* below. This runs for every
+source; the source-specific inputs come from each `sources/<source>.md`.
 
-**This step is source-neutral — it runs for every source.** The insight *schema*, the
-*analysis method*, and the *pattern framework* below are shared; the source-specific inputs
-(how to deep-dive the source, and its construct→Databricks pattern vocabulary) come from the
-"Insights — deep-dive & pattern vocabulary" section of your `sources/<source>.md`.
+## Author and merge agentic insights (all sources)
+
+The deterministic inventory records *what* each pipeline contains; it cannot record *what the
+factory is trying to do* or *how the pipelines relate as a system*. Author that judgment now and
+merge it into `inventory.json` under an `insights` key. This always runs.
+
+**This step is source-neutral — it runs for every source.** The insight *schema*, the *analysis
+method*, and the *pattern framework* below are shared; the source-specific inputs (how to deep-dive
+the source, and its construct→Databricks pattern vocabulary) come from the "Insights — deep-dive &
+pattern vocabulary" section of your `sources/<source>.md`.
 
 1. **Read** the just-written `inventory.json` (`pipelines`, `lineage`, `summary`)
    and `profile_report.csv`. **Then, before authoring, deep-dive the source.** The
@@ -364,15 +214,14 @@ system*. Author that judgment now and merge it into `inventory.json` under an
          state). If a pipeline does real domain work alongside the boilerplate,
          migrate it normally — do not tell the reader to delete real logic.
        - **Collapse clone families.** Cluster pipelines by their activity
-         *signature* (ordered activity types) and shared child-edge set across the
+         *signature* (ordered activity/task types) and shared child-edge set across the
          whole inventory. Where a family of near-identical pipelines exists, emit
          **one** insight (anchored on a representative pipeline that exists in the
          inventory) that names the family and its count, recommends collapsing the
          N clones into a **single parameterized job invoked N times**, and
-         quantifies the win (e.g. "14 `LAAE_ingest_*` pipelines, identical
-         `[IfCondition, IfCondition, ExecutePipeline×4]` signature → 1 parameterized
-         job"). List the members in `conversion_notes`. This supersedes writing N
-         near-duplicate per-pipeline notes.
+         quantifies the win (e.g. "14 near-identical ingest pipelines, identical
+         activity signature → 1 parameterized job"). List the members in
+         `conversion_notes`. This supersedes writing N near-duplicate per-pipeline notes.
    - `pipeline_relationships[]` — characterize **how data and control flow
      between the pipelines**, whatever the mechanism. Each relationship carries
      `from_pipeline` and `to_pipeline` (both must be pipeline names that exist in
@@ -410,14 +259,13 @@ system*. Author that judgment now and merge it into `inventory.json` under an
      - *Data-in-code:* one pipeline's notebook writes a table another's notebook
        reads (no declared dataset, so `data_edges` never saw it).
      - *Ordering dependency:* a producer→consumer hand-off expressed only as
-       sibling `dependsOn` inside a parent orchestrator, which the deterministic
+       sibling ordering inside a parent orchestrator, which the deterministic
        phase did not emit as a cross-pipeline edge.
      - *Shared control/config asset, external trigger, message queue,* or any
        other real coupling flowx could not represent.
-     - *Near-miss (this is an annotation, not inferred):* pipeline A calls B via
-       ExecutePipeline and that call is already a `control_edges` entry — even
-       though B then does its real work in a notebook, the coupling itself was
-       recorded, so annotate it.
+     - *Near-miss (this is an annotation, not inferred):* pipeline A invokes B and
+       that call is already a `control_edges` entry — even though B then does its
+       real work in a notebook, the coupling itself was recorded, so annotate it.
    - **Authoring rules:** reference only pipeline names that exist in the
      inventory; an annotation edge (`control`/`data`) must echo a real lineage
      edge (annotate, don't rediscover); an `inferred` edge must carry non-empty
@@ -441,73 +289,10 @@ system*. Author that judgment now and merge it into `inventory.json` under an
 
 4. **On `ok:false`** the tool did **not** write the file: read `violations`, fix
    the offending pipeline name / lineage edge / field, and call `enrich` again.
-   On `ok:true` the `insights` key is now merged into `inventory.json`.
-
-### Step 6 — Present the summary
-
-Display a summary table to the user:
-
-```
-ADF Discovery Summary
-=====================
-Pipelines parsed:     12
-Total activities:     47
-
-Strategy Breakdown:
-  Deterministic:      35 (74.5%)
-  Agentic:            10 (21.3%)
-  Unsupported:         2 ( 4.3%)
-
-Coverage:             95.7%
-```
-
-Then surface the authored judgment so the user sees *what the factory does*, not
-just coverage numbers: print the factory `overview`, and for each
-`pipeline_insights` entry its `pattern_name` / `intent` and its top
-`recommended_patterns` (ranked simplification-first). Read these back from the
-enriched `inventory.json`.
-
-### Step 7 — Detail agentic activities
-
-For activities classified as `agentic`, explain that each is translated by the agent using LLM-assisted reasoning from the activity's ARM JSON (no built-in deterministic translator exists for these types):
-
-| Activity | Type | Handling |
-|---|---|---|
-| RunDataFlow | ExecuteDataFlow | Agentic (LLM-assisted) |
-| BranchLogic | Switch | Agentic (LLM-assisted) |
-| ... | ... | ... |
-
-### Step 8 — Warn about unsupported activities
-
-For activities classified as `unsupported`, warn the user clearly:
-
-```
-WARNING: The following activities have no automated translation path:
-  - Pipeline "ETL_Main" / Activity "RunSSIS" (ExecuteSSISPackage)
-    Recommendation: Manual conversion to PySpark notebook required.
-```
-
-### Step 9 — Confirm output location
-
-Tell the user where the metadata files were written (`<output_dir>/metadata/`: inventory.json, profile_report.csv, and the per-pipeline `.arm.json`), summarise the complexity sizes, and confirm they can proceed to the `convert` phase using the same `<output_dir>`.
-
-## Examples
-
-- "Discover my ADF pipelines from /Volumes/main/default/adf_export"
-- "Parse ADF definitions from ./tests/resources/json/"
-- "Load the ADF pipeline JSON files and show me the inventory"
-- "Import pipelines from /tmp/customer_adf_export"
-- "Discover only the pl_demo_01 pipeline from /Volumes/main/default/adf_export"
-
-## Output Artifacts
-
-All under the shared `<output_dir>/metadata/` folder:
-
-| File | Description |
-|---|---|
-| `metadata/inventory.json` | Classified activity inventory for the convert phase |
-| `metadata/profile_report.csv` | Per-pipeline complexity report (counts + T-shirt size) |
-| `metadata/<pipeline>.arm.json` | Verbatim original ADF/ARM source for each pipeline |
+   On `ok:true` the `insights` key is now merged into `inventory.json`. Present the
+   authored judgment back to the user (the factory `overview`, and each
+   `pipeline_insights` entry's `pattern_name` / `intent` and top ranked
+   `recommended_patterns`) as part of the source guide's summary step.
 
 ## Future considerations
 
@@ -516,3 +301,8 @@ large factories, revisit partitioning the authoring across subagents keyed on
 lineage clusters (the connected components of the combined control/data-edge
 graph), so each subagent reasons about one coherent subsystem. Out of scope for
 now — always enrich in one pass.
+
+## Reference
+
+- `sources/adf.md` — Azure Data Factory discovery (ARM JSON, UC-volume download, complexity report) + ADF insight deep-dive & pattern vocabulary
+- `sources/airflow.md` — Apache Airflow discovery (DAG `.py` parsing, operator classification) + Airflow insight deep-dive & pattern vocabulary

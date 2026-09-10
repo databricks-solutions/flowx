@@ -57,9 +57,26 @@ Read `<output_dir>/metadata/inventory.json`:
     }
   ],
   "summary": {"pipeline_count": 12, "activity_count": 47, "deterministic_count": 35,
-              "agentic_count": 10, "unsupported_count": 2, "coverage_pct": 95.7}
+              "agentic_count": 10, "unsupported_count": 2, "coverage_pct": 95.7},
+  "lineage": {
+    "control_edges": [
+      {"caller_pipeline": "ETL_Main", "callee_pipeline": "Load_Dim_Customer",
+       "activity_name": "Run Customer Load", "wait_on_completion": true}
+    ],
+    "data_edges": [
+      {"dataset_name": "curated_customer", "producer_pipeline": "Load_Dim_Customer",
+       "consumer_pipeline": "Build_Sales_Mart", "match_kind": "identity",
+       "match_key": "abfss://curated/customer"}
+    ]
+  }
 }
 ```
+
+The `lineage` block records the cross-pipeline edges the discover phase recovered from the ARM —
+`control_edges` (one pipeline invokes another via `ExecutePipeline`; identified by `activity_name`)
+and `data_edges` (one pipeline writes a dataset another reads; identified by `match_key`). The
+shared insights step annotates these edges (`edge_type: control` / `data`), so it depends on this
+block being present; when a factory has no edges of a kind, its list is empty (`[]`).
 
 ## Step 4b — Review the complexity report
 
@@ -82,6 +99,11 @@ Strategy Breakdown:
   Unsupported:         2 ( 4.3%)
 Coverage:             95.7%
 ```
+
+Then, after the shared insights step has enriched `inventory.json`, surface the authored judgment so
+the user sees *what the factory does*, not just coverage numbers: print the factory `overview`, and
+for each `pipeline_insights` entry its `pattern_name` / `intent` and its top `recommended_patterns`
+(ranked simplification-first).
 
 ## Step 6 — Detail agentic activities
 
