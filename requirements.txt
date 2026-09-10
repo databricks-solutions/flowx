@@ -14,7 +14,7 @@ google-auth==2.53.0
     # via databricks-sdk
 idna==3.15
     # via requests
-protobuf==6.33.6
+protobuf==7.36.1
     # via databricks-sdk
 pyasn1==0.6.3
     # via pyasn1-modules
