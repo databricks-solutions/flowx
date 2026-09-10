@@ -13,6 +13,7 @@ from flowx.adapter.__main__ import main as adapter_cli_main  # noqa: E402
 from flowx.mcp import runner as mcp_runner  # noqa: E402
 from flowx.mcp.server import _cmd_enrich  # noqa: E402
 from flowx.models.insights import (  # noqa: E402
+    AgenticMotif,
     Insights,
     LineageEdgeRef,
     PipelineInsight,
@@ -101,6 +102,16 @@ def _inventory() -> dict:
                 }
             ],
         },
+        "motifs": [
+            {
+                "pipeline": "factory_a",
+                "motif_id": "incremental_load_watermark",
+                "matched_activities": ["GetOldWM", "CopyDelta", "UpdateWM"],
+                "databricks_replacement": "auto_loader",
+                "source_type_hint": "database",
+                "confidence_notes": ["Lookup 'GetOldWM' contains a watermark-style query"],
+            }
+        ],
     }
 
 
@@ -146,6 +157,105 @@ def _good_insights() -> dict:
 
 def test_validator_accepts_good_insights():
     assert validate_insights(_good_insights(), _inventory()) == []
+
+
+def _agentic_motif() -> dict:
+    """A valid 'detected' agentic motif resolving against _inventory()'s motifs."""
+    return {
+        "motif_id": "incremental_load_watermark",
+        "applies_to": ["factory_a"],
+        "origin": "detected",
+        "agent_view": "Confirmed watermark load; a managed connector is the better target.",
+        "recommended_patterns": [
+            {
+                "pattern": "Lakeflow Connect SQL Server connector",
+                "fit": "Managed CDC replaces the bespoke watermark Copy",
+                "simplification_pattern": True,
+            }
+        ],
+    }
+
+
+def test_agentic_motif_dataclass_defaults():
+    motif = AgenticMotif(motif_id="incremental_load_watermark", agent_view="looks right")
+    assert motif.origin == "detected"
+    assert motif.applies_to == []
+    assert motif.recommended_patterns == []
+    assert motif.risk_if_ignored is None
+
+
+def test_validator_accepts_detected_agentic_motif():
+    raw = _good_insights()
+    raw["agentic_motifs"] = [_agentic_motif()]
+    assert validate_insights(raw, _inventory()) == []
+
+
+def test_rejects_detected_motif_not_in_inventory():
+    raw = _good_insights()
+    motif = _agentic_motif()
+    motif["motif_id"] = "cdc_change_tracking"  # not detected in factory_a
+    raw["agentic_motifs"] = [motif]
+    violations = validate_insights(raw, _inventory())
+    assert any("was not detected in pipeline 'factory_a'" in v for v in violations)
+
+
+def test_rejects_agentic_motif_applies_to_unknown_pipeline():
+    raw = _good_insights()
+    motif = _agentic_motif()
+    motif["applies_to"] = ["ghost_pipeline"]
+    raw["agentic_motifs"] = [motif]
+    violations = validate_insights(raw, _inventory())
+    assert any("ghost_pipeline" in v for v in violations)
+
+
+def test_accepts_inferred_agentic_motif_without_detection():
+    """An 'inferred' motif is a pattern the engine missed -- resolves against nothing."""
+    raw = _good_insights()
+    raw["agentic_motifs"] = [
+        {
+            "motif_id": "shared_config_framework",
+            "applies_to": ["factory_a", "factory_b"],
+            "origin": "inferred",
+            "agent_view": "A bespoke config-driven framework the motif engine does not model.",
+        }
+    ]
+    assert validate_insights(raw, _inventory()) == []
+
+
+def test_rejects_agentic_motif_missing_agent_view():
+    raw = _good_insights()
+    motif = _agentic_motif()
+    del motif["agent_view"]
+    raw["agentic_motifs"] = [motif]
+    violations = validate_insights(raw, _inventory())
+    assert any("agent_view" in v for v in violations)
+
+
+def test_rejects_agentic_motif_empty_applies_to():
+    raw = _good_insights()
+    motif = _agentic_motif()
+    motif["applies_to"] = []
+    raw["agentic_motifs"] = [motif]
+    violations = validate_insights(raw, _inventory())
+    assert any("applies_to" in v for v in violations)
+
+
+def test_agentic_motif_recommended_patterns_are_validated():
+    raw = _good_insights()
+    motif = _agentic_motif()
+    motif["recommended_patterns"] = [{"pattern": "X", "fit": "y", "simplification_pattern": "yes"}]
+    raw["agentic_motifs"] = [motif]
+    violations = validate_insights(raw, _inventory())
+    assert any("simplification_pattern" in v for v in violations)
+
+
+def test_rejects_agentic_motif_unknown_field():
+    raw = _good_insights()
+    motif = _agentic_motif()
+    motif["bogus"] = 1
+    raw["agentic_motifs"] = [motif]
+    violations = validate_insights(raw, _inventory())
+    assert any("unknown field" in v and "bogus" in v for v in violations)
 
 
 def test_rejects_pipeline_not_in_inventory():

@@ -147,3 +147,23 @@ Automation Bundles (was Databricks Asset Bundles), AI/BI dashboards (was Lakevie
 author and merge the `insights` object by following the source-neutral "Author and merge agentic
 insights" step in the parent `SKILL.md`. The insight schema and the authoring method are shared
 across sources; only the deep-dive and the construct mappings above are ADF-specific.
+
+**Reviewing detected motifs (`agentic_motifs`).** When the inventory carries a `motifs` list, each
+entry names an ADF motif and its coarse `databricks_replacement`. Author your review
+(`agentic_motifs`, per the parent `SKILL.md`) in the **current product vocabulary** using this
+mapping — and elevate beyond it when the holistic/system view calls for it (e.g. a whole
+metadata-driven framework → **Lakeflow Connect** as a `system_recommendation`):
+
+| Detected `motif_id` | `databricks_replacement` | Product-name target for `recommended_patterns` |
+|---|---|---|
+| `incremental_load_watermark` | `auto_loader` | **Auto Loader** (or **Lakeflow Connect** if a managed connector fits) |
+| `cdc_change_tracking` | `dlt_apply_changes` | **Lakeflow Declarative Pipelines `AUTO CDC`** (or **Lakeflow Connect**) |
+| `metadata_driven_bulk_copy` | `for_each_ingestion` | **Lakeflow Connect** (multi-table) or a parameterized **Lakeflow Jobs** for-each task |
+| `file_landing_zone_processing` | `auto_loader_file_notification` | **Auto Loader** (file-notification mode) |
+| `rest_api_pagination` | `python_rest_ingestion` | Python REST ingestion notebook in a **Lakeflow Job** (or a SaaS **Lakeflow Connect** connector) |
+| `parent_child_orchestration` | `for_each_run_job` | **Lakeflow Jobs** for-each + run-job task |
+| `file_existence_validation` | `condition_task` | **Lakeflow Jobs** condition (If/Else) task |
+| `scd_type_2` | `dlt_apply_changes` | **Lakeflow Declarative Pipelines `AUTO CDC`** (SCD Type 2) |
+| `staged_load_synapse` | `spark_delta_write` | Spark write to **Delta** + post-load step |
+| `activity_and_notify` | `task_with_notification` | **Lakeflow Job** task + native job notifications |
+| `lakeflow_connect_database` | `lakeflow_connect_database` | **Lakeflow Connect** (database connector) |

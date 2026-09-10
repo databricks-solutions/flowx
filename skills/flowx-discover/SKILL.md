@@ -271,6 +271,27 @@ pattern vocabulary" section of your `sources/<source>.md`.
      edge (annotate, don't rediscover); an `inferred` edge must carry non-empty
      `evidence` and a `confidence` level and must not be dressed up as proven
      lineage.
+   - `agentic_motifs[]` — **your review of the deterministic motifs.** If the
+     inventory carries a `motifs` list (deterministically detected patterns), review
+     the relevant ones. Each entry has `motif_id`, the pipelines it `applies_to` (one
+     for an instance, many for a recurring framework), an `agent_view` (confirm /
+     refine / reject the detection, and *why*), and your ranked `recommended_patterns`
+     (product vocabulary — you may **elevate** beyond the motif's coarse target, e.g. a
+     metadata-driven framework → **Lakeflow Connect** at the system level). Two tiers,
+     decided like a `lineage_edge`:
+     - `origin: "detected"` — annotates a real detection: `motif_id` **and** every
+       `applies_to` pipeline must match a motif already in the inventory. This is the
+       review of what the engine found.
+     - `origin: "inferred"` — a motif-shaped pattern the deterministic engine **missed**;
+       `motif_id` is your own name and nothing is resolved. Assert these when you see a
+       recurring pattern the engine did not detect — they are candidate new deterministic
+       motifs.
+     **Don't rubber-stamp:** corroborate, refine, or reject, and reach past the coarse
+     target when the holistic view calls for it. When a motif review is a whole-factory
+     decision, also state it in `system_recommendation` — the `agentic_motif` is its
+     motif-level justification. The source-specific motif → Databricks vocabulary lives
+     in your `sources/<source>.md`. (No `motifs` in the inventory → nothing to review;
+     skip this.)
 3. **Enrich** — merge the object in:
 
    - **MCP tool path** (inline dict; the only path in Genie Code):

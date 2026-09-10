@@ -153,6 +153,49 @@ class PipelineRelationship:
 
 
 @dataclass(slots=True, kw_only=True)
+class AgenticMotif:
+    """The agent's view on a motif -- its review of a deterministically detected
+    pattern, or an agent-inferred pattern the deterministic engine missed.
+
+    Two tiers, mirroring a relationship's ``lineage_edge``:
+
+    * ``"detected"`` -- an **annotation** of a real detected motif. ``motif_id``
+      echoes a motif in the inventory's ``motifs`` and every pipeline in
+      ``applies_to`` must be one the engine detected it in. The agent confirms,
+      refines, or rejects the detection and attaches its own ranked target(s).
+    * ``"inferred"`` -- a motif-shaped pattern the deterministic engine did **not**
+      detect. ``motif_id`` is an agent-authored name; there is nothing to resolve
+      against, so this is a *candidate new deterministic motif*.
+
+    A review can span the whole factory: ``applies_to`` lists every pipeline the
+    motif covers (one for an instance, many for a recurring framework). When the
+    review is a whole-factory decision (e.g. a metadata-driven framework becoming
+    Lakeflow Connect), it is also surfaced in the top-level ``system_recommendation``
+    -- this record is that decision's motif-level justification.
+
+    Attributes:
+        motif_id: The detected motif reviewed (``"detected"``) or an agent-authored
+            pattern name (``"inferred"``).
+        applies_to: The pipelines this review covers (>=1); each must exist in the
+            inventory, and for ``"detected"`` each must be one the motif was
+            detected in.
+        origin: ``"detected"`` (reviews a real motif) or ``"inferred"`` (agent-spotted).
+        agent_view: The agent's read -- confirm / refine / reject, and why.
+        recommended_patterns: The agent's ranked Databricks target(s) for this
+            motif, in the same product vocabulary as a pipeline insight; may
+            *elevate* beyond the motif's coarse ``databricks_replacement``.
+        risk_if_ignored: Optional one-line hazard if the motif is ported naively.
+    """
+
+    motif_id: str
+    agent_view: str
+    applies_to: list[str] = field(default_factory=list)
+    origin: Literal["detected", "inferred"] = "detected"
+    recommended_patterns: list[RecommendedPattern] = field(default_factory=list)
+    risk_if_ignored: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
 class Insights:
     """Agent-authored insights merged into inventory.json under the ``insights`` key."""
 
@@ -160,3 +203,4 @@ class Insights:
     system_recommendation: SystemRecommendation | None = None
     pipeline_insights: list[PipelineInsight] = field(default_factory=list)
     pipeline_relationships: list[PipelineRelationship] = field(default_factory=list)
+    agentic_motifs: list[AgenticMotif] = field(default_factory=list)

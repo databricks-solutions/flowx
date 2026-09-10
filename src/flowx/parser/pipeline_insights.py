@@ -30,7 +30,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-_INSIGHTS_TOP_KEYS = {"overview", "system_recommendation", "pipeline_insights", "pipeline_relationships"}
+_INSIGHTS_TOP_KEYS = {
+    "overview",
+    "system_recommendation",
+    "pipeline_insights",
+    "pipeline_relationships",
+    "agentic_motifs",
+}
 _INSIGHT_KEYS = {
     "pipeline",
     "pattern_name",
@@ -53,6 +59,8 @@ _RELATIONSHIP_KEYS = {
 }
 _EDGE_KEYS = {"edge_type", "edge_identity", "evidence", "confidence"}
 _CONFIDENCE_LEVELS = {"high", "medium", "low"}
+_AGENTIC_MOTIF_KEYS = {"motif_id", "applies_to", "origin", "agent_view", "recommended_patterns", "risk_if_ignored"}
+_MOTIF_ORIGINS = {"detected", "inferred"}
 
 
 def _pipeline_names(inventory: dict) -> set[str]:
@@ -95,6 +103,21 @@ def _data_edge_triples(inventory: dict) -> set[tuple[str, str, str]]:
         and e.get("producer_pipeline") is not None
         and e.get("consumer_pipeline") is not None
         and e.get("match_key") is not None
+    }
+
+
+def _motif_pairs(inventory: dict) -> set[tuple[str, str]]:
+    """Real detected motifs as ``(pipeline, motif_id)`` pairs.
+
+    Populated by the deterministic motif-in-inventory surface: ``inventory["motifs"]``
+    is a list of detections shaped ``{"pipeline", "motif_id", ...}``. Absent or empty
+    until that surface lands (and for sources with no motif concept, e.g. Airflow),
+    in which case no ``detected`` agentic motif can resolve -- only ``inferred`` ones.
+    """
+    return {
+        (str(m["pipeline"]), str(m["motif_id"]))
+        for m in inventory.get("motifs", [])
+        if isinstance(m, dict) and m.get("pipeline") is not None and m.get("motif_id") is not None
     }
 
 
@@ -160,7 +183,81 @@ def validate_insights(raw: dict, inventory: dict) -> list[str]:
             _validate_edge(rel.get("lineage_edge"), loc, from_pipeline, to_pipeline, control_triples, data_triples)
         )
 
+    motif_pairs = _motif_pairs(inventory)
+    agentic_motifs = raw.get("agentic_motifs", [])
+    if not isinstance(agentic_motifs, list):
+        violations.append("'agentic_motifs' must be a list")
+        agentic_motifs = []
+    for i, item in enumerate(agentic_motifs):
+        violations.extend(_validate_agentic_motif(item, f"agentic_motifs[{i}]", names, motif_pairs))
+
     return violations
+
+
+def _validate_agentic_motif(
+    item: Any,
+    loc: str,
+    names: set[str],
+    motif_pairs: set[tuple[str, str]],
+) -> list[str]:
+    """Validate one ``agentic_motif`` -- the agent's view on a motif.
+
+    Two tiers, mirroring a ``lineage_edge``:
+
+    * ``detected`` -- an **annotation** of a real detection: for every pipeline in
+      ``applies_to`` the ``(pipeline, motif_id)`` pair must resolve against the
+      inventory's ``motifs``. You cannot review a motif the engine never detected.
+    * ``inferred`` -- an agent-asserted pattern the engine missed; ``motif_id`` is
+      agent-authored and nothing is resolved (a candidate new deterministic motif).
+
+    Both tiers require a non-empty ``agent_view`` and at least one real
+    ``applies_to`` pipeline. All problems are collected.
+    """
+    if not isinstance(item, dict):
+        return [f"{loc} must be an object"]
+    problems: list[str] = []
+    for key in set(item) - _AGENTIC_MOTIF_KEYS:
+        problems.append(f"{loc}: unknown field {key!r}")
+
+    motif_id = item.get("motif_id")
+    if not isinstance(motif_id, str) or not motif_id.strip():
+        problems.append(f"{loc}: 'motif_id' must be a non-empty string")
+
+    origin = item.get("origin", "detected")
+    if origin not in _MOTIF_ORIGINS:
+        problems.append(f"{loc}: 'origin' must be 'detected' or 'inferred', got {origin!r}")
+
+    agent_view = item.get("agent_view")
+    if not isinstance(agent_view, str) or not agent_view.strip():
+        problems.append(f"{loc}: 'agent_view' must be a non-empty string")
+
+    applies_to = item.get("applies_to")
+    if not isinstance(applies_to, list) or not applies_to:
+        problems.append(f"{loc}: 'applies_to' must be a non-empty list of pipeline names")
+        applies_to = []
+    for pipeline in applies_to:
+        if pipeline not in names:
+            problems.append(f"{loc}: applies_to pipeline {pipeline!r} not in inventory")
+
+    # A 'detected' motif annotates a real detection in each pipeline it claims; an
+    # 'inferred' one is agent-asserted (a pattern the engine missed) and resolves
+    # against nothing -- it is a candidate new deterministic motif.
+    if origin == "detected" and isinstance(motif_id, str) and motif_id.strip():
+        for pipeline in applies_to:
+            if pipeline in names and (pipeline, motif_id) not in motif_pairs:
+                problems.append(
+                    f"{loc}: 'detected' motif {motif_id!r} was not detected in pipeline {pipeline!r} "
+                    f"(use origin='inferred' for a pattern the deterministic engine did not find)"
+                )
+
+    if "recommended_patterns" in item:
+        problems.extend(_validate_recommended_patterns(item["recommended_patterns"], loc))
+
+    risk = item.get("risk_if_ignored")
+    if risk is not None and (not isinstance(risk, str) or not risk.strip()):
+        problems.append(f"{loc}: 'risk_if_ignored' must be a non-empty string when present")
+
+    return problems
 
 
 def _validate_edge(
@@ -359,7 +456,13 @@ def enrich_inventory(
     raw = load_insights(insights=insights, insights_path=insights_path)
     violations = validate_insights(raw, inventory)
     if violations:
-        return {"ok": False, "violations": violations, "pipeline_insights": 0, "relationships": 0}
+        return {
+            "ok": False,
+            "violations": violations,
+            "pipeline_insights": 0,
+            "relationships": 0,
+            "agentic_motifs": 0,
+        }
 
     merged = merge_into_inventory(inventory, raw)
     inventory_path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
@@ -368,4 +471,5 @@ def enrich_inventory(
         "violations": [],
         "pipeline_insights": len(raw.get("pipeline_insights", [])),
         "relationships": len(raw.get("pipeline_relationships", [])),
+        "agentic_motifs": len(raw.get("agentic_motifs", [])),
     }
