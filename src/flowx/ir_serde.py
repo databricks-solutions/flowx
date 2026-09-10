@@ -23,12 +23,14 @@ from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
     CopyActivity,
+    DataAsset,
     DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
     FilterActivity,
     ForEachActivity,
     IfConditionActivity,
+    Lineage,
     LookupActivity,
     MotifActivity,
     NotebookActivity,
@@ -80,7 +82,65 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
         }
     if pipeline.translation_configuration is not None:
         result["translation_configuration"] = configuration_to_dict(pipeline.translation_configuration)
+    if pipeline.lineage is not None:
+        result["lineage"] = lineage_to_dict(pipeline.lineage)
     return result
+
+
+def data_asset_to_dict(asset: DataAsset) -> dict[str, Any]:
+    """Serialise a :class:`DataAsset` to a JSON-friendly dictionary.
+
+    ``signature`` always appears; the optional ``identity`` / ``asset_type`` /
+    ``properties`` are emitted only when set so reports stay compact.
+    """
+    result: dict[str, Any] = {"signature": asset.signature}
+    if asset.identity is not None:
+        result["identity"] = asset.identity
+    if asset.asset_type is not None:
+        result["asset_type"] = asset.asset_type
+    if asset.properties:
+        result["properties"] = dict(asset.properties)
+    return result
+
+
+def lineage_to_dict(lineage: Lineage) -> dict[str, Any]:
+    """Serialise a :class:`Lineage` block to a JSON-friendly dictionary.
+
+    Edge lists are always emitted (empty, never ``None``) for stable diffs.
+    """
+    return {
+        "control_edges": [
+            {
+                "source_workflow": edge.source_workflow,
+                "target_workflow": edge.target_workflow,
+                "via_task_key": edge.via_task_key,
+                "wait_for_completion": edge.wait_for_completion,
+                "resolved": edge.resolved,
+            }
+            for edge in lineage.control_edges
+        ],
+        "data_edges": [
+            {
+                "source_task_key": edge.source_task_key,
+                "target_task_key": edge.target_task_key,
+                "match_kind": edge.match_kind,
+                "match_key": edge.match_key,
+                "identity": edge.identity,
+                "asset_type": edge.asset_type,
+            }
+            for edge in lineage.data_edges
+        ],
+        "motifs": [
+            {
+                "motif_id": motif.motif_id,
+                "member_task_keys": list(motif.member_task_keys),
+                "display_name": motif.display_name,
+                "databricks_replacement": motif.databricks_replacement,
+                "notes": list(motif.notes),
+            }
+            for motif in lineage.motifs
+        ],
+    }
 
 
 def configuration_to_dict(configuration: Any) -> dict[str, Any]:
@@ -143,6 +203,12 @@ def activity_to_dict(task: Activity) -> dict[str, Any]:
         task_dict["libraries"] = task.libraries
     if task.parameter_approximations:
         task_dict["parameter_approximations"] = task.parameter_approximations
+    if task.motif_id:
+        task_dict["motif_id"] = task.motif_id
+    if task.data_reads:
+        task_dict["data_reads"] = [data_asset_to_dict(asset) for asset in task.data_reads]
+    if task.data_writes:
+        task_dict["data_writes"] = [data_asset_to_dict(asset) for asset in task.data_writes]
 
     extra = activity_extra_fields(task)
     task_dict.update(extra)
@@ -337,7 +403,7 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             if activity.job_parameters:
                 extra["job_parameters"] = activity.job_parameters
         case MotifActivity():
-            extra["motif_id"] = activity.motif_id
+            # motif_id now lives on the Activity base and is serialised by activity_to_dict.
             extra["display_name"] = activity.display_name
             extra["databricks_replacement"] = activity.databricks_replacement
             extra["matched_activity_names"] = activity.matched_activity_names
