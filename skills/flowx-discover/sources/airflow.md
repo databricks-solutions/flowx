@@ -69,3 +69,44 @@ that are **not** handled (dynamic TaskGroup mapping, shared multi-DAG bundle), s
 [`../../flowx-convert/sources/airflow-coverage.md`](../../flowx-convert/sources/airflow-coverage.md).
 Callables reading Airflow task context (`**context` / `ti`) or XCom, and runtime-branching
 decorators, are routed to placeholders for manual/agentic translation rather than converted.
+
+## Insights — deep-dive & pattern vocabulary
+
+Reference for the shared agentic-insights step (parent `SKILL.md` Step 5, "Author and merge agentic
+insights"). Do this deep-dive before authoring insights for any DAG.
+
+**Deep-dive the DAG source.** The inventory is a deterministic skeleton (task types, strategy,
+dependencies); the *why* and *how* live in the **DAG source** — the `.py` files under the
+`--source-path` you discovered from. Read the DAG module for any pipeline you write about: task
+callables (`PythonOperator` bodies), operator arguments, templated params, hooks / connections, and
+`set_upstream` / `>>` dependencies. Recurse into `TaskGroup`s and dynamically mapped (`.expand`)
+tasks. The parser already extracts operators, `>>` / `<<` edges, `schedule_interval`, and inline
+callables (see "How it works" above), so read the source for the intent the static parse can't
+capture — what a callable actually *does*, what a hook connects to, and why the tasks are ordered as
+they are.
+
+**Airflow operators → Databricks** — a reference menu, NOT an allowlist; the target side uses current
+product names, so reach past it whenever a better or newer fit exists. Flag `simplification_pattern:
+true` only on entries that use a distinctive capability, never on the plain-orchestration fallback.
+
+| DAG uses… | Simplifying target — `simplification_pattern: true` (rank first) | Fallback — `false` |
+|---|---|---|
+| DB extract via `MsSqlOperator` / `JdbcOperator` / custom hook | **Lakeflow Connect** managed connector (change-tracking/CDC → Delta) | JDBC read + `MERGE INTO` |
+| Incremental load w/ XCom or Variable watermark | **Lakeflow Declarative Pipelines `AUTO CDC`** | Delta `MERGE INTO` + `dbutils.jobs.taskValues` |
+| File sensor + load (`*FileSensor` → transform) | **Auto Loader** (`cloudFiles`, file-notification mode) | — |
+| `SparkSubmitOperator` / `DatabricksSubmitRunOperator` | native **Lakeflow Job** task (notebook / JAR / Python) | — |
+| `PythonOperator` glue / bespoke script | notebook or Python task in a **Lakeflow Job** | — |
+| `TriggerDagRunOperator` / `ExternalTaskSensor` fan-out | **Lakeflow Jobs** run-job task + job parameters | — |
+| Dynamic task mapping (`.expand`) over a list | **Lakeflow Jobs** for-each task | — |
+| `BashOperator` shelling out to a script | native task (notebook / Python) driven by job parameters | — |
+| Custom logging / observability via XComs or a side table | **system tables (`system.lakeflow.*`) + native job notifications + AI/BI dashboard** | — |
+
+**Emit current names, not legacy ones:** Lakeflow Jobs (was Databricks Workflows), Lakeflow
+Declarative Pipelines (was Delta Live Tables/DLT), `AUTO CDC` (was `APPLY CHANGES INTO`), Declarative
+Automation Bundles (was Databricks Asset Bundles), AI/BI dashboards (was Lakeview), `system.lakeflow`
+(was `system.workflow`).
+
+**Then author the insights (shared method).** With this deep-dive and pattern vocabulary in hand,
+author and merge the `insights` object by following the source-neutral "Author and merge agentic
+insights" step in the parent `SKILL.md`. The insight schema and the authoring method are shared
+across sources; only the deep-dive and the construct mappings above are Airflow-specific.
