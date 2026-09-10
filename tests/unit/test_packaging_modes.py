@@ -8,7 +8,6 @@ import pytest
 import yaml
 
 from flowx.bundler.dab_writer import (
-    MalformedReportError,
     _group_workflows,
     _load_group_spec,
     _load_report,
