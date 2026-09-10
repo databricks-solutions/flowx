@@ -962,6 +962,115 @@ class TestStripDanglingTaskValueRefs:
         assert tasks[0]["for_each_task"]["task"]["run_job_task"]["job_parameters"]["x"] == ""
 
 
+class TestBackfillTaskValueDependencies:
+    """PR #35 (#30): a task that references ``{{tasks.P.values.*}}`` must have ``P`` as a
+    direct dependency, or Databricks rejects the job at create time
+    (``INVALID_PARAMETER_VALUE: Task 'P' must be a dependency of task 'T'``).
+    ``_backfill_task_value_dependencies`` adds the missing ``depends_on`` edge."""
+
+    def test_condition_operand_ref_backfills_dependency(self):
+        # The core case: a condition operand reads a producer's task value but the edge
+        # was never wired, so deploy would be rejected. The backfill adds it.
+        from flowx.bundler.dab_writer import _backfill_task_value_dependencies
+
+        tasks = [
+            {"task_key": "_init_flag", "notebook_task": {"notebook_path": "/n"}},
+            {
+                "task_key": "gate",
+                "condition_task": {
+                    "op": "EQUAL_TO",
+                    "left": "{{tasks._init_flag.values.flag}}",
+                    "right": "true",
+                },
+            },
+        ]
+        added = _backfill_task_value_dependencies(tasks)
+        assert added == 1
+        assert tasks[1]["depends_on"] == [{"task_key": "_init_flag"}]
+
+    def test_notebook_base_parameter_ref_backfills_dependency(self):
+        from flowx.bundler.dab_writer import _backfill_task_value_dependencies
+
+        tasks = [
+            {"task_key": "producer", "notebook_task": {"notebook_path": "/p"}},
+            {
+                "task_key": "consumer",
+                "notebook_task": {
+                    "notebook_path": "/c",
+                    "base_parameters": {"run_id": "{{tasks.producer.values.run_id}}"},
+                },
+            },
+        ]
+        added = _backfill_task_value_dependencies(tasks)
+        assert added == 1
+        assert tasks[1]["depends_on"] == [{"task_key": "producer"}]
+
+    def test_does_not_duplicate_an_existing_dependency(self):
+        from flowx.bundler.dab_writer import _backfill_task_value_dependencies
+
+        tasks = [
+            {"task_key": "producer", "notebook_task": {"notebook_path": "/p"}},
+            {
+                "task_key": "consumer",
+                "depends_on": [{"task_key": "producer"}],
+                "condition_task": {
+                    "op": "EQUAL_TO",
+                    "left": "{{tasks.producer.values.x}}",
+                    "right": "1",
+                },
+            },
+        ]
+        added = _backfill_task_value_dependencies(tasks)
+        assert added == 0
+        assert tasks[1]["depends_on"] == [{"task_key": "producer"}]
+
+    def test_skips_producer_absent_from_scope(self):
+        # A ref whose producer is not a sibling in this scope (e.g. blanked earlier by
+        # _strip_dangling_task_value_refs) must not fabricate an edge to a missing task.
+        from flowx.bundler.dab_writer import _backfill_task_value_dependencies
+
+        tasks = [
+            {
+                "task_key": "consumer",
+                "condition_task": {
+                    "op": "EQUAL_TO",
+                    "left": "{{tasks.ghost.values.x}}",
+                    "right": "1",
+                },
+            },
+        ]
+        added = _backfill_task_value_dependencies(tasks)
+        assert added == 0
+        assert "depends_on" not in tasks[0]
+
+    def test_for_each_body_is_scoped_locally(self):
+        # Inner-body task keys are local to the parent list, so a body ref to an outer
+        # producer is not backfilled at body level (it recurses without erroring).
+        from flowx.bundler.dab_writer import _backfill_task_value_dependencies
+
+        tasks = [
+            {"task_key": "outer", "notebook_task": {"notebook_path": "/o"}},
+            {
+                "task_key": "loop",
+                "depends_on": [{"task_key": "outer"}],
+                "for_each_task": {
+                    "inputs": "[1, 2, 3]",
+                    "task": {
+                        "task_key": "loop_body",
+                        "condition_task": {
+                            "op": "EQUAL_TO",
+                            "left": "{{tasks.outer.values.x}}",
+                            "right": "1",
+                        },
+                    },
+                },
+            },
+        ]
+        added = _backfill_task_value_dependencies(tasks)
+        assert added == 0
+        assert "depends_on" not in tasks[1]["for_each_task"]["task"]
+
+
 class TestAggregatedReportPipelineParameters:
     """Change pipeline-parameters-and-variables-round-trip (P0): VAR-001."""
 
