@@ -8,7 +8,7 @@ charset-normalizer==3.4.7
     # via requests
 cryptography==48.0.0
     # via google-auth
-databricks-sdk==0.110.0
+databricks-sdk==0.137.0
     # via databricks-flowx
 google-auth==2.53.0
     # via databricks-sdk
