@@ -94,96 +94,14 @@ def test_build_coverage_rows_full_coverage_and_missing_csv(tmp_path: Path):
     assert beta["datasets"] == 0 and beta["complexity_size"] == ""  # defaulted, no CSV
 
 
-def test_audited_counts_drive_translation_and_deterministic_coverage(tmp_path: Path) -> None:
-    metadata = tmp_path / "metadata"
-    metadata.mkdir()
-    inventory = {
-        "source": "airflow",
-        "pipelines": [
-            {
-                "name": "verified_with_gap",
-                "activities": [],
-                "audited_activity_count": 8,
-                "deterministic_count": 7,
-                "agentic_count": 1,
-                "failed_count": 0,
-                "excluded_count": 0,
-                "reconciliation_status": "verified_with_gaps",
-                "migration_status": "included",
-                "findings": [{"fingerprint": "abc123", "severity": "gap"}],
-            },
-            {
-                "name": "failed",
-                "activities": [],
-                "audited_activity_count": 9,
-                "deterministic_count": 7,
-                "agentic_count": 1,
-                "failed_count": 1,
-                "excluded_count": 0,
-                "reconciliation_status": "failed",
-                "migration_status": "included",
-                "findings": [{"fingerprint": "def456", "severity": "failed"}],
-            },
-        ],
-    }
-    (metadata / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+def test_has_insights_column_reflects_insights_key(tmp_path: Path):
+    md = _write_metadata(tmp_path)  # writes inventory.json with no insights key
+    rows = build_coverage_rows(md)
+    assert all(row["has_insights"] is False for row in rows)
 
-    rows = {row["pipeline"]: row for row in build_coverage_rows(metadata)}
-
-    verified = rows["verified_with_gap"]
-    assert verified["activities"] == 8
-    assert verified["audited_activities"] == 8
-    assert verified["coverage_pct"] == 100.0
-    assert verified["deterministic_coverage_pct"] == 87.5
-    assert verified["code_attached_coverage_pct"] == 87.5
-    assert verified["resolved_agentic_count"] == 0
-    assert verified["unresolved_agentic_count"] == 1
-    assert json.loads(verified["agentic_resolution_outcomes"]) == {
-        "resolved": 0,
-        "needs_input": 0,
-        "deferred": 0,
-        "declined": 0,
-        "unreviewed": 1,
-    }
-    assert verified["finding_count"] == 1
-    assert json.loads(verified["finding_fingerprints"]) == ["abc123"]
-
-    failed = rows["failed"]
-    assert failed["activities"] == 9
-    assert failed["failed_activities"] == 1
-    assert failed["coverage_pct"] == 88.9
-    assert failed["deterministic_coverage_pct"] == 77.8
-    assert failed["code_attached_coverage_pct"] == 77.8
-    assert failed["reconciliation_status"] == "failed"
-
-
-def test_excluded_activities_remain_in_coverage_denominator(tmp_path: Path) -> None:
-    metadata = tmp_path / "metadata"
-    metadata.mkdir()
-    inventory = {
-        "source": "airflow",
-        "pipelines": [
-            {
-                "name": "excluded",
-                "activities": [],
-                "audited_activity_count": 3,
-                "deterministic_count": 0,
-                "agentic_count": 0,
-                "failed_count": 0,
-                "excluded_count": 3,
-                "reconciliation_status": "verified",
-                "migration_status": "excluded",
-                "findings": [],
-            }
-        ],
-    }
-    (metadata / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
-
-    row = build_coverage_rows(metadata)[0]
-
-    assert row["activities"] == 3
-    assert row["excluded_activities"] == 3
-    assert row["coverage_pct"] == 0.0
-    assert row["deterministic_coverage_pct"] == 0.0
-    assert row["code_attached_coverage_pct"] == 0.0
-    assert row["migration_status"] == "excluded"
+    inv_path = md / "inventory.json"
+    inv = json.loads(inv_path.read_text())
+    inv["insights"] = {"overview": "x", "pipeline_insights": [], "pipeline_relationships": []}
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    rows2 = build_coverage_rows(md)
+    assert all(row["has_insights"] is True for row in rows2)

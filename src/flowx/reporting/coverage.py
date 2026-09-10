@@ -49,6 +49,7 @@ COVERAGE_METRIC_COLUMNS: tuple[str, ...] = (
     "finding_fingerprints",
     "complexity_score",
     "complexity_size",
+    "has_insights",
 )
 
 _CSV_INT_COLUMNS: tuple[str, ...] = (
@@ -122,6 +123,7 @@ def build_coverage_rows(metadata_dir: Path) -> list[dict[str, Any]]:
             for row in csv.DictReader(handle):
                 csv_by_pipeline[row["pipeline"]] = row
 
+    has_insights = "insights" in inventory
     rows: list[dict[str, Any]] = []
     for pipeline in inventory.get("pipelines", []):
         name = pipeline.get("name", "")
@@ -204,6 +206,7 @@ def build_coverage_rows(metadata_dir: Path) -> list[dict[str, Any]]:
                 "finding_fingerprints": json.dumps(fingerprints, separators=(",", ":")),
                 "complexity_score": _csv_int("complexity_score"),
                 "complexity_size": csv_row.get("complexity_size", "") or "",
+                "has_insights": has_insights,
             }
         )
     rows.sort(key=lambda row: row["pipeline"])

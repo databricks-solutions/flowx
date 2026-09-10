@@ -297,13 +297,13 @@ class AdfDefinitions:
         if not name:
             return None
         lowered = name.lower()
-        ci_fallback = None
+        exact = None
         for pipeline in self.pipelines:
             if pipeline.name == name:
                 return pipeline
-            if ci_fallback is None and pipeline.name.lower() == lowered:
-                ci_fallback = pipeline
-        return ci_fallback
+            if exact is None and pipeline.name.lower() == lowered:
+                exact = pipeline
+        return exact
 
 
 # ---------------------------------------------------------------------------

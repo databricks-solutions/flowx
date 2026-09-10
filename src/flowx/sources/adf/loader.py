@@ -1122,8 +1122,8 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Wrote %d pipeline ARM JSON file(s) to %s", len(arm_paths), metadata_dir)
 
     summary = inventory_dict["summary"]
-    print("\nADF Profile Summary")
-    print("===================")
+    print("\nADF Discovery Summary")
+    print("=====================")
     print(f"Pipelines parsed:     {summary['pipeline_count']}")
     print(f"Total activities:     {summary['activity_count']}")
     print("\nStrategy Breakdown:")
