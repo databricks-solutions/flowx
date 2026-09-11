@@ -378,8 +378,18 @@ def write_bundle_group(
             "warehouse_id", {"description": "SQL warehouse id for sql_task queries"}
         )
 
-    hoisted_global_variables = _collect_hoisted_global_variables(workflow)
-    extra_variable_declarations = {**pipeline_variable_declarations, **hoisted_global_variables}
+    # Hoisted factory globals become bundle variables. Collected per workflow (each call also merges the
+    # workflow's inner ForEach jobs): the bundle-scoped surfaces — databricks.yml ``variables:`` and
+    # SETUP.md — declare the UNION across every workflow in the group, while each individual job resource
+    # (in the loop below) gets only its own workflow's globals. For a single-workflow bundle the union
+    # equals that one workflow's set, so per-pipeline output is unchanged.
+    hoisted_globals_by_workflow: dict[int, set[str]] = {}
+    hoisted_global_union: dict[str, Any] = {}
+    for workflow in workflows:
+        wf_hoisted = _collect_hoisted_global_variables(workflow)
+        hoisted_globals_by_workflow[id(workflow)] = set(wf_hoisted)
+        hoisted_global_union.update(wf_hoisted)
+    extra_variable_declarations = {**pipeline_variable_declarations, **hoisted_global_union}
 
     # dbt-factory PyDABs hooks: each `resources.<key>_dbt_job:load_resources` module must be
     # registered under the `python.resources` block so `bundle deploy` runs it to build the dbt job.
@@ -424,15 +434,17 @@ def write_bundle_group(
     manual_parameters: list[ManualParameter] = []
     resources_dir = output_dir / "resources"
     resources_dir.mkdir(parents=True, exist_ok=True)
-    hoisted_global_names = set(hoisted_global_variables)
     for workflow in workflows:
         resource_key = normalize_task_key(workflow.name)
+        # Each job resource (parent + its inner ForEach jobs) gets only this workflow's hoisted globals,
+        # not the group-wide union, so a widget is bound to ${var.X} only in the pipelines that declare X.
+        wf_hoisted_globals = hoisted_globals_by_workflow[id(workflow)]
         manual_parameters.extend(_extract_manual_parameters_from_existing_notebook_tasks(workflow.tasks))
         for inner in workflow.inner_workflows:
             manual_parameters.extend(_extract_manual_parameters_from_existing_notebook_tasks(inner.tasks))
 
         job_yml_path = resources_dir / f"{resource_key}.yml"
-        job_resource = _build_job_resource(workflow, resource_key, hoisted_globals=hoisted_global_names)
+        job_resource = _build_job_resource(workflow, resource_key, hoisted_globals=wf_hoisted_globals)
         job_yml_path.write_text(
             yaml.dump(
                 job_resource, default_flow_style=False, sort_keys=False, allow_unicode=True, Dumper=_BundleYamlDumper
@@ -447,7 +459,7 @@ def write_bundle_group(
             inner_key = normalize_task_key(inner.name)
             inner_yml_path = resources_dir / f"{inner_key}.yml"
             inner_resource = _build_job_resource(
-                inner, inner_key, extra_notebooks_for_augment=workflow.notebooks, hoisted_globals=hoisted_global_names
+                inner, inner_key, extra_notebooks_for_augment=workflow.notebooks, hoisted_globals=wf_hoisted_globals
             )
             inner_yml_path.write_text(
                 yaml.dump(
@@ -562,7 +574,7 @@ def write_bundle_group(
         manual_schedule_time_of_day=manual_schedule_time_of_day_configs,
         manual_credentials=manual_credential_configs,
         neutralized_conditions=list(_neutralized_conditions),
-        hoisted_global_variables=hoisted_global_variables,
+        hoisted_global_variables=hoisted_global_union,
         pydabs_dbt_factories=pydabs_dbt_factory_configs,
         airflow_backfills=airflow_backfill_configs,
         skipped_pipelines=list(skipped_pipelines or []),
