@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -215,8 +214,21 @@ def _topo_sort(graph: dict[str, list[str]]) -> list[str]:
 
 
 def _run_cli(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-    """Runs a CLI command, capturing output. Isolated so tests can monkeypatch it."""
-    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    """Runs a CLI command, capturing output. Isolated so tests can monkeypatch it.
+
+    If the executable is missing (this is a local-CLI operation and ``databricks`` is not on PATH),
+    surface an actionable message as a non-zero CompletedProcess instead of letting an uncaught
+    FileNotFoundError escape as a traceback. Callers already branch on ``returncode``.
+    """
+    try:
+        return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    except FileNotFoundError:
+        message = (
+            f"`{cmd[0]}` was not found on PATH. Ordered deploy is a local-CLI operation "
+            "(`databricks bundle deploy`/`summary`); install the databricks CLI, or use --dry-run to "
+            "preview the deploy order without deploying."
+        )
+        return subprocess.CompletedProcess(cmd, returncode=127, stdout="", stderr=message)
 
 
 def _capture_job_ids(
@@ -275,17 +287,6 @@ def run(
     output_dir = Path(output_dir)
     if not output_dir.is_dir():
         print(f"Error: output directory not found: {output_dir}", file=sys.stderr)
-        return 1
-
-    # A real deploy shells out to the `databricks` CLI; fail with an actionable message rather than an
-    # uncaught FileNotFoundError if it isn't on PATH. Skipped for --dry-run, which never invokes it.
-    if not dry_run and shutil.which("databricks") is None:
-        print(
-            "Error: the `databricks` CLI was not found on PATH. This is a local-CLI operation "
-            "(`databricks bundle deploy`/`summary`); install the CLI, or use --dry-run to preview the "
-            "deploy order without deploying.",
-            file=sys.stderr,
-        )
         return 1
 
     try:

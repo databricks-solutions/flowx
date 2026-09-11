@@ -1,7 +1,7 @@
 ---
 name: flowx-deploy
 description: >
-  Deploy the per-pipeline Databricks Asset Bundles from a multi-pipeline flowx
+  Deploy the per-pipeline Declarative Automation Bundles from a multi-pipeline flowx
   migration in dependency order, resolving cross-bundle job ids automatically.
   Local CLI only.
 triggers:
