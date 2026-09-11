@@ -2,8 +2,8 @@
 
 Exposes stateless subcommands -- the ``discover``/``convert``/``package`` phase runners plus
 ``inspect``, ``modify``, ``resolve-agentic``, ``inputs``, ``materialize-lookup``, ``workspace-paths``,
-``record-results``, and ``install-dashboard`` -- so each agent turn runs as an independent process
-holding no session state across user prompts.
+``record-results``, ``install-dashboard``, and ``deploy`` -- so each agent turn runs as an independent
+process holding no session state across user prompts.
 """
 
 from __future__ import annotations
@@ -89,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_record_results(args)
     if args.command == "install-dashboard":
         return _run_install_dashboard(args)
+    if args.command == "deploy":
+        return _run_deploy(args)
     parser.print_help(sys.stderr)
     return 2
 
@@ -138,6 +140,23 @@ def _run_resolve_agentic(args: argparse.Namespace) -> int:
         return 1
     _emit_json(payload, None)
     return 0
+
+
+def _run_deploy(args: argparse.Namespace) -> int:
+    """Implements ``deploy``: deploy per-pipeline bundles in dependency order.
+
+    Local-CLI only — shells out to ``databricks bundle deploy`` / ``summary``, which are not
+    available on Databricks serverless / Genie Code. Returns the deployer's exit code.
+    """
+    from flowx.bundler.deployer import run as run_deploy
+
+    return run_deploy(
+        args.output_dir,
+        target=args.target,
+        profile=args.profile,
+        dry_run=args.dry_run,
+        allow_missing_deps=args.allow_missing_deps,
+    )
 
 
 def _run_record_results(args: argparse.Namespace) -> int:
@@ -525,6 +544,35 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Workspace folder for the dashboard (defaults to the current user's home).",
+    )
+
+    deploy = subparsers.add_parser(
+        "deploy",
+        help="Deploy per-pipeline bundles in dependency order, wiring cross-bundle job ids (local CLI).",
+    )
+    deploy.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("./flowx_output"),
+        help="Directory holding the per-pipeline bundle subdirectories.",
+    )
+    deploy.add_argument("--target", type=str, default="dev", help="Bundle target to deploy (default: dev).")
+    deploy.add_argument("--profile", type=str, default=None, help="Databricks CLI profile for deploy and summary.")
+    deploy.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the dependency order and deploy commands without deploying.",
+    )
+    deploy.add_argument(
+        "--allow-missing-deps",
+        action="store_true",
+        help=(
+            "Order and attempt to deploy even when a bundle references a callee absent from the output "
+            "dir. The missing ${var.<callee>} is declared without a default, so that bundle's deploy "
+            "still fails until you supply the value manually (edit its databricks.yml default or "
+            "`databricks bundle deploy --var <callee>=<job_id>` per SETUP.md); this flag only unblocks "
+            "the ordering, not the deploy."
+        ),
     )
 
     # Unified phase runners: `adapter <phase> --source <name> -- <flags>` routes discover/convert
