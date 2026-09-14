@@ -95,7 +95,8 @@ def _sample_graph() -> SourceGraph:
         schedule=ScheduleSpec(
             kind="schedule",
             expression={"frequency": "Day", "interval": 1},
-            extensions={"timezone": "UTC"},
+            timezone="UTC",
+            extensions={"runtime_state": "Started"},
         ),
         tags=["prod", "orders"],
         tasks=[
@@ -195,9 +196,12 @@ def test_round_trip_preserves_data_assets_and_extension_bags():
     assert copy_node.properties == {"linked_service": "AzureSqlDatabase1"}
     assert reloaded.extensions == {"annotations": ["team:data"]}
     assert reloaded.schedule is not None
-    # Source-faithful schedule: the ADF recurrence rides verbatim in `expression`.
+    # Source-faithful schedule: the ADF recurrence rides verbatim in `expression`,
+    # the source-declared timezone is a typed field, and no Databricks-target
+    # shape (Quartz cron / pause_status) is baked in.
     assert reloaded.schedule.expression == {"frequency": "Day", "interval": 1}
-    assert reloaded.schedule.extensions == {"timezone": "UTC"}
+    assert reloaded.schedule.timezone == "UTC"
+    assert reloaded.schedule.extensions == {"runtime_state": "Started"}
 
 
 def test_empty_graph_emits_lists_and_dicts_never_null():

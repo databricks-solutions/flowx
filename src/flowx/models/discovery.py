@@ -69,11 +69,12 @@ class ScheduleSpec:
     """A workflow schedule kept in the SOURCE's own shape.
 
     Deliberately source-faithful, not Databricks-normalised. ``kind`` is a
-    neutral trigger category and ``expression`` holds the schedule exactly as
-    the source gives it -- an Airflow ``schedule_interval`` cron string or
-    preset, an ADF trigger recurrence payload. Databricks-*target*
-    normalisation (a Quartz cron string, ``pause_status``, a resolved timezone
-    id) is a convert/target concern and is intentionally **not** typed here; a
+    neutral trigger category, ``expression`` holds the schedule exactly as the
+    source gives it -- an Airflow ``schedule_interval`` cron string or preset,
+    an ADF trigger recurrence payload -- and ``timezone`` carries the timezone
+    the source itself declares (ADF ``timeZone``, an Airflow DAG timezone).
+    Databricks-*target* normalisation -- a Quartz cron string, ``pause_status``
+    -- is a convert/target concern and is intentionally **not** typed here; a
     mapper that needs to stash such derived values for now puts them in
     :attr:`extensions`, never as first-class fields. Kept minimal on purpose --
     fields get promoted only once genuinely shared.
@@ -84,11 +85,13 @@ class ScheduleSpec:
             unknown.
         expression: The source schedule as-given -- a cron / interval / preset
             string, or a structured recurrence payload.
+        timezone: The timezone the source declares, verbatim, or ``None``.
         extensions: Overflow for any other source-specific schedule detail.
     """
 
     kind: str
     expression: Any = None
+    timezone: str | None = None
     extensions: dict[str, Any] = field(default_factory=dict)
 
 

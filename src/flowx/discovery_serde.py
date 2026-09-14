@@ -90,6 +90,8 @@ def _schedule_to_dict(schedule: ScheduleSpec) -> dict[str, Any]:
     result: dict[str, Any] = {"kind": schedule.kind}
     if schedule.expression is not None:
         result["expression"] = schedule.expression
+    if schedule.timezone is not None:
+        result["timezone"] = schedule.timezone
     if schedule.extensions:
         result["extensions"] = dict(schedule.extensions)
     return result
@@ -99,6 +101,7 @@ def _schedule_from_dict(raw: dict[str, Any]) -> ScheduleSpec:
     return ScheduleSpec(
         kind=raw.get("kind", ""),
         expression=raw.get("expression"),
+        timezone=raw.get("timezone"),
         extensions=dict(raw.get("extensions") or {}),
     )
 
