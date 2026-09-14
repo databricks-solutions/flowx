@@ -103,6 +103,21 @@ def data_asset_to_dict(asset: DataAsset) -> dict[str, Any]:
     return result
 
 
+def data_asset_from_dict(raw: dict[str, Any]) -> DataAsset:
+    """Rehydrate a :class:`DataAsset` from the dict :func:`data_asset_to_dict` emits.
+
+    The canonical inverse of :func:`data_asset_to_dict`, so every consumer of the
+    serialised DataAsset shape (the lineage substrate and the discovery AST)
+    reads it the same way.
+    """
+    return DataAsset(
+        signature=raw.get("signature", ""),
+        identity=raw.get("identity"),
+        asset_type=raw.get("asset_type"),
+        properties=dict(raw.get("properties") or {}),
+    )
+
+
 def lineage_to_dict(lineage: Lineage) -> dict[str, Any]:
     """Serialise a :class:`Lineage` block to a JSON-friendly dictionary.
 
