@@ -9,9 +9,10 @@ import yaml
 from flowx.bundler.dab_writer import (
     _load_report,
     write_bundle,
+    write_bundle_group,
 )
 from flowx.bundler.dab_writer import main as dab_main
-from flowx.models.dab import SecretInstruction, SetupTask
+from flowx.models.dab import DabNotebook, SecretInstruction, SetupTask
 from flowx.models.ir import (
     CopyActivity,
     IfConditionActivity,
@@ -1590,3 +1591,69 @@ class TestHoistedGlobalVariables:
         assert "Factory global parameters (bundle variables)" in md
         assert "Security note" in md
         assert "env=<value>" in md
+
+
+class TestHoistedGlobalsAcrossGroupedWorkflows:
+    """When several workflows share one bundle (single / per-group modes), global-parameter hoisting
+    must be UNION at the bundle level (databricks.yml variables + SETUP.md declare every workflow's
+    globals) but PER-WORKFLOW at each job (a notebook widget binds to ${var.X} only in the pipelines
+    that actually declare X). Regression: the multi-workflow merge previously applied a single leaked
+    workflow's hoisted set (the last one) to every job and to databricks.yml."""
+
+    def _hoisted_workflow(self, name: str, global_name: str) -> PreparedWorkflow:
+        # A generated notebook that reads BOTH globals as widgets, so per-job binding is observable:
+        # the owning workflow's global binds to ${var.X}, the other stays "".
+        notebook = DabNotebook(
+            relative_path=f"notebooks/{name}.py",
+            content=("env_a = dbutils.widgets.get('env_a')\nenv_b = dbutils.widgets.get('env_b')\n"),
+        )
+        return PreparedWorkflow(
+            name=name,
+            tasks=[{"task_key": "run", "notebook_task": {"notebook_path": f"../src/notebooks/{name}.py"}}],
+            notebooks=[notebook],
+            secrets=[],
+            setup_tasks=[],
+            bundle_variables={global_name: {"description": f"Factory global '{global_name}'.", "default": "prod"}},
+        )
+
+    def test_bundle_variables_are_the_union_across_workflows(self, tmp_path):
+        wfs = [self._hoisted_workflow("pl_a", "env_a"), self._hoisted_workflow("pl_b", "env_b")]
+        write_bundle_group(wfs, tmp_path, bundle_name="grouped")
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        # Union: BOTH pipelines' globals are declared, not just the last workflow's.
+        assert "env_a" in variables
+        assert "env_b" in variables
+
+    def test_setup_md_lists_every_workflows_globals(self, tmp_path):
+        wfs = [self._hoisted_workflow("pl_a", "env_a"), self._hoisted_workflow("pl_b", "env_b")]
+        write_bundle_group(wfs, tmp_path, bundle_name="grouped")
+        setup = (tmp_path / "SETUP.md").read_text()
+        assert "env_a" in setup
+        assert "env_b" in setup
+
+    def test_each_job_binds_only_its_own_global(self, tmp_path):
+        wfs = [self._hoisted_workflow("pl_a", "env_a"), self._hoisted_workflow("pl_b", "env_b")]
+        write_bundle_group(wfs, tmp_path, bundle_name="grouped")
+
+        job_a = yaml.safe_load((tmp_path / "resources" / "pl_a.yml").read_text())["resources"]["jobs"]["pl_a"]
+        base_a = job_a["tasks"][0]["notebook_task"]["base_parameters"]
+        # pl_a declares only env_a -> its widget binds to the var; env_b is not its global -> "".
+        assert base_a["env_a"] == "${var.env_a}"
+        assert base_a["env_b"] == ""
+
+        job_b = yaml.safe_load((tmp_path / "resources" / "pl_b.yml").read_text())["resources"]["jobs"]["pl_b"]
+        base_b = job_b["tasks"][0]["notebook_task"]["base_parameters"]
+        assert base_b["env_b"] == "${var.env_b}"
+        assert base_b["env_a"] == ""
+
+    def test_single_workflow_group_unchanged(self, tmp_path):
+        # With one workflow the union equals that workflow's set -> byte-identical to per-pipeline.
+        wf = self._hoisted_workflow("pl_solo", "env_a")
+        write_bundle_group([wf], tmp_path, bundle_name="pl_solo")
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        assert "env_a" in variables
+        assert "env_b" not in variables
+        job = yaml.safe_load((tmp_path / "resources" / "pl_solo.yml").read_text())["resources"]["jobs"]["pl_solo"]
+        base = job["tasks"][0]["notebook_task"]["base_parameters"]
+        assert base["env_a"] == "${var.env_a}"
+        assert base["env_b"] == ""

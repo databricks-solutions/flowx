@@ -234,7 +234,7 @@ Parses the source into typed nodes and classifies each activity/operator as dete
 Applies deterministic translators (ADF activity registry / Airflow operator mapping), resolves dependencies, and records unresolved gaps. ADF supports its guided agentic translation workflow. Airflow supports a fingerprint-bound, explicitly reviewed leaf-gap workflow whose constrained provider output is replayed against an immutable deterministic baseline before packaging. Produces the shared Pipeline IR consumed unchanged by the package phase.
 
 ### Phase 3: Package
-Converts Pipeline IR into a deployable DABs project: `databricks.yml`, per-job YAML resource files, generated Python notebooks, and setup scripts for UC volumes, secrets, and connections.
+Converts Pipeline IR into a deployable DABs project: `databricks.yml`, per-job YAML resource files, generated Python notebooks, and setup scripts for UC volumes, secrets, and connections. A multi-pipeline factory can be laid out into bundles with `--packaging-mode` (`per-pipeline` default / `single` / `per-group`); a top-level `DEPLOY.md` records the suggested callees-first deploy order, and `python -m flowx.adapter deploy` deploys the bundles in that order, wiring cross-bundle job ids automatically.
 
 ## Output Format
 

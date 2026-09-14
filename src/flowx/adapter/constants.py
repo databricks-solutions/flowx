@@ -42,6 +42,13 @@ INPUT_DATABRICKS_PROFILE: Final[str] = "databricks_profile"
 INPUT_RESULTS_TABLE: Final[str] = "results_table"
 INPUT_RESULTS_WAREHOUSE: Final[str] = "results_warehouse_id"
 INPUT_INSTALL_DASHBOARD: Final[str] = "install_dashboard"
+INPUT_PACKAGING_MODE: Final[str] = "packaging_mode"
+INPUT_GROUP_SPEC: Final[str] = "group_spec"
+
+# Packaging-mode answers accepted by the package phase's --packaging-mode flag.
+PACKAGING_MODE_PER_PIPELINE: Final[str] = "per-pipeline"
+PACKAGING_MODE_SINGLE: Final[str] = "single"
+PACKAGING_MODE_PER_GROUP: Final[str] = "per-group"
 
 LAKEFLOW_CONNECTOR_TYPE_QUERY_BASED: Final[str] = "query_based"
 LAKEFLOW_CONNECTOR_TYPE_CDC: Final[str] = "cdc"
