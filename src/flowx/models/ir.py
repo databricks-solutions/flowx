@@ -56,6 +56,134 @@ class Dependency:
 
 
 @dataclass(slots=True, kw_only=True)
+class DataAsset:
+    """A physical data source or sink an activity reads from or writes to.
+
+    Deliberately source-neutral: the same shape describes an ADF dataset, an
+    Airflow dataset/hook target, or any other front-end's data reference, so the
+    lineage substrate never has to know which source produced it.
+
+    Two-tier identity (from #36): ``identity`` is the resolved physical location
+    (``schema.table`` or a concrete storage path) and is the strong join key.
+    It is ``None`` when it cannot be resolved deterministically -- never a guess.
+    ``signature`` is always present and carries the neutral fallback descriptor
+    (a dataset name, a normalised reference, or an expression) so two assets can
+    still be compared when neither side resolved to a physical identity.
+
+    Attributes:
+        signature: Neutral, always-present descriptor used as the weak join key
+            (e.g. dataset name or normalised expression).
+        identity: Resolved physical identity used as the strong join key, or
+            ``None`` when it could not be resolved deterministically.
+        asset_type: Neutral kind of the asset (``"table"`` / ``"file"`` /
+            ``"volume"`` / ...), or ``None`` when unknown.
+        properties: Free-form extra attributes carried through verbatim.
+    """
+
+    signature: str
+    identity: str | None = None
+    asset_type: str | None = None
+    properties: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True, kw_only=True)
+class ControlEdge:
+    """A control-flow invocation between two workflows.
+
+    Emitted for cross-workflow calls -- an ADF ``ExecutePipeline`` invoking a
+    child pipeline, an Airflow ``RunJobActivity`` triggering another job -- so
+    the field names stay neutral (``source_workflow`` / ``target_workflow``)
+    rather than baking in either source's vocabulary.
+
+    Attributes:
+        source_workflow: Name of the calling workflow (the pipeline/DAG the
+            invoking activity lives in).
+        target_workflow: Name of the invoked workflow (child pipeline / job).
+        via_task_key: Task key of the activity that performs the invocation.
+        wait_for_completion: Whether the caller blocks on the callee, when the
+            source expresses it; ``None`` when the source has no such notion.
+        resolved: ``False`` when the callee could not be resolved from a partial
+            export (recorded, not dropped); ``True`` otherwise.
+    """
+
+    source_workflow: str
+    target_workflow: str
+    via_task_key: str
+    wait_for_completion: bool | None = None
+    resolved: bool = True
+
+
+@dataclass(slots=True, kw_only=True)
+class DataEdge:
+    """A proven data hand-off between a producing and a consuming task.
+
+    A producer writes a :class:`DataAsset` that a consumer later reads. The two
+    tiers from #36 are recorded on the edge itself: ``match_kind`` says whether
+    the two assets were joined on resolved physical ``identity`` or on their
+    neutral ``signature``, and ``match_key`` is the value they matched on.
+
+    Attributes:
+        source_task_key: Task key of the producer (writes the asset).
+        target_task_key: Task key of the consumer (reads the asset).
+        match_kind: ``"identity"`` when joined on resolved physical identity,
+            ``"signature"`` when joined on the neutral fallback descriptor.
+        match_key: The value the two assets matched on.
+        identity: Resolved physical identity of the hand-off, or ``None`` when
+            the match was signature-only / the identity was unresolvable.
+        asset_type: Neutral kind of the handed-off asset, when known.
+    """
+
+    source_task_key: str
+    target_task_key: str
+    match_kind: str
+    match_key: str
+    identity: str | None = None
+    asset_type: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class MotifAnnotation:
+    """Describes a detected motif spanning one or more activities.
+
+    Source-neutral record tying a motif id to the tasks that belong to it, so
+    the lineage block can report motifs without depending on how any particular
+    source detects them.  Each member activity also carries the same
+    :attr:`Activity.motif_id` tag.
+
+    Attributes:
+        motif_id: Identifier of the matched motif definition.
+        member_task_keys: Task keys of the activities the motif spans.
+        display_name: Human-readable motif name, if any.
+        databricks_replacement: Target Databricks construct the motif maps to.
+        notes: Detector notes explaining the match rationale.
+    """
+
+    motif_id: str
+    member_task_keys: list[str] = field(default_factory=list)
+    display_name: str | None = None
+    databricks_replacement: str | None = None
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True, kw_only=True)
+class Lineage:
+    """Source-neutral lineage block attached to a translated pipeline.
+
+    Edge lists are always concrete lists (empty, never ``None``) so serialised
+    reports produce stable golden diffs.
+
+    Attributes:
+        control_edges: Cross-workflow invocation edges.
+        data_edges: Proven producer -> consumer data hand-offs.
+        motifs: Detected motif annotations.
+    """
+
+    control_edges: list[ControlEdge] = field(default_factory=list)
+    data_edges: list[DataEdge] = field(default_factory=list)
+    motifs: list[MotifAnnotation] = field(default_factory=list)
+
+
+@dataclass(slots=True, kw_only=True)
 class Activity:
     """Base class for all translated pipeline activities.
 
@@ -94,6 +222,13 @@ class Activity:
     compute_mode: str | None = None
     # Collapsed activity_and_notify spec set by the adapter: {destination, events, args, destination_name}.
     notifications: dict[str, Any] | None = None
+    # Lineage substrate (#61): source-neutral data assets this activity reads from and writes to,
+    # populated by per-source extractors in follow-up work. Always lists, never None.
+    data_reads: list[DataAsset] = field(default_factory=list)
+    data_writes: list[DataAsset] = field(default_factory=list)
+    # Id of the motif this activity was folded into (or belongs to); None when it is part of no motif.
+    # Owned here so every activity type -- not only MotifActivity -- can carry the tag.
+    motif_id: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -570,6 +705,10 @@ class PlaceholderActivity(Activity):
 class MotifActivity(Activity):
     """Activity produced by collapsing a detected motif pattern.
 
+    Redeclares :attr:`Activity.motif_id` as required (the base owns the field so
+    every activity type can carry the tag and it round-trips through one code
+    path, but a motif activity always has one).
+
     Attributes:
         motif_id: Identifier of the matched motif definition.
         display_name: Human-readable motif name.
@@ -624,6 +763,8 @@ class Pipeline:
         reconciliation_status: Source-audit result for this pipeline.
         migration_status: Whether the pipeline is included or explicitly excluded.
         audit: Source-audit counts and transformation ledger.
+        lineage: Source-neutral lineage block (control/data edges + motif
+            annotations), or ``None`` when lineage has not been derived.
     """
 
     name: str
@@ -640,6 +781,7 @@ class Pipeline:
     audit: dict[str, Any] = field(default_factory=dict)
     translation_configuration: TranslationConfiguration | None = None
     bundle_variables: dict[str, dict[str, Any]] = field(default_factory=dict)
+    lineage: Lineage | None = None
 
 
 @dataclass(frozen=True, slots=True)
