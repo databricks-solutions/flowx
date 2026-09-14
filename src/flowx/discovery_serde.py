@@ -88,12 +88,8 @@ def _parameter_from_dict(raw: dict[str, Any]) -> ParameterSpec:
 
 def _schedule_to_dict(schedule: ScheduleSpec) -> dict[str, Any]:
     result: dict[str, Any] = {"kind": schedule.kind}
-    if schedule.quartz_cron_expression is not None:
-        result["quartz_cron_expression"] = schedule.quartz_cron_expression
-    if schedule.timezone_id is not None:
-        result["timezone_id"] = schedule.timezone_id
-    if schedule.pause_status is not None:
-        result["pause_status"] = schedule.pause_status
+    if schedule.expression is not None:
+        result["expression"] = schedule.expression
     if schedule.extensions:
         result["extensions"] = dict(schedule.extensions)
     return result
@@ -102,9 +98,7 @@ def _schedule_to_dict(schedule: ScheduleSpec) -> dict[str, Any]:
 def _schedule_from_dict(raw: dict[str, Any]) -> ScheduleSpec:
     return ScheduleSpec(
         kind=raw.get("kind", ""),
-        quartz_cron_expression=raw.get("quartz_cron_expression"),
-        timezone_id=raw.get("timezone_id"),
-        pause_status=raw.get("pause_status"),
+        expression=raw.get("expression"),
         extensions=dict(raw.get("extensions") or {}),
     )
 
@@ -183,11 +177,17 @@ def _node_to_dict(node: SourceNode) -> dict[str, Any]:
 
 
 def _node_from_dict(raw: dict[str, Any]) -> SourceNode:
-    """Rehydrate any SourceNode from its dict, dispatching on ``node_type``."""
+    """Rehydrate any SourceNode from its dict, dispatching on ``node_type``.
+
+    Optional fields absent from the dict fall back to each class's model
+    default rather than being forced to ``""`` / empty. In particular
+    ``concept`` is passed through only when the dict carries a non-empty value,
+    so a partial :class:`GapNode` dict (no ``concept`` key) rehydrates with the
+    model default ``CONCEPT_GAP`` instead of being overridden with ``""``.
+    """
     common: dict[str, Any] = {
         "source_id": raw.get("source_id", ""),
         "task_key": raw.get("task_key", ""),
-        "concept": raw.get("concept", ""),
         "source": raw.get("source", ""),
         "name": raw.get("name"),
         "native_type": raw.get("native_type"),
@@ -198,7 +198,16 @@ def _node_from_dict(raw: dict[str, Any]) -> SourceNode:
         "properties": dict(raw.get("properties") or {}),
         "raw": raw.get("raw"),
     }
+    concept = raw.get("concept")
+    if concept:
+        common["concept"] = concept
+
     node_type = raw.get("node_type", "SourceNode")
+    if node_type == "GapNode":
+        # Leave `concept` unset when absent so GapNode's CONCEPT_GAP default wins.
+        return GapNode(**common, reason=raw.get("reason"))
+    # SourceNode / ContainerNode require `concept`; only a malformed dict omits it.
+    common.setdefault("concept", "")
     if node_type == "ContainerNode":
         return ContainerNode(
             **common,
@@ -207,6 +216,4 @@ def _node_from_dict(raw: dict[str, Any]) -> SourceNode:
                 for label, children in (raw.get("branches") or {}).items()
             },
         )
-    if node_type == "GapNode":
-        return GapNode(**common, reason=raw.get("reason"))
     return SourceNode(**common)

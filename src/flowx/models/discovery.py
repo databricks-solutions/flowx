@@ -66,26 +66,29 @@ CONCEPT_GAP = "gap"
 
 @dataclass(slots=True, kw_only=True)
 class ScheduleSpec:
-    """A workflow schedule, promoted from the untyped ``Pipeline.schedule`` dict.
+    """A workflow schedule kept in the SOURCE's own shape.
 
-    The shared core is the trigger ``kind`` plus the fields a cron-style
-    schedule needs; everything source-specific (tumbling-window frequency,
-    Airflow interval/unit, file-arrival url/events, approximation notes) rides
-    in :attr:`extensions`.
+    Deliberately source-faithful, not Databricks-normalised. ``kind`` is a
+    neutral trigger category and ``expression`` holds the schedule exactly as
+    the source gives it -- an Airflow ``schedule_interval`` cron string or
+    preset, an ADF trigger recurrence payload. Databricks-*target*
+    normalisation (a Quartz cron string, ``pause_status``, a resolved timezone
+    id) is a convert/target concern and is intentionally **not** typed here; a
+    mapper that needs to stash such derived values for now puts them in
+    :attr:`extensions`, never as first-class fields. Kept minimal on purpose --
+    fields get promoted only once genuinely shared.
 
     Attributes:
-        kind: Trigger kind -- ``"schedule"`` / ``"periodic"`` / ``"continuous"``
-            / ``"file_arrival"`` / ``"manual_setup"`` / ...
-        quartz_cron_expression: Quartz cron string for cron-style schedules.
-        timezone_id: IANA timezone id, when the source resolves one.
-        pause_status: ``"PAUSED"`` / ``"UNPAUSED"`` when the source expresses it.
-        extensions: Source-specific schedule fields with no shared typed home.
+        kind: Neutral trigger category (e.g. ``"schedule"`` / ``"interval"`` /
+            ``"file_arrival"`` / ``"continuous"`` / ``"manual"``), ``""`` when
+            unknown.
+        expression: The source schedule as-given -- a cron / interval / preset
+            string, or a structured recurrence payload.
+        extensions: Overflow for any other source-specific schedule detail.
     """
 
     kind: str
-    quartz_cron_expression: str | None = None
-    timezone_id: str | None = None
-    pause_status: str | None = None
+    expression: Any = None
     extensions: dict[str, Any] = field(default_factory=dict)
 
 

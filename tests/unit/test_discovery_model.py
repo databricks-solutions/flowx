@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from flowx.discovery_serde import source_graph_from_dict, source_graph_to_dict
+from flowx.discovery_serde import _node_from_dict, source_graph_from_dict, source_graph_to_dict
 from flowx.models.discovery import (
     CONCEPT_COPY_DATA,
     CONCEPT_GAP,
@@ -37,6 +37,39 @@ def test_gap_node_defaults_to_gap_concept():
     assert gap.reason == "unmapped ExecuteDataFlow"
 
 
+def test_partial_gap_node_dict_rehydrates_with_gap_concept():
+    """A GapNode dict with no `concept` key falls back to the CONCEPT_GAP default."""
+    partial = {"node_type": "GapNode", "source_id": "d1", "task_key": "dataflow", "source": SOURCE_ADF}
+
+    node = _node_from_dict(partial)
+
+    assert isinstance(node, GapNode)
+    assert node.concept == CONCEPT_GAP
+
+
+def test_partial_source_node_dict_falls_back_to_model_defaults():
+    """Omitted optional fields on a plain SourceNode dict use model defaults, not empty strings."""
+    partial = {
+        "node_type": "SourceNode",
+        "source_id": "n1",
+        "task_key": "run",
+        "concept": CONCEPT_NOTEBOOK,
+        "source": SOURCE_AIRFLOW,
+    }
+
+    node = _node_from_dict(partial)
+
+    assert type(node) is SourceNode
+    assert node.name is None
+    assert node.native_type is None
+    assert node.policy is None
+    assert node.dependencies == []
+    assert node.data_reads == []
+    assert node.data_writes == []
+    assert node.properties == {}
+    assert node.raw is None
+
+
 def test_container_node_holds_labelled_branches():
     """A ContainerNode nests child nodes under source-named branch labels."""
     container = ContainerNode(
@@ -61,10 +94,8 @@ def _sample_graph() -> SourceGraph:
         variables={"batch": ParameterSpec(type="String")},
         schedule=ScheduleSpec(
             kind="schedule",
-            quartz_cron_expression="0 0 * * * ?",
-            timezone_id="UTC",
-            pause_status="UNPAUSED",
-            extensions={"note": "approximated"},
+            expression={"frequency": "Day", "interval": 1},
+            extensions={"timezone": "UTC"},
         ),
         tags=["prod", "orders"],
         tasks=[
@@ -164,7 +195,9 @@ def test_round_trip_preserves_data_assets_and_extension_bags():
     assert copy_node.properties == {"linked_service": "AzureSqlDatabase1"}
     assert reloaded.extensions == {"annotations": ["team:data"]}
     assert reloaded.schedule is not None
-    assert reloaded.schedule.extensions == {"note": "approximated"}
+    # Source-faithful schedule: the ADF recurrence rides verbatim in `expression`.
+    assert reloaded.schedule.expression == {"frequency": "Day", "interval": 1}
+    assert reloaded.schedule.extensions == {"timezone": "UTC"}
 
 
 def test_empty_graph_emits_lists_and_dicts_never_null():
