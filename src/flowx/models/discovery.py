@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from flowx.models.ir import DataAsset
+from flowx.models.ir import DataAsset, Lineage
 
 # --------------------------------------------------------------------------- #
 # Well-known discriminators and concepts (open vocabularies).
@@ -248,6 +248,11 @@ class SourceGraph:
         tags: Free-form label list (ADF annotations, Airflow user tags).
         tasks: Top-level nodes; control flow nests further nodes via
             :class:`ContainerNode`.
+        lineage: Source-neutral lineage block (control/data edges) derived over
+            this graph, or ``None`` when lineage has not been derived. Reuses the
+            #61 :class:`~flowx.models.ir.Lineage` type so the discovery AST and
+            the IR lineage substrate share one vocabulary; populated by
+            :mod:`flowx.discovery_lineage` in the discover phase.
         properties: Free-form bag for graph-level platform-specific attributes.
         extensions: Alias-free overflow for anything else source-specific
             (e.g. ADF ``folder``, Airflow global Variables).
@@ -262,6 +267,7 @@ class SourceGraph:
     schedule: ScheduleSpec | None = None
     tags: list[str] = field(default_factory=list)
     tasks: list[SourceNode] = field(default_factory=list)
+    lineage: Lineage | None = None
     properties: dict[str, Any] = field(default_factory=dict)
     extensions: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] | None = None

@@ -7,7 +7,10 @@ its own round-trip pair so evolving one shape never disturbs the other.
 
 The DataAsset (de)serialisers are reused from ``ir_serde`` (``data_asset_to_dict``
 / ``data_asset_from_dict``) so the physical-asset shape has a single definition
-shared by the lineage substrate and the discovery AST.
+shared by the lineage substrate and the discovery AST. A graph's derived
+:class:`~flowx.models.ir.Lineage` block is serialised through ``ir_serde``'s
+``lineage_to_dict`` for the same reason; its inverse (:func:`_lineage_from_dict`)
+lives here because ``ir_serde`` ships only the forward direction.
 
 Every node dict carries a ``node_type`` discriminator (the dataclass name) so a
 :class:`~flowx.models.discovery.ContainerNode` or
@@ -19,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from flowx.ir_serde import data_asset_from_dict, data_asset_to_dict
+from flowx.ir_serde import data_asset_from_dict, data_asset_to_dict, lineage_to_dict
 from flowx.models.discovery import (
     ContainerNode,
     GapNode,
@@ -30,6 +33,7 @@ from flowx.models.discovery import (
     SourceGraph,
     SourceNode,
 )
+from flowx.models.ir import ControlEdge, DataEdge, Lineage, MotifAnnotation
 
 
 def source_graph_to_dict(graph: SourceGraph) -> dict[str, Any]:
@@ -46,6 +50,8 @@ def source_graph_to_dict(graph: SourceGraph) -> dict[str, Any]:
         result["description"] = graph.description
     if graph.schedule is not None:
         result["schedule"] = _schedule_to_dict(graph.schedule)
+    if graph.lineage is not None:
+        result["lineage"] = lineage_to_dict(graph.lineage)
     if graph.properties:
         result["properties"] = dict(graph.properties)
     if graph.extensions:
@@ -58,6 +64,7 @@ def source_graph_to_dict(graph: SourceGraph) -> dict[str, Any]:
 def source_graph_from_dict(raw: dict[str, Any]) -> SourceGraph:
     """Rehydrate a :class:`SourceGraph` from the dict :func:`source_graph_to_dict` emits."""
     schedule = raw.get("schedule")
+    lineage = raw.get("lineage")
     return SourceGraph(
         name=raw.get("name", ""),
         source=raw.get("source", ""),
@@ -67,9 +74,51 @@ def source_graph_from_dict(raw: dict[str, Any]) -> SourceGraph:
         schedule=_schedule_from_dict(schedule) if schedule else None,
         tags=list(raw.get("tags") or []),
         tasks=[_node_from_dict(node) for node in raw.get("tasks") or []],
+        lineage=_lineage_from_dict(lineage) if lineage else None,
         properties=dict(raw.get("properties") or {}),
         extensions=dict(raw.get("extensions") or {}),
         raw=raw.get("raw"),
+    )
+
+
+def _lineage_from_dict(raw: dict[str, Any]) -> Lineage:
+    """Rehydrate a :class:`Lineage` block from the dict ``ir_serde.lineage_to_dict`` emits.
+
+    The inverse of that forward serialiser (which ``ir_serde`` does not itself
+    ship), so a discovery graph's lineage round-trips through this module.
+    """
+    return Lineage(
+        control_edges=[
+            ControlEdge(
+                source_workflow=edge.get("source_workflow", ""),
+                target_workflow=edge.get("target_workflow", ""),
+                via_task_key=edge.get("via_task_key", ""),
+                wait_for_completion=edge.get("wait_for_completion"),
+                resolved=bool(edge.get("resolved", True)),
+            )
+            for edge in raw.get("control_edges") or []
+        ],
+        data_edges=[
+            DataEdge(
+                source_task_key=edge.get("source_task_key", ""),
+                target_task_key=edge.get("target_task_key", ""),
+                match_kind=edge.get("match_kind", ""),
+                match_key=edge.get("match_key", ""),
+                identity=edge.get("identity"),
+                asset_type=edge.get("asset_type"),
+            )
+            for edge in raw.get("data_edges") or []
+        ],
+        motifs=[
+            MotifAnnotation(
+                motif_id=motif.get("motif_id", ""),
+                member_task_keys=list(motif.get("member_task_keys") or []),
+                display_name=motif.get("display_name"),
+                databricks_replacement=motif.get("databricks_replacement"),
+                notes=list(motif.get("notes") or []),
+            )
+            for motif in raw.get("motifs") or []
+        ],
     )
 
 
