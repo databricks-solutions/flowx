@@ -26,7 +26,7 @@ from flowx.models.discovery import (
     SourceGraph,
     SourceNode,
 )
-from flowx.models.ir import DataAsset
+from flowx.models.ir import ControlEdge, DataAsset, DataEdge, Lineage
 
 
 def test_gap_node_defaults_to_gap_concept():
@@ -214,3 +214,38 @@ def test_empty_graph_emits_lists_and_dicts_never_null():
     assert serialised["variables"] == {}
     # Airflow has no graph-scoped variables; the field stays empty rather than absent.
     assert source_graph_from_dict(serialised).variables == {}
+
+
+def test_lineage_block_round_trips_and_is_absent_when_none():
+    """A graph's derived lineage survives serialise<->deserialise; None stays absent."""
+    graph = SourceGraph(
+        name="pl",
+        source=SOURCE_ADF,
+        lineage=Lineage(
+            control_edges=[
+                ControlEdge(
+                    source_workflow="pl",
+                    target_workflow="child",
+                    via_task_key="Run Child",
+                    wait_for_completion=False,
+                )
+            ],
+            data_edges=[
+                DataEdge(
+                    source_task_key="writer",
+                    target_task_key="reader",
+                    match_kind="identity",
+                    match_key="curated.orders",
+                    identity="curated.orders",
+                    asset_type="table",
+                )
+            ],
+        ),
+    )
+    reloaded = source_graph_from_dict(json.loads(json.dumps(source_graph_to_dict(graph))))
+    assert reloaded == graph
+
+    # A graph with no derived lineage omits the key entirely and rehydrates to None.
+    bare = source_graph_to_dict(SourceGraph(name="bare", source=SOURCE_ADF))
+    assert "lineage" not in bare
+    assert source_graph_from_dict(bare).lineage is None
