@@ -292,7 +292,61 @@ def test_multiple_triggers_preserve_extras_in_extensions() -> None:
     assert schedule is not None
     assert schedule.extensions["trigger_name"] == "tr_first"  # first wins the typed slot
     additional = schedule.extensions["additional_triggers"]
-    assert len(additional) == 1 and additional[0]["type"] == "ScheduleTrigger"
+    assert len(additional) == 1
+    # The additional trigger retains its NAME (not just properties).
+    assert additional[0]["trigger_name"] == "tr_second"
+    assert additional[0]["trigger_type"] == "ScheduleTrigger"
+    assert additional[0]["properties"]["typeProperties"]["recurrence"]["interval"] == 6
+
+
+def test_triggers_do_not_leak_across_pipelines() -> None:
+    """A ScheduleSpec is per-pipeline: a later A-only trigger must not appear on B.
+
+    Guards the shared-instance aliasing bug -- trigger_ab references A and B, then
+    trigger_a references only A. B must keep exactly trigger_ab and gain nothing
+    from trigger_a.
+    """
+    pipeline_a = _parse_pipeline_json({"name": "pl_a", "properties": {"activities": []}})
+    pipeline_b = _parse_pipeline_json({"name": "pl_b", "properties": {"activities": []}})
+    triggers = [
+        _parse_trigger_json(
+            {
+                "name": "tr_ab",
+                "properties": {
+                    "type": "ScheduleTrigger",
+                    "typeProperties": {"recurrence": {"frequency": "Day", "interval": 1}},
+                    "pipelines": [
+                        {"pipelineReference": {"referenceName": "pl_a"}},
+                        {"pipelineReference": {"referenceName": "pl_b"}},
+                    ],
+                },
+            }
+        ),
+        _parse_trigger_json(
+            {
+                "name": "tr_a_only",
+                "properties": {
+                    "type": "ScheduleTrigger",
+                    "typeProperties": {"recurrence": {"frequency": "Hour", "interval": 2}},
+                    "pipelines": [{"pipelineReference": {"referenceName": "pl_a"}}],
+                },
+            }
+        ),
+    ]
+    graphs = {
+        graph.name: graph
+        for graph in adf_definitions_to_source_graphs(
+            AdfDefinitions(pipelines=[pipeline_a, pipeline_b], triggers=triggers)
+        )
+    }
+
+    schedule_a = graphs["pl_a"].schedule
+    schedule_b = graphs["pl_b"].schedule
+    assert schedule_a is not None and schedule_b is not None
+    assert schedule_a is not schedule_b  # distinct instances, no aliasing
+    # A picked up the second trigger; B must NOT have leaked it.
+    assert schedule_a.extensions["additional_triggers"][0]["trigger_name"] == "tr_a_only"
+    assert "additional_triggers" not in schedule_b.extensions
 
 
 def test_fixture_scheduled_pipeline_gets_schedule(adf_definitions) -> None:
@@ -325,6 +379,17 @@ def test_empty_for_each_stays_a_container_with_body_branch() -> None:
 
     node = graph.tasks[0]
     assert isinstance(node, ContainerNode)
+    assert list(node.branches.keys()) == ["body"]
+    assert node.branches["body"] == []
+
+
+def test_empty_until_stays_a_container_with_body_branch() -> None:
+    """An Until with no children still maps to a ContainerNode with an empty body."""
+    graph = _pipeline([{"name": "Retry", "type": "Until", "typeProperties": {}}])
+
+    node = graph.tasks[0]
+    assert isinstance(node, ContainerNode)
+    assert node.native_type == "Until"
     assert list(node.branches.keys()) == ["body"]
     assert node.branches["body"] == []
 

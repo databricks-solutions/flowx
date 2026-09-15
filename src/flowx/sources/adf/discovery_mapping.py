@@ -112,21 +112,32 @@ def _attach_schedules(graphs: list[SourceGraph], triggers: list[AdfTrigger]) -> 
     preserved verbatim under ``schedule.extensions["additional_triggers"]`` so
     nothing is lost. Pipeline references are matched case-insensitively, mirroring
     ADF's case-insensitive identifier semantics.
+
+    A **fresh** :class:`ScheduleSpec` is built for each pipeline assignment rather
+    than sharing one instance across every pipeline a trigger references: a shared
+    instance would let a later trigger's mutation (appending to
+    ``additional_triggers``) leak onto every other pipeline that trigger touched.
     """
     graphs_by_name = {graph.name: graph for graph in graphs}
     graphs_by_lower = {graph.name.lower(): graph for graph in graphs}
 
     for trigger in triggers:
-        schedule = _trigger_to_schedule(trigger)
         for pipeline_name in _trigger_pipeline_names(trigger):
             graph = graphs_by_name.get(pipeline_name) or graphs_by_lower.get(pipeline_name.lower())
             if graph is None:
                 continue
             if graph.schedule is None:
-                graph.schedule = schedule
+                # Per-pipeline instance: no shared mutable state across pipelines.
+                graph.schedule = _trigger_to_schedule(trigger)
             else:
                 additional = graph.schedule.extensions.setdefault("additional_triggers", [])
-                additional.append(schedule.extensions.get("properties"))
+                additional.append(
+                    {
+                        "trigger_name": trigger.name,
+                        "trigger_type": trigger.type,
+                        "properties": trigger.properties,
+                    }
+                )
 
 
 def _trigger_to_schedule(trigger: AdfTrigger) -> ScheduleSpec:
