@@ -6,8 +6,12 @@ the discovery AST is a different model with a different lifecycle. This module i
 its own round-trip pair so evolving one shape never disturbs the other.
 
 The DataAsset (de)serialisers are reused from ``ir_serde`` (``data_asset_to_dict``
-/ ``data_asset_from_dict``) so the physical-asset shape has a single definition
-shared by the lineage substrate and the discovery AST. A graph's derived
+/ ``data_asset_from_dict``) so the data-asset shape has a single definition
+shared by the lineage substrate and the discovery AST. That shape is a general,
+best-effort description of what a task reads/writes -- not physical-only: a
+resolvable physical ``identity`` when there is one (else ``None``), an
+always-present ``signature``, and an open ``asset_type`` that also covers
+non-physical / logical / value hand-offs (e.g. an Airflow XCom). A graph's derived
 :class:`~flowx.models.ir.Lineage` block is serialised through ``ir_serde``'s
 ``lineage_to_dict`` for the same reason; its inverse (:func:`_lineage_from_dict`)
 lives here because ``ir_serde`` ships only the forward direction.

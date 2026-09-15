@@ -27,7 +27,12 @@ a deliberate expansion point, not an oversight.
 The lineage primitives from #61 (:class:`~flowx.models.ir.DataAsset`) are
 reused here rather than duplicated: a node's reads and writes are lists of
 ``DataAsset``, so the discovery AST and the lineage substrate share one
-vocabulary for physical data references.
+vocabulary for describing data references. That description is general and
+best-effort, not physical-only -- ``identity`` is the strong physical id when
+resolvable (else ``None``, never guessed), ``signature`` is the always-present
+weak descriptor, and ``asset_type`` is an open kind that also covers
+non-physical / logical / value hand-offs (e.g. an Airflow XCom). Each source
+populates what it can; empty reads/writes are valid.
 """
 
 from __future__ import annotations
