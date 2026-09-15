@@ -160,7 +160,8 @@ class MotifAnnotation:
 
     Source-neutral record tying a motif id to the tasks that belong to it, so
     the lineage block can report motifs without depending on how any particular
-    source detects them.  ``member_task_keys`` lists the tasks the motif spans.
+    source detects them.  Each member activity also carries the same
+    :attr:`Activity.motif_id` tag.
 
     Attributes:
         motif_id: Identifier of the matched motif definition.
@@ -234,6 +235,13 @@ class Activity:
     compute_mode: str | None = None
     # Collapsed activity_and_notify spec set by the adapter: {destination, events, args, destination_name}.
     notifications: dict[str, Any] | None = None
+    # Lineage substrate (#61): source-neutral data assets this activity reads from and writes to,
+    # populated by per-source extractors in follow-up work. Always lists, never None.
+    data_reads: list[DataAsset] = field(default_factory=list)
+    data_writes: list[DataAsset] = field(default_factory=list)
+    # Id of the motif this activity was folded into (or belongs to); None when it is part of no motif.
+    # Owned here so every activity type -- not only MotifActivity -- can carry the tag.
+    motif_id: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -710,6 +718,10 @@ class PlaceholderActivity(Activity):
 class MotifActivity(Activity):
     """Activity produced by collapsing a detected motif pattern.
 
+    Redeclares :attr:`Activity.motif_id` as required (the base owns the field so
+    every activity type can carry the tag and it round-trips through one code
+    path, but a motif activity always has one).
+
     Attributes:
         motif_id: Identifier of the matched motif definition.
         display_name: Human-readable motif name.
@@ -764,6 +776,8 @@ class Pipeline:
         reconciliation_status: Source-audit result for this pipeline.
         migration_status: Whether the pipeline is included or explicitly excluded.
         audit: Source-audit counts and transformation ledger.
+        lineage: Source-neutral lineage block (control/data edges + motif
+            annotations), or ``None`` when lineage has not been derived.
     """
 
     name: str
@@ -780,6 +794,7 @@ class Pipeline:
     audit: dict[str, Any] = field(default_factory=dict)
     translation_configuration: TranslationConfiguration | None = None
     bundle_variables: dict[str, dict[str, Any]] = field(default_factory=dict)
+    lineage: Lineage | None = None
 
 
 @dataclass(frozen=True, slots=True)
