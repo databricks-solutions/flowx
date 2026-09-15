@@ -57,26 +57,39 @@ class Dependency:
 
 @dataclass(slots=True, kw_only=True)
 class DataAsset:
-    """A physical data source or sink an activity reads from or writes to.
+    """A general, best-effort description of something a task reads or writes.
 
     Deliberately source-neutral: the same shape describes an ADF dataset, an
-    Airflow dataset/hook target, or any other front-end's data reference, so the
-    lineage substrate never has to know which source produced it.
+    Airflow dataset/hook target, an XCom / TaskFlow return value, or any other
+    front-end's data reference, so the lineage substrate never has to know which
+    source produced it.
+
+    Population is **best-effort and open**, not physical-only. Each source fills
+    in what it can -- fully, partially, or not at all -- and an empty
+    ``data_reads`` / ``data_writes`` is valid and expected in places. The asset
+    need not be a physically-resolved table or file: a logical dataset or a pure
+    value hand-off (e.g. an Airflow XCom) is an equally valid asset a source MAY
+    record.
 
     Two-tier identity (from #36): ``identity`` is the resolved physical location
     (``schema.table`` or a concrete storage path) and is the strong join key.
     It is ``None`` when it cannot be resolved deterministically -- never a guess.
     ``signature`` is always present and carries the neutral fallback descriptor
-    (a dataset name, a normalised reference, or an expression) so two assets can
-    still be compared when neither side resolved to a physical identity.
+    (a dataset name, a normalised reference, a value key, or an expression) so
+    two assets can still be compared when neither side resolved to a physical
+    identity.
 
     Attributes:
         signature: Neutral, always-present descriptor used as the weak join key
-            (e.g. dataset name or normalised expression).
+            (e.g. dataset name, value/XCom key, or normalised expression).
         identity: Resolved physical identity used as the strong join key, or
-            ``None`` when it could not be resolved deterministically.
-        asset_type: Neutral kind of the asset (``"table"`` / ``"file"`` /
-            ``"volume"`` / ...), or ``None`` when unknown.
+            ``None`` when it could not be resolved deterministically (or the
+            asset is non-physical). Never guessed.
+        asset_type: Open, neutral kind of the asset -- physical kinds like
+            ``"table"`` / ``"file"`` / ``"volume"`` as well as non-physical /
+            logical ones like ``"value"`` (an XCom / TaskFlow return) or
+            ``"logical"`` (a named logical dataset). The vocabulary is not
+            closed; ``None`` when unknown.
         properties: Free-form extra attributes carried through verbatim.
     """
 

@@ -114,7 +114,12 @@ class ParameterSpec:
 
 @dataclass(slots=True, kw_only=True)
 class PolicySpec:
-    """Retry / timeout policy on a node, normalised to seconds.
+    """Retry / timeout policy, normalised to seconds.
+
+    Used both per node (:attr:`SourceNode.policy`) and as a cascading graph
+    default (:attr:`SourceGraph.default_policy`), e.g. an Airflow DAG's
+    ``default_args`` retries/timeout that apply to every task unless a task
+    overrides them.
 
     Only the genuinely shared retry/timeout knobs are typed; source-specific
     policy (ADF ``secure_input`` / ``secure_output``, Airflow retry-delay
@@ -137,14 +142,18 @@ class PolicySpec:
 class SourceDependency:
     """A dependency edge from a node to one upstream node.
 
-    Conditions stay a **list** -- ADF dependency edges carry one or more
-    outcome conditions (``["Succeeded", "Skipped"]``), so collapsing them to a
-    single outcome would lose information. Airflow's unconditional edges use an
-    empty list (or a single normalised condition).
+    ``conditions`` is a **per-edge** outcome list -- the natural ADF shape,
+    where each individual edge carries the upstream outcome(s) that must hold
+    (``["Succeeded", "Skipped"]``). This is distinct from Airflow's
+    ``trigger_rule``, which is a single rule on the *downstream* node quantified
+    over all its upstreams together and so cannot live on an edge; that rides in
+    :attr:`SourceNode.run_condition` instead.
 
     Attributes:
         upstream: Task key of the upstream node this edge depends on.
-        conditions: Required upstream outcome(s); empty when unconditional.
+        conditions: Required upstream outcome(s) for THIS edge; empty when
+            unconditional. Per-edge (ADF); see :attr:`SourceNode.run_condition`
+            for Airflow's node-level ``trigger_rule``.
         resolved: ``False`` when the upstream could not be resolved (e.g. a
             partial export); recorded, not dropped.
     """
@@ -171,11 +180,22 @@ class SourceNode:
         native_type: The source's own type string, preserved verbatim (ADF
             ``"Copy"`` / ``"DatabricksNotebook"``, Airflow ``"BashOperator"`` /
             a TaskFlow decorator).
-        dependencies: Upstream dependency edges.
-        policy: Retry / timeout policy, when the source declares one.
-        data_reads: Physical data assets this node reads (reuses #61
-            :class:`~flowx.models.ir.DataAsset`).
-        data_writes: Physical data assets this node writes.
+        dependencies: Upstream dependency edges, each with its own per-edge
+            outcome conditions (the ADF shape).
+        run_condition: Node-level aggregate run rule quantified over all this
+            node's upstreams together -- Airflow's ``trigger_rule`` (e.g.
+            ``"all_success"``, ``"none_failed_min_one_success"``,
+            ``"one_failed"``). ``None`` when the source has no such notion
+            (ADF, which expresses outcomes per-edge on :attr:`dependencies`).
+        policy: Retry / timeout policy, when the source declares one on the
+            node; falls back to :attr:`SourceGraph.default_policy` otherwise.
+        data_reads: Best-effort description of what this node reads, as
+            :class:`~flowx.models.ir.DataAsset` values (reuses #61). Population
+            is best-effort and open -- physical tables/files, logical datasets,
+            or value hand-offs (an Airflow XCom) alike -- and an empty list is
+            valid where the source records nothing.
+        data_writes: Best-effort description of what this node writes; same
+            open, best-effort semantics as :attr:`data_reads`.
         properties: Free-form bag for platform-specific attributes with no
             shared typed field yet. Connection / linked-service details live
             here for now -- a typed connection field is a deliberate future
@@ -190,6 +210,7 @@ class SourceNode:
     name: str | None = None
     native_type: str | None = None
     dependencies: list[SourceDependency] = field(default_factory=list)
+    run_condition: str | None = None
     policy: PolicySpec | None = None
     data_reads: list[DataAsset] = field(default_factory=list)
     data_writes: list[DataAsset] = field(default_factory=list)
@@ -245,6 +266,14 @@ class SourceGraph:
             no graph-scoped variable concept (Airflow); such sources' global
             variables ride in :attr:`extensions`.
         schedule: Workflow schedule, when one is declared.
+        default_policy: Cascading default retry / timeout policy applied to
+            every node that does not set its own :attr:`SourceNode.policy` --
+            Airflow's DAG ``default_args`` (retries / retry_delay / timeout).
+            ``None`` when the source has no graph-level default (ADF, which
+            declares policy per activity).
+        run_timeout_seconds: Whole-run timeout for one execution of the
+            workflow (Airflow's ``dagrun_timeout``), or ``None`` when the source
+            declares none.
         tags: Free-form label list (ADF annotations, Airflow user tags).
         tasks: Top-level nodes; control flow nests further nodes via
             :class:`ContainerNode`.
@@ -265,6 +294,8 @@ class SourceGraph:
     parameters: dict[str, ParameterSpec] = field(default_factory=dict)
     variables: dict[str, ParameterSpec] = field(default_factory=dict)
     schedule: ScheduleSpec | None = None
+    default_policy: PolicySpec | None = None
+    run_timeout_seconds: int | None = None
     tags: list[str] = field(default_factory=list)
     tasks: list[SourceNode] = field(default_factory=list)
     lineage: Lineage | None = None
