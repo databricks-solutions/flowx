@@ -8,7 +8,6 @@ import json
 import logging
 import re
 import shutil
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -790,50 +789,6 @@ def _classify_activities(
 
 
 # ---------------------------------------------------------------------------
-# Serialisation helpers
-# ---------------------------------------------------------------------------
-
-
-def _inventory_to_dict(inventory: Inventory, source_dir: str) -> dict[str, Any]:
-    """Serialise an :class:`Inventory` to a JSON-friendly dictionary.
-
-    Args:
-        inventory: The inventory to serialise.
-        source_dir: Original source directory path (for provenance).
-
-    Returns:
-        Dictionary suitable for ``json.dumps``.
-    """
-    pipeline_map: dict[str, list[dict[str, Any]]] = {}
-    for item in inventory.items:
-        entry: dict[str, Any] = {
-            "name": item.activity_name,
-            "type": item.activity_type,
-            "strategy": item.strategy.value,
-        }
-        if item.depends_on:
-            entry["depends_on"] = item.depends_on
-        pipeline_map.setdefault(item.pipeline_name, []).append(entry)
-
-    total = inventory.deterministic_count + inventory.agentic_count + inventory.unsupported_count
-    coverage_pct = round((inventory.deterministic_count + inventory.agentic_count) / total * 100, 1) if total else 0.0
-
-    return {
-        "source_dir": source_dir,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "pipelines": [{"name": pname, "activities": acts} for pname, acts in pipeline_map.items()],
-        "summary": {
-            "pipeline_count": inventory.pipeline_count,
-            "activity_count": total,
-            "deterministic_count": inventory.deterministic_count,
-            "agentic_count": inventory.agentic_count,
-            "unsupported_count": inventory.unsupported_count,
-            "coverage_pct": coverage_pct,
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
 # Profile complexity report (CSV)
 # ---------------------------------------------------------------------------
 
@@ -1095,7 +1050,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         logger.info("Filtered to pipeline: %s", args.pipeline)
 
-    inventory = build_inventory(definitions)
+    # Inventory JSON is projected from the shared discovery AST via the
+    # source-agnostic emitter (so ADF and Airflow emit one shape); imported here
+    # to avoid a module-level cycle (discovery_mapping imports this loader).
+    from flowx.discovery_inventory import build_source_inventory
+    from flowx.models.discovery import SOURCE_ADF
+    from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
 
     output_dir: Path = args.output_dir.resolve()
     clear_stale_outputs(output_dir)
@@ -1103,7 +1063,15 @@ def main(argv: list[str] | None = None) -> int:
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
     inventory_path = metadata_dir / "inventory.json"
-    inventory_dict = _inventory_to_dict(inventory, str(args.source_dir))
+    source_graphs = adf_definitions_to_source_graphs(definitions)
+    inventory_dict = build_source_inventory(
+        source_graphs,
+        source=SOURCE_ADF,
+        source_dir=str(args.source_dir),
+        # ADF has historically omitted zero-activity pipelines from the per-pipeline
+        # listing while still counting them in summary.pipeline_count; preserve that.
+        include_empty_pipelines=False,
+    )
     inventory_path.write_text(json.dumps(inventory_dict, indent=2), encoding="utf-8")
     logger.info("Wrote inventory to %s", inventory_path)
 
