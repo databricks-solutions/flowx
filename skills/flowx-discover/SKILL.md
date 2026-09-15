@@ -74,7 +74,17 @@ The inventory classifies every task into one of three strategies:
 - **Agentic** — requires LLM-assisted translation from the source definition.
 - **Unsupported** — no known translation path; needs manual intervention.
 
+## Step 3 — Optional: enrich the inventory with agentic insights
+
+After the deterministic inventory is written, you can *author* a layer of judgment the parser
+cannot derive — factory-wide architecture recommendation, per-pipeline intent + recommended
+Databricks patterns, and cross-pipeline relationships — and merge it back under a single additive
+`insights` key. flowx contains no LLM: you author the JSON, the library validates and merges it.
+This is optional and changes nothing about conversion. See **`insights.md`** for the shape, the
+validation rules, and the `enrich` command (CLI and MCP).
+
 ## Reference
 
 - `sources/adf.md` — Azure Data Factory discovery (ARM JSON, UC-volume download, complexity report)
 - `sources/airflow.md` — Apache Airflow discovery (DAG `.py` parsing, operator classification)
+- `insights.md` — authoring the optional agentic `insights` layer and running `enrich`
