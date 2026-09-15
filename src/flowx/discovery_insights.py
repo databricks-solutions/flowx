@@ -208,9 +208,14 @@ def _validate_edge(
 
     A ``control`` edge annotates a deterministic edge: the full ``(from, to, edge_identity)``
     triple must resolve against the inventory's lineage and the inferred-only ``evidence`` /
-    ``confidence`` fields must be absent. An ``inferred`` edge asserts a coupling the
+    ``confidence`` keys must be **absent entirely** (an explicit ``null`` is still a violation --
+    the deterministic edge *is* the evidence). An ``inferred`` edge asserts a coupling the
     deterministic layer never found: nothing to resolve, but a non-empty ``evidence`` string
     and a ``confidence`` level are required instead.
+
+    Every problem on the edge is collected (never fail-fast), so a single edge that is wrong in
+    several ways -- e.g. an ``inferred`` edge with both an invalid identity and missing evidence
+    -- surfaces all its errors in one pass, matching the rest of the validator.
     """
     if edge is None:
         return [f"{loc}: missing required field 'lineage_edge'"]
@@ -219,33 +224,37 @@ def _validate_edge(
     problems: list[str] = []
     for key in sorted(set(edge) - _EDGE_KEYS):
         problems.append(f"{loc}.lineage_edge: unknown field {key!r}")
+
     edge_type = edge.get("edge_type")
     identity = edge.get("edge_identity")
     if edge_type not in _EDGE_TYPES:
         problems.append(f"{loc}.lineage_edge: edge_type must be 'control' or 'inferred', got {edge_type!r}")
-        return problems
     if not isinstance(identity, str) or not identity:
         problems.append(f"{loc}.lineage_edge: edge_identity must be a non-empty string")
-        return problems
 
+    # Tier-specific checks run independently of the type/identity checks above so every problem
+    # on the edge is reported together rather than masked by an early return.
     if edge_type == "inferred":
         problems.extend(_validate_inferred_edge(edge, loc))
-        return problems
-
-    # Annotation tier: must resolve to a real control edge, and must NOT carry the
-    # inferred-only evidence/confidence fields.
-    for inferred_only in ("evidence", "confidence"):
-        if edge.get(inferred_only) is not None:
-            problems.append(f"{loc}.lineage_edge: {inferred_only!r} is only valid on an 'inferred' edge")
-    # Endpoint problems are already reported by the caller; only attempt the lookup when both
-    # endpoints are strings, else it is meaningless.
-    if not isinstance(from_pipeline, str) or not isinstance(to_pipeline, str):
-        return problems
-    if (from_pipeline, to_pipeline, identity) not in control_triples:
-        problems.append(
-            f"{loc}.lineage_edge: control edge {identity!r} does not resolve to a lineage edge "
-            f"from {from_pipeline!r} to {to_pipeline!r}"
-        )
+    elif edge_type == "control":
+        # Annotation tier: the inferred-only fields must be ABSENT (key not present), not merely
+        # non-null -- an explicit `evidence: null` / `confidence: null` is still a violation.
+        for inferred_only in ("evidence", "confidence"):
+            if inferred_only in edge:
+                problems.append(f"{loc}.lineage_edge: {inferred_only!r} is only valid on an 'inferred' edge")
+        # Resolve the full triple only when the identity and both endpoints are usable strings
+        # (a bad identity / endpoint is already reported here or by the caller).
+        if (
+            isinstance(identity, str)
+            and identity
+            and isinstance(from_pipeline, str)
+            and isinstance(to_pipeline, str)
+            and (from_pipeline, to_pipeline, identity) not in control_triples
+        ):
+            problems.append(
+                f"{loc}.lineage_edge: control edge {identity!r} does not resolve to a lineage edge "
+                f"from {from_pipeline!r} to {to_pipeline!r}"
+            )
     return problems
 
 

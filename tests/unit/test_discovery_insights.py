@@ -215,12 +215,41 @@ def test_control_edge_may_not_carry_evidence_or_confidence() -> None:
     assert any("'confidence' is only valid on an 'inferred' edge" in v for v in violations)
 
 
+def test_control_edge_rejects_present_but_null_evidence_or_confidence() -> None:
+    """The inferred-only keys are forbidden by PRESENCE -- an explicit ``null`` is still a violation.
+
+    A deterministic control edge annotates a proven lineage edge, so it must not carry these keys
+    at all; ``evidence: null`` / ``confidence: null`` must not slip through as "not set".
+    """
+    raw = _valid_insights()
+    raw["pipeline_relationships"][0]["lineage_edge"]["evidence"] = None
+    raw["pipeline_relationships"][0]["lineage_edge"]["confidence"] = None
+    violations = validate_insights(raw, _inventory())
+    assert any("'evidence' is only valid on an 'inferred' edge" in v for v in violations)
+    assert any("'confidence' is only valid on an 'inferred' edge" in v for v in violations)
+
+
 def test_inferred_edge_requires_evidence_and_confidence() -> None:
     raw = _valid_insights()
     edge = raw["pipeline_relationships"][1]["lineage_edge"]
     del edge["evidence"]
     edge["confidence"] = "certain"
     violations = validate_insights(raw, _inventory())
+    assert any("requires a non-empty 'evidence' string" in v for v in violations)
+    assert any("requires 'confidence' in" in v for v in violations)
+
+
+def test_inferred_edge_aggregates_identity_and_evidence_errors() -> None:
+    """A single edge wrong in several ways surfaces ALL its errors, never fail-fast.
+
+    An inferred edge with both an invalid (empty) ``edge_identity`` AND missing
+    evidence/confidence must report the identity error *and* the evidence/confidence errors in
+    one pass -- not just the first.
+    """
+    raw = _valid_insights()
+    raw["pipeline_relationships"][1]["lineage_edge"] = {"edge_type": "inferred", "edge_identity": ""}
+    violations = validate_insights(raw, _inventory())
+    assert any("edge_identity must be a non-empty string" in v for v in violations)
     assert any("requires a non-empty 'evidence' string" in v for v in violations)
     assert any("requires 'confidence' in" in v for v in violations)
 
