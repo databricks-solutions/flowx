@@ -12,6 +12,7 @@ import ast
 
 import flowx.discovery_inventory as discovery_inventory
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
+from flowx.discovery_serde import source_graph_from_dict, source_graph_to_dict
 from flowx.models.discovery import (
     CONCEPT_BRANCH,
     CONCEPT_NOTEBOOK,
@@ -20,6 +21,7 @@ from flowx.models.discovery import (
     SourceGraph,
     SourceNode,
 )
+from flowx.models.ir import ControlEdge, DataEdge, Lineage
 
 
 def _node(task_key: str, native_type: str, strategy: str, *, deps: list[SourceDependency] | None = None) -> SourceNode:
@@ -166,3 +168,52 @@ def test_empty_input_yields_zero_coverage() -> None:
     assert inventory["pipelines"] == []
     assert inventory["summary"]["coverage_pct"] == 0.0
     assert inventory["summary"]["pipeline_count"] == 0
+
+
+def test_pipeline_carries_derived_lineage_block_that_round_trips() -> None:
+    """A graph with derived lineage emits a per-pipeline block via the shared serialiser.
+
+    The emitted block must be byte-identical to what the shared discovery serde
+    produces for the same graph, and it must rehydrate through that serde back to
+    the original :class:`Lineage` -- proving the emitter consumes the one shared
+    lineage serialisation rather than a second hand-rolled one.
+    """
+    lineage = Lineage(
+        control_edges=[
+            ControlEdge(source_workflow="g", target_workflow="child", via_task_key="call", wait_for_completion=True)
+        ],
+        data_edges=[DataEdge(source_task_key="a", target_task_key="b", match_kind="identity", match_key="cat.sch.tbl")],
+    )
+    graph = SourceGraph(
+        name="g",
+        source="unit",
+        tasks=[_node("a", "Notebook", "deterministic")],
+        lineage=lineage,
+    )
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp/src")
+    pipeline_entry = inventory["pipelines"][0]
+
+    # The block is present and byte-identical to the shared serde's per-graph output.
+    assert pipeline_entry["lineage"] == source_graph_to_dict(graph)["lineage"]
+
+    # It round-trips through the shared serde back to the original Lineage.
+    rehydrated = source_graph_from_dict(
+        {"name": graph.name, "source": graph.source, "lineage": pipeline_entry["lineage"]}
+    )
+    assert rehydrated.lineage == lineage
+
+
+def test_pipeline_without_lineage_omits_the_key() -> None:
+    """A graph with no derived lineage omits the additive key -- historical keys untouched.
+
+    Backward-compat guard: the lineage key is additive-only, so a graph that never
+    had lineage derived leaves the pipeline entry exactly as before.
+    """
+    graph = SourceGraph(name="g", source="unit", tasks=[_node("a", "Notebook", "deterministic")])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp/src")
+
+    assert graph.lineage is None
+    assert "lineage" not in inventory["pipelines"][0]
+    assert sorted(inventory["pipelines"][0].keys()) == ["activities", "name"]

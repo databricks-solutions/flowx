@@ -16,7 +16,19 @@ The projection is deliberately small and additive over the historical ADF shape:
   ``depends_on`` names when present) and gains the standardised
   ``original_type``, ``dependencies`` (upstream **with conditions**), and the
   verbatim per-node ``raw``;
+* each pipeline entry gains an additive ``lineage`` block (control + data edges)
+  when its :class:`~flowx.models.discovery.SourceGraph` carries derived lineage;
 * the ``summary`` keeps the historical count block.
+
+Lineage is placed per pipeline -- one block beside that pipeline's ``activities``
+-- to mirror the shared discovery serde, where lineage is a per-graph field
+(:func:`flowx.discovery_serde.source_graph_to_dict`). The block is produced by the
+one shared serialiser (:func:`flowx.ir_serde.lineage_to_dict`, the same one the
+serde consumes), so an emitted block is byte-identical to the serde's and
+round-trips through :func:`flowx.discovery_serde.source_graph_from_dict`. It is a
+new key only: a graph with no derived lineage (``graph.lineage is None``) omits it
+entirely, so the historical consumer keys (``source`` / ``pipelines`` /
+``activities`` / ``summary``) are untouched.
 
 A node's translation ``strategy`` is a Databricks-*target* classification rather
 than a source concept, so it is not a typed field on the discovery AST. By
@@ -30,6 +42,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from flowx.ir_serde import lineage_to_dict
 from flowx.models.discovery import ContainerNode, SourceGraph, SourceNode
 
 # Well-known property key under which a mapper records a node's Databricks-target
@@ -84,12 +97,13 @@ def build_source_inventory(
             else:
                 unsupported += 1
         if flattened or include_empty_pipelines:
-            pipeline_entries.append(
-                {
-                    "name": graph.name,
-                    "activities": [_activity_entry(node) for node in flattened],
-                }
-            )
+            entry: dict[str, Any] = {
+                "name": graph.name,
+                "activities": [_activity_entry(node) for node in flattened],
+            }
+            if graph.lineage is not None:
+                entry["lineage"] = lineage_to_dict(graph.lineage)
+            pipeline_entries.append(entry)
 
     total = deterministic + agentic + unsupported
     coverage_pct = round((deterministic + agentic) / total * 100, 1) if total else 0.0

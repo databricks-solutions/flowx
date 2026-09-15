@@ -113,6 +113,29 @@ def test_dependencies_field_carries_conditions(tmp_path: Path) -> None:
         assert isinstance(edge["conditions"], list)
 
 
+def test_inventory_carries_per_pipeline_lineage(tmp_path: Path) -> None:
+    """The emitted inventory surfaces the lineage #62b derived over the ADF fixtures.
+
+    Lineage rides additively on each pipeline entry, so the aggregate across the
+    per-pipeline blocks must match what the discovery lineage pass computed: on
+    these fixtures that is 11 cross-pipeline control edges and 0 data edges.
+    """
+    metadata = _run_discover(tmp_path)
+    inventory = json.loads((metadata / "inventory.json").read_text())
+
+    control_edges = 0
+    data_edges = 0
+    for pipeline in inventory["pipelines"]:
+        assert "lineage" in pipeline, pipeline["name"]
+        # Additive block only -- historical per-pipeline keys are untouched.
+        assert set(pipeline["lineage"].keys()) == {"control_edges", "data_edges", "motifs"}
+        control_edges += len(pipeline["lineage"]["control_edges"])
+        data_edges += len(pipeline["lineage"]["data_edges"])
+
+    assert control_edges == 11
+    assert data_edges == 0
+
+
 def test_coverage_output_matches_golden(tmp_path: Path) -> None:
     """The real coverage consumer reproduces the committed golden snapshot.
 
