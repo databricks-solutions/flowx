@@ -23,12 +23,14 @@ from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
     CopyActivity,
+    DataAsset,
     DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
     FilterActivity,
     ForEachActivity,
     IfConditionActivity,
+    Lineage,
     LookupActivity,
     MotifActivity,
     NotebookActivity,
@@ -81,6 +83,77 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
     if pipeline.translation_configuration is not None:
         result["translation_configuration"] = configuration_to_dict(pipeline.translation_configuration)
     return result
+
+
+def data_asset_to_dict(asset: DataAsset) -> dict[str, Any]:
+    """Serialise a :class:`DataAsset` to a JSON-friendly dictionary.
+
+    ``signature`` always appears; the optional ``identity`` / ``asset_type`` /
+    ``properties`` are emitted only when set so reports stay compact.
+    """
+    result: dict[str, Any] = {"signature": asset.signature}
+    if asset.identity is not None:
+        result["identity"] = asset.identity
+    if asset.asset_type is not None:
+        result["asset_type"] = asset.asset_type
+    if asset.properties:
+        result["properties"] = dict(asset.properties)
+    return result
+
+
+def data_asset_from_dict(raw: dict[str, Any]) -> DataAsset:
+    """Rehydrate a :class:`DataAsset` from the dict :func:`data_asset_to_dict` emits.
+
+    The canonical inverse of :func:`data_asset_to_dict`, so every consumer of the
+    serialised DataAsset shape (the lineage substrate and the discovery AST)
+    reads it the same way.
+    """
+    return DataAsset(
+        signature=raw.get("signature", ""),
+        identity=raw.get("identity"),
+        asset_type=raw.get("asset_type"),
+        properties=dict(raw.get("properties") or {}),
+    )
+
+
+def lineage_to_dict(lineage: Lineage) -> dict[str, Any]:
+    """Serialise a :class:`Lineage` block to a JSON-friendly dictionary.
+
+    Edge lists are always emitted (empty, never ``None``) for stable diffs.
+    """
+    return {
+        "control_edges": [
+            {
+                "source_workflow": edge.source_workflow,
+                "target_workflow": edge.target_workflow,
+                "via_task_key": edge.via_task_key,
+                "wait_for_completion": edge.wait_for_completion,
+                "resolved": edge.resolved,
+            }
+            for edge in lineage.control_edges
+        ],
+        "data_edges": [
+            {
+                "source_task_key": edge.source_task_key,
+                "target_task_key": edge.target_task_key,
+                "match_kind": edge.match_kind,
+                "match_key": edge.match_key,
+                "identity": edge.identity,
+                "asset_type": edge.asset_type,
+            }
+            for edge in lineage.data_edges
+        ],
+        "motifs": [
+            {
+                "motif_id": motif.motif_id,
+                "member_task_keys": list(motif.member_task_keys),
+                "display_name": motif.display_name,
+                "databricks_replacement": motif.databricks_replacement,
+                "notes": list(motif.notes),
+            }
+            for motif in lineage.motifs
+        ],
+    }
 
 
 def configuration_to_dict(configuration: Any) -> dict[str, Any]:
