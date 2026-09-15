@@ -9,6 +9,7 @@ outcome conditions, and control-flow nesting maps to labelled container branches
 from __future__ import annotations
 
 from flowx.discovery_inventory import STRATEGY_PROPERTY
+from flowx.models.adf_ast import AdfDefinitions
 from flowx.models.discovery import (
     SOURCE_ADF,
     ContainerNode,
@@ -20,7 +21,7 @@ from flowx.sources.adf.discovery_mapping import (
     adf_definitions_to_source_graphs,
     adf_pipeline_to_source_graph,
 )
-from flowx.sources.adf.loader import _parse_pipeline_json
+from flowx.sources.adf.loader import _parse_pipeline_json, _parse_trigger_json
 
 
 def _pipeline(activities: list[dict], **props) -> SourceGraph:
@@ -190,3 +191,168 @@ def test_definitions_map_preserves_pipeline_order(adf_definitions) -> None:
     graphs = adf_definitions_to_source_graphs(adf_definitions)
     assert [g.name for g in graphs] == [p.name for p in adf_definitions.pipelines]
     assert all(g.source == SOURCE_ADF for g in graphs)
+
+
+# ---------------------------------------------------------------------------
+# Triggers / schedules (BLOCKING 1)
+# ---------------------------------------------------------------------------
+
+
+def _definitions_with_trigger(trigger: dict) -> AdfDefinitions:
+    pipeline = _parse_pipeline_json({"name": "pl_sched", "properties": {"activities": []}})
+    return AdfDefinitions(pipelines=[pipeline], triggers=[_parse_trigger_json(trigger)])
+
+
+def test_schedule_trigger_lands_in_source_graph_schedule() -> None:
+    """A ScheduleTrigger referencing a pipeline populates that graph's schedule."""
+    trigger = {
+        "name": "tr_daily",
+        "properties": {
+            "type": "ScheduleTrigger",
+            "typeProperties": {
+                "recurrence": {"frequency": "Day", "interval": 1, "timeZone": "UTC"},
+            },
+            "pipelines": [{"pipelineReference": {"referenceName": "pl_sched", "type": "PipelineReference"}}],
+        },
+    }
+    graphs = adf_definitions_to_source_graphs(_definitions_with_trigger(trigger))
+
+    schedule = graphs[0].schedule
+    assert schedule is not None
+    assert schedule.kind == "schedule"
+    # Recurrence payload preserved verbatim as the expression.
+    assert schedule.expression == {"frequency": "Day", "interval": 1, "timeZone": "UTC"}
+    assert schedule.timezone == "UTC"
+    # Full trigger properties preserved losslessly in extensions.
+    assert schedule.extensions["trigger_name"] == "tr_daily"
+    assert schedule.extensions["trigger_type"] == "ScheduleTrigger"
+    assert "properties" in schedule.extensions
+
+
+def test_tumbling_window_trigger_expression_from_type_properties() -> None:
+    """A TumblingWindowTrigger keeps its typeProperties as the expression."""
+    trigger = {
+        "name": "tr_tumble",
+        "properties": {
+            "type": "TumblingWindowTrigger",
+            "typeProperties": {"frequency": "Hour", "interval": 1, "startTime": "2024-01-01T00:00:00Z"},
+            "pipelines": [{"pipelineReference": {"referenceName": "pl_sched"}}],
+        },
+    }
+    graphs = adf_definitions_to_source_graphs(_definitions_with_trigger(trigger))
+
+    schedule = graphs[0].schedule
+    assert schedule is not None
+    assert schedule.kind == "interval"
+    assert schedule.expression == {"frequency": "Hour", "interval": 1, "startTime": "2024-01-01T00:00:00Z"}
+
+
+def test_unreferenced_pipeline_has_no_schedule() -> None:
+    """A pipeline no trigger references keeps ``schedule is None``."""
+    trigger = {
+        "name": "tr_other",
+        "properties": {
+            "type": "ScheduleTrigger",
+            "typeProperties": {"recurrence": {"frequency": "Day", "interval": 1}},
+            "pipelines": [{"pipelineReference": {"referenceName": "some_other_pipeline"}}],
+        },
+    }
+    graphs = adf_definitions_to_source_graphs(_definitions_with_trigger(trigger))
+    assert graphs[0].schedule is None
+
+
+def test_multiple_triggers_preserve_extras_in_extensions() -> None:
+    """A second trigger for the same pipeline is preserved, not overwritten."""
+    pipeline = _parse_pipeline_json({"name": "pl_sched", "properties": {"activities": []}})
+    triggers = [
+        _parse_trigger_json(
+            {
+                "name": "tr_first",
+                "properties": {
+                    "type": "ScheduleTrigger",
+                    "typeProperties": {"recurrence": {"frequency": "Day", "interval": 1}},
+                    "pipelines": [{"pipelineReference": {"referenceName": "pl_sched"}}],
+                },
+            }
+        ),
+        _parse_trigger_json(
+            {
+                "name": "tr_second",
+                "properties": {
+                    "type": "ScheduleTrigger",
+                    "typeProperties": {"recurrence": {"frequency": "Hour", "interval": 6}},
+                    "pipelines": [{"pipelineReference": {"referenceName": "pl_sched"}}],
+                },
+            }
+        ),
+    ]
+    graphs = adf_definitions_to_source_graphs(AdfDefinitions(pipelines=[pipeline], triggers=triggers))
+
+    schedule = graphs[0].schedule
+    assert schedule is not None
+    assert schedule.extensions["trigger_name"] == "tr_first"  # first wins the typed slot
+    additional = schedule.extensions["additional_triggers"]
+    assert len(additional) == 1 and additional[0]["type"] == "ScheduleTrigger"
+
+
+def test_fixture_scheduled_pipeline_gets_schedule(adf_definitions) -> None:
+    """End-to-end over the fixtures: a trigger-referenced pipeline gets a schedule."""
+    graphs = {graph.name: graph for graph in adf_definitions_to_source_graphs(adf_definitions)}
+    # tr_daily_schedule references pipeline_copy_csv_to_delta in the fixtures.
+    assert graphs["pipeline_copy_csv_to_delta"].schedule is not None
+
+
+# ---------------------------------------------------------------------------
+# Empty / one-sided control flow (BLOCKING 2)
+# ---------------------------------------------------------------------------
+
+
+def test_empty_if_condition_stays_a_container_with_both_branches() -> None:
+    """An IfCondition with no children still maps to a ContainerNode, both branches present."""
+    graph = _pipeline([{"name": "Gate", "type": "IfCondition", "typeProperties": {}}])
+
+    node = graph.tasks[0]
+    assert isinstance(node, ContainerNode)
+    assert node.native_type == "IfCondition"
+    assert list(node.branches.keys()) == ["true", "false"]
+    assert node.branches["true"] == []
+    assert node.branches["false"] == []
+
+
+def test_empty_for_each_stays_a_container_with_body_branch() -> None:
+    """A ForEach with no children still maps to a ContainerNode with an empty body."""
+    graph = _pipeline([{"name": "Loop", "type": "ForEach", "typeProperties": {}}])
+
+    node = graph.tasks[0]
+    assert isinstance(node, ContainerNode)
+    assert list(node.branches.keys()) == ["body"]
+    assert node.branches["body"] == []
+
+
+def test_one_sided_if_keeps_empty_false_branch() -> None:
+    """An If with only a true branch keeps its false branch present-but-empty."""
+    graph = _pipeline(
+        [
+            {
+                "name": "Gate",
+                "type": "IfCondition",
+                "typeProperties": {"ifTrueActivities": [{"name": "T", "type": "Wait"}]},
+            }
+        ]
+    )
+
+    node = graph.tasks[0]
+    assert isinstance(node, ContainerNode)
+    assert [child.name for child in node.branches["true"]] == ["T"]
+    assert "false" in node.branches  # empty branch is present, not dropped
+    assert node.branches["false"] == []
+
+
+def test_empty_switch_stays_a_container_with_default_branch() -> None:
+    """A Switch with no cases still maps to a ContainerNode with an empty default."""
+    graph = _pipeline([{"name": "Route", "type": "Switch", "typeProperties": {}}])
+
+    node = graph.tasks[0]
+    assert isinstance(node, ContainerNode)
+    assert list(node.branches.keys()) == ["default"]
+    assert node.branches["default"] == []

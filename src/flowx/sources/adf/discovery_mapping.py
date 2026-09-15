@@ -32,7 +32,7 @@ from __future__ import annotations
 from typing import Any
 
 from flowx.discovery_inventory import STRATEGY_PROPERTY
-from flowx.models.adf_ast import AdfActivity, AdfDefinitions, AdfParameter, AdfPipeline, AdfVariable
+from flowx.models.adf_ast import AdfActivity, AdfDefinitions, AdfParameter, AdfPipeline, AdfTrigger, AdfVariable
 from flowx.models.discovery import (
     CONCEPT_BRANCH,
     CONCEPT_COPY_DATA,
@@ -50,11 +50,22 @@ from flowx.models.discovery import (
     GapNode,
     ParameterSpec,
     PolicySpec,
+    ScheduleSpec,
     SourceDependency,
     SourceGraph,
     SourceNode,
 )
 from flowx.sources.adf.loader import classify_activity
+
+# Neutral trigger category for each ADF trigger type. Anything unrecognised maps
+# to ``""`` (unknown) with the ADF type preserved verbatim in the schedule
+# extensions, so no trigger information is lost even for a type not listed here.
+_TRIGGER_KIND: dict[str, str] = {
+    "ScheduleTrigger": "schedule",
+    "TumblingWindowTrigger": "interval",
+    "BlobEventsTrigger": "file_arrival",
+    "CustomEventsTrigger": "event",
+}
 
 # Neutral concept for each ADF activity type. The discovery concept vocabulary is
 # intentionally non-exhaustive: ADF types with no shared concept (WebActivity,
@@ -83,9 +94,81 @@ def adf_definitions_to_source_graphs(definitions: AdfDefinitions) -> list[Source
     """Map every pipeline in *definitions* to a shared :class:`SourceGraph`.
 
     Pipeline order is preserved so downstream consumers see the same ordering the
-    loader produced.
+    loader produced. ADF triggers are mapped into :class:`ScheduleSpec` and attached
+    to each pipeline they reference (see :func:`_attach_schedules`), so schedule /
+    trigger information is preserved rather than dropped.
     """
-    return [adf_pipeline_to_source_graph(pipeline) for pipeline in definitions.pipelines]
+    graphs = [adf_pipeline_to_source_graph(pipeline) for pipeline in definitions.pipelines]
+    _attach_schedules(graphs, definitions.triggers)
+    return graphs
+
+
+def _attach_schedules(graphs: list[SourceGraph], triggers: list[AdfTrigger]) -> None:
+    """Populate each graph's ``schedule`` from the triggers that reference it.
+
+    A trigger can drive several pipelines and a pipeline can be driven by several
+    triggers. The first trigger to reference a pipeline becomes its typed
+    :attr:`SourceGraph.schedule`; any further triggers for the same pipeline are
+    preserved verbatim under ``schedule.extensions["additional_triggers"]`` so
+    nothing is lost. Pipeline references are matched case-insensitively, mirroring
+    ADF's case-insensitive identifier semantics.
+    """
+    graphs_by_name = {graph.name: graph for graph in graphs}
+    graphs_by_lower = {graph.name.lower(): graph for graph in graphs}
+
+    for trigger in triggers:
+        schedule = _trigger_to_schedule(trigger)
+        for pipeline_name in _trigger_pipeline_names(trigger):
+            graph = graphs_by_name.get(pipeline_name) or graphs_by_lower.get(pipeline_name.lower())
+            if graph is None:
+                continue
+            if graph.schedule is None:
+                graph.schedule = schedule
+            else:
+                additional = graph.schedule.extensions.setdefault("additional_triggers", [])
+                additional.append(schedule.extensions.get("properties"))
+
+
+def _trigger_to_schedule(trigger: AdfTrigger) -> ScheduleSpec:
+    """Map a single ADF trigger to a source-faithful :class:`ScheduleSpec`.
+
+    The recurrence payload is kept as-given: schedule triggers nest it under
+    ``typeProperties.recurrence`` while tumbling-window / event triggers put their
+    detail directly in ``typeProperties``, so whichever is present becomes the
+    verbatim ``expression``. The full trigger ``properties`` block also rides in
+    ``extensions`` so the mapping is lossless even for trigger detail with no typed
+    home yet (pipeline parameters, runtime state, annotations).
+    """
+    type_properties = trigger.properties.get("typeProperties") or {}
+    recurrence = type_properties.get("recurrence") if isinstance(type_properties, dict) else None
+    if isinstance(recurrence, dict):
+        expression: Any = recurrence
+        timezone = recurrence.get("timeZone")
+    else:
+        expression = type_properties or None
+        timezone = type_properties.get("timeZone") if isinstance(type_properties, dict) else None
+
+    return ScheduleSpec(
+        kind=_TRIGGER_KIND.get(trigger.type, ""),
+        expression=expression,
+        timezone=timezone,
+        extensions={
+            "trigger_name": trigger.name,
+            "trigger_type": trigger.type,
+            "properties": trigger.properties,
+        },
+    )
+
+
+def _trigger_pipeline_names(trigger: AdfTrigger) -> list[str]:
+    """Collect the names of the pipelines a trigger references, in order."""
+    names: list[str] = []
+    for reference in trigger.pipelines or []:
+        pipeline_reference = reference.get("pipelineReference") if isinstance(reference, dict) else None
+        name = pipeline_reference.get("referenceName") if isinstance(pipeline_reference, dict) else None
+        if name:
+            names.append(name)
+    return names
 
 
 def adf_pipeline_to_source_graph(pipeline: AdfPipeline) -> SourceGraph:
@@ -121,8 +204,8 @@ def _activity_to_node(activity: AdfActivity) -> SourceNode:
     policy = _policy_to_spec(activity)
     properties: dict[str, Any] = {STRATEGY_PROPERTY: strategy.value}
 
-    branches = _activity_branches(activity)
-    if branches:
+    branches = _control_flow_branches(activity)
+    if branches is not None:
         return ContainerNode(
             source_id=activity.name,
             task_key=activity.name,
@@ -163,25 +246,34 @@ def _activity_to_node(activity: AdfActivity) -> SourceNode:
     )
 
 
-def _activity_branches(activity: AdfActivity) -> dict[str, list[SourceNode]]:
-    """Build the labelled child branches of a control-flow activity.
+def _control_flow_branches(activity: AdfActivity) -> dict[str, list[SourceNode]] | None:
+    """Return the labelled branches of a control-flow activity, or ``None`` if it is a leaf.
 
-    Empty for a leaf activity. Branch order matches ADF's own declaration order so
-    a downstream flatten walks children in source order.
+    Keyed on the activity **type**, not on whether children happen to be present:
+    a control-flow activity always maps to a :class:`ContainerNode`, and every
+    branch it declares is always represented -- an empty branch is present-but-empty,
+    never omitted. So an empty ``IfCondition`` still yields ``{"true": [], "false": []}``
+    and a one-sided ``If`` keeps its empty ``false`` branch, rather than collapsing to
+    a plain node and losing the control-flow structure. Returning ``None`` (not an
+    empty dict) is what tells the caller the activity is a leaf.
+
+    Branch order matches ADF's own declaration order (true before false, cases
+    before default) so a downstream flatten walks children in source order.
     """
-    branches: dict[str, list[SourceNode]] = {}
-    if activity.if_true_activities:
-        branches["true"] = [_activity_to_node(child) for child in activity.if_true_activities]
-    if activity.if_false_activities:
-        branches["false"] = [_activity_to_node(child) for child in activity.if_false_activities]
-    if activity.activities:
-        branches["body"] = [_activity_to_node(child) for child in activity.activities]
-    if activity.switch_cases:
-        for case_value, case_activities in activity.switch_cases.items():
+    if activity.type == "IfCondition":
+        return {
+            "true": [_activity_to_node(child) for child in (activity.if_true_activities or [])],
+            "false": [_activity_to_node(child) for child in (activity.if_false_activities or [])],
+        }
+    if activity.type in ("ForEach", "Until"):
+        return {"body": [_activity_to_node(child) for child in (activity.activities or [])]}
+    if activity.type == "Switch":
+        branches: dict[str, list[SourceNode]] = {}
+        for case_value, case_activities in (activity.switch_cases or {}).items():
             branches[case_value] = [_activity_to_node(child) for child in case_activities]
-    if activity.switch_default_activities:
-        branches["default"] = [_activity_to_node(child) for child in activity.switch_default_activities]
-    return branches
+        branches["default"] = [_activity_to_node(child) for child in (activity.switch_default_activities or [])]
+        return branches
+    return None
 
 
 def _policy_to_spec(activity: AdfActivity) -> PolicySpec | None:
