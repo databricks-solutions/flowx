@@ -13,13 +13,15 @@ Two tiers, exactly as #36 established them:
   a concrete ``abfss://`` path). Present only when it resolves *deterministically*
   from literals; a parameterised reference is never guessed at and leaves
   ``identity`` unset. This is the strong join key.
-* **signature** -- always present (the #61 contract). For an asset with a resolved
+* **signature** -- the *path-derived* weak key. For an asset with a resolved
   identity the signature mirrors that identity, so the weak tier can never join a
-  resolved asset to an unresolved one on a coincidence. For an unresolved
-  reference the signature is the *structural path signature* (#36's "expression"
-  tier: the literal path skeleton plus its parameter-slot count) when the path has
-  a literal anchor, and otherwise the dataset reference name (the neutral fallback
-  descriptor the #61 substrate blesses as the weak join key).
+  resolved asset to an unresolved one on a coincidence. For an unresolved reference
+  the signature is the *structural path signature* (#36's "expression" tier: the
+  literal path skeleton plus its parameter-slot count) when the path has a literal
+  anchor. It is **never** the bare dataset reference name: two unrelated opaque
+  references that merely share a name must not join (#36's explicit rule), so when
+  neither a physical identity nor a path-anchored signature is available the
+  signature is left empty and the asset cannot participate in signature matching.
 
 Only literal, provable values ever become an ``identity`` -- the resolver returns
 ``None`` rather than guessing, which is what stopped #36's spurious edges.
@@ -27,6 +29,7 @@ Only literal, provable values ever become an ``identity`` -- the resolver return
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterator
 from typing import Any
@@ -98,15 +101,28 @@ def _dataset_ref_to_asset(
     definitions: AdfDefinitions,
     context: TranslationContext,
 ) -> DataAsset:
-    """Turn one dataset reference into a two-tier :class:`DataAsset`."""
+    """Turn one dataset reference into a two-tier :class:`DataAsset`.
+
+    Signature is derived only from the resolved *physical* location -- the identity
+    when it resolves, else the structural path signature. It is **never** the bare
+    dataset reference name (#36's hard rule): two unrelated opaque references that
+    merely share a name must not join, so when neither a physical identity nor a
+    path-anchored signature is available the signature is left empty. An empty
+    signature is falsy, so :func:`~flowx.lineage._match_assets` cannot use it as a
+    join key -- the asset is still captured as a read / write for reporting, it just
+    cannot manufacture a signature-tier edge.
+    """
     identity = resolve_dataset_identity(dataset_ref, definitions, context)
     if identity is not None:
         # Mirror the identity into the signature so the weak tier never joins a
-        # resolved asset to an unresolved one that merely shares a dataset name.
+        # resolved asset to an unresolved one that merely shares a physical value.
         return DataAsset(signature=identity, identity=identity, asset_type=_asset_type(dataset_ref, definitions))
     path_signature = _path_signature(dataset_ref.parameters)
-    signature = path_signature if path_signature is not None else dataset_ref.reference_name
-    return DataAsset(signature=signature, identity=None, asset_type=_asset_type(dataset_ref, definitions))
+    return DataAsset(
+        signature=path_signature if path_signature is not None else "",
+        identity=None,
+        asset_type=_asset_type(dataset_ref, definitions),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -135,8 +151,12 @@ def _activity_dataset_refs(activity: AdfActivity, *, produced: bool) -> Iterator
     """Yield the dataset references an activity writes (produced) or reads (not).
 
     Gathers activity-level ``inputs`` / ``outputs`` **and** the ``typeProperties``
-    ``source`` / ``sink`` / ``dataset`` slots, de-duplicated by reference name so a
-    dataset named in both places is yielded once.
+    ``source`` / ``sink`` / ``dataset`` slots. De-duplication is by
+    ``(reference_name, parameter binding)``, not by name alone: a dataset named in
+    both an activity slot and ``typeProperties`` with the *same* call-site params is
+    the same physical asset and is yielded once, but two uses of the *same*
+    parameterised dataset with *different* params (``ds(tbl=orders)`` vs
+    ``ds(tbl=customers)``) resolve to distinct physical assets and are both kept.
     """
     type_properties = activity.type_properties or {}
     candidates: list[AdfDatasetReference] = []
@@ -152,12 +172,24 @@ def _activity_dataset_refs(activity: AdfActivity, *, produced: bool) -> Iterator
             if read_reference is not None:
                 candidates.append(read_reference)
 
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for reference in candidates:
-        if reference.reference_name in seen:
+        dedupe_key = (reference.reference_name, _parameter_binding_key(reference))
+        if dedupe_key in seen:
             continue
-        seen.add(reference.reference_name)
+        seen.add(dedupe_key)
         yield reference
+
+
+def _parameter_binding_key(reference: AdfDatasetReference) -> str:
+    """Stable key for a reference's call-site parameter binding.
+
+    Two references with the same name collapse only when their parameters match, so
+    distinct bindings that resolve to distinct physical assets survive. Sorted keys
+    make the string order-independent; ``default=str`` keeps it total for any value
+    an ADF export can carry.
+    """
+    return json.dumps(reference.parameters or {}, sort_keys=True, default=str)
 
 
 # --------------------------------------------------------------------------- #

@@ -240,6 +240,41 @@ def test_adf_within_pipeline_identity_handoff() -> None:
     assert edge.identity == "curated.orders"
 
 
+def test_adf_opaque_references_do_not_produce_a_false_data_edge() -> None:
+    """Two unresolvable references sharing a name must NOT join on that name (#36)."""
+    opaque = AdfDataset(
+        name="ds_opaque",
+        type="AzureSqlTable",
+        properties={"typeProperties": {"table": "@pipeline().parameters.t"}},
+    )
+    definitions = AdfDefinitions(
+        pipelines=[
+            AdfPipeline(
+                name="etl",
+                activities=[
+                    AdfActivity(
+                        name="Write Opaque",
+                        type="Copy",
+                        type_properties={"sink": {"referenceName": "ds_opaque"}},
+                    ),
+                    AdfActivity(
+                        name="Read Opaque",
+                        type="Lookup",
+                        type_properties={"dataset": {"referenceName": "ds_opaque"}},
+                    ),
+                ],
+            )
+        ],
+        datasets={"ds_opaque": opaque},
+    )
+    graph = adf_definitions_to_source_graphs(definitions)[0]
+    assert graph.lineage is not None
+    # Both references resolve to no identity and no path anchor -> empty signature -> no edge.
+    assert graph.lineage.data_edges == []
+    writer = next(node for node in walk_nodes(graph.tasks) if node.task_key == "Write Opaque")
+    assert writer.data_writes[0].signature == ""
+
+
 def test_adf_execute_pipeline_produces_control_edge() -> None:
     definitions = AdfDefinitions(
         pipelines=[

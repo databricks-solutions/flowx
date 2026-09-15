@@ -176,7 +176,8 @@ def test_unresolved_reference_falls_back_to_path_signature() -> None:
     assert reads[0].signature == "FP[watermark|slots=1]/FN[version.txt|slots=0]"
 
 
-def test_unresolved_reference_without_path_anchor_falls_back_to_name() -> None:
+def test_unresolved_reference_without_path_anchor_has_empty_signature() -> None:
+    """No identity and no path anchor -> empty signature, so it never joins (#36 name rule)."""
     dataset = AdfDataset(
         name="ds_generic",
         type="AzureSqlTable",
@@ -190,7 +191,44 @@ def test_unresolved_reference_without_path_anchor_falls_back_to_name() -> None:
     )
     reads, _ = activity_data_assets(activity, definitions)
     assert reads[0].identity is None
-    assert reads[0].signature == "ds_generic"
+    # Never the bare dataset name: an empty signature cannot produce a signature-tier join.
+    assert reads[0].signature == ""
+
+
+def test_distinct_parameter_bindings_of_same_dataset_are_all_retained() -> None:
+    """Same dataset ref, different params -> distinct physical assets, both kept (not collapsed)."""
+    dataset = AdfDataset(
+        name="ds",
+        type="AzureSqlTable",
+        properties={
+            "typeProperties": {"schema": "raw", "table": "@dataset().tbl"},
+            "parameters": {"tbl": {"type": "String"}},
+        },
+    )
+    definitions = _definitions(ds=dataset)
+    activity = AdfActivity(
+        name="Multi Bind",
+        type="Copy",
+        inputs=[
+            AdfDatasetReference(reference_name="ds", parameters={"tbl": "orders"}),
+            AdfDatasetReference(reference_name="ds", parameters={"tbl": "customers"}),
+        ],
+    )
+    reads, _ = activity_data_assets(activity, definitions)
+    assert sorted(asset.identity for asset in reads) == ["raw.customers", "raw.orders"]
+
+
+def test_same_ref_same_params_in_slot_and_typeproperties_still_collapses() -> None:
+    """The de-dup only fires on an identical binding: one asset, not two."""
+    definitions = _definitions(ds_src=_table_dataset("ds_src", schema="raw", table="orders"))
+    activity = AdfActivity(
+        name="Lookup",
+        type="Lookup",
+        inputs=[AdfDatasetReference(reference_name="ds_src")],
+        type_properties={"dataset": {"referenceName": "ds_src"}},
+    )
+    reads, _ = activity_data_assets(activity, definitions)
+    assert [asset.identity for asset in reads] == ["raw.orders"]
 
 
 def _ref_dict(reference: AdfDatasetReference) -> dict:
