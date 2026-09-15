@@ -51,6 +51,7 @@ airflow_source_path (a DAG .py file or directory).
 Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("inputs", {"phase": "discover", "source": "adf"})   # learn a phase's inputs
   flowx("discover", {"source": "adf", "adf_source_path": "...", "output_dir": "..."})
+  flowx("enrich", {"output_dir": "...", "insights": {...}})   # optional: merge agent-authored insights
   flowx("convert", {"source": "adf", "output_dir": "..."})
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
@@ -296,6 +297,35 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
     return {"ok": result.ok, "process": result.as_dict(), **extra}
 
 
+def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
+    """Validate agent-authored insights and merge them into inventory.json.
+
+    Accepts the insights either inline as ``insights`` (a JSON object) or via ``insights_path``
+    (a file the server can read); exactly one is required. Inline insights are staged to a temp
+    file so the same ``enrich`` CLI contract runs on both paths. The returned ``ok`` reflects
+    *validation* success -- ``result.violations`` lists every problem when it is False, and the
+    inventory is left untouched on any failure.
+    """
+    output_dir = p.get("output_dir", "./flowx_output")
+    insights = p.get("insights")
+    insights_path = p.get("insights_path")
+    if (insights is None) == (insights_path is None):
+        return {"ok": False, "error": "provide exactly one of 'insights' (inline object) or 'insights_path'."}
+
+    def _run(path: str) -> dict[str, Any]:
+        result = runner.run_adapter(["enrich", "--output-dir", output_dir, "--insights-path", path])
+        payload = runner.parse_stdout_json(result)
+        ok = bool(isinstance(payload, dict) and payload.get("ok"))
+        return {"ok": ok, "result": payload, "process": result.as_dict()}
+
+    if insights_path is not None:
+        return _run(str(insights_path))
+    with tempfile.TemporaryDirectory(prefix="flowx-insights-") as temporary:
+        inline_path = Path(temporary) / "insights.json"
+        inline_path.write_text(json.dumps(insights, indent=2), encoding="utf-8")
+        return _run(str(inline_path))
+
+
 def _cmd_inspect(p: dict[str, Any]) -> dict[str, Any]:
     args: list[Any] = ["inspect", p["report_path"]]
     for answer in p.get("answers") or []:
@@ -498,6 +528,7 @@ _COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "convert": _cmd_convert,
     "merge_agentic": _cmd_merge_agentic,
     "resolve_agentic": _cmd_resolve_agentic,
+    "enrich": _cmd_enrich,
     "inspect": _cmd_inspect,
     "apply_answers": _cmd_apply_answers,
     "materialize_lookup": _cmd_materialize_lookup,
@@ -551,6 +582,11 @@ def build_server() -> FastMCP:
           airflow_source_path, report_path, gap_id, candidates, replace, accept_gap | accept_gaps, accept_all,
           review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
+        - "enrich": output_dir(req), one of insights(inline object) | insights_path(req) — validate
+          agent-authored discover insights against inventory.json and merge them under one additive
+          `insights` key (atomic, idempotent). `ok` reflects validation; `result.violations` lists any
+          problems and the inventory is left untouched on failure. Author the insights by reading
+          inventory.json + the source artifacts first (see the flowx-discover skill's insights guide).
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
