@@ -6,6 +6,16 @@ only -- ``Activity`` subclasses, ``DataAsset``, ``task_key`` -- and import nothi
 from ``sources/adf`` or ``sources/airflow`` so both front-ends share one code
 path once they populate ``data_reads`` / ``data_writes`` / ``motif_id``.
 
+The tier-matching, self-edge drop, and dedup rules are factored into two
+primitive-level cores -- :func:`control_edges_from_calls` and
+:func:`data_edges_from_endpoints` -- that take only ``task_key`` strings and
+:class:`DataAsset` values, never a ``Pipeline``. The IR entry points
+(:func:`build_control_edges` / :func:`build_data_edges`) gather those primitives
+from a pipeline and delegate, and the source-neutral discovery-AST derivation in
+:mod:`flowx.discovery_lineage` gathers the same primitives from a
+:class:`~flowx.models.discovery.SourceGraph` and delegates too, so both phases
+join edges through exactly one implementation.
+
 Everything here is pure: the functions read the pipeline and return new edge
 lists / a new :class:`Lineage`; nothing is mutated. :func:`with_lineage` attaches
 a block by returning a *new* ``Pipeline`` rather than mutating the input, unlike
@@ -15,7 +25,7 @@ the in-place dependency rewrite in ``motifs/collapser.py``.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 from flowx.models.ir import (
     Activity,
@@ -63,6 +73,50 @@ def walk_activities(activities: list[Activity]) -> Iterator[Activity]:
                 yield from walk_activities(activity.default_activities)
 
 
+def control_edges_from_calls(
+    source_workflow: str,
+    calls: Iterable[tuple[str, bool | None, str]],
+) -> list[ControlEdge]:
+    """Assemble deduplicated control edges from raw invocation primitives.
+
+    The shared core behind :func:`build_control_edges` (IR) and the discovery-AST
+    control-edge derivation: it owns the self-edge drop, the dedup, and the
+    unresolved-callee recording so those rules live in exactly one place and both
+    phases behave identically.
+
+    Args:
+        source_workflow: Name of the calling workflow (pipeline / DAG).
+        calls: One ``(target_workflow, wait_for_completion, via_task_key)`` triple
+            per call site, in the order they should be considered. ``target_workflow``
+            may be empty when the callee could not be resolved from a partial export.
+
+    Returns:
+        Deduplicated control edges in first-seen order. A call whose target equals
+        ``source_workflow`` is dropped (no self-edge); an empty target is kept with
+        ``resolved=False`` rather than dropped.
+    """
+    edges: list[ControlEdge] = []
+    seen: set[tuple[str, str, str]] = set()
+    for target, wait, via_task_key in calls:
+        target_name = target or ""
+        if target_name and target_name == source_workflow:
+            continue
+        key = (source_workflow, target_name, via_task_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append(
+            ControlEdge(
+                source_workflow=source_workflow,
+                target_workflow=target_name,
+                via_task_key=via_task_key,
+                wait_for_completion=wait,
+                resolved=bool(target_name),
+            )
+        )
+    return edges
+
+
 def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
     """Derive cross-workflow invocation edges for a pipeline.
 
@@ -80,37 +134,16 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
     Returns:
         Deduplicated list of control edges, in first-seen order.
     """
-    edges: list[ControlEdge] = []
-    seen: set[tuple[str, str, str]] = set()
-    for activity in walk_activities(pipeline.tasks):
-        target: str | None
-        wait: bool | None
-        match activity:
-            case ExecutePipelineActivity():
-                target = activity.pipeline_name
-                wait = activity.wait_on_completion
-            case RunJobActivity():
-                target = activity.job_name
-                wait = None
-            case _:
-                continue
-        target_name = target or ""
-        if target_name and target_name == pipeline.name:
-            continue
-        key = (pipeline.name, target_name, activity.task_key)
-        if key in seen:
-            continue
-        seen.add(key)
-        edges.append(
-            ControlEdge(
-                source_workflow=pipeline.name,
-                target_workflow=target_name,
-                via_task_key=activity.task_key,
-                wait_for_completion=wait,
-                resolved=bool(target_name),
-            )
-        )
-    return edges
+
+    def _calls() -> Iterator[tuple[str, bool | None, str]]:
+        for activity in walk_activities(pipeline.tasks):
+            match activity:
+                case ExecutePipelineActivity():
+                    yield activity.pipeline_name or "", activity.wait_on_completion, activity.task_key
+                case RunJobActivity():
+                    yield activity.job_name or "", None, activity.task_key
+
+    return control_edges_from_calls(pipeline.name, _calls())
 
 
 def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, str | None] | None:
@@ -137,30 +170,32 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
     return None
 
 
-def build_data_edges(pipeline: Pipeline) -> list[DataEdge]:
-    """Derive proven producer -> consumer data hand-offs for a pipeline.
+def data_edges_from_endpoints(
+    producers: Iterable[tuple[str, DataAsset]],
+    consumers: Iterable[tuple[str, DataAsset]],
+) -> list[DataEdge]:
+    """Join producer endpoints to consumer endpoints via the two-tier match.
 
-    A producer is any activity with a ``data_writes`` asset; a consumer any
-    activity with a ``data_reads`` asset, gathered across the whole pipeline
-    (ForEach / If / Switch bodies included). Each producer asset is joined against
-    each consumer asset via :func:`_match_assets`, tagging the edge as an
-    ``identity`` or ``signature`` match. An activity never hands off to itself
-    (no self-edges), and identical edges are collapsed (no duplicates).
+    The shared core behind :func:`build_data_edges` (IR) and the discovery-AST
+    data-edge derivation: it owns the :func:`_match_assets` tier logic, the
+    no-self-edge rule, and the dedup, so both phases join identically.
 
     Args:
-        pipeline: The translated pipeline IR.
+        producers: ``(task_key, written asset)`` pairs, in first-seen order.
+        consumers: ``(task_key, read asset)`` pairs, in first-seen order.
 
     Returns:
-        Deduplicated list of data edges, in first-seen order.
+        Deduplicated data edges in first-seen order. A producer never hands off to
+        a consumer sharing its ``task_key`` (no self-edge), and identical
+        ``(producer, consumer, match_kind, match_key)`` edges are collapsed.
     """
-    activities = list(walk_activities(pipeline.tasks))
-    producers = [(activity.task_key, asset) for activity in activities for asset in activity.data_writes]
-    consumers = [(activity.task_key, asset) for activity in activities for asset in activity.data_reads]
+    producer_list = list(producers)
+    consumer_list = list(consumers)
 
     edges: list[DataEdge] = []
     seen: set[tuple[str, str, str, str]] = set()
-    for producer_key, producer_asset in producers:
-        for consumer_key, consumer_asset in consumers:
+    for producer_key, producer_asset in producer_list:
+        for consumer_key, consumer_asset in consumer_list:
             if producer_key == consumer_key:
                 continue
             matched = _match_assets(producer_asset, consumer_asset)
@@ -182,6 +217,28 @@ def build_data_edges(pipeline: Pipeline) -> list[DataEdge]:
                 )
             )
     return edges
+
+
+def build_data_edges(pipeline: Pipeline) -> list[DataEdge]:
+    """Derive proven producer -> consumer data hand-offs for a pipeline.
+
+    A producer is any activity with a ``data_writes`` asset; a consumer any
+    activity with a ``data_reads`` asset, gathered across the whole pipeline
+    (ForEach / If / Switch bodies included). Each producer asset is joined against
+    each consumer asset via :func:`_match_assets`, tagging the edge as an
+    ``identity`` or ``signature`` match. An activity never hands off to itself
+    (no self-edges), and identical edges are collapsed (no duplicates).
+
+    Args:
+        pipeline: The translated pipeline IR.
+
+    Returns:
+        Deduplicated list of data edges, in first-seen order.
+    """
+    activities = list(walk_activities(pipeline.tasks))
+    producers = [(activity.task_key, asset) for activity in activities for asset in activity.data_writes]
+    consumers = [(activity.task_key, asset) for activity in activities for asset in activity.data_reads]
+    return data_edges_from_endpoints(producers, consumers)
 
 
 def build_motif_annotations(pipeline: Pipeline) -> list[MotifAnnotation]:

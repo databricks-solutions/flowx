@@ -15,10 +15,17 @@ align to. The mapping is deliberately **1:1 and lossless**:
   the target-side translation strategy -- rides in the ``properties`` /
   ``extensions`` seams rather than being dropped or forced into a field.
 
-Populating a node's ``data_reads`` / ``data_writes`` from ADF dataset resolvers,
-deriving control edges, and Switch-aware lineage walking are intentionally **not**
-done here -- they belong to the follow-up slice (#62b). Nodes therefore carry
-empty read/write lists for now.
+Data lineage (#62b) is populated here now: every node's ``data_reads`` /
+``data_writes`` are resolved from the ADF dataset references via
+:func:`~flowx.sources.adf.dataset_lineage.activity_data_assets` (the two-tier
+identity / signature model), and every ``ExecutePipeline`` node records the child
+pipeline it invokes under the neutral
+:data:`~flowx.discovery_lineage.INVOKES_WORKFLOW_PROPERTY` marker. Because
+:func:`_activity_to_node` recurses into every control-flow branch, this population
+is Switch-aware for free -- a Copy or ExecutePipeline nested inside a Switch case
+(or default), a ForEach / Until body, or either If branch carries its assets and
+marker like any top-level node. The graph's :attr:`SourceGraph.lineage` block is
+then derived by the source-neutral :func:`~flowx.discovery_lineage.build_graph_lineage`.
 
 The control-flow container shape follows :class:`~flowx.models.discovery.ContainerNode`:
 an ``IfCondition`` becomes ``{"true": [...], "false": [...]}``, a ``ForEach`` /
@@ -32,6 +39,7 @@ from __future__ import annotations
 from typing import Any
 
 from flowx.discovery_inventory import STRATEGY_PROPERTY
+from flowx.discovery_lineage import INVOKES_WAIT_PROPERTY, INVOKES_WORKFLOW_PROPERTY, build_graph_lineage
 from flowx.models.adf_ast import AdfActivity, AdfDefinitions, AdfParameter, AdfPipeline, AdfTrigger, AdfVariable
 from flowx.models.discovery import (
     CONCEPT_BRANCH,
@@ -55,6 +63,7 @@ from flowx.models.discovery import (
     SourceGraph,
     SourceNode,
 )
+from flowx.sources.adf.dataset_lineage import activity_data_assets
 from flowx.sources.adf.loader import classify_activity
 
 # Neutral trigger category for each ADF trigger type. Anything unrecognised maps
@@ -96,10 +105,19 @@ def adf_definitions_to_source_graphs(definitions: AdfDefinitions) -> list[Source
     Pipeline order is preserved so downstream consumers see the same ordering the
     loader produced. ADF triggers are mapped into :class:`ScheduleSpec` and attached
     to each pipeline they reference (see :func:`_attach_schedules`), so schedule /
-    trigger information is preserved rather than dropped.
+    trigger information is preserved rather than dropped. Each graph's
+    :attr:`SourceGraph.lineage` block is derived (control + data edges) once its
+    nodes' reads / writes and invocation markers are populated -- data edges are
+    joined within a single graph, matching the per-workflow scope of the shared
+    :class:`~flowx.models.ir.Lineage` model.
+
+    ``definitions`` is threaded down to the activity mapper so a node's data assets
+    resolve against the factory's datasets and linked services.
     """
-    graphs = [adf_pipeline_to_source_graph(pipeline) for pipeline in definitions.pipelines]
+    graphs = [adf_pipeline_to_source_graph(pipeline, definitions) for pipeline in definitions.pipelines]
     _attach_schedules(graphs, definitions.triggers)
+    for graph in graphs:
+        graph.lineage = build_graph_lineage(graph)
     return graphs
 
 
@@ -182,8 +200,17 @@ def _trigger_pipeline_names(trigger: AdfTrigger) -> list[str]:
     return names
 
 
-def adf_pipeline_to_source_graph(pipeline: AdfPipeline) -> SourceGraph:
-    """Map a single ADF pipeline to a source-faithful :class:`SourceGraph`."""
+def adf_pipeline_to_source_graph(pipeline: AdfPipeline, definitions: AdfDefinitions | None = None) -> SourceGraph:
+    """Map a single ADF pipeline to a source-faithful :class:`SourceGraph`.
+
+    ``definitions`` supplies the datasets and linked services the activity mapper
+    needs to resolve each node's data assets to a physical identity. It is optional
+    so a caller mapping a pipeline in isolation still works; without it, dataset
+    references simply stay unresolved (identity ``None``) and fall back to their
+    neutral signature. It does **not** attach the graph-level lineage block --
+    :func:`adf_definitions_to_source_graphs` owns that, once every graph is built.
+    """
+    resolved_definitions = definitions if definitions is not None else AdfDefinitions(pipelines=[])
     properties: dict[str, str] = {}
     if pipeline.folder:
         properties["folder"] = pipeline.folder
@@ -194,17 +221,21 @@ def adf_pipeline_to_source_graph(pipeline: AdfPipeline) -> SourceGraph:
         parameters=_parameters_to_specs(pipeline.parameters),
         variables=_variables_to_specs(pipeline.variables),
         tags=list(pipeline.annotations) if pipeline.annotations else [],
-        tasks=[_activity_to_node(activity) for activity in pipeline.activities],
+        tasks=[_activity_to_node(activity, resolved_definitions) for activity in pipeline.activities],
         properties=properties,
         raw=pipeline.raw,
     )
 
 
-def _activity_to_node(activity: AdfActivity) -> SourceNode:
+def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> SourceNode:
     """Map one ADF activity to a discovery node (1:1, source-faithful).
 
     Fields are passed explicitly to each node class (rather than unpacking a
-    shared dict) so the mapping stays type-checked end to end.
+    shared dict) so the mapping stays type-checked end to end. Data reads / writes
+    are resolved from the activity's dataset references, and an ``ExecutePipeline``
+    records the child pipeline it invokes under the neutral control-edge marker;
+    both apply to nested nodes too because the branch children below route back
+    through this function.
     """
     strategy = classify_activity(activity.type)
     concept = _CONCEPT_BY_TYPE.get(activity.type, CONCEPT_GAP)
@@ -214,8 +245,10 @@ def _activity_to_node(activity: AdfActivity) -> SourceNode:
     ]
     policy = _policy_to_spec(activity)
     properties: dict[str, Any] = {STRATEGY_PROPERTY: strategy.value}
+    _record_invocation(activity, properties)
+    data_reads, data_writes = activity_data_assets(activity, definitions)
 
-    branches = _control_flow_branches(activity)
+    branches = _control_flow_branches(activity, definitions)
     if branches is not None:
         return ContainerNode(
             source_id=activity.name,
@@ -226,6 +259,8 @@ def _activity_to_node(activity: AdfActivity) -> SourceNode:
             native_type=activity.type,
             dependencies=dependencies,
             policy=policy,
+            data_reads=data_reads,
+            data_writes=data_writes,
             properties=properties,
             raw=activity.raw,
             branches=branches,
@@ -239,6 +274,8 @@ def _activity_to_node(activity: AdfActivity) -> SourceNode:
             native_type=activity.type,
             dependencies=dependencies,
             policy=policy,
+            data_reads=data_reads,
+            data_writes=data_writes,
             properties=properties,
             raw=activity.raw,
             reason=f"unsupported ADF activity type {activity.type!r}",
@@ -252,12 +289,36 @@ def _activity_to_node(activity: AdfActivity) -> SourceNode:
         native_type=activity.type,
         dependencies=dependencies,
         policy=policy,
+        data_reads=data_reads,
+        data_writes=data_writes,
         properties=properties,
         raw=activity.raw,
     )
 
 
-def _control_flow_branches(activity: AdfActivity) -> dict[str, list[SourceNode]] | None:
+def _record_invocation(activity: AdfActivity, properties: dict[str, Any]) -> None:
+    """Stash the child pipeline an ``ExecutePipeline`` invokes under neutral keys.
+
+    The callee reference name and ``waitOnCompletion`` flag are read from the same
+    ADF ``typeProperties`` the convert-time translator reads, then recorded under
+    the source-neutral :data:`INVOKES_WORKFLOW_PROPERTY` / :data:`INVOKES_WAIT_PROPERTY`
+    keys so the source-agnostic control-edge derivation can find them without
+    knowing anything about ADF. An empty / missing callee still records the marker
+    (with an empty target) so the edge is reported as unresolved rather than dropped.
+    """
+    if activity.type != "ExecutePipeline":
+        return
+    type_properties = activity.type_properties or {}
+    reference = type_properties.get("pipeline", {})
+    if isinstance(reference, dict):
+        callee = reference.get("referenceName", "") or ""
+    else:
+        callee = str(reference)
+    properties[INVOKES_WORKFLOW_PROPERTY] = callee
+    properties[INVOKES_WAIT_PROPERTY] = bool(type_properties.get("waitOnCompletion", True))
+
+
+def _control_flow_branches(activity: AdfActivity, definitions: AdfDefinitions) -> dict[str, list[SourceNode]] | None:
     """Return the labelled branches of a control-flow activity, or ``None`` if it is a leaf.
 
     Keyed on the activity **type**, not on whether children happen to be present:
@@ -273,16 +334,18 @@ def _control_flow_branches(activity: AdfActivity) -> dict[str, list[SourceNode]]
     """
     if activity.type == "IfCondition":
         return {
-            "true": [_activity_to_node(child) for child in (activity.if_true_activities or [])],
-            "false": [_activity_to_node(child) for child in (activity.if_false_activities or [])],
+            "true": [_activity_to_node(child, definitions) for child in (activity.if_true_activities or [])],
+            "false": [_activity_to_node(child, definitions) for child in (activity.if_false_activities or [])],
         }
     if activity.type in ("ForEach", "Until"):
-        return {"body": [_activity_to_node(child) for child in (activity.activities or [])]}
+        return {"body": [_activity_to_node(child, definitions) for child in (activity.activities or [])]}
     if activity.type == "Switch":
         branches: dict[str, list[SourceNode]] = {}
         for case_value, case_activities in (activity.switch_cases or {}).items():
-            branches[case_value] = [_activity_to_node(child) for child in case_activities]
-        branches["default"] = [_activity_to_node(child) for child in (activity.switch_default_activities or [])]
+            branches[case_value] = [_activity_to_node(child, definitions) for child in case_activities]
+        branches["default"] = [
+            _activity_to_node(child, definitions) for child in (activity.switch_default_activities or [])
+        ]
         return branches
     return None
 
