@@ -52,6 +52,7 @@ Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("inputs", {"phase": "discover", "source": "adf"})   # learn a phase's inputs
   flowx("discover", {"source": "adf", "adf_source_path": "...", "output_dir": "..."})
   flowx("enrich", {"output_dir": "...", "insights": {...}})   # optional: merge agent-authored insights
+  flowx("route", {"output_dir": "...", "action": "recommend"})  # optional: per-component route + user decision
   flowx("convert", {"source": "adf", "output_dir": "..."})
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
@@ -326,6 +327,42 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
         return _run(str(inline_path))
 
 
+def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
+    """Recommend a per-connected-component conversion route, or record the user's decision.
+
+    ``action`` (default ``"recommend"``): ``recommend`` emits the components, both conversion options
+    per component, findings, and a ready-to-record default plan. ``record`` validates an authored plan
+    and writes ``metadata/conversion_plan.json``; supply the plan either inline as ``plan`` (a JSON
+    object) or via ``plan_path`` (exactly one, staged to a temp file so the same CLI contract runs on
+    both paths). The returned ``ok`` reflects the CLI's success; ``result`` carries its JSON.
+    """
+    output_dir = p.get("output_dir", "./flowx_output")
+    action = p.get("action", "recommend")
+    if action == "recommend":
+        result = runner.run_adapter(["route", "recommend", "--output-dir", output_dir])
+        return {"ok": result.ok, "result": runner.parse_stdout_json(result), "process": result.as_dict()}
+    if action != "record":
+        return {"ok": False, "error": f"unknown route action {action!r}; expected 'recommend' or 'record'."}
+
+    plan = p.get("plan")
+    plan_path = p.get("plan_path")
+    if (plan is None) == (plan_path is None):
+        return {"ok": False, "error": "provide exactly one of 'plan' (inline object) or 'plan_path'."}
+
+    def _run(path: str) -> dict[str, Any]:
+        result = runner.run_adapter(["route", "record", "--output-dir", output_dir, "--plan-path", path])
+        payload = runner.parse_stdout_json(result)
+        ok = bool(isinstance(payload, dict) and payload.get("ok"))
+        return {"ok": ok, "result": payload, "process": result.as_dict()}
+
+    if plan_path is not None:
+        return _run(str(plan_path))
+    with tempfile.TemporaryDirectory(prefix="flowx-plan-") as temporary:
+        inline_path = Path(temporary) / "conversion_plan.json"
+        inline_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+        return _run(str(inline_path))
+
+
 def _cmd_inspect(p: dict[str, Any]) -> dict[str, Any]:
     args: list[Any] = ["inspect", p["report_path"]]
     for answer in p.get("answers") or []:
@@ -529,6 +566,7 @@ _COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "merge_agentic": _cmd_merge_agentic,
     "resolve_agentic": _cmd_resolve_agentic,
     "enrich": _cmd_enrich,
+    "route": _cmd_route,
     "inspect": _cmd_inspect,
     "apply_answers": _cmd_apply_answers,
     "materialize_lookup": _cmd_materialize_lookup,
@@ -587,6 +625,13 @@ def build_server() -> FastMCP:
           `insights` key (atomic, idempotent). `ok` reflects validation; `result.violations` lists any
           problems and the inventory is left untouched on failure. Author the insights by reading
           inventory.json + the source artifacts first (see the flowx-discover skill's insights guide).
+        - "route": output_dir(req), action("recommend" default | "record"), one of plan(inline object)
+          | plan_path(for record) — group pipelines into connected components over control lineage and
+          route each. `recommend` emits the components with BOTH conversion options (deterministic
+          capability + motif/coverage evidence, and the agentic recommended patterns with any
+          simplification pattern surfaced), plus a ready-to-record default plan. `record` validates the
+          user's per-component decision and writes metadata/conversion_plan.json (additive; convert is
+          untouched, and with no plan behavior is exactly as today).
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

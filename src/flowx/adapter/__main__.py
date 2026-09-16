@@ -1,9 +1,9 @@
 """Unified CLI entry point that the flowx skills and MCP tools drive via subprocesses.
 
 Exposes stateless subcommands -- the ``discover``/``convert``/``package`` phase runners plus
-``inspect``, ``modify``, ``resolve-agentic``, ``enrich``, ``inputs``, ``materialize-lookup``,
-``workspace-paths``, ``record-results``, and ``install-dashboard`` -- so each agent turn runs as an
-independent process holding no session state across user prompts.
+``inspect``, ``modify``, ``resolve-agentic``, ``enrich``, ``route``, ``inputs``,
+``materialize-lookup``, ``workspace-paths``, ``record-results``, and ``install-dashboard`` -- so each
+agent turn runs as an independent process holding no session state across user prompts.
 """
 
 from __future__ import annotations
@@ -87,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_resolve_agentic(args)
     if args.command == "enrich":
         return _run_enrich(args)
+    if args.command == "route":
+        return _run_route(args)
     if args.command == "record-results":
         return _run_record_results(args)
     if args.command == "install-dashboard":
@@ -158,6 +160,46 @@ def _run_enrich(args: argparse.Namespace) -> int:
         return 1
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"Failed to enrich inventory: {error}", file=sys.stderr)
+        return 1
+    _emit_json(result, args.out)
+    return 0 if result.get("ok") else 1
+
+
+def _run_route(args: argparse.Namespace) -> int:
+    """Implements ``route``: compute a per-connected-component conversion recommendation (``recommend``)
+    or validate and record an agent-authored conversion plan (``record``).
+
+    ``recommend`` is read-only: it emits the components, both conversion options per component, the
+    findings, and a ready-to-record default plan to stdout. ``record`` validates the authored plan and,
+    only when clean, writes ``metadata/conversion_plan.json``; it emits the result JSON (``ok`` /
+    ``violations`` / counts) and returns 1 on validation failure (plan left untouched).
+    """
+    from flowx import routing
+
+    inventory_path = args.output_dir / "metadata" / "inventory.json"
+    if not inventory_path.exists():
+        print(f"No inventory.json under {inventory_path.parent}; run the discover phase first.", file=sys.stderr)
+        return 1
+
+    if args.action == "recommend":
+        try:
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"Failed to read {inventory_path}: {error}", file=sys.stderr)
+            return 1
+        _emit_json(routing.build_recommendation(inventory), args.out)
+        return 0
+
+    if args.plan_path is None:
+        print("route record requires --plan-path.", file=sys.stderr)
+        return 2
+    try:
+        result = routing.record_plan(args.output_dir, plan_path=args.plan_path)
+    except FileNotFoundError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Failed to record conversion plan: {error}", file=sys.stderr)
         return 1
     _emit_json(result, args.out)
     return 0 if result.get("ok") else 1
@@ -519,6 +561,37 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional output file for the enrich result JSON; defaults to stdout.",
+    )
+
+    route = subparsers.add_parser(
+        "route",
+        help=(
+            "Recommend a per-connected-component deterministic/agentic conversion route, or record "
+            "the user's decision as metadata/conversion_plan.json (additive; convert is untouched)."
+        ),
+    )
+    route.add_argument(
+        "action",
+        choices=("recommend", "record"),
+        help="'recommend' emits components + both options + a default plan; 'record' validates and writes the plan.",
+    )
+    route.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Migration output directory (reads metadata/inventory.json; record writes metadata/conversion_plan.json).",
+    )
+    route.add_argument(
+        "--plan-path",
+        type=Path,
+        default=None,
+        help="For 'record': path to the agent-authored conversion plan JSON to validate and record.",
+    )
+    route.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Optional output file for the recommendation / result JSON; defaults to stdout.",
     )
 
     record = subparsers.add_parser(
