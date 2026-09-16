@@ -28,6 +28,7 @@ from flowx.models.adf_ast import (
     InventoryItem,
     TranslationStrategy,
 )
+from flowx.models.motifs import DetectedMotif
 
 logger = logging.getLogger(__name__)
 
@@ -879,7 +880,33 @@ def _tshirt_size(score: int) -> str:
     return "XL"
 
 
-def build_profile_rows(definitions: AdfDefinitions) -> list[dict[str, Any]]:
+def detect_motifs_by_pipeline(definitions: AdfDefinitions) -> dict[str, list[DetectedMotif]]:
+    """Detect the motifs in every pipeline, keyed by pipeline name.
+
+    Runs the profiler's motif detector (:func:`flowx.motifs.detector.detect_motifs`)
+    once per pipeline, so the discover phase can both surface the full detected
+    motifs additively in ``inventory.json`` and count them in the profile report
+    from a single detection pass. Detection is best-effort: a pipeline whose
+    detection raises is logged and recorded with an empty list, never allowed to
+    hard-fail discover. This only *detects* motifs -- it never collapses their
+    member activities, which stays a convert-phase decision.
+    """
+    from flowx.motifs.detector import detect_motifs
+
+    results: dict[str, list[DetectedMotif]] = {}
+    for pipeline in definitions.pipelines:
+        try:
+            results[pipeline.name] = detect_motifs(pipeline, definitions)
+        except Exception as exc:  # noqa: BLE001 - detection must never hard-fail discover
+            logger.warning("Motif detection failed for pipeline %r: %s", pipeline.name, exc)
+            results[pipeline.name] = []
+    return results
+
+
+def build_profile_rows(
+    definitions: AdfDefinitions,
+    motifs_by_pipeline: dict[str, list[DetectedMotif]] | None = None,
+) -> list[dict[str, Any]]:
     """Builds one profile-report row per pipeline.
 
     Each row carries the source activity / dataset / linked-service counts, the
@@ -888,20 +915,22 @@ def build_profile_rows(definitions: AdfDefinitions) -> list[dict[str, Any]]:
 
     Args:
         definitions: Parsed ADF definitions.
+        motifs_by_pipeline: Optional precomputed motif detections keyed by
+            pipeline name (see :func:`detect_motifs_by_pipeline`). Passing the
+            same map the inventory emitter uses keeps the report's pattern count
+            consistent with the surfaced motifs and avoids detecting twice; when
+            omitted, detection runs here.
 
     Returns:
         List of row dicts ordered by pipeline name.
     """
-    from flowx.motifs.detector import detect_motifs
+    if motifs_by_pipeline is None:
+        motifs_by_pipeline = detect_motifs_by_pipeline(definitions)
 
     rows: list[dict[str, Any]] = []
     for pipeline in sorted(definitions.pipelines, key=lambda p: p.name):
         activity_count, datasets, linked_services, category_counts = _pipeline_reference_counts(pipeline, definitions)
-        try:
-            n_patterns = len(detect_motifs(pipeline, definitions))
-        except Exception as exc:  # noqa: BLE001 - profiling must never hard-fail on motif detection
-            logger.warning("Motif detection failed for pipeline %r: %s", pipeline.name, exc)
-            n_patterns = 0
+        n_patterns = len(motifs_by_pipeline.get(pipeline.name, []))
         score = _complexity_score(category_counts, len(datasets), len(linked_services), n_patterns)
         rows.append(
             {
@@ -1064,6 +1093,9 @@ def main(argv: list[str] | None = None) -> int:
 
     inventory_path = metadata_dir / "inventory.json"
     source_graphs = adf_definitions_to_source_graphs(definitions)
+    # Detect motifs once and share the result: the inventory surfaces the full
+    # detections additively, the profile report counts them -- from one pass.
+    motifs_by_pipeline = detect_motifs_by_pipeline(definitions)
     inventory_dict = build_source_inventory(
         source_graphs,
         source=SOURCE_ADF,
@@ -1071,11 +1103,12 @@ def main(argv: list[str] | None = None) -> int:
         # ADF has historically omitted zero-activity pipelines from the per-pipeline
         # listing while still counting them in summary.pipeline_count; preserve that.
         include_empty_pipelines=False,
+        motifs_by_pipeline=motifs_by_pipeline,
     )
     inventory_path.write_text(json.dumps(inventory_dict, indent=2), encoding="utf-8")
     logger.info("Wrote inventory to %s", inventory_path)
 
-    profile_rows = build_profile_rows(definitions)
+    profile_rows = build_profile_rows(definitions, motifs_by_pipeline)
     csv_path = metadata_dir / "profile_report.csv"
     write_profile_csv(profile_rows, csv_path)
     logger.info("Wrote profile report to %s", csv_path)
