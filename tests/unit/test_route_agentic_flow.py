@@ -267,6 +267,34 @@ def test_alter_report_is_idempotent_on_gaps() -> None:
     assert len(twice_gaps) == 1
 
 
+def test_alter_report_keeps_a_non_routed_gap_that_shares_a_task_name_with_a_routed_task() -> None:
+    # Both pipelines have a task named "Sync"; only 'parent' is routed agentic. The untagged convert
+    # gap belongs to the non-routed 'other' and must survive -- the drop must not match by global name.
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [_copy_task("Sync", "sync_parent")]},
+            {"name": "other", "tasks": [_copy_task("Sync", "sync_other")]},
+        ]
+    }
+    existing = [{"activity_name": "Sync", "activity_type": "ExecuteDataFlow", "raw_definition": None}]
+    _report, gaps = alter_report(report, existing, {"parent"})
+
+    # The non-routed pipeline's untagged "Sync" gap survives.
+    assert existing[0] in gaps
+    # The routed pipeline contributes exactly one tagged gap for its own "Sync" task.
+    tagged = [gap for gap in gaps if gap.get("pipeline") == "parent"]
+    assert tagged == [
+        {
+            "activity_name": "Sync",
+            "activity_type": "CopyActivity",
+            "raw_definition": tagged[0]["raw_definition"],
+            "pipeline": "parent",
+        }
+    ]
+    # No duplicate tagged gap for the routed task.
+    assert len(tagged) == 1
+
+
 def test_alter_report_keeps_gaps_for_non_routed_pipelines() -> None:
     report = {
         "pipelines": [

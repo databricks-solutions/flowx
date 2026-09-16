@@ -196,6 +196,17 @@ def alter_report(
 
     report = copy.deepcopy(report)
 
+    # Task names owned by pipelines that are NOT routed agentic. Convert gaps are untagged (they carry
+    # no pipeline), so a name that also belongs to a non-routed pipeline is ambiguous: dropping it
+    # could remove that pipeline's gap, so it is preserved. Computed before mutating routed pipelines.
+    nonrouted_task_names: set[str] = set()
+    for pipeline in _report_pipelines(report):
+        if pipeline.get("name") in agentic:
+            continue
+        for task in pipeline.get("tasks", []):
+            if isinstance(task, dict):
+                nonrouted_task_names.add(str(task.get("name")))
+
     # Emit exactly one pipeline-tagged gap per routed task, replacing (never appending to) any prior
     # gap for a routed pipeline's tasks. Without this, a task that convert already recorded as an
     # agentic gap -- or a re-run of the edit -- would leave duplicate/again-appended gaps.
@@ -218,11 +229,13 @@ def alter_report(
     for gap in gaps:
         pipeline_name = gap.get("pipeline") if isinstance(gap, dict) else None
         activity_name = gap.get("activity_name") if isinstance(gap, dict) else None
-        # Drop our own prior tagged gaps for now-routed pipelines (idempotent re-run) and the untagged
-        # convert gaps superseded by a fresh gap for the same routed task.
+        # Drop our own prior tagged gaps for now-routed pipelines (idempotent re-run).
         if pipeline_name in agentic:
             continue
-        if pipeline_name is None and activity_name in routed_task_names:
+        # Drop an untagged convert gap only when the name belongs *exclusively* to a routed pipeline --
+        # a fresh tagged gap now supersedes it. When the same name also names a task in a non-routed
+        # pipeline, the gap is ambiguous and kept, so a non-routed pipeline never loses its gap.
+        if pipeline_name is None and activity_name in routed_task_names and activity_name not in nonrouted_task_names:
             continue
         kept_gaps.append(gap)
     return report, kept_gaps + fresh_gaps
