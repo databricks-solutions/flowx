@@ -316,3 +316,46 @@ def test_motifs_are_decoupled_from_the_lineage_block() -> None:
     assert entry["motifs"][0]["motif_id"] == "scd_type_2"
     # The lineage block is present but its own motif slot is untouched and empty.
     assert entry["lineage"]["motifs"] == []
+
+
+def test_exact_duplicate_motifs_collapse_but_overlapping_matches_survive() -> None:
+    """Exact duplicates dedupe to the first; overlapping-but-distinct matches all survive.
+
+    A detector can report the same match twice (same motif over the same members),
+    which must collapse to one -- but a match that merely *overlaps* (same motif,
+    a different member set) is a distinct detection and must be kept. Order is
+    first-seen, and the member comparison is a set (order-insensitive).
+    """
+    graph = SourceGraph(
+        name="g1",
+        source="unit",
+        tasks=[
+            _node("copy", "Copy", "deterministic"),
+            _node("notify_a", "WebActivity", "deterministic"),
+            _node("notify_b", "WebActivity", "deterministic"),
+        ],
+    )
+    exact = _motif("activity_and_notify", "task_with_notification", ["copy", "notify_a"])
+    exact_dupe = _motif(
+        "activity_and_notify",
+        "task_with_notification",
+        ["notify_a", "copy"],  # same member set, different order -> the same motif
+        notes=["a different note on the same match"],
+    )
+    overlapping = _motif("activity_and_notify", "task_with_notification", ["copy", "notify_b"])
+
+    inventory = build_source_inventory(
+        [graph],
+        source="unit",
+        source_dir="/tmp",
+        motifs_by_pipeline={"g1": [exact, exact_dupe, overlapping]},
+    )
+    motifs = inventory["pipelines"][0]["motifs"]
+
+    # The exact duplicate collapsed; the overlapping-but-distinct match survived, in first-seen order.
+    assert [frozenset(motif["member_task_keys"]) for motif in motifs] == [
+        frozenset({"copy", "notify_a"}),
+        frozenset({"copy", "notify_b"}),
+    ]
+    # First occurrence is the one kept (its empty notes, not the duplicate's note).
+    assert motifs[0]["confidence_notes"] == []

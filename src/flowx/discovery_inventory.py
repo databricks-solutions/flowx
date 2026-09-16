@@ -96,7 +96,10 @@ def build_source_inventory(
             detected in it (see :mod:`flowx.motifs.detector`). A pipeline with a
             non-empty entry gains an additive ``motifs`` list; the key is omitted
             otherwise. This is surfacing only -- the member activities are never
-            collapsed here (collapse is a convert decision). Keyed by
+            collapsed here (collapse is a convert decision). Exact-duplicate
+            detections (same ``motif_id`` and same member set) are collapsed to one
+            (see :func:`_dedupe_motif_entries`); overlapping-but-distinct matches
+            are all kept. Keyed by
             :attr:`~flowx.models.discovery.SourceGraph.name`, so a source with no
             motif detector simply passes ``None``.
 
@@ -129,7 +132,7 @@ def build_source_inventory(
                 entry["lineage"] = lineage_to_dict(graph.lineage)
             detected = motifs_by_pipeline.get(graph.name)
             if detected:
-                entry["motifs"] = [_motif_entry(motif) for motif in detected]
+                entry["motifs"] = _dedupe_motif_entries([_motif_entry(motif) for motif in detected])
             pipeline_entries.append(entry)
 
     total = deterministic + agentic + unsupported
@@ -217,3 +220,26 @@ def _motif_entry(motif: DetectedMotif) -> dict[str, Any]:
         "source_type_hint": motif.source_type_hint,
         "confidence_notes": list(motif.confidence_notes),
     }
+
+
+def _dedupe_motif_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse exact-duplicate motif entries, preserving first-seen order.
+
+    A detector can report the same match more than once (e.g. two upstreams that
+    each pair with the same notification activity), which would otherwise emit
+    identical inventory entries. Two entries are the *same* motif only when they
+    share both ``motif_id`` **and** the exact same set of ``member_task_keys``;
+    such duplicates collapse to the first occurrence. Entries that merely overlap
+    -- same ``motif_id`` but a different member set -- are genuinely distinct
+    matches and are all kept. The member comparison is order-insensitive (a set),
+    so the same activities in a different order still count as one motif.
+    """
+    seen: set[tuple[str, frozenset[str]]] = set()
+    deduped: list[dict[str, Any]] = []
+    for entry in entries:
+        identity = (entry["motif_id"], frozenset(entry["member_task_keys"]))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(entry)
+    return deduped

@@ -160,7 +160,8 @@ def test_inventory_surfaces_detected_motifs_without_collapsing(tmp_path: Path) -
         "confidence_notes",
     }
     assert bulk["databricks_replacement"] == "for_each_ingestion"
-    assert bulk["member_task_keys"], "motif must name its participating activities"
+    # Exact expected member set for this fixture -- a partial-member regression must fail.
+    assert bulk["member_task_keys"] == ["Lookup ETL Config", "ForEach Table In Config"]
 
     # No collapse at discover: each member survives as its own activity entry.
     activity_names = {activity["name"] for activity in pipeline["activities"]}
