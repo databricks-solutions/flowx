@@ -209,22 +209,35 @@ def _lfc_pipeline() -> dict[str, Any]:
     }
 
 
-def test_fill_agentic_combine_writes_merged_report(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    _setup(tmp_path)
+def _record_agentic_plan(tmp_path: Path) -> None:
+    """Route the parent<->child component agentic and record the plan so combine can bind to it."""
+    plan_path = tmp_path / "route_plan.json"
+    plan_path.write_text(json.dumps(_agentic_plan()), encoding="utf-8")
+    assert adapter_cli_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)]) == 0
+
+
+def _run_combine(tmp_path: Path, members: str, authored: list[dict[str, Any]]) -> int:
     pipelines_path = tmp_path / "authored.json"
-    pipelines_path.write_text(json.dumps([_lfc_pipeline()]), encoding="utf-8")
-    code = adapter_cli_main(
+    pipelines_path.write_text(json.dumps(authored), encoding="utf-8")
+    return adapter_cli_main(
         [
             "fill-agentic",
             "combine",
             "--output-dir",
             str(tmp_path),
             "--members",
-            "child,parent",
+            members,
             "--pipelines-path",
             str(pipelines_path),
         ]
     )
+
+
+def test_fill_agentic_combine_writes_merged_report(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _setup(tmp_path)
+    _record_agentic_plan(tmp_path)
+    capsys.readouterr()  # drop the route-record output so only the combine JSON remains
+    code = _run_combine(tmp_path, "child,parent", [_lfc_pipeline()])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -235,24 +248,84 @@ def test_fill_agentic_combine_writes_merged_report(tmp_path: Path, capsys: pytes
 
 def test_fill_agentic_combine_rejects_dangling_reference(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _setup(tmp_path)
+    _record_agentic_plan(tmp_path)
+    capsys.readouterr()  # drop the route-record output so only the combine JSON remains
     report_before = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
     dangling = _lfc_pipeline()
     dangling["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.ghost.id}"}}
-    pipelines_path = tmp_path / "authored.json"
-    pipelines_path.write_text(json.dumps([dangling]), encoding="utf-8")
-    code = adapter_cli_main(
-        [
-            "fill-agentic",
-            "combine",
-            "--output-dir",
-            str(tmp_path),
-            "--members",
-            "child,parent",
-            "--pipelines-path",
-            str(pipelines_path),
-        ]
-    )
+    code = _run_combine(tmp_path, "child,parent", [dangling])
     assert code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False and payload["violations"]
     assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+
+
+def test_fill_agentic_combine_rejects_a_deterministic_member_set(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup(tmp_path)
+    _record_agentic_plan(tmp_path)  # component-1 (child, parent) agentic; solo is deterministic
+    capsys.readouterr()  # drop the route-record output so only the combine JSON remains
+    code = _run_combine(tmp_path, "solo", [_lfc_pipeline()])
+    assert code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False and payload["error"]
+
+
+def test_fill_agentic_has_no_no_validate_flag(tmp_path: Path) -> None:
+    # The validation bypass must not exist as a CLI surface; argparse rejects the unknown flag.
+    with pytest.raises(SystemExit) as excinfo:
+        adapter_cli_main(
+            [
+                "fill-agentic",
+                "combine",
+                "--output-dir",
+                str(tmp_path),
+                "--members",
+                "child,parent",
+                "--pipelines-path",
+                str(tmp_path / "x.json"),
+                "--no-validate",
+            ]
+        )
+    assert excinfo.value.code == 2
+
+
+def test_route_triggers_convert_when_report_absent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Inventory present, report absent: with --source/--source-path, route triggers convert. Stub the
+    # phase runner to write the report the trigger would have produced, then assert route records+edits.
+    metadata = tmp_path / "metadata"
+    metadata.mkdir(parents=True)
+    (metadata / "inventory.json").write_text(json.dumps(_inventory(), indent=2), encoding="utf-8")
+
+    triggered: list[list[str]] = []
+
+    def fake_run_phase(phase: str, forward: list[str]) -> int:
+        triggered.append([phase, *forward])
+        work = tmp_path / WORK_DIRNAME
+        work.mkdir(parents=True, exist_ok=True)
+        (work / REPORT_FILENAME).write_text(json.dumps(_report(), indent=2), encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr("flowx.adapter.__main__._run_phase", fake_run_phase)
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(_agentic_plan()), encoding="utf-8")
+    code = adapter_cli_main(
+        [
+            "route",
+            "--output-dir",
+            str(tmp_path),
+            "--plan-path",
+            str(plan_path),
+            "--source",
+            "adf",
+            "--source-path",
+            str(tmp_path / "adf_src"),
+        ]
+    )
+    assert code == 0
+    assert triggered and triggered[0][0] == "convert"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True and payload["edit"]["agentic_pipelines"] == ["child", "parent"]

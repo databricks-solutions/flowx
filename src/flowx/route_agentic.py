@@ -9,9 +9,11 @@ package phase, structural validation, and provenance all still apply:
 
 * :func:`alter_report` rewrites the report for the routed-**agentic** groups only: every task in an
   agentic-routed pipeline is removed and replaced by a :class:`~flowx.models.ir.PlaceholderActivity`,
-  and one :class:`~flowx.models.ir.AgenticGap` is appended per task, so the standard gap-fill path
-  handles them. Pipelines in deterministic groups are left byte-identical, and when nothing is routed
-  agentic the report and gaps are returned unchanged -- the non-breaking guarantee.
+  and exactly one pipeline-tagged :class:`~flowx.models.ir.AgenticGap` is emitted per routed task,
+  replacing (never appending to) any prior gap for those pipelines' tasks, so the standard gap-fill
+  path handles them without duplicates and the edit is idempotent. Pipelines in deterministic groups
+  are left byte-identical, and when nothing is routed agentic the report and gaps are returned
+  unchanged -- the non-breaking guarantee.
 * the agent authors the fill. **Per-pipeline** agentic reuses the existing name-matched
   :func:`flowx.ir_serde.merge_agentic_results` (no new code here). **Cross-pipeline COMBINE**
   (N pipelines -> M, e.g. one Lakeflow Connect pipeline) is the one net-new capability:
@@ -44,6 +46,9 @@ from flowx.models.conversion_plan import DECISION_AGENTIC
 WORK_DIRNAME = ".work"
 REPORT_FILENAME = "translation_report.json"
 GAPS_FILENAME = "gaps.json"
+# The recorded plan + inventory the combine fill binds against live under metadata/.
+METADATA_DIRNAME = "metadata"
+INVENTORY_FILENAME = "inventory.json"
 
 # Guidance stamped onto every placeholder the alteration produces.
 _PLACEHOLDER_COMMENT = (
@@ -136,13 +141,27 @@ def _report_pipelines(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _placeholder_and_gap(task: dict[str, Any], pipeline_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Turn one deterministic task into a placeholder + gap, preserving its identity and edges."""
-    original_type = str(task.get("type", "unknown"))
+    """Turn one task into a placeholder + gap, preserving its identity and edges.
+
+    Idempotent: a task that is already a ``PlaceholderActivity`` (a re-run of the edit) is kept as-is
+    and its gap is rebuilt from the recorded ``original_type`` / ``raw_definition`` rather than
+    wrapping the placeholder in another placeholder.
+    """
     name = task.get("name")
-    task_key = task.get("task_key")
+    if task.get("type") == "PlaceholderActivity":
+        original_type = str(task.get("original_type", "unknown"))
+        gap: dict[str, Any] = {
+            "activity_name": name,
+            "activity_type": original_type,
+            "raw_definition": task.get("raw_definition"),
+            "pipeline": pipeline_name,
+        }
+        return task, gap
+
+    original_type = str(task.get("type", "unknown"))
     placeholder: dict[str, Any] = {
         "name": name,
-        "task_key": task_key,
+        "task_key": task.get("task_key"),
         "type": "PlaceholderActivity",
         "original_type": original_type,
         "comment": _PLACEHOLDER_COMMENT,
@@ -151,7 +170,7 @@ def _placeholder_and_gap(task: dict[str, Any], pipeline_name: str) -> tuple[dict
     }
     if task.get("depends_on"):
         placeholder["depends_on"] = task["depends_on"]
-    gap: dict[str, Any] = {
+    gap = {
         "activity_name": name,
         "activity_type": original_type,
         "raw_definition": task,
@@ -176,7 +195,12 @@ def alter_report(
         return report, gaps
 
     report = copy.deepcopy(report)
-    gaps = list(gaps)
+
+    # Emit exactly one pipeline-tagged gap per routed task, replacing (never appending to) any prior
+    # gap for a routed pipeline's tasks. Without this, a task that convert already recorded as an
+    # agentic gap -- or a re-run of the edit -- would leave duplicate/again-appended gaps.
+    fresh_gaps: list[dict[str, Any]] = []
+    routed_task_names: set[str] = set()
     for pipeline in _report_pipelines(report):
         if pipeline.get("name") not in agentic:
             continue
@@ -186,9 +210,22 @@ def alter_report(
                 continue
             placeholder, gap = _placeholder_and_gap(task, str(pipeline.get("name")))
             placeholders.append(placeholder)
-            gaps.append(gap)
+            fresh_gaps.append(gap)
+            routed_task_names.add(str(task.get("name")))
         pipeline["tasks"] = placeholders
-    return report, gaps
+
+    kept_gaps: list[dict[str, Any]] = []
+    for gap in gaps:
+        pipeline_name = gap.get("pipeline") if isinstance(gap, dict) else None
+        activity_name = gap.get("activity_name") if isinstance(gap, dict) else None
+        # Drop our own prior tagged gaps for now-routed pipelines (idempotent re-run) and the untagged
+        # convert gaps superseded by a fresh gap for the same routed task.
+        if pipeline_name in agentic:
+            continue
+        if pipeline_name is None and activity_name in routed_task_names:
+            continue
+        kept_gaps.append(gap)
+    return report, kept_gaps + fresh_gaps
 
 
 def _write_json_atomic(path: Path, document: Any) -> None:
@@ -255,42 +292,102 @@ def combine_group_fill(
     return {"pipelines": kept}
 
 
+def _resolve_agentic_component(output_dir: Path, members: set[str]) -> tuple[str | None, str | None]:
+    """Bind ``members`` to a routed-**agentic** component in the recorded, fingerprint-bound plan.
+
+    Reads ``metadata/conversion_plan.json`` and ``metadata/inventory.json`` and returns
+    ``(component_id, error)``. The error is set (and ``component_id`` is ``None``) when: the plan or
+    inventory is missing; the plan's ``inventory_sha256`` no longer matches the current inventory (a
+    stale plan); ``members`` do not exactly equal one component's members (a partial, superset, or
+    mistyped group); or the exactly-matching component is routed deterministic rather than agentic.
+    Requiring an exact match to a routed-agentic component stops a caller from swapping deterministic
+    pipelines or a partial group.
+    """
+    from flowx.discovery_insights import inventory_fingerprint
+
+    metadata = Path(output_dir) / METADATA_DIRNAME
+    plan_path = metadata / "conversion_plan.json"
+    inventory_path = metadata / INVENTORY_FILENAME
+    if not plan_path.exists():
+        return None, "No metadata/conversion_plan.json; record a routing decision with `route` first."
+    if not inventory_path.exists():
+        return None, "No metadata/inventory.json; run the discover phase first."
+
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    recorded_fingerprint = plan.get("inventory_sha256")
+    current_fingerprint = inventory_fingerprint(inventory)
+    if recorded_fingerprint != current_fingerprint:
+        return None, (
+            "conversion_plan.json is stale: it was recorded against a different inventory "
+            f"({recorded_fingerprint!r} != {current_fingerprint!r}); re-run `route` before filling."
+        )
+
+    for component in plan.get("components", []):
+        if not isinstance(component, dict):
+            continue
+        component_members = {str(member) for member in component.get("members", [])}
+        if component_members != members:
+            continue
+        if component.get("decision") == DECISION_AGENTIC:
+            return str(component.get("component_id")), None
+        return None, (
+            f"members {sorted(members)} match component {component.get('component_id')!r}, which is "
+            f"routed {component.get('decision')!r}, not agentic; only routed-agentic components can be combined."
+        )
+    return None, (
+        f"members {sorted(members)} do not exactly match any component in the recorded plan "
+        "(partial, superset, or mistyped); pass the exact member set of one routed-agentic component."
+    )
+
+
 def apply_combine_fill(
     output_dir: Path,
     group_members: Iterable[str],
     authored_pipelines: list[dict[str, Any]],
-    *,
-    validate: bool = True,
 ) -> dict[str, Any]:
-    """Combine a routed group into agent-authored pipeline(s) on disk, validating before writing.
+    """Combine a routed-agentic group into agent-authored pipeline(s) on disk.
 
-    Reads ``<output_dir>/.work/translation_report.json``, swaps the group's pipelines for
-    ``authored_pipelines``, and -- when ``validate`` -- runs the structural bundle invariants over the
-    merged report. The report is written back only when validation passes, so a dangling reference or
-    duplicate key never lands on disk.
+    The group's membership is **bound to the recorded plan**: ``group_members`` must exactly match a
+    routed-agentic component in ``metadata/conversion_plan.json`` (whose fingerprint must still match
+    the current inventory), so a caller cannot swap deterministic pipelines or a partial/typoed group.
+    The merged report is then **always** validated with the structural bundle invariants (a real
+    ``prepare -> write_bundle`` pass over :func:`validate_report_structurally`) -- there is no bypass --
+    and written back only when it passes, so a dangling reference or duplicate key never lands on disk.
 
-    Returns ``{"ok", "violations", "pipelines"}``. ``ok`` is ``False`` (and nothing written) on any
-    structural violation.
+    Returns ``{"ok", "violations", "error", "component_id", "pipelines"}``. ``ok`` is ``False`` (and
+    nothing written) on a plan/membership error (``error`` set) or any structural violation
+    (``violations`` set).
 
     Raises:
         FileNotFoundError: when the translation report is missing (run convert first).
     """
+    members = {str(member) for member in group_members}
+    component_id, error = _resolve_agentic_component(output_dir, members)
+    if error is not None:
+        return {"ok": False, "error": error, "violations": [], "pipelines": 0}
+
     work = Path(output_dir) / WORK_DIRNAME
     report_path = work / REPORT_FILENAME
     if not report_path.exists():
         raise FileNotFoundError(f"No {REPORT_FILENAME} under {work}; run the convert phase first.")
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    merged = combine_group_fill(report, group_members, authored_pipelines)
+    merged = combine_group_fill(report, members, authored_pipelines)
 
-    if validate:
-        result = validate_report_structurally(merged)
-        if not result.ok:
-            violations = [f"[{finding.code}] {finding.location}: {finding.message}" for finding in result.violations]
-            return {"ok": False, "violations": violations, "pipelines": 0}
+    result = validate_report_structurally(merged)
+    if not result.ok:
+        violations = [f"[{finding.code}] {finding.location}: {finding.message}" for finding in result.violations]
+        return {"ok": False, "error": None, "violations": violations, "pipelines": 0}
 
     _write_json_atomic(report_path, merged)
-    return {"ok": True, "violations": [], "pipelines": len(merged["pipelines"])}
+    return {
+        "ok": True,
+        "error": None,
+        "violations": [],
+        "component_id": component_id,
+        "pipelines": len(merged["pipelines"]),
+    }
 
 
 # --------------------------------------------------------------------------- #

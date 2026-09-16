@@ -21,11 +21,15 @@ The confirmed flow, built here:
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 from pathlib import Path
 from typing import Any
 
+from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.ir_serde import merge_agentic_results
+from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
+from flowx.models.ir import ControlEdge, Lineage
 from flowx.route_agentic import (
     GAPS_FILENAME,
     REPORT_FILENAME,
@@ -38,6 +42,7 @@ from flowx.route_agentic import (
     prompt_for_decisions,
     validate_report_structurally,
 )
+from flowx.routing import record_plan
 
 # --------------------------------------------------------------------------- #
 # Fixtures.
@@ -124,6 +129,44 @@ def _write_work(output_dir: Path, report: dict[str, Any], gaps: list[dict[str, A
         (work / GAPS_FILENAME).write_text(json.dumps(gaps, indent=2), encoding="utf-8")
 
 
+def _node(task_key: str, native_type: str) -> SourceNode:
+    return SourceNode(
+        source_id=task_key,
+        task_key=task_key,
+        concept=CONCEPT_NOTEBOOK,
+        source="unit",
+        name=task_key,
+        native_type=native_type,
+        properties={STRATEGY_PROPERTY: "deterministic"},
+        raw={"name": task_key, "type": native_type},
+    )
+
+
+def _routed_inventory() -> dict[str, Any]:
+    """Inventory whose single 'parent -> child' control edge forms one component {child, parent}."""
+    parent = SourceGraph(
+        name="parent",
+        source="unit",
+        tasks=[_node("call_child", "ExecutePipeline")],
+        lineage=Lineage(
+            control_edges=[ControlEdge(source_workflow="parent", target_workflow="child", via_task_key="call_child")]
+        ),
+    )
+    child = SourceGraph(name="child", source="unit", tasks=[_node("copy_orders", "Copy")])
+    return build_source_inventory([parent, child], source="unit", source_dir="/tmp/src")
+
+
+def _setup_routed_agentic(output_dir: Path, *, decision: str = "agentic") -> None:
+    """Write inventory + report + a recorded conversion_plan.json routing {child, parent} per ``decision``."""
+    _write_work(output_dir, _report_two_pipelines())
+    metadata = output_dir / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "inventory.json").write_text(json.dumps(_routed_inventory(), indent=2), encoding="utf-8")
+    plan = {"components": [{"component_id": "component-1", "members": ["child", "parent"], "decision": decision}]}
+    result = record_plan(output_dir, plan=plan)
+    assert result["ok"], result
+
+
 # --------------------------------------------------------------------------- #
 # Decision selection.
 # --------------------------------------------------------------------------- #
@@ -194,6 +237,47 @@ def test_alter_report_emits_one_gap_per_removed_task_tagged_with_pipeline() -> N
     assert gap["activity_name"] == "Extract"
     assert gap["activity_type"] == "CopyActivity"
     assert gap["pipeline"] == "parent"
+
+
+def test_alter_report_emits_exactly_one_gap_per_task_replacing_prior_gaps() -> None:
+    report = {
+        "pipelines": [
+            {
+                "name": "parent",
+                "tasks": [_copy_task("Extract", "extract"), _copy_task("Flow", "flow")],
+            }
+        ]
+    }
+    # A pre-existing (untagged) convert gap for a task that will be routed must not be duplicated.
+    existing_gaps = [{"activity_name": "Flow", "activity_type": "ExecuteDataFlow", "raw_definition": None}]
+    _report, gaps = alter_report(report, existing_gaps, {"parent"})
+    # One gap per routed task, no duplicates, all tagged with the pipeline.
+    assert len(gaps) == 2
+    identities = sorted((gap["pipeline"], gap["activity_name"]) for gap in gaps)
+    assert identities == [("parent", "Extract"), ("parent", "Flow")]
+    assert len(identities) == len(set(identities))
+
+
+def test_alter_report_is_idempotent_on_gaps() -> None:
+    report = {"pipelines": [{"name": "parent", "tasks": [_copy_task("Extract", "extract")]}]}
+    once_report, once_gaps = alter_report(report, [], {"parent"})
+    twice_report, twice_gaps = alter_report(once_report, once_gaps, {"parent"})
+    # Running the edit again does not append a second gap for the same routed task.
+    assert twice_gaps == once_gaps
+    assert len(twice_gaps) == 1
+
+
+def test_alter_report_keeps_gaps_for_non_routed_pipelines() -> None:
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [_copy_task("Extract", "extract")]},
+            {"name": "other", "tasks": [_copy_task("Keep", "keep")]},
+        ]
+    }
+    existing = [{"activity_name": "OtherGap", "activity_type": "Custom", "raw_definition": None, "pipeline": "other"}]
+    _report, gaps = alter_report(report, existing, {"parent"})
+    # The non-routed pipeline's gap survives; the routed pipeline contributes exactly one.
+    assert {gap["activity_name"] for gap in gaps} == {"OtherGap", "Extract"}
 
 
 def test_alter_report_preserves_depends_on_edges_on_placeholders() -> None:
@@ -330,15 +414,16 @@ def test_combine_fill_with_a_dangling_pipeline_reference_is_caught() -> None:
 
 
 def test_apply_combine_fill_writes_merged_report_when_valid(tmp_path: Path) -> None:
-    _write_work(tmp_path, _report_two_pipelines())
+    _setup_routed_agentic(tmp_path, decision="agentic")
     result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
     assert result["ok"] is True
+    assert result["component_id"] == "component-1"
     report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
     assert [pipeline["name"] for pipeline in report["pipelines"]] == ["orders_lfc"]
 
 
 def test_apply_combine_fill_rejects_and_does_not_write_on_dangling_reference(tmp_path: Path) -> None:
-    _write_work(tmp_path, _report_two_pipelines())
+    _setup_routed_agentic(tmp_path, decision="agentic")
     report_before = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
     dangling = _lfc_pipeline()
     dangling["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.ghost.id}"}}
@@ -348,3 +433,64 @@ def test_apply_combine_fill_rejects_and_does_not_write_on_dangling_reference(tmp
     assert any("dangling_pipeline_reference" in violation for violation in result["violations"])
     # The report on disk is untouched when validation fails.
     assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+
+
+# --------------------------------------------------------------------------- #
+# Combine membership is bound to the recorded, fingerprint-bound plan.
+# --------------------------------------------------------------------------- #
+
+
+def test_combine_rejects_a_deterministic_component(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="deterministic")
+    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "not agentic" in result["error"]
+    # A deterministic component is never swapped out.
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert sorted(pipeline["name"] for pipeline in report["pipelines"]) == ["child", "parent"]
+
+
+def test_combine_rejects_a_partial_member_set(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    result = apply_combine_fill(tmp_path, ["parent"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "do not exactly match" in result["error"]
+
+
+def test_combine_rejects_a_superset_member_set(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    result = apply_combine_fill(tmp_path, ["parent", "child", "extra"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "do not exactly match" in result["error"]
+
+
+def test_combine_rejects_a_typoed_member(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    result = apply_combine_fill(tmp_path, ["parent", "chld"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "do not exactly match" in result["error"]
+
+
+def test_combine_rejects_a_stale_fingerprint_plan(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    # Mutate the inventory after recording so the recorded fingerprint no longer matches.
+    inventory_path = tmp_path / "metadata" / "inventory.json"
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory["pipelines"].append({"name": "late_addition", "activities": [], "motifs": []})
+    inventory_path.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+
+    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "stale" in result["error"]
+
+
+def test_combine_requires_a_recorded_plan(tmp_path: Path) -> None:
+    _write_work(tmp_path, _report_two_pipelines())  # report only; no plan recorded
+    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "conversion_plan.json" in result["error"]
+
+
+def test_apply_combine_fill_has_no_validation_bypass() -> None:
+    # There must be no surface that writes the combined report without structural validation.
+    assert "validate" not in inspect.signature(apply_combine_fill).parameters

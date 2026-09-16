@@ -345,22 +345,45 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
     if plan is not None and plan_path is not None:
         return {"ok": False, "error": "provide at most one of 'plan' (inline object) or 'plan_path'."}
 
-    if plan is None and plan_path is None:
-        result = runner.run_adapter(["route", "--output-dir", output_dir])
-        return {"ok": result.ok, "result": runner.parse_stdout_json(result), "process": result.as_dict()}
+    # Forward source + resolved source-path so the MCP path mirrors the CLI: route can then trigger
+    # convert when the report is missing. `source` is optional here (unlike discover/convert).
+    source_args, cleanup = _route_source_args(p)
+    try:
+        if plan is None and plan_path is None:
+            result = runner.run_adapter(["route", "--output-dir", output_dir, *source_args])
+            return {"ok": result.ok, "result": runner.parse_stdout_json(result), "process": result.as_dict()}
 
-    def _run(path: str) -> dict[str, Any]:
-        result = runner.run_adapter(["route", "--output-dir", output_dir, "--plan-path", path])
-        payload = runner.parse_stdout_json(result)
-        ok = bool(isinstance(payload, dict) and payload.get("ok"))
-        return {"ok": ok, "result": payload, "process": result.as_dict()}
+        def _run(path: str) -> dict[str, Any]:
+            result = runner.run_adapter(["route", "--output-dir", output_dir, "--plan-path", path, *source_args])
+            payload = runner.parse_stdout_json(result)
+            ok = bool(isinstance(payload, dict) and payload.get("ok"))
+            return {"ok": ok, "result": payload, "process": result.as_dict()}
 
-    if plan_path is not None:
-        return _run(str(plan_path))
-    with tempfile.TemporaryDirectory(prefix="flowx-plan-") as temporary:
-        inline_path = Path(temporary) / "conversion_plan.json"
-        inline_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
-        return _run(str(inline_path))
+        if plan_path is not None:
+            return _run(str(plan_path))
+        with tempfile.TemporaryDirectory(prefix="flowx-plan-") as temporary:
+            inline_path = Path(temporary) / "conversion_plan.json"
+            inline_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+            return _run(str(inline_path))
+    finally:
+        cleanup()
+
+
+def _route_source_args(p: dict[str, Any]) -> tuple[list[str], Callable[[], None]]:
+    """Resolve optional ``source`` / source-path into ``route`` CLI flags (empty when no source given).
+
+    Mirrors :func:`_cmd_convert`'s source resolution so a materialized volume/workspace source is read
+    the same way, but ``source`` is optional for ``route`` -- absent it, no source flags are forwarded
+    and route simply skips the convert trigger. Returns ``(args, cleanup)``.
+    """
+    if not p.get("source"):
+        return [], _noop
+    source_name = _source_name(p)
+    source, cleanup = _resolve_source(p)
+    args = ["--source", source_name]
+    if source:
+        args += ["--source-path", str(source)]
+    return args, cleanup
 
 
 def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
@@ -387,8 +410,6 @@ def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
     def _run(path: str) -> dict[str, Any]:
         args: list[Any] = ["fill-agentic", "combine", "--output-dir", output_dir, "--members", members]
         args += ["--pipelines-path", path]
-        if p.get("no_validate"):
-            args.append("--no-validate")
         result = runner.run_adapter(args)
         payload = runner.parse_stdout_json(result)
         ok = bool(isinstance(payload, dict) and payload.get("ok"))
@@ -665,20 +686,23 @@ def build_server() -> FastMCP:
           `insights` key (atomic, idempotent). `ok` reflects validation; `result.violations` lists any
           problems and the inventory is left untouched on failure. Author the insights by reading
           inventory.json + the source artifacts first (see the flowx-discover skill's insights guide).
-        - "route": output_dir(req), at most one of plan(inline object) | plan_path — one command that
-          groups pipelines into connected components over control lineage and routes each. With NO
-          plan it emits the components with BOTH conversion options (deterministic capability +
-          motif/coverage evidence, and the agentic recommended patterns with any simplification
-          pattern surfaced), plus a ready-to-record default plan — the dry run to read first. With a
-          plan it validates + records metadata/conversion_plan.json AND edits the translation report so
-          every routed-agentic group's tasks become placeholder gaps (deterministic groups untouched;
-          convert's deterministic translation is never modified, and with no agentic decision the
-          report is byte-identical to today).
+        - "route": output_dir(req), at most one of plan(inline object) | plan_path, plus optional
+          source + a source path (forwarded so route can trigger convert if the report is absent, like
+          the CLI) — one command that groups pipelines into connected components over control lineage
+          and routes each. With NO plan it emits the components with BOTH conversion options
+          (deterministic capability + motif/coverage evidence, and the agentic recommended patterns
+          with any simplification pattern surfaced), plus a ready-to-record default plan — the dry run
+          to read first. With a plan it validates + records metadata/conversion_plan.json AND edits the
+          translation report so every routed-agentic group's tasks become placeholder gaps
+          (deterministic groups untouched; convert's deterministic translation is never modified, and
+          with no agentic decision the report is byte-identical to today).
         - "fill_agentic": output_dir(req), members(req: list of pipeline names or comma-separated
-          string), one of pipelines(inline list of pipeline IR dicts) | pipelines_path, no_validate(bool)
-          — cross-pipeline COMBINE fill: replace the routed group's pipelines with the agent-authored
-          pipeline(s) (typically AgenticComponentActivity nodes), validated structurally before writing.
-          Per-pipeline agentic fills use "merge_agentic" instead.
+          string), one of pipelines(inline list of pipeline IR dicts) | pipelines_path — cross-pipeline
+          COMBINE fill: replace a routed-agentic group's pipelines with the agent-authored pipeline(s)
+          (typically AgenticComponentActivity nodes). `members` must exactly match a routed-agentic
+          component in the recorded, fingerprint-bound conversion_plan.json, and the merged report is
+          always validated structurally before writing (no bypass). Per-pipeline agentic fills use
+          "merge_agentic" instead.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

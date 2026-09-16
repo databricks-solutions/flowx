@@ -276,11 +276,12 @@ def _trigger_convert(args: argparse.Namespace) -> int:
 def _run_fill_agentic(args: argparse.Namespace) -> int:
     """Implements ``fill-agentic combine``: the cross-pipeline pipeline-grain fill.
 
-    Replaces a routed group's pipelines (``--members`` as a comma-separated list) with the
+    Replaces a routed-agentic group's pipelines (``--members`` as a comma-separated list) with the
     agent-authored pipeline(s) read from ``--pipelines-path`` (a JSON list of pipeline IR dicts, each
-    typically carrying ``AgenticComponentActivity`` nodes). The merged report is validated structurally
-    with the existing bundle invariants and written back only when it passes. Per-pipeline agentic
-    fills reuse ``convert --merge-agentic`` instead and are not handled here.
+    typically carrying ``AgenticComponentActivity`` nodes). The membership must exactly match a
+    routed-agentic component in the recorded, fingerprint-bound ``metadata/conversion_plan.json``, and
+    the merged report is always validated structurally before it is written back -- there is no bypass.
+    Per-pipeline agentic fills reuse ``convert --merge-agentic`` instead and are not handled here.
     """
     from flowx.route_agentic import apply_combine_fill
 
@@ -300,7 +301,7 @@ def _run_fill_agentic(args: argparse.Namespace) -> int:
         print("--pipelines-path must contain a JSON list of pipeline IR dicts.", file=sys.stderr)
         return 2
     try:
-        result = apply_combine_fill(args.output_dir, members, authored, validate=not args.no_validate)
+        result = apply_combine_fill(args.output_dir, members, authored)
     except FileNotFoundError as error:
         print(str(error), file=sys.stderr)
         return 1
@@ -738,11 +739,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="JSON file: a list of agent-authored pipeline IR dicts (typically AgenticComponentActivity nodes).",
-    )
-    fill_agentic.add_argument(
-        "--no-validate",
-        action="store_true",
-        help="Skip the structural bundle-invariant validation before writing (not recommended).",
     )
     fill_agentic.add_argument(
         "--out",

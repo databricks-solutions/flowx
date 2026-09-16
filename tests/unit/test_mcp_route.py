@@ -75,6 +75,29 @@ def test_route_rejects_both_plan_and_plan_path(tmp_path: Path) -> None:
     assert out["ok"] is False and "at most one" in out["error"]
 
 
+def test_route_forwards_source_so_convert_can_be_triggered(captured, tmp_path: Path) -> None:
+    # Parity with the CLI: MCP route forwards source + source-path so the CLI can trigger convert when
+    # the report is absent. Recommend path (no plan).
+    server._cmd_route({"output_dir": str(tmp_path), "source": "adf", "adf_source_path": "/tmp/adf"})
+    argv = captured[0]
+    assert argv[argv.index("--source") + 1] == "adf"
+    assert argv[argv.index("--source-path") + 1] == "/tmp/adf"
+
+
+def test_route_forwards_source_on_the_record_path(captured, tmp_path: Path) -> None:
+    plan = {"components": [{"component_id": "component-1", "members": ["a"], "decision": "agentic"}]}
+    server._cmd_route({"output_dir": str(tmp_path), "plan": plan, "source": "adf", "adf_source_path": "/tmp/adf"})
+    argv = captured[0]
+    assert "--plan-path" in argv
+    assert argv[argv.index("--source") + 1] == "adf"
+    assert argv[argv.index("--source-path") + 1] == "/tmp/adf"
+
+
+def test_route_without_source_forwards_no_source_flags(captured, tmp_path: Path) -> None:
+    server._cmd_route({"output_dir": str(tmp_path)})
+    assert "--source" not in captured[0]
+
+
 def test_route_registered_in_command_map() -> None:
     assert "route" in server._COMMANDS
 
