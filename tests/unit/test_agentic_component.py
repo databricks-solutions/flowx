@@ -8,7 +8,7 @@ import json
 import pytest
 import yaml
 
-from flowx.bundler.dab_writer import pipeline_dict_to_ir, write_bundle
+from flowx.bundler.dab_writer import _combine_airflow_workflows, pipeline_dict_to_ir, write_bundle
 from flowx.ir_serde import activity_to_dict, pipeline_to_dict
 from flowx.models.ir import AgenticComponentActivity, Pipeline
 from flowx.preparer.workflow_preparer import prepare_workflow
@@ -108,12 +108,49 @@ def test_agentic_component_notebook_files_with_reserved_paths_stay_under_src(tmp
     assert not (tmp_path / "resources" / "custom.py").exists()
     assert not (tmp_path / "pyproject.toml").exists()
     job_resource = yaml.safe_load((tmp_path / "resources" / "custom.yml").read_text(encoding="utf-8"))
-    assert job_resource["resources"]["jobs"]["custom"]["tasks"][0]["notebook_task"] == {
-        "notebook_path": "../src/resources/custom.py"
-    }
+    assert job_resource["resources"]["jobs"]["custom"]["tasks"][0]["notebook_task"]["notebook_path"] == (
+        "../src/resources/custom.py"
+    )
 
 
-@pytest.mark.parametrize("path", ["../outside.py", "/tmp/outside.py"])
+def test_agentic_component_notebook_path_tracks_shared_workflow_namespacing(tmp_path):
+    custom = AgenticComponentActivity(
+        name="Custom notebook",
+        task_key="custom_notebook",
+        files=[{"path": "resources/custom.py", "content": "print('custom')\n"}],
+        task={"notebook_task": {"notebook_path": "../src/resources/custom.py"}},
+    )
+    other = AgenticComponentActivity(
+        name="Other notebook",
+        task_key="other_notebook",
+        files=[{"path": "notebooks/other.py", "content": "print('other')\n"}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/other.py"}},
+    )
+    combined = _combine_airflow_workflows(
+        [
+            prepare_workflow(Pipeline(name="custom", tasks=[custom])),
+            prepare_workflow(Pipeline(name="other", tasks=[other])),
+        ]
+    )
+
+    write_bundle(combined, tmp_path)
+
+    assert (tmp_path / "src" / "custom" / "resources" / "custom.py").exists()
+    custom_job = yaml.safe_load((tmp_path / "resources" / "custom.yml").read_text(encoding="utf-8"))
+    assert custom_job["resources"]["jobs"]["custom"]["tasks"][0]["notebook_task"]["notebook_path"] == (
+        "../src/custom/resources/custom.py"
+    )
+    assert (tmp_path / "src" / "other" / "notebooks" / "other.py").exists()
+    other_job = yaml.safe_load((tmp_path / "resources" / "other.yml").read_text(encoding="utf-8"))
+    assert other_job["resources"]["jobs"]["other"]["tasks"][0]["notebook_task"]["notebook_path"] == (
+        "../src/other/notebooks/other.py"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["../outside.py", "/tmp/outside.py", "..\\outside.py", "C:\\tmp\\outside.py"],
+)
 def test_agentic_component_rejects_file_paths_that_escape_src(path):
     activity = AgenticComponentActivity(
         name="Unsafe file",

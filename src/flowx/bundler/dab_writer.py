@@ -239,11 +239,7 @@ def write_bundle(
     src_dir = output_dir / "src"
 
     def _write_generated(notebooks: list[DabNotebook]) -> None:
-        root_artifacts = [
-            notebook
-            for notebook in notebooks
-            if notebook.relative_path.startswith("resources/") or notebook.relative_path == "pyproject.toml"
-        ]
+        root_artifacts = [notebook for notebook in notebooks if _is_bundle_root_artifact(notebook)]
         rest = [notebook for notebook in notebooks if notebook not in root_artifacts]
         if rest:
             created_files.extend(write_notebooks(rest, src_dir))
@@ -661,6 +657,13 @@ def _known_bundle_job_keys(workflow: PreparedWorkflow, resource_key: str) -> set
     return keys
 
 
+def _is_bundle_root_artifact(notebook: DabNotebook) -> bool:
+    """Return whether a generated file belongs at the bundle root instead of below ``src``."""
+    if notebook.write_to_bundle_root is not None:
+        return notebook.write_to_bundle_root
+    return notebook.relative_path.startswith("resources/") or notebook.relative_path == "pyproject.toml"
+
+
 def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
     """Namespaces generated source files by DAG while preserving workspace paths."""
     cloned = copy.deepcopy(workflow)
@@ -697,7 +700,7 @@ def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
                 notebook.content = notebook.content.replace("src/dbt_project", f"src/{prefix}/dbt_project")
                 notebook.content = notebook.content.replace("src/dbt_profiles", f"src/{prefix}/dbt_profiles")
                 continue
-            if original_path.startswith("resources/") or original_path == "pyproject.toml":
+            if _is_bundle_root_artifact(notebook):
                 continue
             notebook.relative_path = f"{prefix}/{original_path}"
             replacements[f"../src/{original_path}"] = f"../src/{notebook.relative_path}"
