@@ -317,37 +317,61 @@ def test_load_plan_requires_exactly_one_source(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI wiring.
+# CLI wiring. The reshaped `route` is one command: no plan on a non-TTY emits the recommendation; a
+# `--plan-path` records the plan and edits the report. (Report editing is covered end-to-end in
+# test_cli_route_agentic.py; here we exercise the record/recommend wiring against a bare inventory.)
 # --------------------------------------------------------------------------- #
 
 
-def test_cli_route_recommend_emits_components(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def _write_empty_report(output_dir: Path) -> None:
+    """A minimal report matching the inventory's pipelines so the edit step has something to rewrite."""
+    work = output_dir / ".work"
+    work.mkdir(parents=True, exist_ok=True)
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [{"name": "call_child", "task_key": "call_child", "type": "CopyActivity"}]},
+            {"name": "child", "tasks": [{"name": "copy_orders", "task_key": "copy_orders", "type": "CopyActivity"}]},
+            {"name": "solo", "tasks": [{"name": "load", "task_key": "load", "type": "NotebookActivity"}]},
+        ]
+    }
+    (work / "translation_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+
+def test_cli_route_without_plan_emits_components(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+
     _write_inventory(tmp_path, _inventory())
-    code = adapter_cli_main(["route", "recommend", "--output-dir", str(tmp_path)])
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))  # not a TTY -> dry-run recommendation
+    code = adapter_cli_main(["route", "--output-dir", str(tmp_path)])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert [c["component_id"] for c in payload["components"]] == ["component-1", "component-2"]
     assert "default_plan" in payload
 
 
-def test_cli_route_record_success(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_route_with_plan_records_and_reports_the_edit(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write_inventory(tmp_path, _inventory())
+    _write_empty_report(tmp_path)
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(json.dumps(_authored_plan()), encoding="utf-8")
-    code = adapter_cli_main(["route", "record", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)])
+    code = adapter_cli_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True and payload["components"] == 2
+    assert "edit" in payload
     assert (tmp_path / "metadata" / PLAN_FILENAME).exists()
 
 
-def test_cli_route_record_validation_failure_returns_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_route_validation_failure_returns_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _write_inventory(tmp_path, _inventory())
+    _write_empty_report(tmp_path)
     raw = _authored_plan()
     raw["components"].pop()  # partial plan: component-2 undecided
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(json.dumps(raw), encoding="utf-8")
-    code = adapter_cli_main(["route", "record", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)])
+    code = adapter_cli_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)])
     assert code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False and payload["violations"]
