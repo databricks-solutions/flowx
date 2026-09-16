@@ -130,3 +130,49 @@ def test_bundle_job_reference_to_unknown_resource_is_flagged(tmp_path):
     assert "parent.yml" in finding.location
     assert "call_missing" in finding.location
     assert "dangling_run_job_reference" in format_result(result)
+
+
+def test_bundle_pipeline_reference_can_target_pipeline_in_another_resource_file(tmp_path):
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    (resources / "job.yml").write_text(
+        "resources:\n"
+        "  jobs:\n"
+        "    parent:\n"
+        "      tasks:\n"
+        "        - task_key: run_pipeline\n"
+        "          pipeline_task:\n"
+        "            pipeline_id: ${resources.pipelines.ingestion.id}\n",
+        encoding="utf-8",
+    )
+    (resources / "pipeline.yml").write_text(
+        "resources:\n  pipelines:\n    ingestion:\n      name: ingestion\n",
+        encoding="utf-8",
+    )
+
+    result = check_bundle_dir(tmp_path)
+
+    assert "dangling_pipeline_reference" not in _codes(result.findings)
+
+
+def test_bundle_pipeline_reference_to_unknown_resource_is_flagged(tmp_path):
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    (resources / "job.yml").write_text(
+        "resources:\n"
+        "  jobs:\n"
+        "    parent:\n"
+        "      tasks:\n"
+        "        - task_key: run_pipeline\n"
+        "          pipeline_task:\n"
+        "            pipeline_id: ${resources.pipelines.missing.id}\n",
+        encoding="utf-8",
+    )
+
+    result = check_bundle_dir(tmp_path)
+    finding = next(finding for finding in result.findings if finding.code == "dangling_pipeline_reference")
+
+    assert finding.severity == "violation"
+    assert "job.yml" in finding.location
+    assert "run_pipeline" in finding.location
+    assert "dangling_pipeline_reference" in format_result(result)
