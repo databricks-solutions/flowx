@@ -21,6 +21,7 @@ from typing import Any
 
 from flowx.models.ir import (
     Activity,
+    AgenticComponentActivity,
     AppendVariableActivity,
     CopyActivity,
     DataAsset,
@@ -242,6 +243,12 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
     extra: dict[str, Any] = {}
 
     match activity:
+        case AgenticComponentActivity():
+            extra["files"] = activity.files
+            extra["resources"] = activity.resources
+            extra["task"] = activity.task
+            if activity.raw_definition is not None:
+                extra["raw_definition"] = activity.raw_definition
         case NotebookActivity():
             extra["notebook_path"] = activity.notebook_path
             if activity.base_parameters:
