@@ -217,6 +217,15 @@ def test_component_id_mismatch_is_rejected() -> None:
     assert any("does not match" in v for v in violations)
 
 
+def test_duplicate_members_are_rejected() -> None:
+    # A frozenset would collapse ["solo", "solo"] to {"solo"} and wrongly match component-2; the
+    # members-match/bijection contract must reject the duplicate explicitly.
+    raw = _authored_plan()
+    raw["components"][1]["members"] = ["solo", "solo"]
+    violations = validate_plan(raw, _inventory())
+    assert any("duplicate" in v.lower() and "solo" in v for v in violations)
+
+
 def test_rationale_must_be_non_empty_when_present() -> None:
     raw = _authored_plan()
     raw["components"][0]["rationale"] = "   "

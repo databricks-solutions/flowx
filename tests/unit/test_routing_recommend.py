@@ -91,6 +91,33 @@ def test_motif_covered_agentic_activity_is_engine_capable() -> None:
     assert options["deterministic"]["motifs"] == ["metadata_driven_bulk_copy"]
 
 
+def test_motif_coverage_does_not_leak_across_pipelines_in_a_component() -> None:
+    # A component spans A -> B. Pipeline A has a motif claiming an activity named 'shared'; pipeline B
+    # has an UNRELATED activity also named 'shared' with no motif. Motif coverage must be keyed by
+    # (pipeline, activity), so B's 'shared' stays an uncovered gap rather than being masked by A's.
+    graphs = [
+        SourceGraph(
+            name="A",
+            source="unit",
+            tasks=[_node("call_b", "ExecutePipeline"), _node("shared", "Copy", strategy="agentic")],
+            lineage=Lineage(
+                control_edges=[ControlEdge(source_workflow="A", target_workflow="B", via_task_key="call_b")]
+            ),
+        ),
+        SourceGraph(name="B", source="unit", tasks=[_node("shared", "Copy", strategy="agentic")]),
+    ]
+    motif = DetectedMotif(
+        definition=MOTIF_METADATA_DRIVEN_BULK_COPY, matched_activities=["shared"], source_type_hint="database"
+    )
+    recommended, options = recommend_component(["A", "B"], _inventory(graphs, motifs={"A": [motif]}))
+    assert recommended == "agentic"
+    assert options["deterministic"]["capable"] is False
+    # A's 'shared' is motif-covered; only B's unrelated 'shared' is the uncovered gap.
+    assert options["deterministic"]["uncovered"] == [
+        {"pipeline": "B", "activity": "shared", "type": "Copy", "strategy": "agentic"}
+    ]
+
+
 def test_missing_strategy_counts_as_unsupported_gap() -> None:
     node = _node("mystery", "Custom")
     node.properties.pop(STRATEGY_PROPERTY)  # no strategy recorded at all

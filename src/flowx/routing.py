@@ -201,12 +201,15 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
     motifs_by_pipeline = _motifs_by_pipeline(inventory)
 
     motif_ids: list[str] = []
-    covered_activities: set[str] = set()
+    # Motif coverage is keyed by (pipeline, activity name), never bare name: a motif claiming a task
+    # in one pipeline must not mark an unrelated same-named task in another pipeline of the component
+    # as covered, which would silently hide a real gap.
+    covered_activities: set[tuple[str, str]] = set()
     for pipeline in members:
         for motif in motifs_by_pipeline.get(pipeline, []):
             if motif.get("motif_id") is not None:
                 motif_ids.append(str(motif["motif_id"]))
-            covered_activities.update(str(key) for key in motif.get("member_task_keys") or [])
+            covered_activities.update((pipeline, str(key)) for key in motif.get("member_task_keys") or [])
 
     counts = {"deterministic": 0, "agentic": 0, "unsupported": 0}
     uncovered: list[dict[str, Any]] = []
@@ -216,7 +219,7 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
             bucket = strategy if strategy in ("deterministic", "agentic") else "unsupported"
             counts[bucket] += 1
             name = activity.get("name")
-            if strategy != _DETERMINISTIC_STRATEGY and name not in covered_activities:
+            if strategy != _DETERMINISTIC_STRATEGY and (pipeline, name) not in covered_activities:
                 uncovered.append(
                     {
                         "pipeline": pipeline,
@@ -401,6 +404,13 @@ def _validate_component_entry(
     for member in members:
         if member not in names:
             violations.append(f"{loc}: pipeline {member!r} not in inventory")
+
+    # Reject duplicate members explicitly: a frozenset match would collapse ["a", "a"] to {"a"} and
+    # wrongly accept it as the component {"a"}, breaking the members-match / bijection contract.
+    duplicates = sorted({member for member in members if members.count(member) > 1})
+    if duplicates:
+        violations.append(f"{loc}: duplicate members {duplicates}; list each pipeline once")
+        return None
 
     matched_id = computed_by_members.get(frozenset(members))
     if matched_id is None:
