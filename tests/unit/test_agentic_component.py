@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 
+import pytest
 import yaml
 
 from flowx.bundler.dab_writer import pipeline_dict_to_ir, write_bundle
@@ -87,3 +88,39 @@ def test_agentic_component_packages_authored_files_resource_and_pipeline_task(tm
         {"task_key": "ingest_orders", "pipeline_task": TASK["pipeline_task"]}
     ]
     assert check_bundle_dir(tmp_path).ok
+
+
+def test_agentic_component_notebook_files_with_reserved_paths_stay_under_src(tmp_path):
+    activity = AgenticComponentActivity(
+        name="Custom notebook",
+        task_key="custom_notebook",
+        files=[
+            {"path": "resources/custom.py", "content": "print('custom')\n"},
+            {"path": "pyproject.toml", "content": "[project]\nname = 'custom'\n"},
+        ],
+        task={"notebook_task": {"notebook_path": "../src/resources/custom.py"}},
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="custom", tasks=[activity])), tmp_path)
+
+    assert (tmp_path / "src" / "resources" / "custom.py").read_text(encoding="utf-8") == "print('custom')\n"
+    assert (tmp_path / "src" / "pyproject.toml").read_text(encoding="utf-8") == "[project]\nname = 'custom'\n"
+    assert not (tmp_path / "resources" / "custom.py").exists()
+    assert not (tmp_path / "pyproject.toml").exists()
+    job_resource = yaml.safe_load((tmp_path / "resources" / "custom.yml").read_text(encoding="utf-8"))
+    assert job_resource["resources"]["jobs"]["custom"]["tasks"][0]["notebook_task"] == {
+        "notebook_path": "../src/resources/custom.py"
+    }
+
+
+@pytest.mark.parametrize("path", ["../outside.py", "/tmp/outside.py"])
+def test_agentic_component_rejects_file_paths_that_escape_src(path):
+    activity = AgenticComponentActivity(
+        name="Unsafe file",
+        task_key="unsafe_file",
+        files=[{"path": path, "content": "unsafe\n"}],
+        task={"notebook_task": {"notebook_path": "../src/safe.py"}},
+    )
+
+    with pytest.raises(ValueError, match="relative to the bundle src directory"):
+        prepare_workflow(Pipeline(name="unsafe", tasks=[activity]))
