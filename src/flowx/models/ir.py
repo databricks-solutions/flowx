@@ -686,6 +686,27 @@ class DbtFactoryActivity(Activity):
 
 
 @dataclass(slots=True, kw_only=True)
+class AgenticComponentActivity(Activity):
+    """Bundle components authored for a source activity the typed engine cannot express.
+
+    Attributes:
+        files: Files to write below the bundle's ``src`` directory. Each entry
+            carries ``path`` and either UTF-8 ``content`` or base64-encoded
+            ``binary_content``.
+        resources: Pipeline resources in the existing ``resource_key`` plus
+            raw ``definition`` shape used by the bundle writer.
+        task: Raw Databricks task fragment containing either ``pipeline_task``
+            or ``notebook_task`` wiring to an authored resource or file.
+        raw_definition: Original source definition retained for auditing.
+    """
+
+    files: list[dict[str, Any]] = field(default_factory=list)
+    resources: list[dict[str, Any]] = field(default_factory=list)
+    task: dict[str, Any] = field(default_factory=dict)
+    raw_definition: dict[str, Any] | None = None
+
+
+@dataclass(slots=True, kw_only=True)
 class UnsupportedActivity(Activity):
     """Sentinel for activities that could not be translated.
 

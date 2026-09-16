@@ -29,6 +29,7 @@ from flowx.bundler.setup_generator import generate_setup_tasks
 from flowx.models.dab import DabNotebook
 from flowx.models.ir import (
     Activity,
+    AgenticComponentActivity,
     AppendVariableActivity,
     ControlEdge,
     CopyActivity,
@@ -2278,6 +2279,14 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             motif_config=task_ir.get("motif_config") or {},
             consolidate_metadata_driven=bool(task_ir.get("consolidate_metadata_driven", False)),
             lookup_values=list(task_ir.get("lookup_values") or []),
+        )
+    if task_type == "AgenticComponentActivity":
+        return AgenticComponentActivity(
+            **base,
+            files=list(task_ir.get("files") or []),
+            resources=list(task_ir.get("resources") or []),
+            task=dict(task_ir.get("task") or {}),
+            raw_definition=task_ir.get("raw_definition"),
         )
     if task_type == "UnsupportedActivity":
         return UnsupportedActivity(
