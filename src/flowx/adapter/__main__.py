@@ -1,9 +1,9 @@
 """Unified CLI entry point that the flowx skills and MCP tools drive via subprocesses.
 
 Exposes stateless subcommands -- the ``discover``/``convert``/``package`` phase runners plus
-``inspect``, ``modify``, ``resolve-agentic``, ``inputs``, ``materialize-lookup``, ``workspace-paths``,
-``record-results``, and ``install-dashboard`` -- so each agent turn runs as an independent process
-holding no session state across user prompts.
+``inspect``, ``modify``, ``resolve-agentic``, ``enrich``, ``inputs``, ``materialize-lookup``,
+``workspace-paths``, ``record-results``, and ``install-dashboard`` -- so each agent turn runs as an
+independent process holding no session state across user prompts.
 """
 
 from __future__ import annotations
@@ -85,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_workspace_paths(args)
     if args.command == "resolve-agentic":
         return _run_resolve_agentic(args)
+    if args.command == "enrich":
+        return _run_enrich(args)
     if args.command == "record-results":
         return _run_record_results(args)
     if args.command == "install-dashboard":
@@ -138,6 +140,27 @@ def _run_resolve_agentic(args: argparse.Namespace) -> int:
         return 1
     _emit_json(payload, None)
     return 0
+
+
+def _run_enrich(args: argparse.Namespace) -> int:
+    """Implements ``enrich``: validate agent-authored insights and merge them into inventory.json.
+
+    Emits the enrich result JSON (``ok`` / ``violations`` / counts) to stdout so the caller can
+    surface every violation at once. Returns 0 when the insights merged cleanly, 1 on validation
+    failure (inventory left untouched) or when the inputs cannot be read.
+    """
+    from flowx.discovery_insights import enrich_inventory
+
+    try:
+        result = enrich_inventory(args.output_dir, insights_path=args.insights_path)
+    except FileNotFoundError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Failed to enrich inventory: {error}", file=sys.stderr)
+        return 1
+    _emit_json(result, args.out)
+    return 0 if result.get("ok") else 1
 
 
 def _run_record_results(args: argparse.Namespace) -> int:
@@ -473,6 +496,29 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("static", "pydabs"),
         default="static",
         help="Airflow dbt conversion mode used to reproduce the deterministic report during prepare.",
+    )
+
+    enrich = subparsers.add_parser(
+        "enrich",
+        help="Validate agent-authored insights and merge them into inventory.json (additive, atomic).",
+    )
+    enrich.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Migration output directory (reads and rewrites metadata/inventory.json).",
+    )
+    enrich.add_argument(
+        "--insights-path",
+        type=Path,
+        required=True,
+        help="Path to the agent-authored insights JSON to validate and merge.",
+    )
+    enrich.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Optional output file for the enrich result JSON; defaults to stdout.",
     )
 
     record = subparsers.add_parser(
