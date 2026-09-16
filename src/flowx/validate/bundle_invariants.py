@@ -25,6 +25,7 @@ import yaml
 _ANCHOR_RE = re.compile(r"[&*]id\d+\b")
 _JOB_PARAM_REF_RE = re.compile(r"\{\{\s*job\.parameters\.([A-Za-z0-9_]+)\s*\}\}")
 _JOB_RESOURCE_ID_RE = re.compile(r"\$\{resources\.jobs\.([^.}]+)\.id\}")
+_PIPELINE_RESOURCE_ID_RE = re.compile(r"\$\{resources\.pipelines\.([^.}]+)\.id\}")
 _PYDABS_JOB_RE = re.compile(r"resources\.add_job\(\s*['\"]([^'\"]+)['\"]")
 
 
@@ -246,10 +247,15 @@ def check_bundle_dir(bundle_dir: Path) -> BundleInvariantResult:
             documents.append((path, document))
 
     known_jobs: set[str] = set()
+    known_pipelines: set[str] = set()
     for _path, document in documents:
-        jobs = (document.get("resources") or {}).get("jobs") or {}
+        document_resources = document.get("resources") or {}
+        jobs = document_resources.get("jobs") or {}
         if isinstance(jobs, dict):
             known_jobs.update(str(job_key) for job_key in jobs)
+        pipelines = document_resources.get("pipelines") or {}
+        if isinstance(pipelines, dict):
+            known_pipelines.update(str(pipeline_key) for pipeline_key in pipelines)
         python_resources = (document.get("python") or {}).get("resources") or []
         for resource in python_resources:
             if not isinstance(resource, str):
@@ -268,6 +274,22 @@ def check_bundle_dir(bundle_dir: Path) -> BundleInvariantResult:
             if not isinstance(job, dict):
                 continue
             for task in _iter_tasks(job.get("tasks") or []):
+                pipeline_task = task.get("pipeline_task") or {}
+                pipeline_id = pipeline_task.get("pipeline_id") if isinstance(pipeline_task, dict) else None
+                pipeline_match = (
+                    _PIPELINE_RESOURCE_ID_RE.fullmatch(pipeline_id) if isinstance(pipeline_id, str) else None
+                )
+                if pipeline_match is not None and pipeline_match.group(1) not in known_pipelines:
+                    findings.append(
+                        BundleFinding(
+                            code="dangling_pipeline_reference",
+                            location=f"{path.name}, job '{job_key}', task '{task.get('task_key', '')}'",
+                            message=(
+                                f"pipeline_task references bundle pipeline '{pipeline_match.group(1)}', which is not "
+                                "declared in static resource YAML."
+                            ),
+                        )
+                    )
                 run_job = task.get("run_job_task") or {}
                 job_id = run_job.get("job_id") if isinstance(run_job, dict) else None
                 match = _JOB_RESOURCE_ID_RE.fullmatch(job_id) if isinstance(job_id, str) else None
