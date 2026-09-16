@@ -86,6 +86,8 @@ intermediates under `.work/` (pruned by `package`).
 | `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/` |
 | `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK |
 | `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table |
+| `routing.py` | Groups pipelines into connected components over control lineage; recommends deterministic/agentic per component (both options) and records the user's decision as `metadata/conversion_plan.json` (additive; convert untouched) |
+| `models/conversion_plan.py` | Source-neutral conversion-plan artifact model (per-component decision + both options), the routing counterpart to `models/insights.py` |
 
 ## Activity Types
 
