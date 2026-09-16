@@ -22,6 +22,30 @@ from flowx.models.discovery import (
     SourceNode,
 )
 from flowx.models.ir import ControlEdge, DataEdge, Lineage
+from flowx.models.motifs import DetectedMotif, MotifDefinition
+
+
+def _motif(
+    motif_id: str,
+    replacement: str,
+    members: list[str],
+    *,
+    hint: str | None = None,
+    notes: list[str] | None = None,
+) -> DetectedMotif:
+    definition = MotifDefinition(
+        motif_id=motif_id,
+        display_name=motif_id,
+        description="",
+        expected_activity_types=(),
+        databricks_replacement=replacement,
+    )
+    return DetectedMotif(
+        definition=definition,
+        matched_activities=list(members),
+        source_type_hint=hint,
+        confidence_notes=list(notes or []),
+    )
 
 
 def _node(task_key: str, native_type: str, strategy: str, *, deps: list[SourceDependency] | None = None) -> SourceNode:
@@ -217,3 +241,121 @@ def test_pipeline_without_lineage_omits_the_key() -> None:
     assert graph.lineage is None
     assert "lineage" not in inventory["pipelines"][0]
     assert sorted(inventory["pipelines"][0].keys()) == ["activities", "name"]
+
+
+def test_detected_motifs_surface_additively_without_collapsing_members() -> None:
+    """A supplied motif projects to an additive per-pipeline ``motifs`` entry.
+
+    The member activities are surfaced by key but never merged away -- each still
+    appears as its own entry in ``activities``, proving discover does not collapse.
+    """
+    graph = SourceGraph(
+        name="g1",
+        source="unit",
+        tasks=[
+            _node("load", "Copy", "deterministic"),
+            _node("notify", "WebActivity", "deterministic"),
+        ],
+    )
+    motif = _motif(
+        "activity_and_notify",
+        "task_with_notification",
+        ["load", "notify"],
+        hint="database",
+        notes=["'notify' looks like a notification call"],
+    )
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline={"g1": [motif]})
+    entry = inventory["pipelines"][0]
+
+    assert entry["motifs"] == [
+        {
+            "motif_id": "activity_and_notify",
+            "display_name": "activity_and_notify",
+            "databricks_replacement": "task_with_notification",
+            "member_task_keys": ["load", "notify"],
+            "source_type_hint": "database",
+            "confidence_notes": ["'notify' looks like a notification call"],
+        }
+    ]
+    # No collapse: both members remain their own activity entries.
+    assert [activity["name"] for activity in entry["activities"]] == ["load", "notify"]
+
+
+def test_motifs_key_is_additive_and_omitted_when_none_detected() -> None:
+    """The ``motifs`` key only appears when a pipeline has a detected motif.
+
+    A pipeline mapped to an empty list, or absent from the map entirely, keeps the
+    historical per-pipeline keys untouched -- the key is additive-only.
+    """
+    graph = SourceGraph(name="g1", source="unit", tasks=[_node("a", "Notebook", "deterministic")])
+
+    empty = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline={"g1": []})
+    assert "motifs" not in empty["pipelines"][0]
+
+    unmapped = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline=None)
+    assert "motifs" not in unmapped["pipelines"][0]
+    assert sorted(unmapped["pipelines"][0].keys()) == ["activities", "name"]
+
+
+def test_motifs_are_decoupled_from_the_lineage_block() -> None:
+    """Motifs ride as their own pipeline key, never nested under ``lineage``.
+
+    A pipeline that has both derived lineage and a detected motif emits both, and
+    the lineage block's own (convert-time) motif slot stays empty and separate.
+    """
+    lineage = Lineage(
+        data_edges=[DataEdge(source_task_key="a", target_task_key="b", match_kind="identity", match_key="cat.sch.tbl")]
+    )
+    graph = SourceGraph(name="g", source="unit", tasks=[_node("a", "Notebook", "deterministic")], lineage=lineage)
+    motif = _motif("scd_type_2", "dlt_apply_changes", ["a"])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline={"g": [motif]})
+    entry = inventory["pipelines"][0]
+
+    assert entry["motifs"][0]["motif_id"] == "scd_type_2"
+    # The lineage block is present but its own motif slot is untouched and empty.
+    assert entry["lineage"]["motifs"] == []
+
+
+def test_exact_duplicate_motifs_collapse_but_overlapping_matches_survive() -> None:
+    """Exact duplicates dedupe to the first; overlapping-but-distinct matches all survive.
+
+    A detector can report the same match twice (same motif over the same members),
+    which must collapse to one -- but a match that merely *overlaps* (same motif,
+    a different member set) is a distinct detection and must be kept. Order is
+    first-seen, and the member comparison is a set (order-insensitive).
+    """
+    graph = SourceGraph(
+        name="g1",
+        source="unit",
+        tasks=[
+            _node("copy", "Copy", "deterministic"),
+            _node("notify_a", "WebActivity", "deterministic"),
+            _node("notify_b", "WebActivity", "deterministic"),
+        ],
+    )
+    exact = _motif("activity_and_notify", "task_with_notification", ["copy", "notify_a"])
+    exact_dupe = _motif(
+        "activity_and_notify",
+        "task_with_notification",
+        ["notify_a", "copy"],  # same member set, different order -> the same motif
+        notes=["a different note on the same match"],
+    )
+    overlapping = _motif("activity_and_notify", "task_with_notification", ["copy", "notify_b"])
+
+    inventory = build_source_inventory(
+        [graph],
+        source="unit",
+        source_dir="/tmp",
+        motifs_by_pipeline={"g1": [exact, exact_dupe, overlapping]},
+    )
+    motifs = inventory["pipelines"][0]["motifs"]
+
+    # The exact duplicate collapsed; the overlapping-but-distinct match survived, in first-seen order.
+    assert [frozenset(motif["member_task_keys"]) for motif in motifs] == [
+        frozenset({"copy", "notify_a"}),
+        frozenset({"copy", "notify_b"}),
+    ]
+    # First occurrence is the one kept (its empty notes, not the duplicate's note).
+    assert motifs[0]["confidence_notes"] == []

@@ -136,6 +136,51 @@ def test_inventory_carries_per_pipeline_lineage(tmp_path: Path) -> None:
     assert data_edges == 0
 
 
+def test_inventory_surfaces_detected_motifs_without_collapsing(tmp_path: Path) -> None:
+    """Discover surfaces the profiler's detected motifs additively, members intact.
+
+    ``pipeline_complex_etl`` carries a detectable metadata-driven bulk-copy motif.
+    It must appear in the pipeline's additive ``motifs`` list -- carrying its type,
+    Databricks replacement target, and participating activities -- while every
+    member still appears as its own entry in ``activities`` (no discover-time
+    collapse) and the lineage block's own motif slot stays empty (decoupled).
+    """
+    metadata = _run_discover(tmp_path)
+    inventory = json.loads((metadata / "inventory.json").read_text())
+
+    pipeline = next(p for p in inventory["pipelines"] if p["name"] == "pipeline_complex_etl")
+    bulk = next(m for m in pipeline["motifs"] if m["motif_id"] == "metadata_driven_bulk_copy")
+
+    assert set(bulk.keys()) == {
+        "motif_id",
+        "display_name",
+        "databricks_replacement",
+        "member_task_keys",
+        "source_type_hint",
+        "confidence_notes",
+    }
+    assert bulk["databricks_replacement"] == "for_each_ingestion"
+    # Exact expected member set for this fixture -- a partial-member regression must fail.
+    assert bulk["member_task_keys"] == ["Lookup ETL Config", "ForEach Table In Config"]
+
+    # No collapse at discover: each member survives as its own activity entry.
+    activity_names = {activity["name"] for activity in pipeline["activities"]}
+    for member in bulk["member_task_keys"]:
+        assert member in activity_names, member
+
+    # Decoupled from lineage: the additive motifs key is separate from lineage.motifs.
+    assert pipeline["lineage"]["motifs"] == []
+
+
+def test_pipelines_without_a_motif_omit_the_motifs_key(tmp_path: Path) -> None:
+    """The motifs field is additive: a pipeline with no detected motif omits it."""
+    metadata = _run_discover(tmp_path)
+    inventory = json.loads((metadata / "inventory.json").read_text())
+
+    plain = next(p for p in inventory["pipelines"] if p["name"] == "pipeline_notebook_basic")
+    assert "motifs" not in plain
+
+
 def test_coverage_output_matches_golden(tmp_path: Path) -> None:
     """The real coverage consumer reproduces the committed golden snapshot.
 
