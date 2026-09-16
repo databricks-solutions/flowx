@@ -6,8 +6,12 @@ the discovery AST is a different model with a different lifecycle. This module i
 its own round-trip pair so evolving one shape never disturbs the other.
 
 The DataAsset (de)serialisers are reused from ``ir_serde`` (``data_asset_to_dict``
-/ ``data_asset_from_dict``) so the physical-asset shape has a single definition
-shared by the lineage substrate and the discovery AST. A graph's derived
+/ ``data_asset_from_dict``) so the data-asset shape has a single definition
+shared by the lineage substrate and the discovery AST. That shape is a general,
+best-effort description of what a task reads/writes -- not physical-only: a
+resolvable physical ``identity`` when there is one (else ``None``), an
+always-present ``signature``, and an open ``asset_type`` that also covers
+non-physical / logical / value hand-offs (e.g. an Airflow XCom). A graph's derived
 :class:`~flowx.models.ir.Lineage` block is serialised through ``ir_serde``'s
 ``lineage_to_dict`` for the same reason; its inverse (:func:`_lineage_from_dict`)
 lives here because ``ir_serde`` ships only the forward direction.
@@ -50,6 +54,10 @@ def source_graph_to_dict(graph: SourceGraph) -> dict[str, Any]:
         result["description"] = graph.description
     if graph.schedule is not None:
         result["schedule"] = _schedule_to_dict(graph.schedule)
+    if graph.default_policy is not None:
+        result["default_policy"] = _policy_to_dict(graph.default_policy)
+    if graph.run_timeout_seconds is not None:
+        result["run_timeout_seconds"] = graph.run_timeout_seconds
     if graph.lineage is not None:
         result["lineage"] = lineage_to_dict(graph.lineage)
     if graph.properties:
@@ -64,6 +72,7 @@ def source_graph_to_dict(graph: SourceGraph) -> dict[str, Any]:
 def source_graph_from_dict(raw: dict[str, Any]) -> SourceGraph:
     """Rehydrate a :class:`SourceGraph` from the dict :func:`source_graph_to_dict` emits."""
     schedule = raw.get("schedule")
+    default_policy = raw.get("default_policy")
     lineage = raw.get("lineage")
     return SourceGraph(
         name=raw.get("name", ""),
@@ -72,6 +81,8 @@ def source_graph_from_dict(raw: dict[str, Any]) -> SourceGraph:
         parameters={name: _parameter_from_dict(spec) for name, spec in (raw.get("parameters") or {}).items()},
         variables={name: _parameter_from_dict(spec) for name, spec in (raw.get("variables") or {}).items()},
         schedule=_schedule_from_dict(schedule) if schedule else None,
+        default_policy=_policy_from_dict(default_policy) if default_policy else None,
+        run_timeout_seconds=raw.get("run_timeout_seconds"),
         tags=list(raw.get("tags") or []),
         tasks=[_node_from_dict(node) for node in raw.get("tasks") or []],
         lineage=_lineage_from_dict(lineage) if lineage else None,
@@ -213,6 +224,8 @@ def _node_to_dict(node: SourceNode) -> dict[str, Any]:
         result["name"] = node.name
     if node.native_type is not None:
         result["native_type"] = node.native_type
+    if node.run_condition is not None:
+        result["run_condition"] = node.run_condition
     if node.policy is not None:
         result["policy"] = _policy_to_dict(node.policy)
     if node.properties:
@@ -243,6 +256,7 @@ def _node_from_dict(raw: dict[str, Any]) -> SourceNode:
         "source": raw.get("source", ""),
         "name": raw.get("name"),
         "native_type": raw.get("native_type"),
+        "run_condition": raw.get("run_condition"),
         "dependencies": [_dependency_from_dict(dependency) for dependency in raw.get("dependencies") or []],
         "policy": _policy_from_dict(raw["policy"]) if raw.get("policy") else None,
         "data_reads": [data_asset_from_dict(asset) for asset in raw.get("data_reads") or []],

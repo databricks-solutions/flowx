@@ -125,7 +125,8 @@ def build_graph_lineage(graph: SourceGraph) -> Lineage:
 def with_graph_lineage(graph: SourceGraph) -> SourceGraph:
     """Return a *new* graph carrying its derived lineage, leaving the input untouched.
 
-    Mirrors :func:`flowx.lineage.with_lineage` for the discovery AST.
+    Pure: builds the lineage block and attaches it via :func:`dataclasses.replace`
+    rather than mutating the input graph.
 
     Args:
         graph: The source graph to copy.

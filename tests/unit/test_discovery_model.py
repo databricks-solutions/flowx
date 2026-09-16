@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from flowx.discovery_serde import _node_from_dict, source_graph_from_dict, source_graph_to_dict
+from flowx.discovery_serde import _node_from_dict, _node_to_dict, source_graph_from_dict, source_graph_to_dict
 from flowx.models.discovery import (
     CONCEPT_COPY_DATA,
     CONCEPT_GAP,
@@ -249,3 +249,77 @@ def test_lineage_block_round_trips_and_is_absent_when_none():
     bare = source_graph_to_dict(SourceGraph(name="bare", source=SOURCE_ADF))
     assert "lineage" not in bare
     assert source_graph_from_dict(bare).lineage is None
+
+
+def test_node_run_condition_round_trips_and_defaults_none():
+    """Airflow's node-level trigger_rule round-trips; ADF-style nodes leave it None."""
+    node = SourceNode(
+        source_id="join",
+        task_key="join",
+        concept=CONCEPT_NOTEBOOK,
+        source=SOURCE_AIRFLOW,
+        run_condition="none_failed_min_one_success",
+    )
+    graph = SourceGraph(name="dag", source=SOURCE_AIRFLOW, tasks=[node])
+
+    reloaded = source_graph_from_dict(json.loads(json.dumps(source_graph_to_dict(graph))))
+    assert reloaded == graph
+    assert reloaded.tasks[0].run_condition == "none_failed_min_one_success"
+
+    # ADF/substrate default: a node that sets no run_condition omits the key and stays None.
+    plain = SourceNode(source_id="a", task_key="a", concept=CONCEPT_NOTEBOOK, source=SOURCE_ADF)
+    assert "run_condition" not in _node_to_dict(plain)
+    assert _node_from_dict(_node_to_dict(plain)).run_condition is None
+
+
+def test_graph_default_policy_and_run_timeout_round_trip_and_default_none():
+    """Airflow DAG default_args cascade + dagrun_timeout round-trip; ADF leaves both None."""
+    graph = SourceGraph(
+        name="dag",
+        source=SOURCE_AIRFLOW,
+        default_policy=PolicySpec(max_retries=3, retry_interval_seconds=300, extensions={"owner": "data"}),
+        run_timeout_seconds=7200,
+    )
+
+    reloaded = source_graph_from_dict(json.loads(json.dumps(source_graph_to_dict(graph))))
+    assert reloaded == graph
+    assert reloaded.default_policy == PolicySpec(
+        max_retries=3, retry_interval_seconds=300, extensions={"owner": "data"}
+    )
+    assert reloaded.run_timeout_seconds == 7200
+
+    # ADF/substrate default: no graph-level policy or run timeout -> keys absent, fields None.
+    bare = source_graph_to_dict(SourceGraph(name="pl", source=SOURCE_ADF))
+    assert "default_policy" not in bare
+    assert "run_timeout_seconds" not in bare
+    rehydrated = source_graph_from_dict(bare)
+    assert rehydrated.default_policy is None
+    assert rehydrated.run_timeout_seconds is None
+
+
+def test_non_physical_asset_type_and_empty_reads_writes_are_valid():
+    """A value/logical asset_type round-trips, and empty reads/writes are valid (best-effort)."""
+    producer = SourceNode(
+        source_id="extract",
+        task_key="extract",
+        concept=CONCEPT_NOTEBOOK,
+        source=SOURCE_AIRFLOW,
+        # An Airflow XCom / TaskFlow return value: no physical identity, an open non-physical kind.
+        data_writes=[DataAsset(signature="extract:return_value", asset_type="value")],
+    )
+    # Best-effort population: a node may record nothing at all.
+    consumer = SourceNode(
+        source_id="load",
+        task_key="load",
+        concept=CONCEPT_NOTEBOOK,
+        source=SOURCE_AIRFLOW,
+    )
+    graph = SourceGraph(name="dag", source=SOURCE_AIRFLOW, tasks=[producer, consumer])
+
+    reloaded = source_graph_from_dict(json.loads(json.dumps(source_graph_to_dict(graph))))
+    assert reloaded == graph
+    assert reloaded.tasks[0].data_writes == [DataAsset(signature="extract:return_value", asset_type="value")]
+    assert reloaded.tasks[0].data_writes[0].identity is None
+    # Empty reads/writes survive as empty lists, never None.
+    assert reloaded.tasks[1].data_reads == []
+    assert reloaded.tasks[1].data_writes == []

@@ -1,13 +1,11 @@
 """Tests for lineage over the shared discovery AST (:mod:`flowx.discovery_lineage`).
 
-Two layers:
-
-* the source-neutral derivation itself -- the identity vs signature join tiers,
-  no self-edges, no duplicates, fan-out, and Switch / ForEach / If recursion --
-  driven straight off :class:`SourceGraph` / :class:`SourceNode` values; and
-* the end-to-end ADF path -- :func:`adf_definitions_to_source_graphs` populating a
-  node's reads / writes from the ADF resolver and attaching a derived lineage
-  block, including nested-in-Switch capture and ExecutePipeline control edges.
+The source-neutral derivation itself -- the identity vs signature join tiers, no
+self-edges, no duplicates, fan-out, and Switch / ForEach / If recursion -- driven
+straight off :class:`SourceGraph` / :class:`SourceNode` values. Per-source
+population of a node's reads / writes / invocation markers (the ADF and Airflow
+mappers) is exercised in the per-source test suites (#62 / #63); this file stays
+free of any ``sources/*`` coupling.
 """
 
 from __future__ import annotations
@@ -19,12 +17,6 @@ from flowx.discovery_lineage import (
     walk_nodes,
     with_graph_lineage,
 )
-from flowx.models.adf_ast import (
-    AdfActivity,
-    AdfDataset,
-    AdfDefinitions,
-    AdfPipeline,
-)
 from flowx.models.discovery import (
     SOURCE_ADF,
     ContainerNode,
@@ -32,8 +24,6 @@ from flowx.models.discovery import (
     SourceNode,
 )
 from flowx.models.ir import DataAsset
-from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
-from flowx.sources.adf.loader import load_adf_definitions
 
 # --------------------------------------------------------------------------- #
 # Helpers for the source-neutral layer
@@ -187,187 +177,3 @@ def test_with_graph_lineage_returns_new_graph_and_leaves_input_untouched() -> No
     assert graph.lineage is None
     assert result is not graph
     assert len(result.lineage.control_edges) == 1
-
-
-# --------------------------------------------------------------------------- #
-# End-to-end through the ADF mapper
-# --------------------------------------------------------------------------- #
-
-
-def _table_dataset(name: str, *, schema: str, table: str) -> AdfDataset:
-    return AdfDataset(
-        name=name,
-        type="AzureSqlTable",
-        properties={"typeProperties": {"schema": schema, "table": table}},
-    )
-
-
-def test_adf_within_pipeline_identity_handoff() -> None:
-    """A Copy writes curated.orders; a later Lookup reads it -> one identity data edge."""
-    definitions = AdfDefinitions(
-        pipelines=[
-            AdfPipeline(
-                name="etl",
-                activities=[
-                    AdfActivity(
-                        name="Load Orders",
-                        type="Copy",
-                        type_properties={
-                            "source": {"referenceName": "ds_raw"},
-                            "sink": {"referenceName": "ds_curated"},
-                        },
-                    ),
-                    AdfActivity(
-                        name="Check Orders",
-                        type="Lookup",
-                        type_properties={"dataset": {"referenceName": "ds_curated"}},
-                    ),
-                ],
-            )
-        ],
-        datasets={
-            "ds_raw": _table_dataset("ds_raw", schema="raw", table="orders"),
-            "ds_curated": _table_dataset("ds_curated", schema="curated", table="orders"),
-        },
-    )
-    graph = adf_definitions_to_source_graphs(definitions)[0]
-    assert graph.lineage is not None
-    data_edges = graph.lineage.data_edges
-    assert len(data_edges) == 1
-    edge = data_edges[0]
-    assert (edge.source_task_key, edge.target_task_key) == ("Load Orders", "Check Orders")
-    assert edge.match_kind == "identity"
-    assert edge.identity == "curated.orders"
-
-
-def test_adf_opaque_references_do_not_produce_a_false_data_edge() -> None:
-    """Two unresolvable references sharing a name must NOT join on that name (#36)."""
-    opaque = AdfDataset(
-        name="ds_opaque",
-        type="AzureSqlTable",
-        properties={"typeProperties": {"table": "@pipeline().parameters.t"}},
-    )
-    definitions = AdfDefinitions(
-        pipelines=[
-            AdfPipeline(
-                name="etl",
-                activities=[
-                    AdfActivity(
-                        name="Write Opaque",
-                        type="Copy",
-                        type_properties={"sink": {"referenceName": "ds_opaque"}},
-                    ),
-                    AdfActivity(
-                        name="Read Opaque",
-                        type="Lookup",
-                        type_properties={"dataset": {"referenceName": "ds_opaque"}},
-                    ),
-                ],
-            )
-        ],
-        datasets={"ds_opaque": opaque},
-    )
-    graph = adf_definitions_to_source_graphs(definitions)[0]
-    assert graph.lineage is not None
-    # Both references resolve to no identity and no path anchor -> empty signature -> no edge.
-    assert graph.lineage.data_edges == []
-    writer = next(node for node in walk_nodes(graph.tasks) if node.task_key == "Write Opaque")
-    assert writer.data_writes[0].signature == ""
-
-
-def test_adf_execute_pipeline_produces_control_edge() -> None:
-    definitions = AdfDefinitions(
-        pipelines=[
-            AdfPipeline(
-                name="parent",
-                activities=[
-                    AdfActivity(
-                        name="Run Child",
-                        type="ExecutePipeline",
-                        type_properties={
-                            "pipeline": {"referenceName": "child"},
-                            "waitOnCompletion": False,
-                        },
-                    ),
-                ],
-            ),
-            AdfPipeline(name="child", activities=[]),
-        ],
-    )
-    parent = adf_definitions_to_source_graphs(definitions)[0]
-    assert parent.lineage is not None
-    control_edges = parent.lineage.control_edges
-    assert len(control_edges) == 1
-    edge = control_edges[0]
-    assert (edge.source_workflow, edge.target_workflow) == ("parent", "child")
-    assert edge.via_task_key == "Run Child"
-    assert edge.wait_for_completion is False
-
-
-def test_adf_switch_nested_copy_reads_and_writes_are_captured() -> None:
-    """A Copy inside a Switch case carries resolved reads/writes; its hand-off is found."""
-    definitions = AdfDefinitions(
-        pipelines=[
-            AdfPipeline(
-                name="switched",
-                activities=[
-                    AdfActivity(
-                        name="Route",
-                        type="Switch",
-                        switch_cases={
-                            "sql": [
-                                AdfActivity(
-                                    name="Copy From SQL",
-                                    type="Copy",
-                                    type_properties={
-                                        "source": {"referenceName": "ds_raw"},
-                                        "sink": {"referenceName": "ds_stage"},
-                                    },
-                                )
-                            ]
-                        },
-                        switch_default_activities=[
-                            AdfActivity(
-                                name="Read Stage",
-                                type="Lookup",
-                                type_properties={"dataset": {"referenceName": "ds_stage"}},
-                            )
-                        ],
-                    ),
-                ],
-            )
-        ],
-        datasets={
-            "ds_raw": _table_dataset("ds_raw", schema="raw", table="events"),
-            "ds_stage": _table_dataset("ds_stage", schema="stage", table="events"),
-        },
-    )
-    graph = adf_definitions_to_source_graphs(definitions)[0]
-
-    # The nested Copy carries its resolved reads/writes.
-    nested = {node.task_key: node for node in walk_nodes(graph.tasks)}
-    copy_node = nested["Copy From SQL"]
-    assert [asset.identity for asset in copy_node.data_reads] == ["raw.events"]
-    assert [asset.identity for asset in copy_node.data_writes] == ["stage.events"]
-
-    # And the writer (Switch case) -> reader (Switch default) hand-off is derived.
-    assert graph.lineage is not None
-    data_edges = graph.lineage.data_edges
-    assert len(data_edges) == 1
-    assert (data_edges[0].source_task_key, data_edges[0].target_task_key) == ("Copy From SQL", "Read Stage")
-    assert data_edges[0].identity == "stage.events"
-
-
-def test_shared_execute_pipeline_fixture_reproduces_hash36_control_edges(fixtures_dir) -> None:
-    """The nested-ExecutePipeline fixture yields exactly #36's three caller->callee edges."""
-    graphs = adf_definitions_to_source_graphs(load_adf_definitions(fixtures_dir))
-    graph = next(g for g in graphs if g.name == "pipeline_execute_pipeline_nested")
-    assert graph.lineage is not None
-    edges = {
-        (edge.source_workflow, edge.target_workflow, edge.wait_for_completion) for edge in graph.lineage.control_edges
-    }
-    assert edges == {
-        ("pipeline_execute_pipeline_nested", "pipeline_copy_sql_to_delta", True),
-        ("pipeline_execute_pipeline_nested", "pipeline_notebook_with_params", True),
-        ("pipeline_execute_pipeline_nested", "pipeline_delete_recursive", False),
-    }
