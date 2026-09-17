@@ -170,7 +170,7 @@ resolved gap into an agentic-results directory:
 }
 ```
 
-Then merge (`task_key`/`depends_on` are inherited from the placeholder when omitted, preserving edges):
+Then merge (`task_key`/`depends_on` are inherited from the matched task when omitted, preserving edges):
 
 ```bash
 "$PY" -m flowx.adapter convert --source adf --merge-agentic \
@@ -179,14 +179,18 @@ Then merge (`task_key`/`depends_on` are inherited from the placeholder when omit
   [--output <path>]     # default: overwrite --report
 ```
 
-`--source` is **mandatory** for the convert phase — the phase runner exits 2 without it, even for
-`--merge-agentic`. Use `--source adf` here (`merge_agentic` is **ADF-only**; an Airflow per-gap fill
-would use `--source airflow`, but Airflow gaps normally go through the `flowx-resolve-airflow-gaps`
-skill). This merge is **additive** — it replaces only the placeholder tasks in the existing report and
-leaves every other pipeline byte-identical, so it never erases routing's edits.
+This per-pipeline merge is **ADF-only**. `--source adf` is **mandatory** — the convert phase runner
+exits 2 without it, and `--source airflow` is explicitly rejected here (Airflow's `--merge-agentic`
+is disabled and exits 2). For **Airflow** per-gap fills, use the **`flowx-resolve-airflow-gaps`**
+skill (the fingerprint-bound `resolve-agentic` workflow), not this command.
+
+The merge finds, per result, the **first task whose `name` matches `activity_name`** (recursing into
+`IfCondition`/`ForEach`/`Switch` containers) and replaces it — it matches by name and does **not**
+verify the target is a `PlaceholderActivity`, so make sure each `activity_name` targets the intended
+agentic gap. Other pipelines and unmatched tasks are left untouched.
 
 MCP: `flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})`.
-Placeholders are replaced in place, status → `translated`; exits non-zero if any result can't be
+The matched task's status becomes `translated`; the command exits non-zero if any result can't be
 matched.
 
 ### 3b — Cross-pipeline COMBINE (N pipelines → M)
