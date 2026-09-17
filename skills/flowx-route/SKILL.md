@@ -25,6 +25,13 @@ Connect pipeline). It records the decision as a fingerprint-bound `metadata/conv
 edits the translation report so routed-agentic groups become placeholder gaps, and then you author
 the fill.
 
+**ADF only (current scope).** The discover → enrich → route → edit → fill agentic-conversion flow is
+supported for **ADF today**. Airflow is **not** yet wired for routing: its discovery does not emit
+control lineage or motifs, so it cannot form multi-DAG routing components, and `convert
+--merge-agentic --source airflow` is disabled. Airflow aligns with routing once #63 maps it onto the
+shared discovery AST. For **Airflow agentic gaps today, use the `flowx-resolve-airflow-gaps` skill**
+(the strict per-gap resolver) — not this routing flow.
+
 **There is no LLM inside flowx.** The library computes the recommendation deterministically and only
 *validates and records* the decision and the authored fill — the same author → validate → merge
 contract `enrich` uses. This is additive and non-breaking: with **no recorded plan**, `convert` and
@@ -49,8 +56,9 @@ placeholders, the only convert is the additive `convert --merge-agentic` fill �
 
 Pipelines are grouped into weak/undirected **connected components** over the inventory's control
 lineage (`lineage.control_edges`), so mutually-referencing pipelines are decided together and a
-caller/callee reference is never split across incompatible routes. Both ADF (`ExecutePipeline`) and
-Airflow (`RunJob`) emit control edges, so routing is source-neutral.
+caller/callee reference is never split across incompatible routes. ADF emits these control edges
+(from `ExecutePipeline`) in discovery; Airflow discovery does not emit control lineage yet, which is
+why routing is ADF-only today (see the scope note above).
 
 Run the **`setup`** skill first if you haven't. Everything below has an MCP-tool path (Genie Code, or
 a local stdio registration — call the single **`flowx`** tool, run no `python3`/`$PY`) and a venv-CLI
