@@ -26,15 +26,26 @@ edits the translation report so routed-agentic groups become placeholder gaps, a
 the fill.
 
 **There is no LLM inside flowx.** The library computes the recommendation deterministically and only
-*validates and records* your decision and your authored fill — the same author → validate → merge
+*validates and records* the decision and the authored fill — the same author → validate → merge
 contract `enrich` uses. This is additive and non-breaking: with **no recorded plan**, `convert` and
 `package` behave exactly as before.
+
+**Who decides what.** The library **recommends** a route per component; the **customer decides**
+deterministic-vs-agentic for each component; the **agent** presents the options and the
+recommendation, serializes only the customer's *approved* decision into the plan, and authors the
+agentic fill. The agent never picks the route on the customer's behalf — it records the customer's
+choice and does the mechanical work of the approved fill.
 
 ## Where routing sits
 
 ```
-discover → enrich (default) → route → convert → fill-agentic → package
+discover → enrich (default) → convert (deterministic baseline) → route (decide + edit) → fill-agentic → package
 ```
+
+Convert builds the deterministic baseline report **before** routing (route can trigger it in-process
+via `--source` / `--source-path`); routing then edits that report. After routing has recorded agentic
+placeholders, the only convert is the additive `convert --merge-agentic` fill — never a second plain
+`convert`, which would overwrite the report and erase the placeholders.
 
 Pipelines are grouped into weak/undirected **connected components** over the inventory's control
 lineage (`lineage.control_edges`), so mutually-referencing pipelines are decided together and a
@@ -90,12 +101,14 @@ There are three ways to supply the decision:
   flowx(command="route", parameters={"output_dir": "<dir>", "plan": { ...authored plan... }})
   ```
 
-### The authored plan shape
+### The plan shape
 
-You author **only** the decision (and an optional rationale) per component. The library recomputes
-`members`, `recommended`, and both `options` on record, so recorded facts cannot drift from the
-inventory or be faked. Start from the recommendation's `default_plan` and flip the components you want
-to override:
+The plan carries **only** the decision (and an optional rationale) per component — and the decision is
+the **customer's**, not yours. Your job is to present each component's members, its `recommended`
+route, and both `options`, then serialize the customer's pick; you do not choose the route yourself.
+The library recomputes `members`, `recommended`, and both `options` on record, so recorded facts
+cannot drift from the inventory or be faked. Start from the recommendation's `default_plan` and flip
+the components the customer chose to override:
 
 ```json
 {
@@ -114,14 +127,18 @@ Rules the validator enforces (all violations returned at once; nothing written o
 - Every `member` must be a real inventory pipeline, and a component's `members` must **exactly match
   one computed connected component** — a decision can never split a component or span two.
 - The plan is a **bijection**: every component is decided exactly once (no partial plan, no
-  duplicate/conflicting decisions). `component_id`, when given, must match the component for those
-  members.
+  duplicate/conflicting decisions).
+- `component_id` is **required** on every component — a non-empty string that must match the computed
+  component for those `members`. Start from the recommendation's `default_plan`, which already carries
+  the correct `component_id` for each component.
 
 ### Triggering convert if the report is missing
 
 `route` edits `.work/translation_report.json`, which the convert phase produces. If it is missing,
-pass `--source <adf|airflow>` **and** `--source-path <path>` (MCP: `source` + the source-path param)
-and `route` triggers the convert phase in-process first. Otherwise run `flowx-convert` before routing.
+pass `--source <adf|airflow>` **and** `--source-path <path>` (MCP: `source` plus the source-specific
+path param — `adf_source_path` or `airflow_source_path`; a generic `source_path` is **ignored**, and
+ADF also accepts `adf_definitions` / `adf_volume_path` / `adf_workspace_path`) and `route` triggers
+the convert phase in-process first. Otherwise run `flowx-convert` before routing.
 
 ### venv CLI
 
@@ -156,15 +173,21 @@ resolved gap into an agentic-results directory:
 Then merge (`task_key`/`depends_on` are inherited from the placeholder when omitted, preserving edges):
 
 ```bash
-"$PY" -m flowx.adapter convert --merge-agentic \
+"$PY" -m flowx.adapter convert --source adf --merge-agentic \
   --report <output_dir>/.work/translation_report.json \
   --agentic-results <agentic_results_dir> \
   [--output <path>]     # default: overwrite --report
 ```
 
+`--source` is **mandatory** for the convert phase — the phase runner exits 2 without it, even for
+`--merge-agentic`. Use `--source adf` here (`merge_agentic` is **ADF-only**; an Airflow per-gap fill
+would use `--source airflow`, but Airflow gaps normally go through the `flowx-resolve-airflow-gaps`
+skill). This merge is **additive** — it replaces only the placeholder tasks in the existing report and
+leaves every other pipeline byte-identical, so it never erases routing's edits.
+
 MCP: `flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})`.
 Placeholders are replaced in place, status → `translated`; exits non-zero if any result can't be
-matched. `merge_agentic` is **ADF-only** (Airflow uses `flowx-resolve-airflow-gaps`).
+matched.
 
 ### 3b — Cross-pipeline COMBINE (N pipelines → M)
 

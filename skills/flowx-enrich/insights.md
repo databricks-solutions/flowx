@@ -63,11 +63,13 @@ fingerprint that binds your insights to the exact inventory they describe):
 
 - **Foreign keys.** Every `pipeline_insights[].pipeline` and every relationship
   `from_pipeline` / `to_pipeline` must be a real pipeline name in the inventory.
-- **`recommended_patterns`** (per pipeline and system-wide): a ranked list of **1–4**, best-first.
-  Each needs a non-empty `pattern` and `fit`, and a boolean `simplification_pattern`. Set
-  `simplification_pattern: true` **only** for a distinctive capability that collapses a whole legacy
-  pattern (a managed connector, declarative `AUTO CDC`, Auto Loader, system tables replacing a
-  home-grown logging tier) — not for a like-for-like port. Rank the `true` patterns first.
+- **`recommended_patterns`** (per pipeline and system-wide): **1–4** patterns. The validator enforces
+  the count and that each has a non-empty `pattern` and `fit` and a boolean `simplification_pattern`;
+  it does **not** enforce ordering. Set `simplification_pattern: true` **only** for a distinctive
+  capability that collapses a whole legacy pattern (a managed connector, declarative `AUTO CDC`, Auto
+  Loader, system tables replacing a home-grown logging tier) — not for a like-for-like port. By
+  convention (not validated), order them best-first and list the `simplification_pattern: true` ones
+  ahead of like-for-like ports.
 - **`system_recommendation`** needs a non-empty `headline` and a `recommended_patterns` list;
   `cascade` (non-empty strings) and `decision_driver` are optional.
 - **Relationship edges** come in two tiers:
