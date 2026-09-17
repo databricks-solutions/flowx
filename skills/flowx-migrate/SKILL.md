@@ -2,7 +2,8 @@
 name: flowx-migrate
 description: >
   End-to-end migration of a source orchestrator's pipelines (Azure Data Factory, Apache Airflow)
-  to Databricks Lakeflow Jobs. Orchestrates discover, convert, and package phases in sequence.
+  to Databricks Lakeflow Jobs. Orchestrates discover → enrich → route → convert/fill → package in
+  sequence.
 triggers:
   - "migrate pipelines"
   - "migrate ADF"
@@ -16,16 +17,25 @@ triggers:
 # End-to-End Source to Databricks Migration
 
 Orchestrate the complete migration of a source orchestrator's pipelines to Databricks Lakeflow Jobs
-via Declarative Automation Bundles. This skill runs all three phases in sequence: discover, convert,
-package.
+via Declarative Automation Bundles. This skill runs the full flow in sequence: discover → enrich
+(default) → route → convert/fill → package.
 
 ## Context
 
 This is the top-level orchestration skill. It runs the full migration pipeline:
 
 1. **Discover** — Parse the source's definitions into a typed inventory
-2. **Convert** — Convert the source's tasks to Databricks IR (deterministic + agentic)
-3. **Package** — Generate Databricks Declarative Automation Bundles for deployment
+2. **Enrich** *(default)* — Author the agentic `insights` layer over the inventory and merge it
+   (`flowx-enrich`); skippable for a deterministic-only pass
+3. **Convert (deterministic baseline)** — Convert the source's tasks to Databricks IR, producing
+   `.work/translation_report.json`. This runs **once, before routing** (routing reads and edits it);
+   route can also trigger it in-process (`flowx-convert`)
+4. **Route + fill** — Decide, per connected component, deterministic vs. agentic conversion; record
+   the fingerprint-bound `metadata/conversion_plan.json`; edit the baseline report so routed-agentic
+   groups become placeholder gaps; then **fill** those gaps additively — per-pipeline
+   `convert --merge-agentic` or cross-pipeline `fill-agentic combine`. **Never re-run a plain
+   `convert` after routing** — it would rewrite the report and erase the placeholders (`flowx-route`)
+5. **Package** — Generate Databricks Declarative Automation Bundles for deployment
 
 Each phase builds on the output of the previous phase. The user is shown a summary and asked to confirm before proceeding to the next phase.
 
@@ -40,7 +50,7 @@ source path (`--adf-source-path` / `--airflow-source-path`, both aliases of `--s
 
 ## How to run this skill — MCP tools or venv CLI
 
-This skill orchestrates all three phases. Run the **`setup`** skill first if you haven't. There are
+This skill orchestrates the full flow. Run the **`setup`** skill first if you haven't. There are
 two execution paths:
 
 ### MCP tools (Databricks Genie Code, or a local stdio registration)
@@ -101,8 +111,11 @@ discover/convert and for `inputs discover`/`inputs convert`; for Airflow, swap `
 ```
 flowx(command="inputs", parameters={"phase": "discover", "source": "adf"})  # source req for discover/convert
 flowx(command="discover", parameters={"source": "adf", "adf_definitions": {...}, "output_dir": ..., "pipeline": ...})
+flowx(command="enrich", parameters={"output_dir": ..., "insights": {...}})  # default: author + merge the insights layer (see flowx-enrich)
+flowx(command="route", parameters={"output_dir": ...})  # recommend; re-call with "plan": {...} to record + edit the report (see flowx-route)
 flowx(command="convert", parameters={"source": "adf", "output_dir": ..., "pipeline": ...})
-flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # ADF only, if agentic results
+flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # ADF only, per-pipeline agentic fill
+flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [...], "pipelines": [...]})  # cross-pipeline combine of a routed-agentic group
 flowx(command="inspect", parameters={"report_path": ...})
 flowx(command="apply_answers", parameters={"report_path": ..., "answers": [...], "output_dir": ...})
 flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema": ...})
@@ -209,14 +222,59 @@ If the user says no, explain the options:
 - Review `<output_dir>/metadata/inventory.json` (and `profile_report.csv`) to understand unsupported activities and pipeline complexity
 - Manually classify activities before proceeding
 
-If the user says yes, proceed to step 4.
+If the user says yes, proceed to step 3.5.
 
-### Step 4 — Phase 2: Convert
+### Step 3.5 — Enrich the inventory (default)
 
-Invoke the `flowx:flowx-convert` skill with:
+By default, chain into enrichment: invoke the **`flowx:flowx-enrich`** skill to author the agentic
+`insights` layer (factory-wide recommendation, per-pipeline intent + recommended Databricks patterns,
+cross-pipeline relationships) and merge it into `<output_dir>/metadata/inventory.json`. flowx has no
+LLM — you author the insights JSON and `enrich` validates + merges it additively, leaving every
+deterministic inventory key byte-identical. The routing step consumes this block to present the
+agentic conversion option per group.
+
+**Skip only for a deterministic-only pass.** When the user explicitly asked for a headless,
+deterministic-only migration (no agent/LLM authoring), skip enrich — the deterministic
+`inventory.json` is complete and `flowx-route` still works from the structure alone. Otherwise enrich
+by default.
+
+### Step 3.6 — Route the conversion (deterministic vs. agentic)
+
+Routing reads and edits the **deterministic baseline** report `.work/translation_report.json`, so
+convert (Step 4) must have produced it first. The clean path is to let `route` **trigger convert once
+in-process** — pass `--source` / `--source-path` and route builds the baseline and then edits it in a
+single step (this *is* the Phase-2 convert; a separate Step 4 run is then unnecessary). Otherwise run
+Step 4 before this step.
+
+Invoke the **`flowx:flowx-route`** skill to present the per-connected-component recommendation, take
+the **customer's** decision (interactive, or an authored plan — the customer decides
+deterministic-vs-agentic per component; the agent presents the options and serializes only the
+approved decision), and record the fingerprint-bound `<output_dir>/metadata/conversion_plan.json`.
+Recording a plan edits `.work/translation_report.json` so every routed-**agentic** group's tasks
+become placeholder gaps; deterministic groups (and a no-agentic-route plan) leave the report
+untouched — non-breaking.
+
+**Once routing has recorded agentic placeholders, never run a plain `convert` again** — a second
+`convert --source-dir` overwrites `.work/translation_report.json` and erases the placeholders.
+Routed-agentic groups are **filled** additively in Step 5.05 (per-pipeline `convert --merge-agentic`
+or cross-pipeline `fill-agentic combine`), which is the only convert after routing. If the user wants
+a straight deterministic migration, they accept the all-deterministic recommendation here and the
+rest of the flow is unchanged.
+
+### Step 4 — Phase 2: Convert (deterministic baseline, runs before routing)
+
+Convert produces the deterministic baseline report `<output_dir>/.work/translation_report.json` that
+routing (Step 3.6) reads and edits — so it runs **before** the plan is recorded. If you let `route`
+trigger convert in-process (Step 3.6), this step is already done; otherwise invoke the
+`flowx:flowx-convert` skill directly, before routing, with:
 - `--source <source>`: the same source discover used
 - Source path: the original source path (same one discover used)
 - Output dir: the same shared `<output_dir>` (convert writes its report to `<output_dir>/.work/`)
+
+> **Run this convert exactly once, before routing.** After Step 3.6 records agentic placeholders, do
+> **not** re-run a plain `convert` — it rewrites `.work/translation_report.json` and erases the
+> routed-agentic placeholders. The only convert after routing is the additive `convert --merge-agentic`
+> fill in Step 5.05.
 
 Wait for the translation to complete and present the summary:
 
@@ -240,6 +298,25 @@ For failures, suggest:
 - Manual notebook creation
 - Retry with additional context
 - Skip and add placeholder
+
+### Step 5.05 — Fill routed-agentic groups (before just-in-time config)
+
+If Step 3.6 routed any component **agentic**, its pipelines' tasks are now `PlaceholderActivity`
+nodes with one tagged gap each. Fill them via the **`flowx:flowx-route`** skill (Step 3 there) before
+the just-in-time config below, so the filled tasks get configuration-stamped and packaged:
+
+- **Per-pipeline** (the pipeline stays 1:1): author one result JSON per gap and merge with
+  `convert --source adf --merge-agentic --report .work/translation_report.json --agentic-results <dir>`
+  (ADF only; `--source` is mandatory for the convert phase — it exits 2 without it). This merge is
+  additive: it replaces only the placeholder tasks and leaves every other pipeline byte-identical.
+  Airflow per-gap fills use the `flowx-resolve-airflow-gaps` skill instead.
+- **Cross-pipeline COMBINE** (N pipelines → M, e.g. one Lakeflow Connect pipeline): author the
+  replacement pipeline IR (typically with `AgenticComponentActivity` nodes) and run
+  `fill-agentic combine --output-dir <output_dir> --members "<a,b,...>" --pipelines-path <file>`;
+  the members must exactly match the routed-agentic component and the merged report is validated
+  structurally before it is written.
+
+Skip this step entirely when no component was routed agentic.
 
 ### Step 5.1 — Gather just-in-time translation configuration
 
@@ -432,7 +509,7 @@ See `references/workflow.md` for a detailed description of the three-phase archi
 
 ## Output Artifacts
 
-All three phases write into a single shared `<output_dir>` (default `./flowx_output`):
+All phases write into a single shared `<output_dir>` (default `./flowx_output`):
 
 | Path | Phase | Contents |
 |---|---|---|
