@@ -1,53 +1,13 @@
-# Authoring agentic insights (optional, after discover)
+# The agentic insights shape
 
-The deterministic discover pass records what each source workflow **is**; it cannot record what
-to **do** about it. That judgment — a factory-wide architectural recommendation, each pipeline's
-intent and recommended Databricks patterns, and how pipelines couple — is authored by **you, the
-agent**, and merged back into `inventory.json` under a single additive `insights` key.
+This is the reference for the `insights` JSON you author before calling `enrich`. The `flowx-enrich`
+SKILL.md covers the workflow (no-LLM contract, the three authoring steps, how to run `enrich`, and
+when a deterministic-only pass skips it); this file covers **what to write** and the rules the
+validator enforces.
 
-**There is no LLM inside flowx.** You author the insights JSON; the library only *validates and
-merges* it (the same author-then-validate-merge contract the agentic gap-resolution path uses).
-That keeps the deterministic inventory trustworthy and every insight accountable — foreign keys
-must point at real pipelines, and every cross-pipeline edge is either an annotation of a proven
-lineage edge or an explicitly-flagged inference with cited evidence.
-
-Insights are **optional** and change nothing about conversion. They are descriptive data that a
-later routing step may consume; on their own they add zero routing/IR/conversion decisions.
-
-## When to author them
-
-After `discover` has written `metadata/inventory.json`, and before (or instead of) convert, when a
-human reader would benefit from a migration narrative: which pipelines collapse onto a managed
-capability, how the factory hangs together, what the risky couplings are.
-
-## How to author (three steps)
-
-1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json`. Note every
-   pipeline `name` (these are the only valid foreign keys), and each pipeline's `lineage` block —
-   in particular `lineage.control_edges`, each `{source_workflow, target_workflow, via_task_key}`.
-   A deterministic **control** relationship you annotate must match one of these exactly.
-2. **Read the source artifacts** you need to form judgment — the per-pipeline `raw` payloads in the
-   inventory, the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source — enough to state
-   each pipeline's *intent* and the Databricks patterns that fit. Ground every recommended pattern
-   in a **real, publicly-documented** Databricks capability; never invent a product name.
-3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
-   and, only when clean, merges it in atomically. On any violation the inventory is left untouched
-   and you get the full list of problems to fix in one pass.
-
-### Run enrich
-
-- **MCP tool:** `flowx("enrich", {"output_dir": "<dir>", "insights": { ... }})` (inline object), or
-  pass `"insights_path": "<file>"` instead. `ok` reflects validation; `result.violations` lists any
-  problems.
-- **venv CLI:**
-
-  ```bash
-  export PYTHONPATH="<plugin_dir>/src"
-  PY="$(cat <plugin_dir>/.migration-venv)"
-  "$PY" -m flowx.adapter enrich --output-dir <dir> --insights-path insights.json
-  ```
-
-  Exit code 0 means merged; exit code 1 prints the violations JSON and leaves the inventory untouched.
+Author the insights when a human reader would benefit from a migration narrative — which pipelines
+collapse onto a managed capability, how the factory hangs together, what the risky couplings are.
+The `flowx-route` step reads this block to present the agentic conversion option per component.
 
 ## The insights shape
 

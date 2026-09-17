@@ -24,8 +24,13 @@ package.
 This is the top-level orchestration skill. It runs the full migration pipeline:
 
 1. **Discover** — Parse the source's definitions into a typed inventory
-2. **Convert** — Convert the source's tasks to Databricks IR (deterministic + agentic)
-3. **Package** — Generate Databricks Declarative Automation Bundles for deployment
+2. **Enrich** *(default)* — Author the agentic `insights` layer over the inventory and merge it
+   (`flowx-enrich`); skippable for a deterministic-only pass
+3. **Route** — Decide, per connected component, deterministic vs. agentic conversion and record the
+   fingerprint-bound `metadata/conversion_plan.json` (`flowx-route`)
+4. **Convert** — Convert the source's tasks to Databricks IR (deterministic + agentic), then fill any
+   routed-agentic groups (per-pipeline merge or cross-pipeline combine)
+5. **Package** — Generate Databricks Declarative Automation Bundles for deployment
 
 Each phase builds on the output of the previous phase. The user is shown a summary and asked to confirm before proceeding to the next phase.
 
@@ -101,8 +106,11 @@ discover/convert and for `inputs discover`/`inputs convert`; for Airflow, swap `
 ```
 flowx(command="inputs", parameters={"phase": "discover", "source": "adf"})  # source req for discover/convert
 flowx(command="discover", parameters={"source": "adf", "adf_definitions": {...}, "output_dir": ..., "pipeline": ...})
+flowx(command="enrich", parameters={"output_dir": ..., "insights": {...}})  # default: author + merge the insights layer (see flowx-enrich)
+flowx(command="route", parameters={"output_dir": ...})  # recommend; re-call with "plan": {...} to record + edit the report (see flowx-route)
 flowx(command="convert", parameters={"source": "adf", "output_dir": ..., "pipeline": ...})
-flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # ADF only, if agentic results
+flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # ADF only, per-pipeline agentic fill
+flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [...], "pipelines": [...]})  # cross-pipeline combine of a routed-agentic group
 flowx(command="inspect", parameters={"report_path": ...})
 flowx(command="apply_answers", parameters={"report_path": ..., "answers": [...], "output_dir": ...})
 flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema": ...})
@@ -209,7 +217,35 @@ If the user says no, explain the options:
 - Review `<output_dir>/metadata/inventory.json` (and `profile_report.csv`) to understand unsupported activities and pipeline complexity
 - Manually classify activities before proceeding
 
-If the user says yes, proceed to step 4.
+If the user says yes, proceed to step 3.5.
+
+### Step 3.5 — Enrich the inventory (default)
+
+By default, chain into enrichment: invoke the **`flowx:flowx-enrich`** skill to author the agentic
+`insights` layer (factory-wide recommendation, per-pipeline intent + recommended Databricks patterns,
+cross-pipeline relationships) and merge it into `<output_dir>/metadata/inventory.json`. flowx has no
+LLM — you author the insights JSON and `enrich` validates + merges it additively, leaving every
+deterministic inventory key byte-identical. The routing step consumes this block to present the
+agentic conversion option per group.
+
+**Skip only for a deterministic-only pass.** When the user explicitly asked for a headless,
+deterministic-only migration (no agent/LLM authoring), skip enrich — the deterministic
+`inventory.json` is complete and `flowx-route` still works from the structure alone. Otherwise enrich
+by default.
+
+### Step 3.6 — Route the conversion (deterministic vs. agentic)
+
+Invoke the **`flowx:flowx-route`** skill to recommend a per-connected-component route, take the
+user's decision (interactive, or an authored plan), and record the fingerprint-bound
+`<output_dir>/metadata/conversion_plan.json`. Recording a plan edits `.work/translation_report.json`
+so every routed-**agentic** group's tasks become placeholder gaps; deterministic groups (and a
+no-agentic-route plan) leave the report untouched — non-breaking.
+
+`route` can trigger the convert phase in-process when the report is missing (pass `--source` /
+`--source-path`), so it may run before or after Step 4. Routed-agentic groups are **filled** in Step
+5.2 (per-pipeline merge or cross-pipeline combine). If the user wants a straight deterministic
+migration, they can accept the all-deterministic recommendation here and the rest of the flow is
+unchanged.
 
 ### Step 4 — Phase 2: Convert
 
@@ -240,6 +276,22 @@ For failures, suggest:
 - Manual notebook creation
 - Retry with additional context
 - Skip and add placeholder
+
+### Step 5.05 — Fill routed-agentic groups (before just-in-time config)
+
+If Step 3.6 routed any component **agentic**, its pipelines' tasks are now `PlaceholderActivity`
+nodes with one tagged gap each. Fill them via the **`flowx:flowx-route`** skill (Step 3 there) before
+the just-in-time config below, so the filled tasks get configuration-stamped and packaged:
+
+- **Per-pipeline** (the pipeline stays 1:1): author one result JSON per gap and merge with
+  `convert --merge-agentic --report .work/translation_report.json --agentic-results <dir>` (ADF only).
+- **Cross-pipeline COMBINE** (N pipelines → M, e.g. one Lakeflow Connect pipeline): author the
+  replacement pipeline IR (typically with `AgenticComponentActivity` nodes) and run
+  `fill-agentic combine --output-dir <output_dir> --members "<a,b,...>" --pipelines-path <file>`;
+  the members must exactly match the routed-agentic component and the merged report is validated
+  structurally before it is written.
+
+Skip this step entirely when no component was routed agentic.
 
 ### Step 5.1 — Gather just-in-time translation configuration
 

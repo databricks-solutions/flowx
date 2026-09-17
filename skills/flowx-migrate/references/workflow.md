@@ -60,6 +60,28 @@ ADF JSON Exports
 - Datasets and linked services are parsed for context but not independently translated — they inform the activity translators.
 - Triggers are included in the inventory and translated in phase 2.
 
+## Between Discover and Convert: Enrich (default) + Route
+
+**Skills:** `flowx:flowx-enrich`, `flowx:flowx-route`
+
+After discover writes the deterministic inventory, the standard flow enriches and routes before
+convert. Both are additive and contain **no LLM** — the agent authors, the library validates and
+merges:
+
+- **Enrich (default):** the agent authors an `insights` layer (factory-wide recommendation,
+  per-pipeline intent + recommended Databricks patterns, cross-pipeline relationships) and `enrich`
+  merges it into `metadata/inventory.json` under a single additive `insights` key, leaving every
+  deterministic key byte-identical. Skippable for a deterministic-only, headless pass.
+- **Route:** groups pipelines into connected components over control lineage and, per component,
+  records a `deterministic` or `agentic` decision as the fingerprint-bound
+  `metadata/conversion_plan.json`. Recording an agentic decision edits `.work/translation_report.json`
+  so those groups' tasks become placeholder gaps; a fully-deterministic plan (or no plan) leaves
+  convert/package behaving exactly as before — the non-breaking guarantee.
+
+Routed-agentic groups are then filled during convert: per-pipeline via `convert --merge-agentic`, or
+cross-pipeline (N→M, e.g. a Lakeflow Connect collapse) via `fill-agentic combine` using authored
+`AgenticComponentActivity` nodes.
+
 ## Phase 2: Convert
 
 **Skill:** `flowx:flowx-convert`
