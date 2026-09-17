@@ -11,6 +11,7 @@
   "skills": [
     "./skills/flowx-setup",
     "./skills/flowx-discover",
+    "./skills/flowx-enrich",
     "./skills/flowx-convert",
     "./skills/flowx-package",
     "./skills/flowx-migrate"
