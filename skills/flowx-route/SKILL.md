@@ -190,7 +190,8 @@ verify the target is a `PlaceholderActivity`, so make sure each `activity_name` 
 agentic gap. Other pipelines and unmatched tasks are left untouched.
 
 MCP: `flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})`.
-The matched task's status becomes `translated`; the command exits non-zero if any result can't be
+The matched task is replaced in place by the authored task definition (carrying whatever fields that
+task defines; the merge itself sets no `status`); the command exits non-zero if any result can't be
 matched.
 
 ### 3b — Cross-pipeline COMBINE (N pipelines → M)
