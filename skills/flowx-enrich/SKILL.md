@@ -84,10 +84,14 @@ narrative.
      required.
 
    `release_state` is **required** on any pattern you mark `simplification_pattern: true` (a distinctive
-   capability must declare its verified release state). Separately from *how the state is surfaced*, the
-   recommendation-eligibility rule still stands: treat a **Private Preview** feature as `doNotSuggest`
-   unless the workspace has **confirmed enrollment/entitlement** (not merely user acceptance). This
-   mirrors the Airflow `lakeflow-connect` grounding rule.
+   capability must declare its verified release state). There is **no recommendation-eligibility gate** on
+   top of that: even a verified **Private Preview** feature may be suggested. **Disclose the release state
+   and let the customer decide** — record the verified state on the structured `release_state` /
+   `release_state_source` fields, note that Private Preview typically requires workspace
+   enrollment/entitlement, and leave the decision to proceed to the customer. The tool does **not**
+   unilaterally refuse to suggest it (there is no `doNotSuggest` gate). This is disclosure, not a gate —
+   and it does not relax the rule above: you still **verify the release state against the current public
+   Databricks docs before recommending** (never "recommend now, verify later").
 3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
    and, only when clean, merges it in atomically. On any violation the inventory is left untouched
    and you get the full list of problems to fix in one pass.
