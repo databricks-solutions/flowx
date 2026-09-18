@@ -108,6 +108,7 @@ def _lfc_pipeline() -> dict[str, Any]:
     }
     return {
         "name": "orders_lfc",
+        "tags": {"source": "adf"},
         "tasks": [
             {
                 "name": "Ingest orders",
@@ -119,6 +120,13 @@ def _lfc_pipeline() -> dict[str, Any]:
             }
         ],
     }
+
+
+def _named_lfc_pipeline(name: str) -> dict[str, Any]:
+    """A correctly-tagged authored combine pipeline with a caller-chosen ``name``."""
+    pipeline = _lfc_pipeline()
+    pipeline["name"] = name
+    return pipeline
 
 
 def _write_work(output_dir: Path, report: dict[str, Any], gaps: list[dict[str, Any]] | None = None) -> None:
@@ -461,6 +469,95 @@ def test_apply_combine_fill_rejects_and_does_not_write_on_dangling_reference(tmp
     assert any("dangling_pipeline_reference" in violation for violation in result["violations"])
     # The report on disk is untouched when validation fails.
     assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+
+
+def test_combine_rejects_an_authored_pipeline_missing_the_source_tag(tmp_path: Path) -> None:
+    """FIX 2: an authored pipeline without tags.source == 'adf' fails closed at combine (nothing written)."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_before = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
+    untagged = _lfc_pipeline()
+    del untagged["tags"]
+
+    result = apply_combine_fill(tmp_path, ["parent", "child"], [untagged])
+
+    assert result["ok"] is False
+    assert any("tags.source" in violation and "adf" in violation for violation in result["violations"])
+    # Nothing is written when the source tag is missing.
+    assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+
+
+def test_combine_rejects_an_authored_pipeline_with_wrong_source_tag(tmp_path: Path) -> None:
+    """A non-'adf' source tag is rejected the same way (routing/agentic is ADF-only)."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    mistagged = _lfc_pipeline()
+    mistagged["tags"] = {"source": "airflow"}
+
+    result = apply_combine_fill(tmp_path, ["parent", "child"], [mistagged])
+
+    assert result["ok"] is False
+    assert any("tags.source" in violation for violation in result["violations"])
+
+
+def test_combine_is_idempotent_running_twice_yields_no_duplicate(tmp_path: Path) -> None:
+    """FIX 3: re-running combine with the same members + authored pipeline does not duplicate it."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+
+    first = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert first["ok"] is True
+    assert first["already_combined"] is False
+
+    # The recorded plan still lists {parent, child}, so the plan/membership check passes again; the
+    # report, however, now contains only the authored pipeline. A naive re-run would re-append it.
+    second = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert second["ok"] is True
+    assert second["already_combined"] is True
+
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    names = [pipeline["name"] for pipeline in report["pipelines"]]
+    assert names == ["orders_lfc"]  # exactly one authored pipeline, no duplicate
+
+
+def test_combine_idempotent_with_a_differently_named_authored_pipeline(tmp_path: Path) -> None:
+    """FIX 3 (a): a second combine whose authored replacement is renamed must NOT duplicate.
+
+    Name-set matching would fail here (the new name is absent from the report, the old members are
+    already gone), fall through, and append a second authored pipeline. Provenance keyed on
+    (component_id, fingerprint) catches the re-run regardless of the authored name.
+    """
+    _setup_routed_agentic(tmp_path, decision="agentic")
+
+    first = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc")])
+    assert first["ok"] is True and first["already_combined"] is False
+
+    # Same members, but the authored replacement is named differently this time.
+    second = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc_v2")])
+    assert second["ok"] is True
+    assert second["already_combined"] is True
+
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    names = [pipeline["name"] for pipeline in report["pipelines"]]
+    assert names == ["orders_lfc"]  # first authored pipeline kept; the renamed re-run added nothing
+
+
+def test_combine_idempotent_when_authored_name_collides_with_a_former_member(tmp_path: Path) -> None:
+    """FIX 3 (b): an authored name colliding with a former member is still detected as already-combined.
+
+    After the first combine the report holds a pipeline named 'parent' (a former member). Name-based
+    detection would see 'parent' present and conclude the combine had not happened; provenance keeps
+    the detection correct and independent of names.
+    """
+    _setup_routed_agentic(tmp_path, decision="agentic")
+
+    first = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("parent")])
+    assert first["ok"] is True and first["already_combined"] is False
+
+    second = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("parent")])
+    assert second["ok"] is True
+    assert second["already_combined"] is True
+
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    names = [pipeline["name"] for pipeline in report["pipelines"]]
+    assert names == ["parent"]  # exactly one authored pipeline, no duplicate
 
 
 # --------------------------------------------------------------------------- #

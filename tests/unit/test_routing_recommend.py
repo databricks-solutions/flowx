@@ -167,7 +167,132 @@ def test_agentic_option_surfaces_insight_patterns_with_simplification_prominent(
 def test_agentic_option_empty_when_no_insights() -> None:
     graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook")])]
     _, options = recommend_component(["a"], _inventory(graphs))
-    assert options["agentic"] == {"recommended_patterns": [], "has_simplification": False}
+    assert options["agentic"] == {
+        "recommended_patterns": [],
+        "has_simplification": False,
+        "release_disclosures": [],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Agentic option: neutral GA/Preview release-state disclosure (no warnings).
+# --------------------------------------------------------------------------- #
+
+
+def _insights_one_pattern(pattern: dict[str, Any]) -> dict[str, Any]:
+    """An insights block with a single recommended pattern on pipeline 'a'."""
+    return {"pipeline_insights": [{"pipeline": "a", "recommended_patterns": [pattern]}]}
+
+
+def test_agentic_option_ga_and_unknown_are_silent() -> None:
+    # 'ga' and 'unknown' both contribute NO disclosure entry -- 'unknown' is treated exactly like 'ga'.
+    for state in ("ga", "unknown"):
+        graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook")])]
+        insights = _insights_one_pattern(
+            {
+                "pattern": "Lakeflow Job",
+                "fit": "Native orchestration",
+                "simplification_pattern": False,
+                "release_state": state,
+            }
+        )
+        _, options = recommend_component(["a"], _inventory(graphs, insights=insights))
+        assert options["agentic"]["release_disclosures"] == [], f"{state!r} must be silent"
+
+
+def test_agentic_option_public_preview_is_disclosed_as_production_ready() -> None:
+    graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook")])]
+    insights = _insights_one_pattern(
+        {
+            "pattern": "Lakeflow Connect",
+            "fit": "Managed ingestion",
+            "simplification_pattern": True,
+            "release_state": "public_preview",
+            "release_state_source": "https://docs.databricks.com/ingestion/lakeflow-connect/",
+        }
+    )
+    _, options = recommend_component(["a"], _inventory(graphs, insights=insights))
+    disclosures = options["agentic"]["release_disclosures"]
+    assert len(disclosures) == 1
+    disclosure = disclosures[0]
+    assert disclosure["release_state"] == "public_preview"
+    assert disclosure["label"] == "Public Preview (production-ready)"
+    assert disclosure["pipeline"] == "a"
+    # A neutral disclosure -- no warning/severity framing.
+    assert "severity" not in disclosure
+    # The cited source rides along into the human-readable disclosure.
+    assert "docs.databricks.com" in disclosure["message"]
+
+
+def test_agentic_option_private_preview_and_beta_are_plain_labels() -> None:
+    for state, expected_label in (("private_preview", "Private Preview"), ("beta", "Beta")):
+        graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook")])]
+        insights = _insights_one_pattern(
+            {
+                "pattern": "Some capability",
+                "fit": "A capability",
+                "simplification_pattern": False,
+                "release_state": state,
+                "release_state_source": "https://docs.databricks.com/some-feature/",
+            }
+        )
+        _, options = recommend_component(["a"], _inventory(graphs, insights=insights))
+        disclosures = options["agentic"]["release_disclosures"]
+        assert len(disclosures) == 1
+        assert disclosures[0]["label"] == expected_label
+        assert disclosures[0]["release_state"] == state
+        # Plain factual label -- no warning/severity field.
+        assert "severity" not in disclosures[0]
+
+
+def test_agentic_option_discloses_each_non_silent_pattern() -> None:
+    # A component with a public-preview pattern and a private-preview pattern discloses BOTH as plain
+    # neutral labels (public preview noted production-ready); a ga/unknown pattern would add nothing.
+    graphs = [
+        SourceGraph(
+            name="parent",
+            source="unit",
+            tasks=[_node("call_child", "ExecutePipeline")],
+            lineage=Lineage(
+                control_edges=[
+                    ControlEdge(source_workflow="parent", target_workflow="child", via_task_key="call_child")
+                ]
+            ),
+        ),
+        SourceGraph(name="child", source="unit", tasks=[_node("load", "Notebook")]),
+    ]
+    insights = {
+        "pipeline_insights": [
+            {
+                "pipeline": "parent",
+                "recommended_patterns": [
+                    {
+                        "pattern": "Public thing",
+                        "fit": "x",
+                        "simplification_pattern": False,
+                        "release_state": "public_preview",
+                        "release_state_source": "https://docs.databricks.com/a/",
+                    }
+                ],
+            },
+            {
+                "pipeline": "child",
+                "recommended_patterns": [
+                    {
+                        "pattern": "Gated thing",
+                        "fit": "y",
+                        "simplification_pattern": False,
+                        "release_state": "private_preview",
+                        "release_state_source": "https://docs.databricks.com/b/",
+                    }
+                ],
+            },
+        ]
+    }
+    _, options = recommend_component(["child", "parent"], _inventory(graphs, insights=insights))
+    disclosures = options["agentic"]["release_disclosures"]
+    labels = {d["release_state"]: d["label"] for d in disclosures}
+    assert labels == {"public_preview": "Public Preview (production-ready)", "private_preview": "Private Preview"}
 
 
 def test_build_recommendation_emits_both_options_and_a_default_plan() -> None:

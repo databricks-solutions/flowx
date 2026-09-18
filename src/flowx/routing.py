@@ -236,12 +236,55 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
     }
 
 
+# Neutral disclosure labels for the agentic option, keyed by release state. ``"ga"`` and ``"unknown"``
+# carry NO entry -- they are silent (we do not surface them, and ``"unknown"`` is treated exactly like
+# ``"ga"``). ``"public_preview"`` is labelled production-ready per Databricks; ``"private_preview"`` /
+# ``"beta"`` are stated as plain factual labels. This is disclosure, not a warning.
+_RELEASE_STATE_LABELS: dict[str, str] = {
+    "public_preview": "Public Preview (production-ready)",
+    "private_preview": "Private Preview",
+    "beta": "Beta",
+}
+
+
+def _release_disclosure(pattern: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a neutral release-state disclosure for one recommended pattern, or ``None``.
+
+    Returns ``None`` for ``"ga"`` / ``"unknown"`` (both silent -- ``"unknown"`` is treated exactly like
+    ``"ga"``) and for a pattern with no ``release_state``. ``"public_preview"`` / ``"private_preview"``
+    / ``"beta"`` each yield a factual state ``label`` -- ``public_preview`` noted as production-ready --
+    with no warning framing. The cited source is appended when the insight carried one.
+    """
+    release_state = pattern.get("release_state")
+    label = _RELEASE_STATE_LABELS.get(release_state) if isinstance(release_state, str) else None
+    if label is None:
+        return None
+    message = f"'{pattern.get('pattern')}' (pipeline '{pattern.get('pipeline')}'): {label}."
+    source = pattern.get("release_state_source")
+    if isinstance(source, str) and source.strip():
+        message = f"{message} Source: {source.strip()}"
+    return {
+        "pipeline": pattern.get("pipeline"),
+        "pattern": pattern.get("pattern"),
+        "release_state": release_state,
+        "label": label,
+        "message": message,
+    }
+
+
 def _agentic_option(members: list[str], inventory: dict[str, Any]) -> dict[str, Any]:
     """Surface the agent-authored recommended patterns for a component as a first-class option.
 
     Draws every ``recommended_patterns`` entry from the member pipelines' insights, tagging each with
-    its pipeline, and flags whether any is a ``simplification_pattern`` (a distinctive re-architecture
-    such as a multi-pipeline -> Lakeflow Connect collapse) so the user sees it prominently.
+    its pipeline (the per-pattern ``release_state`` / ``release_state_source`` ride along in the
+    ``{**pattern}`` spread), and computes two signals for the user:
+
+    * ``has_simplification`` -- any pattern is a ``simplification_pattern`` (a distinctive
+      re-architecture such as a multi-pipeline -> Lakeflow Connect collapse), surfaced prominently.
+    * ``release_disclosures`` -- a neutral, per-pattern disclosure of any non-silent ``release_state``
+      (:data:`~flowx.models.conversion_plan.DISCLOSED_RELEASE_STATES`): ``public_preview`` labelled
+      production-ready, ``private_preview`` / ``beta`` stated as plain labels. ``ga`` and ``unknown``
+      add nothing (silent). Factual labelling, not a warning.
     """
     insights_by_pipeline = _pipeline_insights(inventory)
     recommended_patterns: list[dict[str, Any]] = []
@@ -253,7 +296,16 @@ def _agentic_option(members: list[str], inventory: dict[str, Any]) -> dict[str, 
             if isinstance(pattern, dict):
                 recommended_patterns.append({"pipeline": pipeline, **pattern})
     has_simplification = any(pattern.get("simplification_pattern") for pattern in recommended_patterns)
-    return {"recommended_patterns": recommended_patterns, "has_simplification": has_simplification}
+    release_disclosures: list[dict[str, Any]] = []
+    for pattern in recommended_patterns:
+        disclosure = _release_disclosure(pattern)
+        if disclosure is not None:
+            release_disclosures.append(disclosure)
+    return {
+        "recommended_patterns": recommended_patterns,
+        "has_simplification": has_simplification,
+        "release_disclosures": release_disclosures,
+    }
 
 
 def recommend_component(members: list[str], inventory: dict[str, Any]) -> tuple[str, dict[str, Any]]:

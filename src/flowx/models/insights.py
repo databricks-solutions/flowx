@@ -46,6 +46,25 @@ MAX_RECOMMENDED_PATTERNS = 4
 # The confidence levels an ``inferred`` edge may carry.
 CONFIDENCE_LEVELS: tuple[str, ...] = ("high", "medium", "low")
 
+# The Databricks GA/Preview release states a recommended pattern may declare, verified against
+# current public docs at authoring time (never hardcoded):
+#
+# * ``"ga"`` -- Generally Available.
+# * ``"public_preview"`` -- Public Preview; generally production-ready and supported per Databricks.
+# * ``"private_preview"`` -- available only to workspaces with confirmed enrollment/entitlement.
+# * ``"beta"`` -- an early, pre-GA release.
+# * ``"unknown"`` -- the release state could not be verified.
+#
+# How each state is *surfaced* -- a neutral factual disclosure, never a warning -- is described on
+# :attr:`RecommendedPattern.release_state`.
+RELEASE_STATES: tuple[str, ...] = ("ga", "public_preview", "private_preview", "beta", "unknown")
+
+# Release states that MUST cite a source (``release_state_source``): the non-GA preview/beta states
+# whose availability and eligibility are not self-evident. ``"ga"`` and ``"unknown"`` need no citation
+# (``"ga"`` is the stable default; ``"unknown"`` is by definition unverifiable, so it carries no claim
+# to ground).
+RELEASE_STATES_REQUIRING_SOURCE: tuple[str, ...] = ("public_preview", "private_preview", "beta")
+
 
 @dataclass(slots=True, kw_only=True)
 class LineageEdgeRef:
@@ -98,11 +117,27 @@ class RecommendedPattern:
             or system tables replacing a home-grown logging tier. ``False`` for a like-for-like
             port and for plain native building blocks that merely re-home the same work.
             Rank the ``True`` patterns first.
+        release_state: The pattern's verified Databricks release state -- one of
+            :data:`RELEASE_STATES` -- established against **current public docs** at authoring time
+            (never hardcoded). It is surfaced downstream (routing) as a neutral factual **disclosure**,
+            never a warning: ``"ga"`` and ``"unknown"`` are silent (``"unknown"`` is treated exactly
+            like ``"ga"`` -- the two are indistinguishable in the surfaced output); ``"public_preview"``
+            is disclosed as production-ready (Public Preview is generally production-ready and supported
+            per Databricks); ``"private_preview"`` and ``"beta"`` are stated as plain factual labels.
+            **Required** whenever :attr:`simplification_pattern` is ``True`` -- a distinctive capability
+            must declare its release state; optional otherwise, defaulting to ``None`` (unstated) for
+            back-compat with insights authored before this field.
+        release_state_source: The doc URL / citation grounding :attr:`release_state`. **Required**
+            (a non-empty string) whenever ``release_state`` is one of
+            :data:`RELEASE_STATES_REQUIRING_SOURCE` (``"public_preview"`` / ``"private_preview"`` /
+            ``"beta"``); not required for ``"ga"`` or ``"unknown"``.
     """
 
     pattern: str
     fit: str
     simplification_pattern: bool
+    release_state: Literal["ga", "public_preview", "private_preview", "beta", "unknown"] | None = None
+    release_state_source: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)

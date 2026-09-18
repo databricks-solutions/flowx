@@ -27,6 +27,8 @@ from flowx.discovery_insights import (
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.models.discovery import CONCEPT_NOTEBOOK, CONCEPT_RUN_WORKFLOW, SourceGraph, SourceNode
 from flowx.models.insights import (
+    RELEASE_STATES,
+    RELEASE_STATES_REQUIRING_SOURCE,
     Insights,
     LineageEdgeRef,
     PipelineInsight,
@@ -79,6 +81,7 @@ def _valid_insights() -> dict[str, Any]:
                     "pattern": "Lakeflow Connect SQL Server connector",
                     "fit": "Replaces the child extractor",
                     "simplification_pattern": True,
+                    "release_state": "ga",
                 },
                 {
                     "pattern": "Parameterised Lakeflow Job",
@@ -95,7 +98,13 @@ def _valid_insights() -> dict[str, Any]:
                 "intent": "Extract a table into the lake",
                 "databricks_pattern": "Managed ingestion",
                 "recommended_patterns": [
-                    {"pattern": "Lakeflow Connect", "fit": "Managed CDC ingestion", "simplification_pattern": True}
+                    {
+                        "pattern": "Lakeflow Connect",
+                        "fit": "Managed CDC ingestion",
+                        "simplification_pattern": True,
+                        "release_state": "public_preview",
+                        "release_state_source": "https://docs.databricks.com/ingestion/lakeflow-connect/",
+                    }
                 ],
                 "conversion_notes": ["Point the connector at the same source"],
                 "risk_if_ignored": "Bespoke extractor code carries forward",
@@ -258,7 +267,10 @@ def test_unknown_edge_type_is_rejected() -> None:
     raw = _valid_insights()
     raw["pipeline_relationships"][0]["lineage_edge"]["edge_type"] = "data"
     violations = validate_insights(raw, _inventory())
-    assert any("edge_type must be 'control' or 'inferred'" in v for v in violations)
+    edge_type_violations = [v for v in violations if "edge_type must be 'control' or 'inferred'" in v]
+    assert edge_type_violations
+    # The message must steer a 'data' coupling onto the 'inferred' tier rather than just rejecting it.
+    assert any("inferred" in v and "evidence" in v and "confidence" in v for v in edge_type_violations)
 
 
 def test_unknown_top_level_key_including_library_owned_fields() -> None:
@@ -291,6 +303,79 @@ def test_empty_recommended_patterns_list_is_rejected() -> None:
     raw["pipeline_insights"][0]["recommended_patterns"] = []
     violations = validate_insights(raw, _inventory())
     assert any("must contain 1-4 patterns when present" in v for v in violations)
+
+
+# --------------------------------------------------------------------------- #
+# Validation: the structured GA/Preview release-state field (tiered surfacing).
+# --------------------------------------------------------------------------- #
+
+
+def test_release_state_enum_accepts_every_known_value() -> None:
+    """Every value in RELEASE_STATES validates on a recommended pattern (with a source when needed)."""
+    for state in RELEASE_STATES:
+        raw = _valid_insights()
+        pattern = raw["pipeline_insights"][0]["recommended_patterns"][0]
+        pattern["release_state"] = state
+        # A cited source keeps the preview/beta states valid; 'ga'/'unknown' simply ignore it.
+        pattern["release_state_source"] = "https://docs.databricks.com/some-feature/"
+        assert validate_insights(raw, _inventory()) == [], f"{state!r} should validate"
+
+
+def test_release_state_bad_value_is_rejected() -> None:
+    raw = _valid_insights()
+    raw["pipeline_insights"][0]["recommended_patterns"][0]["release_state"] = "prod"
+    violations = validate_insights(raw, _inventory())
+    assert any("'release_state' must be one of" in v and "'prod'" in v for v in violations)
+
+
+def test_release_state_required_when_simplification_pattern_true() -> None:
+    """A simplification pattern MUST declare a release_state -- the intended new strictness."""
+    raw = _valid_insights()
+    pattern = raw["pipeline_insights"][0]["recommended_patterns"][0]
+    assert pattern["simplification_pattern"] is True
+    del pattern["release_state"]
+    del pattern["release_state_source"]
+    violations = validate_insights(raw, _inventory())
+    assert any("'release_state' is required when 'simplification_pattern' is true" in v for v in violations)
+
+
+def test_release_state_not_required_when_simplification_pattern_false() -> None:
+    """A like-for-like port (simplification_pattern False) may omit release_state and still validate."""
+    raw = _valid_insights()
+    raw["pipeline_insights"][0]["recommended_patterns"] = [
+        {"pattern": "Parameterised Lakeflow Job", "fit": "Like-for-like port", "simplification_pattern": False}
+    ]
+    assert validate_insights(raw, _inventory()) == []
+
+
+def test_release_state_source_required_for_preview_and_beta_states() -> None:
+    for state in RELEASE_STATES_REQUIRING_SOURCE:
+        raw = _valid_insights()
+        pattern = raw["pipeline_insights"][0]["recommended_patterns"][0]
+        pattern["release_state"] = state
+        pattern.pop("release_state_source", None)
+        violations = validate_insights(raw, _inventory())
+        assert any("'release_state_source'" in v and "required" in v and repr(state) in v for v in violations), (
+            f"{state!r} must require a cited source"
+        )
+
+
+def test_release_state_source_not_required_for_ga_or_unknown() -> None:
+    for state in ("ga", "unknown"):
+        raw = _valid_insights()
+        pattern = raw["pipeline_insights"][0]["recommended_patterns"][0]
+        pattern["release_state"] = state
+        pattern.pop("release_state_source", None)
+        assert validate_insights(raw, _inventory()) == [], f"{state!r} must not require a source"
+
+
+def test_release_state_source_empty_string_is_rejected_for_preview() -> None:
+    raw = _valid_insights()
+    pattern = raw["pipeline_insights"][0]["recommended_patterns"][0]
+    pattern["release_state"] = "private_preview"
+    pattern["release_state_source"] = "   "
+    violations = validate_insights(raw, _inventory())
+    assert any("'release_state_source'" in v and "'private_preview'" in v for v in violations)
 
 
 def test_system_recommendation_requires_headline_and_patterns() -> None:

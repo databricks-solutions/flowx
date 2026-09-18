@@ -196,6 +196,7 @@ def _lfc_pipeline() -> dict[str, Any]:
     definition = {"name": "orders_ingestion", "catalog": "${var.catalog}", "target": "${var.schema}"}
     return {
         "name": "orders_lfc",
+        "tags": {"source": "adf"},
         "tasks": [
             {
                 "name": "Ingest orders",

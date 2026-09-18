@@ -18,7 +18,7 @@ This is Phase-1, descriptive-only routing metadata: recording a plan does not al
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 # The plan schema version stamped onto the recorded artifact. Bump on any backwards-incompatible
 # change to the recorded shape.
@@ -28,6 +28,12 @@ SCHEMA_VERSION = "1"
 DECISION_DETERMINISTIC = "deterministic"
 DECISION_AGENTIC = "agentic"
 DECISIONS: tuple[str, ...] = (DECISION_DETERMINISTIC, DECISION_AGENTIC)
+
+# Recommended-pattern release states surfaced as a neutral disclosure label on the agentic option
+# (:attr:`AgenticOption.release_disclosures`). ``"ga"`` and ``"unknown"`` are deliberately **silent**
+# -- they contribute no entry, and ``"unknown"`` is treated exactly like ``"ga"`` (we do not surface
+# or distinguish it). This is factual labelling, never a warning or an alarm.
+DISCLOSED_RELEASE_STATES: tuple[str, ...] = ("public_preview", "private_preview", "beta")
 
 
 @dataclass(slots=True, kw_only=True)
@@ -62,12 +68,20 @@ class AgenticPattern:
         fit: One line on why it fits / what it replaces.
         simplification_pattern: ``True`` when the pattern uses a distinctive capability that collapses
             a whole legacy pattern (e.g. a multi-pipeline -> Lakeflow Connect re-architecture).
+        release_state: The pattern's verified Databricks GA/Preview release state, carried verbatim
+            from the insight (one of :data:`~flowx.models.insights.RELEASE_STATES`, or ``None`` when
+            the insight left it unstated). Drives the neutral release-state disclosure on
+            :class:`AgenticOption`.
+        release_state_source: The doc URL / citation grounding :attr:`release_state`, carried verbatim
+            from the insight; ``None`` when unstated.
     """
 
     pipeline: str
     pattern: str
     fit: str
     simplification_pattern: bool
+    release_state: Literal["ga", "public_preview", "private_preview", "beta", "unknown"] | None = None
+    release_state_source: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -79,10 +93,18 @@ class AgenticOption:
             each tagged with its pipeline. Empty when the inventory carries no insights.
         has_simplification: ``True`` when any recommended pattern is a ``simplification_pattern`` --
             surfaced prominently so the user sees a re-architecture option, not a buried sub-key.
+        release_disclosures: A neutral, per-pattern **disclosure** of any non-silent ``release_state``
+            -- one entry per recommended pattern whose state is in :data:`DISCLOSED_RELEASE_STATES`,
+            carrying the ``pipeline``, ``pattern``, ``release_state``, and a factual ``label``
+            (``public_preview`` labelled "Public Preview (production-ready)"; ``private_preview`` /
+            ``beta`` stated as the plain labels "Private Preview" / "Beta"). ``"ga"`` and ``"unknown"``
+            are **silent** -- they add nothing (``"unknown"`` is treated exactly like ``"ga"``). Empty
+            when nothing needs disclosing. Factual labelling, never a warning or an alarm.
     """
 
     recommended_patterns: list[AgenticPattern] = field(default_factory=list)
     has_simplification: bool = False
+    release_disclosures: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)
