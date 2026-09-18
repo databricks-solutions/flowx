@@ -37,6 +37,8 @@ from typing import Any
 from flowx.models.insights import (
     CONFIDENCE_LEVELS,
     MAX_RECOMMENDED_PATTERNS,
+    RELEASE_STATES,
+    RELEASE_STATES_REQUIRING_SOURCE,
     SCHEMA_VERSION,
 )
 
@@ -57,7 +59,7 @@ _INSIGHT_KEYS = {
     "conversion_notes",
     "risk_if_ignored",
 }
-_RECOMMENDED_PATTERN_KEYS = {"pattern", "fit", "simplification_pattern"}
+_RECOMMENDED_PATTERN_KEYS = {"pattern", "fit", "simplification_pattern", "release_state", "release_state_source"}
 _SYSTEM_RECOMMENDATION_KEYS = {"headline", "recommended_patterns", "cascade", "decision_driver"}
 _RELATIONSHIP_KEYS = {
     "from_pipeline",
@@ -314,6 +316,45 @@ def _validate_recommended_patterns(value: Any, loc: str) -> list[str]:
                 f"{pattern_loc}: 'simplification_pattern' must be a boolean (true/false), "
                 f"got {type(pattern.get('simplification_pattern')).__name__}"
             )
+        problems.extend(_validate_release_state(pattern, pattern_loc))
+    return problems
+
+
+def _validate_release_state(pattern: dict[str, Any], loc: str) -> list[str]:
+    """Validate a recommended pattern's optional GA/Preview ``release_state`` fields.
+
+    The release state is authored judgment the deterministic layer can never derive, verified against
+    current public Databricks docs. Rules (all collected, never fail-fast, matching the rest of the
+    validator):
+
+    * ``release_state``, when set, must be one of :data:`~flowx.models.insights.RELEASE_STATES`.
+    * ``release_state`` is **required** whenever ``simplification_pattern`` is ``True`` -- a
+      distinctive capability that collapses a legacy pattern must declare its verified release state
+      so the downstream routing surface can warn (private preview / beta / unknown) or disclose
+      (public preview) correctly rather than recommend blindly.
+    * ``release_state_source`` (a non-empty citation) is **required** whenever ``release_state`` is a
+      non-GA preview/beta state (:data:`~flowx.models.insights.RELEASE_STATES_REQUIRING_SOURCE`); it
+      is not required for ``"ga"`` (the stable default) or ``"unknown"`` (no claim to ground).
+    """
+    problems: list[str] = []
+    release_state = pattern.get("release_state")
+    source = pattern.get("release_state_source")
+
+    if release_state is not None and release_state not in RELEASE_STATES:
+        allowed = ", ".join(repr(state) for state in RELEASE_STATES)
+        problems.append(f"{loc}: 'release_state' must be one of {{{allowed}}}, got {release_state!r}")
+
+    if pattern.get("simplification_pattern") is True and release_state is None:
+        problems.append(
+            f"{loc}: 'release_state' is required when 'simplification_pattern' is true "
+            f"(a distinctive capability must declare its verified GA/Preview release state)"
+        )
+
+    if release_state in RELEASE_STATES_REQUIRING_SOURCE and (not isinstance(source, str) or not source.strip()):
+        problems.append(
+            f"{loc}: 'release_state_source' (a non-empty doc URL / citation) is required when "
+            f"'release_state' is {release_state!r}"
+        )
     return problems
 
 

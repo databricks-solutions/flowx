@@ -59,18 +59,36 @@ narrative.
    each pipeline's *intent* and the Databricks patterns that fit. Ground every recommended pattern in
    a **real, publicly-documented** Databricks capability; never invent a product name.
 
-   **Verify GA/Preview status before recommending a connector or Lakeflow Connect pattern.** Do
-   **not** hardcode GA/Preview status or dates — release state changes. Before recommending a
-   connector or a Lakeflow Connect ingestion pattern (or naming it in `recommended_patterns` /
-   `system_recommendation`), you **must** verify against the **current public Databricks docs** both
-   that (a) the feature's GA-vs-Preview release state is acceptable and (b) it is available in the
-   target workspace. In the insight, **record the resolved GA/Preview status and cite the doc source**
-   in the pattern's `fit` / `conversion_notes`. Treat a **Private Preview** feature as `doNotSuggest`
-   unless the workspace has **confirmed enrollment/entitlement** (not merely user acceptance). If you
-   cannot verify a capability's current release state and workspace availability, **do not recommend
-   it** — recommend a verified alternative (e.g. a like-for-like Lakeflow Job port) instead. Never emit
-   a "recommend now, verify later" conditional recommendation: verification happens **before** the
-   recommendation, not after. This mirrors the Airflow `lakeflow-connect` grounding rule.
+   **Verify GA/Preview status before recommending a connector or Lakeflow Connect pattern, then
+   record it as a structured field.** Do **not** hardcode GA/Preview status or dates — release state
+   changes. Before recommending a connector or a Lakeflow Connect ingestion pattern (or naming it in
+   `recommended_patterns` / `system_recommendation`), you **must** verify against the **current public
+   Databricks docs** both that (a) the feature's GA-vs-Preview release state is acceptable and (b) it
+   is available in the target workspace. Verification happens **before** the recommendation, never
+   after: never emit a "recommend now, verify later" conditional.
+
+   Record the resolved state on the pattern with the **structured `release_state` field** — *not* prose
+   buried in `fit` / `conversion_notes` — and cite the doc that grounds it in `release_state_source`.
+   The validator enforces this, and `flowx-route` surfaces it with **severity-tiered** framing, so the
+   distinction below is the crux — get it exactly right:
+
+   - `ga` — Generally Available. **No warning.**
+   - `public_preview` — Public Preview. **Disclose it as informational, not a scary warning:** Public
+     Preview is generally production-ready and supported per Databricks. Still state the preview status
+     and confirm the feature is available in the target workspace. A cited `release_state_source` is
+     required.
+   - `private_preview` — **Prominent warning.** Gated: requires confirmed enrollment/entitlement and is
+     not for production without it. Treat **Private Preview** as `doNotSuggest` unless the workspace has
+     **confirmed enrollment/entitlement** (not merely user acceptance). A cited `release_state_source`
+     is required.
+   - `beta` — **Prominent warning.** Not production-ready. A cited `release_state_source` is required.
+   - `unknown` — you could **not** verify the release state. Do **not** recommend the pattern on the
+     strength of an unknown state; prefer a verified alternative (e.g. a like-for-like Lakeflow Job
+     port) instead.
+
+   `release_state` is **required** on any pattern you mark `simplification_pattern: true` (a distinctive
+   capability must declare its verified release state). This mirrors the Airflow `lakeflow-connect`
+   grounding rule.
 3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
    and, only when clean, merges it in atomically. On any violation the inventory is left untouched
    and you get the full list of problems to fix in one pass.
