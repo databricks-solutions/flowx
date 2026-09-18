@@ -1,9 +1,9 @@
 """Unified CLI entry point that the flowx skills and MCP tools drive via subprocesses.
 
 Exposes stateless subcommands -- the ``discover``/``convert``/``package`` phase runners plus
-``inspect``, ``modify``, ``resolve-agentic``, ``enrich``, ``inputs``, ``materialize-lookup``,
-``workspace-paths``, ``record-results``, and ``install-dashboard`` -- so each agent turn runs as an
-independent process holding no session state across user prompts.
+``inspect``, ``modify``, ``resolve-agentic``, ``enrich``, ``route``, ``fill-agentic``, ``inputs``,
+``materialize-lookup``, ``workspace-paths``, ``record-results``, and ``install-dashboard`` -- so each
+agent turn runs as an independent process holding no session state across user prompts.
 """
 
 from __future__ import annotations
@@ -87,6 +87,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_resolve_agentic(args)
     if args.command == "enrich":
         return _run_enrich(args)
+    if args.command == "route":
+        return _run_route(args)
+    if args.command == "fill-agentic":
+        return _run_fill_agentic(args)
     if args.command == "record-results":
         return _run_record_results(args)
     if args.command == "install-dashboard":
@@ -158,6 +162,151 @@ def _run_enrich(args: argparse.Namespace) -> int:
         return 1
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"Failed to enrich inventory: {error}", file=sys.stderr)
+        return 1
+    _emit_json(result, args.out)
+    return 0 if result.get("ok") else 1
+
+
+def _run_route(args: argparse.Namespace) -> int:
+    """Implements the reshaped ``route``: one command that recommends, decides, records, and edits.
+
+    Groups pipelines by connected component and computes the per-component recommendation (reusing
+    :mod:`flowx.routing`). Then:
+
+    * with **no decision** on a non-TTY it emits the recommendation (components + both options +
+      findings + a ready-to-record default plan) and exits -- the dry run an agent reads first;
+    * with a **decision** -- ``--plan-path FILE`` (or ``--plan-path -`` to read the plan from stdin),
+      or an interactive TTY prompt -- it validates and records the fingerprint-bound
+      ``metadata/conversion_plan.json`` and then edits ``.work/translation_report.json`` +
+      ``gaps.json`` so every routed-agentic group's tasks become placeholder gaps (deterministic
+      groups untouched; nothing routed agentic leaves the report byte-identical).
+
+    Triggers the convert phase in-process when the report is missing and ``--source`` /
+    ``--source-path`` are supplied. Returns 1 on a missing report it cannot produce, or on a plan
+    that fails validation (report + plan left untouched).
+    """
+    from flowx import routing
+    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan_to_report
+
+    inventory_path = args.output_dir / "metadata" / "inventory.json"
+    if not inventory_path.exists():
+        print(f"No inventory.json under {inventory_path.parent}; run the discover phase first.", file=sys.stderr)
+        return 1
+    try:
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"Failed to read {inventory_path}: {error}", file=sys.stderr)
+        return 1
+    recommendation = routing.build_recommendation(inventory)
+
+    try:
+        plan = _route_decision(args, recommendation)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"Failed to read the conversion plan: {error}", file=sys.stderr)
+        return 1
+    if plan is None:
+        # No decision on a non-TTY: emit the recommendation as a dry run and stop.
+        _emit_json(recommendation, args.out)
+        return 0
+
+    report_path = args.output_dir / WORK_DIRNAME / REPORT_FILENAME
+    if not report_path.exists():
+        triggered = _trigger_convert(args)
+        if triggered != 0:
+            return triggered
+        if not report_path.exists():
+            print(
+                f"No {REPORT_FILENAME} under {report_path.parent}; run the convert phase first "
+                "(or pass --source and --source-path so route can trigger it).",
+                file=sys.stderr,
+            )
+            return 1
+
+    try:
+        result = routing.record_plan(args.output_dir, plan=plan)
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Failed to record conversion plan: {error}", file=sys.stderr)
+        return 1
+    if not result.get("ok"):
+        _emit_json(result, args.out)
+        return 1
+    try:
+        edit = apply_plan_to_report(args.output_dir, plan)
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Failed to edit translation report: {error}", file=sys.stderr)
+        return 1
+    _emit_json({**result, "edit": edit}, args.out)
+    return 0
+
+
+def _route_decision(args: argparse.Namespace, recommendation: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve the routing decision as an authored plan, or ``None`` for a dry-run recommendation.
+
+    Precedence: ``--plan-path FILE`` (a file), ``--plan-path -`` (stdin JSON), then -- when stdin is
+    a TTY -- an interactive per-component prompt. On a non-TTY with no ``--plan-path`` there is no
+    decision, so the caller emits the recommendation instead.
+    """
+    from flowx.route_agentic import prompt_for_decisions
+
+    if args.plan_path is not None:
+        if str(args.plan_path) == "-":
+            return json.loads(sys.stdin.read())
+        return json.loads(Path(args.plan_path).read_text(encoding="utf-8"))
+    if sys.stdin.isatty():
+        return prompt_for_decisions(recommendation)
+    return None
+
+
+def _trigger_convert(args: argparse.Namespace) -> int:
+    """Run the convert phase in-process when ``--source`` / ``--source-path`` are supplied.
+
+    Returns 0 when convert ran (or there was nothing to trigger because the inputs were absent), or
+    the convert phase's non-zero exit code on failure.
+    """
+    source = getattr(args, "source", None)
+    source_path = getattr(args, "source_path", None)
+    if not source or not source_path:
+        return 0
+    return _run_phase(
+        "convert",
+        ["--source", source, "--source-path", str(source_path), "--output-dir", str(args.output_dir)],
+    )
+
+
+def _run_fill_agentic(args: argparse.Namespace) -> int:
+    """Implements ``fill-agentic combine``: the cross-pipeline pipeline-grain fill.
+
+    Replaces a routed-agentic group's pipelines (``--members`` as a comma-separated list) with the
+    agent-authored pipeline(s) read from ``--pipelines-path`` (a JSON list of pipeline IR dicts, each
+    typically carrying ``AgenticComponentActivity`` nodes). The membership must exactly match a
+    routed-agentic component in the recorded, fingerprint-bound ``metadata/conversion_plan.json``, and
+    the merged report is always validated structurally before it is written back -- there is no bypass.
+    Per-pipeline agentic fills reuse ``convert --merge-agentic`` instead and are not handled here.
+    """
+    from flowx.route_agentic import apply_combine_fill
+
+    if args.action != "combine":
+        print(f"Unknown fill-agentic action {args.action!r}; expected 'combine'.", file=sys.stderr)
+        return 2
+    members = [member.strip() for member in args.members.split(",") if member.strip()]
+    if not members:
+        print("fill-agentic combine requires a non-empty --members list.", file=sys.stderr)
+        return 2
+    try:
+        authored = json.loads(Path(args.pipelines_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"Failed to read {args.pipelines_path}: {error}", file=sys.stderr)
+        return 1
+    if not isinstance(authored, list):
+        print("--pipelines-path must contain a JSON list of pipeline IR dicts.", file=sys.stderr)
+        return 2
+    try:
+        result = apply_combine_fill(args.output_dir, members, authored)
+    except FileNotFoundError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Failed to apply combine fill: {error}", file=sys.stderr)
         return 1
     _emit_json(result, args.out)
     return 0 if result.get("ok") else 1
@@ -519,6 +668,83 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional output file for the enrich result JSON; defaults to stdout.",
+    )
+
+    route = subparsers.add_parser(
+        "route",
+        help=(
+            "One command: recommend a per-connected-component route, take the decision (interactive on "
+            "a TTY, else --plan-path / stdin), record metadata/conversion_plan.json, and edit the "
+            "translation report so routed-agentic groups become placeholder gaps."
+        ),
+    )
+    route.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help=(
+            "Migration output directory (reads metadata/inventory.json + .work/translation_report.json; "
+            "records metadata/conversion_plan.json and edits the report for routed-agentic groups)."
+        ),
+    )
+    route.add_argument(
+        "--plan-path",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the agent-authored conversion plan JSON to validate, record, and apply. Use '-' to "
+            "read the plan from stdin. Omit on a TTY for an interactive prompt, or on a non-TTY to emit "
+            "the recommendation as a dry run."
+        ),
+    )
+    route.add_argument(
+        "--source",
+        default=None,
+        help="Migration source (adf | airflow); with --source-path, lets route trigger convert if needed.",
+    )
+    route.add_argument(
+        "--source-path",
+        type=Path,
+        default=None,
+        help="Path to the source; with --source, lets route trigger the convert phase when the report is missing.",
+    )
+    route.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Optional output file for the recommendation / result JSON; defaults to stdout.",
+    )
+
+    fill_agentic = subparsers.add_parser(
+        "fill-agentic",
+        help=(
+            "Cross-pipeline COMBINE fill: replace a routed group's pipelines with agent-authored "
+            "pipeline(s), validated structurally before writing. Per-pipeline fills use convert --merge-agentic."
+        ),
+    )
+    fill_agentic.add_argument("action", choices=("combine",), help="'combine' performs the pipeline-grain fill.")
+    fill_agentic.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Migration output directory (reads and rewrites .work/translation_report.json).",
+    )
+    fill_agentic.add_argument(
+        "--members",
+        required=True,
+        help="Comma-separated pipeline names of the routed group to replace.",
+    )
+    fill_agentic.add_argument(
+        "--pipelines-path",
+        type=Path,
+        required=True,
+        help="JSON file: a list of agent-authored pipeline IR dicts (typically AgenticComponentActivity nodes).",
+    )
+    fill_agentic.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Optional output file for the result JSON; defaults to stdout.",
     )
 
     record = subparsers.add_parser(
