@@ -50,6 +50,11 @@ GAPS_FILENAME = "gaps.json"
 METADATA_DIRNAME = "metadata"
 INVENTORY_FILENAME = "inventory.json"
 
+# Routing / in-engine agentic conversion is ADF-only, so every agent-authored combine pipeline must
+# carry this source tag. The package preflight enforces it too, but combine asserts it up front so a
+# mis-tagged authored pipeline fails closed here (nothing written) instead of surviving to package.
+REQUIRED_COMBINE_SOURCE_TAG = "adf"
+
 # Guidance stamped onto every placeholder the alteration produces.
 _PLACEHOLDER_COMMENT = (
     "Routed agentic by the conversion plan; author a replacement task (per-pipeline fill) or replace "
@@ -354,6 +359,27 @@ def _resolve_agentic_component(output_dir: Path, members: set[str]) -> tuple[str
     )
 
 
+def _authored_source_tag_violations(authored_pipelines: list[dict[str, Any]]) -> list[str]:
+    """Reports each authored combine pipeline that is missing the required ``tags.source == 'adf'``.
+
+    Routing / in-engine agentic conversion is ADF-only, so an authored combine pipeline that omits or
+    mis-sets the source tag is an authoring error. Catching it here fails the combine closed (nothing
+    written) with a clear message, rather than letting the mis-tagged pipeline reach the package
+    preflight where it is only rejected much later.
+    """
+    violations: list[str] = []
+    for index, pipeline in enumerate(authored_pipelines):
+        label = pipeline.get("name") if isinstance(pipeline, dict) and pipeline.get("name") else f"pipeline[{index}]"
+        tags = pipeline.get("tags") if isinstance(pipeline, dict) else None
+        source = tags.get("source") if isinstance(tags, dict) else None
+        if source != REQUIRED_COMBINE_SOURCE_TAG:
+            violations.append(
+                f"{label}: authored combine pipeline must carry tags.source == "
+                f"{REQUIRED_COMBINE_SOURCE_TAG!r}, got {source!r}"
+            )
+    return violations
+
+
 def apply_combine_fill(
     output_dir: Path,
     group_members: Iterable[str],
@@ -364,13 +390,21 @@ def apply_combine_fill(
     The group's membership is **bound to the recorded plan**: ``group_members`` must exactly match a
     routed-agentic component in ``metadata/conversion_plan.json`` (whose fingerprint must still match
     the current inventory), so a caller cannot swap deterministic pipelines or a partial/typoed group.
+    Every authored pipeline must carry ``tags.source == 'adf'`` (routing/agentic is ADF-only); a
+    mis-tagged pipeline fails the combine closed here rather than surviving to the package preflight.
     The merged report is then **always** validated with the structural bundle invariants (a real
     ``prepare -> write_bundle`` pass over :func:`validate_report_structurally`) -- there is no bypass --
     and written back only when it passes, so a dangling reference or duplicate key never lands on disk.
 
-    Returns ``{"ok", "violations", "error", "component_id", "pipelines"}``. ``ok`` is ``False`` (and
-    nothing written) on a plan/membership error (``error`` set) or any structural violation
-    (``violations`` set).
+    The combine is **idempotent**: because the merged report no longer contains the collapsed members
+    (only the recorded plan still lists them), re-running with the same ``group_members`` and authored
+    pipeline(s) detects the already-combined state -- the members are gone from the report and the
+    authored pipeline(s) are already present -- and no-ops (``already_combined`` true) instead of
+    appending the authored pipeline(s) a second time.
+
+    Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_combined"}``. ``ok``
+    is ``False`` (and nothing written) on a plan/membership error (``error`` set), a missing source tag,
+    or any structural violation (``violations`` set).
 
     Raises:
         FileNotFoundError: when the translation report is missing (run convert first).
@@ -380,12 +414,34 @@ def apply_combine_fill(
     if error is not None:
         return {"ok": False, "error": error, "violations": [], "pipelines": 0}
 
+    tag_violations = _authored_source_tag_violations(authored_pipelines)
+    if tag_violations:
+        return {"ok": False, "error": None, "violations": tag_violations, "pipelines": 0}
+
     work = Path(output_dir) / WORK_DIRNAME
     report_path = work / REPORT_FILENAME
     if not report_path.exists():
         raise FileNotFoundError(f"No {REPORT_FILENAME} under {work}; run the convert phase first.")
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    # Idempotency: the recorded plan still lists the members even after a prior combine collapsed them
+    # out of the report, so the plan/membership check above passes on a re-run. Detect the
+    # already-combined state (members gone from the report, authored pipeline(s) already present) and
+    # no-op, so a second run cannot append a duplicate authored pipeline.
+    report_pipelines = _report_pipelines(report)
+    report_names = {pipeline.get("name") for pipeline in report_pipelines}
+    authored_names = {pipeline.get("name") for pipeline in authored_pipelines}
+    if authored_names and not (members & report_names) and authored_names <= report_names:
+        return {
+            "ok": True,
+            "error": None,
+            "violations": [],
+            "component_id": component_id,
+            "pipelines": len(report_pipelines),
+            "already_combined": True,
+        }
+
     merged = combine_group_fill(report, members, authored_pipelines)
 
     result = validate_report_structurally(merged)
@@ -400,6 +456,7 @@ def apply_combine_fill(
         "violations": [],
         "component_id": component_id,
         "pipelines": len(merged["pipelines"]),
+        "already_combined": False,
     }
 
 

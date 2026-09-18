@@ -227,6 +227,10 @@ MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [.
   — you can't swap pipelines the plan didn't route agentic.
 - `--pipelines-path` is a JSON **list** of pipeline IR dicts (the authored replacements), typically
   carrying `AgenticComponentActivity` nodes (see below).
+- Each authored pipeline **must** carry the source tag `"tags": {"source": "adf"}` (routing/agentic
+  conversion is ADF-only). Combine asserts this up front and **fails closed** (nothing written, with
+  a clear message) on a missing or non-`adf` tag, so a mis-tagged pipeline is caught here rather than
+  surviving to the package preflight.
 - The merged report is **always** validated with the structural bundle invariants (a real
   `prepare → write_bundle` pass) before it is written — no bypass — so a duplicate key, dangling
   dependency, cycle, or dangling pipeline/run_job reference can never land on disk. On any violation,
@@ -235,25 +239,34 @@ MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [.
 ### Authoring an `AgenticComponentActivity` (the escape hatch)
 
 When the target can't be expressed by the typed engine (e.g. a managed Lakeflow Connect ingestion
-pipeline), emit an `AgenticComponentActivity` task inside the authored pipeline. It carries the raw
-bundle components the package phase writes verbatim:
+pipeline), emit an `AgenticComponentActivity` task inside the authored pipeline. The authored
+**pipeline** carries the required `tags.source == "adf"`; the task carries the raw bundle components
+the package phase writes verbatim:
 
 ```json
 {
   "name": "IngestAll",
-  "task_key": "ingest_all",
-  "type": "AgenticComponentActivity",
-  "files": [
-    {"path": "src/ingest/lakeflow_connect.py", "content": "# authored pipeline source ..."}
-  ],
-  "resources": [
-    {"resource_key": "ingest_all_pipeline", "definition": { ...raw pipeline resource... }}
-  ],
-  "task": {"pipeline_task": {"pipeline_id": "${resources.pipelines.ingest_all_pipeline.id}"}},
-  "raw_definition": { ...original source definitions, retained for auditing... }
+  "tags": {"source": "adf"},
+  "tasks": [
+    {
+      "name": "IngestAll",
+      "task_key": "ingest_all",
+      "type": "AgenticComponentActivity",
+      "files": [
+        {"path": "src/ingest/lakeflow_connect.py", "content": "# authored pipeline source ..."}
+      ],
+      "resources": [
+        {"resource_key": "ingest_all_pipeline", "definition": { "channel": "current", "...": "raw pipeline resource" }}
+      ],
+      "task": {"pipeline_task": {"pipeline_id": "${resources.pipelines.ingest_all_pipeline.id}"}},
+      "raw_definition": { "...": "original source definitions, retained for auditing" }
+    }
+  ]
 }
 ```
 
+- `tags` — the authored pipeline **must** set `tags.source` to `"adf"` (routing/agentic is ADF-only);
+  combine fails closed otherwise (see the combine guarantees above).
 - `files` — files written below the bundle `src/`; each is `path` + either UTF-8 `content` or
   base64 `binary_content`.
 - `resources` — bundle resources in the `resource_key` + raw `definition` shape the bundle writer
@@ -261,6 +274,15 @@ bundle components the package phase writes verbatim:
 - `task` — the raw Databricks task fragment (`pipeline_task` or `notebook_task`) wiring to an
   authored resource or file.
 - `raw_definition` — the original source definition, retained for provenance.
+
+**Default the Lakeflow pipeline / Connect resource `channel` to `current` (stable/GA).** Do **not**
+emit `channel: preview` by default. Only use `preview` with a cited GA-status justification and
+confirmed workspace availability — and **verify GA-vs-Preview status before recommending any
+connector or Lakeflow Connect pattern**: do not hardcode GA/Preview status or dates (release state
+changes), check the feature's current release state **and** target-workspace availability against the
+current public Databricks docs, and cite the source. Treat a **Private Preview** connector as
+`doNotSuggest` unless the workspace has confirmed enrollment/entitlement. (Same grounding rule the
+`flowx-enrich` skill applies when authoring recommended patterns.)
 
 ## Step 4 — Continue to package
 
