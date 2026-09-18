@@ -276,13 +276,27 @@ the package phase writes verbatim:
 - `raw_definition` — the original source definition, retained for provenance.
 
 **Default the Lakeflow pipeline / Connect resource `channel` to `current` (stable/GA).** Do **not**
-emit `channel: preview` by default. Only use `preview` with a cited GA-status justification and
-confirmed workspace availability — and **verify GA-vs-Preview status before recommending any
-connector or Lakeflow Connect pattern**: do not hardcode GA/Preview status or dates (release state
-changes), check the feature's current release state **and** target-workspace availability against the
-current public Databricks docs, and cite the source. Treat a **Private Preview** connector as
-`doNotSuggest` unless the workspace has confirmed enrollment/entitlement. (Same grounding rule the
-`flowx-enrich` skill applies when authoring recommended patterns.)
+emit `channel: preview` by default. Let the enriched insight's **structured `release_state`** drive
+the channel — the routing recommendation exposes each agentic option's states as a neutral
+`release_disclosures` list (factual labels, no alarm). Surface the state as disclosure, tiered as:
+
+- `ga` — `channel: current`; **silent** (not surfaced).
+- `unknown` — **silent**, treated exactly like `ga` (no separate label — we can't distinguish them).
+- `public_preview` — the informational label **"Public Preview (production-ready)"**: generally
+  production-ready and supported per Databricks; still confirm workspace availability. Emit
+  `channel: preview` only with the cited `release_state_source`.
+- `private_preview` — the plain factual label **"Private Preview"**. Emit `channel: preview` only
+  with the cited `release_state_source`.
+- `beta` — the plain factual label **"Beta"**. Emit `channel: preview` only with the cited
+  `release_state_source`.
+
+Separately from *how the state is surfaced*, keep the recommendation-eligibility rule: treat a
+**Private Preview** connector as `doNotSuggest` unless the workspace has confirmed
+enrollment/entitlement. And **verify GA-vs-Preview status before recommending any connector or
+Lakeflow Connect pattern**: do not hardcode GA/Preview status or dates (release state changes), check
+the feature's current release state **and** target-workspace availability against the current public
+Databricks docs, and cite the source. (Same structured grounding rule the `flowx-enrich` skill
+applies when authoring recommended patterns.)
 
 ## Step 4 — Continue to package
 
