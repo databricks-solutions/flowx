@@ -62,12 +62,15 @@ narrative.
    **Verify GA/Preview status before recommending a connector or Lakeflow Connect pattern.** Do
    **not** hardcode GA/Preview status or dates — release state changes. Before recommending a
    connector or a Lakeflow Connect ingestion pattern (or naming it in `recommended_patterns` /
-   `system_recommendation`), verify against the **current public Databricks docs** both that (a) the
-   feature's release state is acceptable and (b) it is available in the target workspace, and **cite
-   the doc source** in the pattern's `fit` / `conversion_notes`. Treat a **Private Preview** feature
-   as `doNotSuggest` unless the workspace has **confirmed enrollment/entitlement** (not merely user
-   acceptance); when a connector's state is uncertain, phrase the recommendation as conditional on the
-   customer verifying current release state, and surface that check as the pattern's `decision_driver`.
+   `system_recommendation`), you **must** verify against the **current public Databricks docs** both
+   that (a) the feature's GA-vs-Preview release state is acceptable and (b) it is available in the
+   target workspace. In the insight, **record the resolved GA/Preview status and cite the doc source**
+   in the pattern's `fit` / `conversion_notes`. Treat a **Private Preview** feature as `doNotSuggest`
+   unless the workspace has **confirmed enrollment/entitlement** (not merely user acceptance). If you
+   cannot verify a capability's current release state and workspace availability, **do not recommend
+   it** — recommend a verified alternative (e.g. a like-for-like Lakeflow Job port) instead. Never emit
+   a "recommend now, verify later" conditional recommendation: verification happens **before** the
+   recommendation, not after. This mirrors the Airflow `lakeflow-connect` grounding rule.
 3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
    and, only when clean, merges it in atomically. On any violation the inventory is left untouched
    and you get the full list of problems to fix in one pass.
