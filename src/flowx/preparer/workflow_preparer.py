@@ -9,6 +9,7 @@ from typing import Any
 from flowx.models.dab import DabNotebook, ParameterApproximation, SecretInstruction, SetupTask
 from flowx.models.ir import (
     Activity,
+    AgenticComponentActivity,
     AppendVariableActivity,
     CopyActivity,
     DbtFactoryActivity,
@@ -142,6 +143,7 @@ def prepare_activity(
 ) -> PreparedActivity:
     """Dispatches to the appropriate activity preparer based on activity type."""
     from flowx.preparer.activity_preparers import (
+        agentic_component,
         append_variable,
         copy,
         databricks_job,
@@ -164,6 +166,7 @@ def prepare_activity(
     )
 
     dispatch: dict[type, Any] = {
+        AgenticComponentActivity: agentic_component.prepare,
         NotebookActivity: notebook.prepare,
         SparkJarActivity: spark_jar.prepare,
         SparkPythonActivity: spark_python.prepare,
