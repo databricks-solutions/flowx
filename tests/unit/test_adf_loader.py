@@ -576,6 +576,9 @@ class TestZeroPipelineWarning:
         assert "0 pipelines" in stderr
         assert "ARM template" in stderr
         assert ".json" in stderr
+        # The guidance names the user-facing flag (--adf-source-path), not the loader-internal one.
+        assert "--adf-source-path" in stderr
+        assert "--source-dir" not in stderr
 
     def test_valid_directory_does_not_warn(self, fixtures_dir, tmp_path, capsys):
         """A valid ADF export loads pipelines and emits no zero-pipeline warning."""
