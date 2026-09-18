@@ -84,6 +84,33 @@ fingerprint that binds your insights to the exact inventory they describe):
   - There is no deterministic cross-pipeline **data** tier in v1: the deterministic data edges are
     intra-pipeline and task-scoped, so a cross-pipeline data coupling rides the `inferred` tier.
 
+#### Worked example: a cross-pipeline data coupling → `inferred` (not a `data` edge_type)
+
+`edge_type` accepts only `control` or `inferred`. There is **no** `data` edge_type. When one pipeline
+writes a table (or file) that another pipeline reads, record it on the `inferred` tier with the
+`evidence` + `confidence` the tier requires:
+
+```jsonc
+// WRONG — the validator rejects this and tells you to use the 'inferred' tier
+{
+  "from_pipeline": "IngestSalesforce",
+  "to_pipeline": "BuildMart",
+  "lineage_edge": {"edge_type": "data", "edge_identity": "sales.curated"}
+}
+
+// RIGHT — a cross-pipeline data coupling rides the 'inferred' tier
+{
+  "from_pipeline": "IngestSalesforce",
+  "to_pipeline": "BuildMart",
+  "lineage_edge": {
+    "edge_type": "inferred",
+    "edge_identity": "shared table sales.curated",
+    "evidence": "IngestSalesforce writes sales.curated; BuildMart reads it — the hand-off is inside notebook code the parser can't see",
+    "confidence": "medium"
+  }
+}
+```
+
 ## Idempotency & safety
 
 `enrich` is atomic and idempotent: it replaces the whole `insights` block (never stacks), recomputes
