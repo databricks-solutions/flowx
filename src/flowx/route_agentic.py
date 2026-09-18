@@ -55,6 +55,15 @@ INVENTORY_FILENAME = "inventory.json"
 # mis-tagged authored pipeline fails closed here (nothing written) instead of surviving to package.
 REQUIRED_COMBINE_SOURCE_TAG = "adf"
 
+# Additive top-level marker stamped onto the report each time a combine is applied, recording the
+# (component_id, inventory fingerprint) of every applied combine. Idempotency keys off this recorded
+# state -- not off comparing authored pipeline names to member names -- so a re-run is detected no
+# matter what the authored replacement is named or whether a name collides with a former member. It
+# lives *in* the report, so a fresh convert (which rewrites the report) naturally clears it, and it is
+# ignored by the package phase (not one of the recognized report shape keys) and by ir_serde (which
+# reads per-pipeline IR, not the report wrapper).
+_COMBINE_PROVENANCE_KEY = "_combine_provenance"
+
 # Guidance stamped onto every placeholder the alteration produces.
 _PLACEHOLDER_COMMENT = (
     "Routed agentic by the conversion plan; author a replacement task (per-pipeline fill) or replace "
@@ -310,16 +319,17 @@ def combine_group_fill(
     return {"pipelines": kept}
 
 
-def _resolve_agentic_component(output_dir: Path, members: set[str]) -> tuple[str | None, str | None]:
+def _resolve_agentic_component(output_dir: Path, members: set[str]) -> tuple[str | None, str | None, str | None]:
     """Bind ``members`` to a routed-**agentic** component in the recorded, fingerprint-bound plan.
 
     Reads ``metadata/conversion_plan.json`` and ``metadata/inventory.json`` and returns
-    ``(component_id, error)``. The error is set (and ``component_id`` is ``None``) when: the plan or
-    inventory is missing; the plan's ``inventory_sha256`` no longer matches the current inventory (a
-    stale plan); ``members`` do not exactly equal one component's members (a partial, superset, or
-    mistyped group); or the exactly-matching component is routed deterministic rather than agentic.
-    Requiring an exact match to a routed-agentic component stops a caller from swapping deterministic
-    pipelines or a partial group.
+    ``(component_id, inventory_fingerprint, error)``. The error is set (and the other two are ``None``)
+    when: the plan or inventory is missing; the plan's ``inventory_sha256`` no longer matches the
+    current inventory (a stale plan); ``members`` do not exactly equal one component's members (a
+    partial, superset, or mistyped group); or the exactly-matching component is routed deterministic
+    rather than agentic. Requiring an exact match to a routed-agentic component stops a caller from
+    swapping deterministic pipelines or a partial group. The fingerprint is returned so the combine can
+    record its provenance keyed on the exact inventory it was applied against.
     """
     from flowx.discovery_insights import inventory_fingerprint
 
@@ -327,18 +337,22 @@ def _resolve_agentic_component(output_dir: Path, members: set[str]) -> tuple[str
     plan_path = metadata / "conversion_plan.json"
     inventory_path = metadata / INVENTORY_FILENAME
     if not plan_path.exists():
-        return None, "No metadata/conversion_plan.json; record a routing decision with `route` first."
+        return None, None, "No metadata/conversion_plan.json; record a routing decision with `route` first."
     if not inventory_path.exists():
-        return None, "No metadata/inventory.json; run the discover phase first."
+        return None, None, "No metadata/inventory.json; run the discover phase first."
 
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     recorded_fingerprint = plan.get("inventory_sha256")
     current_fingerprint = inventory_fingerprint(inventory)
     if recorded_fingerprint != current_fingerprint:
-        return None, (
-            "conversion_plan.json is stale: it was recorded against a different inventory "
-            f"({recorded_fingerprint!r} != {current_fingerprint!r}); re-run `route` before filling."
+        return (
+            None,
+            None,
+            (
+                "conversion_plan.json is stale: it was recorded against a different inventory "
+                f"({recorded_fingerprint!r} != {current_fingerprint!r}); re-run `route` before filling."
+            ),
         )
 
     for component in plan.get("components", []):
@@ -348,14 +362,22 @@ def _resolve_agentic_component(output_dir: Path, members: set[str]) -> tuple[str
         if component_members != members:
             continue
         if component.get("decision") == DECISION_AGENTIC:
-            return str(component.get("component_id")), None
-        return None, (
-            f"members {sorted(members)} match component {component.get('component_id')!r}, which is "
-            f"routed {component.get('decision')!r}, not agentic; only routed-agentic components can be combined."
+            return str(component.get("component_id")), current_fingerprint, None
+        return (
+            None,
+            None,
+            (
+                f"members {sorted(members)} match component {component.get('component_id')!r}, which is "
+                f"routed {component.get('decision')!r}, not agentic; only routed-agentic components can be combined."
+            ),
         )
-    return None, (
-        f"members {sorted(members)} do not exactly match any component in the recorded plan "
-        "(partial, superset, or mistyped); pass the exact member set of one routed-agentic component."
+    return (
+        None,
+        None,
+        (
+            f"members {sorted(members)} do not exactly match any component in the recorded plan "
+            "(partial, superset, or mistyped); pass the exact member set of one routed-agentic component."
+        ),
     )
 
 
@@ -380,6 +402,25 @@ def _authored_source_tag_violations(authored_pipelines: list[dict[str, Any]]) ->
     return violations
 
 
+def _combine_already_applied(report: dict[str, Any], component_id: str, fingerprint: str) -> bool:
+    """Report whether this component's combine (at this inventory fingerprint) is already recorded.
+
+    Reads the additive ``_combine_provenance`` marker stamped onto the report by a prior combine.
+    Detection is keyed purely on ``(component_id, fingerprint)`` -- never on comparing authored
+    pipeline names to member names -- so a re-run is recognised as already-combined no matter what the
+    authored replacement is named, and even when an authored name collides with a former member.
+    """
+    provenance = report.get(_COMBINE_PROVENANCE_KEY) if isinstance(report, dict) else None
+    if not isinstance(provenance, list):
+        return False
+    return any(
+        isinstance(entry, dict)
+        and entry.get("component_id") == component_id
+        and entry.get("inventory_sha256") == fingerprint
+        for entry in provenance
+    )
+
+
 def apply_combine_fill(
     output_dir: Path,
     group_members: Iterable[str],
@@ -396,11 +437,13 @@ def apply_combine_fill(
     ``prepare -> write_bundle`` pass over :func:`validate_report_structurally`) -- there is no bypass --
     and written back only when it passes, so a dangling reference or duplicate key never lands on disk.
 
-    The combine is **idempotent**: because the merged report no longer contains the collapsed members
-    (only the recorded plan still lists them), re-running with the same ``group_members`` and authored
-    pipeline(s) detects the already-combined state -- the members are gone from the report and the
-    authored pipeline(s) are already present -- and no-ops (``already_combined`` true) instead of
-    appending the authored pipeline(s) a second time.
+    The combine is **idempotent**, keyed on recorded report state rather than pipeline names. Each
+    successful combine stamps a ``_combine_provenance`` entry -- ``(component_id, inventory
+    fingerprint)`` -- onto the report. A re-run detects that stamp and no-ops (``already_combined``
+    true) instead of collapsing/appending again, so it never duplicates the authored pipeline(s) even
+    when the authored replacement is renamed, and it still recognises the already-combined state when
+    an authored pipeline's name collides with a former member. A fresh ``convert`` rewrites the report
+    without the marker, so the combine will re-apply after a genuine re-convert.
 
     Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_combined"}``. ``ok``
     is ``False`` (and nothing written) on a plan/membership error (``error`` set), a missing source tag,
@@ -410,9 +453,10 @@ def apply_combine_fill(
         FileNotFoundError: when the translation report is missing (run convert first).
     """
     members = {str(member) for member in group_members}
-    component_id, error = _resolve_agentic_component(output_dir, members)
+    component_id, fingerprint, error = _resolve_agentic_component(output_dir, members)
     if error is not None:
         return {"ok": False, "error": error, "violations": [], "pipelines": 0}
+    assert component_id is not None and fingerprint is not None  # guaranteed when error is None
 
     tag_violations = _authored_source_tag_violations(authored_pipelines)
     if tag_violations:
@@ -425,24 +469,29 @@ def apply_combine_fill(
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
 
-    # Idempotency: the recorded plan still lists the members even after a prior combine collapsed them
-    # out of the report, so the plan/membership check above passes on a re-run. Detect the
-    # already-combined state (members gone from the report, authored pipeline(s) already present) and
-    # no-op, so a second run cannot append a duplicate authored pipeline.
-    report_pipelines = _report_pipelines(report)
-    report_names = {pipeline.get("name") for pipeline in report_pipelines}
-    authored_names = {pipeline.get("name") for pipeline in authored_pipelines}
-    if authored_names and not (members & report_names) and authored_names <= report_names:
+    # Idempotency: a prior combine stamps _combine_provenance onto the report for this
+    # (component_id, fingerprint). Detecting that recorded state -- not the authored/member name sets
+    # -- means a re-run no-ops regardless of how the authored replacement is named or whether a name
+    # collides with a former member, so it can never append a duplicate authored pipeline.
+    if _combine_already_applied(report, component_id, fingerprint):
         return {
             "ok": True,
             "error": None,
             "violations": [],
             "component_id": component_id,
-            "pipelines": len(report_pipelines),
+            "pipelines": len(_report_pipelines(report)),
             "already_combined": True,
         }
 
     merged = combine_group_fill(report, members, authored_pipelines)
+    # Carry any prior provenance forward (combine_group_fill returns only ``pipelines``) and record
+    # this combine so a later re-run detects it.
+    prior_provenance = report.get(_COMBINE_PROVENANCE_KEY) if isinstance(report, dict) else None
+    provenance = (
+        [entry for entry in prior_provenance if isinstance(entry, dict)] if isinstance(prior_provenance, list) else []
+    )
+    provenance.append({"component_id": component_id, "inventory_sha256": fingerprint, "members": sorted(members)})
+    merged[_COMBINE_PROVENANCE_KEY] = provenance
 
     result = validate_report_structurally(merged)
     if not result.ok:

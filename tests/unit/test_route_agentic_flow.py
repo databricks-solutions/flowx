@@ -122,6 +122,13 @@ def _lfc_pipeline() -> dict[str, Any]:
     }
 
 
+def _named_lfc_pipeline(name: str) -> dict[str, Any]:
+    """A correctly-tagged authored combine pipeline with a caller-chosen ``name``."""
+    pipeline = _lfc_pipeline()
+    pipeline["name"] = name
+    return pipeline
+
+
 def _write_work(output_dir: Path, report: dict[str, Any], gaps: list[dict[str, Any]] | None = None) -> None:
     work = output_dir / WORK_DIRNAME
     work.mkdir(parents=True, exist_ok=True)
@@ -508,6 +515,49 @@ def test_combine_is_idempotent_running_twice_yields_no_duplicate(tmp_path: Path)
     report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
     names = [pipeline["name"] for pipeline in report["pipelines"]]
     assert names == ["orders_lfc"]  # exactly one authored pipeline, no duplicate
+
+
+def test_combine_idempotent_with_a_differently_named_authored_pipeline(tmp_path: Path) -> None:
+    """FIX 3 (a): a second combine whose authored replacement is renamed must NOT duplicate.
+
+    Name-set matching would fail here (the new name is absent from the report, the old members are
+    already gone), fall through, and append a second authored pipeline. Provenance keyed on
+    (component_id, fingerprint) catches the re-run regardless of the authored name.
+    """
+    _setup_routed_agentic(tmp_path, decision="agentic")
+
+    first = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc")])
+    assert first["ok"] is True and first["already_combined"] is False
+
+    # Same members, but the authored replacement is named differently this time.
+    second = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc_v2")])
+    assert second["ok"] is True
+    assert second["already_combined"] is True
+
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    names = [pipeline["name"] for pipeline in report["pipelines"]]
+    assert names == ["orders_lfc"]  # first authored pipeline kept; the renamed re-run added nothing
+
+
+def test_combine_idempotent_when_authored_name_collides_with_a_former_member(tmp_path: Path) -> None:
+    """FIX 3 (b): an authored name colliding with a former member is still detected as already-combined.
+
+    After the first combine the report holds a pipeline named 'parent' (a former member). Name-based
+    detection would see 'parent' present and conclude the combine had not happened; provenance keeps
+    the detection correct and independent of names.
+    """
+    _setup_routed_agentic(tmp_path, decision="agentic")
+
+    first = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("parent")])
+    assert first["ok"] is True and first["already_combined"] is False
+
+    second = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("parent")])
+    assert second["ok"] is True
+    assert second["already_combined"] is True
+
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    names = [pipeline["name"] for pipeline in report["pipelines"]]
+    assert names == ["parent"]  # exactly one authored pipeline, no duplicate
 
 
 # --------------------------------------------------------------------------- #
