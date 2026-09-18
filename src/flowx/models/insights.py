@@ -47,15 +47,16 @@ MAX_RECOMMENDED_PATTERNS = 4
 CONFIDENCE_LEVELS: tuple[str, ...] = ("high", "medium", "low")
 
 # The Databricks GA/Preview release states a recommended pattern may declare, verified against
-# current public docs at authoring time. They drive *tiered* surfacing downstream (routing):
+# current public docs at authoring time (never hardcoded):
 #
-# * ``"ga"`` -- Generally Available; no warning.
-# * ``"public_preview"`` -- Public Preview; generally production-ready and supported per Databricks,
-#   so it is *disclosed* informationally, not alarmed (confirm workspace availability).
-# * ``"private_preview"`` -- gated; requires confirmed enrollment/entitlement and is not for
-#   production without it (a prominent warning).
-# * ``"beta"`` -- not production-ready (a prominent warning).
-# * ``"unknown"`` -- the release state could not be verified; prefer a verified alternative.
+# * ``"ga"`` -- Generally Available.
+# * ``"public_preview"`` -- Public Preview; generally production-ready and supported per Databricks.
+# * ``"private_preview"`` -- available only to workspaces with confirmed enrollment/entitlement.
+# * ``"beta"`` -- an early, pre-GA release.
+# * ``"unknown"`` -- the release state could not be verified.
+#
+# How each state is *surfaced* -- a neutral factual disclosure, never a warning -- is described on
+# :attr:`RecommendedPattern.release_state`.
 RELEASE_STATES: tuple[str, ...] = ("ga", "public_preview", "private_preview", "beta", "unknown")
 
 # Release states that MUST cite a source (``release_state_source``): the non-GA preview/beta states
