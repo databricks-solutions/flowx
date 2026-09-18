@@ -330,8 +330,7 @@ def _validate_release_state(pattern: dict[str, Any], loc: str) -> list[str]:
     * ``release_state``, when set, must be one of :data:`~flowx.models.insights.RELEASE_STATES`.
     * ``release_state`` is **required** whenever ``simplification_pattern`` is ``True`` -- a
       distinctive capability that collapses a legacy pattern must declare its verified release state
-      so the downstream routing surface can warn (private preview / beta / unknown) or disclose
-      (public preview) correctly rather than recommend blindly.
+      so the downstream routing surface can disclose it correctly rather than recommend blindly.
     * ``release_state_source`` (a non-empty citation) is **required** whenever ``release_state`` is a
       non-GA preview/beta state (:data:`~flowx.models.insights.RELEASE_STATES_REQUIRING_SOURCE`); it
       is not required for ``"ga"`` (the stable default) or ``"unknown"`` (no claim to ground).
