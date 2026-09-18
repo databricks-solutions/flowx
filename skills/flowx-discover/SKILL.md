@@ -74,7 +74,28 @@ The inventory classifies every task into one of three strategies:
 - **Agentic** — requires LLM-assisted translation from the source definition.
 - **Unsupported** — no known translation path; needs manual intervention.
 
+## Step 3 — Enrich the inventory (default next step)
+
+Once the deterministic inventory is written, the standard flow **chains into enrichment**: you author
+a layer of judgment the parser cannot derive — a factory-wide architecture recommendation,
+per-pipeline intent + recommended Databricks patterns, and cross-pipeline relationships — and merge
+it back under a single additive `insights` key. flowx contains no LLM: you author the JSON, the
+library validates and merges it. The routing step (`flowx-route`) reads this block to present the
+agentic conversion option per pipeline group.
+
+**Continue with the `flowx-enrich` skill by default** — it guides authoring the insights and running
+`enrich`. Enrichment is additive and leaves every deterministic inventory key byte-identical, so it
+never destabilizes discover's output.
+
+**Deterministic-only skip path.** A standalone, headless discover — no agent, no LLM — is fully
+valid: `metadata/inventory.json` is complete and self-standing without an `insights` block, and
+`flowx-route` still recommends and records a plan from the deterministic structure alone. Skip
+`flowx-enrich` only when the caller explicitly asked for a deterministic-only pass, or when no human
+reader needs a migration narrative.
+
 ## Reference
 
 - `sources/adf.md` — Azure Data Factory discovery (ARM JSON, UC-volume download, complexity report)
 - `sources/airflow.md` — Apache Airflow discovery (DAG `.py` parsing, operator classification)
+- `flowx-enrich` skill — authoring the agentic `insights` layer and running `enrich` (the default
+  next step)
