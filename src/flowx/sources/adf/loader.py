@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import shutil
-from datetime import datetime, timezone
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ from flowx.models.adf_ast import (
     InventoryItem,
     TranslationStrategy,
 )
+from flowx.models.motifs import DetectedMotif
 
 logger = logging.getLogger(__name__)
 
@@ -790,50 +791,6 @@ def _classify_activities(
 
 
 # ---------------------------------------------------------------------------
-# Serialisation helpers
-# ---------------------------------------------------------------------------
-
-
-def _inventory_to_dict(inventory: Inventory, source_dir: str) -> dict[str, Any]:
-    """Serialise an :class:`Inventory` to a JSON-friendly dictionary.
-
-    Args:
-        inventory: The inventory to serialise.
-        source_dir: Original source directory path (for provenance).
-
-    Returns:
-        Dictionary suitable for ``json.dumps``.
-    """
-    pipeline_map: dict[str, list[dict[str, Any]]] = {}
-    for item in inventory.items:
-        entry: dict[str, Any] = {
-            "name": item.activity_name,
-            "type": item.activity_type,
-            "strategy": item.strategy.value,
-        }
-        if item.depends_on:
-            entry["depends_on"] = item.depends_on
-        pipeline_map.setdefault(item.pipeline_name, []).append(entry)
-
-    total = inventory.deterministic_count + inventory.agentic_count + inventory.unsupported_count
-    coverage_pct = round((inventory.deterministic_count + inventory.agentic_count) / total * 100, 1) if total else 0.0
-
-    return {
-        "source_dir": source_dir,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "pipelines": [{"name": pname, "activities": acts} for pname, acts in pipeline_map.items()],
-        "summary": {
-            "pipeline_count": inventory.pipeline_count,
-            "activity_count": total,
-            "deterministic_count": inventory.deterministic_count,
-            "agentic_count": inventory.agentic_count,
-            "unsupported_count": inventory.unsupported_count,
-            "coverage_pct": coverage_pct,
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
 # Profile complexity report (CSV)
 # ---------------------------------------------------------------------------
 
@@ -924,7 +881,33 @@ def _tshirt_size(score: int) -> str:
     return "XL"
 
 
-def build_profile_rows(definitions: AdfDefinitions) -> list[dict[str, Any]]:
+def detect_motifs_by_pipeline(definitions: AdfDefinitions) -> dict[str, list[DetectedMotif]]:
+    """Detect the motifs in every pipeline, keyed by pipeline name.
+
+    Runs the profiler's motif detector (:func:`flowx.motifs.detector.detect_motifs`)
+    once per pipeline, so the discover phase can both surface the full detected
+    motifs additively in ``inventory.json`` and count them in the profile report
+    from a single detection pass. Detection is best-effort: a pipeline whose
+    detection raises is logged and recorded with an empty list, never allowed to
+    hard-fail discover. This only *detects* motifs -- it never collapses their
+    member activities, which stays a convert-phase decision.
+    """
+    from flowx.motifs.detector import detect_motifs
+
+    results: dict[str, list[DetectedMotif]] = {}
+    for pipeline in definitions.pipelines:
+        try:
+            results[pipeline.name] = detect_motifs(pipeline, definitions)
+        except Exception as exc:  # noqa: BLE001 - detection must never hard-fail discover
+            logger.warning("Motif detection failed for pipeline %r: %s", pipeline.name, exc)
+            results[pipeline.name] = []
+    return results
+
+
+def build_profile_rows(
+    definitions: AdfDefinitions,
+    motifs_by_pipeline: dict[str, list[DetectedMotif]] | None = None,
+) -> list[dict[str, Any]]:
     """Builds one profile-report row per pipeline.
 
     Each row carries the source activity / dataset / linked-service counts, the
@@ -933,20 +916,22 @@ def build_profile_rows(definitions: AdfDefinitions) -> list[dict[str, Any]]:
 
     Args:
         definitions: Parsed ADF definitions.
+        motifs_by_pipeline: Optional precomputed motif detections keyed by
+            pipeline name (see :func:`detect_motifs_by_pipeline`). Passing the
+            same map the inventory emitter uses keeps the report's pattern count
+            consistent with the surfaced motifs and avoids detecting twice; when
+            omitted, detection runs here.
 
     Returns:
         List of row dicts ordered by pipeline name.
     """
-    from flowx.motifs.detector import detect_motifs
+    if motifs_by_pipeline is None:
+        motifs_by_pipeline = detect_motifs_by_pipeline(definitions)
 
     rows: list[dict[str, Any]] = []
     for pipeline in sorted(definitions.pipelines, key=lambda p: p.name):
         activity_count, datasets, linked_services, category_counts = _pipeline_reference_counts(pipeline, definitions)
-        try:
-            n_patterns = len(detect_motifs(pipeline, definitions))
-        except Exception as exc:  # noqa: BLE001 - profiling must never hard-fail on motif detection
-            logger.warning("Motif detection failed for pipeline %r: %s", pipeline.name, exc)
-            n_patterns = 0
+        n_patterns = len(motifs_by_pipeline.get(pipeline.name, []))
         score = _complexity_score(category_counts, len(datasets), len(linked_services), n_patterns)
         rows.append(
             {
@@ -1043,6 +1028,40 @@ def clear_stale_outputs(output_dir: Path) -> None:
         (output_dir / filename).unlink(missing_ok=True)
 
 
+def _warn_no_pipelines_found(source_dir: Path) -> None:
+    """Prints a loud stderr warning when discover parses zero pipelines.
+
+    The usual cause is pointing ``--adf-source-path`` at a directory that holds ARM-template
+    ``.json`` file(s) instead of the expected ADF export layout (a ``pipelines/`` folder), or
+    passing a directory when a single ARM template file was meant. We tailor the guidance to
+    whichever case we can detect, so an empty run never looks like a successful one. The message
+    names ``--adf-source-path`` -- the user-facing flag the discover runner takes -- not the
+    loader's internal ``--source-dir`` it normalises to.
+    """
+    source_path = Path(source_dir)
+    top_level_json = sorted(source_path.glob("*.json")) if source_path.is_dir() else []
+
+    banner = "!" * 72
+    lines = [banner, "WARNING: discover loaded 0 pipelines -- nothing was migrated."]
+    if top_level_json:
+        lines.append(
+            f"Found {len(top_level_json)} top-level .json file(s) in {source_path} but no "
+            "recognized ADF export layout (no 'pipelines/' directory)."
+        )
+        lines.append(
+            "If these are ARM templates, pass the ARM template file directly as the "
+            "--adf-source-path (a single .json file), not the containing directory."
+        )
+    else:
+        lines.append(
+            f"No ADF pipelines were found under {source_path}. Pass an ARM template file as "
+            "the --adf-source-path, or point --adf-source-path at a directory with the expected "
+            "ADF export layout ('pipelines/', 'datasets/', 'linked_services/', ...)."
+        )
+    lines.append(banner)
+    print("\n".join(lines), file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Discover-phase entry point: load ADF, build the inventory + profile report.
 
@@ -1075,6 +1094,13 @@ def main(argv: list[str] | None = None) -> int:
     definitions = load_adf_definitions(args.source_dir)
     logger.info("Loaded %d pipeline(s) from %s", len(definitions.pipelines), args.source_dir)
 
+    # A directory of ARM templates with no recognized ``pipelines/`` layout parses to zero
+    # pipelines and would otherwise finish with a success-shaped "Loaded 0 pipeline(s)". Fail
+    # loud (stderr) so the operator notices the export layout / path is wrong rather than
+    # trusting an empty-but-green run.
+    if not definitions.pipelines:
+        _warn_no_pipelines_found(args.source_dir)
+
     # Filter to a single pipeline when --pipeline is specified
     if args.pipeline:
         matched = [pipeline for pipeline in definitions.pipelines if pipeline.name == args.pipeline]
@@ -1095,7 +1121,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         logger.info("Filtered to pipeline: %s", args.pipeline)
 
-    inventory = build_inventory(definitions)
+    # Inventory JSON is projected from the shared discovery AST via the
+    # source-agnostic emitter (so ADF and Airflow emit one shape); imported here
+    # to avoid a module-level cycle (discovery_mapping imports this loader).
+    from flowx.discovery_inventory import build_source_inventory
+    from flowx.models.discovery import SOURCE_ADF
+    from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
 
     output_dir: Path = args.output_dir.resolve()
     clear_stale_outputs(output_dir)
@@ -1103,11 +1134,23 @@ def main(argv: list[str] | None = None) -> int:
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
     inventory_path = metadata_dir / "inventory.json"
-    inventory_dict = _inventory_to_dict(inventory, str(args.source_dir))
+    source_graphs = adf_definitions_to_source_graphs(definitions)
+    # Detect motifs once and share the result: the inventory surfaces the full
+    # detections additively, the profile report counts them -- from one pass.
+    motifs_by_pipeline = detect_motifs_by_pipeline(definitions)
+    inventory_dict = build_source_inventory(
+        source_graphs,
+        source=SOURCE_ADF,
+        source_dir=str(args.source_dir),
+        # ADF has historically omitted zero-activity pipelines from the per-pipeline
+        # listing while still counting them in summary.pipeline_count; preserve that.
+        include_empty_pipelines=False,
+        motifs_by_pipeline=motifs_by_pipeline,
+    )
     inventory_path.write_text(json.dumps(inventory_dict, indent=2), encoding="utf-8")
     logger.info("Wrote inventory to %s", inventory_path)
 
-    profile_rows = build_profile_rows(definitions)
+    profile_rows = build_profile_rows(definitions, motifs_by_pipeline)
     csv_path = metadata_dir / "profile_report.csv"
     write_profile_csv(profile_rows, csv_path)
     logger.info("Wrote profile report to %s", csv_path)
@@ -1119,7 +1162,11 @@ def main(argv: list[str] | None = None) -> int:
     print("\nADF Profile Summary")
     print("===================")
     print(f"Pipelines parsed:     {summary['pipeline_count']}")
-    print(f"Total activities:     {summary['activity_count']}")
+    print(f"Total activities:     {summary['activity_count']}  (raw activities, incl. nested)")
+    # Discover counts every activity, including those nested inside ForEach/If/Switch. The
+    # convert phase reports top-level task-units *after* motif collapse, so its count is
+    # smaller -- label the units here so the two numbers are not mistaken for a discrepancy.
+    print("  (convert reports top-level task-units after motif collapse; expect fewer there)")
     print("\nStrategy Breakdown:")
     print(f"  Deterministic:      {summary['deterministic_count']}")
     print(f"  Agentic:            {summary['agentic_count']}")
