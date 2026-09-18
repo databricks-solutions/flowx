@@ -228,7 +228,12 @@ def _validate_edge(
     edge_type = edge.get("edge_type")
     identity = edge.get("edge_identity")
     if edge_type not in _EDGE_TYPES:
-        problems.append(f"{loc}.lineage_edge: edge_type must be 'control' or 'inferred', got {edge_type!r}")
+        problems.append(
+            f"{loc}.lineage_edge: edge_type must be 'control' or 'inferred', got {edge_type!r}. "
+            "There is no 'data' edge_type: a cross-pipeline data coupling (one pipeline writes a "
+            "table/file another reads) belongs on the 'inferred' tier -- set edge_type 'inferred' "
+            "with an 'evidence' string and a 'confidence' level, not a 'data' edge."
+        )
     if not isinstance(identity, str) or not identity:
         problems.append(f"{loc}.lineage_edge: edge_identity must be a non-empty string")
 

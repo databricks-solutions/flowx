@@ -58,6 +58,16 @@ narrative.
    inventory, the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source — enough to state
    each pipeline's *intent* and the Databricks patterns that fit. Ground every recommended pattern in
    a **real, publicly-documented** Databricks capability; never invent a product name.
+
+   **Verify GA/Preview status before recommending a connector or Lakeflow Connect pattern.** Do
+   **not** hardcode GA/Preview status or dates — release state changes. Before recommending a
+   connector or a Lakeflow Connect ingestion pattern (or naming it in `recommended_patterns` /
+   `system_recommendation`), verify against the **current public Databricks docs** both that (a) the
+   feature's release state is acceptable and (b) it is available in the target workspace, and **cite
+   the doc source** in the pattern's `fit` / `conversion_notes`. Treat a **Private Preview** feature
+   as `doNotSuggest` unless the workspace has **confirmed enrollment/entitlement** (not merely user
+   acceptance); when a connector's state is uncertain, phrase the recommendation as conditional on the
+   customer verifying current release state, and surface that check as the pattern's `decision_driver`.
 3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
    and, only when clean, merges it in atomically. On any violation the inventory is left untouched
    and you get the full list of problems to fix in one pass.
