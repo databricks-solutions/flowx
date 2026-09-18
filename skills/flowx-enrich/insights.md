@@ -20,7 +20,7 @@ fingerprint that binds your insights to the exact inventory they describe):
   "system_recommendation": {
     "headline": "The one decision a migrator must make before any per-pipeline work",
     "recommended_patterns": [
-      {"pattern": "Lakeflow Connect SQL Server connector", "fit": "Replaces the child extractor family", "simplification_pattern": true},
+      {"pattern": "Lakeflow Connect SQL Server connector", "fit": "Replaces the child extractor family", "simplification_pattern": true, "release_state": "ga", "release_state_source": "https://docs.databricks.com/ingestion/lakeflow-connect/sql-server"},
       {"pattern": "Parameterised Lakeflow Job", "fit": "Like-for-like orchestration fallback", "simplification_pattern": false}
     ],
     "cascade": ["5 child extractors -> managed connector pipelines"],
@@ -32,7 +32,7 @@ fingerprint that binds your insights to the exact inventory they describe):
       "intent": "Land Salesforce objects into the bronze layer nightly",
       "databricks_pattern": "Managed ingestion",
       "recommended_patterns": [
-        {"pattern": "Lakeflow Connect", "fit": "Managed CDC ingestion replaces the copy loop", "simplification_pattern": true}
+        {"pattern": "Lakeflow Connect", "fit": "Managed CDC ingestion replaces the copy loop", "simplification_pattern": true, "release_state": "public_preview", "release_state_source": "https://docs.databricks.com/ingestion/lakeflow-connect/"}
       ],
       "conversion_notes": ["Point the connector at the same source objects"],
       "risk_if_ignored": "Bespoke extractor code and its watermark table carry forward"
@@ -70,6 +70,18 @@ fingerprint that binds your insights to the exact inventory they describe):
   Loader, system tables replacing a home-grown logging tier) — not for a like-for-like port. By
   convention (not validated), order them best-first and list the `simplification_pattern: true` ones
   ahead of like-for-like ports.
+- **`release_state` + `release_state_source`** (per recommended pattern): the pattern's *verified*
+  Databricks release state and the doc that grounds it. `release_state` is one of `ga`,
+  `public_preview`, `private_preview`, `beta`, `unknown`. It is **required** on any pattern with
+  `simplification_pattern: true` (a distinctive capability must declare its verified release state);
+  optional otherwise. `release_state_source` (a non-empty citation) is **required** when
+  `release_state` is `public_preview` / `private_preview` / `beta`; not required for `ga` / `unknown`.
+  The state drives *tiered* surfacing in `flowx-route`: `ga` → no warning; `public_preview` →
+  informational disclosure (generally production-ready and supported per Databricks — disclosed, not
+  alarmed; confirm workspace availability); `private_preview` → prominent warning (gated, needs
+  confirmed enrollment/entitlement, `doNotSuggest` without it); `beta` → prominent warning (not
+  production-ready); `unknown` → could not verify, prefer a verified alternative. Verify against the
+  current public docs **before** recommending — see the SKILL.md GA-grounding step for the full rule.
 - **`system_recommendation`** needs a non-empty `headline` and a `recommended_patterns` list;
   `cascade` (non-empty strings) and `decision_driver` are optional.
 - **Relationship edges** come in two tiers:
