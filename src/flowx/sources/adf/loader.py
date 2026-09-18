@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -1027,6 +1028,38 @@ def clear_stale_outputs(output_dir: Path) -> None:
         (output_dir / filename).unlink(missing_ok=True)
 
 
+def _warn_no_pipelines_found(source_dir: Path) -> None:
+    """Prints a loud stderr warning when discover parses zero pipelines.
+
+    The usual cause is pointing ``--source-dir`` at a directory that holds ARM-template
+    ``.json`` file(s) instead of the expected ADF export layout (a ``pipelines/`` folder), or
+    passing a directory when a single ARM template file was meant. We tailor the guidance to
+    whichever case we can detect, so an empty run never looks like a successful one.
+    """
+    source_path = Path(source_dir)
+    top_level_json = sorted(source_path.glob("*.json")) if source_path.is_dir() else []
+
+    banner = "!" * 72
+    lines = [banner, "WARNING: discover loaded 0 pipelines -- nothing was migrated."]
+    if top_level_json:
+        lines.append(
+            f"Found {len(top_level_json)} top-level .json file(s) in {source_path} but no "
+            "recognized ADF export layout (no 'pipelines/' directory)."
+        )
+        lines.append(
+            "If these are ARM templates, pass the ARM template file directly as the "
+            "--source-dir path (a single .json file), not the containing directory."
+        )
+    else:
+        lines.append(
+            f"No ADF pipelines were found under {source_path}. Pass an ARM template file as "
+            "the path, or point --source-dir at a directory with the expected ADF export "
+            "layout ('pipelines/', 'datasets/', 'linked_services/', ...)."
+        )
+    lines.append(banner)
+    print("\n".join(lines), file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Discover-phase entry point: load ADF, build the inventory + profile report.
 
@@ -1058,6 +1091,13 @@ def main(argv: list[str] | None = None) -> int:
 
     definitions = load_adf_definitions(args.source_dir)
     logger.info("Loaded %d pipeline(s) from %s", len(definitions.pipelines), args.source_dir)
+
+    # A directory of ARM templates with no recognized ``pipelines/`` layout parses to zero
+    # pipelines and would otherwise finish with a success-shaped "Loaded 0 pipeline(s)". Fail
+    # loud (stderr) so the operator notices the export layout / path is wrong rather than
+    # trusting an empty-but-green run.
+    if not definitions.pipelines:
+        _warn_no_pipelines_found(args.source_dir)
 
     # Filter to a single pipeline when --pipeline is specified
     if args.pipeline:
@@ -1120,7 +1160,11 @@ def main(argv: list[str] | None = None) -> int:
     print("\nADF Profile Summary")
     print("===================")
     print(f"Pipelines parsed:     {summary['pipeline_count']}")
-    print(f"Total activities:     {summary['activity_count']}")
+    print(f"Total activities:     {summary['activity_count']}  (raw activities, incl. nested)")
+    # Discover counts every activity, including those nested inside ForEach/If/Switch. The
+    # convert phase reports top-level task-units *after* motif collapse, so its count is
+    # smaller -- label the units here so the two numbers are not mistaken for a discrepancy.
+    print("  (convert reports top-level task-units after motif collapse; expect fewer there)")
     print("\nStrategy Breakdown:")
     print(f"  Deterministic:      {summary['deterministic_count']}")
     print(f"  Agentic:            {summary['agentic_count']}")
