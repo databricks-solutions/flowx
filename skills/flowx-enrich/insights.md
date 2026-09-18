@@ -20,11 +20,11 @@ fingerprint that binds your insights to the exact inventory they describe):
   "system_recommendation": {
     "headline": "The one decision a migrator must make before any per-pipeline work",
     "recommended_patterns": [
-      {"pattern": "Lakeflow Connect SQL Server connector", "fit": "Replaces the child extractor family", "simplification_pattern": true, "release_state": "ga", "release_state_source": "https://docs.databricks.com/ingestion/lakeflow-connect/sql-server"},
+      {"pattern": "<managed connector for your source>", "fit": "Replaces the child extractor family", "simplification_pattern": true, "release_state": "<verify live; do not copy — one of ga|public_preview|private_preview|beta|unknown>", "release_state_source": "<cite the current Databricks doc you verified>"},
       {"pattern": "Parameterised Lakeflow Job", "fit": "Like-for-like orchestration fallback", "simplification_pattern": false}
     ],
     "cascade": ["5 child extractors -> managed connector pipelines"],
-    "decision_driver": "Is the Lakeflow Connect connector GA/approved for this source?"
+    "decision_driver": "Is a managed connector available and its release state verified/approved for this source?"
   },
   "pipeline_insights": [
     {
@@ -32,7 +32,7 @@ fingerprint that binds your insights to the exact inventory they describe):
       "intent": "Land Salesforce objects into the bronze layer nightly",
       "databricks_pattern": "Managed ingestion",
       "recommended_patterns": [
-        {"pattern": "Lakeflow Connect", "fit": "Managed CDC ingestion replaces the copy loop", "simplification_pattern": true, "release_state": "public_preview", "release_state_source": "https://docs.databricks.com/ingestion/lakeflow-connect/"}
+        {"pattern": "<managed CDC ingestion connector>", "fit": "Managed CDC ingestion replaces the copy loop", "simplification_pattern": true, "release_state": "<verify live; do not copy — one of ga|public_preview|private_preview|beta|unknown>", "release_state_source": "<cite the current Databricks doc you verified>"}
       ],
       "conversion_notes": ["Point the connector at the same source objects"],
       "risk_if_ignored": "Bespoke extractor code and its watermark table carry forward"
@@ -79,8 +79,9 @@ fingerprint that binds your insights to the exact inventory they describe):
   The state is a factual **disclosure**, not a warning: `flowx-route` surfaces `public_preview` as the
   label "Public Preview (production-ready)" and `private_preview` / `beta` as plain labels, while `ga`
   and `unknown` are silent (`unknown` is treated exactly like `ga`). Verify against the current public
-  docs **before** recommending — see the SKILL.md GA-grounding step for the full rule. (The separate
-  `doNotSuggest`-Private-Preview recommendation-eligibility rule is unchanged; see the SKILL.md step.)
+  docs **before** recommending — see the SKILL.md GA-grounding step for the full rule. (There is no
+  `doNotSuggest` eligibility gate: a verified Private Preview feature is still eligible to suggest —
+  disclose the state and let the customer decide; see the SKILL.md step.)
 - **`system_recommendation`** needs a non-empty `headline` and a `recommended_patterns` list;
   `cascade` (non-empty strings) and `decision_driver` are optional.
 - **Relationship edges** come in two tiers:
