@@ -258,7 +258,10 @@ def test_unknown_edge_type_is_rejected() -> None:
     raw = _valid_insights()
     raw["pipeline_relationships"][0]["lineage_edge"]["edge_type"] = "data"
     violations = validate_insights(raw, _inventory())
-    assert any("edge_type must be 'control' or 'inferred'" in v for v in violations)
+    edge_type_violations = [v for v in violations if "edge_type must be 'control' or 'inferred'" in v]
+    assert edge_type_violations
+    # The message must steer a 'data' coupling onto the 'inferred' tier rather than just rejecting it.
+    assert any("inferred" in v and "evidence" in v and "confidence" in v for v in edge_type_violations)
 
 
 def test_unknown_top_level_key_including_library_owned_fields() -> None:
