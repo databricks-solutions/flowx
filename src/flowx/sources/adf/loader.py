@@ -1031,10 +1031,12 @@ def clear_stale_outputs(output_dir: Path) -> None:
 def _warn_no_pipelines_found(source_dir: Path) -> None:
     """Prints a loud stderr warning when discover parses zero pipelines.
 
-    The usual cause is pointing ``--source-dir`` at a directory that holds ARM-template
+    The usual cause is pointing ``--adf-source-path`` at a directory that holds ARM-template
     ``.json`` file(s) instead of the expected ADF export layout (a ``pipelines/`` folder), or
     passing a directory when a single ARM template file was meant. We tailor the guidance to
-    whichever case we can detect, so an empty run never looks like a successful one.
+    whichever case we can detect, so an empty run never looks like a successful one. The message
+    names ``--adf-source-path`` -- the user-facing flag the discover runner takes -- not the
+    loader's internal ``--source-dir`` it normalises to.
     """
     source_path = Path(source_dir)
     top_level_json = sorted(source_path.glob("*.json")) if source_path.is_dir() else []
@@ -1048,13 +1050,13 @@ def _warn_no_pipelines_found(source_dir: Path) -> None:
         )
         lines.append(
             "If these are ARM templates, pass the ARM template file directly as the "
-            "--source-dir path (a single .json file), not the containing directory."
+            "--adf-source-path (a single .json file), not the containing directory."
         )
     else:
         lines.append(
             f"No ADF pipelines were found under {source_path}. Pass an ARM template file as "
-            "the path, or point --source-dir at a directory with the expected ADF export "
-            "layout ('pipelines/', 'datasets/', 'linked_services/', ...)."
+            "the --adf-source-path, or point --adf-source-path at a directory with the expected "
+            "ADF export layout ('pipelines/', 'datasets/', 'linked_services/', ...)."
         )
     lines.append(banner)
     print("\n".join(lines), file=sys.stderr)
