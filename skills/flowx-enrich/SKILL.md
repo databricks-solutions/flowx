@@ -69,26 +69,25 @@ narrative.
 
    Record the resolved state on the pattern with the **structured `release_state` field** — *not* prose
    buried in `fit` / `conversion_notes` — and cite the doc that grounds it in `release_state_source`.
-   The validator enforces this, and `flowx-route` surfaces it with **severity-tiered** framing, so the
-   distinction below is the crux — get it exactly right:
+   The validator enforces this. The state is a factual **disclosure**, not a warning; `flowx-route`
+   surfaces it as a neutral label (no alarm), tiered as:
 
-   - `ga` — Generally Available. **No warning.**
-   - `public_preview` — Public Preview. **Disclose it as informational, not a scary warning:** Public
-     Preview is generally production-ready and supported per Databricks. Still state the preview status
-     and confirm the feature is available in the target workspace. A cited `release_state_source` is
+   - `ga` — Generally Available. **Silent** (not surfaced).
+   - `unknown` — the release state could not be verified. **Silent**, treated exactly like `ga` (there
+     is no separate label — the two are indistinguishable in the surfaced output).
+   - `public_preview` — surfaced as the informational label **"Public Preview (production-ready)"**:
+     Public Preview is generally production-ready and supported per Databricks. Still confirm the
+     feature is available in the target workspace. A cited `release_state_source` is required.
+   - `private_preview` — surfaced as the plain factual label **"Private Preview"**. A cited
+     `release_state_source` is required.
+   - `beta` — surfaced as the plain factual label **"Beta"**. A cited `release_state_source` is
      required.
-   - `private_preview` — **Prominent warning.** Gated: requires confirmed enrollment/entitlement and is
-     not for production without it. Treat **Private Preview** as `doNotSuggest` unless the workspace has
-     **confirmed enrollment/entitlement** (not merely user acceptance). A cited `release_state_source`
-     is required.
-   - `beta` — **Prominent warning.** Not production-ready. A cited `release_state_source` is required.
-   - `unknown` — you could **not** verify the release state. Do **not** recommend the pattern on the
-     strength of an unknown state; prefer a verified alternative (e.g. a like-for-like Lakeflow Job
-     port) instead.
 
    `release_state` is **required** on any pattern you mark `simplification_pattern: true` (a distinctive
-   capability must declare its verified release state). This mirrors the Airflow `lakeflow-connect`
-   grounding rule.
+   capability must declare its verified release state). Separately from *how the state is surfaced*, the
+   recommendation-eligibility rule still stands: treat a **Private Preview** feature as `doNotSuggest`
+   unless the workspace has **confirmed enrollment/entitlement** (not merely user acceptance). This
+   mirrors the Airflow `lakeflow-connect` grounding rule.
 3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
    and, only when clean, merges it in atomically. On any violation the inventory is left untouched
    and you get the full list of problems to fix in one pass.
