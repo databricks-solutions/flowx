@@ -76,12 +76,11 @@ fingerprint that binds your insights to the exact inventory they describe):
   `simplification_pattern: true` (a distinctive capability must declare its verified release state);
   optional otherwise. `release_state_source` (a non-empty citation) is **required** when
   `release_state` is `public_preview` / `private_preview` / `beta`; not required for `ga` / `unknown`.
-  The state drives *tiered* surfacing in `flowx-route`: `ga` → no warning; `public_preview` →
-  informational disclosure (generally production-ready and supported per Databricks — disclosed, not
-  alarmed; confirm workspace availability); `private_preview` → prominent warning (gated, needs
-  confirmed enrollment/entitlement, `doNotSuggest` without it); `beta` → prominent warning (not
-  production-ready); `unknown` → could not verify, prefer a verified alternative. Verify against the
-  current public docs **before** recommending — see the SKILL.md GA-grounding step for the full rule.
+  The state is a factual **disclosure**, not a warning: `flowx-route` surfaces `public_preview` as the
+  label "Public Preview (production-ready)" and `private_preview` / `beta` as plain labels, while `ga`
+  and `unknown` are silent (`unknown` is treated exactly like `ga`). Verify against the current public
+  docs **before** recommending — see the SKILL.md GA-grounding step for the full rule. (The separate
+  `doNotSuggest`-Private-Preview recommendation-eligibility rule is unchanged; see the SKILL.md step.)
 - **`system_recommendation`** needs a non-empty `headline` and a `recommended_patterns` list;
   `cascade` (non-empty strings) and `decision_driver` are optional.
 - **Relationship edges** come in two tiers:
