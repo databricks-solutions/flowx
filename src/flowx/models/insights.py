@@ -118,15 +118,14 @@ class RecommendedPattern:
             Rank the ``True`` patterns first.
         release_state: The pattern's verified Databricks release state -- one of
             :data:`RELEASE_STATES` -- established against **current public docs** at authoring time
-            (never hardcoded). It drives *tiered* surfacing downstream: ``"ga"`` shows no warning;
-            ``"public_preview"`` is disclosed informationally (Public Preview is generally
-            production-ready and supported per Databricks; still confirm workspace availability);
-            ``"private_preview"`` warns prominently (gated -- confirmed enrollment/entitlement
-            required, not for production without it); ``"beta"`` warns prominently (not
-            production-ready); ``"unknown"`` means the state could not be verified (prefer a verified
-            alternative). **Required** whenever :attr:`simplification_pattern` is ``True`` -- a
-            distinctive capability must declare its release state; optional otherwise, defaulting to
-            ``None`` (unstated) for back-compat with insights authored before this field.
+            (never hardcoded). It is surfaced downstream (routing) as a neutral factual **disclosure**,
+            never a warning: ``"ga"`` and ``"unknown"`` are silent (``"unknown"`` is treated exactly
+            like ``"ga"`` -- the two are indistinguishable in the surfaced output); ``"public_preview"``
+            is disclosed as production-ready (Public Preview is generally production-ready and supported
+            per Databricks); ``"private_preview"`` and ``"beta"`` are stated as plain factual labels.
+            **Required** whenever :attr:`simplification_pattern` is ``True`` -- a distinctive capability
+            must declare its release state; optional otherwise, defaulting to ``None`` (unstated) for
+            back-compat with insights authored before this field.
         release_state_source: The doc URL / citation grounding :attr:`release_state`. **Required**
             (a non-empty string) whenever ``release_state`` is one of
             :data:`RELEASE_STATES_REQUIRING_SOURCE` (``"public_preview"`` / ``"private_preview"`` /
