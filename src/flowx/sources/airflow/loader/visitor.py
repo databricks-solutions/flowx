@@ -114,7 +114,7 @@ class _DagVisitor(ast.NodeVisitor):
         self.taskflow_defs: dict[str, tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]] = {}
         # @task_group def names -- a group is a sub-pipeline, not a single renderable task, so an
         # invocation routes to a placeholder + gap rather than being expanded here.
-        self.taskgroup_defs: set[str] = set()
+        self.taskgroup_defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
         for fn in _iter_functions(module):
             decorator = next(
                 (
@@ -127,7 +127,7 @@ class _DagVisitor(ast.NodeVisitor):
             if decorator is not None:
                 self.taskflow_defs[fn.name] = (fn, decorator)
             elif _has_decorator(fn, _TASK_GROUP_DECORATORS, self._aliases):
-                self.taskgroup_defs.add(fn.name)
+                self.taskgroup_defs[fn.name] = fn
         # TaskFlow task instances: var name -> _TaskFlowTask (id, def-name, decorator, arg bindings).
         self.taskflow_tasks: dict[str, _TaskFlowTask] = {}
         # @task_group invocations: var name -> (task_id, def-name, is_mapped).
@@ -156,6 +156,11 @@ class _DagVisitor(ast.NodeVisitor):
         if definition is not None:
             functions[name] = definition
         return functions
+
+    def resolved_callable_for(self, task_var: str) -> ast.FunctionDef | None:
+        """Returns the callable definition resolved for a classic operator task."""
+        resolved = self._resolved_callables.get(task_var)
+        return resolved[1] if resolved is not None else None
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         # A @task- or @task_group-decorated function defines a task / sub-pipeline from its body,

@@ -37,6 +37,7 @@ from flowx.sources.airflow.audit import SourceAudit
 from flowx.sources.airflow.loader.captures import DagDeclaration, SourceSpan
 from flowx.sources.airflow.loader.graph import _allocate_task_keys, _expand_group_edges
 from flowx.sources.airflow.loader.policy import _job_timeout_seconds
+from flowx.sources.airflow.loader.schedule import _asset_expression
 from flowx.sources.airflow.loader.visitor import _DagVisitor
 
 _QUERY_OPERATORS = frozenset(
@@ -105,6 +106,7 @@ def build_airflow_source_graph(
         {variable: task.task_id for variable, task in visitor.taskflow_tasks.items()},
         {variable: task_id for variable, (task_id, _, _) in visitor.taskgroup_calls.items()},
         visitor.groups,
+        visitor.capture_source_nodes,
     )
     expanded_edges = _expand_group_edges(visitor.edges, visitor.groups, visitor.group_vars)
     upstreams: dict[str, list[str]] = {capture_id: [] for capture_id in task_keys}
@@ -135,6 +137,8 @@ def build_airflow_source_graph(
         "source": ast.get_source_segment(source, declaration.node) or ast.unparse(declaration.node),
         "dag_arguments": {name: _expression_payload(value, source) for name, value in visitor.dag_kwargs.items()},
     }
+    if declaration.factory is not None:
+        declaration_raw["factory_definition"] = _definition_payload(declaration.factory, source)
     graph = SourceGraph(
         name=pipeline.name,
         source=SOURCE_AIRFLOW,
@@ -249,6 +253,9 @@ def _captured_node(
         raw["arguments"] = {name: _expression_payload(value, source) for name, value in kwargs.items()}
         raw["operator_fqn"] = visitor.task_captures[capture_id].operator_fqn
         raw["argument_disposition"] = ops.argument_classification(operator, kwargs)
+        callable_definition = visitor.resolved_callable_for(capture_id)
+        if callable_definition is not None:
+            raw["callable_definition"] = _definition_payload(callable_definition, source)
         run_condition = ops.literal_str(kwargs.get("trigger_rule"))
         policy = _policy(kwargs)
         concept = _operator_concept(operator, capture_id in visitor.mapped)
@@ -257,7 +264,11 @@ def _captured_node(
             target = ops.literal_str(kwargs.get("trigger_dag_id"))
             if target is not None:
                 properties[INVOKES_WORKFLOW_PROPERTY] = target
-                properties[INVOKES_WAIT_PROPERTY] = bool(ops.literal_value(kwargs.get("wait_for_completion")))
+                wait_node = kwargs.get("wait_for_completion")
+                wait_value = ops.literal_value(wait_node)
+                properties[INVOKES_WAIT_PROPERTY] = (
+                    False if wait_node is None else wait_value if isinstance(wait_value, bool) else None
+                )
         elif operator in {"DatabricksRunNowOperator", "DatabricksRunNowDeferrableOperator"}:
             job_id = ops.literal_value(kwargs.get("job_id"))
             if job_id is not None:
@@ -334,9 +345,15 @@ def _captured_node(
                 "unresolved_arguments": list(task.unresolved_arguments),
             }
         )
+        taskflow_definition = visitor.taskflow_defs[task.def_name][0]
+        raw["callable_definition"] = _definition_payload(taskflow_definition, source)
+        data_upstreams = [
+            *[task.positional_deps[position] for position in sorted(task.positional_deps)],
+            *task.keyword_deps.values(),
+        ]
         reads = [
             DataAsset(signature=f"xcom:{task_keys[upstream]}", asset_type="value")
-            for upstream in dict.fromkeys(upstreams)
+            for upstream in dict.fromkeys(data_upstreams)
             if upstream in task_keys
         ]
         writes = [DataAsset(signature=f"xcom:{task_key}", asset_type="value")]
@@ -390,6 +407,9 @@ def _captured_node(
 
     task_id, definition, mapped = visitor.taskgroup_calls[capture_id]
     raw.update({"task_group_callable": definition, "mapped": mapped})
+    taskgroup_definition = visitor.taskgroup_defs.get(definition)
+    if taskgroup_definition is not None:
+        raw["callable_definition"] = _definition_payload(taskgroup_definition, source)
     return ContainerNode(
         source_id=capture_id,
         task_key=task_key,
@@ -631,8 +651,8 @@ def _source_schedule(visitor: _DagVisitor, source: str) -> ScheduleSpec | None:
     source_expression = ast.get_source_segment(source, node) or ast.unparse(node)
     expression = source_expression if literal is None else _json_safe(literal, fallback=source_expression)
     kind = "schedule" if isinstance(literal, str) else "interval"
-    is_asset_expression = isinstance(node, ast.Call) and "Asset" in ast.unparse(node)
-    if isinstance(node, (ast.List, ast.Tuple, ast.Set)) or is_asset_expression:
+    is_asset_expression = _asset_expression(node, visitor._aliases, visitor.asset_definitions) is not None
+    if is_asset_expression:
         kind = "asset"
     return ScheduleSpec(
         kind=kind,
@@ -647,6 +667,18 @@ def _expression_payload(node: ast.expr, source: str) -> dict[str, Any]:
     return {
         "source": ast.get_source_segment(source, node) or ast.unparse(node),
         "value": _json_safe(value, fallback=None),
+    }
+
+
+def _definition_payload(node: ast.AST, source: str) -> dict[str, Any]:
+    return {
+        "source": ast.get_source_segment(source, node) or ast.unparse(node),
+        "source_span": {
+            "line": getattr(node, "lineno", 0),
+            "column": getattr(node, "col_offset", 0),
+            "end_line": getattr(node, "end_lineno", getattr(node, "lineno", 0)),
+            "end_column": getattr(node, "end_col_offset", getattr(node, "col_offset", 0)),
+        },
     }
 
 

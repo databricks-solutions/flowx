@@ -83,6 +83,7 @@ def _load_airflow_module(
         {var: task.task_id for var, task in visitor.taskflow_tasks.items()},
         {var: task_id for var, (task_id, _, _) in visitor.taskgroup_calls.items()},
         visitor.groups,
+        visitor.capture_source_nodes,
     )
 
     # Expand group-level edges (`group_a >> group_b`, `task >> group`, ...) into edges between the
@@ -205,10 +206,12 @@ def _load_airflow_module(
         return dbt_key_remap.get(key, key)
 
     tasks: list[Activity] = []
+    task_capture_ids: dict[int, str] = {}
     placeholder_capture_ids: dict[int, str] = {}
     helper_expansion_ids = {str(item["capture_id"]) for item in visitor.helper_expansions}
 
     def append_task(activity: Activity, capture_id: str) -> None:
+        task_capture_ids[id(activity)] = capture_id
         for placeholder in _iter_placeholders([activity]):
             placeholder_capture_ids[id(placeholder)] = capture_id
         tasks.append(activity)
@@ -572,6 +575,9 @@ def _load_airflow_module(
         )
         placeholder.depends_on = depends_on
         append_task(placeholder, var)
+
+    capture_order = {capture_id: index for index, capture_id in enumerate(var_to_task_key)}
+    tasks.sort(key=lambda activity: capture_order[task_capture_ids[id(activity)]])
 
     # Declare every job parameter -- those referenced in templates plus any from the DAG's
     # params={...} -- each with a default (Databricks requires one): the params={...} default when

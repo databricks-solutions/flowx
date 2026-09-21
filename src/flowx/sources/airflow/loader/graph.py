@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow.loader.ast_utils import _sanitize_task_key
@@ -13,15 +14,27 @@ def _allocate_task_keys(
     taskflow_task_ids: dict[str, str],
     taskgroup_task_ids: dict[str, str],
     groups: dict[str, str],
+    capture_source_nodes: Mapping[str, ast.AST],
 ) -> dict[str, str]:
     """Allocates stable, collision-free task keys in capture order."""
     task_ids = {variable: task_id for variable, (task_id, _, _) in operators.items()}
     task_ids.update(taskflow_task_ids)
     task_ids.update(taskgroup_task_ids)
 
+    capture_indexes = {capture_id: index for index, capture_id in enumerate(capture_source_nodes)}
+    capture_ids = sorted(
+        task_ids,
+        key=lambda capture_id: (
+            getattr(capture_source_nodes.get(capture_id), "lineno", 0),
+            getattr(capture_source_nodes.get(capture_id), "col_offset", 0),
+            capture_indexes.get(capture_id, len(capture_indexes)),
+        ),
+    )
+
     allocated: dict[str, str] = {}
     used: set[str] = set()
-    for variable, task_id in task_ids.items():
+    for variable in capture_ids:
+        task_id = task_ids[variable]
         base = _sanitize_task_key(task_id)
         if variable in groups:
             base = f"{groups[variable]}__{base}"
