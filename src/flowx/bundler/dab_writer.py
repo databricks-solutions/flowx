@@ -378,6 +378,70 @@ def _default_report_path(output_dir: Path) -> Path:
     return work / "translation_report.json"
 
 
+def _write_route_audit(output_dir: Path) -> Path | None:
+    """Persist a compact routing/gaps audit to ``metadata/route_audit.json`` before the prune.
+
+    Package prunes the transient ``.work/`` folder (translation report + ``gaps.json``) by default,
+    which erases the "what did routing change?" trail. When a routing decision was recorded
+    (``metadata/conversion_plan.json`` exists), summarise the routed components, their decisions, and
+    the gaps routing introduced into an additive ``metadata/`` artifact that survives the prune.
+
+    Returns the written path, or ``None`` when there is no recorded plan (no routing happened) -- so
+    the no-route path writes nothing and stays byte-identical.
+    """
+    metadata_dir = Path(output_dir) / "metadata"
+    plan_path = metadata_dir / "conversion_plan.json"
+    if not plan_path.is_file():
+        return None
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(plan, dict):
+        return None
+
+    components: list[dict[str, Any]] = []
+    agentic_pipelines: list[str] = []
+    for component in plan.get("components", []):
+        if not isinstance(component, dict):
+            continue
+        members = [str(member) for member in component.get("members", []) if isinstance(member, str)]
+        decision = component.get("decision")
+        components.append({"component_id": component.get("component_id"), "members": members, "decision": decision})
+        if decision == "agentic":
+            agentic_pipelines.extend(members)
+
+    gaps_introduced: list[dict[str, Any]] = []
+    gaps_path = Path(output_dir) / ".work" / "gaps.json"
+    if gaps_path.is_file():
+        try:
+            gaps = json.loads(gaps_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            gaps = []
+        for gap in gaps if isinstance(gaps, list) else []:
+            if isinstance(gap, dict):
+                gaps_introduced.append(
+                    {
+                        "pipeline": gap.get("pipeline"),
+                        "activity_name": gap.get("activity_name"),
+                        "activity_type": gap.get("activity_type"),
+                    }
+                )
+
+    audit = {
+        "schema": "flowx.route_audit/v1",
+        "recorded_against_inventory_sha256": plan.get("inventory_sha256"),
+        "components": components,
+        "agentic_pipelines": sorted(set(agentic_pipelines)),
+        "gaps_count": len(gaps_introduced),
+        "gaps_introduced": gaps_introduced,
+    }
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = metadata_dir / "route_audit.json"
+    audit_path.write_text(json.dumps(audit, indent=2), encoding="utf-8")
+    return audit_path
+
+
 def main(argv: list[str] | None = None) -> int:
     """Package-phase entry point for DAB bundle generation.
 
@@ -583,6 +647,12 @@ def main(argv: list[str] | None = None) -> int:
         if not result.ok or result.warnings:
             print(format_result(result), file=sys.stderr)
         invariant_violations += len(result.violations)
+
+    # Persist the routing/gaps audit to metadata/ before pruning .work/, so the "what did routing
+    # change?" trail survives the default prune. No-ops (writes nothing) when no plan was recorded.
+    audit_path = _write_route_audit(args.output_dir)
+    if audit_path is not None:
+        print(f"Wrote routing audit to {audit_path}")
 
     if not args.keep_intermediates:
         work_dir = args.output_dir / ".work"

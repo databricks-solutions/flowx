@@ -12,7 +12,9 @@
     "./skills/flowx-setup",
     "./skills/flowx-discover",
     "./skills/flowx-enrich",
+    "./skills/flowx-route",
     "./skills/flowx-convert",
+    "./skills/flowx-resolve-airflow-gaps",
     "./skills/flowx-package",
     "./skills/flowx-migrate"
   ]

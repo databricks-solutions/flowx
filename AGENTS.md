@@ -73,10 +73,13 @@ intermediates under `.work/` (pruned by `package`).
 | `models/adf_ast.py` | Typed AST nodes for ADF definitions |
 | `models/ir.py` | Databricks intermediate representation |
 | `models/dab.py` | DAB output schema types |
-| `parser/adf_loader.py` | Parses ADF exports, produces `metadata/inventory.json` + `metadata/profile_report.csv` |
+| `models/discovery.py` | Source-faithful shared discovery AST (`SourceGraph`) that both ADF and Airflow map onto |
+| `sources/adf/loader.py` | Parses ADF exports, produces `metadata/inventory.json` + `metadata/profile_report.csv` |
+| `sources/adf/discovery_mapping.py` | Maps the ADF AST onto the shared `SourceGraph` discovery model (1:1, lossless) |
+| `sources/adf/translate.py` | Registry dispatch, topological sort, context threading |
+| `sources/adf/translators/` | One module per deterministic activity type (16 total) |
+| `sources/airflow/` | Airflow source: loader, discover, and convert (mirrors the ADF source layout) |
 | `parser/expression_parser.py` | Translates ADF expressions (@activity, @pipeline, @variables) |
-| `translator/engine.py` | Registry dispatch, topological sort, context threading |
-| `translator/activity_translators/` | One module per deterministic activity type (16 total) |
 | `preparer/workflow_preparer.py` | Orchestrates activity preparers |
 | `preparer/code_generator.py` | Notebook code generation for activity types |
 | `preparer/activity_preparers/` | One module per activity type |
@@ -86,6 +89,9 @@ intermediates under `.work/` (pruned by `package`).
 | `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/` |
 | `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK |
 | `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table |
+| `routing.py` | Groups pipelines into connected components over control lineage; recommends deterministic/agentic per component (both options) and records the user's decision as `metadata/conversion_plan.json` (additive; convert untouched) |
+| `route_agentic.py` | Applies a routing decision after convert: rewrites the translation report for agentic-routed groups (placeholder tasks + per-task `AgenticGap`), keeping the fill in-engine |
+| `models/conversion_plan.py` | Source-neutral conversion-plan artifact model (per-component decision + both options), the routing counterpart to `models/insights.py` |
 
 ## Activity Types
 
@@ -127,11 +133,11 @@ ExecuteDataFlow, SqlServerStoredProcedure, AzureFunction, WebHook, Custom, Execu
 ## Adding a New Deterministic Translator
 
 1. Add IR dataclass to `src/flowx/models/ir.py`
-2. Create translator at `src/flowx/translator/activity_translators/<type>.py`
+2. Create translator at `src/flowx/sources/adf/translators/<type>.py`
 3. Create preparer at `src/flowx/preparer/activity_preparers/<type>.py`
 4. Add notebook generator to `src/flowx/preparer/code_generator.py` if needed
-5. Register in engine.py (TRANSLATOR_REGISTRY for leaf, match statement for control-flow)
-6. Move from AGENTIC_TYPES to DETERMINISTIC_TYPES in adf_loader.py
+5. Register in `src/flowx/sources/adf/translate.py` (TRANSLATOR_REGISTRY for leaf, match statement for control-flow)
+6. Move from AGENTIC_TYPES to DETERMINISTIC_TYPES in `src/flowx/sources/adf/loader.py`
 7. Update activity-mapping.md reference
 8. Add test fixtures and unit tests
 
@@ -153,3 +159,10 @@ only one-line pointers):
   proxy the SDK sees the workspace `Origin` and a proxied `Host: localhost:<port>`, so its Host/Origin
   allowlist misfires (403/421) while adding nothing on top of the proxy's authentication. Browser
   CORS is a separate concern configured via `FLOWX_ALLOWED_ORIGINS`.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
