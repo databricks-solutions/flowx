@@ -271,11 +271,264 @@ build()
     )
 
     assert [(node.source_id, node.task_key) for node in result.graph.tasks] == [
-        ("same", "same"),
-        ("middle", "same__2"),
+        ("same", "same__2"),
+        ("middle", "same"),
         ("last", "last"),
     ]
     assert [task.task_key for task in result.pipeline.tasks] == ["same", "same__2", "last"]
+    assert [task.name for task in result.pipeline.tasks] == ["same", "same", "last"]
+
+
+def test_records_unresolved_cross_workflow_invocations(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow import DAG
+from airflow.models import Variable
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.providers.databricks.operators.databricks import DatabricksRunNowOperator
+
+with DAG(dag_id="dynamic_targets", schedule=None) as dag:
+    trigger = TriggerDagRunOperator(task_id="trigger", trigger_dag_id=Variable.get("CHILD_DAG"))
+    run_now = DatabricksRunNowOperator(task_id="run_now", job_id=Variable.get("JOB_ID"))
+""",
+    )
+
+    nodes = {node.task_key: node for node in result.graph.tasks}
+    assert nodes["trigger"].properties["invokes_workflow"] == ""
+    assert nodes["run_now"].properties["invokes_workflow"] == ""
+    assert result.graph.lineage is not None
+    control_edges = [
+        (edge.via_task_key, edge.target_workflow, edge.resolved) for edge in result.graph.lineage.control_edges
+    ]
+    assert control_edges == [
+        ("trigger", "", False),
+        ("run_now", "", False),
+    ]
+
+
+def test_preserves_mapped_taskflow_xcom_lineage(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow.decorators import dag, task
+
+@dag(dag_id="mapped_xcom", schedule=None)
+def build():
+    @task
+    def extract():
+        return [1, 2]
+
+    @task
+    def process(value, fixed=None):
+        return value
+
+    upstream = extract()
+    mapped = process.expand(value=upstream)
+    partial_mapped = process.partial(fixed=upstream).expand(value=[1, 2])
+
+build()
+""",
+    )
+
+    nodes = {node.source_id: node for node in result.graph.tasks}
+    assert [asset.signature for asset in nodes["mapped"].data_reads] == ["xcom:upstream"]
+    assert [asset.signature for asset in nodes["partial_mapped"].data_reads] == ["xcom:upstream"]
+    assert result.graph.lineage is not None
+    assert {(edge.source_task_key, edge.target_task_key) for edge in result.graph.lineage.data_edges} == {
+        ("upstream", "mapped"),
+        ("upstream", "partial_mapped"),
+    }
+
+
+def test_maps_context_managed_cosmos_task_group(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow import DAG
+from cosmos import DbtTaskGroup, ProfileConfig, ProjectConfig
+
+with DAG(dag_id="cosmos_context", schedule=None) as dag:
+    with DbtTaskGroup(
+        group_id="transform",
+        project_config=ProjectConfig("/opt/dbt"),
+        profile_config=ProfileConfig(profile_name="analytics", target_name="prod"),
+    ) as transform:
+        pass
+""",
+    )
+
+    transform = next(node for node in walk_nodes(result.graph.tasks) if node.source_id == "transform")
+    assert transform.native_type == "DbtTaskGroup"
+    assert transform.raw is not None
+    assert transform.raw["operator_fqn"] == "cosmos.DbtTaskGroup"
+
+
+def test_resolves_named_task_assets_and_lineage(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow import DAG, Dataset
+from airflow.operators.bash import BashOperator
+from airflow.sdk import Asset
+
+orders = Dataset("s3://warehouse/orders")
+customers = Asset(uri="s3://warehouse/customers")
+
+with DAG(dag_id="named_assets", schedule=None) as dag:
+    produce_orders = BashOperator(task_id="produce_orders", bash_command="echo orders", outlets=[orders])
+    consume_orders = BashOperator(task_id="consume_orders", bash_command="echo orders", inlets=[orders])
+    produce_customers = BashOperator(task_id="produce_customers", bash_command="echo customers", outlets=[customers])
+    consume_customers = BashOperator(task_id="consume_customers", bash_command="echo customers", inlets=[customers])
+""",
+    )
+
+    nodes = {node.task_key: node for node in result.graph.tasks}
+    assert nodes["produce_orders"].data_writes[0].identity == "s3://warehouse/orders"
+    assert nodes["consume_orders"].data_reads[0].identity == "s3://warehouse/orders"
+    assert nodes["produce_customers"].data_writes[0].identity == "s3://warehouse/customers"
+    assert nodes["consume_customers"].data_reads[0].identity == "s3://warehouse/customers"
+    assert result.graph.lineage is not None
+    assert {(edge.source_task_key, edge.target_task_key) for edge in result.graph.lineage.data_edges} == {
+        ("produce_orders", "consume_orders"),
+        ("produce_customers", "consume_customers"),
+    }
+
+
+def test_preserves_gap_source_order_and_task_group_scope(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from airflow.utils.task_group import TaskGroup
+
+with DAG(dag_id="ordered_gaps", schedule=None) as dag:
+    first = BashOperator(task_id="first", bash_command="echo first")
+    fanout = [BashOperator(task_id=f"work_{index}", bash_command="echo work") for index in range(3)]
+    last = BashOperator(task_id="last", bash_command="echo last")
+    with TaskGroup(group_id="nested") as nested:
+        inner = BashOperator(task_id="inner", bash_command="echo inner")
+        grouped_fanout = [BashOperator(task_id=f"grouped_{index}", bash_command="echo work") for index in range(2)]
+""",
+    )
+
+    root_names = [node.name for node in result.graph.tasks]
+    assert root_names[:3] == ["first", "unclaimed_task_call", "last"]
+    nested = next(node for node in result.graph.tasks if isinstance(node, ContainerNode) and node.name == "nested")
+    assert [node.name for node in nested.branches["group"]][:2] == ["inner", "unclaimed_task_call"]
+    assert any(isinstance(node, GapNode) for node in nested.branches["group"])
+
+
+def test_persists_complete_callable_dependency_closure(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+import math
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+SCALE = 3
+
+class Multiplier:
+    def apply(self, value):
+        return value * SCALE
+
+def helper(value):
+    return Multiplier().apply(math.floor(value))
+
+def callable_task():
+    return helper(2.5)
+
+with DAG(dag_id="callable_closure", schedule=None) as dag:
+    run = PythonOperator(task_id="run", python_callable=callable_task)
+""",
+    )
+
+    callable_definition = result.graph.tasks[0].raw["callable_definition"]
+    closure = callable_definition["closure_source"]
+    assert "import math" in closure
+    assert "SCALE = 3" in closure
+    assert "class Multiplier:" in closure
+    assert "def helper(value):" in closure
+    assert "def callable_task():" in closure
+
+
+def test_allocates_unique_structural_task_group_keys(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from airflow.utils.task_group import TaskGroup
+
+with DAG(dag_id="group_key_collision", schedule=None) as dag:
+    collision = BashOperator(task_id="processing", bash_command="echo collision")
+    with TaskGroup(group_id="processing") as processing:
+        inner = BashOperator(task_id="inner", bash_command="echo inner")
+""",
+    )
+
+    keys = [node.task_key for node in walk_nodes(result.graph.tasks)]
+    assert len(keys) == len(set(keys))
+    group = next(node for node in result.graph.tasks if isinstance(node, ContainerNode))
+    assert group.task_key == "processing__2"
+
+
+def test_resolves_task_group_definitions_lexically(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow.decorators import dag, task_group
+
+@task_group
+def grouped():
+    module_marker = "module"
+
+@dag(dag_id="lexical_groups", schedule=None)
+def build():
+    @task_group
+    def grouped():
+        nested_marker = "nested"
+
+    selected = grouped()
+
+build()
+""",
+    )
+
+    selected = next(node for node in result.graph.tasks if node.source_id == "selected")
+    definition = selected.raw["callable_definition"]
+    assert "nested_marker" in definition["source"]
+    assert "module_marker" not in definition["source"]
+
+
+def test_routes_conditionally_ambiguous_task_group_definition_to_gap(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow.decorators import dag, task_group
+from airflow.models import Variable
+
+@task_group
+def grouped():
+    module_marker = "module"
+
+@dag(dag_id="ambiguous_group", schedule=None)
+def build():
+    if Variable.get("USE_LOCAL"):
+        @task_group
+        def grouped():
+            conditional_marker = "conditional"
+
+    selected = grouped()
+
+build()
+""",
+    )
+
+    assert not any(node.source_id == "selected" and node.concept == CONCEPT_GROUP for node in result.graph.tasks)
+    assert any(isinstance(node, GapNode) for node in result.graph.tasks)
 
 
 def test_unclaimed_comprehension_is_an_explicit_gap(tmp_path: Path) -> None:

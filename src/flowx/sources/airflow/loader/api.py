@@ -27,7 +27,7 @@ from flowx.sources.airflow.loader.dag_discovery import (
     _top_level_dag_declarations,
 )
 from flowx.sources.airflow.loader.lowering import _load_airflow_module
-from flowx.sources.airflow.loader.visitor import _DagVisitor
+from flowx.sources.airflow.loader.visitor import DagVisitor
 from flowx.utils import normalize_task_key
 
 _HOST_PATTERN = re.compile(r"https://([A-Za-z0-9._-]*(?:azuredatabricks\.net|databricks\.com|cloud\.databricks\.com))")
@@ -71,7 +71,16 @@ def load_airflow_dag_results(
     dbt_mode: str = "static",
     source_file: str | None = None,
 ) -> list[AirflowDiscoveryResult]:
-    """Parses every DAG into current IR and its shared source graph in one capture pass."""
+    """Parses every DAG into current IR and its shared source graph in one capture pass.
+
+    Args:
+        dag_path: Python file containing one or more Airflow DAG declarations.
+        dbt_mode: dbt-factory render mode, either ``"static"`` or ``"pydabs"``.
+        source_file: Stable source label stored in discovery metadata. Defaults to the file name.
+
+    Returns:
+        One paired pipeline and source graph for each DAG declaration in the file.
+    """
     results = _load_airflow_dag_results(
         dag_path,
         dbt_mode=dbt_mode,
@@ -115,7 +124,7 @@ def _load_airflow_dag_results(
             continue
         isolated = _module_for_dag(module, declaration, declarations)
         audit = source_audit.audit_module(isolated, target_dag_variable=declaration.target_dag_variable)
-        visitor = _DagVisitor(isolated, target_dag_variable=declaration.target_dag_variable)
+        visitor = DagVisitor(isolated, target_dag_variable=declaration.target_dag_variable)
         visitor.visit(isolated)
         pipeline = _load_airflow_module(
             dag_path,
@@ -186,7 +195,17 @@ def load_discovery_results(
     dbt_mode: str = "static",
     exclude_dags: set[str] | None = None,
 ) -> list[AirflowDiscoveryResult]:
-    """Loads Airflow DAGs into paired Pipeline IR and shared source graphs."""
+    """Loads Airflow DAGs into paired Pipeline IR and shared source graphs.
+
+    Args:
+        source_path: A DAG Python file or directory searched recursively for DAG files.
+        pipeline: Optional DAG identifier used to select one pipeline.
+        dbt_mode: dbt-factory render mode, either ``"static"`` or ``"pydabs"``.
+        exclude_dags: DAG identifiers retained in reporting but excluded from migration output.
+
+    Returns:
+        Paired pipeline and source-graph results after filtering and exclusion rewrites.
+    """
     root = source_path if source_path.is_dir() else source_path.parent
     results = [
         result

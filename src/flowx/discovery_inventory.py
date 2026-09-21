@@ -21,7 +21,17 @@ def build_source_inventory(
     source_dir: str,
     include_empty_pipelines: bool = True,
 ) -> dict[str, Any]:
-    """Projects source graphs into the common discovery inventory shape."""
+    """Projects source graphs into the common discovery inventory shape.
+
+    Args:
+        graphs: Source-faithful workflow graphs to summarize.
+        source: Source-system identifier written to the inventory.
+        source_dir: Source directory label written to the inventory.
+        include_empty_pipelines: Whether workflows without visible activities remain in the inventory.
+
+    Returns:
+        The serializable inventory payload with per-pipeline activities and aggregate coverage.
+    """
     pipeline_entries: list[dict[str, Any]] = []
     deterministic = 0
     agentic = 0

@@ -285,3 +285,21 @@ def _asset_schedule_from_node(
         },
         None,
     )
+
+
+def asset_expression(
+    node: ast.expr,
+    aliases: dict[str, str],
+    definitions: dict[str, ast.Call],
+) -> tuple[list[str], str, str | None] | None:
+    """Resolves an Airflow Asset or Dataset schedule expression.
+
+    Args:
+        node: Schedule expression to resolve.
+        aliases: Canonical import names keyed by local aliases.
+        definitions: Named Asset or Dataset constructors keyed by variable name.
+
+    Returns:
+        Table names, combination mode, and an optional error code, or ``None`` when the expression is not asset-based.
+    """
+    return _asset_expression(node, aliases, definitions)

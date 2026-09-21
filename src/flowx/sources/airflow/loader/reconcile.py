@@ -21,7 +21,7 @@ from flowx.sources.airflow.loader.policy import (
     _RECOGNIZED_DAG_SETTINGS,
     _dag_setting_disposition,
 )
-from flowx.sources.airflow.loader.visitor import _DagVisitor
+from flowx.sources.airflow.loader.visitor import DagVisitor
 
 
 def _semantic_finding(
@@ -78,7 +78,7 @@ def _reconcile_pipeline(
     pipeline: Pipeline,
     *,
     audit: source_audit.SourceAudit,
-    visitor: _DagVisitor,
+    visitor: DagVisitor,
     source_file: str,
     var_to_task_key: dict[str, str],
     dropped: set[str],

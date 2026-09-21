@@ -26,17 +26,17 @@ from flowx.sources.airflow.loader.activity_templates import (
 from flowx.sources.airflow.loader.ast_utils import _span
 from flowx.sources.airflow.loader.dbt import _build_dbt_factory
 from flowx.sources.airflow.loader.graph import (
-    _allocate_task_keys,
-    _expand_group_edges,
     _rewire_dropped,
     _root_trigger_sensor,
     _trigger_from_sensor,
+    allocate_task_keys,
+    expand_group_edges,
 )
 from flowx.sources.airflow.loader.policy import _job_email_notifications, _job_timeout_seconds
 from flowx.sources.airflow.loader.reconcile import _iter_placeholders, _semantic_finding
 from flowx.sources.airflow.loader.schedule import _asset_schedule_from_node, _schedule_from_interval
 from flowx.sources.airflow.loader.taskflow import _build_taskflow_task, _wrap_in_for_each, _wrap_taskflow_in_for_each
-from flowx.sources.airflow.loader.visitor import _DagVisitor
+from flowx.sources.airflow.loader.visitor import DagVisitor
 
 _DATABRICKS_JOB_TAG_LIMIT = 25
 
@@ -50,7 +50,7 @@ def _load_airflow_module(
     target_dag_variable: str | None = None,
     source_file: str | None = None,
     captured_audit: SourceAudit | None = None,
-    captured_visitor: _DagVisitor | None = None,
+    captured_visitor: DagVisitor | None = None,
 ) -> Pipeline:
     """Parses one isolated DAG declaration into a flowx Pipeline IR.
 
@@ -68,7 +68,7 @@ def _load_airflow_module(
         PlaceholderActivity.
     """
     audit = captured_audit or source_audit.audit_module(module, target_dag_variable=target_dag_variable)
-    visitor = captured_visitor or _DagVisitor(module, target_dag_variable=target_dag_variable)
+    visitor = captured_visitor or DagVisitor(module, target_dag_variable=target_dag_variable)
     if captured_visitor is None:
         visitor.visit(module)
     functions = visitor.functions()
@@ -78,18 +78,17 @@ def _load_airflow_module(
     var_task_ids: dict[str, str] = {var: tid for var, (tid, _, _) in visitor.operators.items()}
     var_task_ids.update({var: tf.task_id for var, tf in visitor.taskflow_tasks.items()})
     var_task_ids.update({var: task_id for var, (task_id, _, _) in visitor.taskgroup_calls.items()})
-    var_to_task_key = _allocate_task_keys(
+    var_to_task_key = allocate_task_keys(
         visitor.operators,
         {var: task.task_id for var, task in visitor.taskflow_tasks.items()},
         {var: task_id for var, (task_id, _, _) in visitor.taskgroup_calls.items()},
         visitor.groups,
-        visitor.capture_source_nodes,
     )
 
     # Expand group-level edges (`group_a >> group_b`, `task >> group`, ...) into edges between the
     # groups' boundary tasks: leaves of the upstream group -> roots of the downstream group, matching
     # Airflow's TaskGroup dependency semantics. A non-group var resolves to itself.
-    edges = _expand_group_edges(visitor.edges, visitor.groups, visitor.group_vars)
+    edges = expand_group_edges(visitor.edges, visitor.groups, visitor.group_vars)
 
     # Build the upstream adjacency in dependency terms, then drop structural nodes
     # (Dummy/Empty and lifted root sensors) by rewiring their downstreams to their upstreams.
@@ -128,7 +127,7 @@ def _load_airflow_module(
                 },
             }
         elif schedule_gap is not None:
-            visitor.unresolved_constructs.append((schedule_gap, schedule_node))
+            visitor.add_unresolved_construct(schedule_gap, schedule_node)
     has_schedule = schedule is not None
 
     # Dummy/Empty operators are structural and can be removed after dependency rewiring.
@@ -206,12 +205,10 @@ def _load_airflow_module(
         return dbt_key_remap.get(key, key)
 
     tasks: list[Activity] = []
-    task_capture_ids: dict[int, str] = {}
     placeholder_capture_ids: dict[int, str] = {}
     helper_expansion_ids = {str(item["capture_id"]) for item in visitor.helper_expansions}
 
     def append_task(activity: Activity, capture_id: str) -> None:
-        task_capture_ids[id(activity)] = capture_id
         for placeholder in _iter_placeholders([activity]):
             placeholder_capture_ids[id(placeholder)] = capture_id
         tasks.append(activity)
@@ -575,9 +572,6 @@ def _load_airflow_module(
         )
         placeholder.depends_on = depends_on
         append_task(placeholder, var)
-
-    capture_order = {capture_id: index for index, capture_id in enumerate(var_to_task_key)}
-    tasks.sort(key=lambda activity: capture_order[task_capture_ids[id(activity)]])
 
     # Declare every job parameter -- those referenced in templates plus any from the DAG's
     # params={...} -- each with a default (Databricks requires one): the params={...} default when
