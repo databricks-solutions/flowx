@@ -5,6 +5,34 @@ from __future__ import annotations
 import ast
 
 from flowx.sources.airflow import operators as ops
+from flowx.sources.airflow.loader.ast_utils import _sanitize_task_key
+
+
+def _allocate_task_keys(
+    operators: dict[str, tuple[str, str, dict[str, ast.expr]]],
+    taskflow_task_ids: dict[str, str],
+    taskgroup_task_ids: dict[str, str],
+    groups: dict[str, str],
+) -> dict[str, str]:
+    """Allocates stable, collision-free task keys in capture order."""
+    task_ids = {variable: task_id for variable, (task_id, _, _) in operators.items()}
+    task_ids.update(taskflow_task_ids)
+    task_ids.update(taskgroup_task_ids)
+
+    allocated: dict[str, str] = {}
+    used: set[str] = set()
+    for variable, task_id in task_ids.items():
+        base = _sanitize_task_key(task_id)
+        if variable in groups:
+            base = f"{groups[variable]}__{base}"
+        candidate = base
+        suffix = 2
+        while candidate in used:
+            candidate = f"{base}__{suffix}"
+            suffix += 1
+        used.add(candidate)
+        allocated[variable] = candidate
+    return allocated
 
 
 def _expand_group_edges(

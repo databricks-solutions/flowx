@@ -16,15 +16,17 @@ from flowx.models.ir import (
 from flowx.sources.airflow import audit as source_audit
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow import templating
+from flowx.sources.airflow.audit import SourceAudit
 from flowx.sources.airflow.loader import reconcile
 from flowx.sources.airflow.loader.activity_templates import (
     _convert_activity_templates,
     _declared_param_default,
     _unresolved_activity_templates,
 )
-from flowx.sources.airflow.loader.ast_utils import _sanitize_task_key, _span
+from flowx.sources.airflow.loader.ast_utils import _span
 from flowx.sources.airflow.loader.dbt import _build_dbt_factory
 from flowx.sources.airflow.loader.graph import (
+    _allocate_task_keys,
     _expand_group_edges,
     _rewire_dropped,
     _root_trigger_sensor,
@@ -47,6 +49,8 @@ def _load_airflow_module(
     dbt_mode: str = "static",
     target_dag_variable: str | None = None,
     source_file: str | None = None,
+    captured_audit: SourceAudit | None = None,
+    captured_visitor: _DagVisitor | None = None,
 ) -> Pipeline:
     """Parses one isolated DAG declaration into a flowx Pipeline IR.
 
@@ -63,33 +67,23 @@ def _load_airflow_module(
         sensors remain explicit placeholders; unmapped operators become a
         PlaceholderActivity.
     """
-    audit = source_audit.audit_module(module, target_dag_variable=target_dag_variable)
-    visitor = _DagVisitor(module, target_dag_variable=target_dag_variable)
-    visitor.visit(module)
+    audit = captured_audit or source_audit.audit_module(module, target_dag_variable=target_dag_variable)
+    visitor = captured_visitor or _DagVisitor(module, target_dag_variable=target_dag_variable)
+    if captured_visitor is None:
+        visitor.visit(module)
     functions = visitor.functions()
-
-    # Prefix TaskGroup member keys with the group id (e.g. extract__run) so two tasks named
-    # `run` in different groups don't collide.
-    def _task_key(var: str, task_id: str) -> str:
-        key = _sanitize_task_key(task_id)
-        return f"{visitor.groups[var]}__{key}" if var in visitor.groups else key
 
     # TaskFlow @task instances share the task table with classic operators (both are just tasks with
     # a task_key and dependency edges downstream).
     var_task_ids: dict[str, str] = {var: tid for var, (tid, _, _) in visitor.operators.items()}
     var_task_ids.update({var: tf.task_id for var, tf in visitor.taskflow_tasks.items()})
     var_task_ids.update({var: task_id for var, (task_id, _, _) in visitor.taskgroup_calls.items()})
-    var_to_task_key: dict[str, str] = {}
-    used_task_keys: set[str] = set()
-    for var, task_id in var_task_ids.items():
-        base = _task_key(var, task_id)
-        candidate = base
-        suffix = 2
-        while candidate in used_task_keys:
-            candidate = f"{base}__{suffix}"
-            suffix += 1
-        used_task_keys.add(candidate)
-        var_to_task_key[var] = candidate
+    var_to_task_key = _allocate_task_keys(
+        visitor.operators,
+        {var: task.task_id for var, task in visitor.taskflow_tasks.items()},
+        {var: task_id for var, (task_id, _, _) in visitor.taskgroup_calls.items()},
+        visitor.groups,
+    )
 
     # Expand group-level edges (`group_a >> group_b`, `task >> group`, ...) into edges between the
     # groups' boundary tasks: leaves of the upstream group -> roots of the downstream group, matching

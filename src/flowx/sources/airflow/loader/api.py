@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import ast
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
+from flowx.models.discovery import SourceGraph
 from flowx.models.ir import (
     Pipeline,
     PlaceholderActivity,
     RunJobActivity,
 )
 from flowx.sources.airflow import audit as source_audit
+from flowx.sources.airflow.discovery_mapping import (
+    AirflowDiscoveryResult,
+    build_airflow_source_graph,
+    failed_declaration_source_graph,
+    sync_graph_translation_metadata,
+)
 from flowx.sources.airflow.loader.ast_utils import _expand_top_level_loops
 from flowx.sources.airflow.loader.dag_discovery import (
     _failed_dag_declaration_pipeline,
@@ -19,9 +27,16 @@ from flowx.sources.airflow.loader.dag_discovery import (
     _top_level_dag_declarations,
 )
 from flowx.sources.airflow.loader.lowering import _load_airflow_module
+from flowx.sources.airflow.loader.visitor import _DagVisitor
 from flowx.utils import normalize_task_key
 
 _HOST_PATTERN = re.compile(r"https://([A-Za-z0-9._-]*(?:azuredatabricks\.net|databricks\.com|cloud\.databricks\.com))")
+
+
+@dataclass(slots=True, kw_only=True)
+class _LoadedDag:
+    pipeline: Pipeline
+    graph: SourceGraph | None
 
 
 def load_airflow_dag(dag_path: Path, *, dbt_mode: str = "static") -> Pipeline:
@@ -39,31 +54,94 @@ def load_airflow_dags(
     source_file: str | None = None,
 ) -> list[Pipeline]:
     """Parses every independently declared Airflow DAG in a Python file."""
+    return [
+        result.pipeline
+        for result in _load_airflow_dag_results(
+            dag_path,
+            dbt_mode=dbt_mode,
+            source_file=source_file,
+            include_graph=False,
+        )
+    ]
+
+
+def load_airflow_dag_results(
+    dag_path: Path,
+    *,
+    dbt_mode: str = "static",
+    source_file: str | None = None,
+) -> list[AirflowDiscoveryResult]:
+    """Parses every DAG into current IR and its shared source graph in one capture pass."""
+    results = _load_airflow_dag_results(
+        dag_path,
+        dbt_mode=dbt_mode,
+        source_file=source_file,
+        include_graph=True,
+    )
+    return [
+        AirflowDiscoveryResult(pipeline=result.pipeline, graph=result.graph)
+        for result in results
+        if result.graph is not None
+    ]
+
+
+def _load_airflow_dag_results(
+    dag_path: Path,
+    *,
+    dbt_mode: str,
+    source_file: str | None,
+    include_graph: bool,
+) -> list[_LoadedDag]:
     source = Path(dag_path).read_text(encoding="utf-8")
     module = _expand_top_level_loops(ast.parse(source))
     declarations = _top_level_dag_declarations(module)
-    pipelines: list[Pipeline] = []
+    results: list[_LoadedDag] = []
+    label = source_file or dag_path.name
     for declaration in declarations:
         if declaration.unsupported_reason is not None:
-            pipelines.append(
-                _failed_dag_declaration_pipeline(
-                    dag_path,
-                    declaration,
-                    source_file=source_file or dag_path.name,
+            pipeline = _failed_dag_declaration_pipeline(dag_path, declaration, source_file=label)
+            graph = (
+                failed_declaration_source_graph(
+                    dag_path=dag_path,
+                    source_file=label,
+                    source=source,
+                    declaration=declaration,
+                    pipeline=pipeline,
                 )
+                if include_graph
+                else None
             )
+            results.append(_LoadedDag(pipeline=pipeline, graph=graph))
             continue
-        pipelines.append(
-            _load_airflow_module(
-                dag_path,
-                source,
-                _module_for_dag(module, declaration, declarations),
-                dbt_mode=dbt_mode,
-                target_dag_variable=declaration.target_dag_variable,
-                source_file=source_file or dag_path.name,
-            )
+        isolated = _module_for_dag(module, declaration, declarations)
+        audit = source_audit.audit_module(isolated, target_dag_variable=declaration.target_dag_variable)
+        visitor = _DagVisitor(isolated, target_dag_variable=declaration.target_dag_variable)
+        visitor.visit(isolated)
+        pipeline = _load_airflow_module(
+            dag_path,
+            source,
+            isolated,
+            dbt_mode=dbt_mode,
+            target_dag_variable=declaration.target_dag_variable,
+            source_file=label,
+            captured_audit=audit,
+            captured_visitor=visitor,
         )
-    return pipelines
+        graph = (
+            build_airflow_source_graph(
+                dag_path=dag_path,
+                source_file=label,
+                source=source,
+                declaration=declaration,
+                visitor=visitor,
+                audit=audit,
+                pipeline=pipeline,
+            )
+            if include_graph
+            else None
+        )
+        results.append(_LoadedDag(pipeline=pipeline, graph=graph))
+    return results
 
 
 def load_pipelines(
@@ -97,6 +175,40 @@ def load_pipelines(
     if pipeline is not None:
         pipelines = [p for p in pipelines if p.name == pipeline]
     excluded = set(exclude_dags or ())
+    _apply_exclusions(pipelines, excluded)
+    return pipelines
+
+
+def load_discovery_results(
+    source_path: Path,
+    pipeline: str | None = None,
+    *,
+    dbt_mode: str = "static",
+    exclude_dags: set[str] | None = None,
+) -> list[AirflowDiscoveryResult]:
+    """Loads Airflow DAGs into paired Pipeline IR and shared source graphs."""
+    root = source_path if source_path.is_dir() else source_path.parent
+    results = [
+        result
+        for dag_path in discover_dags(source_path)
+        for result in load_airflow_dag_results(
+            dag_path,
+            dbt_mode=dbt_mode,
+            source_file=source_audit.source_label(dag_path, root),
+        )
+    ]
+    if pipeline is not None:
+        results = [result for result in results if result.pipeline.name == pipeline]
+    excluded = set(exclude_dags or ())
+    pipelines = [result.pipeline for result in results]
+    _apply_exclusions(pipelines, excluded)
+    for result in results:
+        sync_graph_translation_metadata(result.graph, result.pipeline)
+    return results
+
+
+def _apply_exclusions(pipelines: list[Pipeline], excluded: set[str]) -> None:
+    """Marks excluded DAGs and replaces included references to them."""
     for loaded in pipelines:
         if loaded.name in excluded:
             loaded.migration_status = "excluded"
@@ -111,7 +223,6 @@ def load_pipelines(
             )
     if excluded:
         _replace_excluded_dag_references(pipelines, excluded)
-    return pipelines
 
 
 def _replace_excluded_dag_references(pipelines: list[Pipeline], excluded: set[str]) -> None:

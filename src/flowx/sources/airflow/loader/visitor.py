@@ -12,6 +12,7 @@ from flowx.sources.airflow.loader.ast_utils import (
     _UNRESOLVED,
     _airflow_generation,
     _bind_constants,
+    _canonical_name,
     _construct_name,
     _import_aliases,
     _index_lexical_functions,
@@ -96,6 +97,7 @@ class _DagVisitor(ast.NodeVisitor):
         # task variable name -> TaskGroup id prefix (for task-key namespacing)
         self.groups: dict[str, str] = {}
         self._group_stack: list[str] = []
+        self.group_source_nodes: dict[str, ast.Call] = {}
         # `with TaskGroup(...) as tg:` binding -> the group's prefix, so a group-level edge
         # (tg >> other) can expand to edges between the groups' boundary tasks.
         self.group_vars: dict[str, str] = {}
@@ -263,6 +265,7 @@ class _DagVisitor(ast.NodeVisitor):
         call = direct or (mapped[0] if mapped is not None else None)
         if call is None:
             return False
+        operator_fqn = _canonical_name(call.func, self._aliases)
         construct = _construct_name(call.func, self._aliases)
         kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
         dag_node = kwargs.get("dag")
@@ -285,6 +288,7 @@ class _DagVisitor(ast.NodeVisitor):
             variable=binding or var,
             task_id=task_id,
             operator=construct,
+            operator_fqn=operator_fqn,
             call=call,
             span=_span(node),
         )
@@ -609,6 +613,7 @@ class _DagVisitor(ast.NodeVisitor):
                         or "group"
                     )
                     self._group_stack.append(_sanitize_task_key(group_id))
+                    self.group_source_nodes["__".join(self._group_stack)] = call
                     pushed_group = True
                     # Record the `as tg` binding (with the full nested prefix) so a group-level
                     # edge on `tg` resolves to the group's member tasks.

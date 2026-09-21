@@ -228,7 +228,7 @@ to the supported static subset; flowx never imports or executes DAG modules.
 ## How It Works
 
 ### Phase 1: Discover
-Parses the source into typed nodes and classifies each activity/operator as deterministic, agentic, or unsupported — ADF JSON from Unity Catalog volumes (or a `/Workspace` Git folder, normalizing ARM template format), or Airflow DAG `.py` modules read statically with `ast`. Airflow inventory includes audited/deterministic/agentic/failed/excluded counts, reconciliation status, stable finding fingerprints, translation-path coverage, and deterministic coverage. Produces `metadata/inventory.json` and a per-pipeline complexity report at `metadata/profile_report.csv`.
+Parses the source into typed nodes and classifies each activity/operator as deterministic, agentic, or unsupported — ADF JSON from Unity Catalog volumes (or a `/Workspace` Git folder, normalizing ARM template format), or Airflow DAG `.py` modules read statically with `ast`. Airflow discovery also persists the source-faithful shared graph at `metadata/source_graphs.json`, including source identities, dependencies, policies, groups, mappings, gaps, and lineage before target lowering. Airflow inventory includes audited/deterministic/agentic/failed/excluded counts, reconciliation status, stable finding fingerprints, translation-path coverage, and deterministic coverage. Produces `metadata/inventory.json` and a per-pipeline complexity report at `metadata/profile_report.csv`.
 
 ### Phase 2: Convert
 Applies deterministic translators (ADF activity registry / Airflow operator mapping), resolves dependencies, and records unresolved gaps. ADF supports its guided agentic translation workflow. Airflow supports a fingerprint-bound, explicitly reviewed leaf-gap workflow whose constrained provider output is replayed against an immutable deterministic baseline before packaging. Produces the shared Pipeline IR consumed unchanged by the package phase.
@@ -258,6 +258,7 @@ flowx_output/
   metadata/
     inventory.json            # discover: activity inventory
     profile_report.csv        # discover: per-pipeline complexity report
+    source_graphs.json        # Airflow discover: source-faithful shared graphs and lineage
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
     configuration.json        # modify: collected configuration answers
   .work/                      # transient intermediates (translation report, IR, gaps.json); pruned by package
