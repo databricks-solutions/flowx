@@ -19,7 +19,10 @@ from flowx.sources.airflow import templating
 _AIRFLOW_IMPORT_ROOTS: frozenset[str] = frozenset({"airflow", "cosmos", "airflow_dbt"})
 
 
-def _enclosing_statements(module: ast.Module, func: ast.FunctionDef) -> list[ast.stmt]:
+def _enclosing_statements(
+    module: ast.Module,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[ast.stmt]:
     """Returns safe statements visible from the callable's enclosing function scopes."""
     scopes = [
         node
@@ -89,7 +92,9 @@ def _names_used(node: ast.AST) -> set[str]:
 
 
 def _closure(
-    func: ast.FunctionDef, defs: dict[str, ast.stmt], assigns: dict[str, ast.stmt]
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    defs: dict[str, ast.stmt],
+    assigns: dict[str, ast.stmt],
 ) -> tuple[list[str], set[str]]:
     """Returns transitively-referenced module symbols (defs+assigns) in source order, plus all names used.
 
@@ -116,6 +121,36 @@ def _closure(
                 queue.append(used_name)
     ordered.sort(key=lambda name: (defs.get(name) or assigns[name]).lineno)
     return ordered, all_names
+
+
+def render_source_closure(func: ast.FunctionDef | ast.AsyncFunctionDef, source: str) -> str:
+    """Renders a callable and every statically resolved source dependency it uses.
+
+    Args:
+        func: Callable definition whose source closure is required.
+        source: Complete DAG module source used to resolve and slice dependencies.
+
+    Returns:
+        Source containing referenced imports, helpers, classes, constants, and the callable.
+    """
+    module = ast.parse(source)
+    enclosing_statements = _enclosing_statements(module, func)
+    definitions, assignments = _module_symbols(module, enclosing_statements)
+    imports = _import_bindings(module, enclosing_statements)
+    dependency_names, used_names = _closure(func, definitions, assignments)
+
+    import_nodes: dict[int, ast.stmt] = {}
+    for name in used_names:
+        binding = imports.get(name)
+        if binding is not None:
+            import_nodes[id(binding[0])] = binding[0]
+
+    nodes = [
+        *sorted(import_nodes.values(), key=lambda node: node.lineno),
+        *(definitions.get(name) or assignments[name] for name in dependency_names),
+        func,
+    ]
+    return "\n\n".join(segment for node in nodes if (segment := ast.get_source_segment(source, node)) is not None)
 
 
 def render_definitions(func: ast.FunctionDef, source: str, *, note: str) -> str:

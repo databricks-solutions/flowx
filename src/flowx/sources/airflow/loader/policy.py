@@ -6,7 +6,7 @@ import ast
 
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow import templating
-from flowx.sources.airflow.loader.visitor import _DagVisitor
+from flowx.sources.airflow.loader.visitor import DagVisitor
 
 _RECOGNIZED_DAG_SETTINGS = frozenset(
     {
@@ -41,11 +41,11 @@ _RECOGNIZED_DAG_SETTINGS = frozenset(
 _NON_EXECUTION_DAG_SETTINGS = frozenset({"tags", "description", "doc_md", "dag_display_name", "default_args.owner"})
 
 
-def _job_timeout_seconds(visitor: _DagVisitor) -> int | None:
+def _job_timeout_seconds(visitor: DagVisitor) -> int | None:
     return templating.timedelta_seconds(visitor.dag_kwargs.get("dagrun_timeout"))
 
 
-def _job_email_notifications(visitor: _DagVisitor) -> dict[str, list[str]]:
+def _job_email_notifications(visitor: DagVisitor) -> dict[str, list[str]]:
     recipients = templating.literal_email_recipients(visitor.default_args.get("email"))
     on_failure = visitor.default_args.get("email_on_failure")
     failure_enabled = on_failure is None or (isinstance(on_failure, ast.Constant) and on_failure.value is True)
@@ -54,7 +54,7 @@ def _job_email_notifications(visitor: _DagVisitor) -> dict[str, list[str]]:
     return {}
 
 
-def _retry_email_is_active(visitor: _DagVisitor) -> bool:
+def _retry_email_is_active(visitor: DagVisitor) -> bool:
     """Returns whether any captured task can emit an Airflow retry email."""
     for _, _, kwargs in visitor.operators.values():
         retry_node = kwargs.get("retries", visitor.default_args.get("retries"))
@@ -70,7 +70,7 @@ def _retry_email_is_active(visitor: _DagVisitor) -> bool:
     return False
 
 
-def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] | None:
+def _dag_setting_disposition(name: str, visitor: DagVisitor) -> dict[str, str] | None:
     """Classifies recognized DAG settings as mapped, intentional no-ops, or runtime gaps."""
     if name not in _RECOGNIZED_DAG_SETTINGS:
         return {
@@ -239,3 +239,15 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
             "rationale": "preserved_as_databricks_job_failure_notification",
         }
     return None
+
+
+def job_timeout_seconds(visitor: DagVisitor) -> int | None:
+    """Returns the statically resolved DAG run timeout in seconds.
+
+    Args:
+        visitor: Completed capture containing the DAG arguments.
+
+    Returns:
+        The DAG run timeout in seconds, or ``None`` when it cannot be resolved.
+    """
+    return _job_timeout_seconds(visitor)

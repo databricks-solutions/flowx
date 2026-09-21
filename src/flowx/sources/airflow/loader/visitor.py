@@ -12,6 +12,7 @@ from flowx.sources.airflow.loader.ast_utils import (
     _UNRESOLVED,
     _airflow_generation,
     _bind_constants,
+    _canonical_name,
     _construct_name,
     _import_aliases,
     _index_lexical_functions,
@@ -42,8 +43,20 @@ from flowx.sources.airflow.loader.schedule import _asset_definitions, _extract_t
 _EDGE_MODIFIER_CONSTRUCTS = frozenset({"Label"})
 
 
-class _DagVisitor(ast.NodeVisitor):
-    """Collects operator calls, dependency edges, and the DAG's schedule."""
+class DagVisitor(ast.NodeVisitor):
+    """Collects source-faithful tasks, dependencies, settings, and unsupported constructs.
+
+    Args:
+        module: Isolated Python module containing one DAG declaration.
+        target_dag_variable: Assigned DAG variable selected from a multi-DAG module.
+
+    Attributes:
+        task_captures: Classic operator captures keyed by stable source identity.
+        edge_captures: Dependency declarations retained with source spans.
+        taskflow_tasks: TaskFlow invocations keyed by stable source identity.
+        taskgroup_calls: Decorated task-group invocations keyed by stable source identity.
+        unresolved_constructs: Unsupported constructs paired with their source nodes.
+    """
 
     def __init__(self, module: ast.Module, *, target_dag_variable: str | None = None) -> None:
         self._aliases = _import_aliases(module)
@@ -69,6 +82,7 @@ class _DagVisitor(ast.NodeVisitor):
         self.unclaimed_task_calls: list[ast.Call] = []
         self.unclaimed_statements: list[ast.stmt] = []
         self.unresolved_constructs: list[tuple[str, ast.AST]] = []
+        self.gap_group_paths: dict[int, str] = {}
         self._claimed_task_call_ids: set[int] = set()
         self._claimed_statement_ids: set[int] = set()
         self._dag_scope_depth = 0
@@ -96,6 +110,7 @@ class _DagVisitor(ast.NodeVisitor):
         # task variable name -> TaskGroup id prefix (for task-key namespacing)
         self.groups: dict[str, str] = {}
         self._group_stack: list[str] = []
+        self.group_source_nodes: dict[str, ast.Call] = {}
         # `with TaskGroup(...) as tg:` binding -> the group's prefix, so a group-level edge
         # (tg >> other) can expand to edges between the groups' boundary tasks.
         self.group_vars: dict[str, str] = {}
@@ -113,6 +128,7 @@ class _DagVisitor(ast.NodeVisitor):
         # @task_group def names -- a group is a sub-pipeline, not a single renderable task, so an
         # invocation routes to a placeholder + gap rather than being expanded here.
         self.taskgroup_defs: set[str] = set()
+        self.taskgroup_definitions_by_capture: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
         for fn in _iter_functions(module):
             decorator = next(
                 (
@@ -154,6 +170,24 @@ class _DagVisitor(ast.NodeVisitor):
         if definition is not None:
             functions[name] = definition
         return functions
+
+    def resolved_callable_for(self, task_var: str) -> ast.FunctionDef | None:
+        """Returns the callable definition resolved for a classic operator task."""
+        resolved = self._resolved_callables.get(task_var)
+        return resolved[1] if resolved is not None else None
+
+    def taskgroup_definition_for(self, task_var: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        """Returns the lexical task-group definition resolved for an invocation."""
+        return self.taskgroup_definitions_by_capture.get(task_var)
+
+    def add_unresolved_construct(self, reason: str, node: ast.AST) -> None:
+        """Records an unsupported construct and its enclosing TaskGroup path."""
+        self.unresolved_constructs.append((reason, node))
+        self._record_gap_group(node)
+
+    def _record_gap_group(self, node: ast.AST) -> None:
+        if self._group_stack:
+            self.gap_group_paths[id(node)] = "__".join(self._group_stack)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         # A @task- or @task_group-decorated function defines a task / sub-pipeline from its body,
@@ -263,6 +297,7 @@ class _DagVisitor(ast.NodeVisitor):
         call = direct or (mapped[0] if mapped is not None else None)
         if call is None:
             return False
+        operator_fqn = _canonical_name(call.func, self._aliases)
         construct = _construct_name(call.func, self._aliases)
         kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
         dag_node = kwargs.get("dag")
@@ -285,6 +320,7 @@ class _DagVisitor(ast.NodeVisitor):
             variable=binding or var,
             task_id=task_id,
             operator=construct,
+            operator_fqn=operator_fqn,
             call=call,
             span=_span(node),
         )
@@ -484,6 +520,8 @@ class _DagVisitor(ast.NodeVisitor):
             for mapped_arg in _mapping_chain_args(call):
                 dep = self._resolve_taskflow_arg(mapped_arg)
                 if dep is not None and dep != var:
+                    if dep not in task.mapped_deps:
+                        task.mapped_deps.append(dep)
                     self._add_edges([dep], [var], call)
         if self._group_stack:
             self.groups[var] = "__".join(self._group_stack)
@@ -560,15 +598,42 @@ class _DagVisitor(ast.NodeVisitor):
         if not (isinstance(func, ast.Name) and func.id in self.taskgroup_defs):
             return False
         def_name = func.id
+        definition = self._resolve_taskgroup_definition(def_name, call)
+        if definition is None:
+            return False
         if var is None:
             self._taskgroup_counter += 1
             var = f"{def_name}__tg{self._taskgroup_counter}"
         self.taskgroup_calls[var] = (var, def_name, mapped)
+        self.taskgroup_definitions_by_capture[var] = definition
         self.capture_source_nodes[var] = call
         self._claimed_task_call_ids.add(id(call))
         if self._group_stack:
             self.groups[var] = "__".join(self._group_stack)
         return True
+
+    def _resolve_taskgroup_definition(
+        self,
+        name: str,
+        reference: ast.AST,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        definition = self._resolve_lexical_function(name, reference)
+        if definition is not None and _has_decorator(definition, _TASK_GROUP_DECORATORS, self._aliases):
+            return definition
+        module = self._scope_stack[0]
+        if any(self._lexical_functions.get(id(scope), {}).get(name) for scope in self._scope_stack[1:]):
+            return None
+        events = self._lexical_functions.get(id(module), {}).get(name, [])
+        line = getattr(reference, "lineno", 0)
+        if any(event_line <= line for event_line, _conditional, _candidate in events):
+            return None
+        if any(conditional for _event_line, conditional, _candidate in events):
+            return None
+        candidates = [candidate for _line, conditional, candidate in events if not conditional]
+        candidate = candidates[-1] if candidates else None
+        if candidate is not None and _has_decorator(candidate, _TASK_GROUP_DECORATORS, self._aliases):
+            return candidate
+        return None
 
     def _resolve_taskflow_arg(self, arg: ast.expr) -> str | None:
         """Returns the upstream task var an argument refers to, else None (a literal / unknown).
@@ -609,6 +674,7 @@ class _DagVisitor(ast.NodeVisitor):
                         or "group"
                     )
                     self._group_stack.append(_sanitize_task_key(group_id))
+                    self.group_source_nodes["__".join(self._group_stack)] = call
                     pushed_group = True
                     # Record the `as tg` binding (with the full nested prefix) so a group-level
                     # edge on `tg` resolves to the group's member tasks.
@@ -618,10 +684,7 @@ class _DagVisitor(ast.NodeVisitor):
                     # `with DbtTaskGroup(...) as g:` — a cosmos group bound to a name.
                     if isinstance(item.optional_vars, ast.Name):
                         var = item.optional_vars.id
-                        kwargs = {kw.arg: kw.value for kw in call.keywords if kw.arg}
-                        task_id = ops.literal_str(kwargs.get("group_id")) or var
-                        self.operators[var] = (task_id, construct, kwargs)
-                        self.calls[var] = call
+                        self._register_operator_call(call, var, binding=var)
         if opens_dag_scope:
             self._dag_scope_depth += 1
             try:
@@ -657,6 +720,7 @@ class _DagVisitor(ast.NodeVisitor):
             self._claimed_statement_ids.add(id(statement))
             return
         self.unclaimed_statements.append(statement)
+        self._record_gap_group(statement)
 
     def visit_Call(self, node: ast.Call) -> None:
         """Fails closed when a task-producing call in a DAG scope was not captured."""
@@ -690,6 +754,7 @@ class _DagVisitor(ast.NodeVisitor):
                 or self._helper_factory_return(node)
             ):
                 self.unclaimed_task_calls.append(node)
+                self._record_gap_group(node)
         self.generic_visit(node)
 
     def _helper_targets_assigned_dag(self, call: ast.Call) -> bool:
@@ -726,7 +791,7 @@ class _DagVisitor(ast.NodeVisitor):
         self.dag_id = ops.literal_str(kwargs.get("dag_id")) or positional_dag_id
         self._apply_dag_kwargs(kwargs)
         if self.airflow_generation == "1.10" and not {"schedule", "schedule_interval"} & kwargs.keys():
-            self.unresolved_constructs.append(("ambiguous_airflow_1_10_default_schedule", call))
+            self.add_unresolved_construct("ambiguous_airflow_1_10_default_schedule", call)
 
     def _apply_dag_kwargs(self, kwargs: dict[str, ast.expr]) -> None:
         self.dag_kwargs.update(kwargs)
@@ -759,7 +824,7 @@ class _DagVisitor(ast.NodeVisitor):
             for key, val in zip(params.keys, params.values):
                 if isinstance(key, ast.Constant) and isinstance(key.value, str):
                     if key.value.startswith(templating.FLOWX_INTERNAL_PARAMETER_PREFIX):
-                        self.unresolved_constructs.append(("reserved_airflow_parameter_name", key))
+                        self.add_unresolved_construct("reserved_airflow_parameter_name", key)
                         continue
                     self.dag_params[key.value] = _param_default(val)
 
@@ -829,7 +894,7 @@ class _DagVisitor(ast.NodeVisitor):
     def visit_For(self, node: ast.For) -> None:
         """Executes bounded literal/range loops with Python name rebinding semantics."""
         if not isinstance(node.target, ast.Name):
-            self.unresolved_constructs.append(("dynamic_loop_target", node))
+            self.add_unresolved_construct("dynamic_loop_target", node)
             self._claimed_statement_ids.add(id(node))
             return
         items = _static_iteration_nodes(node.iter, self._constants)
@@ -839,7 +904,7 @@ class _DagVisitor(ast.NodeVisitor):
             if isinstance(node.iter, (ast.List, ast.Tuple)):
                 items = list(node.iter.elts)
             else:
-                self.unresolved_constructs.append(("dynamic_loop_iterable", node))
+                self.add_unresolved_construct("dynamic_loop_iterable", node)
                 self._claimed_statement_ids.add(id(node))
                 return
         for item in items:
@@ -850,7 +915,7 @@ class _DagVisitor(ast.NodeVisitor):
             else:
                 value = _safe_static_value(item, self._constants)
                 if value is _UNRESOLVED:
-                    self.unresolved_constructs.append(("dynamic_loop_value", item))
+                    self.add_unresolved_construct("dynamic_loop_value", item)
                     self._claimed_statement_ids.add(id(node))
                     return
                 self._constants[node.target.id] = value
@@ -867,7 +932,7 @@ class _DagVisitor(ast.NodeVisitor):
         if value is _UNRESOLVED and isinstance(node.test, ast.Name) and node.test.id in self._task_bindings:
             value = True
         if value is _UNRESOLVED:
-            self.unresolved_constructs.append(("ambiguous_condition", node))
+            self.add_unresolved_construct("ambiguous_condition", node)
             self._claimed_statement_ids.add(id(node))
             return
         branch = node.body if bool(value) else node.orelse
@@ -958,3 +1023,6 @@ class _DagVisitor(ast.NodeVisitor):
             self._add_edges(this_names, others, call)
         elif func.attr == "set_upstream":
             self._add_edges(others, this_names, call)
+
+
+_DagVisitor = DagVisitor
