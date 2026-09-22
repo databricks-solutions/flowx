@@ -140,7 +140,7 @@ the venv and register the stdio server with your MCP client:
 
 ```bash
 PY="$(cat <plugin_dir>/.migration-venv)"
-"$PY" -m pip install "mcp>=1.12" "uvicorn>=0.30" "starlette>=0.40"
+"$PY" -m pip install "mcp>=1.12,<2" "uvicorn>=0.30" "starlette>=0.40"
 PYTHONPATH="<plugin_dir>/src" "$PY" -m flowx.mcp        # stdio (default)
 ```
 

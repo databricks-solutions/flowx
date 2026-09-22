@@ -2,7 +2,7 @@
 # The flowx package itself is vendored next to app.py by deploy.sh, so only
 # third-party runtime dependencies are installed here (flowx's own deps plus
 # the MCP/HTTP server stack).
-mcp>=1.12
+mcp>=1.12,<2
 uvicorn>=0.30
 starlette>=0.40
 databricks-sdk>=0.40
