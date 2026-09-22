@@ -46,7 +46,7 @@ through the single `flowx` tool: `flowx(command="<command>", parameters={...})`.
 
 Every discover/convert/migrate call requires `source` ("adf" | "airflow") — there is no default.
 ADF reads adf_volume_path | adf_workspace_path | adf_definitions | adf_source_path; Airflow reads
-airflow_source_path (a DAG .py file or directory).
+airflow_volume_path | airflow_workspace_path | airflow_definitions | airflow_source_path.
 
 Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("inputs", {"phase": "discover", "source": "adf"})   # learn a phase's inputs
@@ -56,7 +56,10 @@ Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
   flowx("package", {"output_dir": "...", "catalog": "main", "schema": "default"})
 For a reviewed Airflow leaf gap, call `resolve_agentic` with action `prepare`, then `stage` with
-provider-authored candidates, then `apply` with an explicit `accept_gap` allowlist.
+provider-authored candidates, then `apply` with an explicit `accept_gap` allowlist. Airflow `migrate`
+pauses before package with `status="needs_agentic_resolution"`; after apply, call it again with
+`resume_agentic=true` to package the reviewed report. Structural gaps remain explicit and require
+manual migration, deterministic support, or a future GraphPatch contract.
 Or run it all at once:
   flowx("migrate", {"source": "airflow", "airflow_source_path": "...", "output_dir": "...",
                     "catalog": "...", "schema": "..."})
@@ -88,32 +91,36 @@ def _source_name(p: dict[str, Any]) -> str:
 def _resolve_source(p: dict[str, Any], path_key: str | None = None) -> tuple[str | None, Callable[[], None]]:
     """Resolve the migration source for a command into a local path the adapter can read.
 
-    ADF input modes, in priority order — a hosted app can't read the user's files directly, so it
-    relies on the first three:
+    Source input modes, in priority order — a hosted app can't read the user's files directly, so
+    it relies on the first three:
 
-    1. ``adf_volume_path`` — a UC Volume directory; the server downloads it via the SDK Files API.
-    2. ``adf_workspace_path`` — a ``/Workspace`` directory (e.g. an ADF Git folder); downloaded via
-       the SDK Workspace API. Both (1) and (2) scale to large factories — the bytes bypass the agent.
-    3. ``adf_definitions`` — an inline ARM-JSON payload (small jobs); materialized to a temp dir.
+    1. ``<source>_volume_path`` — a UC Volume directory downloaded via the SDK Files API.
+    2. ``<source>_workspace_path`` — a ``/Workspace`` directory downloaded via the SDK Workspace API.
+       Both hosted path modes scale because the bytes bypass the agent.
+    3. ``<source>_definitions`` — a small inline mapping materialized to a temporary source tree.
     4. ``<source>_source_path`` (e.g. ``airflow_source_path``) or the explicit ``path_key`` — a path
        the server itself can read. ``path_key`` is an *additional* key to try (e.g. ``source_dir``),
        not a replacement, so the source's natural key still resolves.
-
-    For ``source="airflow"`` the volume/workspace/inline modes are ADF-specific and skipped; the DAG
-    path is read from ``airflow_source_path`` (or the explicit ``path_key``).
     """
     source = _source_name(p)
-    if source == "adf":
-        if p.get("adf_volume_path"):
-            src = runner.download_volume_dir(p["adf_volume_path"])
-            return src, lambda: runner.cleanup_materialized(src)
-        if p.get("adf_workspace_path"):
-            src = runner.download_workspace_dir(p["adf_workspace_path"])
-            return src, lambda: runner.cleanup_materialized(src)
-        definitions = p.get("adf_definitions")
-        if definitions:
-            src = runner.materialize_adf_definitions(definitions)
-            return src, lambda: runner.cleanup_materialized(src)
+    volume_path = p.get(f"{source}_volume_path")
+    if volume_path:
+        src = runner.download_volume_dir(volume_path)
+        return src, lambda: runner.cleanup_materialized(src)
+    workspace_path = p.get(f"{source}_workspace_path")
+    if workspace_path:
+        src = runner.download_workspace_dir(workspace_path)
+        return src, lambda: runner.cleanup_materialized(src)
+    definitions = p.get(f"{source}_definitions")
+    if definitions:
+        if not isinstance(definitions, dict):
+            raise ValueError(f"'{source}_definitions' must be a mapping of relative paths to content")
+        src = (
+            runner.materialize_adf_definitions(definitions)
+            if source == "adf"
+            else runner.materialize_airflow_definitions(definitions)
+        )
+        return src, lambda: runner.cleanup_materialized(src)
     candidate_keys = [f"{source}_source_path"]
     if path_key:
         candidate_keys.append(path_key)
@@ -140,6 +147,134 @@ def _bundle_output(p: dict[str, Any], out: Path) -> dict[str, Any]:
 
 def _noop() -> None:
     """Cleanup placeholder used when there is no materialized source to remove."""
+
+
+def _source_parameter_names(source: str) -> str:
+    """Returns the accepted MCP source parameters for one migration source."""
+    return " / ".join(
+        (
+            f"{source}_volume_path",
+            f"{source}_workspace_path",
+            f"{source}_definitions",
+            f"{source}_source_path",
+        )
+    )
+
+
+def _has_source_reference(parameters: dict[str, Any], source: str) -> bool:
+    """Reports whether a request carries any source location or inline definition mapping."""
+    return any(
+        parameters.get(key)
+        for key in (
+            f"{source}_volume_path",
+            f"{source}_workspace_path",
+            f"{source}_definitions",
+            f"{source}_source_path",
+            "source_dir",
+        )
+    )
+
+
+_GRAPH_PATCH_FINDING_CODES = {
+    "excluded_dag_reference",
+    "taskflow_mapped_output_unavailable",
+    "unsupported_trigger_rule",
+}
+_TASK_POLICY_FINDING_CODES = {"unrepresented_task_policy"}
+
+
+def _gap_capability(gap: dict[str, Any], finding_codes: dict[str, str]) -> str | None:
+    """Returns the contract capability a prepared gap needs beyond leaf replacement, if any."""
+    operator = str(gap.get("operator", "")).casefold().replace("_", "")
+    if any(marker in operator for marker in ("branch", "shortcircuit", "taskgroup", "subdag")):
+        return "graph_patch"
+    codes = {finding_codes.get(str(fingerprint), "") for fingerprint in gap.get("finding_fingerprints") or []}
+    if codes & _GRAPH_PATCH_FINDING_CODES:
+        return "graph_patch"
+    if codes & _TASK_POLICY_FINDING_CODES:
+        return "task_policy_patch"
+    if gap.get("allowed_replacement_kinds") == []:
+        return "non_leaf_patch"
+    return None
+
+
+def _airflow_gap_state(report: Any, prepared_gaps: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Classifies reconciled Airflow findings against the v1 leaf-resolution contract."""
+    pipelines = report.get("pipelines") if isinstance(report, dict) else None
+    if not isinstance(pipelines, list):
+        pipelines = [report] if isinstance(report, dict) else []
+    findings: list[tuple[str, dict[str, Any]]] = []
+    finding_codes: dict[str, str] = {}
+    for pipeline in pipelines:
+        if not isinstance(pipeline, dict):
+            continue
+        pipeline_name = str(pipeline.get("name", ""))
+        for finding in pipeline.get("not_translatable") or []:
+            if not isinstance(finding, dict) or finding.get("severity") != "gap":
+                continue
+            findings.append((pipeline_name, finding))
+            fingerprint = finding.get("fingerprint")
+            if isinstance(fingerprint, str):
+                finding_codes[fingerprint] = str(finding.get("code", ""))
+
+    eligible: list[dict[str, Any]] = []
+    structural: list[dict[str, Any]] = []
+    bound_fingerprints: set[str] = set()
+    for gap in prepared_gaps:
+        fingerprints = {str(value) for value in gap.get("finding_fingerprints") or []}
+        bound_fingerprints.update(fingerprints)
+        capability = _gap_capability(gap, finding_codes)
+        if capability is None:
+            eligible.append(gap)
+            continue
+        structural.append(
+            {
+                **gap,
+                "resolution_support": "unsupported_by_leaf_contract",
+                "required_capability": capability,
+            }
+        )
+
+    unsupported: list[dict[str, Any]] = []
+    for pipeline_name, finding in findings:
+        fingerprint = finding.get("fingerprint")
+        if isinstance(fingerprint, str) and fingerprint in bound_fingerprints:
+            continue
+        code = str(finding.get("code", ""))
+        capability = (
+            "graph_patch"
+            if code in _GRAPH_PATCH_FINDING_CODES
+            else "task_policy_patch"
+            if code in _TASK_POLICY_FINDING_CODES
+            else "source_semantics"
+        )
+        unsupported.append(
+            {
+                "gap_id": fingerprint,
+                "pipeline_name": pipeline_name,
+                "code": code,
+                "message": str(finding.get("message", "")),
+                "source_span": {key: finding.get(key, 0) for key in ("line", "column", "end_line", "end_column")},
+                "details": finding.get("details") or {},
+                "resolution_support": "unsupported_by_leaf_contract",
+                "required_capability": capability,
+            }
+        )
+    return {"eligible_gaps": eligible, "structural_gaps": structural, "unsupported_gaps": unsupported}
+
+
+def _airflow_gap_findings(report: Any) -> list[dict[str, Any]]:
+    """Returns every unresolved reconciled gap finding in an Airflow report."""
+    pipelines = report.get("pipelines") if isinstance(report, dict) else None
+    if not isinstance(pipelines, list):
+        pipelines = [report] if isinstance(report, dict) else []
+    return [
+        finding
+        for pipeline in pipelines
+        if isinstance(pipeline, dict)
+        for finding in pipeline.get("not_translatable") or []
+        if isinstance(finding, dict) and finding.get("severity") == "gap"
+    ]
 
 
 def _pending_options(inspect_result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -183,7 +318,7 @@ def _cmd_discover(p: dict[str, Any]) -> dict[str, Any]:
     if not source:
         return {
             "ok": False,
-            "error": f"Provide a source path for source '{source_name}' (e.g. '{source_name}_source_path').",
+            "error": f"Provide a source for '{source_name}' using one of: {_source_parameter_names(source_name)}.",
         }
     try:
         args = ["discover", "--source", source_name, "--source-path", source, "--output-dir", output_dir]
@@ -249,51 +384,65 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "resolve_agentic action must be prepare, stage, or apply."}
     output_dir = Path(p.get("output_dir", "./flowx_output"))
     args: list[Any] = ["resolve-agentic", action, "--source", "airflow", "--output-dir", output_dir]
-    if p.get("airflow_source_path"):
-        args += ["--source-path", p["airflow_source_path"]]
-    if p.get("report_path"):
-        args += ["--report", p["report_path"]]
-    if p.get("dbt_mode"):
-        args += ["--dbt-mode", p["dbt_mode"]]
-    if p.get("gap_id"):
-        args += ["--gap-id", p["gap_id"]]
-    accepted_gaps = p.get("accept_gap") or p.get("accept_gaps") or []
-    if isinstance(accepted_gaps, str):
-        accepted_gaps = [accepted_gaps]
-    for gap_id in accepted_gaps:
-        args += ["--accept-gap", gap_id]
-    if p.get("accept_all"):
-        args.append("--accept-all")
-    if p.get("review_complete"):
-        args.append("--review-complete")
-    if p.get("review_manifest"):
-        args += ["--review-manifest", p["review_manifest"]]
-    if p.get("reset"):
-        args.append("--reset")
-    if p.get("replace"):
-        args.append("--replace")
+    cleanup = _noop
+    try:
+        if action == "prepare" or _has_source_reference(p, "airflow"):
+            source_path, cleanup = _resolve_source(p)
+            if action == "prepare" and not source_path:
+                return {
+                    "ok": False,
+                    "error": f"Provide one of: {_source_parameter_names('airflow')}.",
+                }
+            if source_path:
+                args += ["--source-path", source_path]
+        if p.get("report_path"):
+            args += ["--report", p["report_path"]]
+        if p.get("dbt_mode"):
+            args += ["--dbt-mode", p["dbt_mode"]]
+        if p.get("gap_id"):
+            args += ["--gap-id", p["gap_id"]]
+        accepted_gaps = p.get("accept_gap") or p.get("accept_gaps") or []
+        if isinstance(accepted_gaps, str):
+            accepted_gaps = [accepted_gaps]
+        for gap_id in accepted_gaps:
+            args += ["--accept-gap", gap_id]
+        if p.get("accept_all"):
+            args.append("--accept-all")
+        if p.get("review_complete"):
+            args.append("--review-complete")
+        if p.get("review_manifest"):
+            args += ["--review-manifest", p["review_manifest"]]
+        if p.get("reset"):
+            args.append("--reset")
+        if p.get("replace"):
+            args.append("--replace")
 
-    raw_candidate_paths = p.get("candidate_paths") or []
-    candidate_paths = [raw_candidate_paths] if isinstance(raw_candidate_paths, str) else list(raw_candidate_paths)
-    inline_candidates = p.get("candidates") or []
-    if isinstance(inline_candidates, dict):
-        inline_candidates = [inline_candidates]
-    with tempfile.TemporaryDirectory(prefix="flowx-agentic-candidates-") as temporary:
-        for index, candidate in enumerate(inline_candidates):
-            inline_path = Path(temporary) / f"candidate-{index}.json"
-            inline_path.write_text(json.dumps(candidate, indent=2), encoding="utf-8")
-            candidate_paths.append(str(inline_path))
-        for candidate_path in candidate_paths:
-            args += ["--candidate", candidate_path]
-        result = runner.run_adapter(args)
-    payload = runner.parse_stdout_json(result)
-    extra: dict[str, Any] = {"result": payload}
-    if action == "prepare":
-        gaps = runner.read_json(output_dir / ".work" / "agentic" / "gaps.json")
-        if p.get("gap_id") and isinstance(gaps, list):
-            gaps = [gap for gap in gaps if isinstance(gap, dict) and gap.get("gap_id") == p["gap_id"]]
-        extra["gaps"] = gaps
-    return {"ok": result.ok, "process": result.as_dict(), **extra}
+        raw_candidate_paths = p.get("candidate_paths") or []
+        candidate_paths = [raw_candidate_paths] if isinstance(raw_candidate_paths, str) else list(raw_candidate_paths)
+        inline_candidates = p.get("candidates") or []
+        if isinstance(inline_candidates, dict):
+            inline_candidates = [inline_candidates]
+        with tempfile.TemporaryDirectory(prefix="flowx-agentic-candidates-") as temporary:
+            for index, candidate in enumerate(inline_candidates):
+                inline_path = Path(temporary) / f"candidate-{index}.json"
+                inline_path.write_text(json.dumps(candidate, indent=2), encoding="utf-8")
+                candidate_paths.append(str(inline_path))
+            for candidate_path in candidate_paths:
+                args += ["--candidate", candidate_path]
+            result = runner.run_adapter(args)
+        payload = runner.parse_stdout_json(result)
+        extra: dict[str, Any] = {"result": payload}
+        if action == "prepare":
+            gaps = runner.read_json(output_dir / ".work" / "agentic" / "gaps.json")
+            if p.get("gap_id") and isinstance(gaps, list):
+                gaps = [gap for gap in gaps if isinstance(gap, dict) and gap.get("gap_id") == p["gap_id"]]
+            extra["gaps"] = gaps
+            report = runner.read_json(Path(p["report_path"])) if p.get("report_path") else None
+            if isinstance(gaps, list):
+                extra.update(_airflow_gap_state(report, [gap for gap in gaps if isinstance(gap, dict)]))
+        return {"ok": result.ok, "process": result.as_dict(), **extra}
+    finally:
+        cleanup()
 
 
 def _cmd_inspect(p: dict[str, Any]) -> dict[str, Any]:
@@ -362,7 +511,7 @@ def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
-    """Run discover→convert→package, pausing for configuration when options are available.
+    """Run discover→convert→package with configuration and Airflow agentic review gates.
 
     Because an MCP call can't prompt mid-flight, ``migrate`` is interactive by *handing the questions
     back to the agent*: after ``convert`` it returns the **full option schema** once
@@ -371,7 +520,12 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
     is satisfied, performing any data lookups), then re-calls ``migrate`` a single time with the
     complete ``answers`` (``["option_id=value", ...]``), which applies them and packages
     (``status="completed"``). No per-follow-up round trip. Pass ``interactive=False`` to skip the
-    prompt and package with defaults.
+    configuration prompt and package with defaults.
+
+    Airflow reports with reconciled gaps pause independently with
+    ``status="needs_agentic_resolution"``. The result separates leaf envelopes supported by the v1
+    contract from graph-structural and source-semantic gaps. After a reviewed ``resolve_agentic``
+    apply, call migrate with ``resume_agentic=True`` to package the validated agentic report.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     source_name = _source_name(p)
@@ -385,9 +539,61 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
     report_path = str(out / ".work" / "translation_report.json")
     steps: dict[str, Any] = {}
 
+    if source_name == "airflow" and answers:
+        return {
+            "ok": False,
+            "status": "failed",
+            "error": "migrate answers are ADF configuration inputs; Airflow uses resolve_agentic review decisions.",
+        }
+
+    if p.get("resume_agentic"):
+        if source_name != "airflow":
+            return {
+                "ok": False,
+                "status": "failed",
+                "error": "resume_agentic is only available for Airflow migrations.",
+            }
+        reviewed_report = Path(p.get("agentic_report_path") or out / ".work" / "translation_report.agentic.json")
+        if not reviewed_report.is_file():
+            return {
+                "ok": False,
+                "status": "failed",
+                "error": f"Reviewed Airflow report not found: {reviewed_report}",
+            }
+        reviewed_payload = runner.read_json(reviewed_report)
+        has_reviewed_gaps = bool(_airflow_gap_findings(reviewed_payload))
+        package_args: list[Any] = [
+            "package",
+            "--output-dir",
+            output_dir,
+            "--catalog",
+            catalog,
+            "--schema",
+            schema,
+            "--report",
+            reviewed_report,
+        ]
+        package_res = runner.run_adapter(package_args)
+        extra = _bundle_output(p, out) if package_res.ok else {}
+        steps["package"] = _phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra)
+        return {
+            "ok": package_res.ok,
+            "status": (
+                "completed_with_reviewed_gaps"
+                if package_res.ok and has_reviewed_gaps
+                else "completed"
+                if package_res.ok
+                else "failed"
+            ),
+            "failed_phase": None if package_res.ok else "package",
+            "report_path": str(reviewed_report),
+            "steps": steps,
+        }
+
     # Resume: with answers in hand and a prior report present, skip re-running discover/convert.
     resume = bool(answers) and (out / ".work" / "translation_report.json").is_file()
 
+    source: str | None = None
     cleanup = _noop
     try:
         if not resume:
@@ -396,9 +602,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                 return {
                     "ok": False,
                     "error": (
-                        f"Provide a source path for source '{source_name}' "
-                        "(adf: adf_volume_path / adf_workspace_path / adf_definitions / adf_source_path; "
-                        "airflow: airflow_source_path)."
+                        f"Provide a source for '{source_name}' using one of: {_source_parameter_names(source_name)}."
                     ),
                 }
             discover_args = ["discover", "--source", source_name, "--source-path", source, "--output-dir", output_dir]
@@ -422,7 +626,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": False, "status": "failed", "failed_phase": "convert", "steps": steps}
 
         # Interactive gate: on the first (answerless) call, hand the full option schema to the agent.
-        if interactive and not answers:
+        if source_name == "adf" and interactive and not answers:
             options_schema = _pending_options(_cmd_inspect({"report_path": report_path}))
             if options_schema:
                 return {
@@ -456,6 +660,72 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
             steps["apply_answers"] = apply_res
             if not apply_res.get("ok"):
                 return {"ok": False, "status": "failed", "failed_phase": "apply_answers", "steps": steps}
+
+        if source_name == "airflow":
+            report = runner.read_json(Path(report_path))
+            gap_findings = _airflow_gap_findings(report)
+            if gap_findings:
+                operator_gaps = [finding for finding in gap_findings if finding.get("code") == "operator_placeholder"]
+                prepared_gaps: list[dict[str, Any]] = []
+                if operator_gaps:
+                    if not source:
+                        source, cleanup = _resolve_source(p)
+                    if not source:
+                        return {
+                            "ok": False,
+                            "status": "failed",
+                            "failed_phase": "prepare_agentic",
+                            "error": (
+                                "Airflow leaf gaps require the source during agentic preparation. "
+                                f"Provide one of: {_source_parameter_names('airflow')}."
+                            ),
+                            "steps": steps,
+                        }
+                    prepare_args: list[Any] = [
+                        "resolve-agentic",
+                        "prepare",
+                        "--source",
+                        "airflow",
+                        "--output-dir",
+                        output_dir,
+                        "--source-path",
+                        source,
+                        "--report",
+                        report_path,
+                    ]
+                    if p.get("dbt_mode"):
+                        prepare_args += ["--dbt-mode", p["dbt_mode"]]
+                    prepare_res = runner.run_adapter(prepare_args)
+                    steps["prepare_agentic"] = {
+                        "ok": prepare_res.ok,
+                        "process": prepare_res.as_dict(),
+                    }
+                    if not prepare_res.ok:
+                        return {
+                            "ok": False,
+                            "status": "failed",
+                            "failed_phase": "prepare_agentic",
+                            "steps": steps,
+                        }
+                    payload = runner.read_json(out / ".work" / "agentic" / "gaps.json")
+                    if isinstance(payload, list):
+                        prepared_gaps = [gap for gap in payload if isinstance(gap, dict)]
+                state = _airflow_gap_state(report, prepared_gaps)
+                return {
+                    "ok": True,
+                    "status": "needs_agentic_resolution",
+                    "report_path": report_path,
+                    "output_dir": output_dir,
+                    **state,
+                    "steps": steps,
+                    "next_action": (
+                        "Stage and review eligible leaf candidates with resolve_agentic, then apply them and call "
+                        "migrate again with resume_agentic=true. Structural and source-semantic gaps are outside "
+                        "the v1 leaf contract and require deterministic support, manual migration, or a future "
+                        "GraphPatch contract. To keep reviewed placeholders, complete the review with no accepted "
+                        "candidates before resuming."
+                    ),
+                }
 
         package_res = runner.run_adapter(
             ["package", "--output-dir", output_dir, "--catalog", catalog, "--schema", schema]
@@ -535,53 +805,52 @@ def build_server() -> FastMCP:
         ``parameters`` keys (req = required; phases share ``output_dir``, default "./flowx_output").
         ``source`` ("adf" | "airflow") is **required** for discover/convert/migrate/inputs (and
         workspace_paths); there is no default. It selects both the parser and which source-path key
-        applies: ADF reads adf_volume_path | adf_workspace_path | adf_definitions | adf_source_path,
-        Airflow reads ``airflow_source_path`` (a DAG .py file or directory). ``package`` is
-        source-independent (it consumes the translation report).
+        applies: ADF reads adf_volume_path | adf_workspace_path | adf_definitions | adf_source_path;
+        Airflow reads airflow_volume_path | airflow_workspace_path | airflow_definitions |
+        airflow_source_path. ``package`` is source-independent (it consumes the translation report).
 
         - "inputs": phase(req: "discover"|"convert"|"package"), source(req for discover/convert) —
           list a phase's input prompts.
-        - "discover": source(req), one ADF source key | airflow_source_path (req), output_dir,
+        - "discover": source(req), one source-specific input key (req), output_dir,
           pipeline, exclude_dag | exclude_dags (Airflow, repeatable list) — parse and audit definitions.
-        - "convert": source(req), (one ADF source key | airflow_source_path), output_dir, pipeline,
+        - "convert": source(req), one source-specific input key, output_dir, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list).
         - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
           merge ADF agent results. Airflow's legacy name-based merge is disabled; use resolve_agentic.
         - "resolve_agentic": source(req: "airflow"), action(req: prepare | stage | apply), output_dir,
-          airflow_source_path, report_path, gap_id, candidates, replace, accept_gap | accept_gaps, accept_all,
-          review_complete, review_manifest, reset —
+          one Airflow source key, report_path, gap_id, candidates, replace, accept_gap | accept_gaps,
+          accept_all, review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
         - "materialize_lookup": source(req: CSV path or literal CSV), out(req: destination JSON path).
-        - "workspace_paths": source(req), report_path(req), (one ADF source key | airflow_source_path
-          | source_dir).
+        - "workspace_paths": source(req), report_path(req), one source-specific input key | source_dir.
         - "package": output_dir, output_volume_path, output_workspace_path, report_path,
           catalog(default "main"), schema(default "default"), bundle_name, profile,
           download_workspace_files(bool), keep_intermediates(bool).
-        - "migrate": source(req), one ADF source key | airflow_source_path (req), output_dir,
+        - "migrate": source(req), one source-specific input key (req unless resuming), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list),
-          answers(list of "ID=VALUE"), interactive(bool, default true), lookup_csv — runs
-          discover→convert→package, returning the full option schema once (status "needs_input") when
-          configuration is available; re-call once with the complete answers to apply (see below).
+          answers(ADF only, list of "ID=VALUE"), interactive(ADF only, bool, default true), lookup_csv,
+          resume_agentic(bool), agentic_report_path — runs discover→convert→package, returning the full
+          option schema once (status "needs_input") when configuration is available. Airflow gaps pause
+          with status "needs_agentic_resolution" before package; after reviewed apply, resume_agentic
+          packages ``translation_report.agentic.json`` through the existing validation gate.
         - "record_results": output_dir(req), results_table(req: catalog.schema.table), warehouse_id.
         - "install_dashboard": results_table(req), warehouse_id, dashboard_name, parent_path.
 
-        Providing the source (a hosted app can't read the user's workspace/volume files directly). For
-        ``source="airflow"`` pass ``airflow_source_path`` (a DAG .py file or directory the server can
-        read). For ``source="adf"``, in priority order:
-        - ``adf_volume_path``: a UC Volume directory the server reads via the SDK Files API. **Preferred
-          for large factories** — the bytes never pass through the agent. Requires the app's service
-          principal to have read on the volume.
-        - ``adf_workspace_path``: a ``/Workspace`` directory (e.g. an ADF Git folder) the server reads
-          via the SDK Workspace API. Also scales (bytes bypass the agent); needs SP read on that path.
-        - ``adf_definitions``: an inline mapping of relative path → JSON content mirroring the ADF
-          Git-export layout, e.g. {"pipeline/Foo.json": {...}, "linkedService/Bar.json": {...}} (a single
-          ARM-template object is also accepted). Convenient for small jobs; capped (~5 MB) since it flows
-          through the agent's context — over the cap, switch to ``adf_volume_path``.
-        - ``adf_source_path`` / ``source_dir``: a path the server itself can read (local hosting / mounted volume).
+        Providing the source (a hosted app can't read the user's workspace/volume files directly). Both
+        sources support the same ordered modes:
+        - ``<source>_volume_path``: a UC Volume directory read via the SDK Files API. **Preferred for
+          large migrations** — the bytes never pass through the agent. The app service principal needs
+          read access on the volume.
+        - ``<source>_workspace_path``: a ``/Workspace`` directory read via the SDK Workspace API. The
+          bytes also bypass the agent; the app service principal needs read access on the path.
+        - ``<source>_definitions``: a small inline mapping. ADF accepts relative export paths → JSON;
+          Airflow accepts relative ``.py`` paths → Python source. Inline payloads are capped (~5 MB).
+        - ``<source>_source_path`` / ``source_dir``: a path the server itself can read (local hosting or
+          a mounted volume).
 
         Delivering the generated DAB (the server's output_dir is local/ephemeral, so "package"/"migrate"
         write it to the target via the SDK — the contents bypass the agent):
@@ -607,6 +876,18 @@ def build_server() -> FastMCP:
         - When every applicable option is answered, submit **once**: "migrate" re-called with the full
           ``answers`` (applies + packages), or standalone "apply_answers" → "package". The server still
           validates every answer at apply time. ``interactive=false`` on "migrate" skips prompting.
+
+        Airflow gap review:
+        - ``migrate`` never treats a reconciled Airflow report with gaps as complete. It returns
+          ``status="needs_agentic_resolution"`` with ``eligible_gaps`` (v1 leaf envelopes),
+          ``structural_gaps`` (future GraphPatch or task-policy work), and ``unsupported_gaps``
+          (source-level semantics outside leaf replacement).
+        - Run ``resolve_agentic`` stage/apply with reviewed candidates. Then call ``migrate`` with
+          ``source="airflow"``, the same ``output_dir``, and ``resume_agentic=true``. The reviewed
+          report is passed explicitly to package, where persisted evidence and reconciliation are
+          validated before bundle files are written. A successful package that retains reviewed
+          placeholders returns ``status="completed_with_reviewed_gaps"`` rather than claiming the
+          migration is semantically complete.
 
         Returns a dict ``{"ok": bool, ...}`` with per-command summaries (inventory / translation /
         bundle_files / questions / result) and a "process" block (stdout/stderr/returncode). An unknown

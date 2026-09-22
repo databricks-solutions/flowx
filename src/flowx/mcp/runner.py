@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 # Phases can take a while on large factories; allow generous default headroom.
@@ -204,8 +204,56 @@ def materialize_adf_definitions(definitions: dict[str, Any]) -> str:
     return str(base)
 
 
+def materialize_airflow_definitions(definitions: dict[str, str]) -> str:
+    """Write inline Airflow DAG modules to a temporary source tree.
+
+    The mapping keys are relative POSIX paths ending in ``.py`` and the values are Python source.
+    Inline sources share the hosted MCP payload cap with ADF definitions; larger DAG collections
+    belong in a Unity Catalog Volume or Workspace directory so their bytes bypass the agent.
+    """
+    if not definitions:
+        raise ValueError("airflow_definitions is empty")
+
+    validated: list[tuple[PurePosixPath, str]] = []
+    validated_paths: set[PurePosixPath] = set()
+    total_bytes = 0
+    for relative_path, content in definitions.items():
+        if not isinstance(relative_path, str) or not relative_path or "\\" in relative_path:
+            raise ValueError(f"unsafe path in airflow_definitions: {relative_path!r}")
+        validated_path = PurePosixPath(relative_path)
+        if validated_path.is_absolute() or ".." in validated_path.parts or validated_path.name in {"", "."}:
+            raise ValueError(f"unsafe path in airflow_definitions: {relative_path!r}")
+        if validated_path.suffix != ".py":
+            raise ValueError(f"airflow_definitions path must end in .py: {relative_path!r}")
+        if validated_path in validated_paths:
+            raise ValueError(f"duplicate path in airflow_definitions: {relative_path!r}")
+        if not isinstance(content, str):
+            raise ValueError(f"airflow_definitions content must be a string: {relative_path!r}")
+        total_bytes += len(content.encode("utf-8"))
+        validated.append((validated_path, content))
+        validated_paths.add(validated_path)
+
+    if total_bytes > MAX_INLINE_BYTES:
+        raise ValueError(
+            f"airflow_definitions is {total_bytes} bytes (limit {MAX_INLINE_BYTES}); inline payloads pass "
+            "through the agent's context and do not scale. Stage the DAG files to a UC Volume and pass "
+            "'airflow_volume_path' instead."
+        )
+
+    base = Path(tempfile.mkdtemp(prefix="flowx-airflow-"))
+    try:
+        for validated_path, content in validated:
+            destination = base.joinpath(*validated_path.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(content, encoding="utf-8")
+    except Exception:
+        shutil.rmtree(base, ignore_errors=True)
+        raise
+    return str(base)
+
+
 def cleanup_materialized(source: str) -> None:
-    """Remove a temp tree created by :func:`materialize_adf_definitions`.
+    """Remove a temporary tree created by an inline or hosted source materializer.
 
     Accepts either the returned directory or the single-file path (whose parent temp dir is
     removed). Only paths under the system temp dir are deleted, as a safety guard.

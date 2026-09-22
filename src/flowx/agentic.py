@@ -30,6 +30,13 @@ _PROVIDER_MANIFEST_PATH = PurePosixPath("providers/flowx-gap-resolver/provider.j
 _PROVIDER_PIN_FIELD = "flowx_pin"
 
 _ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql", "spark_python")
+_STRUCTURAL_OPERATOR_MARKERS = ("branch", "shortcircuit", "taskgroup", "subdag")
+_NON_LEAF_FINDING_CODES = {
+    "excluded_dag_reference",
+    "taskflow_mapped_output_unavailable",
+    "unrepresented_task_policy",
+    "unsupported_trigger_rule",
+}
 _RESOLUTION_STATUSES = {"resolved", "needs_input", "deferred"}
 _DISPOSITIONS = {"consumed", "preserved_by_flowx", "ignored", "needs_input"}
 _MAX_GENERATED_FILE_BYTES = 1024 * 1024
@@ -112,6 +119,7 @@ class GapEnvelope:
     downstream_task_keys: list[str]
     dag_settings: dict[str, Any]
     reason: dict[str, str]
+    allowed_replacement_kinds: tuple[str, ...]
 
     def as_dict(self, *, provider: dict[str, str] | None = None) -> dict[str, Any]:
         """Returns the public GapEnvelope v1 representation."""
@@ -141,7 +149,7 @@ class GapEnvelope:
             "downstream_task_keys": self.downstream_task_keys,
             "dag_settings": self.dag_settings,
             "reason": self.reason,
-            "allowed_replacement_kinds": list(_ALLOWED_REPLACEMENT_KINDS),
+            "allowed_replacement_kinds": list(self.allowed_replacement_kinds),
             "knowledge_provider": provider,
         }
         payload["request_sha256"] = _sha256_bytes(_json_bytes(payload))
@@ -881,6 +889,7 @@ def _build_gap_envelopes(
                     "code": str(matched_finding.get("code", "operator_placeholder")),
                     "message": str(task.get("comment") or matched_finding.get("message", "")),
                 },
+                allowed_replacement_kinds=_allowed_replacement_kinds(operator, related_findings),
             )
             envelopes.append(envelope.as_dict(provider=provider))
     ordered = sorted(envelopes, key=lambda item: (item["pipeline_name"], item["task_path"]))
@@ -888,6 +897,17 @@ def _build_gap_envelopes(
     if len(gap_ids) != len(set(gap_ids)):
         raise AgenticContractError("Prepared Airflow gaps contain duplicate fingerprints")
     return ordered
+
+
+def _allowed_replacement_kinds(operator: str, findings: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Returns leaf replacement kinds only when the gap needs no graph or task-policy mutation."""
+    normalized_operator = operator.casefold().replace("_", "")
+    finding_codes = {str(finding.get("code", "")) for finding in findings}
+    if any(marker in normalized_operator for marker in _STRUCTURAL_OPERATOR_MARKERS):
+        return ()
+    if finding_codes & _NON_LEAF_FINDING_CODES:
+        return ()
+    return _ALLOWED_REPLACEMENT_KINDS
 
 
 def _extract_arguments(
