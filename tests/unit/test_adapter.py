@@ -20,6 +20,10 @@ from flowx.adapter import (
     gather_options,
     validate_answer,
 )
+from flowx.adapter.__main__ import (
+    _inline_collapsed_lookup_references,
+    _stamp_lookup_values_into_metadata_driven_motifs,
+)
 from flowx.adapter.__main__ import main as adapter_cli_main
 from flowx.adapter.constants import (
     COMPUTE_MODE_CLASSIC_MULTI_NODE,
@@ -1318,3 +1322,90 @@ class TestBundleOutput:
         job_yml = yaml.safe_load((tmp_path / "resources" / "job.yml").read_text())
         task = job_yml["resources"]["jobs"]["job"]["tasks"][0]
         assert task["job_cluster_key"] == "default_cluster"
+
+
+def _consolidated_bulk_copy_motif(
+    *,
+    task_key: str = "motif_metadata_driven_bulk_copy",
+    matched: list[str] | None = None,
+    lookup_values: list[dict[str, Any]] | None = None,
+) -> MotifActivity:
+    """A consolidated metadata-driven bulk-copy motif that swallowed a Lookup."""
+    return MotifActivity(
+        **_make_base(task_key, task_key),
+        motif_id="metadata_driven_bulk_copy",
+        display_name="Metadata-Driven Bulk Copy",
+        databricks_replacement="for_each_ingestion",
+        matched_activity_names=matched or ["LKP_GetActiveTables", "FE_CopyEachTable"],
+        source_type_hint="database",
+        consolidate_metadata_driven=True,
+        lookup_values=lookup_values or [],
+    )
+
+
+class TestInlineCollapsedLookupReferences:
+    """A ForEach that iterated a Lookup collapsed into a consolidated motif."""
+
+    _ROWS = [
+        {"source_schema": "dbo", "source_table": "customers", "target_table": "bronze.customers"},
+        {"source_schema": "dbo", "source_table": "orders", "target_table": "bronze.orders"},
+    ]
+
+    def _downstream_foreach(self, items: str) -> ForEachActivity:
+        return ForEachActivity(**_make_base("FE_TransformEachTable"), items_expression=items)
+
+    def test_inlines_lookup_values_for_reference_to_collapsed_lookup(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = _inline_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == json.dumps(self._ROWS)
+
+    def test_reference_to_live_task_is_untouched(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        # References a task that still exists, not one the motif collapsed.
+        foreach = self._downstream_foreach("{{tasks.SomeOtherTask.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = _inline_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.SomeOtherTask.values.result}}"
+
+    def test_no_rewrite_when_motif_has_no_materialized_values(self):
+        # Not yet stamped: nothing to inline, so the (still-dangling) ref is left
+        # for the existing dangling-ref safety net rather than blanked here.
+        motif = _consolidated_bulk_copy_motif(lookup_values=[])
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = _inline_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.LKP_GetActiveTables.values.result}}"
+
+    def test_stamp_then_inline_end_to_end(self):
+        # Mirrors the modify flow: stamp materialised rows onto the motif, then
+        # resolve the downstream reference against them.
+        motif = _consolidated_bulk_copy_motif(lookup_values=[])
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        stamped = _stamp_lookup_values_into_metadata_driven_motifs(pipeline, self._ROWS)
+        result = _inline_collapsed_lookup_references(stamped)
+
+        assert result.tasks[1].items_expression == json.dumps(self._ROWS)
+
+    def test_rewrites_reference_inside_nested_foreach(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        inner = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        outer = ForEachActivity(
+            **_make_base("FE_Outer"),
+            items_expression="{{job.parameters.envs}}",
+            inner_activities=[inner],
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, outer])
+
+        result = _inline_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].inner_activities[0].items_expression == json.dumps(self._ROWS)

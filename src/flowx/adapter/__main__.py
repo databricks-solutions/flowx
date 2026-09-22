@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -551,7 +552,11 @@ def _run_modify(args: argparse.Namespace) -> int:
         return 2
 
     stamped_pipelines = [
-        _stamp_lookup_values_into_metadata_driven_motifs(apply_configuration(pipeline, configuration), lookup_values)
+        _inline_collapsed_lookup_references(
+            _stamp_lookup_values_into_metadata_driven_motifs(
+                apply_configuration(pipeline, configuration), lookup_values
+            )
+        )
         for pipeline in pipelines
     ]
     # Prompt-time provisioning: create/reuse the Databricks notification destination for any non-email
@@ -644,6 +649,70 @@ def _stamp_lookup_values_into_metadata_driven_motifs(pipeline, lookup_values: li
         else:
             stamped_tasks.append(task)
     return _dataclasses.replace(pipeline, tasks=stamped_tasks)
+
+
+# Matches a task value reference that is the whole string, e.g. "{{tasks.LKP.values.result}}".
+_WHOLE_TASK_VALUE_REF = re.compile(r"^\{\{tasks\.([^.]+)\.values\.[^}]+\}\}$")
+
+
+def _inline_collapsed_lookup_references(pipeline):
+    """Resolves references to a Lookup that a consolidated motif replaced.
+
+    When the metadata-driven bulk-copy motif is consolidated it becomes a
+    single ``pipeline_task``, and the Lookup it collapsed no longer exists as a
+    task.  A downstream ForEach may still reference that Lookup's output
+    (``{{tasks.<lookup>.values.result}}``) for its iterator -- ``depends_on`` is
+    rewired to the motif by the collapser, but this value reference is not, and
+    a ``pipeline_task`` publishes no task values, so the reference dangles.
+
+    Consolidation materialises the control rows onto the motif
+    (``lookup_values``), so the safe resolution is to inline those rows as the
+    downstream iterator input -- the same literal-array shape the
+    non-consolidated path emits for a static control table.
+
+    Args:
+        pipeline: Configuration-stamped pipeline IR (after
+            :func:`_stamp_lookup_values_into_metadata_driven_motifs`).
+
+    Returns:
+        A new :class:`Pipeline` with dangling references to collapsed Lookups
+        replaced by the materialised rows.  Unchanged when no consolidated
+        motif carries lookup values.
+    """
+    import dataclasses as _dataclasses
+
+    from flowx.models.ir import ForEachActivity as _ForEachActivity
+    from flowx.models.ir import MotifActivity as _MotifActivity
+
+    def _sanitize(name: str) -> str:
+        # Mirror the translator's task-key sanitiser (case-preserving) so a raw
+        # matched-activity name matches the sanitised key used inside a ref.
+        key = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+        return re.sub(r"_+", "_", key).strip("_") or "unnamed"
+
+    # collapsed task_key -> inlined JSON array of the motif's materialised rows.
+    inlined_by_key: dict[str, str] = {}
+    for task in pipeline.tasks:
+        if isinstance(task, _MotifActivity) and task.consolidate_metadata_driven and task.lookup_values:
+            inlined = json.dumps(task.lookup_values)
+            for name in task.matched_activity_names:
+                inlined_by_key[_sanitize(name)] = inlined
+    if not inlined_by_key:
+        return pipeline
+
+    def _rewrite(activity):
+        if not isinstance(activity, _ForEachActivity):
+            return activity
+        new_inner = [_rewrite(child) for child in activity.inner_activities]
+        new_items = activity.items_expression
+        match = _WHOLE_TASK_VALUE_REF.match(activity.items_expression or "")
+        if match and match.group(1) in inlined_by_key:
+            new_items = inlined_by_key[match.group(1)]
+        if new_items == activity.items_expression and new_inner == activity.inner_activities:
+            return activity
+        return _dataclasses.replace(activity, items_expression=new_items, inner_activities=new_inner)
+
+    return _dataclasses.replace(pipeline, tasks=[_rewrite(task) for task in pipeline.tasks])
 
 
 def _load_pipelines(report_path: Path) -> list[Any] | None:
