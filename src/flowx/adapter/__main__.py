@@ -2,7 +2,7 @@
 
 Exposes stateless subcommands -- the ``discover``/``convert``/``package`` phase runners plus
 ``inspect``, ``modify``, ``resolve-agentic``, ``inputs``, ``materialize-lookup``, ``workspace-paths``,
-``record-results``, and ``install-dashboard`` -- so each agent turn runs as an independent process
+``record-results``, ``install-dashboard``, and ``profile`` -- so each agent turn runs as an independent process
 holding no session state across user prompts.
 """
 
@@ -89,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_record_results(args)
     if args.command == "install-dashboard":
         return _run_install_dashboard(args)
+    if args.command == "profile":
+        return _run_profile(args)
     parser.print_help(sys.stderr)
     return 2
 
@@ -183,6 +185,38 @@ def _run_install_dashboard(args: argparse.Namespace) -> int:
     print(f"Installed coverage dashboard (id={dashboard_id}).")
     if url:
         print(f"  {url}")
+    return 0
+
+
+def _run_profile(args: argparse.Namespace) -> int:
+    """Implements ``profile``: survey an Azure Data Factory / Synapse / Fabric estate.
+
+    Runs the standalone extractor and writes CSV/Markdown reports under
+    ``--output-dir``. Returns 0 on success, 1 when auth fails, nothing is found,
+    or the run errors.
+    """
+    # Imported lazily: pulls in pandas + azure-* only when profiling actually runs.
+    from flowx.profiler.extract_pipelines import get_credential, run_extraction
+
+    try:
+        credential = get_credential(args.tenant_id, args.client_id, args.client_secret)
+        output_files = run_extraction(
+            credential=credential,
+            subscription_id=args.subscription_id,
+            resource_group=args.resource_group,
+            factory_name=args.factory_name,
+            output_dir=str(args.output_dir),
+            include_synapse=not args.no_synapse,
+            include_fabric=not args.no_fabric,
+            profiling_days=args.days,
+        )
+    except Exception as error:  # noqa: BLE001 - surface an actionable message to the agent
+        print(f"Profiling failed: {error}", file=sys.stderr)
+        return 1
+    if not output_files:
+        print("No factories or workspaces found for the given scope.", file=sys.stderr)
+        return 1
+    print(json.dumps({"ok": True, "output_files": output_files}))
     return 0
 
 
@@ -526,6 +560,27 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Workspace folder for the dashboard (defaults to the current user's home).",
     )
+
+    profile = subparsers.add_parser(
+        "profile",
+        help="Survey an Azure Data Factory / Synapse / Fabric estate into CSV/Markdown reports.",
+    )
+    profile.add_argument("--subscription-id", type=str, default=None, help="Limit to one subscription.")
+    profile.add_argument("--resource-group", type=str, default=None, help="Limit to one resource group.")
+    profile.add_argument("--factory-name", type=str, default=None, help="Limit to one data factory.")
+    profile.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("./output"),
+        help="Base output directory; each run creates a timestamped subfolder (default: ./output).",
+    )
+    # Default mirrors extract_pipelines.DEFAULT_PROFILING_DAYS (kept here to avoid the heavy import).
+    profile.add_argument("--days", type=int, default=90, help="Runtime/cost lookback window in days (default: 90).")
+    profile.add_argument("--no-synapse", action="store_true", help="Skip Synapse workspaces.")
+    profile.add_argument("--no-fabric", action="store_true", help="Skip Fabric workspaces.")
+    profile.add_argument("--tenant-id", type=str, default=None, help="Azure tenant id (service-principal auth).")
+    profile.add_argument("--client-id", type=str, default=None, help="Service-principal client id.")
+    profile.add_argument("--client-secret", type=str, default=None, help="Service-principal client secret.")
 
     # Unified phase runners: `adapter <phase> --source <name> -- <flags>` routes discover/convert
     # to the named source's phase module. --source is required for those phases (no default);

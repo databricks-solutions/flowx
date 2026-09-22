@@ -480,6 +480,36 @@ def _cmd_record_results(p: dict[str, Any]) -> dict[str, Any]:
     return {"ok": result.ok, "process": result.as_dict()}
 
 
+def _cmd_profile(p: dict[str, Any]) -> dict[str, Any]:
+    """Survey an Azure Data Factory / Synapse / Fabric estate.
+
+    Every parameter is optional; with none set the whole tenant is profiled over
+    a 90-day window. Note: on the deployed app there is no `az login`, so an MCP
+    run must pass `tenant_id`/`client_id`/`client_secret`, and reports are written
+    to the app's ephemeral `output_dir` (point it at a mounted Volume to retrieve
+    them, or run the local venv path).
+    """
+    args: list[Any] = ["profile"]
+    for key, flag in (
+        ("subscription_id", "--subscription-id"),
+        ("resource_group", "--resource-group"),
+        ("factory_name", "--factory-name"),
+        ("output_dir", "--output-dir"),
+        ("days", "--days"),
+        ("tenant_id", "--tenant-id"),
+        ("client_id", "--client-id"),
+        ("client_secret", "--client-secret"),
+    ):
+        if p.get(key) is not None:
+            args += [flag, p[key]]
+    if p.get("no_synapse"):
+        args += ["--no-synapse"]
+    if p.get("no_fabric"):
+        args += ["--no-fabric"]
+    result = runner.run_adapter(args)
+    return {"ok": result.ok, "result": runner.parse_stdout_json(result), "process": result.as_dict()}
+
+
 def _cmd_install_dashboard(p: dict[str, Any]) -> dict[str, Any]:
     args: list[Any] = ["install-dashboard", "--results-table", p["results_table"]]
     if p.get("warehouse_id"):
@@ -506,6 +536,7 @@ _COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "migrate": _cmd_migrate,
     "record_results": _cmd_record_results,
     "install_dashboard": _cmd_install_dashboard,
+    "profile": _cmd_profile,
 }
 
 

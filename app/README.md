@@ -30,6 +30,7 @@ operation; `parameters` is its keyword-argument dict.
 | `migrate` | discover→convert→package | Full non-interactive migration |
 | `record_results` | `adapter record-results` | Write coverage to a UC table |
 | `install_dashboard` | `adapter install-dashboard` | Publish the coverage dashboard |
+| `profile` | `adapter profile` | Survey an Azure Data Factory / Synapse / Fabric estate |
 
 Example: `flowx(command="discover", parameters={"source": "adf", "adf_source_path": "/Volumes/main/default/adf_export", "output_dir": "./out"})`.
 

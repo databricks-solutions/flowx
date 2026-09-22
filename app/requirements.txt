@@ -8,3 +8,10 @@ starlette>=0.40
 databricks-sdk>=0.40
 pyyaml>=6.0
 sqlglot>=25.0
+# flowx.profiler (the `profile` command) deps — kept in sync with pyproject.toml.
+pandas>=2.0
+aiohttp>=3.9
+tqdm>=4.66
+azure-identity>=1.16
+azure-mgmt-datafactory>=9.0
+azure-mgmt-resource>=23,<25

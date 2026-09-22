@@ -86,6 +86,7 @@ intermediates under `.work/` (pruned by `package`).
 | `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/` |
 | `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK |
 | `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table |
+| `profiler/extract_pipelines.py` | Standalone Azure Data Factory / Synapse / Fabric estate profiler (the `profile` command) |
 
 ## Activity Types
 
