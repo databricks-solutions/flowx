@@ -378,6 +378,12 @@ def test_airflow_migrate_resumes_from_reviewed_agentic_report(monkeypatch, tmp_p
     monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
     monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
     monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
+    validated: list[tuple[dict, Path]] = []
+    monkeypatch.setattr(
+        server,
+        "validate_persisted_agentic_report",
+        lambda payload, *, evidence_dir: validated.append((payload, evidence_dir)) or [],
+    )
 
     result = server._cmd_migrate(
         {
@@ -388,6 +394,7 @@ def test_airflow_migrate_resumes_from_reviewed_agentic_report(monkeypatch, tmp_p
     )
 
     assert result["status"] == "completed_with_reviewed_gaps"
+    assert validated == [(_airflow_report(operator="KubernetesPodOperator"), output / "metadata" / "agentic")]
     assert len(calls) == 1 and calls[0][0] == "package"
     assert calls[0][calls[0].index("--report") + 1] == str(report)
 
@@ -403,6 +410,7 @@ def test_airflow_migrate_resume_is_completed_only_when_reviewed_report_has_no_ga
     monkeypatch.setattr(runner, "run_adapter", lambda _args: _FakeResult())
     monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
     monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
+    monkeypatch.setattr(server, "validate_persisted_agentic_report", lambda _payload, *, evidence_dir: [])
 
     result = server._cmd_migrate(
         {
@@ -427,6 +435,51 @@ def test_airflow_migrate_resume_requires_reviewed_agentic_report(tmp_path: Path)
     assert result["ok"] is False
     assert result["status"] == "failed"
     assert "translation_report.agentic.json" in result["error"]
+
+
+def test_airflow_migrate_resume_rejects_custom_agentic_report_path(monkeypatch, tmp_path: Path):
+    output = tmp_path / "out"
+    custom_report = tmp_path / "untrusted.json"
+    custom_report.write_text(json.dumps(_airflow_report(operator="KubernetesPodOperator")), encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runner, "run_adapter", lambda args: calls.append([str(value) for value in args]))
+
+    result = server._cmd_migrate(
+        {
+            "source": "airflow",
+            "output_dir": str(output),
+            "resume_agentic": True,
+            "agentic_report_path": str(custom_report),
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert "agentic_report_path" in result["error"]
+    assert calls == []
+
+
+def test_airflow_migrate_resume_replays_agentic_evidence_before_package(monkeypatch, tmp_path: Path):
+    output = tmp_path / "out"
+    report = output / ".work" / "translation_report.agentic.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps(_airflow_report(operator="KubernetesPodOperator")), encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runner, "run_adapter", lambda args: calls.append([str(value) for value in args]))
+
+    result = server._cmd_migrate(
+        {
+            "source": "airflow",
+            "output_dir": str(output),
+            "resume_agentic": True,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["failed_phase"] == "validate_agentic"
+    assert "evidence" in result["error"]
+    assert calls == []
 
 
 def test_airflow_migrate_end_to_end_prepares_gap_without_writing_bundle(tmp_path: Path):

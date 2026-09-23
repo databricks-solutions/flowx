@@ -16,6 +16,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from flowx.agentic import validate_persisted_agentic_report
 from flowx.mcp import runner
 
 
@@ -553,7 +554,16 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                 "status": "failed",
                 "error": "resume_agentic is only available for Airflow migrations.",
             }
-        reviewed_report = Path(p.get("agentic_report_path") or out / ".work" / "translation_report.agentic.json")
+        if "agentic_report_path" in p:
+            return {
+                "ok": False,
+                "status": "failed",
+                "error": (
+                    "agentic_report_path is not accepted. Airflow resume always uses the fingerprint-bound "
+                    "report at <output_dir>/.work/translation_report.agentic.json."
+                ),
+            }
+        reviewed_report = out / ".work" / "translation_report.agentic.json"
         if not reviewed_report.is_file():
             return {
                 "ok": False,
@@ -561,7 +571,26 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                 "error": f"Reviewed Airflow report not found: {reviewed_report}",
             }
         reviewed_payload = runner.read_json(reviewed_report)
-        has_reviewed_gaps = bool(_airflow_gap_findings(reviewed_payload))
+        if not isinstance(reviewed_payload, dict):
+            return {
+                "ok": False,
+                "status": "failed",
+                "failed_phase": "validate_agentic",
+                "error": "Reviewed Airflow report must be a JSON object.",
+            }
+        validation_failures = validate_persisted_agentic_report(
+            reviewed_payload,
+            evidence_dir=out / "metadata" / "agentic",
+        )
+        if validation_failures:
+            return {
+                "ok": False,
+                "status": "failed",
+                "failed_phase": "validate_agentic",
+                "error": "Reviewed Airflow report failed agentic evidence validation.",
+                "validation_failures": validation_failures,
+            }
+        has_validated_gaps = bool(_airflow_gap_findings(reviewed_payload))
         package_args: list[Any] = [
             "package",
             "--output-dir",
@@ -580,7 +609,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
             "ok": package_res.ok,
             "status": (
                 "completed_with_reviewed_gaps"
-                if package_res.ok and has_reviewed_gaps
+                if package_res.ok and has_validated_gaps
                 else "completed"
                 if package_res.ok
                 else "failed"
@@ -833,7 +862,7 @@ def build_server() -> FastMCP:
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list),
           answers(ADF only, list of "ID=VALUE"), interactive(ADF only, bool, default true), lookup_csv,
-          resume_agentic(bool), agentic_report_path — runs discover→convert→package, returning the full
+          resume_agentic(bool) — runs discover→convert→package, returning the full
           option schema once (status "needs_input") when configuration is available. Airflow gaps pause
           with status "needs_agentic_resolution" before package; after reviewed apply, resume_agentic
           packages ``translation_report.agentic.json`` through the existing validation gate.
