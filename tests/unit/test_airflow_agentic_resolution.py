@@ -466,6 +466,45 @@ def test_taskflow_gap_arguments_come_from_invocation_not_callable_body(tmp_path:
     ]
 
 
+@pytest.mark.parametrize(
+    "operator_source",
+    [
+        (
+            "from airflow import DAG\n"
+            "from airflow.operators.python import BranchPythonOperator\n"
+            "def choose():\n"
+            "    return 'next'\n"
+            "with DAG(dag_id='branch') as dag:\n"
+            "    choose_path = BranchPythonOperator(task_id='choose_path', python_callable=choose)\n"
+        ),
+        (
+            "from airflow.decorators import dag, task_group\n"
+            "@task_group\n"
+            "def grouped():\n"
+            "    pass\n"
+            "@dag(dag_id='grouped')\n"
+            "def workflow():\n"
+            "    grouped()\n"
+            "workflow()\n"
+        ),
+    ],
+    ids=("branch", "task-group"),
+)
+def test_structural_gap_rejects_leaf_replacement_but_accepts_deferred_candidate(
+    tmp_path: Path, capsys, operator_source: str
+) -> None:
+    source = tmp_path / "structural.py"
+    source.write_text(operator_source, encoding="utf-8")
+    output = tmp_path / "output"
+    gap = _prepare_source(source, output)[0]
+
+    assert gap["allowed_replacement_kinds"] == []
+    assert _stage(output, _candidate(gap)) == 1
+    assert "not allowed for this gap" in capsys.readouterr().err
+
+    assert _stage(output, _candidate(gap, status="deferred")) == 0
+
+
 def test_only_actually_preserved_policy_arguments_are_flowx_owned(tmp_path: Path) -> None:
     source = tmp_path / "policy.py"
     source.write_text(
