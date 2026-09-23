@@ -92,8 +92,8 @@ def render_deploy_md(
     if single_bundle:
         bundle_dir, pipeline_keys = groups[0]
         lines += [
-            "All pipelines are packaged into a **single bundle** at the migration output root. Deploy it "
-            "directly — there is no cross-bundle ordering to worry about:",
+            "All pipelines are packaged into a **single bundle** at the migration output root. There is no "
+            "cross-bundle ordering *within* this migration, so deploy it directly:",
             "",
             "```bash",
             "databricks bundle validate -t dev",
@@ -101,6 +101,11 @@ def render_deploy_md(
             "```",
             "",
             f"Pipelines in this bundle: {', '.join(sorted(pipeline_keys))}.",
+            "",
+            "> **Note:** if this bundle references a pipeline outside the migration, that reference is a "
+            "`${var.<callee>_job_id}` bundle variable with no default — `databricks bundle deploy` fails "
+            "on the unset variable, and `flowx deploy` errors with `MissingDependencyError` unless you "
+            "pass `--allow-missing-deps`. See `SETUP.md` to supply the job id(s).",
             "",
         ]
         return "\n".join(lines)

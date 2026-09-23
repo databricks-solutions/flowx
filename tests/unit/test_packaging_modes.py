@@ -79,6 +79,20 @@ class TestGroupWorkflows:
         members_by_name = {name: sorted(m.name for m in members) for name, members in groups}
         assert members_by_name == {"grp1": ["a", "b"], "grp2": ["c"]}
 
+    def test_per_group_spec_requires_group_spec(self):
+        # --group-by spec with no --group-spec file must fail loudly, not silently fall back.
+        wfs = [_workflow("a"), _workflow("b")]
+        with pytest.raises(ValueError, match="requires a --group-spec"):
+            _group_workflows(wfs, mode="per-group", group_by="spec", group_spec=None)
+
+    def test_per_group_spec_absent_pipeline_colliding_with_group_name_raises(self):
+        # 'b' is mapped to group "grp1"; 'a' is absent from the spec, so it would form its own bundle
+        # named "grp1" (its normalized key) — colliding with the explicit group and silently merging the
+        # two. Must fail loudly instead.
+        wfs = [_workflow("grp1"), _workflow("b")]
+        with pytest.raises(ValueError, match="collides with an explicit group"):
+            _group_workflows(wfs, mode="per-group", group_by="spec", group_spec={"b": "grp1"})
+
     def test_single_pipeline_collapses_regardless_of_mode(self):
         groups = _group_workflows([_workflow("solo")], mode="per-group")
         assert len(groups) == 1
