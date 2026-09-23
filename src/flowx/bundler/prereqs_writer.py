@@ -142,6 +142,10 @@ class Prereqs:
     # Each entry is a human-readable identifier (the pipeline name, or ``index N`` when unnamed) so a
     # skipped pipeline is surfaced rather than silently missing from the bundle.
     skipped_pipelines: list[str] = field(default_factory=list)
+    # Job parameters emitted with a synthetic ``default: ""`` because the ADF pipeline parameter had no
+    # default (it was supplied by the caller at ExecutePipeline/trigger time). Each entry is
+    # ``{job, name}``; the operator must override these at run/deploy time or the run gets "".
+    synthetic_default_parameters: list[dict[str, str]] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         """Return ``True`` when nothing needs to happen before ``bundle run``."""
@@ -165,6 +169,7 @@ class Prereqs:
             and not self.pydabs_dbt_factories
             and not self.airflow_backfills
             and not self.skipped_pipelines
+            and not self.synthetic_default_parameters
         )
 
 
@@ -380,6 +385,7 @@ def build_prereqs(
     pydabs_dbt_factories: list[dict[str, Any]] | None = None,
     airflow_backfills: list[dict[str, Any]] | None = None,
     skipped_pipelines: list[str] | None = None,
+    synthetic_default_parameters: list[dict[str, str]] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
 
@@ -431,6 +437,7 @@ def build_prereqs(
         pydabs_dbt_factories=list(pydabs_dbt_factories or []),
         airflow_backfills=list(airflow_backfills or []),
         skipped_pipelines=list(skipped_pipelines or []),
+        synthetic_default_parameters=list(synthetic_default_parameters or []),
     )
 
 
@@ -586,6 +593,24 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
         lines.append("|---|---|")
         for empty_parameter in prereqs.empty_parameters:
             lines.append(f"| `{empty_parameter.task_key}` | `{empty_parameter.widget_name}` |")
+        lines.append("")
+
+    if prereqs.synthetic_default_parameters:
+        lines.append("## Job parameters without an ADF default")
+        lines.append("")
+        lines.append(
+            "The job parameters below had no default in the source ADF pipeline — they were supplied "
+            "by the caller at ExecutePipeline (or trigger) time. A DAB job parameter must declare a "
+            '`default`, so flowx emitted `default: ""` to keep the bundle deploy-valid. **Override '
+            "each one** at run time (`databricks bundle run <job> --params '{<param>:<value>}'`) or set "
+            "a real default in the job YAML — a run that omits it receives an empty string rather than "
+            "failing fast."
+        )
+        lines.append("")
+        lines.append("| Job | Parameter |")
+        lines.append("|---|---|")
+        for parameter in prereqs.synthetic_default_parameters:
+            lines.append(f"| `{parameter.get('job', '')}` | `{parameter.get('name', '')}` |")
         lines.append("")
 
     if prereqs.compute_notes:
