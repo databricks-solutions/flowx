@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 
 import pytest
@@ -174,9 +175,9 @@ def test_pydabs_emits_hook_module_and_no_inner_job(tmp_path):
     } <= hook_paths
     hook = next(nb for nb in prepared.notebooks if nb.relative_path.endswith("_dbt_job.py"))
     assert "load_resources" in hook.content
-    assert "from databricks_dbt_factory.Utils import read_dbt_manifest" in hook.content
+    assert "from databricks_dbt_factory.utils import read_dbt_manifest" in hook.content
     assert "DbtFactory(task_factories" in hook.content
-    # The supported factory API exposes the manifest reader as a module-level Utils function.
+    # The supported factory API exposes the manifest reader as a module-level utils function.
     assert "SpecsHandler" not in hook.content
     assert "read_dbt_manifest(MANIFEST_PATH)" in hook.content
     runner = next(nb for nb in prepared.notebooks if nb.relative_path == "notebooks/run_dbt_command.py")
@@ -315,7 +316,7 @@ def test_pydabs_bundle_wires_python_resources_and_setup(tmp_path):
     assert not (tmp_path / "src" / "resources").exists()
     pyproject = (tmp_path / "pyproject.toml").read_text()
     assert 'requires-python = ">=3.10,<3.13"' in pyproject
-    assert "databricks-dbt-factory==0.3.3" in pyproject
+    assert "databricks-dbt-factory==0.3.5" in pyproject
     assert "dbt-databricks==1.12.2" in pyproject
     setup = (tmp_path / "SETUP.md").read_text()
     assert "dbt factory (PyDABs mode)" in setup
@@ -354,3 +355,60 @@ def test_pydabs_copies_available_dbt_project_into_bundle(tmp_path):
     assert (output / "src" / "dbt_project" / "dbt_project.yml").exists()
     assert (output / "src" / "dbt_project" / "models" / "orders.sql").exists()
     assert (output / "src" / "dbt_project" / "target" / "partial_parse.msgpack").read_bytes() == b"prebuilt-dbt-graph"
+
+
+def test_pydabs_hook_imports_the_snake_case_factory_modules(tmp_path):
+    prepared = prepare_activity(_pydabs_activity(tmp_path))
+    hook = next(nb for nb in prepared.notebooks if nb.relative_path.endswith("_dbt_job.py"))
+    tree = ast.parse(hook.content)
+    factory_imports = {
+        node.module: sorted(alias.name for alias in node.names)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("databricks_dbt_factory")
+    }
+
+    assert factory_imports == {
+        "databricks_dbt_factory.dbt_factory": ["DbtFactory"],
+        "databricks_dbt_factory.dbt_task": ["DbtTaskOptions", "TaskType"],
+        "databricks_dbt_factory.task_factory": [
+            "DbtDependencyResolver",
+            "ModelTaskFactory",
+            "SeedTaskFactory",
+            "SnapshotTaskFactory",
+            "TestTaskFactory",
+        ],
+        "databricks_dbt_factory.utils": ["read_dbt_manifest"],
+    }
+    calls = {
+        node.func.id if isinstance(node.func, ast.Name) else node.func.attr: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, (ast.Name, ast.Attribute))
+    }
+    assert [keyword.arg for keyword in calls["DbtFactory"].keywords] == ["bundle_tests"]
+    assert len(calls["DbtFactory"].args) == 1
+    assert len(calls["create_tasks"].args) == 1
+    assert len(calls["read_dbt_manifest"].args) == 1
+    assert {keyword.arg for keyword in calls["DbtTaskOptions"].keywords} <= {
+        "task_type",
+        "environment_key",
+        "notebook_path",
+        "project_directory",
+        "profiles_directory",
+    }
+
+
+def test_pydabs_runner_authenticates_through_the_databricks_sdk(tmp_path):
+    prepared = prepare_activity(_pydabs_activity(tmp_path))
+    runner = next(nb for nb in prepared.notebooks if nb.relative_path == "notebooks/run_dbt_command.py")
+    ast.parse(runner.content)
+
+    assert "from databricks.sdk import WorkspaceClient" in runner.content
+    assert (
+        "os.environ['DBT_ACCESS_TOKEN'] = ws.config.authenticate()['Authorization'].removeprefix('Bearer ').strip()"
+        in runner.content
+    )
+    assert "os.environ['DBT_HOST'] = _host.netloc or _host.path.strip('/')" in runner.content
+    assert "apiToken()" not in runner.content
+    assert "apiUrl()" not in runner.content
+    assert runner.content.count("getContext()") == 1
+    assert "context.notebookPath()" in runner.content
