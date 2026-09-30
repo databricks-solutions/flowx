@@ -276,10 +276,12 @@ def test_resolver_is_emitted_for_sql_and_notebook_consumers_and_reconciles(tmp_p
     assert [dependency.task_key for dependency in sql.depends_on or []] == [RESOLVER]
     notebook = tasks["nb"]
     assert notebook.base_parameters == {"p": "{{tasks.__flowx_airflow_dates.values.ts_nodash}}"}
-    assert {dependency.task_key for dependency in notebook.depends_on or []} == {RESOLVER, "q"}
+    assert [dependency.task_key for dependency in notebook.depends_on or []] == ["q"]
     proof = next(item for item in pipeline.audit["transformations"] if item["code"] == "logical_date_resolver_emitted")
     assert proof["semantics"] == "data_interval_cron"
-    assert proof["emitted_edges"] == [[RESOLVER, "nb"], [RESOLVER, "q"]]
+    assert proof["consumer_task_keys"] == ["nb", "q"]
+    assert proof["attached_root_task_keys"] == ["q"]
+    assert proof["emitted_edges"] == [[RESOLVER, "q"]]
     assert {parameter["name"] for parameter in pipeline.parameters or []} == {
         "__flowx_airflow_trigger_time",
         "__flowx_airflow_trigger_type",
@@ -382,18 +384,71 @@ def test_airflow2_default_schedule_resolves_with_a_daily_delta(tmp_path: Path) -
     assert "airflow2_default_schedule_assumed" in _codes(pipeline)
 
 
-def test_consumer_trigger_rule_outcome_carries_onto_the_resolver_edge(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("trigger_rule", "run_if"),
+    [
+        ("all_failed", "ALL_FAILED"),
+        ("one_success", "AT_LEAST_ONE_SUCCESS"),
+        ("none_failed", "NONE_FAILED"),
+        ("all_done", "ALL_DONE"),
+        ("one_failed", "AT_LEAST_ONE_FAILED"),
+    ],
+)
+def test_resolver_never_joins_a_consumer_trigger_rule(tmp_path: Path, trigger_rule: str, run_if: str) -> None:
+    pipeline = _load(
+        tmp_path,
+        f"""
+        from airflow import DAG
+        from airflow.operators.bash import BashOperator
+        with DAG(dag_id="d", schedule_interval="@daily") as dag:
+            work = BashOperator(task_id="work", bash_command="true")
+            handler = BashOperator(task_id="handler", bash_command="echo {{{{ ds }}}}", trigger_rule="{trigger_rule}")
+            work >> handler
+        """,
+    )
+    from flowx.preparer.workflow_preparer import prepare_workflow
+
+    assert pipeline.reconciliation_status == "verified"
+    prepared = {task["task_key"]: task for task in prepare_workflow(pipeline).tasks}
+    assert prepared["handler"]["depends_on"] == [{"task_key": "work"}]
+    assert prepared["handler"]["run_if"] == run_if
+    assert prepared["work"]["depends_on"] == [{"task_key": RESOLVER}]
+    assert "run_if" not in prepared["work"]
+
+
+def test_root_consumer_depends_directly_on_the_resolver(tmp_path: Path) -> None:
     pipeline = _load(
         tmp_path,
         """
         from airflow import DAG
         from airflow.operators.bash import BashOperator
         with DAG(dag_id="d", schedule_interval="@daily") as dag:
-            first = BashOperator(task_id="first", bash_command="true")
-            last = BashOperator(task_id="last", bash_command="echo {{ ds }}", trigger_rule="all_done")
-            first >> last
+            first = BashOperator(task_id="first", bash_command="echo {{ ds }}", trigger_rule="all_failed")
+            second = BashOperator(task_id="second", bash_command="true")
+            first >> second
         """,
     )
-    last = _by_key(pipeline)["last"]
-    outcomes = {dependency.task_key: dependency.outcome for dependency in last.depends_on or []}
-    assert outcomes[RESOLVER] == outcomes["first"]
+    from flowx.preparer.workflow_preparer import prepare_workflow
+
+    prepared = {task["task_key"]: task for task in prepare_workflow(pipeline).tasks}
+    assert prepared["first"]["depends_on"] == [{"task_key": RESOLVER}]
+    assert "run_if" not in prepared["first"]
+    assert prepared["second"]["depends_on"] == [{"task_key": "first"}]
+
+
+def test_roots_that_feed_no_consumer_do_not_wait_for_the_resolver(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        """
+        from airflow import DAG
+        from airflow.operators.bash import BashOperator
+        with DAG(dag_id="d", schedule_interval="@daily") as dag:
+            independent = BashOperator(task_id="independent", bash_command="true")
+            upstream = BashOperator(task_id="upstream", bash_command="true")
+            consumer = BashOperator(task_id="consumer", bash_command="echo {{ ds }}")
+            upstream >> consumer
+        """,
+    )
+    tasks = _by_key(pipeline)
+    assert not tasks["independent"].depends_on
+    assert [dependency.task_key for dependency in tasks["upstream"].depends_on or []] == [RESOLVER]

@@ -75,6 +75,40 @@ def _iter_placeholders(tasks: list[Activity]) -> list[PlaceholderActivity]:
     return [placeholder for _, placeholder in _iter_placeholders_with_paths(tasks)]
 
 
+def _resolver_root_keys(tasks: list[Activity], consumer_keys: set[str]) -> set[str]:
+    """Returns the root tasks the date resolver must precede so every consumer runs after it.
+
+    Databricks applies a task's ``run_if`` to all of its dependencies, so an edge from the resolver
+    straight to a consumer would change that consumer's trigger rule. Roots have no dependencies and
+    therefore no ``run_if``; making the resolver their only upstream keeps every task's trigger rule
+    evaluated over exactly its captured upstreams, while each consumer still runs after the resolver.
+    """
+    by_key = {task.task_key: task for task in tasks}
+    top_level_of: dict[str, str] = {}
+    for task in tasks:
+        top_level_of[task.task_key] = task.task_key
+        pending = list(task.inner_activities) if isinstance(task, ForEachActivity) else []
+        while pending:
+            nested = pending.pop()
+            top_level_of[nested.task_key] = task.task_key
+            if isinstance(nested, ForEachActivity):
+                pending.extend(nested.inner_activities)
+
+    roots: set[str] = set()
+    visited: set[str] = set()
+    pending_keys = [top_level_of[key] for key in consumer_keys if key in top_level_of]
+    while pending_keys:
+        key = pending_keys.pop()
+        if key in visited or key not in by_key:
+            continue
+        visited.add(key)
+        upstreams = by_key[key].depends_on or []
+        if not upstreams:
+            roots.add(key)
+        pending_keys.extend(dependency.task_key for dependency in upstreams)
+    return roots
+
+
 def _reconcile_pipeline(
     pipeline: Pipeline,
     *,
@@ -607,12 +641,13 @@ def _reconcile_pipeline(
         # The synthetic resolver and its edges are added after the captured graph is reconciled; the
         # ledger entry names every edge it introduces.
         resolver, resolver_proof = logical_date_resolver
-        consumer_keys = set(resolver_proof["consumer_task_keys"])
+        attached_roots = _resolver_root_keys(pipeline.tasks, set(resolver_proof["consumer_task_keys"]))
         for task in pipeline.tasks:
-            if task.task_key in consumer_keys:
-                outcome = task.depends_on[0].outcome if task.depends_on else None
-                task.depends_on = [Dependency(task_key=resolver.task_key, outcome=outcome), *(task.depends_on or [])]
+            if task.task_key in attached_roots:
+                task.depends_on = [Dependency(task_key=resolver.task_key)]
         pipeline.tasks.insert(0, resolver)
+        resolver_proof["attached_root_task_keys"] = sorted(attached_roots)
+        resolver_proof["emitted_edges"] = [[resolver.task_key, root] for root in sorted(attached_roots)]
         transformations.append(resolver_proof)
 
     blocking_gaps = [*unsupported_settings, *unresolved]
