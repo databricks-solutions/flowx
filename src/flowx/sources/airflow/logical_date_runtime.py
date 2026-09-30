@@ -78,11 +78,18 @@ def _parse_field(field: str, low: int, high: int, names: dict[str, int]) -> froz
     return frozenset(values)
 
 
-class CronSchedule:
-    """A five-field Unix cron expression evaluated on local wall-clock time.
+_ALL_HOURS = frozenset(range(24))
+_ALL_DAYS = frozenset(range(1, 32))
+_ALL_WEEKDAYS = frozenset(range(7))
 
-    Day-of-month and day-of-week follow Vixie cron: when both fields are restricted (neither starts
-    with ``*``), a day matches if either field matches; otherwise both must match.
+
+class CronSchedule:
+    """A five-field Unix cron expression evaluated the way Airflow evaluates it through croniter.
+
+    A day-of-month or day-of-week field is unrestricted when it is written as a bare ``*``, or when it
+    lists every value and the other day field is written with a ``*``; this is croniter's expansion
+    rule, so ``*/2`` in either day field is restricted. When both day fields are restricted, a day
+    matches if either field matches.
     """
 
     def __init__(self, expression: str) -> None:
@@ -95,8 +102,9 @@ class CronSchedule:
         self.days = _parse_field(fields[2], 1, 31, {})
         self.months = _parse_field(fields[3], 1, 12, _MONTH_NAMES)
         self.weekdays = frozenset(day % 7 for day in _parse_field(fields[4], 0, 7, _DAY_NAMES))
-        self.days_unrestricted = fields[2].startswith("*")
-        self.weekdays_unrestricted = fields[4].startswith("*")
+        self.days_unrestricted = fields[2] == "*" or (self.days == _ALL_DAYS and "*" in fields[4])
+        self.weekdays_unrestricted = fields[4] == "*" or (self.weekdays == _ALL_WEEKDAYS and "*" in fields[2])
+        self.covers_every_hour = self.hours == _ALL_HOURS
 
     def day_matches(self, moment: datetime) -> bool:
         """Returns whether *moment*'s calendar day can hold a tick."""
@@ -109,63 +117,117 @@ class CronSchedule:
         return day_ok or weekday_ok
 
 
-def _localize(wall_clock: datetime, zone: ZoneInfo) -> datetime | None:
-    """Attaches *zone* to a naive wall-clock time, or returns None when that time does not exist.
-
-    A time skipped by a daylight-saving jump has no instant, so it cannot be a tick. A repeated time
-    uses its first occurrence.
-    """
-    aware = wall_clock.replace(tzinfo=zone, fold=0)
-    if aware.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None) != wall_clock:
-        return None
-    return aware
-
-
-def previous_tick(schedule: CronSchedule, instant: datetime, zone: ZoneInfo) -> datetime:
-    """Returns the latest tick strictly before *instant*, in UTC."""
-    candidate = instant.astimezone(zone).replace(tzinfo=None, second=0, microsecond=0)
+def _wall_clock_previous(schedule: CronSchedule, wall_clock: datetime) -> datetime:
+    """Returns the latest matching naive wall-clock minute strictly before *wall_clock*."""
+    candidate = wall_clock.replace(second=0, microsecond=0)
+    if candidate == wall_clock:
+        candidate -= timedelta(minutes=1)
     floor = candidate - _MAXIMUM_SEARCH_SPAN
     while candidate >= floor:
         if not schedule.day_matches(candidate):
             candidate = candidate.replace(hour=23, minute=59) - timedelta(days=1)
-            continue
-        if candidate.hour not in schedule.hours:
+        elif candidate.hour not in schedule.hours:
             candidate = candidate.replace(minute=59) - timedelta(hours=1)
-            continue
-        if candidate.minute not in schedule.minutes:
+        elif candidate.minute not in schedule.minutes:
             candidate -= timedelta(minutes=1)
-            continue
-        aware = _localize(candidate, zone)
-        if aware is not None and aware < instant:
-            return aware.astimezone(timezone.utc)
-        candidate -= timedelta(minutes=1)
-    raise RuntimeError(f"cron {schedule.expression!r} has no tick before {instant.isoformat()}")
+        else:
+            return candidate
+    raise RuntimeError(f"cron {schedule.expression!r} has no tick before {wall_clock.isoformat()}")
 
 
-def next_tick(schedule: CronSchedule, instant: datetime, zone: ZoneInfo) -> datetime:
-    """Returns the earliest tick strictly after *instant*, in UTC."""
-    candidate = instant.astimezone(zone).replace(tzinfo=None, second=0, microsecond=0)
+def _wall_clock_next(schedule: CronSchedule, wall_clock: datetime) -> datetime:
+    """Returns the earliest matching naive wall-clock minute strictly after *wall_clock*."""
+    candidate = wall_clock.replace(second=0, microsecond=0) + timedelta(minutes=1)
     ceiling = candidate + _MAXIMUM_SEARCH_SPAN
     while candidate <= ceiling:
         if not schedule.day_matches(candidate):
             candidate = candidate.replace(hour=0, minute=0) + timedelta(days=1)
-            continue
-        if candidate.hour not in schedule.hours:
+        elif candidate.hour not in schedule.hours:
             candidate = candidate.replace(minute=0) + timedelta(hours=1)
-            continue
-        if candidate.minute not in schedule.minutes:
+        elif candidate.minute not in schedule.minutes:
             candidate += timedelta(minutes=1)
-            continue
-        aware = _localize(candidate, zone)
-        if aware is not None and aware > instant:
-            return aware.astimezone(timezone.utc)
-        candidate += timedelta(minutes=1)
-    raise RuntimeError(f"cron {schedule.expression!r} has no tick after {instant.isoformat()}")
+        else:
+            return candidate
+    raise RuntimeError(f"cron {schedule.expression!r} has no tick after {wall_clock.isoformat()}")
+
+
+def _to_wall_clock(instant: datetime, zone: ZoneInfo) -> datetime:
+    return instant.astimezone(zone).replace(tzinfo=None)
+
+
+def _localize(wall_clock: datetime, zone: ZoneInfo) -> datetime:
+    """Attaches *zone* to a naive wall-clock time exactly as Airflow's ``make_aware`` does.
+
+    Airflow marks the time as the second occurrence and lets pendulum resolve it: a time skipped by a
+    daylight-saving jump moves forward by the length of the jump, and a repeated time is its second
+    occurrence.
+    """
+    offset_before = wall_clock.replace(tzinfo=zone, fold=0).utcoffset()
+    offset_after = wall_clock.replace(tzinfo=zone, fold=1).utcoffset()
+    if offset_before is not None and offset_after is not None and offset_after > offset_before:
+        wall_clock += offset_after - offset_before
+    return wall_clock.replace(tzinfo=zone, fold=1).astimezone(timezone.utc)
+
+
+def _shift(instant: datetime, delta: timedelta, zone: ZoneInfo) -> datetime:
+    """Adds *delta* to *instant* the way a pendulum datetime does.
+
+    A change shorter than a day is exact elapsed time; one with whole days is applied to the local
+    wall clock and then localized again.
+    """
+    if abs(delta).days == 0:
+        return (instant + delta).astimezone(timezone.utc)
+    return _localize(_to_wall_clock(instant, zone) + delta, zone)
+
+
+def previous_tick(schedule: CronSchedule, instant: datetime, zone: ZoneInfo) -> datetime:
+    """Returns the tick before *instant*, in UTC (Airflow's ``CronMixin._get_prev``)."""
+    wall_clock = _to_wall_clock(instant, zone)
+    scheduled = _wall_clock_previous(schedule, wall_clock)
+    if not schedule.covers_every_hour:
+        return _localize(scheduled, zone)
+    return _shift(instant, -(wall_clock - scheduled), zone)
+
+
+def next_tick(schedule: CronSchedule, instant: datetime, zone: ZoneInfo) -> datetime:
+    """Returns the tick after *instant*, in UTC (Airflow's ``CronMixin._get_next``)."""
+    wall_clock = _to_wall_clock(instant, zone)
+    scheduled = _wall_clock_next(schedule, wall_clock)
+    if not schedule.covers_every_hour:
+        return _localize(scheduled, zone)
+    return _shift(instant, scheduled - wall_clock, zone)
 
 
 def latest_tick_at_or_before(schedule: CronSchedule, instant: datetime, zone: ZoneInfo) -> datetime:
-    """Returns the tick at or before *instant*, so a trigger time a few seconds late still aligns."""
-    return previous_tick(schedule, instant + timedelta(microseconds=1), zone)
+    """Returns *instant* when it is a tick, otherwise the tick before it (Airflow's ``_align_to_prev``)."""
+    previous = previous_tick(schedule, instant, zone)
+    return instant if next_tick(schedule, previous, zone) == instant else previous
+
+
+def scheduled_interval_start(schedule: CronSchedule, end: datetime, zone: ZoneInfo) -> datetime:
+    """Returns the tick whose next tick is *end*, the start of the scheduled interval ending at *end*.
+
+    Airflow chains scheduled intervals forward, each ending at the next tick after its start, so this
+    is the tick before *end* in that chain. It differs from :func:`previous_tick` only when *end* is a
+    time moved forward by a daylight-saving jump, where Airflow's own previous-tick lookup returns *end*.
+    """
+    start = previous_tick(schedule, end, zone)
+    if start >= end:
+        start = previous_tick(schedule, end - timedelta(minutes=1), zone)
+    return start
+
+
+def nearest_tick(schedule: CronSchedule, instant: datetime, zone: ZoneInfo) -> datetime:
+    """Returns the tick closest to a scheduled run's fire instant, preferring the earlier one on a tie.
+
+    A scheduled run fires on a tick, but its reported trigger time can lag by a few seconds, and on a
+    daylight-saving jump the scheduler may fire before the tick Airflow would have produced.
+    """
+    earlier = latest_tick_at_or_before(schedule, instant, zone)
+    if earlier == instant:
+        return earlier
+    later = next_tick(schedule, instant, zone)
+    return later if later - instant < instant - earlier else earlier
 
 
 def parse_instant(value: str) -> datetime:
@@ -244,8 +306,12 @@ def resolve(
         fired = parse_instant(trigger_time)
         manual = trigger_type.strip().lower() in MANUAL_TRIGGER_TYPES
         if semantics == DATA_INTERVAL_CRON and schedule is not None:
-            end = latest_tick_at_or_before(schedule, fired, zone)
-            start = previous_tick(schedule, end, zone)
+            if manual:
+                end = latest_tick_at_or_before(schedule, fired, zone)
+                start = previous_tick(schedule, end, zone)
+            else:
+                end = nearest_tick(schedule, fired, zone)
+                start = scheduled_interval_start(schedule, end, zone)
             logical = fired if manual else start
         elif semantics == DATA_INTERVAL_DELTA:
             start, end = fired - delta, fired

@@ -129,15 +129,75 @@ def test_named_months_and_days() -> None:
     assert april["data_interval_end"] == "2026-03-31T06:00:00+00:00"
 
 
-def test_daylight_saving_gap_skips_the_nonexistent_local_tick() -> None:
-    # 02:30 on 2026-03-08 does not exist in New York; the tick before the 03-09 run is 03-07 02:30 EST.
+def test_daylight_saving_gap_moves_the_nonexistent_tick_forward() -> None:
+    # 02:30 on 2026-03-08 does not exist in New York; Airflow moves that tick to 03:30 EDT (07:30Z), so
+    # the run firing 03-09 02:30 EDT covers the interval starting at the moved tick.
     values = _resolve(
         semantics="data_interval_cron",
         cron="30 2 * * *",
         zone_name="America/New_York",
         trigger_time="2026-03-09T06:30:00Z",
     )
-    assert values["data_interval_start"] == "2026-03-07T07:30:00+00:00"
+    assert values["data_interval_start"] == "2026-03-08T07:30:00+00:00"
+    assert values["ds"] == "2026-03-08"
+
+
+@pytest.mark.parametrize("march_eighth_fire", ["2026-03-08T10:00:00Z", "2026-03-08T09:00:00Z"])
+def test_spring_forward_runs_get_consecutive_partitions(march_eighth_fire: str) -> None:
+    fires = ["2026-03-07T10:00:00Z", march_eighth_fire, "2026-03-09T09:00:00Z", "2026-03-10T09:00:00Z"]
+    runs = [
+        _resolve(semantics="data_interval_cron", cron="0 2 * * *", zone_name="America/Los_Angeles", trigger_time=fire)
+        for fire in fires
+    ]
+    assert [run["ds"] for run in runs] == ["2026-03-06", "2026-03-07", "2026-03-08", "2026-03-09"]
+    for earlier, later in zip(runs, runs[1:], strict=False):
+        assert earlier["data_interval_end"] == later["data_interval_start"]
+
+
+def test_fall_back_hourly_intervals_are_contiguous_and_one_hour_long() -> None:
+    runs = [
+        _resolve(
+            semantics="data_interval_cron",
+            cron="0 * * * *",
+            zone_name="America/New_York",
+            trigger_time=f"2026-11-01T{hour:02d}:00:00Z",
+        )
+        for hour in range(3, 10)
+    ]
+    for earlier, later in zip(runs, runs[1:], strict=False):
+        assert earlier["data_interval_end"] == later["data_interval_start"]
+    for run in runs:
+        start = runtime.parse_instant(run["data_interval_start"])
+        end = runtime.parse_instant(run["data_interval_end"])
+        assert (end - start).total_seconds() == 3600
+
+
+@pytest.mark.parametrize(
+    ("expression", "days_unrestricted", "weekdays_unrestricted"),
+    [
+        ("0 0 * * *", True, True),
+        ("0 0 */2 * *", False, True),
+        ("0 0 * * */2", True, False),
+        ("0 0 */2 * 1", False, False),
+        ("0 0 1-31 * 1", False, False),
+        ("0 0 1-31 * *", True, True),
+    ],
+)
+def test_day_fields_follow_croniter_restriction_rules(
+    expression: str, days_unrestricted: bool, weekdays_unrestricted: bool
+) -> None:
+    schedule = runtime.CronSchedule(expression)
+    assert schedule.days_unrestricted is days_unrestricted
+    assert schedule.weekdays_unrestricted is weekdays_unrestricted
+
+
+def test_restricted_step_day_of_month_ors_with_day_of_week() -> None:
+    from datetime import datetime
+
+    schedule = runtime.CronSchedule("0 0 */2 * 1")
+    assert schedule.day_matches(datetime(2026, 1, 3))  # odd day of month (a Saturday)
+    assert schedule.day_matches(datetime(2026, 1, 12))  # even day of month, but a Monday
+    assert not schedule.day_matches(datetime(2026, 1, 6))  # even day of month, a Tuesday
 
 
 def test_cron_ticks_use_the_dag_timezone_and_render_in_utc() -> None:
