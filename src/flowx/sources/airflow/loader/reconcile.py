@@ -91,6 +91,7 @@ def _reconcile_pipeline(
     expected_ir_edges: set[tuple[str, str]],
     placeholder_capture_ids: dict[int, str],
     collapse_proofs: list[dict[str, Any]] | None = None,
+    logical_date_resolver: tuple[NotebookActivity, dict[str, Any]] | None = None,
 ) -> Pipeline:
     """Reconciles an independent source audit with captured graph and emitted IR."""
     findings: list[dict[str, Any]] = list(semantic_findings)
@@ -601,6 +602,18 @@ def _reconcile_pipeline(
                 "rationale": "preserve_a_runnable_job_for_a_structural_or_empty_airflow_dag",
             }
         )
+
+    if logical_date_resolver is not None:
+        # The synthetic resolver and its edges are added after the captured graph is reconciled; the
+        # ledger entry names every edge it introduces.
+        resolver, resolver_proof = logical_date_resolver
+        consumer_keys = set(resolver_proof["consumer_task_keys"])
+        for task in pipeline.tasks:
+            if task.task_key in consumer_keys:
+                outcome = task.depends_on[0].outcome if task.depends_on else None
+                task.depends_on = [Dependency(task_key=resolver.task_key, outcome=outcome), *(task.depends_on or [])]
+        pipeline.tasks.insert(0, resolver)
+        transformations.append(resolver_proof)
 
     blocking_gaps = [*unsupported_settings, *unresolved]
     placeholder_entries = [

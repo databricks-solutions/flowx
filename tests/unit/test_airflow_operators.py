@@ -209,24 +209,26 @@ def test_bash_operator_macros_thread_through_shell_env_vars():
     task = _by_key(p)["run"]
     assert isinstance(task, NotebookActivity)
     # Macros converted to shell variables; the raw {{ ... }} is gone from the %sh cell.
-    assert "--date ${__flowx_airflow_run_date}" in task.generated_source
+    assert "--date ${__flowx_airflow_date_ds}" in task.generated_source
     assert "--env ${env}" in task.generated_source
     assert "{{ ds }}" not in task.generated_source
     # The widgets are declared and exported to the environment before the %sh cell.
     assert (
-        "os.environ['__flowx_airflow_run_date'] = dbutils.widgets.get('__flowx_airflow_run_date')"
+        "os.environ['__flowx_airflow_date_ds'] = dbutils.widgets.get('__flowx_airflow_date_ds')"
     ) in task.generated_source
     compile("\n".join(task.generated_source.split("# MAGIC %sh")[0].splitlines()), "<pre>", "exec")
-    # Each widget must be BOUND to its job parameter: an unbound widget is backfilled with an empty
-    # string by the bundler, so the command would silently run with blank values.
+    # Each widget must be BOUND: ds reads the date resolver's task value, env its job parameter. An
+    # unbound widget is backfilled with an empty string, so the command would run with blank values.
     assert task.base_parameters == {
-        "__flowx_airflow_run_date": "{{job.parameters.__flowx_airflow_run_date}}",
+        "__flowx_airflow_date_ds": "{{tasks.__flowx_airflow_dates.values.ds}}",
         "env": "{{job.parameters.env}}",
     }
-    # run_date declared as a job parameter with the schedule-aware default (backfill-overridable).
+    assert [dependency.task_key for dependency in task.depends_on or []] == ["__flowx_airflow_dates"]
+    # The resolver's inputs are declared; the task-local date widget is not a job parameter.
     params = {param["name"]: param["default"] for param in p.parameters}
-    assert params["__flowx_airflow_run_date"] == "{{job.trigger.time.iso_date}}"
+    assert params["__flowx_airflow_trigger_time"] == "{{job.trigger.time.iso_datetime}}"
     assert params["env"] == ""
+    assert "__flowx_airflow_date_ds" not in params
 
 
 def test_python_operator_with_unresolvable_callable_becomes_placeholder():
@@ -1067,22 +1069,23 @@ def test_jinja_macros_convert_to_dab_refs_and_collect_params():
     )
     task = _by_key(p)["t"]
     # op_kwargs are JSON-encoded into the internal __flowx_op_kwargs widget; Jinja inside the
-    # values is still converted to DAB refs. {{ ds }} routes through a run_date job parameter (so a
-    # native backfill can override it), not an inline start_time ref.
+    # values is still converted to DAB refs. {{ ds }} reads the generated date resolver's task value.
     kwargs_json = task.base_parameters["__flowx_op_kwargs"]
-    assert "{{job.parameters.__flowx_airflow_run_date}}" in kwargs_json
+    assert "{{tasks.__flowx_airflow_dates.values.ds}}" in kwargs_json
     assert "{{job.parameters.env}}" in kwargs_json
-    # Referenced params are declared with Databricks-required defaults; the reserved logical-date
-    # parameter defaults to the scheduled trigger time on a cron job.
+    # Referenced params are declared with Databricks-required defaults, alongside the resolver's
+    # trigger-instant inputs.
     assert p.parameters == [
-        {"name": "__flowx_airflow_run_date", "default": "{{job.trigger.time.iso_date}}"},
+        {"name": "__flowx_airflow_logical_date", "default": ""},
+        {"name": "__flowx_airflow_trigger_time", "default": "{{job.trigger.time.iso_datetime}}"},
+        {"name": "__flowx_airflow_trigger_type", "default": "{{job.trigger.type}}"},
         {"name": "env", "default": ""},
     ]
 
 
-def test_execution_date_on_event_triggered_job_defaults_to_start_time():
-    # A cron+sensor collapses to a file_arrival trigger -- no scheduled trigger time exists, so the
-    # The reserved execution-date parameter approximates with the run start time.
+def test_execution_date_on_event_triggered_job_is_a_gap():
+    # A root sensor lifts to a file_arrival trigger, so a run has no scheduled logical instant; the
+    # consumer becomes a gap instead of approximating the date with the run start time.
     p = _load(
         "from airflow import DAG\n"
         "from airflow.operators.python import PythonOperator\n"
@@ -1094,7 +1097,11 @@ def test_execution_date_on_event_triggered_job_defaults_to_start_time():
         "    wait >> t\n"
     )
     assert (p.schedule or {}).get("kind") == "file_arrival"
-    assert p.parameters == [{"name": "__flowx_airflow_execution_date", "default": "{{job.start_time.iso_datetime}}"}]
+    assert isinstance(_by_key(p)["t"], PlaceholderActivity)
+    assert "__flowx_airflow_dates" not in _by_key(p)
+    codes = {finding["code"] for finding in p.not_translatable}
+    assert "airflow_logical_date_semantics_undeterminable" in codes
+    assert not p.parameters
 
 
 def test_catchup_true_tags_pipeline_for_native_backfill():
@@ -1130,9 +1137,9 @@ def test_dag_param_named_run_date_remains_distinct_from_logical_date():
     )
     parameters = {param["name"]: param["default"] for param in p.parameters}
     assert parameters["run_date"] == "2024-01-01"
-    assert parameters["__flowx_airflow_run_date"] == "{{job.trigger.time.iso_date}}"
     task = _by_key(p)["t"]
-    assert "{{job.parameters.__flowx_airflow_run_date}}" in task.base_parameters["__flowx_op_kwargs"]
+    assert "{{tasks.__flowx_airflow_dates.values.ds}}" in task.base_parameters["__flowx_op_kwargs"]
+    assert "{{job.parameters.run_date}}" not in task.base_parameters["__flowx_op_kwargs"]
 
 
 def test_sql_embedded_string_template_becomes_placeholder():
@@ -1154,12 +1161,12 @@ def test_unsupported_airflow_macro_becomes_placeholder():
         "from airflow.operators.python import PythonOperator\n"
         "def w(value=None):\n    return value\n"
         "with DAG(dag_id='d') as dag:\n"
-        "    t = PythonOperator(task_id='t', python_callable=w, op_kwargs={'value': '{{ ds_nodash }}'})\n"
+        "    t = PythonOperator(task_id='t', python_callable=w, op_kwargs={'value': '{{ macros.ds_add(ds, 1) }}'})\n"
     )
 
     task = _by_key(p)["t"]
     assert isinstance(task, PlaceholderActivity)
-    assert "ds_nodash" in task.comment
+    assert "macros.ds_add" in task.comment
 
 
 def test_default_args_apply_retries_timeout_retry_delay():

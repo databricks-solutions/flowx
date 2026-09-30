@@ -10,7 +10,14 @@ import pytest
 import yaml
 
 from flowx.bundler.dab_writer import main as package_main
-from flowx.models.ir import Pipeline, PlaceholderActivity, SparkJarActivity, SparkPythonActivity, SqlActivity
+from flowx.models.ir import (
+    NotebookActivity,
+    Pipeline,
+    PlaceholderActivity,
+    SparkJarActivity,
+    SparkPythonActivity,
+    SqlActivity,
+)
 from flowx.sources.airflow.loader import load_airflow_dag
 
 FIXTURE = Path(__file__).parents[1] / "resources" / "airflow" / "dataproc_events_dag.py"
@@ -57,9 +64,11 @@ def _codes(pipeline: Pipeline) -> set[str]:
 def test_example_dag_lowers_to_one_native_spark_python_task() -> None:
     pipeline = load_airflow_dag(FIXTURE)
 
-    assert [type(task) for task in pipeline.tasks] == [SparkPythonActivity]
-    task = pipeline.tasks[0]
-    assert task.task_key == "submit_events"
+    assert [(type(task), task.task_key) for task in pipeline.tasks] == [
+        (NotebookActivity, "__flowx_airflow_dates"),
+        (SparkPythonActivity, "submit_events"),
+    ]
+    task = pipeline.tasks[1]
     assert task.python_file == "gs://customer-dataproc-artifacts/jobs/transform_events.py"
     assert task.parameters == [
         "--input",
@@ -67,9 +76,9 @@ def test_example_dag_lowers_to_one_native_spark_python_task() -> None:
         "--output-table",
         "analytics.events_daily",
         "--run-date",
-        "{{job.parameters.__flowx_airflow_run_date}}",
+        "{{tasks.__flowx_airflow_dates.values.ds}}",
     ]
-    assert task.depends_on is None
+    assert [dependency.task_key for dependency in task.depends_on or []] == ["__flowx_airflow_dates"]
     assert task.cluster == {
         "num_workers": 4,
         "spark_conf": {"spark.sql.adaptive.enabled": "true", "spark.sql.shuffle.partitions": "200"},
@@ -123,6 +132,7 @@ def test_managed_spark_aliases_produce_the_same_tasks(tmp_path: Path) -> None:
         return [
             (type(task).__name__, task.task_key, task.python_file, task.parameters, task.cluster)
             for task in pipeline.tasks
+            if task.task_key != "__flowx_airflow_dates"
         ]
 
     assert lowered("Dataproc") == lowered("ManagedSpark")
@@ -408,7 +418,9 @@ def test_example_packages_onto_the_bound_job_cluster(tmp_path: Path) -> None:
     assert "spark_submit_task" not in bundle_text
     resource = yaml.safe_load((output_dir / "resources" / "dataproc_events.yml").read_text(encoding="utf-8"))
     job = resource["resources"]["jobs"]["dataproc_events"]
-    assert job["tasks"][0]["job_cluster_key"] == "default_cluster"
+    tasks = {task["task_key"]: task for task in job["tasks"]}
+    assert tasks["submit_events"]["job_cluster_key"] == "default_cluster"
+    assert tasks["submit_events"]["depends_on"] == [{"task_key": "__flowx_airflow_dates"}]
     cluster = job["job_clusters"][0]["new_cluster"]
     assert cluster["num_workers"] == 4
     assert cluster["spark_conf"] == {"spark.sql.adaptive.enabled": "true", "spark.sql.shuffle.partitions": "200"}

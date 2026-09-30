@@ -924,21 +924,36 @@ class TestStripDanglingTaskValueRefs:
         assert "`branch`" in md
 
     def test_airflow_backfill_renders_setup_section(self):
-        # An Airflow catchup=True DAG surfaces a native-backfill section in SETUP.md so the
-        # run_date override path is documented rather than silently lost.
+        # A DAG that resolves Airflow logical dates documents which trigger-instant parameters a
+        # native backfill must override, so replayed windows get the same previous-interval shift.
         from flowx.bundler.prereqs_writer import build_prereqs, render_setup_md
 
         prereqs = build_prereqs(
             notebooks=[],
             tasks=[],
             known_bundle_jobs=set(),
-            airflow_backfills=[{"pipeline": "daily_etl"}],
+            airflow_backfills=[{"pipeline": "daily_etl", "catchup": True, "date_resolver": True}],
         )
         assert not prereqs.is_empty()
         md = render_setup_md(prereqs, bundle_name="b")
-        assert "Backfill (Airflow catchup)" in md
-        assert "{{backfill.iso_date}}" in md
-        assert "`daily_etl`" in md
+        assert "## Backfill and Airflow logical dates" in md
+        assert "override `__flowx_airflow_trigger_time` with `{{backfill.iso_datetime}}`" in md
+        assert "set `__flowx_airflow_trigger_type` to `periodic`" in md
+        assert "{{backfill.iso_date}}" not in md
+        assert "- `daily_etl` (catchup=True, resolves Airflow logical dates)" in md
+
+    def test_catchup_only_backfill_omits_the_resolver_parameters(self):
+        from flowx.bundler.prereqs_writer import build_prereqs, render_setup_md
+
+        prereqs = build_prereqs(
+            notebooks=[],
+            tasks=[],
+            known_bundle_jobs=set(),
+            airflow_backfills=[{"pipeline": "daily_etl", "catchup": True, "date_resolver": False}],
+        )
+        md = render_setup_md(prereqs, bundle_name="b")
+        assert "__flowx_airflow_trigger_time" not in md
+        assert "- `daily_etl` (catchup=True)" in md
 
     def test_recurses_into_for_each_task_body(self):
         from flowx.bundler.dab_writer import _strip_dangling_task_value_refs

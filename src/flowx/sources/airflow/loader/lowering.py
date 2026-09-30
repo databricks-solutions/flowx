@@ -16,7 +16,7 @@ from flowx.models.ir import (
 from flowx.sources.airflow import audit as source_audit
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow import templating
-from flowx.sources.airflow.loader import reconcile
+from flowx.sources.airflow.loader import logical_dates, reconcile
 from flowx.sources.airflow.loader.activity_templates import (
     _convert_activity_templates,
     _declared_param_default,
@@ -157,6 +157,17 @@ def _load_airflow_module(
     dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions)
     dropped |= dataproc_plan.dropped
     upstreams = _rewire_dropped(upstreams, dropped)
+
+    # Interval macros resolve from one logical instant whose relation to the fire time depends on the
+    # Airflow version and timetable; decide it once the job's trigger is final.
+    logical_semantics = logical_dates.classify(
+        module,
+        dag_kwargs=visitor.dag_kwargs,
+        schedule_node=visitor.schedule_node,
+        schedule_interval=visitor.schedule_interval,
+        timezone=visitor.timezone,
+        schedule=schedule,
+    )
 
     # Collapse all dbt CLI operators over the one project into a single DbtFactoryActivity emitted at
     # the first dbt task's position. Every dbt var's task_key remaps to that single key, so a
@@ -399,6 +410,25 @@ def _load_airflow_module(
             )
         # Convert Airflow Jinja in the activity's parameter fields to DAB refs; collect params.
         referenced_params |= _convert_activity_templates(activity)
+        date_values = sorted(logical_dates.logical_date_values(activity))
+        date_gap = logical_semantics.unavailable_reason(set(date_values)) if date_values else None
+        if date_gap is not None:
+            activity = ops.build_placeholder_with_comment(
+                ctx,
+                f"Airflow interval macro(s) {', '.join(date_values)} cannot be reproduced: {date_gap}.",
+            )
+            activity.depends_on = depends_on
+            semantic_findings.append(
+                _semantic_finding(
+                    source_file or dag_path.name,
+                    visitor.calls.get(var),
+                    code="airflow_logical_date_semantics_undeterminable",
+                    message=f"Task {task_id!r} uses interval macro(s) {', '.join(date_values)}: {date_gap}.",
+                    task_key=task_key,
+                    capture_id=var,
+                    expressions=date_values,
+                )
+            )
         unresolved_templates = _unresolved_activity_templates(activity)
         if unresolved_templates:
             expressions = ", ".join(sorted(unresolved_templates))
@@ -574,6 +604,34 @@ def _load_airflow_module(
             raw_definition["invocation"] = ast.get_source_segment(source, visitor.capture_source_nodes[var]) or ""
             activity.raw_definition = raw_definition
         referenced_params |= _convert_activity_templates(activity)
+        date_values = sorted(logical_dates.logical_date_values(activity))
+        date_gap = logical_semantics.unavailable_reason(set(date_values)) if date_values else None
+        if date_gap is not None:
+            placeholder = PlaceholderActivity(
+                name=tf.task_id,
+                task_key=task_key,
+                original_type=f"@{tf.decorator}",
+                comment=f"Airflow interval macro(s) {', '.join(date_values)} cannot be reproduced: {date_gap}.",
+                raw_definition={
+                    "operator": f"@{tf.decorator}",
+                    "source": ast.get_source_segment(source, definition) or "",
+                    "invocation": ast.get_source_segment(source, visitor.capture_source_nodes[var]) or "",
+                },
+            )
+            placeholder.depends_on = depends_on
+            append_task(placeholder, var)
+            semantic_findings.append(
+                _semantic_finding(
+                    source_file or dag_path.name,
+                    visitor.calls.get(var),
+                    code="airflow_logical_date_semantics_undeterminable",
+                    message=f"Task {tf.task_id!r} uses interval macro(s) {', '.join(date_values)}: {date_gap}.",
+                    task_key=task_key,
+                    capture_id=var,
+                    expressions=date_values,
+                )
+            )
+            continue
         if var in visitor.mapped and isinstance(activity, NotebookActivity):
             # .expand(param=[literal list]) -> a for_each_task iterating the callable notebook; the
             # inner notebook reads the mapped parameter from the per-iteration `item` widget.
@@ -609,14 +667,35 @@ def _load_airflow_module(
         placeholder.depends_on = depends_on
         append_task(placeholder, var)
 
+    # Tasks that read a resolved interval macro depend on one generated resolver task, which reads the
+    # run's trigger instant and type (or an explicit override) from reserved job parameters.
+    date_consumers = [task.task_key for task in tasks if logical_dates.logical_date_values(task)]
+    logical_date_resolver: tuple[NotebookActivity, dict[str, Any]] | None = None
+    if date_consumers:
+        referenced_params |= set(templating.LOGICAL_DATE_PARAMETER_DEFAULTS)
+        logical_date_resolver = (
+            logical_dates.build_resolver(logical_semantics),
+            logical_dates.resolver_proof(logical_semantics, date_consumers),
+        )
+        semantic_findings.extend(
+            _semantic_finding(
+                source_file or dag_path.name,
+                visitor.schedule_node,
+                code=code,
+                message=message,
+                task_key=templating.LOGICAL_DATE_RESOLVER_TASK_KEY,
+                capture_id="dag_schedule",
+            )
+            for code, message in logical_semantics.disclosures
+        )
+
     # Declare every job parameter -- those referenced in templates plus any from the DAG's
     # params={...} -- each with a default (Databricks requires one): the params={...} default when
-    # present; a reserved logical-date parameter its schedule-aware time ref so a native backfill can
-    # override it per window; else an empty string so the bundle still validates.
+    # present; a flowx-reserved parameter its run-time default; else an empty string so the bundle
+    # still validates.
     param_names = referenced_params | set(visitor.dag_params)
     parameters = [
-        {"name": name, "default": _declared_param_default(name, visitor.dag_params, schedule)}
-        for name in sorted(param_names)
+        {"name": name, "default": _declared_param_default(name, visitor.dag_params)} for name in sorted(param_names)
     ] or None
     tags = {"source": "airflow", "dag_id": visitor.dag_id or ""}
     if visitor.catchup:
@@ -656,6 +735,7 @@ def _load_airflow_module(
         schedule_proof=schedule_proof,
         argument_proofs=argument_proofs,
         collapse_proofs=dataproc_plan.proofs,
+        logical_date_resolver=logical_date_resolver,
         expected_ir_edges=expected_ir_edges,
         placeholder_capture_ids=placeholder_capture_ids,
     )

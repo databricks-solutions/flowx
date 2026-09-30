@@ -219,7 +219,9 @@ not change trigger-rule behavior. Otherwise the task stays as a placeholder with
 `timedelta` → periodic, `@continuous` → continuous mode, Airflow-3 Asset/Dataset lists →
 `ALL_UPDATED` / `ANY_UPDATED` table triggers, `trigger_rule` → `run_if`, `params={...}` / `Param` →
 job parameters, and `>>` / `<<` / `set_upstream` / `set_downstream` / TaskGroup edges → task
-dependencies.
+dependencies. Interval macros (`{{ ds }}`, `{{ ts }}`, `{{ data_interval_start }}`, ...) are computed per run
+by a generated first task that reproduces Airflow's rendering: the previous schedule tick for an Airflow 2
+data-interval timetable, the fire time for an Airflow 3 raw cron, and the trigger time for a manual run.
 
 Operators without a deterministic mapping become a failing placeholder and are recorded in
 `gaps.json` for review. Eligible leaf gaps can use the fingerprint-bound resolver backed by the pinned [`airflow-to-dabs`](https://github.com/park-peter/airflow-to-dabs/tree/main/providers/flowx-gap-resolver) provider profile; flowx retains ownership of parsing, graph identity, policy, IR, and packaging. Full matrix:

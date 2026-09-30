@@ -32,6 +32,7 @@ from flowx.models.ir import (
     WaitActivity,
     WebActivity,
 )
+from flowx.sources.airflow.templating import LOGICAL_DATE_TRIGGER_TIME_PARAMETER
 
 
 @dataclass(slots=True, kw_only=True)
@@ -381,10 +382,18 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
             )
         )
 
-    # Airflow catchup=True has no DABs schedule setting; surface that history is replayed via a native
-    # Databricks backfill, which overrides the run_date job parameter with {{backfill.iso_date}}.
-    if pipeline.tags.get("airflow_catchup") == "true":
-        setup_tasks_out.append(SetupTask(type="airflow_backfill", config={"pipeline": pipeline.name}))
+    # Airflow catchup=True has no DABs schedule setting, and interval macros resolve from the run's
+    # trigger instant; both need backfill guidance naming the trigger-instant parameters to override.
+    parameter_names = {parameter.get("name") for parameter in pipeline.parameters or []}
+    date_resolver = LOGICAL_DATE_TRIGGER_TIME_PARAMETER in parameter_names
+    catchup = pipeline.tags.get("airflow_catchup") == "true"
+    if catchup or date_resolver:
+        setup_tasks_out.append(
+            SetupTask(
+                type="airflow_backfill",
+                config={"pipeline": pipeline.name, "catchup": catchup, "date_resolver": date_resolver},
+            )
+        )
 
     # C-39 (LSC4-004): ADF auth modes with no Databricks equivalent (MSI, CredentialReference) make the
     # default_cluster fall back to single_user_name: ${workspace.current_user.userName}; flag it via SetupTask.

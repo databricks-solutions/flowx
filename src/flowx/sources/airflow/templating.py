@@ -19,21 +19,49 @@ FLOWX_INTERNAL_PARAMETER_PREFIX = "__flowx_"
 FLOWX_AIRFLOW_PARAMETER_PREFIX = "__flowx_airflow_"
 AIRFLOW_RUN_ID_PARAMETER = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}run_id"
 
-# Airflow date/time macros carry the run's logical date through reserved job parameters so native
-# Databricks backfills can override them without colliding with user-defined DAG parameters.
-_DATE_MACRO_FIELDS: dict[str, tuple[str, str]] = {
-    "ds": ("run_date", "iso_date"),
-    "ts": ("run_timestamp", "iso_datetime"),
-    "data_interval_start": ("data_interval_start", "iso_datetime"),
-    "data_interval_end": ("data_interval_end", "iso_datetime"),
-    "execution_date": ("execution_date", "iso_datetime"),
-    "logical_date": ("logical_date", "iso_datetime"),
+# Airflow interval macros resolve at run time in a generated first task (see
+# ``flowx.sources.airflow.logical_date_runtime``), because the logical date is one schedule tick behind
+# the fire time for data-interval timetables and dynamic value references cannot do that arithmetic.
+# Consumers read the published task values; the resolver reads these reserved job parameters.
+LOGICAL_DATE_RESOLVER_TASK_KEY = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}dates"
+LOGICAL_DATE_TRIGGER_TIME_PARAMETER = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}trigger_time"
+LOGICAL_DATE_TRIGGER_TYPE_PARAMETER = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}trigger_type"
+LOGICAL_DATE_OVERRIDE_PARAMETER = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}logical_date"
+LOGICAL_DATE_PARAMETER_DEFAULTS: dict[str, str] = {
+    LOGICAL_DATE_TRIGGER_TIME_PARAMETER: "{{job.trigger.time.iso_datetime}}",
+    LOGICAL_DATE_TRIGGER_TYPE_PARAMETER: "{{job.trigger.type}}",
+    LOGICAL_DATE_OVERRIDE_PARAMETER: "",
 }
+# Widget and SQL-marker names that carry a resolved logical-date value into a consumer task.
+LOGICAL_DATE_BINDING_PREFIX = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}date_"
 
-# Job parameter name -> dynamic-value time field.
-DATE_PARAM_FIELDS: dict[str, str] = {
-    f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}{suffix}": field for suffix, field in _DATE_MACRO_FIELDS.values()
+# Airflow macro expression -> the task value the resolver publishes for it.
+LOGICAL_DATE_MACROS: dict[str, str] = {
+    "ds": "ds",
+    "ds_nodash": "ds_nodash",
+    "ts": "ts",
+    "ts_nodash": "ts_nodash",
+    "logical_date": "logical_date",
+    "execution_date": "execution_date",
+    "data_interval_start": "data_interval_start",
+    "data_interval_end": "data_interval_end",
+    "prev_ds": "prev_ds",
+    "next_ds": "next_ds",
+    "prev_ds_nodash": "prev_ds_nodash",
+    "next_ds_nodash": "next_ds_nodash",
 }
+# Task values that exist only for Airflow 2 data-interval timetables (Airflow 3 removed them).
+LOGICAL_DATE_NEIGHBOR_VALUES = frozenset({"prev_ds", "next_ds", "prev_ds_nodash", "next_ds_nodash"})
+
+LOGICAL_DATE_VALUE_REF = re.compile(
+    r"\{\{\s*tasks\." + re.escape(LOGICAL_DATE_RESOLVER_TASK_KEY) + r"\.values\.([A-Za-z_]+)\s*\}\}"
+)
+
+
+def logical_date_value_ref(value_name: str) -> str:
+    """Returns the dynamic value reference a consumer uses to read one resolved macro."""
+    return "{{tasks." + LOGICAL_DATE_RESOLVER_TASK_KEY + ".values." + value_name + "}}"
+
 
 # Non-date macros with an exact Databricks equivalent, mapped inline (no backfill relevance).
 _MACRO_TO_DAB_REF: dict[str, str] = {
@@ -41,30 +69,15 @@ _MACRO_TO_DAB_REF: dict[str, str] = {
 }
 
 
-def date_param_default(field: str, schedule: dict[str, object] | None) -> str:
-    """Returns the default dynamic-value ref for a logical-date job parameter.
+def macro_param_default(name: str) -> str | None:
+    """Returns the Databricks-required default for a flowx-reserved job parameter, or None.
 
-    On a cron/periodic schedule the logical date is the scheduled trigger time
-    (``{{job.trigger.time...}}``) -- ``start_time`` would drift with queue delay and retries. On an
-    event-triggered job (``file_arrival``/``table_update``/``continuous``) or an unscheduled job there
-    is no scheduled trigger time, so approximate with the run's start time. A native backfill overrides
-    the parameter regardless of this default.
+    The date resolver's inputs default to the run's trigger instant and type. The reserved run-id
+    parameter gets the inline run-id ref because shell and SQL tasks must bind it through a named value.
+    Other names are not flowx-reserved, so the caller supplies their default.
     """
-    kind = schedule.get("kind") if schedule else None
-    base = "{{job.trigger.time." if kind in ("schedule", "periodic") else "{{job.start_time."
-    return f"{base}{field}}}}}"
-
-
-def macro_param_default(name: str, schedule: dict[str, object] | None) -> str | None:
-    """Returns the Databricks-required default for a macro-derived job parameter, or None.
-
-    Reserved logical-date parameters get schedule-aware time refs. The reserved run-id parameter gets
-    the inline run-id ref because shell and SQL tasks must bind it through a named value. Other names
-    are not macro-derived, so the caller supplies their default.
-    """
-    field = DATE_PARAM_FIELDS.get(name)
-    if field is not None:
-        return date_param_default(field, schedule)
+    if name in LOGICAL_DATE_PARAMETER_DEFAULTS:
+        return LOGICAL_DATE_PARAMETER_DEFAULTS[name]
     if name == AIRFLOW_RUN_ID_PARAMETER:
         return _MACRO_TO_DAB_REF["run_id"]
     return None
@@ -99,10 +112,13 @@ def _airflow_parameter(namespace: str, name: str) -> str:
 
 
 def _template_binding(expression: str) -> _TemplateBinding | None:
-    date_macro = _DATE_MACRO_FIELDS.get(expression)
-    if date_macro is not None:
-        name = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}{date_macro[0]}"
-        return _TemplateBinding(name=name, value_ref=_job_parameter_ref(name), job_parameter=name)
+    date_value = LOGICAL_DATE_MACROS.get(expression)
+    if date_value is not None:
+        return _TemplateBinding(
+            name=f"{LOGICAL_DATE_BINDING_PREFIX}{date_value}",
+            value_ref=logical_date_value_ref(date_value),
+            job_parameter=None,
+        )
     if expression in _MACRO_TO_DAB_REF:
         return _TemplateBinding(
             name=AIRFLOW_RUN_ID_PARAMETER,
