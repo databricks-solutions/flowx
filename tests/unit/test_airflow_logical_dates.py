@@ -512,3 +512,39 @@ def test_roots_that_feed_no_consumer_do_not_wait_for_the_resolver(tmp_path: Path
     tasks = _by_key(pipeline)
     assert not tasks["independent"].depends_on
     assert [dependency.task_key for dependency in tasks["upstream"].depends_on or []] == [RESOLVER]
+
+
+def _classify_timedelta(imports: str) -> logical_dates.LogicalDateSemantics:
+    node = ast.parse("timedelta(hours=6)").body[0].value  # type: ignore[attr-defined]
+    return logical_dates.classify(
+        ast.parse(imports),
+        dag_kwargs={"schedule": node},
+        schedule_node=node,
+        schedule_interval=None,
+        timezone=None,
+        schedule=None,
+    )
+
+
+def test_airflow2_timedelta_schedule_uses_data_intervals() -> None:
+    semantics = _classify_timedelta("from airflow.operators.bash import BashOperator\n")
+    assert (semantics.kind, semantics.delta_seconds) == ("data_interval_delta", 21600)
+    assert not semantics.disclosures
+
+
+def test_airflow3_timedelta_schedule_uses_the_fire_time_and_discloses_the_assumption() -> None:
+    semantics = _classify_timedelta("from airflow.sdk import DAG\n")
+    assert (semantics.kind, semantics.delta_seconds) == ("trigger_delta", 21600)
+    assert [code for code, _ in semantics.disclosures] == ["airflow3_delta_data_intervals_assumed_false"]
+    namespace = _generated_namespace(semantics)
+    values = namespace["resolve"](
+        trigger_time="2026-01-02T06:00:00Z", trigger_type="periodic", override="", **namespace["_TIMETABLE"]
+    )
+    assert values["ts"] == "2026-01-02T06:00:00+00:00"
+    assert values["data_interval_start"] == values["data_interval_end"] == "2026-01-02T06:00:00+00:00"
+
+
+def test_timedelta_schedule_with_an_unknown_airflow_version_is_undeterminable() -> None:
+    semantics = _classify_timedelta("from airflow import DAG\n")
+    assert semantics.kind == logical_dates.UNDETERMINABLE
+    assert not semantics.resolvable

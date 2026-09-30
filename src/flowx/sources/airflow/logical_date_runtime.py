@@ -19,8 +19,9 @@ from zoneinfo import ZoneInfo
 DATA_INTERVAL_CRON = "data_interval_cron"
 DATA_INTERVAL_DELTA = "data_interval_delta"
 TRIGGER_CRON = "trigger_cron"
+TRIGGER_DELTA = "trigger_delta"
 MANUAL_ONLY = "manual_only"
-RESOLVABLE_SEMANTICS = frozenset({DATA_INTERVAL_CRON, DATA_INTERVAL_DELTA, TRIGGER_CRON, MANUAL_ONLY})
+RESOLVABLE_SEMANTICS = frozenset({DATA_INTERVAL_CRON, DATA_INTERVAL_DELTA, TRIGGER_CRON, TRIGGER_DELTA, MANUAL_ONLY})
 
 # Databricks trigger types that correspond to an Airflow manual or triggered-DAG run.
 MANUAL_TRIGGER_TYPES = frozenset({"one_time", "run_job_task"})

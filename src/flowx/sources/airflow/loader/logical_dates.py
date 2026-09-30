@@ -137,15 +137,42 @@ def _timetable_semantics(call: ast.Call, generation: str, timezone: str) -> Logi
     zone = _extract_timezone(arguments.get("timezone")) or timezone
     if name == "timedelta":
         seconds = _timedelta_seconds(call)
-        if seconds > 0:
+        if seconds <= 0:
+            return LogicalDateSemantics(kind=UNDETERMINABLE, generation=generation, reason="non-literal timedelta")
+        if generation in ("2", "1.10"):
             return LogicalDateSemantics(
                 kind=runtime.DATA_INTERVAL_DELTA,
                 generation=generation,
                 delta_seconds=seconds,
                 timezone=zone,
-                reason="timedelta schedule (data-interval timetable)",
+                reason=f"Airflow {generation} timedelta schedule uses DeltaDataIntervalTimetable",
             )
-        return LogicalDateSemantics(kind=UNDETERMINABLE, generation=generation, reason="non-literal timedelta")
+        if generation == "3":
+            return LogicalDateSemantics(
+                kind=runtime.TRIGGER_DELTA,
+                generation=generation,
+                delta_seconds=seconds,
+                timezone=zone,
+                reason="Airflow 3 timedelta schedule uses DeltaTriggerTimetable",
+                disclosures=(
+                    (
+                        "airflow3_delta_data_intervals_assumed_false",
+                        "Airflow 3 renders a timedelta schedule with DeltaTriggerTimetable unless the deployment "
+                        "enables data intervals in its [scheduler] settings (create_delta_data_intervals, which "
+                        "current Airflow releases read through create_cron_data_intervals), and that setting is not "
+                        "visible in DAG source. flowx assumed the default (False): ds is the fire date, not the "
+                        "previous interval.",
+                    ),
+                ),
+            )
+        return LogicalDateSemantics(
+            kind=UNDETERMINABLE,
+            generation=generation,
+            reason=(
+                "the Airflow version cannot be determined from source, and a timedelta schedule's logical date is "
+                "one interval behind the fire time on Airflow 2 but equals it on Airflow 3"
+            ),
+        )
     if name == "DeltaTriggerTimetable":
         return LogicalDateSemantics(
             kind=UNDETERMINABLE,
