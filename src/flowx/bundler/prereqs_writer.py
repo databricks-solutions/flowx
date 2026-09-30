@@ -142,6 +142,9 @@ class Prereqs:
     # Each entry is a human-readable identifier (the pipeline name, or ``index N`` when unnamed) so a
     # skipped pipeline is surfaced rather than silently missing from the bundle.
     skipped_pipelines: list[str] = field(default_factory=list)
+    # Bundle variables declared without a default (name -> description); `bundle validate` fails until
+    # the user supplies each one.
+    required_variables: dict[str, str] = field(default_factory=dict)
 
     def is_empty(self) -> bool:
         """Return ``True`` when nothing needs to happen before ``bundle run``."""
@@ -165,6 +168,7 @@ class Prereqs:
             and not self.pydabs_dbt_factories
             and not self.airflow_backfills
             and not self.skipped_pipelines
+            and not self.required_variables
         )
 
 
@@ -380,6 +384,7 @@ def build_prereqs(
     pydabs_dbt_factories: list[dict[str, Any]] | None = None,
     airflow_backfills: list[dict[str, Any]] | None = None,
     skipped_pipelines: list[str] | None = None,
+    required_variables: dict[str, str] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
 
@@ -431,6 +436,7 @@ def build_prereqs(
         pydabs_dbt_factories=list(pydabs_dbt_factories or []),
         airflow_backfills=list(airflow_backfills or []),
         skipped_pipelines=list(skipped_pipelines or []),
+        required_variables=dict(required_variables or {}),
     )
 
 
@@ -469,6 +475,28 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
         "Deployment itself is **not** listed — it is the step that comes *after* everything here."
     )
     lines.append("")
+
+    if prereqs.required_variables:
+        lines.append("## Required bundle variables")
+        lines.append("")
+        lines.append(
+            "These variables have no default. `databricks bundle validate` reports them as missing until you "
+            "supply a value for the target workspace, either under `targets.<target>.variables` in "
+            "`databricks.yml` or with `--var name=value`:"
+        )
+        lines.append("")
+        lines.append("| Variable | What to set |")
+        lines.append("|---|---|")
+        for name, description in sorted(prereqs.required_variables.items()):
+            lines.append(f"| `{name}` | {description} |")
+        lines.append("")
+        lines.append("```bash")
+        lines.append(
+            "databricks bundle validate -t dev "
+            + " ".join(f"--var {name}=<value>" for name in sorted(prereqs.required_variables))
+        )
+        lines.append("```")
+        lines.append("")
 
     if prereqs.secrets:
         lines.append("## Secret scopes and values")

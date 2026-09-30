@@ -18,7 +18,6 @@ from flowx.adapter.operations import collect_workspace_artifact_paths
 from flowx.bundler.constants import (
     COMPUTE_MODE_TO_CLUSTER_KEY,
     DEFAULT_JOB_CLUSTER_KEY,
-    MULTI_NODE_CLUSTER_NODE_TYPE_ID,
     MULTI_NODE_JOB_CLUSTER_KEY,
     SINGLE_NODE_JOB_CLUSTER_KEY,
 )
@@ -146,10 +145,10 @@ def write_bundle(
     # registered under the `python.resources` block so `bundle deploy` runs it to build the dbt job.
     pydabs_resource_entries = _collect_pydabs_resource_entries(workflow)
 
-    # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id
-    #    defaults come from the ADF linked-service configs; when every task is serverless, they're omitted.
+    # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id are
+    #    declared as required variables; when every task is serverless, they're omitted.
     databricks_yml_path = output_dir / "databricks.yml"
-    inferred_spark_version, inferred_node_type_id = _infer_bundle_cluster_defaults(workflow)
+    inferred_spark_version, inferred_node_type_id = _infer_source_cluster_settings(workflow)
     databricks_yml_dict = _build_databricks_yml(
         effective_name,
         catalog,
@@ -341,6 +340,11 @@ def write_bundle(
         pydabs_dbt_factories=pydabs_dbt_factory_configs,
         airflow_backfills=airflow_backfill_configs,
         skipped_pipelines=list(skipped_pipelines or []),
+        required_variables={
+            name: declaration["description"]
+            for name, declaration in databricks_yml_dict.get("variables", {}).items()
+            if name in _CLUSTER_VARIABLES
+        },
     )
     setup_path = output_dir / "SETUP.md"
     setup_path.write_text(render_setup_md(prereqs, bundle_name=effective_name), encoding="utf-8")
@@ -597,12 +601,33 @@ def main(argv: list[str] | None = None) -> int:
             "fix before `databricks bundle validate`.",
             file=sys.stderr,
         )
+    required = sorted(
+        {name for bundle_dir in bundle_dirs for name in _required_cluster_variables_in(bundle_dir / "databricks.yml")}
+    )
     print("\nNext steps:")
     print("  1. Review the generated notebooks in src/")
     print("  2. Run the setup notebooks to create secrets and volumes")
-    print("  3. Validate the bundle: databricks bundle validate")
-    print("  4. Deploy: databricks bundle deploy -t dev")
+    if required:
+        print(f"  3. Supply the required bundle variables ({', '.join(required)}); see SETUP.md")
+        print("  4. Validate the bundle: databricks bundle validate")
+        print("  5. Deploy: databricks bundle deploy -t dev")
+    else:
+        print("  3. Validate the bundle: databricks bundle validate")
+        print("  4. Deploy: databricks bundle deploy -t dev")
     return 1 if invariant_violations else 0
+
+
+def _required_cluster_variables_in(databricks_yml: Path) -> set[str]:
+    """Returns the required cluster variables a written ``databricks.yml`` declares."""
+    if not databricks_yml.is_file():
+        return set()
+    config = yaml.safe_load(databricks_yml.read_text(encoding="utf-8")) or {}
+    variables = config.get("variables") or {}
+    return {
+        name
+        for name in _CLUSTER_VARIABLES
+        if isinstance(variables.get(name), dict) and "default" not in variables[name]
+    }
 
 
 def _combine_airflow_workflows(workflows: list[PreparedWorkflow]) -> PreparedWorkflow:
@@ -731,9 +756,6 @@ def _warn(task_key: str, message: str) -> None:
     _bundle_warnings.append(f"- **{task_key}**: {message}")
 
 
-_DEFAULT_SPARK_VERSION = "15.4.x-scala2.12"
-_DEFAULT_NODE_TYPE_ID = "Standard_DS3_v2"
-
 # C-29 (NB-ITER4-002): anchor on the canonical DBR version shape (e.g. "15.4.x-photon-scala2.12") so
 # unresolved ADF expressions like @if(equals(item()?.photon,true),...) fall through to the safe default
 # instead of landing in databricks.yml as a spark_version that bundle deploy rejects.
@@ -763,19 +785,22 @@ def _is_valid_node_type_id(value: Any) -> bool:
     return True
 
 
-def _infer_bundle_cluster_defaults(workflow: PreparedWorkflow) -> tuple[str, str]:
-    """Derive ``spark_version`` and ``node_type_id`` defaults from task clusters.
+def _infer_source_cluster_settings(workflow: PreparedWorkflow) -> tuple[str | None, str | None]:
+    """Finds the runtime and node type the source pipelines configured for their clusters.
+
+    These are suggestions shown to the user, not bundle defaults: ``node_type_id`` and
+    ``spark_version`` are required variables because a source value (an Azure node type, an older
+    runtime) is rarely right for the target workspace.
 
     Args:
         workflow: The prepared workflow being written.
 
     Returns:
-        ``(spark_version, node_type_id)`` strings.
+        ``(spark_version, node_type_id)``, each ``None`` when no task cluster named a usable value.
     """
     from collections import Counter
 
-    # C-29 (NB-ITER4-002): filter out unparseable spark_version / node_type_id hints before Counter so
-    # unresolved ADF expressions don't land as the bundle default and break ``databricks bundle deploy``.
+    # C-29 (NB-ITER4-002): unresolved ADF expressions are not usable suggestions.
     spark_versions = [
         hint["spark_version"] for hint in workflow.cluster_hints if _is_valid_spark_version(hint.get("spark_version"))
     ]
@@ -783,8 +808,8 @@ def _infer_bundle_cluster_defaults(workflow: PreparedWorkflow) -> tuple[str, str
         hint["node_type_id"] for hint in workflow.cluster_hints if _is_valid_node_type_id(hint.get("node_type_id"))
     ]
 
-    spark_version = Counter(spark_versions).most_common(1)[0][0] if spark_versions else _DEFAULT_SPARK_VERSION
-    node_type_id = Counter(node_types).most_common(1)[0][0] if node_types else _DEFAULT_NODE_TYPE_ID
+    spark_version = Counter(spark_versions).most_common(1)[0][0] if spark_versions else None
+    node_type_id = Counter(node_types).most_common(1)[0][0] if node_types else None
     return spark_version, node_type_id
 
 
@@ -834,13 +859,39 @@ def _infer_bundle_cluster_extras(workflow: PreparedWorkflow) -> dict[str, Any]:
     return extras
 
 
+def required_cluster_variables(
+    *, spark_version: str | None = None, node_type_id: str | None = None
+) -> dict[str, dict[str, str]]:
+    """Declares ``node_type_id`` and ``spark_version`` as required bundle variables with no default.
+
+    Node types are cloud-specific and runtimes are workspace-specific, so flowx never picks one.
+    ``databricks bundle validate`` reports both until the user supplies them. A value the source
+    pipelines configured is mentioned in the description as a starting point.
+    """
+    node_description = (
+        "Required. A node type supported by the target workspace's cloud for the job clusters "
+        "(for example i3.xlarge on AWS, Standard_D4ds_v5 on Azure, n2-standard-4 on GCP)."
+    )
+    if node_type_id:
+        node_description += f" The source pipelines used {node_type_id}."
+    runtime_description = (
+        "Required. A Databricks Runtime version supported by the target workspace for the job clusters."
+    )
+    if spark_version:
+        runtime_description += f" The source pipelines used {spark_version}."
+    return {
+        "node_type_id": {"description": node_description},
+        "spark_version": {"description": runtime_description},
+    }
+
+
 def _build_databricks_yml(
     bundle_name: str,
     catalog: str,
     schema: str,
     *,
-    spark_version: str = _DEFAULT_SPARK_VERSION,
-    node_type_id: str = _DEFAULT_NODE_TYPE_ID,
+    spark_version: str | None = None,
+    node_type_id: str | None = None,
     include_cluster_variables: bool = True,
     extra_variables: dict[str, Any] | None = None,
     pydabs_resources: list[str] | None = None,
@@ -851,11 +902,11 @@ def _build_databricks_yml(
         bundle_name: Name for the bundle.
         catalog: Default target catalog.
         schema: Default target schema.
-        spark_version: DBR version for the default job_cluster.  Callers
-            typically derive this from :func:`_infer_bundle_cluster_defaults`.
-        node_type_id: Instance type for the default job_cluster.
+        spark_version: The Databricks Runtime the source configured, shown as a suggestion in the
+            variable description. Callers derive it from :func:`_infer_source_cluster_settings`.
+        node_type_id: The node type the source configured, shown the same way.
         include_cluster_variables: When True, declares ``spark_version`` and
-            ``node_type_id`` variables for the default job_cluster.  Set to
+            ``node_type_id`` as required variables (no default) for the job clusters.  Set to
             False when no task in the bundle uses classic compute (every
             generated notebook runs on serverless), so the bundle stays
             free of unused tunables.
@@ -880,17 +931,7 @@ def _build_databricks_yml(
         },
     }
     if include_cluster_variables:
-        variables["node_type_id"] = {
-            "description": (
-                "Instance type for the default job_cluster — override per cloud "
-                "(e.g. i3.xlarge on AWS, n1-standard-4 on GCP)."
-            ),
-            "default": node_type_id,
-        }
-        variables["spark_version"] = {
-            "description": "Databricks Runtime for the default job_cluster.",
-            "default": spark_version,
-        }
+        variables.update(required_cluster_variables(spark_version=spark_version, node_type_id=node_type_id))
     for name, declaration in (extra_variables or {}).items():
         variables.setdefault(name, declaration)
     # Declare a variable for each cross-bundle ExecutePipeline reference so `${var.X_job_id}` resolves and
@@ -1025,14 +1066,13 @@ def _build_multi_node_cluster() -> dict[str, Any]:
     """Builds the fixed two-node job_cluster used for Copy Data tasks under classic compute.
 
     Returns:
-        Cluster definition with two workers on the Copy Data instance
-        type and the bundle-variable spark_version knob.
+        Cluster definition with two workers on the bundle's required node type and runtime.
     """
     return {
         "job_cluster_key": MULTI_NODE_JOB_CLUSTER_KEY,
         "new_cluster": {
             "spark_version": "${var.spark_version}",
-            "node_type_id": MULTI_NODE_CLUSTER_NODE_TYPE_ID,
+            "node_type_id": "${var.node_type_id}",
             "num_workers": 2,
             "data_security_mode": "SINGLE_USER",
             "single_user_name": "${workspace.current_user.userName}",
@@ -1090,7 +1130,8 @@ def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
 
 _VAR_REFERENCE_RE = re.compile(r"\$\{var\.([A-Za-z_][A-Za-z0-9_]*)\}")
 
-_BUILTIN_BUNDLE_VARIABLES = frozenset({"catalog", "schema", "node_type_id", "spark_version"})
+_CLUSTER_VARIABLES = frozenset({"node_type_id", "spark_version"})
+_BUILTIN_BUNDLE_VARIABLES = frozenset({"catalog", "schema"}) | _CLUSTER_VARIABLES
 
 
 def _collect_variable_references(value: Any) -> set[str]:
