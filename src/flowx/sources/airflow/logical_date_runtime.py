@@ -245,7 +245,16 @@ def parse_instant(value: str) -> datetime:
 
 
 def _render_timestamp(moment: datetime) -> str:
-    return moment.astimezone(timezone.utc).isoformat()
+    return moment.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def nearest_delta_tick(instant: datetime, delta: timedelta, anchor: datetime) -> datetime:
+    """Returns the multiple of *delta* from *anchor* closest to *instant*, preferring the earlier one."""
+    elapsed = instant - anchor
+    steps = elapsed // delta
+    earlier = anchor + steps * delta
+    later = earlier + delta
+    return later if later - instant < instant - earlier else earlier
 
 
 def _render_date(moment: datetime) -> str:
@@ -265,6 +274,7 @@ def resolve(
     cron: str | None = None,
     zone_name: str = "UTC",
     delta_seconds: int = 0,
+    anchor_time: str = "",
     publish_neighbors: bool = False,
 ) -> dict[str, str]:
     """Computes the Airflow interval macros for one Databricks run, rendered as Airflow renders them.
@@ -280,6 +290,8 @@ def resolve(
         cron: The source cron expression or preset, for cron semantics.
         zone_name: The DAG timezone that cron ticks are evaluated in.
         delta_seconds: The ``timedelta`` schedule length, for delta semantics.
+        anchor_time: An instant on the delta schedule (its ``start_date``), so a scheduled run's fire time
+            aligns to Airflow's interval boundaries. Without it the fire time is used as reported.
         publish_neighbors: Whether to publish ``prev_ds`` / ``next_ds`` (Airflow 2 only).
 
     Returns:
@@ -291,7 +303,7 @@ def resolve(
     uses_cron = semantics in (DATA_INTERVAL_CRON, TRIGGER_CRON)
     schedule = CronSchedule(cron or "") if uses_cron else None
     delta = timedelta(seconds=delta_seconds)
-    if semantics == DATA_INTERVAL_DELTA and delta <= timedelta(0):
+    if semantics in (DATA_INTERVAL_DELTA, TRIGGER_DELTA) and delta <= timedelta(0):
         raise ValueError("a delta timetable needs a positive interval")
 
     if override.strip():
@@ -306,6 +318,9 @@ def resolve(
     else:
         fired = parse_instant(trigger_time)
         manual = trigger_type.strip().lower() in MANUAL_TRIGGER_TYPES
+        uses_delta = semantics in (DATA_INTERVAL_DELTA, TRIGGER_DELTA)
+        if uses_delta and not manual and anchor_time.strip():
+            fired = nearest_delta_tick(fired, delta, parse_instant(anchor_time))
         if semantics == DATA_INTERVAL_CRON and schedule is not None:
             if manual:
                 end = latest_tick_at_or_before(schedule, fired, zone)
@@ -317,6 +332,8 @@ def resolve(
         elif semantics == DATA_INTERVAL_DELTA:
             start, end = fired - delta, fired
             logical = fired if manual else start
+        elif semantics == TRIGGER_CRON and schedule is not None and not manual:
+            logical = start = end = nearest_tick(schedule, fired, zone)
         else:
             logical = start = end = fired
 

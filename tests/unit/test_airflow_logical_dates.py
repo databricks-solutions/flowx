@@ -548,3 +548,41 @@ def test_timedelta_schedule_with_an_unknown_airflow_version_is_undeterminable() 
     semantics = _classify_timedelta("from airflow import DAG\n")
     assert semantics.kind == logical_dates.UNDETERMINABLE
     assert not semantics.resolvable
+
+
+def test_airflow3_raw_cron_aligns_a_late_trigger_to_its_tick() -> None:
+    values = _resolve(semantics="trigger_cron", cron="0 0 * * *", trigger_time="2026-01-01T00:00:03.250Z")
+    assert values["ts"] == "2026-01-01T00:00:00+00:00"
+    assert values["ts_nodash"] == "20260101T000000"
+    assert values["logical_date"] == values["data_interval_start"] == values["data_interval_end"] == values["ts"]
+
+
+def test_manual_trigger_cron_run_keeps_its_trigger_time_to_the_second() -> None:
+    values = _resolve(
+        semantics="trigger_cron", cron="0 0 * * *", trigger_time="2026-01-01T15:30:12.345Z", trigger_type="one_time"
+    )
+    assert values["ts"] == "2026-01-01T15:30:12+00:00"
+
+
+@pytest.mark.parametrize("semantics", ["data_interval_delta", "trigger_delta"])
+def test_delta_runs_align_to_their_anchor(semantics: str) -> None:
+    values = _resolve(
+        semantics=semantics,
+        delta_seconds=21600,
+        anchor_time="2026-01-01T00:00:00Z",
+        trigger_time="2026-01-02T06:00:04.900Z",
+    )
+    expected_end = "2026-01-02T06:00:00+00:00"
+    assert values["data_interval_end"] == expected_end
+    if semantics == "trigger_delta":
+        assert values["ts"] == expected_end
+    else:
+        assert values["ts"] == values["data_interval_start"] == "2026-01-02T00:00:00+00:00"
+
+
+def test_no_rendered_timestamp_carries_sub_second_precision() -> None:
+    for semantics in ("data_interval_cron", "trigger_cron", "manual_only"):
+        values = _resolve(
+            semantics=semantics, cron="0 * * * *", trigger_time="2026-01-01T05:00:00.999Z", trigger_type="one_time"
+        )
+        assert all("." not in value for value in values.values())
