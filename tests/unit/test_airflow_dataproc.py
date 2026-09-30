@@ -393,10 +393,9 @@ def test_arguments_carry_dataproc_rationales() -> None:
     assert rationales["job"] == "dataproc_payload_translated"
 
 
-def test_example_packages_onto_the_bound_job_cluster(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_example_packages_onto_the_bound_job_cluster(tmp_path: Path) -> None:
     from flowx.ir_serde import pipeline_to_dict
 
-    monkeypatch.setattr("flowx.preparer.activity_preparers.spark_python.download_dbfs_file", lambda _path: None)
     output_dir = tmp_path / "bundle"
     work_dir = output_dir / ".work"
     work_dir.mkdir(parents=True)
