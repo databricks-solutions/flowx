@@ -17,6 +17,7 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 | `BranchPythonOperator` / `ShortCircuitOperator` | Failing placeholder + review gap (runtime branch selection can't be lowered statically). |
 | `BashOperator` / `SSHOperator` | `%sh` notebook; a single unchained `spark-submit` invocation is lifted only when every option arity is known. |
 | `SparkSubmitOperator` | Spark JAR or Python task. |
+| Dataproc / Managed Spark (`DataprocSubmitJobOperator`, `DataprocCreateBatchOperator`, and the `ManagedSpark*` aliases) | Routed by the nested payload key, never the class: PySpark → Spark Python task, JVM Spark → Spark JAR task, inline Spark SQL → `sql_task`. Cluster lifecycle tasks and paired sensors are absorbed into Jobs compute when provably safe; see [Dataproc](#dataproc-and-managed-spark). |
 | Databricks provider operators (`DatabricksSubmitRun*`, `DatabricksRunNow*`, `DatabricksNotebookOperator`) | Notebook / run-job tasks. |
 | SQL operators (`DatabricksSql*`, `SQLExecuteQueryOperator`, `PostgresOperator`, `MySqlOperator`, `HiveOperator`, `DatabricksCopyIntoOperator`) | `sql_task` (SqlActivity); Jinja values → `:name`, identifier positions → `IDENTIFIER(:name)`, with `sql_task.parameters`. |
 | `TriggerDagRunOperator` | `run_job_task` referencing the target DAG by sanitized job name. |
@@ -76,6 +77,57 @@ decisions.
   flags must be statically visible. Selectors, excludes, and vars are rendered by static explosion
   only; in `--dbt-mode pydabs` they force a static fallback. Missing project, profile, or manifest
   inputs produce a failing setup-required placeholder rather than a partially deployable dbt job.
+
+## Dataproc and Managed Spark
+
+flowx recognizes the Google provider's Dataproc operators and sensors, and the `ManagedSpark*` names
+that alias them, and applies one set of rules to both names. A job or batch payload must resolve
+statically to exactly one engine key; its value decides the task:
+
+| Payload | Result |
+| --- | --- |
+| `pyspark_job` / `pyspark_batch` | `spark_python_task`; `args` → `parameters`, `jar_file_uris` → task libraries. |
+| `spark_job` / `spark_batch` | `spark_jar_task`; `main_class` → `main_class_name`, main and dependency JARs → task libraries. |
+| `spark_sql_job` with an inline `query_list` | `sql_task`, with Jinja values bound as named parameters. |
+| `spark_r_*`, `pyspark_notebook_batch`, `hive_job`, `hadoop_job`, `pig_job`, `flink_job`, `presto_job`, `trino_job` | Failing placeholder + gap with engine-specific migration guidance. |
+
+These fail closed rather than guessing a mapping:
+- zero or several engine keys, or a payload that isn't static;
+- a query file, auxiliary `python_file_uris` / `file_uris` / `archive_uris`, or a missing `main_class`;
+- a `file://` Dataproc node path, or a templated artifact location;
+- a non-Spark job property, `cancel_on_kill=False`, or any argument without declared semantics.
+
+`spark_submit_task` is never emitted.
+
+**Compute.** The job's `placement.cluster_name` links it to its `DataprocCreateClusterOperator`. From
+that cluster, flowx carries over:
+- `worker_config.num_instances` as `num_workers`, when there are no secondary workers;
+- `spark:`-prefixed software properties, as `spark_conf`.
+
+The job's own `spark.*` properties are added to the same `spark_conf`, and the task binds to the
+default job cluster. Other property prefixes (`yarn:`, `hdfs:`, `mapred:`, `dataproc:`, …) are
+removed and reported. Machine types and image versions are reported but never mapped, so the node
+type and Databricks Runtime remain bundle variables.
+
+Secondary workers, init actions, autoscaling policies, a Dataproc Metastore, GKE placement, and
+optional components block absorption.
+
+**Collapse.** Cluster create, delete, start, and stop tasks are removed, with dependencies rewired, only
+when all of these hold:
+- every job placed on the cluster migrates deterministically;
+- nothing else in the DAG reads a removed task's output through XCom;
+- no task updates, scales, or diagnoses the cluster;
+- removing a task with a non-default trigger rule would not change when its downstream tasks run.
+
+A `DataprocJobSensor` is removed when its `dataproc_job_id` is the `xcom_pull` of an asynchronous
+submission that nothing else reads. A `DataprocBatchSensor` is removed when its `batch_id` matches the
+creating operator's `batch_id`.
+
+Every removal is recorded in the transformation ledger. The changed retry, teardown, and wait
+behavior is reported as a gap finding, as are the GCS artifacts the job's Databricks identity must
+be able to read. Tasks that cannot be removed stay as failing placeholders with the reason attached.
+Workflow templates, cluster update, scale, and diagnose, batch control, and cancel-operation tasks
+always stay as placeholders.
 
 ## dbt factory mode
 

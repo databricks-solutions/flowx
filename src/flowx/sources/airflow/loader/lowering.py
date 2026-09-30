@@ -23,6 +23,7 @@ from flowx.sources.airflow.loader.activity_templates import (
     _unresolved_activity_templates,
 )
 from flowx.sources.airflow.loader.ast_utils import _sanitize_task_key, _span
+from flowx.sources.airflow.loader.dataproc_graph import plan_dataproc
 from flowx.sources.airflow.loader.dbt import _build_dbt_factory
 from flowx.sources.airflow.loader.graph import (
     _expand_group_edges,
@@ -153,6 +154,8 @@ def _load_airflow_module(
                     "task_key": var_to_task_key[trigger_var],
                     "covered_capture_ids": sorted(covered_tasks),
                 }
+    dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions)
+    dropped |= dataproc_plan.dropped
     upstreams = _rewire_dropped(upstreams, dropped)
 
     # Collapse all dbt CLI operators over the one project into a single DbtFactoryActivity emitted at
@@ -230,6 +233,17 @@ def _load_airflow_module(
         }
         for var, (_task_id, operator, kwargs) in visitor.operators.items()
     ]
+    semantic_findings.extend(
+        _semantic_finding(
+            source_file or dag_path.name,
+            visitor.calls.get(var),
+            code=code,
+            message=message,
+            task_key=var_to_task_key[var],
+            capture_id=var,
+        )
+        for var, code, message in dataproc_plan.disclosures
+    )
     referenced_params: set[str] = set()
     emitted_dbt = False
     for var, (task_id, operator, kwargs) in visitor.operators.items():
@@ -296,6 +310,10 @@ def _load_airflow_module(
         )
         builder = ops.OPERATOR_REGISTRY.get(operator, ops.build_placeholder)
         activity = builder(ctx)
+        if var in dataproc_plan.retained_reasons:
+            activity = ops.build_placeholder_with_comment(ctx, dataproc_plan.retained_reasons[var])
+        elif var in dataproc_plan.clusters and not isinstance(activity, PlaceholderActivity):
+            activity.cluster = dict(dataproc_plan.clusters[var])
         activity.depends_on = depends_on
         if trigger_mapping.status == "unsupported":
             activity = ops.build_placeholder_with_comment(
@@ -625,6 +643,7 @@ def _load_airflow_module(
         sensor_lift_proof=sensor_lift_proof,
         schedule_proof=schedule_proof,
         argument_proofs=argument_proofs,
+        collapse_proofs=dataproc_plan.proofs,
         expected_ir_edges=expected_ir_edges,
         placeholder_capture_ids=placeholder_capture_ids,
     )

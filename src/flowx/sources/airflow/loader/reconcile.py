@@ -89,6 +89,7 @@ def _reconcile_pipeline(
     argument_proofs: list[dict[str, Any]],
     expected_ir_edges: set[tuple[str, str]],
     placeholder_capture_ids: dict[int, str],
+    collapse_proofs: list[dict[str, Any]] | None = None,
 ) -> Pipeline:
     """Reconciles an independent source audit with captured graph and emitted IR."""
     findings: list[dict[str, Any]] = list(semantic_findings)
@@ -114,6 +115,7 @@ def _reconcile_pipeline(
         transformations.append(sensor_lift_proof)
     if schedule_proof is not None:
         transformations.append(schedule_proof)
+    transformations.extend(collapse_proofs or [])
     captured_task_count = len(visitor.operators) + len(visitor.taskflow_tasks) + len(visitor.taskgroup_calls)
 
     unresolved = list(audit.unresolved)

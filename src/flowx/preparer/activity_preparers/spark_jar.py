@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from flowx.models.dab import DabNotebook
-from flowx.preparer.activity_preparers.helpers import resolve_param_value
+from flowx.preparer.activity_preparers.helpers import bind_requested_job_cluster, resolve_param_value
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
 from flowx.preparer.workspace_downloader import download_dbfs_file
 
@@ -95,4 +95,5 @@ def prepare(activity: SparkJarActivity, *, scope: str = "") -> PreparedActivity:
     elif activity.libraries:
         task["libraries"] = list(activity.libraries)
 
+    bind_requested_job_cluster(task, activity)
     return PreparedActivity(task=task, notebooks=notebooks)
