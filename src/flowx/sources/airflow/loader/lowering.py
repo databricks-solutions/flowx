@@ -244,6 +244,18 @@ def _load_airflow_module(
         )
         for var, code, message in dataproc_plan.disclosures
     )
+    semantic_findings.extend(
+        _semantic_finding(
+            source_file or dag_path.name,
+            visitor.calls.get(var),
+            code=code,
+            message=message,
+            task_key=var_to_task_key[var],
+            capture_id=var,
+            severity="failed",
+        )
+        for var, code, message in dataproc_plan.validation_failures
+    )
     referenced_params: set[str] = set()
     emitted_dbt = False
     for var, (task_id, operator, kwargs) in visitor.operators.items():

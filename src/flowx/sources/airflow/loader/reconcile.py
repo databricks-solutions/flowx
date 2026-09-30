@@ -32,9 +32,10 @@ def _semantic_finding(
     message: str,
     task_key: str,
     capture_id: str,
+    severity: str = "gap",
     **details: Any,
 ) -> dict[str, Any]:
-    """Builds a stable gap finding for a captured task-level semantic limitation."""
+    """Builds a stable finding for a captured task-level semantic limitation (a gap unless stated)."""
     candidate = source_audit.AuditCandidate(
         kind="task_semantics",
         code=code,
@@ -48,7 +49,7 @@ def _semantic_finding(
     return source_audit.finding(
         source_file=source_file,
         code=code,
-        severity="gap",
+        severity=severity,
         message=message,
         candidate=candidate,
     )

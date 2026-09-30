@@ -149,6 +149,8 @@ class WorkloadTranslation:
         dropped_properties: Dataproc-only properties removed from the payload.
         artifact_uris: Remote source and library locations the Databricks identity must be able to read.
         not_mapped: Payload settings recorded for review because Databricks has no equivalent field.
+        validation_error: Why the payload is malformed (it does not name exactly one engine), which blocks
+            packaging rather than routing the task to manual migration.
     """
 
     activity: Activity | None = None
@@ -159,6 +161,7 @@ class WorkloadTranslation:
     dropped_properties: list[str] = field(default_factory=list)
     artifact_uris: list[str] = field(default_factory=list)
     not_mapped: list[str] = field(default_factory=list)
+    validation_error: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -267,7 +270,8 @@ def translate_workload(operator: str, task_id: str, task_key: str, kwargs: dict[
 
     discriminator, error = _resolve_discriminator(payload, _BATCH_DISCRIMINATORS if is_batch else _JOB_DISCRIMINATORS)
     if discriminator is None:
-        return WorkloadTranslation(reason=f"The Dataproc {payload_key} cannot be translated: {error}.")
+        message = f"The Dataproc {payload_key} payload is invalid: {error}."
+        return WorkloadTranslation(reason=message, validation_error=message)
     result = WorkloadTranslation(discriminator=discriminator)
     placement = payload.get("placement") if not is_batch else None
     if isinstance(placement, dict) and isinstance(placement.get("cluster_name"), str):

@@ -214,21 +214,44 @@ def test_non_spark_engines_route_to_placeholders(tmp_path: Path, discriminator: 
 
 
 @pytest.mark.parametrize(
-    ("job", "reason"),
+    ("job", "found"),
     [
         ('{"placement": {"cluster_name": "c"}}', "found none"),
         (
             '{"pyspark_job": {"main_python_file_uri": "gs://b/m.py"}, "spark_job": {"main_class": "C"}}',
             "found pyspark_job, spark_job",
         ),
-        ("JOB_FROM_ELSEWHERE", "not statically resolvable"),
     ],
 )
-def test_ambiguous_or_unresolved_payloads_fail_closed(tmp_path: Path, job: str, reason: str) -> None:
-    task = _task(_load(tmp_path, _submit(job)), "submit")
+def test_payload_without_exactly_one_engine_fails_reconciliation(tmp_path: Path, job: str, found: str) -> None:
+    pipeline = _load(tmp_path, _submit(job))
+
+    assert pipeline.reconciliation_status == "failed"
+    failures = [finding for finding in pipeline.not_translatable if finding["severity"] == "failed"]
+    assert [finding["code"] for finding in failures] == ["dataproc_payload_engine_invalid"]
+    assert found in failures[0]["message"]
+
+
+def test_payload_without_exactly_one_engine_blocks_packaging(tmp_path: Path) -> None:
+    from flowx.ir_serde import pipeline_to_dict
+
+    pipeline = _load(tmp_path, _submit('{"placement": {"cluster_name": "c"}}'))
+    output_dir = tmp_path / "bundle"
+    work_dir = output_dir / ".work"
+    work_dir.mkdir(parents=True)
+    (work_dir / "translation_report.json").write_text(json.dumps(pipeline_to_dict(pipeline)), encoding="utf-8")
+
+    assert package_main(["--output-dir", str(output_dir), "--no-download-workspace-files"]) != 0
+    assert not (output_dir / "databricks.yml").exists()
+
+
+def test_unresolved_payload_fails_closed_to_a_placeholder(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, _submit("JOB_FROM_ELSEWHERE"))
+    task = _task(pipeline, "submit")
 
     assert isinstance(task, PlaceholderActivity)
-    assert reason in task.comment
+    assert "not statically resolvable" in task.comment
+    assert pipeline.reconciliation_status == "verified_with_gaps"
 
 
 def test_notebook_batch_routes_to_placeholder(tmp_path: Path) -> None:

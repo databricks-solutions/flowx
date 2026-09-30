@@ -40,6 +40,8 @@ class DataprocPlan:
         clusters: Jobs compute settings for each migrated workload, keyed by capture id.
         retained_reasons: Why each Dataproc task that stays in the graph needs manual migration.
         disclosures: ``(capture_id, code, message)`` findings describing changed behavior.
+        validation_failures: ``(capture_id, code, message)`` findings for malformed payloads, which fail
+            reconciliation and block packaging.
     """
 
     dropped: set[str] = field(default_factory=set)
@@ -47,6 +49,7 @@ class DataprocPlan:
     clusters: dict[str, dict[str, Any]] = field(default_factory=dict)
     retained_reasons: dict[str, str] = field(default_factory=dict)
     disclosures: list[tuple[str, str, str]] = field(default_factory=list)
+    validation_failures: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def _references_task(text: str, task_id: str) -> bool:
@@ -123,6 +126,11 @@ def plan_dataproc(
         for variable, (task_id, canonical, operator, kwargs) in dataproc_vars.items()
         if canonical in dataproc.WORKLOAD_OPERATORS
     }
+    plan.validation_failures.extend(
+        (variable, "dataproc_payload_engine_invalid", translation.validation_error)
+        for variable, translation in workloads.items()
+        if translation.validation_error is not None
+    )
     collapsed_by_workload: dict[str, list[str]] = {variable: [] for variable in workloads}
     teardown_rules: dict[str, str] = {}
 
