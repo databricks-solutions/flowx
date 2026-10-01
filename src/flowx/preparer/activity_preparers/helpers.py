@@ -91,8 +91,8 @@ def bind_requested_job_cluster(task: dict[str, Any], activity: Activity) -> None
     """Binds *task* to the default job cluster when its source asked for dedicated Jobs compute.
 
     A source front-end requests this by setting ``_bind_default_cluster`` in the activity's cluster
-    hint, so the hint's worker count and Spark configuration reach the task instead of only shaping a
-    cluster no task uses.
+    hint. The job has one shared default cluster, whose worker count and Spark configuration are the
+    most common values across the tasks' hints, so a task whose hint differs runs on those values.
     """
     if (activity.cluster or {}).get("_bind_default_cluster") and not task.get("existing_cluster_id"):
         task["job_cluster_key"] = DEFAULT_JOB_CLUSTER_KEY

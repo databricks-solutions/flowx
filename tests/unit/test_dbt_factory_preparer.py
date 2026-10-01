@@ -404,8 +404,8 @@ def test_pydabs_runner_authenticates_through_the_databricks_sdk(tmp_path):
 
     assert "from databricks.sdk import WorkspaceClient" in runner.content
     assert (
-        "os.environ['DBT_ACCESS_TOKEN'] = ws.config.authenticate()['Authorization'].removeprefix('Bearer ').strip()"
-        in runner.content
+        "os.environ['DBT_ACCESS_TOKEN'] = workspace_client.config.authenticate()['Authorization']"
+        ".removeprefix('Bearer ').strip()" in runner.content
     )
     assert "os.environ['DBT_HOST'] = _host.netloc or _host.path.strip('/')" in runner.content
     assert "apiToken()" not in runner.content

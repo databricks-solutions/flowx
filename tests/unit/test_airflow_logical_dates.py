@@ -726,3 +726,23 @@ def test_try_except_version_shim_is_an_unknown_generation() -> None:
 
     assert ast_utils.airflow_generation(module)[0] == "unknown"
     assert logical_dates.airflow_generation is ast_utils.airflow_generation
+
+
+def test_logical_date_values_scan_nested_strings_without_copying(monkeypatch: pytest.MonkeyPatch) -> None:
+    import dataclasses
+
+    from flowx.models.ir import ForEachActivity
+
+    def forbid_copy(*_arguments: object, **_keywords: object) -> None:
+        raise AssertionError("logical_date_values deep-copied the activity")
+
+    nested = NotebookActivity(
+        name="inner",
+        task_key="inner",
+        notebook_path="inner.py",
+        base_parameters={"{{tasks.__flowx_airflow_dates.values.ts}}": "{{tasks.__flowx_airflow_dates.values.ds}}"},
+    )
+    loop = ForEachActivity(name="loop", task_key="loop", items_expression="[1]", inner_activities=[nested])
+    monkeypatch.setattr(dataclasses, "asdict", forbid_copy)
+
+    assert logical_dates.logical_date_values(loop) == {"ds", "ts"}

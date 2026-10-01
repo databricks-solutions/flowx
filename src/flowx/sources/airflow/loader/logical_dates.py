@@ -12,7 +12,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
-import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -305,10 +305,25 @@ def _classify_timetable(
     )
 
 
+def _strings(value: Any) -> Iterator[str]:
+    """Yields every string inside *value*: dataclass fields, mapping keys and values, and list items."""
+    if isinstance(value, str):
+        yield value
+    elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for field in dataclasses.fields(value):
+            yield from _strings(getattr(value, field.name))
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _strings(key)
+            yield from _strings(item)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from _strings(item)
+
+
 def logical_date_values(activity: Activity) -> set[str]:
     """Returns the resolver task values *activity* (including nested tasks) reads."""
-    serialized = json.dumps(dataclasses.asdict(activity), default=str)
-    return set(templating.LOGICAL_DATE_VALUE_REF.findall(serialized))
+    return {name for text in _strings(activity) for name in templating.LOGICAL_DATE_VALUE_REF.findall(text)}
 
 
 def resolver_source(semantics: LogicalDateSemantics) -> str:
