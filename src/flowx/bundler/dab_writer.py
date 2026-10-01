@@ -2232,6 +2232,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             **base,
             main_class_name=task_ir.get("main_class_name", ""),
             parameters=task_ir.get("parameters"),
+            keep_remote_artifacts=bool(task_ir.get("keep_remote_artifacts")),
         )
     if task_type == "SparkPythonActivity":
         return SparkPythonActivity(
@@ -2239,6 +2240,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             python_file=task_ir.get("python_file", ""),
             parameters=task_ir.get("parameters"),
             generated_source=task_ir.get("generated_source"),
+            keep_remote_artifacts=bool(task_ir.get("keep_remote_artifacts")),
         )
     if task_type == "ExecutePipelineActivity":
         return ExecutePipelineActivity(

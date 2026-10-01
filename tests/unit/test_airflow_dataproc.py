@@ -426,3 +426,40 @@ def test_example_packages_onto_the_bound_job_cluster(tmp_path: Path) -> None:
     assert cluster["spark_conf"] == {"spark.sql.adaptive.enabled": "true", "spark.sql.shuffle.partitions": "200"}
     assert cluster["node_type_id"] == "${var.node_type_id}"
     assert "_bind_default_cluster" not in bundle_text
+
+
+def _package(tmp_path: Path, pipeline: Pipeline) -> Path:
+    from flowx.ir_serde import pipeline_to_dict
+
+    output_dir = tmp_path / "bundle"
+    work_dir = output_dir / ".work"
+    work_dir.mkdir(parents=True)
+    (work_dir / "translation_report.json").write_text(json.dumps(pipeline_to_dict(pipeline)), encoding="utf-8")
+    assert package_main(["--output-dir", str(output_dir), "--no-download-workspace-files"]) == 0
+    return output_dir
+
+
+def test_cloud_storage_artifacts_keep_their_source_uris(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        _submit(
+            '{"placement": {"cluster_name": "c"}, "spark_job": {"main_class": "com.example.Main",'
+            ' "jar_file_uris": ["gs://bucket/app.jar"], "args": ["a"]}}',
+            task_id="aggregate",
+        )
+        + _submit(
+            '{"placement": {"cluster_name": "c"}, "pyspark_job": {"main_python_file_uri":'
+            ' "gs://bucket/jobs/transform.py", "jar_file_uris": ["gs://bucket/udfs.jar"]}}',
+            task_id="transform",
+        ),
+    )
+    output_dir = _package(tmp_path, pipeline)
+
+    resource = yaml.safe_load((output_dir / "resources" / "dataproc_case.yml").read_text(encoding="utf-8"))
+    tasks = {task["task_key"]: task for task in resource["resources"]["jobs"]["dataproc_case"]["tasks"]}
+    assert tasks["aggregate"]["libraries"] == [{"jar": "gs://bucket/app.jar"}]
+    assert tasks["transform"]["spark_python_task"]["python_file"] == "gs://bucket/jobs/transform.py"
+    assert tasks["transform"]["libraries"] == [{"jar": "gs://bucket/udfs.jar"}]
+    assert not (output_dir / "lib").exists()
+    assert not list((output_dir / "src").rglob("transform.py"))
+    assert not list(output_dir.rglob("*placeholder*"))

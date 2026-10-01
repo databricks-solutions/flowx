@@ -80,3 +80,50 @@ def test_multi_pipeline_reports_expose_dbfs_artifacts_for_download(tmp_path: Pat
     report_path.write_text(json.dumps(report), encoding="utf-8")
 
     assert collect_workspace_artifact_paths(report_path) == ["dbfs:/scripts/a.py", "dbfs:/jars/c.jar"]
+
+
+def test_remote_python_file_is_kept_when_the_source_reads_it_in_place(forbid_network: None) -> None:
+    activity = SparkPythonActivity(
+        name="etl",
+        task_key="etl",
+        python_file="gs://bucket/jobs/transform.py",
+        libraries=[{"jar": "gs://bucket/udfs.jar"}],
+        keep_remote_artifacts=True,
+    )
+
+    prepared = spark_python.prepare(activity)
+
+    assert prepared.task["spark_python_task"]["python_file"] == "gs://bucket/jobs/transform.py"
+    assert prepared.task["libraries"] == [{"jar": "gs://bucket/udfs.jar"}]
+    assert prepared.notebooks == []
+
+
+def test_remote_jars_are_kept_when_the_source_reads_them_in_place(forbid_network: None) -> None:
+    activity = SparkJarActivity(
+        name="agg",
+        task_key="agg",
+        main_class_name="com.example.Main",
+        libraries=[{"jar": "gs://bucket/app.jar"}, {"jar": "s3://bucket/dep.jar"}],
+        keep_remote_artifacts=True,
+    )
+
+    prepared = spark_jar.prepare(activity)
+
+    assert prepared.task["libraries"] == [{"jar": "gs://bucket/app.jar"}, {"jar": "s3://bucket/dep.jar"}]
+    assert prepared.notebooks == []
+
+
+def test_kept_remote_jar_still_copies_a_dbfs_library(forbid_network: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(workspace_downloader, "_downloads_enabled", False)
+    activity = SparkJarActivity(
+        name="agg",
+        task_key="agg",
+        main_class_name="com.example.Main",
+        libraries=[{"jar": "gs://bucket/app.jar"}, {"jar": "dbfs:/FileStore/jars/dep.jar"}],
+        keep_remote_artifacts=True,
+    )
+
+    prepared = spark_jar.prepare(activity)
+
+    assert prepared.task["libraries"] == [{"jar": "gs://bucket/app.jar"}, {"jar": "../lib/dep.jar"}]
+    assert prepared.notebooks, "a DBFS JAR that was not downloaded still needs its copy instructions"

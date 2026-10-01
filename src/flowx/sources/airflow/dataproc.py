@@ -360,6 +360,7 @@ def translate_workload(operator: str, task_id: str, task_key: str, kwargs: dict[
             python_file=main_file,
             parameters=arguments or None,
             libraries=[{"jar": uri} for uri in jar_uris] or None,
+            keep_remote_artifacts=True,
         )
         return result
 
@@ -395,6 +396,7 @@ def translate_workload(operator: str, task_id: str, task_key: str, kwargs: dict[
             main_class_name=main_class,
             parameters=arguments or None,
             libraries=[{"jar": uri} for uri in library_uris],
+            keep_remote_artifacts=True,
         )
         return result
 

@@ -96,3 +96,9 @@ def bind_requested_job_cluster(task: dict[str, Any], activity: Activity) -> None
     """
     if (activity.cluster or {}).get("_bind_default_cluster") and not task.get("existing_cluster_id"):
         task["job_cluster_key"] = DEFAULT_JOB_CLUSTER_KEY
+
+
+def is_remote_artifact_uri(path: str) -> bool:
+    """Returns True for a cloud-storage URI such as ``gs://`` or ``s3://`` that a job reads in place."""
+    scheme, separator, _ = path.partition("://")
+    return bool(separator) and scheme.lower() not in ("dbfs", "file")

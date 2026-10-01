@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from flowx.models.dab import DabNotebook
-from flowx.preparer.activity_preparers.helpers import bind_requested_job_cluster, resolve_param_value
+from flowx.preparer.activity_preparers.helpers import (
+    bind_requested_job_cluster,
+    is_remote_artifact_uri,
+    resolve_param_value,
+)
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
 from flowx.preparer.workspace_downloader import download_dbfs_file
 
@@ -53,11 +57,15 @@ def prepare(activity: SparkJarActivity, *, scope: str = "") -> PreparedActivity:
     rewritten_libraries: list[dict] = []
     notebooks: list[DabNotebook] = []
     downloaded_any = False
+    copies_needed = False
     if activity.libraries:
         for lib in activity.libraries:
             rewritten_lib = {}
             for key, path in lib.items():
-                if isinstance(path, str) and ("dbfs:" in path or "/" in path):
+                if activity.keep_remote_artifacts and isinstance(path, str) and is_remote_artifact_uri(path):
+                    rewritten_lib[key] = path
+                elif isinstance(path, str) and ("dbfs:" in path or "/" in path):
+                    copies_needed = True
                     filename = path.rsplit("/", 1)[-1] if "/" in path else path
                     rewritten_lib[key] = f"../lib/{filename}"
                     if key == "jar":
@@ -74,7 +82,7 @@ def prepare(activity: SparkJarActivity, *, scope: str = "") -> PreparedActivity:
                     rewritten_lib[key] = path
             rewritten_libraries.append(rewritten_lib)
 
-        if not downloaded_any:
+        if (copies_needed or not activity.keep_remote_artifacts) and not downloaded_any:
             placeholder_content = _jar_placeholder(activity.libraries, activity.name)
             notebooks.append(
                 DabNotebook(
