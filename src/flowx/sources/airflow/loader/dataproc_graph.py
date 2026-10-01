@@ -81,6 +81,41 @@ def _consumers(
     return found
 
 
+_DATAPROC_CLIENTS = re.compile(
+    r"\b(?:DataprocHook|ClusterControllerClient|JobControllerClient|BatchControllerClient)\b"
+)
+
+
+def _cluster_users(
+    cluster_name: str,
+    identifiers: set[str],
+    candidates: dict[str, str],
+    function_texts: dict[str, str],
+) -> set[str]:
+    """Returns every candidate task that names the cluster or drives Dataproc through a client.
+
+    A candidate's text includes the bodies of module functions it references by name, so a
+    ``python_callable`` that submits work to the cluster through the Dataproc hook still counts.
+    """
+    name_pattern = re.compile(rf"(?<![\w-]){re.escape(cluster_name)}(?![\w-])")
+    identifier_patterns = [re.compile(rf"\b{re.escape(identifier)}\b") for identifier in sorted(identifiers)]
+    users: set[str] = set()
+    for task_id, text in candidates.items():
+        called = " ".join(
+            body
+            for function_name, body in function_texts.items()
+            if re.search(rf"\b{re.escape(function_name)}\b", text)
+        )
+        combined = f"{text} {called}"
+        if (
+            name_pattern.search(combined)
+            or any(pattern.search(combined) for pattern in identifier_patterns)
+            or _DATAPROC_CLIENTS.search(called)
+        ):
+            users.add(task_id)
+    return users
+
+
 def _downstreams(variable: str, upstreams: dict[str, list[str]]) -> set[str]:
     return {other for other, parents in upstreams.items() if variable in parents}
 
@@ -172,6 +207,21 @@ def plan_dataproc(
         if blocker is None:
             cluster = dataproc.translate_cluster_config(dataproc_vars[creates[0]][3])
             blocker = cluster.blocking_reason
+        if blocker is None:
+            identifiers = {
+                node.id
+                for member in members
+                for node in [dataproc_vars[member][3].get("cluster_name")]
+                if isinstance(node, ast.Name)
+            }
+            candidates = {
+                operators[variable][0]: text
+                for variable, text in operator_texts.items()
+                if variable not in members and variable not in cluster_workloads
+            }
+            users = _cluster_users(name, identifiers, candidates, function_texts)
+            if users:
+                blocker = f"task(s) {', '.join(sorted(users))} still use the cluster outside a migrated Dataproc job"
         if blocker is None:
             for member in members:
                 task_id, _canonical, operator, kwargs = dataproc_vars[member]

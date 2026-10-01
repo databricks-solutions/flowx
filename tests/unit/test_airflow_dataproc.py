@@ -463,3 +463,75 @@ def test_cloud_storage_artifacts_keep_their_source_uris(tmp_path: Path) -> None:
     assert not (output_dir / "lib").exists()
     assert not list((output_dir / "src").rglob("transform.py"))
     assert not list(output_dir.rglob("*placeholder*"))
+
+
+_CLUSTER_PREFIX = 'CLUSTER_NAME = "events-cluster"\n'
+_CLUSTER_BODY = (
+    'create = DataprocCreateClusterOperator(task_id="create", project_id="p", region="r", cluster_name=CLUSTER_NAME)\n'
+    + _submit('{"placement": {"cluster_name": CLUSTER_NAME}, "pyspark_job": {"main_python_file_uri": "gs://b/m.py"}}')
+    + 'delete = DataprocDeleteClusterOperator(task_id="delete", project_id="p", region="r", '
+    "cluster_name=CLUSTER_NAME)\n"
+)
+_HIVE_SUBMIT = "gcloud dataproc jobs submit hive --cluster="
+
+
+def _assert_cluster_retained(pipeline: Pipeline) -> None:
+    for task_key in ("create", "delete"):
+        lifecycle = _task(pipeline, task_key)
+        assert isinstance(lifecycle, PlaceholderActivity)
+        assert "still use the cluster" in lifecycle.comment
+    assert isinstance(_task(pipeline, "submit"), SparkPythonActivity)
+
+
+def test_cluster_named_by_a_bash_task_is_retained(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        _CLUSTER_BODY + f'hive = BashOperator(task_id="hive", bash_command=f"{_HIVE_SUBMIT}{{CLUSTER_NAME}}")\n'
+        "create >> [submit, hive] >> delete\n",
+        functions="from airflow.operators.bash import BashOperator\n" + _CLUSTER_PREFIX,
+    )
+
+    _assert_cluster_retained(pipeline)
+
+
+def test_cluster_named_literally_by_a_bash_task_is_retained(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        _CLUSTER_BODY + f'hive = BashOperator(task_id="hive", bash_command="{_HIVE_SUBMIT}events-cluster")\n'
+        "create >> [submit, hive] >> delete\n",
+        functions="from airflow.operators.bash import BashOperator\n" + _CLUSTER_PREFIX,
+    )
+
+    _assert_cluster_retained(pipeline)
+
+
+def test_cluster_driven_through_the_dataproc_hook_is_retained(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        _CLUSTER_BODY + 'extra = PythonOperator(task_id="extra", python_callable=run_extra)\n'
+        "create >> [submit, extra] >> delete\n",
+        functions=(
+            _CLUSTER_PREFIX + "def run_extra():\n"
+            "    from airflow.providers.google.cloud.hooks.dataproc import DataprocHook\n"
+            "    DataprocHook().submit_job(project_id='p', region='r', job={})\n\n"
+        ),
+    )
+
+    _assert_cluster_retained(pipeline)
+
+
+def test_payload_helper_naming_the_cluster_does_not_block_collapse(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        _CLUSTER_BODY + 'report = PythonOperator(task_id="report", python_callable=report)\n'
+        "create >> submit >> delete >> report\n",
+        functions=(
+            _CLUSTER_PREFIX
+            + "def unused_payload():\n    return {'placement': {'cluster_name': CLUSTER_NAME}}\n\n"
+            + "def report():\n    print('done')\n\n"
+        ),
+    )
+
+    task_keys = {task.task_key for task in pipeline.tasks}
+    assert "create" not in task_keys and "delete" not in task_keys
+    assert isinstance(_task(pipeline, "submit"), SparkPythonActivity)
