@@ -18,6 +18,7 @@ from flowx.adapter.operations import collect_workspace_artifact_paths
 from flowx.bundler.constants import (
     COMPUTE_MODE_TO_CLUSTER_KEY,
     DEFAULT_JOB_CLUSTER_KEY,
+    MULTI_NODE_CLUSTER_NODE_TYPE_ID,
     MULTI_NODE_JOB_CLUSTER_KEY,
     SINGLE_NODE_JOB_CLUSTER_KEY,
 )
@@ -146,7 +147,8 @@ def write_bundle(
     pydabs_resource_entries = _collect_pydabs_resource_entries(workflow)
 
     # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id are
-    #    declared as required variables; when every task is serverless, they're omitted.
+    #    declared: required for Airflow bundles, defaulted from the ADF linked-service configs for ADF;
+    #    when every task is serverless, they're omitted.
     databricks_yml_path = output_dir / "databricks.yml"
     inferred_spark_version, inferred_node_type_id = _infer_source_cluster_settings(workflow)
     databricks_yml_dict = _build_databricks_yml(
@@ -156,6 +158,7 @@ def write_bundle(
         spark_version=inferred_spark_version,
         node_type_id=inferred_node_type_id,
         include_cluster_variables=bundle_uses_classic_cluster,
+        require_cluster_variables=workflow.source == "airflow",
         extra_variables=extra_variable_declarations,
         pydabs_resources=pydabs_resource_entries,
     )
@@ -343,7 +346,7 @@ def write_bundle(
         required_variables={
             name: declaration["description"]
             for name, declaration in databricks_yml_dict.get("variables", {}).items()
-            if name in _CLUSTER_VARIABLES
+            if name in _CLUSTER_VARIABLES and "default" not in declaration
         },
     )
     setup_path = output_dir / "SETUP.md"
@@ -785,12 +788,16 @@ def _is_valid_node_type_id(value: Any) -> bool:
     return True
 
 
+_DEFAULT_SPARK_VERSION = "15.4.x-scala2.12"
+_DEFAULT_NODE_TYPE_ID = "Standard_DS3_v2"
+
+
 def _infer_source_cluster_settings(workflow: PreparedWorkflow) -> tuple[str | None, str | None]:
     """Finds the runtime and node type the source pipelines configured for their clusters.
 
-    These are suggestions shown to the user, not bundle defaults: ``node_type_id`` and
-    ``spark_version`` are required variables because a source value (an Azure node type, an older
-    runtime) is rarely right for the target workspace.
+    For Airflow bundles these are suggestions in the descriptions of the required ``node_type_id`` and
+    ``spark_version`` variables. For ADF bundles they are the variable defaults, falling back to
+    ``_DEFAULT_SPARK_VERSION`` and ``_DEFAULT_NODE_TYPE_ID`` when no task cluster named a usable value.
 
     Args:
         workflow: The prepared workflow being written.
@@ -893,6 +900,7 @@ def _build_databricks_yml(
     spark_version: str | None = None,
     node_type_id: str | None = None,
     include_cluster_variables: bool = True,
+    require_cluster_variables: bool = True,
     extra_variables: dict[str, Any] | None = None,
     pydabs_resources: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -906,10 +914,13 @@ def _build_databricks_yml(
             variable description. Callers derive it from :func:`_infer_source_cluster_settings`.
         node_type_id: The node type the source configured, shown the same way.
         include_cluster_variables: When True, declares ``spark_version`` and
-            ``node_type_id`` as required variables (no default) for the job clusters.  Set to
+            ``node_type_id`` for the job clusters.  Set to
             False when no task in the bundle uses classic compute (every
             generated notebook runs on serverless), so the bundle stays
             free of unused tunables.
+        require_cluster_variables: When True, the two variables are required (no default) and a
+            source value only appears in their descriptions. When False they default to the
+            source value, as ADF bundles do.
         extra_variables: Additional variable declarations (name -> DAB
             declaration dict) to merge into the ``variables`` block, e.g.
             the source-side variables a Lakeflow Connect pipeline references.
@@ -930,8 +941,20 @@ def _build_databricks_yml(
             "default": schema,
         },
     }
-    if include_cluster_variables:
+    if include_cluster_variables and require_cluster_variables:
         variables.update(required_cluster_variables(spark_version=spark_version, node_type_id=node_type_id))
+    elif include_cluster_variables:
+        variables["node_type_id"] = {
+            "description": (
+                "Instance type for the default job_cluster — override per cloud "
+                "(e.g. i3.xlarge on AWS, n1-standard-4 on GCP)."
+            ),
+            "default": node_type_id or _DEFAULT_NODE_TYPE_ID,
+        }
+        variables["spark_version"] = {
+            "description": "Databricks Runtime for the default job_cluster.",
+            "default": spark_version or _DEFAULT_SPARK_VERSION,
+        }
     for name, declaration in (extra_variables or {}).items():
         variables.setdefault(name, declaration)
     # Declare a variable for each cross-bundle ExecutePipeline reference so `${var.X_job_id}` resolves and
@@ -1066,13 +1089,14 @@ def _build_multi_node_cluster() -> dict[str, Any]:
     """Builds the fixed two-node job_cluster used for Copy Data tasks under classic compute.
 
     Returns:
-        Cluster definition with two workers on the bundle's required node type and runtime.
+        Cluster definition with two workers on the Copy Data instance
+        type and the bundle-variable spark_version knob.
     """
     return {
         "job_cluster_key": MULTI_NODE_JOB_CLUSTER_KEY,
         "new_cluster": {
             "spark_version": "${var.spark_version}",
-            "node_type_id": "${var.node_type_id}",
+            "node_type_id": MULTI_NODE_CLUSTER_NODE_TYPE_ID,
             "num_workers": 2,
             "data_security_mode": "SINGLE_USER",
             "single_user_name": "${workspace.current_user.userName}",

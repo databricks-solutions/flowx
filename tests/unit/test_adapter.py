@@ -929,7 +929,7 @@ class TestBundleOutput:
         keys = {cluster["job_cluster_key"] for cluster in clusters}
         assert "multi_node_cluster" in keys
         multi_node = next(cluster for cluster in clusters if cluster["job_cluster_key"] == "multi_node_cluster")
-        assert multi_node["new_cluster"]["node_type_id"] == "${var.node_type_id}"
+        assert multi_node["new_cluster"]["node_type_id"] == "Standard_D8ds_v5"
         assert multi_node["new_cluster"]["num_workers"] == 2
 
     def test_classic_single_node_cluster_uses_is_single_node_flag(self, tmp_path: Path):

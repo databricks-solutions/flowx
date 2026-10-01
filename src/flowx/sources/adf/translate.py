@@ -1261,9 +1261,7 @@ def _extract_cluster_config(
     if new_cluster:
         config["spark_version"] = new_cluster
         config["num_workers"] = _coerce_int(fields.get("newClusterNumOfWorker", 1))
-        node_type = fields.get("newClusterNodeType")
-        if node_type:
-            config["node_type_id"] = node_type
+        config["node_type_id"] = fields.get("newClusterNodeType", "Standard_DS3_v2")
         spark_conf = fields.get("newClusterSparkConf")
         if spark_conf:
             config["spark_conf"] = spark_conf

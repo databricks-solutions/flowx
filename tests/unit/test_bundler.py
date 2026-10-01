@@ -1298,11 +1298,15 @@ class TestUnparseableClusterHintsFiltered:
 
 
 class TestRequiredClusterVariables:
-    """node_type_id and spark_version are required bundle variables: no default, listed in SETUP.md."""
+    """Airflow bundles declare node_type_id and spark_version as required variables listed in SETUP.md.
 
-    def _classic_workflow(self):
+    ADF bundles keep source-derived defaults until ADF node-type handling is revisited separately.
+    """
+
+    def _classic_workflow(self, source: str | None = "airflow"):
         pipeline = Pipeline(
             name="classic_job",
+            tags={"source": source} if source else {},
             tasks=[
                 NotebookActivity(
                     name="Run NB",
@@ -1335,6 +1339,13 @@ class TestRequiredClusterVariables:
         assert "| `node_type_id` |" in setup
         assert "| `spark_version` |" in setup
         assert "--var node_type_id=<value> --var spark_version=<value>" in setup
+
+    def test_adf_bundle_defaults_cluster_variables_to_source_values(self, tmp_path):
+        write_bundle(self._classic_workflow(source="adf"), tmp_path)
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        assert variables["node_type_id"]["default"] == "Standard_D4s_v3"
+        assert variables["spark_version"]["default"] == "14.3.x-scala2.12"
+        assert "## Required bundle variables" not in (tmp_path / "SETUP.md").read_text()
 
     def test_serverless_bundle_declares_no_cluster_variables(self, tmp_path):
         pipeline = Pipeline(
