@@ -33,7 +33,12 @@ from flowx.sources.airflow.loader.graph import (
 )
 from flowx.sources.airflow.loader.policy import _job_email_notifications, _job_timeout_seconds
 from flowx.sources.airflow.loader.reconcile import _iter_placeholders, _semantic_finding
-from flowx.sources.airflow.loader.schedule import _asset_schedule_from_node, _schedule_from_interval
+from flowx.sources.airflow.loader.schedule import (
+    _asset_schedule_from_node,
+    _extract_timezone,
+    _schedule_from_interval,
+    static_start_date,
+)
 from flowx.sources.airflow.loader.taskflow import _build_taskflow_task, _wrap_in_for_each, _wrap_taskflow_in_for_each
 from flowx.sources.airflow.loader.visitor import _DagVisitor
 
@@ -110,7 +115,11 @@ def _load_airflow_module(
     # the DAG root AND no cron/timedelta schedule is present. With a schedule (cron AND-THEN wait) or
     # mid-DAG (an ordering gate, not the DAG's entry condition), the sensor is retained as a polling
     # task instead of being silently dropped.
-    schedule = _schedule_from_interval(visitor.schedule_interval, node=visitor.schedule_node, timezone=visitor.timezone)
+    start_date_node = visitor.dag_kwargs.get("start_date") or visitor.default_args.get("start_date")
+    start_date = static_start_date(start_date_node, visitor.timezone or _extract_timezone(start_date_node))
+    schedule = _schedule_from_interval(
+        visitor.schedule_interval, node=visitor.schedule_node, timezone=visitor.timezone, start_date=start_date
+    )
     schedule_proof: dict[str, Any] | None = None
     schedule_node = visitor.schedule_node
     explicit_none_schedule = isinstance(schedule_node, ast.Constant) and schedule_node.value is None
@@ -167,6 +176,7 @@ def _load_airflow_module(
         schedule_interval=visitor.schedule_interval,
         timezone=visitor.timezone,
         schedule=schedule,
+        start_date=start_date,
     )
 
     # Collapse all dbt CLI operators over the one project into a single DbtFactoryActivity emitted at

@@ -248,13 +248,22 @@ def _render_timestamp(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def nearest_delta_tick(instant: datetime, delta: timedelta, anchor: datetime) -> datetime:
-    """Returns the multiple of *delta* from *anchor* closest to *instant*, preferring the earlier one."""
-    elapsed = instant - anchor
-    steps = elapsed // delta
-    earlier = anchor + steps * delta
-    later = earlier + delta
-    return later if later - instant < instant - earlier else earlier
+def nearest_delta_tick(instant: datetime, delta: timedelta, anchor: datetime, zone: ZoneInfo) -> datetime:
+    """Returns the delta schedule's tick closest to *instant*, preferring the earlier one.
+
+    Ticks repeat every *delta* from *anchor* the way pendulum adds a timedelta: a change shorter than
+    a day steps elapsed time, while whole days step the local wall clock, so a daily schedule keeps its
+    local time across daylight-saving changes.
+    """
+    if delta.days == 0:
+        earlier = anchor + ((instant - anchor) // delta) * delta
+        candidates = [earlier, earlier + delta]
+    else:
+        anchor_wall = _to_wall_clock(anchor, zone)
+        elapsed_days = (_to_wall_clock(instant, zone).date() - anchor_wall.date()).days
+        base = anchor_wall + timedelta(days=(elapsed_days // delta.days) * delta.days)
+        candidates = [_localize(base + offset * delta, zone) for offset in (-1, 0, 1)]
+    return min(candidates, key=lambda tick: (abs(tick - instant), tick))
 
 
 def _render_date(moment: datetime) -> str:
@@ -312,7 +321,7 @@ def resolve(
         if semantics == DATA_INTERVAL_CRON and schedule is not None:
             end = next_tick(schedule, logical, zone)
         elif semantics == DATA_INTERVAL_DELTA:
-            end = logical + delta
+            end = _shift(logical, delta, zone)
         else:
             end = logical
     else:
@@ -320,7 +329,7 @@ def resolve(
         manual = trigger_type.strip().lower() in MANUAL_TRIGGER_TYPES
         uses_delta = semantics in (DATA_INTERVAL_DELTA, TRIGGER_DELTA)
         if uses_delta and not manual and anchor_time.strip():
-            fired = nearest_delta_tick(fired, delta, parse_instant(anchor_time))
+            fired = nearest_delta_tick(fired, delta, parse_instant(anchor_time), zone)
         if semantics == DATA_INTERVAL_CRON and schedule is not None:
             if manual:
                 end = latest_tick_at_or_before(schedule, fired, zone)
@@ -330,7 +339,7 @@ def resolve(
                 start = scheduled_interval_start(schedule, end, zone)
             logical = fired if manual else start
         elif semantics == DATA_INTERVAL_DELTA:
-            start, end = fired - delta, fired
+            start, end = _shift(fired, -delta, zone), fired
             logical = fired if manual else start
         elif semantics == TRIGGER_CRON and schedule is not None and not manual:
             logical = start = end = nearest_tick(schedule, fired, zone)

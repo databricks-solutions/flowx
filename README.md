@@ -216,7 +216,7 @@ task's output, the sensor pairs with its asynchronous submission (or matching `b
 not change trigger-rule behavior. Otherwise the task stays as a placeholder with the reason attached.
 
 **Scheduling & semantics** (source-level, applied alongside the operators above): cron → Quartz,
-`timedelta` → periodic, `@continuous` → continuous mode, Airflow-3 Asset/Dataset lists →
+`timedelta` → a `start_date`-anchored Quartz cron when its length divides an hour or a day (else periodic), `@continuous` → continuous mode, Airflow-3 Asset/Dataset lists →
 `ALL_UPDATED` / `ANY_UPDATED` table triggers, `trigger_rule` → `run_if`, `params={...}` / `Param` →
 job parameters, and `>>` / `<<` / `set_upstream` / `set_downstream` / TaskGroup edges → task
 dependencies. Interval macros (`{{ ds }}`, `{{ ts }}`, `{{ data_interval_start }}`, ...) are computed per run

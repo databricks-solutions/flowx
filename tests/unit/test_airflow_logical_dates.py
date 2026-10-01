@@ -586,3 +586,97 @@ def test_no_rendered_timestamp_carries_sub_second_precision() -> None:
             semantics=semantics, cron="0 * * * *", trigger_time="2026-01-01T05:00:00.999Z", trigger_type="one_time"
         )
         assert all("." not in value for value in values.values())
+
+
+def _delta_dag(delta: str, start_date: str, *, uses_date: bool = True) -> str:
+    command = "echo {{ ds }}" if uses_date else "echo done"
+    return f"""
+        from datetime import datetime, timedelta
+
+        import pendulum
+        from airflow import DAG
+        from airflow.operators.bash import BashOperator
+
+        with DAG(dag_id="delta_dag", schedule_interval={delta}, start_date={start_date}) as dag:
+            BashOperator(task_id="work", bash_command="{command}")
+    """
+
+
+@pytest.mark.parametrize(
+    ("delta", "start_date", "expected"),
+    [
+        ("timedelta(hours=6)", "datetime(2026, 1, 1)", ("0 0 0/6 * * ?", "UTC")),
+        (
+            "timedelta(hours=6)",
+            'pendulum.datetime(2026, 1, 1, 1, 30, tz="America/Los_Angeles")',
+            ("0 30 3/6 * * ?", "UTC"),
+        ),
+        (
+            "timedelta(days=1)",
+            'pendulum.datetime(2026, 1, 1, 5, tz="America/Los_Angeles")',
+            ("0 0 5 * * ?", "America/Los_Angeles"),
+        ),
+        ("timedelta(minutes=15)", "datetime(2026, 1, 1, 0, 7)", ("0 7/15 * * * ?", "UTC")),
+    ],
+)
+def test_day_dividing_timedelta_fires_on_airflow_interval_boundaries(
+    tmp_path: Path, delta: str, start_date: str, expected: tuple[str, str]
+) -> None:
+    pipeline = _load(tmp_path, _delta_dag(delta, start_date, uses_date=False))
+
+    assert pipeline.schedule is not None
+    assert (pipeline.schedule["quartz_cron_expression"], pipeline.schedule["timezone_id"]) == expected
+
+
+@pytest.mark.parametrize(
+    ("delta", "start_date"),
+    [
+        ("timedelta(days=2)", "datetime(2026, 1, 1)"),
+        ("timedelta(hours=6)", "pendulum.today()"),
+        ("timedelta(days=1)", 'pendulum.datetime(2026, 1, 1, 2, 30, tz="America/Los_Angeles")'),
+    ],
+)
+def test_timedelta_without_a_fixed_phase_stays_periodic(tmp_path: Path, delta: str, start_date: str) -> None:
+    pipeline = _load(tmp_path, _delta_dag(delta, start_date, uses_date=False))
+
+    assert pipeline.schedule is not None and pipeline.schedule["kind"] == "periodic"
+
+
+def test_dates_on_a_periodic_timedelta_schedule_are_undeterminable(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, _delta_dag("timedelta(days=2)", "datetime(2026, 1, 1)"))
+
+    assert RESOLVER not in _by_key(pipeline)
+    assert isinstance(_by_key(pipeline)["work"], PlaceholderActivity)
+    assert "airflow_logical_date_semantics_undeterminable" in _codes(pipeline)
+
+
+def test_anchored_timedelta_resolver_carries_its_start_date(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, _delta_dag("timedelta(hours=6)", "datetime(2026, 1, 1, 0, 0)"))
+
+    resolver = _by_key(pipeline)[RESOLVER]
+    assert isinstance(resolver, NotebookActivity)
+    assert "'anchor_time': '2026-01-01T00:00:00+00:00'" in (resolver.generated_source or "")
+
+
+def test_daily_delta_intervals_stay_contiguous_across_daylight_saving() -> None:
+    anchor = "2026-01-01T13:00:00+00:00"
+    fires = ["2026-03-07T13:00:00Z", "2026-03-08T12:00:00Z", "2026-03-09T12:00:00Z"]
+    resolved = [
+        _resolve(
+            semantics=runtime.DATA_INTERVAL_DELTA,
+            delta_seconds=86400,
+            zone_name="America/Los_Angeles",
+            anchor_time=anchor,
+            trigger_time=fire,
+        )
+        for fire in fires
+    ]
+
+    assert [values["ds"] for values in resolved] == ["2026-03-06", "2026-03-07", "2026-03-08"]
+    assert [values["data_interval_end"] for values in resolved] == [
+        "2026-03-07T13:00:00+00:00",
+        "2026-03-08T12:00:00+00:00",
+        "2026-03-09T12:00:00+00:00",
+    ]
+    for earlier, later in zip(resolved, resolved[1:], strict=False):
+        assert earlier["data_interval_end"] == later["data_interval_start"]

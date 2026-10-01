@@ -15,6 +15,7 @@ import inspect
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from flowx.models.ir import Activity, NotebookActivity
@@ -54,6 +55,7 @@ class LogicalDateSemantics:
     cron: str | None = None
     timezone: str = "UTC"
     delta_seconds: int = 0
+    anchor_time: str = ""
     reason: str = ""
     disclosures: tuple[tuple[str, str], ...] = ()
 
@@ -211,8 +213,45 @@ def classify(
     schedule_interval: str | None,
     timezone: str | None,
     schedule: dict[str, object] | None,
+    start_date: datetime | None = None,
 ) -> LogicalDateSemantics:
-    """Decides which timetable family governs this DAG's interval macros, from source alone."""
+    """Decides which timetable family governs this DAG's interval macros, from source alone.
+
+    A timedelta schedule is only resolvable when its Databricks schedule fires on Airflow's interval
+    boundaries, which needs the Quartz cron anchored to a literal ``start_date``. A periodic trigger
+    fires relative to when the job was deployed, so its runs cannot be mapped back to Airflow intervals.
+    """
+    semantics = _classify_timetable(
+        module,
+        dag_kwargs=dag_kwargs,
+        schedule_node=schedule_node,
+        schedule_interval=schedule_interval,
+        timezone=timezone,
+        schedule=schedule,
+    )
+    if semantics.kind not in (runtime.DATA_INTERVAL_DELTA, runtime.TRIGGER_DELTA) or schedule is None:
+        return semantics
+    if schedule.get("kind") != "schedule" or start_date is None:
+        return LogicalDateSemantics(
+            kind=UNDETERMINABLE,
+            generation=semantics.generation,
+            reason=(
+                "the timedelta schedule became a Databricks periodic trigger, which fires relative to when the "
+                "job was deployed rather than on Airflow's interval boundaries from start_date"
+            ),
+        )
+    return dataclasses.replace(semantics, anchor_time=start_date.isoformat())
+
+
+def _classify_timetable(
+    module: ast.Module,
+    *,
+    dag_kwargs: dict[str, ast.expr],
+    schedule_node: ast.expr | None,
+    schedule_interval: str | None,
+    timezone: str | None,
+    schedule: dict[str, object] | None,
+) -> LogicalDateSemantics:
     generation, evidence = airflow_generation(module, dag_kwargs)
     zone = timezone or "UTC"
     if schedule is not None and schedule.get("kind") in _EVENT_SCHEDULE_KINDS:
@@ -320,6 +359,7 @@ def resolver_source(semantics: LogicalDateSemantics) -> str:
         "cron": semantics.cron,
         "zone_name": semantics.timezone,
         "delta_seconds": semantics.delta_seconds,
+        "anchor_time": semantics.anchor_time,
         "publish_neighbors": semantics.publishes_neighbors,
     }
     main = (
