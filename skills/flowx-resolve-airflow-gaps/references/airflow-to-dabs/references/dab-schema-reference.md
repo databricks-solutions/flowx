@@ -14,15 +14,14 @@ include:
   - resources/*.yml
 
 variables:
-  spark_version:
-    description: Spark runtime version
-    default: "<SPARK_VERSION>"
-  node_type_id:
-    description: Cluster node type
-    default: "<NODE_TYPE_ID>"
-  warehouse_id:
+  # Declare each only when a generated task uses it, with no default. `bundle validate`
+  # then reports the value the user must supply.
+  spark_version:                           # only with classic job compute
+    description: Databricks Runtime for classic job compute
+  node_type_id:                            # only with classic job compute
+    description: Workspace-supported node type for classic job compute
+  warehouse_id:                            # only with sql_task
     description: SQL warehouse ID for SQL tasks
-    default: ""
 
 targets:
   dev:
@@ -120,7 +119,7 @@ resources:
         - name: env
           default: "dev"
 
-      # Shared cluster definitions
+      # Shared cluster definitions (only for tasks that need classic compute)
       job_clusters:
         - job_cluster_key: shared-cluster
           new_cluster:
@@ -154,7 +153,7 @@ Each task must have exactly one task type field (e.g., `notebook_task`, `sql_tas
       outcome: "true"                      # Only for condition_task dependencies
   timeout_seconds: 3600                    # 0 = no timeout
   run_if: ALL_SUCCESS                      # ALL_SUCCESS | ALL_DONE | NONE_FAILED | AT_LEAST_ONE_SUCCESS | ALL_FAILED | AT_LEAST_ONE_FAILED
-  # Cluster (one of):
+  # Compute: omit all three for serverless; for classic, one of:
   job_cluster_key: shared-cluster          # Reference to job_clusters entry
   existing_cluster_id: "1234-567890-abc"   # Use existing cluster
   new_cluster:                             # Create new cluster for this task
@@ -193,6 +192,7 @@ Runs a Python file on a Spark cluster.
 
 ```yaml
 - task_key: my_python_script
+  environment_key: Default                      # Required on serverless; classic uses job_cluster_key
   spark_python_task:
     python_file: ../src/my_script.py            # Required. Path to .py file.
     source: WORKSPACE
@@ -209,15 +209,27 @@ Runs an entry point from a Python wheel package.
 
 ```yaml
 - task_key: my_wheel_task
+  environment_key: wheel_env                    # Required on serverless
   python_wheel_task:
     entry_point: run                            # Required. Function or class name.
     package_name: my_package                    # Required. Package name.
     named_parameters:                           # Optional keyword args (OR parameters, not both)
       env: "prod"
       date: "{{job.parameters.run_date}}"
-  libraries:
-    - whl: ../dist/my_package-*.whl
 ```
+
+The job-level serverless environment installs the wheel:
+
+```yaml
+environments:
+  - environment_key: wheel_env
+    spec:
+      environment_version: "5"
+      dependencies:
+        - ../dist/my_package-*.whl
+```
+
+On classic compute, replace `environment_key` with `job_cluster_key` and install the wheel with task-level `libraries: [{whl: ../dist/my_package-*.whl}]`.
 
 ---
 
@@ -378,6 +390,7 @@ Runs dbt commands.
 
 ```yaml
 - task_key: my_dbt_task
+  environment_key: dbt_env                      # Required on serverless
   dbt_task:
     commands:                                   # Required. Up to 10 commands.
       - "dbt deps"
@@ -389,9 +402,17 @@ Runs dbt commands.
     # profiles_directory: ../dbt/profiles       # Optional. Use only when warehouse_id is omitted.
     catalog: main                               # Optional. Requires warehouse_id.
     schema: transforms                          # Optional.
-  libraries:
-    - pypi:
-        package: "dbt-databricks>=1.0.0,<2.0.0"
+```
+
+Job level:
+
+```yaml
+environments:
+  - environment_key: dbt_env
+    spec:
+      environment_version: "5"
+      dependencies:
+        - "dbt-databricks>=1.0.0,<2.0.0"
 ```
 
 A single `dbt_task` runs the whole invocation as one opaque task. For one task per dbt model/seed/snapshot/test (per-model observability and retries), use dbt factory mode instead — see the dbt conversion decision point in `references/operator-mapping.md`.
@@ -609,7 +630,9 @@ trigger:
 
 ## Cluster Configuration
 
-Three ways to assign compute to a task:
+Serverless is the default: a serverless task omits `job_cluster_key`, `new_cluster`, and `existing_cluster_id` (see Serverless Environments below). Use classic compute only when the workload needs it — R, Spark properties outside the serverless allowlist, init scripts, GPUs, a custom container, a cluster configured in the source DAG — or when the user confirms the target workspace has no serverless jobs compute. Classic compute declares `spark_version` and `node_type_id` as required bundle variables with no default; never copy or guess a runtime or node type the source does not specify.
+
+Three ways to assign classic compute to a task:
 
 ### New Cluster (per-task)
 
@@ -656,7 +679,7 @@ job_clusters:
 
 ### Serverless Environments
 
-Serverless notebook tasks omit all cluster fields (`job_cluster_key`, `new_cluster`, `existing_cluster_id`). Referencing a job-level environment via `environment_key` is OPTIONAL — use it to pin dependencies; without it the task runs on the default serverless environment.
+Serverless tasks omit all cluster fields (`job_cluster_key`, `new_cluster`, `existing_cluster_id`). A notebook task may reference a job-level environment via `environment_key` to pin dependencies; without it the task runs on the default serverless environment. Python script (`spark_python_task`), Python wheel, and dbt tasks on serverless **require** `environment_key` referencing an entry in the job's `environments`.
 
 ```yaml
 resources:

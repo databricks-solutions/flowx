@@ -327,7 +327,7 @@ spark_etl = SparkSubmitOperator(
 ```yaml
 - task_key: spark_etl
   new_cluster:
-    spark_version: "15.4.x-scala2.12"
+    spark_version: ${var.spark_version}
     node_type_id: ${var.node_type_id}
     num_workers: 2
     spark_conf:
@@ -812,15 +812,24 @@ dbt_run = DbtRunOperator(
 
 ```yaml
 - task_key: dbt_transform
+  environment_key: dbt_env
   dbt_task:
     commands:
       - "dbt deps"
       - "dbt run --select tag:daily"
     project_directory: ../dbt/my_project
     warehouse_id: ${var.warehouse_id}
-  libraries:
-    - pypi:
-        package: "dbt-databricks>=1.0.0,<2.0.0"
+```
+
+Job level:
+
+```yaml
+environments:
+  - environment_key: dbt_env
+    spec:
+      environment_version: "5"
+      dependencies:
+        - "dbt-databricks>=1.0.0,<2.0.0"
 ```
 
 Also treat `BashOperator`/`SSHOperator` commands matching `dbt (deps|seed|snapshot|run|test|build)` as dbt workloads subject to this decision point.
@@ -1047,11 +1056,21 @@ If the function has custom dependencies, package it as a Python wheel with an `e
 
 ```yaml
 - task_key: custom_transform
+  environment_key: custom_transform_env
   python_wheel_task:
     entry_point: run
     package_name: custom_transform
-  libraries:
-    - whl: ../dist/custom_transform-*.whl
+```
+
+Job level:
+
+```yaml
+environments:
+  - environment_key: custom_transform_env
+    spec:
+      environment_version: "5"
+      dependencies:
+        - ../dist/custom_transform-*.whl
 ```
 
 **DABs YAML (notebook approach):**
@@ -1535,7 +1554,7 @@ run_etl = KubernetesPodOperator(
 job_clusters:
   - job_cluster_key: etl_container
     new_cluster:
-      spark_version: "15.4.x-scala2.12"
+      spark_version: ${var.spark_version}
       node_type_id: ${var.node_type_id}
       data_security_mode: SINGLE_USER
       num_workers: 0
@@ -1580,7 +1599,7 @@ run_go_binary = KubernetesPodOperator(
 job_clusters:
   - job_cluster_key: go_processor_container
     new_cluster:
-      spark_version: "15.4.x-scala2.12"
+      spark_version: ${var.spark_version}
       node_type_id: ${var.node_type_id}
       data_security_mode: SINGLE_USER
       num_workers: 0
