@@ -32,7 +32,6 @@ from flowx.models.ir import (
     WaitActivity,
     WebActivity,
 )
-from flowx.sources.airflow.templating import LOGICAL_DATE_TRIGGER_TIME_PARAMETER
 
 
 @dataclass(slots=True, kw_only=True)
@@ -384,8 +383,7 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
 
     # Airflow catchup=True has no DABs schedule setting, and interval macros resolve from the run's
     # trigger instant; both need backfill guidance naming the trigger-instant parameters to override.
-    parameter_names = {parameter.get("name") for parameter in pipeline.parameters or []}
-    date_resolver = LOGICAL_DATE_TRIGGER_TIME_PARAMETER in parameter_names
+    date_resolver = pipeline.tags.get("airflow_logical_date_resolver") == "true"
     catchup = pipeline.tags.get("airflow_catchup") == "true"
     if catchup or date_resolver:
         setup_tasks_out.append(

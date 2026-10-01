@@ -25,6 +25,9 @@ AIRFLOW_RUN_ID_PARAMETER = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}run_id"
 # Consumers read the published task values; the resolver reads these reserved job parameters.
 LOGICAL_DATE_RESOLVER_TASK_KEY = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}dates"
 LOGICAL_DATE_TRIGGER_TIME_PARAMETER = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}trigger_time"
+# Job tag marking a pipeline whose interval macros come from the generated date resolver, so shared
+# packaging code can add backfill guidance without depending on the Airflow front-end.
+LOGICAL_DATE_RESOLVER_TAG = "airflow_logical_date_resolver"
 LOGICAL_DATE_TRIGGER_TYPE_PARAMETER = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}trigger_type"
 LOGICAL_DATE_OVERRIDE_PARAMETER = f"{FLOWX_AIRFLOW_PARAMETER_PREFIX}logical_date"
 LOGICAL_DATE_PARAMETER_DEFAULTS: dict[str, str] = {

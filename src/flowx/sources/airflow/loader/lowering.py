@@ -712,6 +712,8 @@ def _load_airflow_module(
         # Airflow catchup=True has no DABs schedule setting; it maps to running a native Databricks
         # backfill, which overrides the reserved logical-date parameter per replayed window.
         tags["airflow_catchup"] = "true"
+    if logical_date_resolver is not None:
+        tags[templating.LOGICAL_DATE_RESOLVER_TAG] = "true"
     if visitor.dag_owner:
         tags["airflow_owner"] = visitor.dag_owner
     available_user_tags = _DATABRICKS_JOB_TAG_LIMIT - len(tags)

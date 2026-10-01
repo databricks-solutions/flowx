@@ -13,7 +13,6 @@ import ast
 import dataclasses
 import inspect
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -22,13 +21,12 @@ from flowx.models.ir import Activity, NotebookActivity
 from flowx.sources.airflow import logical_date_runtime as runtime
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow import templating
+from flowx.sources.airflow.loader.ast_utils import airflow_generation
 from flowx.sources.airflow.loader.schedule import _extract_timezone, _timedelta_seconds
 
 EVENT = "event"
 UNDETERMINABLE = "undeterminable"
 
-_LEGACY_MODULE = re.compile(r"^airflow\.(?:operators|sensors)\.[^.]+_(?:operator|sensor)$")
-_AIRFLOW_2_CORE_MODULE = re.compile(r"^airflow\.(?:operators|sensors)\.[A-Za-z0-9_]+$")
 _EVENT_SCHEDULE_KINDS = frozenset({"file_arrival", "table_update", "continuous"})
 _TIMETABLE_NAMES = frozenset(
     {"CronDataIntervalTimetable", "CronTriggerTimetable", "DeltaDataIntervalTimetable", "DeltaTriggerTimetable"}
@@ -83,45 +81,6 @@ class LogicalDateSemantics:
                 f"(this DAG: Airflow {self.generation}, {self.kind})"
             )
         return None
-
-
-def _imported_modules(module: ast.Module) -> list[str]:
-    names: list[str] = []
-    for statement in module.body:
-        if isinstance(statement, ast.Import):
-            names.extend(item.name for item in statement.names)
-        elif isinstance(statement, ast.ImportFrom) and statement.module:
-            names.append(statement.module)
-    return names
-
-
-def airflow_generation(module: ast.Module, dag_kwargs: dict[str, ast.expr]) -> tuple[str, str]:
-    """Infers the Airflow major version from source, returning ``(generation, evidence)``.
-
-    Airflow 3 is identified by the Task SDK or the standard provider. Airflow 2 is identified by syntax
-    Airflow 3 removed: the ``schedule_interval`` DAG argument, core ``airflow.operators`` /
-    ``airflow.sensors`` modules, and ``airflow.utils.dates``. Conflicting evidence is ``unknown``.
-    """
-    modules = _imported_modules(module)
-    three = [name for name in modules if name.startswith(("airflow.sdk", "airflow.providers.standard"))]
-    legacy = [name for name in modules if name.startswith("airflow.contrib.") or _LEGACY_MODULE.fullmatch(name)]
-    two = [
-        name
-        for name in modules
-        if (_AIRFLOW_2_CORE_MODULE.fullmatch(name) and not _LEGACY_MODULE.fullmatch(name))
-        or name == "airflow.utils.dates"
-    ]
-    if "schedule_interval" in dag_kwargs:
-        two.append("schedule_interval")
-    if three and (two or legacy):
-        return "unknown", f"conflicting Airflow 3 ({three[0]}) and Airflow 2 ({(two or legacy)[0]}) syntax"
-    if legacy:
-        return "1.10", legacy[0]
-    if two:
-        return "2", two[0]
-    if three:
-        return "3", three[0]
-    return "unknown", "no version-specific syntax"
 
 
 def _valid_cron(expression: str) -> bool:

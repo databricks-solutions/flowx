@@ -680,3 +680,49 @@ def test_daily_delta_intervals_stay_contiguous_across_daylight_saving() -> None:
     ]
     for earlier, later in zip(resolved, resolved[1:], strict=False):
         assert earlier["data_interval_end"] == later["data_interval_start"]
+
+
+def test_shared_preparer_does_not_depend_on_the_airflow_front_end() -> None:
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys, flowx.preparer.workflow_preparer\n"
+        "assert 'flowx.sources.airflow.templating' not in sys.modules, 'preparer imported Airflow templating'\n"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_backfill_setup_follows_the_resolver_tag() -> None:
+    from flowx.models.ir import WaitActivity
+    from flowx.preparer.workflow_preparer import prepare_workflow
+
+    pipeline = Pipeline(
+        name="tagged",
+        tags={"source": "airflow", "airflow_logical_date_resolver": "true"},
+        tasks=[WaitActivity(name="w", task_key="w", wait_time_seconds=1)],
+    )
+
+    backfills = [task for task in prepare_workflow(pipeline).setup_tasks if task.type == "airflow_backfill"]
+
+    assert [task.config["date_resolver"] for task in backfills] == [True]
+
+
+def test_resolver_pipelines_carry_the_resolver_tag(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, _delta_dag("timedelta(hours=6)", "datetime(2026, 1, 1)"))
+
+    assert pipeline.tags.get("airflow_logical_date_resolver") == "true"
+
+
+def test_try_except_version_shim_is_an_unknown_generation() -> None:
+    from flowx.sources.airflow.loader import ast_utils
+
+    module = ast.parse(
+        "from airflow.operators.bash import BashOperator\n"
+        "try:\n    from airflow.sdk import DAG\nexcept ImportError:\n    from airflow import DAG\n"
+    )
+
+    assert ast_utils.airflow_generation(module)[0] == "unknown"
+    assert logical_dates.airflow_generation is ast_utils.airflow_generation
