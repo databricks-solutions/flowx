@@ -31,12 +31,12 @@ _PROVIDER_PIN_FIELD = "flowx_pin"
 
 _ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql", "spark_python")
 _STRUCTURAL_OPERATOR_MARKERS = ("branch", "shortcircuit", "taskgroup", "subdag")
-_NON_LEAF_FINDING_CODES = {
+_GRAPH_PATCH_FINDING_CODES = {
     "excluded_dag_reference",
     "taskflow_mapped_output_unavailable",
-    "unrepresented_task_policy",
     "unsupported_trigger_rule",
 }
+_TASK_POLICY_FINDING_CODES = {"unrepresented_task_policy"}
 _RESOLUTION_STATUSES = {"resolved", "needs_input", "deferred"}
 _DISPOSITIONS = {"consumed", "preserved_by_flowx", "ignored", "needs_input"}
 _MAX_GENERATED_FILE_BYTES = 1024 * 1024
@@ -56,6 +56,20 @@ _COMMON_TASK_FIELDS = (
     "compute_mode",
     "notifications",
 )
+
+
+def airflow_gap_required_capability(operator: str, finding_codes: set[str]) -> str | None:
+    """Returns the contract capability required when a gap cannot use a leaf replacement."""
+    normalized_operator = operator.casefold().replace("_", "")
+    if any(marker in normalized_operator for marker in _STRUCTURAL_OPERATOR_MARKERS):
+        return "graph_patch"
+    if finding_codes & _GRAPH_PATCH_FINDING_CODES:
+        return "graph_patch"
+    if finding_codes & _TASK_POLICY_FINDING_CODES:
+        return "task_policy_patch"
+    return None
+
+
 _FLOWX_OWNED_ARGUMENTS = {
     "task_id",
 }
@@ -901,11 +915,8 @@ def _build_gap_envelopes(
 
 def _allowed_replacement_kinds(operator: str, findings: list[dict[str, Any]]) -> tuple[str, ...]:
     """Returns leaf replacement kinds only when the gap needs no graph or task-policy mutation."""
-    normalized_operator = operator.casefold().replace("_", "")
     finding_codes = {str(finding.get("code", "")) for finding in findings}
-    if any(marker in normalized_operator for marker in _STRUCTURAL_OPERATOR_MARKERS):
-        return ()
-    if finding_codes & _NON_LEAF_FINDING_CODES:
+    if airflow_gap_required_capability(operator, finding_codes) is not None:
         return ()
     return _ALLOWED_REPLACEMENT_KINDS
 

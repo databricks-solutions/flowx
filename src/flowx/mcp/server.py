@@ -16,7 +16,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from flowx.agentic import validate_persisted_agentic_report
+from flowx.agentic import airflow_gap_required_capability, validate_persisted_agentic_report
 from flowx.mcp import runner
 
 
@@ -176,24 +176,13 @@ def _has_source_reference(parameters: dict[str, Any], source: str) -> bool:
     )
 
 
-_GRAPH_PATCH_FINDING_CODES = {
-    "excluded_dag_reference",
-    "taskflow_mapped_output_unavailable",
-    "unsupported_trigger_rule",
-}
-_TASK_POLICY_FINDING_CODES = {"unrepresented_task_policy"}
-
-
 def _gap_capability(gap: dict[str, Any], finding_codes: dict[str, str]) -> str | None:
     """Returns the contract capability a prepared gap needs beyond leaf replacement, if any."""
-    operator = str(gap.get("operator", "")).casefold().replace("_", "")
-    if any(marker in operator for marker in ("branch", "shortcircuit", "taskgroup", "subdag")):
-        return "graph_patch"
+    operator = str(gap.get("operator", ""))
     codes = {finding_codes.get(str(fingerprint), "") for fingerprint in gap.get("finding_fingerprints") or []}
-    if codes & _GRAPH_PATCH_FINDING_CODES:
-        return "graph_patch"
-    if codes & _TASK_POLICY_FINDING_CODES:
-        return "task_policy_patch"
+    required_capability = airflow_gap_required_capability(operator, codes)
+    if required_capability is not None:
+        return required_capability
     if gap.get("allowed_replacement_kinds") == []:
         return "non_leaf_patch"
     return None
@@ -242,13 +231,7 @@ def _airflow_gap_state(report: Any, prepared_gaps: list[dict[str, Any]]) -> dict
         if isinstance(fingerprint, str) and fingerprint in bound_fingerprints:
             continue
         code = str(finding.get("code", ""))
-        capability = (
-            "graph_patch"
-            if code in _GRAPH_PATCH_FINDING_CODES
-            else "task_policy_patch"
-            if code in _TASK_POLICY_FINDING_CODES
-            else "source_semantics"
-        )
+        capability = airflow_gap_required_capability("", {code}) or "source_semantics"
         unsupported.append(
             {
                 "gap_id": fingerprint,
@@ -388,7 +371,7 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
     cleanup = _noop
     try:
         if action == "prepare" or _has_source_reference(p, "airflow"):
-            source_path, cleanup = _resolve_source(p)
+            source_path, cleanup = _resolve_source(p, path_key="source_dir")
             if action == "prepare" and not source_path:
                 return {
                     "ok": False,
@@ -740,6 +723,21 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                     if isinstance(payload, list):
                         prepared_gaps = [gap for gap in payload if isinstance(gap, dict)]
                 state = _airflow_gap_state(report, prepared_gaps)
+                if state["eligible_gaps"]:
+                    next_action = (
+                        "Stage and review eligible leaf candidates with resolve_agentic, then apply them and call "
+                        "migrate again with resume_agentic=true. Structural and source-semantic gaps remain linked "
+                        "failing placeholders unless they are migrated manually or gain deterministic or GraphPatch "
+                        "support."
+                    )
+                else:
+                    next_action = (
+                        "No gap is eligible for the v1 leaf-resolution contract, so migrate cannot create a reviewed "
+                        "agentic report to resume. To intentionally retain the linked failing placeholders, call "
+                        f"package separately with report_path={report_path!r} and "
+                        f"output_dir={output_dir!r}. Otherwise, "
+                        "migrate the unsupported semantics manually or add deterministic or GraphPatch support."
+                    )
                 return {
                     "ok": True,
                     "status": "needs_agentic_resolution",
@@ -747,13 +745,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                     "output_dir": output_dir,
                     **state,
                     "steps": steps,
-                    "next_action": (
-                        "Stage and review eligible leaf candidates with resolve_agentic, then apply them and call "
-                        "migrate again with resume_agentic=true. Structural and source-semantic gaps are outside "
-                        "the v1 leaf contract and require deterministic support, manual migration, or a future "
-                        "GraphPatch contract. To keep reviewed placeholders, complete the review with no accepted "
-                        "candidates before resuming."
-                    ),
+                    "next_action": next_action,
                 }
 
         package_res = runner.run_adapter(
@@ -917,6 +909,10 @@ def build_server() -> FastMCP:
           validated before bundle files are written. A successful package that retains reviewed
           placeholders returns ``status="completed_with_reviewed_gaps"`` rather than claiming the
           migration is semantically complete.
+        - When no gap is eligible for leaf resolution, no agentic report exists to resume. To retain
+          those linked failing placeholders intentionally, call ``package`` separately with the
+          deterministic ``report_path`` returned by ``migrate``; otherwise migrate them manually or
+          add deterministic or GraphPatch support.
 
         Returns a dict ``{"ok": bool, ...}`` with per-command summaries (inventory / translation /
         bundle_files / questions / result) and a "process" block (stdout/stderr/returncode). An unknown

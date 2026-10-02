@@ -313,6 +313,8 @@ def test_airflow_migrate_reports_unbound_source_semantics_as_unsupported(monkeyp
     assert result["structural_gaps"] == []
     assert result["unsupported_gaps"][0]["gap_id"] == "gap-setting"
     assert result["unsupported_gaps"][0]["required_capability"] == "source_semantics"
+    assert "package" in result["next_action"]
+    assert result["report_path"] in result["next_action"]
     assert not any(argv[0] == "resolve-agentic" for argv in calls)
     assert not any(argv[0] == "package" for argv in calls)
 
