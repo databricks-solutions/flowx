@@ -102,11 +102,13 @@ These fail closed rather than guessing a mapping:
 
 **Compute.** The job's `placement.cluster_name` links it to its `DataprocCreateClusterOperator`. From
 that cluster, flowx carries over:
-- `worker_config.num_instances` as `num_workers`, when there are no secondary workers;
+- `worker_config.num_instances` as `num_workers`, when there are no secondary workers (zero workers
+  becomes a single-node cluster);
 - `spark:`-prefixed software properties, as `spark_conf`.
 
-The job's own `spark.*` properties are added to the same `spark_conf`, and the task binds to the
-default job cluster. Other property prefixes (`yarn:`, `hdfs:`, `mapred:`, `dataproc:`, …) are
+The job's own `spark.*` properties are added to the same `spark_conf`, and every Spark workload binds
+to the default job cluster. A job placed by `cluster_labels`, or on a cluster this DAG does not create,
+also runs there, and that compute change is reported. Other property prefixes (`yarn:`, `hdfs:`, `mapred:`, `dataproc:`, …) are
 removed and reported. Machine types and image versions are reported but never mapped, so the node
 type and Databricks Runtime remain bundle variables.
 
@@ -122,7 +124,9 @@ when all of these hold:
 
 A `DataprocJobSensor` is removed when its `dataproc_job_id` is the `xcom_pull` of an asynchronous
 submission that nothing else reads. A `DataprocBatchSensor` is removed when its `batch_id` matches the
-creating operator's `batch_id`.
+creating operator's `batch_id`. Either sensor must also be downstream of the workload it waits on and
+set no `retries` / `retry_delay` of its own. A static `timeout` or `execution_timeout` becomes the
+workload task's `timeout_seconds`, which cancels the workload when it expires.
 
 Every removal is recorded in the transformation ledger. The changed retry, teardown, and wait
 behavior is reported as a gap finding, as are the GCS artifacts the job's Databricks identity must

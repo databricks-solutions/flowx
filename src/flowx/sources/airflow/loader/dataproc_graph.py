@@ -11,10 +11,12 @@ Anything short of that stays in the graph as a failing placeholder with the reas
 from __future__ import annotations
 
 import ast
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from flowx.models.ir import SparkJarActivity, SparkPythonActivity
 from flowx.sources.airflow import dataproc, templating
 from flowx.sources.airflow import operators as ops
 
@@ -39,6 +41,8 @@ class DataprocPlan:
         proofs: Transformation-ledger entries explaining every removal.
         clusters: Jobs compute settings for each migrated workload, keyed by capture id.
         retained_reasons: Why each Dataproc task that stays in the graph needs manual migration.
+        timeouts: Run-time bounds in seconds that collapsed sensors placed on their workloads, keyed by
+            the workload's capture id.
         disclosures: ``(capture_id, code, message)`` findings describing changed behavior.
         validation_failures: ``(capture_id, code, message)`` findings for malformed payloads, which fail
             reconciliation and block packaging.
@@ -48,6 +52,7 @@ class DataprocPlan:
     proofs: list[dict[str, Any]] = field(default_factory=list)
     clusters: dict[str, dict[str, Any]] = field(default_factory=dict)
     retained_reasons: dict[str, str] = field(default_factory=dict)
+    timeouts: dict[str, int] = field(default_factory=dict)
     disclosures: list[tuple[str, str, str]] = field(default_factory=list)
     validation_failures: list[tuple[str, str, str]] = field(default_factory=list)
 
@@ -108,6 +113,46 @@ def _cluster_users(
         if name_pattern.search(combined) or _DATAPROC_CLIENTS.search(combined):
             users.add(task_id)
     return users
+
+
+def _ancestors(variable: str, upstreams: dict[str, list[str]]) -> set[str]:
+    seen: set[str] = set()
+    pending = list(upstreams.get(variable, []))
+    while pending:
+        parent = pending.pop()
+        if parent not in seen:
+            seen.add(parent)
+            pending.extend(upstreams.get(parent, []))
+    return seen
+
+
+def _static_seconds(node: ast.expr | None) -> tuple[int | None, bool]:
+    """Returns a duration argument in whole seconds and whether it could be read; an absent one reads as None."""
+    if node is None:
+        return None, True
+    if isinstance(node, ast.Constant) and isinstance(node.value, int | float) and not isinstance(node.value, bool):
+        return (math.ceil(node.value), True) if node.value > 0 else (None, False)
+    seconds = templating.timedelta_seconds(node)
+    return seconds, seconds is not None
+
+
+def _sensor_wait_bound(kwargs: dict[str, ast.expr]) -> tuple[int | None, str | None]:
+    """Returns the sensor's static wait bound in seconds, or why its wait policy cannot move to the workload.
+
+    The sensor's ``timeout`` and ``execution_timeout`` become the workload task's timeout. Its own
+    ``retries`` / ``retry_delay`` repeat the wait, which native task completion cannot reproduce.
+    """
+    retried = sorted(name for name in ("retries", "retry_delay") if name in kwargs)
+    if retried:
+        return None, f"its own {' and '.join(retried)} repeat the wait, which native task completion cannot reproduce"
+    bounds: list[int] = []
+    for name in ("timeout", "execution_timeout"):
+        seconds, readable = _static_seconds(kwargs.get(name))
+        if not readable:
+            return None, f"its {name} is not a static positive duration"
+        if seconds is not None:
+            bounds.append(seconds)
+    return (min(bounds) if bounds else None), None
 
 
 def _downstreams(variable: str, upstreams: dict[str, list[str]]) -> set[str]:
@@ -245,8 +290,7 @@ def plan_dataproc(
             spark_conf = {**cluster.spark_conf, **workloads[workload].spark_conf}
             if spark_conf:
                 compute["spark_conf"] = spark_conf
-            if compute:
-                plan.clusters[workload] = {**compute, "_bind_default_cluster": True}
+            plan.clusters[workload] = {**compute, "_bind_default_cluster": True}
             if cluster.dropped_properties or cluster.not_mapped:
                 details = [
                     *(f"property {item} removed" for item in cluster.dropped_properties),
@@ -275,12 +319,14 @@ def plan_dataproc(
         )
 
     for variable, result in workloads.items():
-        if result.activity is None or variable in plan.clusters or not result.spark_conf:
+        if variable in plan.clusters or not isinstance(result.activity, SparkPythonActivity | SparkJarActivity):
             continue
-        plan.clusters[variable] = {"spark_conf": dict(result.spark_conf), "_bind_default_cluster": True}
+        compute = {"spark_conf": dict(result.spark_conf)} if result.spark_conf else {}
+        plan.clusters[variable] = {**compute, "_bind_default_cluster": True}
 
     paired_workloads: dict[str, list[str]] = {}
     sensor_targets: dict[str, str] = {}
+    wait_bounds: dict[str, tuple[int, str]] = {}
     task_to_variable = {task_id: variable for variable, (task_id, _c, _o, _k) in dataproc_vars.items()}
     for variable, (_task_id, canonical, _operator, kwargs) in dataproc_vars.items():
         if canonical == dataproc.JOB_SENSOR:
@@ -326,6 +372,11 @@ def plan_dataproc(
             blocker = f"the workload {target_task_id!r} it waits on needs manual migration"
         elif len(paired_workloads[target]) != 1:
             blocker = f"more than one sensor waits on {target_task_id!r}"
+        elif target not in _ancestors(sensor, upstreams):
+            blocker = (
+                f"{target_task_id!r} is not upstream of the sensor, so removing the sensor would let its "
+                "downstream tasks start before the workload finishes"
+            )
         elif (
             target_canonical == dataproc.SUBMIT_JOB
             and dataproc.static_value(target_kwargs.get("asynchronous")) is not True
@@ -340,9 +391,15 @@ def plan_dataproc(
                 blocker = "another task reads the sensor's output"
             else:
                 blocker = _removal_blocker(sensor, operator, kwargs, upstreams)
+        bound: int | None = None
+        if blocker is None:
+            bound, blocker = _sensor_wait_bound(kwargs)
         if blocker is not None:
             retain(sensor, f"{canonical} was not collapsed into native task completion: {blocker}.")
             continue
+        if bound is not None:
+            wait_bounds[target] = (bound, task_id)
+            plan.timeouts[target] = bound
         plan.dropped.add(sensor)
         collapsed_by_workload[target].append(sensor)
         plan.proofs.append(
@@ -402,6 +459,12 @@ def plan_dataproc(
                     f"teardown {dataproc_vars[member][0]!r} ran under trigger_rule {teardown_rules[member]!r}; "
                     "the job cluster now terminates with the run"
                 )
+        if variable in wait_bounds:
+            bound, sensor_task_id = wait_bounds[variable]
+            notes.append(
+                f"sensor {sensor_task_id!r} bounded the wait to {bound}s, so the task now times out after {bound}s "
+                "and cancels the workload"
+            )
         if canonical == dataproc.SUBMIT_JOB and asynchronous and not waited:
             notes.append("the asynchronous submission had no paired sensor, so downstream tasks now wait for it")
         if notes:
@@ -414,9 +477,14 @@ def plan_dataproc(
                 )
             )
 
-    distinct_compute = {repr(sorted(compute.items())) for compute in plan.clusters.values()}
+    configured = {
+        variable: settings
+        for variable, compute in plan.clusters.items()
+        if (settings := {key: value for key, value in compute.items() if key != "_bind_default_cluster"})
+    }
+    distinct_compute = {repr(sorted(settings.items())) for settings in configured.values()}
     if len(distinct_compute) > 1:
-        first = sorted(plan.clusters)[0]
+        first = sorted(configured)[0]
         plan.disclosures.append(
             (
                 first,

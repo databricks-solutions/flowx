@@ -368,6 +368,67 @@ def test_synchronous_submission_does_not_pair_with_a_job_sensor(tmp_path: Path) 
     assert "not submitted asynchronously" in wait.comment
 
 
+_ASYNC_SUBMIT = _submit('{"pyspark_job": {"main_python_file_uri": "gs://b/m.py"}}', extra=", asynchronous=True")
+
+
+def _job_sensor(extra: str = "") -> str:
+    return (
+        'wait = DataprocJobSensor(task_id="wait", project_id="p", region="r", '
+        f"dataproc_job_id=\"{{{{ ti.xcom_pull(task_ids='submit') }}}}\"{extra})\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        (", timeout=600", 600),
+        (", timeout=7200, execution_timeout=timedelta(minutes=15)", 900),
+        ("", None),
+    ],
+)
+def test_collapsed_sensor_moves_its_timeout_to_the_workload(tmp_path: Path, extra: str, expected: int | None) -> None:
+    pipeline = _load(
+        tmp_path,
+        _ASYNC_SUBMIT + _job_sensor(extra) + "submit >> wait\n",
+        functions="from datetime import timedelta\n",
+    )
+
+    assert "wait" not in {task.task_key for task in pipeline.tasks}
+    assert _task(pipeline, "submit").timeout_seconds == expected
+    messages = " ".join(finding["message"] for finding in pipeline.not_translatable)
+    assert (f"times out after {expected}s" in messages) is (expected is not None)
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        (", retries=3", "retries repeat the wait"),
+        (", timeout=WAIT_SECONDS", "timeout is not a static positive duration"),
+    ],
+)
+def test_sensor_with_an_untransferable_wait_policy_is_retained(tmp_path: Path, extra: str, reason: str) -> None:
+    pipeline = _load(tmp_path, _ASYNC_SUBMIT + _job_sensor(extra) + "submit >> wait\n")
+
+    wait = _task(pipeline, "wait")
+    assert isinstance(wait, PlaceholderActivity)
+    assert reason in wait.comment
+
+
+def test_sensor_not_downstream_of_its_submission_is_retained(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        _ASYNC_SUBMIT
+        + _job_sensor()
+        + 'after = PythonOperator(task_id="after", python_callable=print)\n'
+        + "wait >> after\n",
+    )
+
+    wait = _task(pipeline, "wait")
+    assert isinstance(wait, PlaceholderActivity)
+    assert "is not upstream of the sensor" in wait.comment
+    assert [dependency.task_key for dependency in _task(pipeline, "after").depends_on] == ["wait"]
+
+
 def test_asynchronous_submission_without_a_sensor_discloses_the_new_wait(tmp_path: Path) -> None:
     pipeline = _load(
         tmp_path,
@@ -437,6 +498,46 @@ def _package(tmp_path: Path, pipeline: Pipeline) -> Path:
     (work_dir / "translation_report.json").write_text(json.dumps(pipeline_to_dict(pipeline)), encoding="utf-8")
     assert package_main(["--output-dir", str(output_dir), "--no-download-workspace-files"]) == 0
     return output_dir
+
+
+def _job_resource(output_dir: Path) -> dict:
+    resource = yaml.safe_load((output_dir / "resources" / "dataproc_case.yml").read_text(encoding="utf-8"))
+    return resource["resources"]["jobs"]["dataproc_case"]
+
+
+def test_absorbed_cluster_without_settings_still_binds_the_job_cluster(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, _CLUSTER_BODY + "create >> submit >> delete\n", functions=_CLUSTER_PREFIX)
+
+    assert _task(pipeline, "submit").cluster == {"_bind_default_cluster": True}
+    job = _job_resource(_package(tmp_path, pipeline))
+    tasks = {task["task_key"]: task for task in job["tasks"]}
+    assert tasks["submit"]["job_cluster_key"] == "default_cluster"
+
+
+def test_unplaced_spark_workload_binds_the_job_cluster(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, _submit('{"pyspark_job": {"main_python_file_uri": "gs://b/m.py"}}'))
+
+    assert _task(pipeline, "submit").cluster == {"_bind_default_cluster": True}
+
+
+def test_single_node_dataproc_cluster_packages_as_single_node_compute(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        'create = DataprocCreateClusterOperator(task_id="create", project_id="p", region="r", '
+        'cluster_name=CLUSTER_NAME, cluster_config={"worker_config": {"num_instances": 0}})\n'
+        + _submit(
+            '{"placement": {"cluster_name": CLUSTER_NAME}, "pyspark_job": {"main_python_file_uri": "gs://b/m.py"}}'
+        )
+        + 'delete = DataprocDeleteClusterOperator(task_id="delete", project_id="p", region="r", '
+        "cluster_name=CLUSTER_NAME)\n"
+        "create >> submit >> delete\n",
+        functions=_CLUSTER_PREFIX,
+    )
+
+    assert _task(pipeline, "submit").cluster == {"num_workers": 0, "_bind_default_cluster": True}
+    cluster = _job_resource(_package(tmp_path, pipeline))["job_clusters"][0]["new_cluster"]
+    assert cluster["is_single_node"] is True
+    assert "num_workers" not in cluster
 
 
 def test_cloud_storage_artifacts_keep_their_source_uris(tmp_path: Path) -> None:

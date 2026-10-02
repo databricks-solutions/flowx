@@ -494,6 +494,9 @@ def _load_airflow_module(
         activity.max_retries = policy.get("max_retries")
         activity.timeout_seconds = policy.get("timeout_seconds")
         activity.min_retry_interval_millis = policy.get("min_retry_interval_millis")
+        if var in dataproc_plan.timeouts and not isinstance(activity, PlaceholderActivity):
+            bound = dataproc_plan.timeouts[var]
+            activity.timeout_seconds = min(activity.timeout_seconds or bound, bound)
         if isinstance(activity, PlaceholderActivity) and call_node is not None:
             raw_definition = dict(activity.raw_definition or {})
             raw_definition["bound_source"] = ast.unparse(call_node)

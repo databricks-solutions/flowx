@@ -850,7 +850,11 @@ def _infer_bundle_cluster_extras(workflow: PreparedWorkflow) -> dict[str, Any]:
         "spark_conf",
     )
     for key in extra_keys:
-        values = [hint[key] for hint in workflow.cluster_hints if hint.get(key)]
+        values = [
+            hint[key]
+            for hint in workflow.cluster_hints
+            if hint.get(key) or (key == "num_workers" and hint.get(key) == 0)
+        ]
         if not values:
             continue
         # Use string repr to dedupe non-hashable dict entries while still
@@ -1041,8 +1045,9 @@ def _build_default_cluster(extras: dict[str, Any] | None = None) -> dict[str, An
             merge into ``new_cluster`` (num_workers, driver_node_type_id,
             spark_env_vars, custom_tags, init_scripts, cluster_log_conf,
             spark_conf, data_security_mode).  ``num_workers`` overrides the
-            default single-worker value and ``data_security_mode`` overrides
-            the default ``SINGLE_USER`` value when supplied.
+            default single-worker value (zero workers becomes a single-node
+            cluster) and ``data_security_mode`` overrides the default
+            ``SINGLE_USER`` value when supplied.
 
     Returns:
         Cluster definition with the mined (or default single) worker count
@@ -1059,6 +1064,9 @@ def _build_default_cluster(extras: dict[str, Any] | None = None) -> dict[str, An
     if extras:
         for key, value in extras.items():
             new_cluster[key] = value
+    if new_cluster["num_workers"] == 0:
+        del new_cluster["num_workers"]
+        new_cluster["is_single_node"] = True
     return {
         "job_cluster_key": DEFAULT_JOB_CLUSTER_KEY,
         "new_cluster": new_cluster,
