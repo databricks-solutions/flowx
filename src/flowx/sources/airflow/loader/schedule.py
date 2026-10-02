@@ -93,7 +93,7 @@ def _cron_to_quartz(cron: str) -> str | None:
 
 
 def _extract_timezone(node: ast.expr | None) -> str | None:
-    """Extracts an IANA timezone from a ``pendulum.timezone("…")`` call or a tz string kwarg.
+    """Extracts an IANA timezone from a ``pendulum.timezone("…")`` / ``Timezone("…")`` call or a tz string kwarg.
 
     Handles ``start_date=datetime(..., tzinfo=pendulum.timezone("Europe/Madrid"))``,
     ``timezone="Europe/Madrid"``, and ``pendulum.timezone("…")`` directly. Returns None
@@ -106,7 +106,7 @@ def _extract_timezone(node: ast.expr | None) -> str | None:
     if isinstance(node, ast.Call):
         func = node.func
         name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
-        if name in ("timezone", "timezone_") and node.args:
+        if name in ("timezone", "timezone_", "Timezone") and node.args:
             return ops.literal_str(node.args[0])
         # datetime(..., tzinfo=pendulum.timezone("…")) / tz=...
         for kw in node.keywords:

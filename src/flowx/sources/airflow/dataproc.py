@@ -145,6 +145,7 @@ class WorkloadTranslation:
         reason: Why the payload needs manual migration when ``activity`` is ``None``.
         discriminator: The resolved one-of payload key, when exactly one was present.
         cluster_name: The Dataproc cluster the job is placed on, used to find its create operator.
+        placement: A description of the Dataproc cluster the job targets, when its payload sets ``placement``.
         spark_conf: Spark properties from the payload that belong on the task's compute.
         dropped_properties: Dataproc-only properties removed from the payload.
         artifact_uris: Remote source and library locations the Databricks identity must be able to read.
@@ -157,6 +158,7 @@ class WorkloadTranslation:
     reason: str | None = None
     discriminator: str | None = None
     cluster_name: str | None = None
+    placement: str | None = None
     spark_conf: dict[str, str] = field(default_factory=dict)
     dropped_properties: list[str] = field(default_factory=list)
     artifact_uris: list[str] = field(default_factory=list)
@@ -274,8 +276,14 @@ def translate_workload(operator: str, task_id: str, task_key: str, kwargs: dict[
         return WorkloadTranslation(reason=message, validation_error=message)
     result = WorkloadTranslation(discriminator=discriminator)
     placement = payload.get("placement") if not is_batch else None
-    if isinstance(placement, dict) and isinstance(placement.get("cluster_name"), str):
-        result.cluster_name = placement["cluster_name"]
+    if isinstance(placement, dict):
+        if isinstance(placement.get("cluster_name"), str):
+            result.cluster_name = placement["cluster_name"]
+            result.placement = f"cluster {result.cluster_name!r}"
+        elif placement.get("cluster_labels"):
+            result.placement = "a cluster selected by cluster_labels"
+        else:
+            result.placement = "a cluster that the payload does not name"
     if discriminator in _UNSUPPORTED_ENGINE_GUIDANCE:
         result.reason = (
             f"Dataproc {discriminator} needs manual migration. {_UNSUPPORTED_ENGINE_GUIDANCE[discriminator]}"

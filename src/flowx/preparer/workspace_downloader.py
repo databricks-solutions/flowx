@@ -329,8 +329,7 @@ def download_dbfs_file(dbfs_path: str) -> bytes | None:
         return None
     try:
         w = _get_workspace_client()
-        # Strip "dbfs:" prefix for the SDK call
-        path = dbfs_path.replace("dbfs:", "", 1)
+        path = dbfs_path.removeprefix("dbfs:")
         with w.dbfs.open(path, read=True) as f:
             return f.read()
     except ImportError:

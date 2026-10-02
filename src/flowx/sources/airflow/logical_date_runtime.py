@@ -23,8 +23,9 @@ TRIGGER_DELTA = "trigger_delta"
 MANUAL_ONLY = "manual_only"
 RESOLVABLE_SEMANTICS = frozenset({DATA_INTERVAL_CRON, DATA_INTERVAL_DELTA, TRIGGER_CRON, TRIGGER_DELTA, MANUAL_ONLY})
 
-# Databricks trigger types that correspond to an Airflow manual or triggered-DAG run.
-MANUAL_TRIGGER_TYPES = frozenset({"one_time", "run_job_task"})
+# The only Databricks trigger type that fires on the job's cron schedule. Every other type (one_time,
+# run_job_task, file_arrival, table, continuous, model) is treated as an Airflow manual run.
+SCHEDULED_TRIGGER_TYPE = "periodic"
 
 CRON_PRESETS = {
     "@hourly": "0 * * * *",
@@ -292,8 +293,8 @@ def resolve(
         semantics: The DAG's timetable family (one of ``RESOLVABLE_SEMANTICS``).
         trigger_time: The run's fire instant, normally ``{{job.trigger.time.iso_datetime}}``; a native
             backfill overrides it with ``{{backfill.iso_datetime}}``.
-        trigger_type: ``{{job.trigger.type}}``; manual and triggered-job runs keep the trigger time as
-            their logical date, as Airflow does for manual runs.
+        trigger_type: ``{{job.trigger.type}}``; any run other than ``periodic`` keeps the trigger time as
+            its logical date, as Airflow does for manual runs.
         override: An explicit logical date for an exact partition replay. When set it wins and is not
             shifted.
         cron: The source cron expression or preset, for cron semantics.
@@ -326,7 +327,7 @@ def resolve(
             end = logical
     else:
         fired = parse_instant(trigger_time)
-        manual = trigger_type.strip().lower() in MANUAL_TRIGGER_TYPES
+        manual = trigger_type.strip().lower() != SCHEDULED_TRIGGER_TYPE
         uses_delta = semantics in (DATA_INTERVAL_DELTA, TRIGGER_DELTA)
         if uses_delta and not manual and anchor_time.strip():
             fired = nearest_delta_tick(fired, delta, parse_instant(anchor_time), zone)
@@ -361,7 +362,7 @@ def resolve(
             previous_logical = previous_tick(schedule, logical, zone)
             next_logical = next_tick(schedule, logical, zone)
         elif semantics == DATA_INTERVAL_DELTA:
-            previous_logical, next_logical = logical - delta, logical + delta
+            previous_logical, next_logical = _shift(logical, -delta, zone), _shift(logical, delta, zone)
         else:
             raise ValueError("prev_ds and next_ds need a data-interval timetable")
         values.update(

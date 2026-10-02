@@ -97,6 +97,41 @@ def test_manual_runs_keep_the_trigger_time(trigger_type: str) -> None:
     assert values["data_interval_end"] == "2026-01-02T02:00:00+00:00"
 
 
+@pytest.mark.parametrize("trigger_type", ["file_arrival", "table", "continuous", "model", ""])
+def test_non_periodic_runs_keep_the_trigger_time(trigger_type: str) -> None:
+    values = _resolve(
+        semantics="data_interval_cron", cron="0 2 * * *", trigger_time="2026-01-02T15:30:00Z", trigger_type=trigger_type
+    )
+    assert values["ts"] == "2026-01-02T15:30:00+00:00"
+
+
+def test_manual_run_on_a_timedelta_schedule_keeps_the_trigger_time() -> None:
+    values = _resolve(
+        semantics="data_interval_delta",
+        delta_seconds=6 * 3600,
+        anchor_time="2026-01-01T00:00:00Z",
+        trigger_time="2026-01-02T15:30:00Z",
+        trigger_type="one_time",
+    )
+    # Airflow's DeltaDataIntervalTimetable.infer_manual_data_interval: (run_after - delta, run_after).
+    assert values["ts"] == values["data_interval_end"] == "2026-01-02T15:30:00+00:00"
+    assert values["data_interval_start"] == "2026-01-02T09:30:00+00:00"
+
+
+def test_daily_delta_neighbors_follow_the_wall_clock_across_daylight_saving() -> None:
+    values = _resolve(
+        semantics="data_interval_delta",
+        delta_seconds=86400,
+        zone_name="America/Los_Angeles",
+        trigger_time="2026-03-10T00:00:00Z",
+        override="2026-03-08T23:30:00Z",
+        publish_neighbors=True,
+    )
+    # 16:30 PDT on 2026-03-08; the previous interval starts at 16:30 PST, 00:30 UTC the same date.
+    assert values["prev_ds"] == "2026-03-08"
+    assert values["next_ds"] == "2026-03-09"
+
+
 def test_logical_date_override_wins_without_a_shift() -> None:
     values = _resolve(
         semantics="data_interval_cron",
@@ -411,6 +446,29 @@ def test_airflow3_explicit_data_interval_timetable_shifts_to_the_previous_tick()
         trigger_time="2026-01-02T02:00:00Z", trigger_type="periodic", override="", **namespace["_TIMETABLE"]
     )
     assert values["ds"] == "2026-01-01"
+
+
+def _classify_timetable_call(source: str) -> logical_dates.LogicalDateSemantics:
+    node = ast.parse(source).body[0].value  # type: ignore[attr-defined]
+    return logical_dates.classify(
+        ast.parse("from airflow.sdk import DAG\n"),
+        dag_kwargs={"schedule": node},
+        schedule_node=node,
+        schedule_interval=None,
+        timezone=None,
+        schedule=None,
+    )
+
+
+def test_data_interval_timetable_reads_a_positional_timezone() -> None:
+    semantics = _classify_timetable_call("CronDataIntervalTimetable('0 2 * * *', Timezone('Europe/Madrid'))")
+    assert (semantics.kind, semantics.timezone) == ("data_interval_cron", "Europe/Madrid")
+
+
+def test_timetable_with_a_non_literal_timezone_is_undeterminable() -> None:
+    semantics = _classify_timetable_call("CronDataIntervalTimetable('0 2 * * *', LOCAL_ZONE)")
+    assert semantics.kind == logical_dates.UNDETERMINABLE
+    assert "timezone" in (semantics.reason or "")
 
 
 def test_airflow3_prev_ds_is_a_gap(tmp_path: Path) -> None:

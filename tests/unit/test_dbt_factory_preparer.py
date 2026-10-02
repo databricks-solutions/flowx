@@ -193,6 +193,43 @@ def test_pydabs_emits_hook_module_and_no_inner_job(tmp_path):
     assert "run_job_task" in prepared.task
 
 
+def test_pydabs_hook_rejects_a_resource_type_without_a_task_factory(tmp_path):
+    prepared = prepare_activity(_pydabs_activity(tmp_path))
+    hook = next(nb for nb in prepared.notebooks if nb.relative_path.endswith("_dbt_job.py"))
+    factories = next(
+        node
+        for node in ast.parse(hook.content).body
+        if isinstance(node, ast.FunctionDef) and node.name == "_task_factories"
+    )
+
+    class Stub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    namespace = {
+        name: Stub
+        for name in (
+            "DbtDependencyResolver",
+            "DbtTaskOptions",
+            "ModelTaskFactory",
+            "SeedTaskFactory",
+            "SnapshotTaskFactory",
+            "TestTaskFactory",
+        )
+    }
+    namespace.update(
+        TaskType=type("TaskType", (), {"NOTEBOOK": "notebook"}),
+        PROJECT_DIR="",
+        PROFILES_DIR="",
+        RESOURCE_TYPES=["model", "source"],
+        DBT_OPTIONS={},
+    )
+    exec(compile(ast.Module(body=[factories], type_ignores=[]), hook.relative_path, "exec"), namespace)
+
+    with pytest.raises(ValueError, match="source"):
+        namespace["_task_factories"]()
+
+
 @pytest.mark.parametrize(
     "reserved_options",
     [

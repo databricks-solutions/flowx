@@ -95,7 +95,15 @@ def _timetable_semantics(call: ast.Call, generation: str, timezone: str) -> Logi
     name = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", "")
     arguments = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
     first = call.args[0] if call.args else None
-    zone = _extract_timezone(arguments.get("timezone")) or timezone
+    timezone_node = arguments.get("timezone")
+    if timezone_node is None and name == "CronDataIntervalTimetable" and len(call.args) > 1:
+        timezone_node = call.args[1]
+    explicit_zone = _extract_timezone(timezone_node)
+    if timezone_node is not None and explicit_zone is None:
+        return LogicalDateSemantics(
+            kind=UNDETERMINABLE, generation=generation, reason=f"{name} timezone is not a literal IANA zone"
+        )
+    zone = explicit_zone or timezone
     if name == "timedelta":
         seconds = _timedelta_seconds(call)
         if seconds <= 0:
@@ -375,7 +383,7 @@ def build_resolver(semantics: LogicalDateSemantics) -> NotebookActivity:
 
 
 def resolver_proof(semantics: LogicalDateSemantics, consumers: list[str]) -> dict[str, Any]:
-    """Returns the ledger entry that explains the synthetic resolver task and its edges."""
+    """Returns the ledger entry for the synthetic resolver task; reconcile adds the edges it attaches."""
     return {
         "code": "logical_date_resolver_emitted",
         "task_key": templating.LOGICAL_DATE_RESOLVER_TASK_KEY,
@@ -386,5 +394,4 @@ def resolver_proof(semantics: LogicalDateSemantics, consumers: list[str]) -> dic
         "delta_seconds": semantics.delta_seconds,
         "rationale": semantics.reason,
         "consumer_task_keys": sorted(consumers),
-        "emitted_edges": [[templating.LOGICAL_DATE_RESOLVER_TASK_KEY, consumer] for consumer in sorted(consumers)],
     }

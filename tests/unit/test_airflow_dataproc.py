@@ -520,6 +520,45 @@ def test_cluster_driven_through_the_dataproc_hook_is_retained(tmp_path: Path) ->
     _assert_cluster_retained(pipeline)
 
 
+def test_cluster_driven_through_an_inline_hook_is_retained(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        _CLUSTER_BODY + 'extra = PythonOperator(task_id="extra", python_callable=lambda: '
+        "DataprocHook().submit_job(project_id='p', region='r', job={}))\n"
+        "create >> [submit, extra] >> delete\n",
+        functions="from airflow.providers.google.cloud.hooks.dataproc import DataprocHook\n" + _CLUSTER_PREFIX,
+    )
+
+    _assert_cluster_retained(pipeline)
+
+
+@pytest.mark.parametrize(
+    ("placement", "described"),
+    [
+        ('{"cluster_labels": {"env": "prod"}}', "cluster_labels"),
+        ('{"cluster_name": "shared-cluster"}', "'shared-cluster'"),
+    ],
+)
+def test_placement_outside_this_dag_discloses_the_compute_change(
+    tmp_path: Path, placement: str, described: str
+) -> None:
+    pipeline = _load(
+        tmp_path,
+        _submit(f'{{"placement": {placement}, "pyspark_job": {{"main_python_file_uri": "gs://b/m.py"}}}}'),
+    )
+
+    assert isinstance(_task(pipeline, "submit"), SparkPythonActivity)
+    finding = next(item for item in pipeline.not_translatable if item["code"] == "dataproc_placement_not_migrated")
+    assert described in finding["message"]
+
+
+def test_absorbed_cluster_placement_is_not_disclosed(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, _CLUSTER_BODY + "create >> submit >> delete\n", functions=_CLUSTER_PREFIX)
+
+    assert "create" not in {task.task_key for task in pipeline.tasks}
+    assert "dataproc_placement_not_migrated" not in _codes(pipeline)
+
+
 def test_payload_helper_naming_the_cluster_does_not_block_collapse(tmp_path: Path) -> None:
     pipeline = _load(
         tmp_path,

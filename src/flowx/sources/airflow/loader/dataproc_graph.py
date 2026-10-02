@@ -88,7 +88,6 @@ _DATAPROC_CLIENTS = re.compile(
 
 def _cluster_users(
     cluster_name: str,
-    identifiers: set[str],
     candidates: dict[str, str],
     function_texts: dict[str, str],
 ) -> set[str]:
@@ -98,7 +97,6 @@ def _cluster_users(
     ``python_callable`` that submits work to the cluster through the Dataproc hook still counts.
     """
     name_pattern = re.compile(rf"(?<![\w-]){re.escape(cluster_name)}(?![\w-])")
-    identifier_patterns = [re.compile(rf"\b{re.escape(identifier)}\b") for identifier in sorted(identifiers)]
     users: set[str] = set()
     for task_id, text in candidates.items():
         called = " ".join(
@@ -107,11 +105,7 @@ def _cluster_users(
             if re.search(rf"\b{re.escape(function_name)}\b", text)
         )
         combined = f"{text} {called}"
-        if (
-            name_pattern.search(combined)
-            or any(pattern.search(combined) for pattern in identifier_patterns)
-            or _DATAPROC_CLIENTS.search(called)
-        ):
+        if name_pattern.search(combined) or _DATAPROC_CLIENTS.search(combined):
             users.add(task_id)
     return users
 
@@ -167,6 +161,7 @@ def plan_dataproc(
         if translation.validation_error is not None
     )
     collapsed_by_workload: dict[str, list[str]] = {variable: [] for variable in workloads}
+    absorbed_workloads: set[str] = set()
     teardown_rules: dict[str, str] = {}
 
     def retain(variable: str, reason: str) -> None:
@@ -208,18 +203,12 @@ def plan_dataproc(
             cluster = dataproc.translate_cluster_config(dataproc_vars[creates[0]][3])
             blocker = cluster.blocking_reason
         if blocker is None:
-            identifiers = {
-                node.id
-                for member in members
-                for node in [dataproc_vars[member][3].get("cluster_name")]
-                if isinstance(node, ast.Name)
-            }
             candidates = {
                 operators[variable][0]: text
                 for variable, text in operator_texts.items()
                 if variable not in members and variable not in cluster_workloads
             }
-            users = _cluster_users(name, identifiers, candidates, function_texts)
+            users = _cluster_users(name, candidates, function_texts)
             if users:
                 blocker = f"task(s) {', '.join(sorted(users))} still use the cluster outside a migrated Dataproc job"
         if blocker is None:
@@ -243,6 +232,7 @@ def plan_dataproc(
             continue
 
         plan.dropped.update(members)
+        absorbed_workloads.update(cluster_workloads)
         for member in members:
             rule = templating.trigger_rule_mapping(dataproc_vars[member][3]).rule
             if dataproc_vars[member][1] == dataproc.DELETE_CLUSTER and rule != "all_success":
@@ -368,6 +358,16 @@ def plan_dataproc(
         if result.activity is None:
             continue
         task_id, canonical, _operator, kwargs = dataproc_vars[variable]
+        if result.placement is not None and variable not in absorbed_workloads:
+            plan.disclosures.append(
+                (
+                    variable,
+                    "dataproc_placement_not_migrated",
+                    f"Task {task_id!r} was placed on {result.placement}, which is not a cluster this DAG creates "
+                    "and flowx absorbed into Jobs compute. It now runs on the bundle's default job cluster; size "
+                    "that cluster to match the Dataproc compute it replaces.",
+                )
+            )
         if result.artifact_uris:
             plan.disclosures.append(
                 (
