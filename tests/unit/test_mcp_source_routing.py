@@ -203,6 +203,22 @@ def test_resolve_agentic_prepare_routes_airflow_contract(captured):
     assert result["ok"] is True
 
 
+def test_resolve_agentic_prepare_routes_source_dir_alias(captured):
+    result = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "prepare",
+            "source_dir": "/tmp/dags",
+            "report_path": "/tmp/out/.work/translation_report.json",
+            "output_dir": "/tmp/out",
+        }
+    )
+
+    argv = _argv(captured, "resolve-agentic")
+    assert argv[argv.index("--source-path") + 1] == "/tmp/dags"
+    assert result["ok"] is True
+
+
 def test_resolve_agentic_prepare_materializes_hosted_airflow_source(captured, monkeypatch, tmp_path: Path):
     materialized = tmp_path / "materialized"
     cleaned: list[str] = []
