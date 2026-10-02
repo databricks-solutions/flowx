@@ -85,7 +85,8 @@ def test_example_dag_lowers_to_one_native_spark_python_task() -> None:
         "_bind_default_cluster": True,
     }
     assert "n2-standard-8" not in json.dumps(task.cluster)
-    assert (task.max_retries, task.min_retry_interval_millis, task.timeout_seconds) == (2, 300000, 7200)
+    # The asynchronous submission's Airflow policy covered only the submit call.
+    assert (task.max_retries, task.min_retry_interval_millis, task.timeout_seconds) == (None, None, None)
 
 
 def test_example_dag_reconciles_with_disclosed_behavior_changes() -> None:
@@ -96,6 +97,7 @@ def test_example_dag_reconciles_with_disclosed_behavior_changes() -> None:
         "dataproc_cluster_settings_not_mapped",
         "dataproc_artifacts_require_access",
         "dataproc_execution_envelope_changed",
+        "dataproc_sensor_wait_removed",
     }
     messages = {finding["code"]: finding["message"] for finding in pipeline.not_translatable}
     assert "yarn:yarn.nodemanager.resource.memory-mb removed" in messages["dataproc_cluster_settings_not_mapped"]
@@ -282,7 +284,8 @@ def test_batch_and_matching_batch_sensor_collapse(tmp_path: Path) -> None:
         'batch = DataprocCreateBatchOperator(task_id="batch", project_id="p", region="r", batch_id="b1", '
         'batch={"pyspark_batch": {"main_python_file_uri": "gs://b/m.py"}, '
         '"runtime_config": {"version": "2.2", "properties": {"spark.executor.cores": "4"}}})\n'
-        'wait = DataprocBatchSensor(task_id="wait", project_id="p", region="r", batch_id="b1", poke_interval=10)\n'
+        'wait = DataprocBatchSensor(task_id="wait", project_id="p", region="r", batch_id="b1", poke_interval=10, '
+        "timeout=600)\n"
         'after = PythonOperator(task_id="after", python_callable=print)\n'
         "batch >> wait >> after\n",
     )
@@ -378,40 +381,117 @@ def _job_sensor(extra: str = "") -> str:
     )
 
 
-@pytest.mark.parametrize(
-    ("extra", "expected"),
-    [
-        (", timeout=600", 600),
-        (", timeout=7200, execution_timeout=timedelta(minutes=15)", 900),
-        ("", None),
-    ],
+def _load_with_default_args(tmp_path: Path, body: str, default_args: str) -> Pipeline:
+    source = (
+        "from datetime import timedelta\n"
+        + _HEADER.replace(
+            'schedule_interval="0 2 * * *")', f'schedule_interval="0 2 * * *", default_args={default_args})'
+        )
+        + textwrap.indent(textwrap.dedent(body), "    ")
+    )
+    dag_path = tmp_path / "dataproc_case.py"
+    dag_path.write_text(source, encoding="utf-8")
+    return load_airflow_dag(dag_path)
+
+
+_POLICY = '{"retries": 3, "retry_delay": timedelta(minutes=5), "execution_timeout": timedelta(hours=1)}'
+_BATCH = (
+    'batch = DataprocCreateBatchOperator(task_id="batch", project_id="p", region="r", batch_id="b1", '
+    'batch={{"pyspark_batch": {{"main_python_file_uri": "gs://b/m.py"}}}}{extra})\n'
+    'wait = DataprocBatchSensor(task_id="wait", project_id="p", region="r", batch_id="b1", timeout=600)\n'
+    "batch >> wait\n"
 )
-def test_collapsed_sensor_moves_its_timeout_to_the_workload(tmp_path: Path, extra: str, expected: int | None) -> None:
-    pipeline = _load(
-        tmp_path,
-        _ASYNC_SUBMIT + _job_sensor(extra) + "submit >> wait\n",
-        functions="from datetime import timedelta\n",
+
+
+def _messages(pipeline: Pipeline) -> str:
+    return " ".join(finding["message"] for finding in pipeline.not_translatable)
+
+
+def test_collapsed_sensor_timing_is_not_inferred_as_a_task_timeout(tmp_path: Path) -> None:
+    pipeline = _load_with_default_args(
+        tmp_path, _ASYNC_SUBMIT + _job_sensor(", timeout=600, mode='reschedule'") + "submit >> wait\n", _POLICY
     )
 
     assert "wait" not in {task.task_key for task in pipeline.tasks}
-    assert _task(pipeline, "submit").timeout_seconds == expected
-    messages = " ".join(finding["message"] for finding in pipeline.not_translatable)
-    assert (f"times out after {expected}s" in messages) is (expected is not None)
+    submit = _task(pipeline, "submit")
+    assert (submit.timeout_seconds, submit.max_retries, submit.min_retry_interval_millis) == (None, None, None)
+    finding = next(item for item in pipeline.not_translatable if item["code"] == "dataproc_sensor_wait_removed")
+    assert "No Databricks timeout was inferred" in finding["message"]
+    assert "does not retry" in _messages(pipeline)
+    assert "Task retries rerun the workload" not in _messages(pipeline)
 
 
-@pytest.mark.parametrize(
-    ("extra", "reason"),
-    [
-        (", retries=3", "retries repeat the wait"),
-        (", timeout=WAIT_SECONDS", "timeout is not a static positive duration"),
-    ],
-)
-def test_sensor_with_an_untransferable_wait_policy_is_retained(tmp_path: Path, extra: str, reason: str) -> None:
-    pipeline = _load(tmp_path, _ASYNC_SUBMIT + _job_sensor(extra) + "submit >> wait\n")
+def test_unpaired_asynchronous_submission_drops_its_submission_policy(tmp_path: Path) -> None:
+    pipeline = _load_with_default_args(tmp_path, _ASYNC_SUBMIT, _POLICY)
 
-    wait = _task(pipeline, "wait")
-    assert isinstance(wait, PlaceholderActivity)
-    assert reason in wait.comment
+    submit = _task(pipeline, "submit")
+    assert (submit.timeout_seconds, submit.max_retries) == (None, None)
+
+
+def test_synchronous_batch_keeps_its_policy_and_drops_the_confirming_sensor(tmp_path: Path) -> None:
+    pipeline = _load_with_default_args(tmp_path, _BATCH.format(extra=""), _POLICY)
+
+    assert "wait" not in {task.task_key for task in pipeline.tasks}
+    batch = _task(pipeline, "batch")
+    assert (batch.timeout_seconds, batch.max_retries) == (3600, 3)
+    assert "only confirmed a batch" in _messages(pipeline)
+    assert "dataproc_sensor_wait_removed" not in _codes(pipeline)
+
+
+def test_asynchronous_batch_sensor_wait_is_removed_without_a_timeout(tmp_path: Path) -> None:
+    pipeline = _load_with_default_args(tmp_path, _BATCH.format(extra=", asynchronous=True"), _POLICY)
+
+    batch = _task(pipeline, "batch")
+    assert (batch.timeout_seconds, batch.max_retries) == (None, None)
+    assert "dataproc_sensor_wait_removed" in _codes(pipeline)
+
+
+def test_removed_sensor_timing_is_disclosed_with_its_sources(tmp_path: Path) -> None:
+    pipeline = _load_with_default_args(
+        tmp_path, _ASYNC_SUBMIT + _job_sensor(", timeout=600, poke_interval=30") + "submit >> wait\n", '{"retries": 3}'
+    )
+
+    message = next(item for item in pipeline.not_translatable if item["code"] == "dataproc_sensor_wait_removed")[
+        "message"
+    ]
+    assert "timeout=600 (sensor)" in message
+    assert "poke_interval=30 (sensor)" in message
+    assert "retries=3 (default_args)" in message
+    assert "mode='poke' (BaseSensorOperator default)" in message
+    assert "retry_delay=unknown (deployment [core] default_task_retry_delay)" in message
+    assert "execution_timeout=unknown (deployment [core] default_task_execution_timeout)" in message
+    assert "wait_timeout=None (Dataproc sensor default)" in message
+    proof = next(item for item in pipeline.audit["transformations"] if item["code"] == "dataproc_sensor_collapsed")
+    assert proof["sensor_timing"]["timeout"] == "600 (sensor)"
+
+
+def test_removed_sensor_wait_timeout_keeps_its_source(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, _ASYNC_SUBMIT + _job_sensor(", timeout=600, wait_timeout=120") + "submit >> wait\n")
+
+    proof = next(item for item in pipeline.audit["transformations"] if item["code"] == "dataproc_sensor_collapsed")
+    assert proof["sensor_timing"]["wait_timeout"] == "120 (sensor)"
+
+
+@pytest.mark.parametrize("operator", ["DataprocCreateBatchOperator", "DataprocSubmitJobOperator"])
+def test_dynamic_asynchronous_mode_fails_closed(tmp_path: Path, operator: str) -> None:
+    if operator == "DataprocCreateBatchOperator":
+        body = _BATCH.format(extra=", asynchronous=Variable.get('async')")
+        workload = "batch"
+    else:
+        body = (
+            _submit(
+                '{"pyspark_job": {"main_python_file_uri": "gs://b/m.py"}}', extra=", asynchronous=Variable.get('a')"
+            )
+            + _job_sensor(", timeout=600")
+            + "submit >> wait\n"
+        )
+        workload = "submit"
+    pipeline = _load(tmp_path, body, functions="from airflow.models import Variable\n")
+
+    task = _task(pipeline, workload)
+    assert isinstance(task, PlaceholderActivity)
+    assert "asynchronous is not a static boolean" in task.comment
+    assert isinstance(_task(pipeline, "wait"), PlaceholderActivity)
 
 
 def test_sensor_not_downstream_of_its_submission_is_retained(tmp_path: Path) -> None:
@@ -536,8 +616,10 @@ def test_single_node_dataproc_cluster_packages_as_single_node_compute(tmp_path: 
 
     assert _task(pipeline, "submit").cluster == {"num_workers": 0, "_bind_default_cluster": True}
     cluster = _job_resource(_package(tmp_path, pipeline))["job_clusters"][0]["new_cluster"]
-    assert cluster["is_single_node"] is True
-    assert "num_workers" not in cluster
+    assert cluster["num_workers"] == 0
+    assert cluster["spark_conf"] == {"spark.databricks.cluster.profile": "singleNode", "spark.master": "local[*]"}
+    assert cluster["custom_tags"] == {"ResourceClass": "SingleNode"}
+    assert "is_single_node" not in cluster and "kind" not in cluster
 
 
 def test_cloud_storage_artifacts_keep_their_source_uris(tmp_path: Path) -> None:

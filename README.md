@@ -212,7 +212,7 @@ task context or XCom, an unsafe inline template context, or a non-literal `.expa
 **Agentic** emits a failing placeholder + `gaps.json` entry (eligible for the leaf-gap
 resolver) because the construct's behavior is inherently runtime.
 **‡** Dropped only when provably safe: every job on the cluster migrates, no other task reads the removed
-task's output, the sensor pairs with an upstream asynchronous submission (or matching `batch_id`) and sets no retries of its own, and rewiring does
+task's output, the sensor pairs with an upstream asynchronous submission (or matching `batch_id`) (its timing is reported, not turned into a task timeout), and rewiring does
 not change trigger-rule behavior. Otherwise the task stays as a placeholder with the reason attached.
 
 **Scheduling & semantics** (source-level, applied alongside the operators above): cron → Quartz,

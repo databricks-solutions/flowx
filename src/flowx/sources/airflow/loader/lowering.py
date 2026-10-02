@@ -163,7 +163,7 @@ def _load_airflow_module(
                     "task_key": var_to_task_key[trigger_var],
                     "covered_capture_ids": sorted(covered_tasks),
                 }
-    dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions)
+    dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions, visitor.default_args)
     dropped |= dataproc_plan.dropped
     upstreams = _rewire_dropped(upstreams, dropped)
 
@@ -494,9 +494,10 @@ def _load_airflow_module(
         activity.max_retries = policy.get("max_retries")
         activity.timeout_seconds = policy.get("timeout_seconds")
         activity.min_retry_interval_millis = policy.get("min_retry_interval_millis")
-        if var in dataproc_plan.timeouts and not isinstance(activity, PlaceholderActivity):
-            bound = dataproc_plan.timeouts[var]
-            activity.timeout_seconds = min(activity.timeout_seconds or bound, bound)
+        if var in dataproc_plan.submission_only_policies and not isinstance(activity, PlaceholderActivity):
+            activity.timeout_seconds = None
+            activity.max_retries = None
+            activity.min_retry_interval_millis = None
         if isinstance(activity, PlaceholderActivity) and call_node is not None:
             raw_definition = dict(activity.raw_definition or {})
             raw_definition["bound_source"] = ast.unparse(call_node)

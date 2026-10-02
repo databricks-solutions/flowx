@@ -978,7 +978,7 @@ def argument_classification(operator: str, kwargs: dict[str, ast.expr]) -> list[
         elif name in adapter_consumed:
             status = "consumed"
             if dataproc_name in dataproc.DATAPROC_SENSORS and name == "timeout":
-                rationale = "sensor_timeout_moved_to_workload_task"
+                rationale = "scheduler_wait_superseded_by_native_task"
             elif dataproc_name in _DATAPROC_CONSUMED_KWARGS:
                 rationale = _DATAPROC_ARGUMENT_RATIONALES.get(name, "operator_adapter")
             else:

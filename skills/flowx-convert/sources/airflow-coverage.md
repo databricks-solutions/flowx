@@ -96,14 +96,15 @@ These fail closed rather than guessing a mapping:
 - zero or several engine keys, or a payload that isn't static;
 - a query file, auxiliary `python_file_uris` / `file_uris` / `archive_uris`, or a missing `main_class`;
 - a `file://` Dataproc node path, or a templated artifact location;
-- a non-Spark job property, `cancel_on_kill=False`, or any argument without declared semantics.
+- a non-Spark job property, `cancel_on_kill=False`, an `asynchronous` that is not a static boolean, or
+  any argument without declared semantics.
 
 `spark_submit_task` is never emitted.
 
 **Compute.** The job's `placement.cluster_name` links it to its `DataprocCreateClusterOperator`. From
 that cluster, flowx carries over:
 - `worker_config.num_instances` as `num_workers`, when there are no secondary workers (zero workers
-  becomes a single-node cluster);
+  becomes a single-node cluster profile);
 - `spark:`-prefixed software properties, as `spark_conf`.
 
 The job's own `spark.*` properties are added to the same `spark_conf`, and every Spark workload binds
@@ -124,9 +125,14 @@ when all of these hold:
 
 A `DataprocJobSensor` is removed when its `dataproc_job_id` is the `xcom_pull` of an asynchronous
 submission that nothing else reads. A `DataprocBatchSensor` is removed when its `batch_id` matches the
-creating operator's `batch_id`. Either sensor must also be downstream of the workload it waits on and
-set no `retries` / `retry_delay` of its own. A static `timeout` or `execution_timeout` becomes the
-workload task's `timeout_seconds`, which cancels the workload when it expires.
+creating operator's `batch_id`. Either sensor must also be downstream of the workload it waits on.
+No task timeout is inferred from a sensor's timing: an Airflow sensor timeout failed the wait without
+cancelling the Dataproc workload, while a Databricks task timeout cancels it, so the native task waits
+for completion and the removed wait is reported with each timing setting and its source (sensor,
+`default_args`, operator default, or unknown deployment configuration). Configure an explicit task timeout if cancellation is
+wanted. An asynchronous workload also drops its own timeout and retries, which in Airflow covered only
+the submission call. A synchronous batch keeps its timeout and retries, and its sensor, which only
+confirmed the finished batch, is removed.
 
 Every removal is recorded in the transformation ledger. The changed retry, teardown, and wait
 behavior is reported as a gap finding, as are the GCS artifacts the job's Databricks identity must

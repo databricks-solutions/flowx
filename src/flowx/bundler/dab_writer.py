@@ -1037,6 +1037,11 @@ def _build_default_job_clusters(
     return [builder() for key, builder in builders if key in needed_keys]
 
 
+# The single-node cluster settings that need no compute ``kind``; ``is_single_node`` requires
+# ``kind: CLASSIC_PREVIEW``.
+_SINGLE_NODE_SPARK_CONF = {"spark.databricks.cluster.profile": "singleNode", "spark.master": "local[*]"}
+
+
 def _build_default_cluster(extras: dict[str, Any] | None = None) -> dict[str, Any]:
     """Builds the multi-purpose default job_cluster used for legacy bindings.
 
@@ -1045,8 +1050,8 @@ def _build_default_cluster(extras: dict[str, Any] | None = None) -> dict[str, An
             merge into ``new_cluster`` (num_workers, driver_node_type_id,
             spark_env_vars, custom_tags, init_scripts, cluster_log_conf,
             spark_conf, data_security_mode).  ``num_workers`` overrides the
-            default single-worker value (zero workers becomes a single-node
-            cluster) and ``data_security_mode`` overrides the default
+            default single-worker value (zero workers adds the single-node
+            Spark profile and tag) and ``data_security_mode`` overrides the default
             ``SINGLE_USER`` value when supplied.
 
     Returns:
@@ -1065,8 +1070,8 @@ def _build_default_cluster(extras: dict[str, Any] | None = None) -> dict[str, An
         for key, value in extras.items():
             new_cluster[key] = value
     if new_cluster["num_workers"] == 0:
-        del new_cluster["num_workers"]
-        new_cluster["is_single_node"] = True
+        new_cluster["spark_conf"] = {**new_cluster.get("spark_conf", {}), **_SINGLE_NODE_SPARK_CONF}
+        new_cluster["custom_tags"] = {**new_cluster.get("custom_tags", {}), "ResourceClass": "SingleNode"}
     return {
         "job_cluster_key": DEFAULT_JOB_CLUSTER_KEY,
         "new_cluster": new_cluster,

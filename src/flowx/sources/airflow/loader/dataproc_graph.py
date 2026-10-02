@@ -11,7 +11,6 @@ Anything short of that stays in the graph as a failing placeholder with the reas
 from __future__ import annotations
 
 import ast
-import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,8 +40,8 @@ class DataprocPlan:
         proofs: Transformation-ledger entries explaining every removal.
         clusters: Jobs compute settings for each migrated workload, keyed by capture id.
         retained_reasons: Why each Dataproc task that stays in the graph needs manual migration.
-        timeouts: Run-time bounds in seconds that collapsed sensors placed on their workloads, keyed by
-            the workload's capture id.
+        submission_only_policies: Capture ids of asynchronous workloads, whose Airflow timeout and retries
+            covered only the submission call, so the native task gets neither.
         disclosures: ``(capture_id, code, message)`` findings describing changed behavior.
         validation_failures: ``(capture_id, code, message)`` findings for malformed payloads, which fail
             reconciliation and block packaging.
@@ -52,7 +51,7 @@ class DataprocPlan:
     proofs: list[dict[str, Any]] = field(default_factory=list)
     clusters: dict[str, dict[str, Any]] = field(default_factory=dict)
     retained_reasons: dict[str, str] = field(default_factory=dict)
-    timeouts: dict[str, int] = field(default_factory=dict)
+    submission_only_policies: set[str] = field(default_factory=set)
     disclosures: list[tuple[str, str, str]] = field(default_factory=list)
     validation_failures: list[tuple[str, str, str]] = field(default_factory=list)
 
@@ -126,33 +125,29 @@ def _ancestors(variable: str, upstreams: dict[str, list[str]]) -> set[str]:
     return seen
 
 
-def _static_seconds(node: ast.expr | None) -> tuple[int | None, bool]:
-    """Returns a duration argument in whole seconds and whether it could be read; an absent one reads as None."""
-    if node is None:
-        return None, True
-    if isinstance(node, ast.Constant) and isinstance(node.value, int | float) and not isinstance(node.value, bool):
-        return (math.ceil(node.value), True) if node.value > 0 else (None, False)
-    seconds = templating.timedelta_seconds(node)
-    return seconds, seconds is not None
+# Where an Airflow sensor's timing comes from when neither the sensor nor ``default_args`` sets it.
+_SENSOR_TIMING_FALLBACKS = {
+    "mode": "'poke' (BaseSensorOperator default)",
+    "poke_interval": "60 (BaseSensorOperator default)",
+    "timeout": "unknown (deployment [sensors] default_timeout)",
+    "execution_timeout": "unknown (deployment [core] default_task_execution_timeout)",
+    "retries": "unknown (deployment [core] default_task_retries)",
+    "retry_delay": "unknown (deployment [core] default_task_retry_delay)",
+    "wait_timeout": "None (Dataproc sensor default)",
+}
 
 
-def _sensor_wait_bound(kwargs: dict[str, ast.expr]) -> tuple[int | None, str | None]:
-    """Returns the sensor's static wait bound in seconds, or why its wait policy cannot move to the workload.
-
-    The sensor's ``timeout`` and ``execution_timeout`` become the workload task's timeout. Its own
-    ``retries`` / ``retry_delay`` repeat the wait, which native task completion cannot reproduce.
-    """
-    retried = sorted(name for name in ("retries", "retry_delay") if name in kwargs)
-    if retried:
-        return None, f"its own {' and '.join(retried)} repeat the wait, which native task completion cannot reproduce"
-    bounds: list[int] = []
-    for name in ("timeout", "execution_timeout"):
-        seconds, readable = _static_seconds(kwargs.get(name))
-        if not readable:
-            return None, f"its {name} is not a static positive duration"
-        if seconds is not None:
-            bounds.append(seconds)
-    return (min(bounds) if bounds else None), None
+def _sensor_timing(kwargs: dict[str, ast.expr], default_args: dict[str, ast.expr]) -> dict[str, str]:
+    """Describes each timing setting of a removed sensor and where its value came from."""
+    timing: dict[str, str] = {}
+    for name in (*_SENSOR_TIMING_FALLBACKS, "retry_exponential_backoff", "max_retry_delay"):
+        if name in kwargs:
+            timing[name] = f"{ast.unparse(kwargs[name])} (sensor)"
+        elif name in default_args:
+            timing[name] = f"{ast.unparse(default_args[name])} (default_args)"
+        elif name in _SENSOR_TIMING_FALLBACKS:
+            timing[name] = _SENSOR_TIMING_FALLBACKS[name]
+    return timing
 
 
 def _downstreams(variable: str, upstreams: dict[str, list[str]]) -> set[str]:
@@ -179,6 +174,7 @@ def plan_dataproc(
     operators: dict[str, tuple[str, str, dict[str, ast.expr]]],
     upstreams: dict[str, list[str]],
     functions: dict[str, ast.FunctionDef],
+    default_args: dict[str, ast.expr],
 ) -> DataprocPlan:
     """Decides which Dataproc tasks Jobs compute absorbs and what compute each workload runs on."""
     plan = DataprocPlan()
@@ -326,7 +322,7 @@ def plan_dataproc(
 
     paired_workloads: dict[str, list[str]] = {}
     sensor_targets: dict[str, str] = {}
-    wait_bounds: dict[str, tuple[int, str]] = {}
+    confirming_sensors: dict[str, str] = {}
     task_to_variable = {task_id: variable for variable, (task_id, _c, _o, _k) in dataproc_vars.items()}
     for variable, (_task_id, canonical, _operator, kwargs) in dataproc_vars.items():
         if canonical == dataproc.JOB_SENSOR:
@@ -367,6 +363,7 @@ def plan_dataproc(
     for sensor, target in sorted(sensor_targets.items()):
         task_id, canonical, operator, kwargs = dataproc_vars[sensor]
         target_task_id, target_canonical, _target_operator, target_kwargs = dataproc_vars[target]
+        target_asynchronous = dataproc.static_value(target_kwargs.get("asynchronous")) is True
         blocker = None
         if workloads[target].activity is None:
             blocker = f"the workload {target_task_id!r} it waits on needs manual migration"
@@ -377,10 +374,7 @@ def plan_dataproc(
                 f"{target_task_id!r} is not upstream of the sensor, so removing the sensor would let its "
                 "downstream tasks start before the workload finishes"
             )
-        elif (
-            target_canonical == dataproc.SUBMIT_JOB
-            and dataproc.static_value(target_kwargs.get("asynchronous")) is not True
-        ):
+        elif not target_asynchronous and target_canonical == dataproc.SUBMIT_JOB:
             blocker = f"{target_task_id!r} is not submitted asynchronously, so the sensor does not pair with it"
         else:
             allowed = {sensor} if target_canonical == dataproc.SUBMIT_JOB else set()
@@ -391,15 +385,25 @@ def plan_dataproc(
                 blocker = "another task reads the sensor's output"
             else:
                 blocker = _removal_blocker(sensor, operator, kwargs, upstreams)
-        bound: int | None = None
-        if blocker is None:
-            bound, blocker = _sensor_wait_bound(kwargs)
         if blocker is not None:
             retain(sensor, f"{canonical} was not collapsed into native task completion: {blocker}.")
             continue
-        if bound is not None:
-            wait_bounds[target] = (bound, task_id)
-            plan.timeouts[target] = bound
+        timing = _sensor_timing(kwargs, default_args)
+        if target_asynchronous:
+            described = "; ".join(f"{name}={value}" for name, value in timing.items())
+            plan.disclosures.append(
+                (
+                    target,
+                    "dataproc_sensor_wait_removed",
+                    f"Sensor {task_id!r} wait was removed because the native Databricks task waits for workload "
+                    "completion. In Airflow, the sensor could stop waiting and fail after its configured timing "
+                    f"({described}) without cancelling the Dataproc workload. No Databricks timeout was inferred, "
+                    "so the native task may continue beyond that point. Configure an explicit task timeout if "
+                    "cancellation is desired.",
+                )
+            )
+        else:
+            confirming_sensors[target] = task_id
         plan.dropped.add(sensor)
         collapsed_by_workload[target].append(sensor)
         plan.proofs.append(
@@ -408,6 +412,7 @@ def plan_dataproc(
                 "capture_id": sensor,
                 "paired_capture_id": target,
                 "pairing": "dataproc_job_id" if canonical == dataproc.JOB_SENSOR else "batch_id",
+                "sensor_timing": timing,
             }
         )
 
@@ -459,21 +464,30 @@ def plan_dataproc(
                     f"teardown {dataproc_vars[member][0]!r} ran under trigger_rule {teardown_rules[member]!r}; "
                     "the job cluster now terminates with the run"
                 )
-        if variable in wait_bounds:
-            bound, sensor_task_id = wait_bounds[variable]
+        if asynchronous:
+            plan.submission_only_policies.add(variable)
             notes.append(
-                f"sensor {sensor_task_id!r} bounded the wait to {bound}s, so the task now times out after {bound}s "
-                "and cancels the workload"
+                "its Airflow timeout and retries covered only the asynchronous submission, so the task has no "
+                "timeout and does not retry"
+            )
+        if variable in confirming_sensors:
+            notes.append(
+                f"sensor {confirming_sensors[variable]!r} only confirmed a batch the operator had already waited for"
             )
         if canonical == dataproc.SUBMIT_JOB and asynchronous and not waited:
             notes.append("the asynchronous submission had no paired sensor, so downstream tasks now wait for it")
         if notes:
+            closing = (
+                "Cancellation follows the task."
+                if asynchronous
+                else "Task retries rerun the workload instead of resubmitting to Dataproc, and timeouts and "
+                "cancellation follow the task."
+            )
             plan.disclosures.append(
                 (
                     variable,
                     "dataproc_execution_envelope_changed",
-                    f"Task {task_id!r} now runs natively on Databricks: {'; '.join(notes)}. Task retries rerun the "
-                    "workload instead of resubmitting to Dataproc, and timeouts and cancellation follow the task.",
+                    f"Task {task_id!r} now runs natively on Databricks: {'; '.join(notes)}. {closing}",
                 )
             )
 

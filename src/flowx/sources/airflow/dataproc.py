@@ -264,6 +264,11 @@ def translate_workload(operator: str, task_id: str, task_key: str, kwargs: dict[
         return WorkloadTranslation(
             reason=f"The {payload_key} payload is not statically resolvable; supply the resolved payload."
         )
+    if "asynchronous" in kwargs and not isinstance(static_value(kwargs["asynchronous"]), bool):
+        return WorkloadTranslation(
+            reason="asynchronous is not a static boolean, so it is unknown whether the task's timeout and retries "
+            "cover the whole workload or only its submission; set it explicitly."
+        )
     if static_value(kwargs.get("cancel_on_kill")) is False:
         return WorkloadTranslation(
             reason="cancel_on_kill=False keeps the Dataproc job running after the task is killed; Databricks "
