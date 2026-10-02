@@ -295,12 +295,16 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             extra["main_class_name"] = activity.main_class_name
             if activity.parameters:
                 extra["parameters"] = activity.parameters
+            if activity.keep_remote_artifacts:
+                extra["keep_remote_artifacts"] = True
         case SparkPythonActivity():
             extra["python_file"] = activity.python_file
             if activity.parameters:
                 extra["parameters"] = activity.parameters
             if activity.generated_source is not None:
                 extra["generated_source"] = activity.generated_source
+            if activity.keep_remote_artifacts:
+                extra["keep_remote_artifacts"] = True
         case WebActivity():
             extra["url"] = activity.url
             extra["method"] = activity.method

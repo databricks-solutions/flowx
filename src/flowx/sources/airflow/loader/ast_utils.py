@@ -82,23 +82,61 @@ def _construct_name(node: ast.expr, aliases: dict[str, str]) -> str:
     return canonical.rsplit(".", 1)[-1] if canonical else ""
 
 
-def _airflow_generation(module: ast.Module) -> str:
-    """Infers version-specific authoring syntax only when imports are unambiguous."""
-    imported_modules: list[str] = []
-    for statement in module.body:
+_LEGACY_AIRFLOW_MODULE = re.compile(r"^airflow\.(?:operators|sensors)\.[^.]+_(?:operator|sensor)$")
+_AIRFLOW_2_CORE_MODULE = re.compile(r"^airflow\.(?:operators|sensors)\.[A-Za-z0-9_]+$")
+
+
+def _module_level_imports(statements: list[ast.stmt]) -> list[str]:
+    """Returns modules imported at module level, including both branches of a try/except import shim."""
+    names: list[str] = []
+    for statement in statements:
         if isinstance(statement, ast.Import):
-            imported_modules.extend(item.name for item in statement.names)
+            names.extend(item.name for item in statement.names)
         elif isinstance(statement, ast.ImportFrom) and statement.module:
-            imported_modules.append(statement.module)
-    if any(name == "airflow.sdk" or name.startswith("airflow.sdk.") for name in imported_modules) or any(
-        name == "airflow.providers.standard" or name.startswith("airflow.providers.standard.")
-        for name in imported_modules
-    ):
-        return "3"
-    legacy_module = re.compile(r"^airflow\.(?:operators|sensors)\.[^.]+_(?:operator|sensor)$")
-    if any(name.startswith("airflow.contrib.") or legacy_module.fullmatch(name) for name in imported_modules):
-        return "1.10"
-    return "unknown"
+            names.append(statement.module)
+        elif isinstance(statement, ast.Try):
+            names.extend(_module_level_imports(statement.body))
+            for handler in statement.handlers:
+                names.extend(_module_level_imports(handler.body))
+            names.extend(_module_level_imports(statement.orelse))
+            names.extend(_module_level_imports(statement.finalbody))
+    return names
+
+
+def airflow_generation(module: ast.Module, dag_kwargs: dict[str, ast.expr] | None = None) -> tuple[str, str]:
+    """Infers the Airflow major version from source, returning ``(generation, evidence)``.
+
+    Airflow 3 is identified by the Task SDK or the standard provider; Airflow 1.10 by ``airflow.contrib``
+    or the legacy ``*_operator`` / ``*_sensor`` modules; Airflow 2 by syntax Airflow 3 removed (the
+    ``schedule_interval`` DAG argument, core ``airflow.operators`` / ``airflow.sensors`` modules, and
+    ``airflow.utils.dates``). Imports in either branch of a try/except shim count, so a module written
+    for several versions reports conflicting evidence and is ``unknown``.
+    """
+    modules = _module_level_imports(module.body)
+    three = [name for name in modules if name.startswith(("airflow.sdk", "airflow.providers.standard"))]
+    legacy = [name for name in modules if name.startswith("airflow.contrib.") or _LEGACY_AIRFLOW_MODULE.fullmatch(name)]
+    two = [
+        name
+        for name in modules
+        if (_AIRFLOW_2_CORE_MODULE.fullmatch(name) and not _LEGACY_AIRFLOW_MODULE.fullmatch(name))
+        or name == "airflow.utils.dates"
+    ]
+    if dag_kwargs and "schedule_interval" in dag_kwargs:
+        two.append("schedule_interval")
+    if three and (two or legacy):
+        return "unknown", f"conflicting Airflow 3 ({three[0]}) and Airflow 2 ({(two or legacy)[0]}) syntax"
+    if legacy:
+        return "1.10", legacy[0]
+    if two:
+        return "2", two[0]
+    if three:
+        return "3", three[0]
+    return "unknown", "no version-specific syntax"
+
+
+def _airflow_generation(module: ast.Module) -> str:
+    """Returns just the inferred Airflow generation; see :func:`airflow_generation`."""
+    return airflow_generation(module)[0]
 
 
 def _safe_static_value(node: ast.expr, constants: dict[str, Any]) -> Any:

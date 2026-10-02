@@ -924,21 +924,36 @@ class TestStripDanglingTaskValueRefs:
         assert "`branch`" in md
 
     def test_airflow_backfill_renders_setup_section(self):
-        # An Airflow catchup=True DAG surfaces a native-backfill section in SETUP.md so the
-        # run_date override path is documented rather than silently lost.
+        # A DAG that resolves Airflow logical dates documents which trigger-instant parameters a
+        # native backfill must override, so replayed windows get the same previous-interval shift.
         from flowx.bundler.prereqs_writer import build_prereqs, render_setup_md
 
         prereqs = build_prereqs(
             notebooks=[],
             tasks=[],
             known_bundle_jobs=set(),
-            airflow_backfills=[{"pipeline": "daily_etl"}],
+            airflow_backfills=[{"pipeline": "daily_etl", "catchup": True, "date_resolver": True}],
         )
         assert not prereqs.is_empty()
         md = render_setup_md(prereqs, bundle_name="b")
-        assert "Backfill (Airflow catchup)" in md
-        assert "{{backfill.iso_date}}" in md
-        assert "`daily_etl`" in md
+        assert "## Backfill and Airflow logical dates" in md
+        assert "override `__flowx_airflow_trigger_time` with `{{backfill.iso_datetime}}`" in md
+        assert "set `__flowx_airflow_trigger_type` to `periodic`" in md
+        assert "{{backfill.iso_date}}" not in md
+        assert "- `daily_etl` (catchup=True, resolves Airflow logical dates)" in md
+
+    def test_catchup_only_backfill_omits_the_resolver_parameters(self):
+        from flowx.bundler.prereqs_writer import build_prereqs, render_setup_md
+
+        prereqs = build_prereqs(
+            notebooks=[],
+            tasks=[],
+            known_bundle_jobs=set(),
+            airflow_backfills=[{"pipeline": "daily_etl", "catchup": True, "date_resolver": False}],
+        )
+        md = render_setup_md(prereqs, bundle_name="b")
+        assert "__flowx_airflow_trigger_time" not in md
+        assert "- `daily_etl` (catchup=True)" in md
 
     def test_recurses_into_for_each_task_body(self):
         from flowx.bundler.dab_writer import _strip_dangling_task_value_refs
@@ -1238,14 +1253,11 @@ class TestManualCredentialFromMsiLinkedService:
 
 
 class TestUnparseableClusterHintsFiltered:
-    """C-29 (NB-ITER4-002): unparseable spark_version / node_type_id values
-    are filtered before Counter so the bundle default stays deployable."""
+    """C-29 (NB-ITER4-002): unparseable spark_version / node_type_id values are filtered before
+    Counter so they are never suggested as the value for a required bundle variable."""
 
-    def test_unparseable_spark_version_falls_back_to_default(self):
-        from flowx.bundler.dab_writer import (
-            _DEFAULT_SPARK_VERSION,
-            _infer_bundle_cluster_defaults,
-        )
+    def test_unparseable_spark_version_is_not_suggested(self):
+        from flowx.bundler.dab_writer import _infer_source_cluster_settings
 
         wf = _simple_workflow()
         wf.cluster_hints = [
@@ -1254,15 +1266,12 @@ class TestUnparseableClusterHintsFiltered:
                 "node_type_id": "Standard_DS3_v2",
             },
         ]
-        spark_version, node_type_id = _infer_bundle_cluster_defaults(wf)
-        assert spark_version == _DEFAULT_SPARK_VERSION
+        spark_version, node_type_id = _infer_source_cluster_settings(wf)
+        assert spark_version is None
         assert node_type_id == "Standard_DS3_v2"
 
-    def test_unparseable_node_type_falls_back_to_default(self):
-        from flowx.bundler.dab_writer import (
-            _DEFAULT_NODE_TYPE_ID,
-            _infer_bundle_cluster_defaults,
-        )
+    def test_unparseable_node_type_is_not_suggested(self):
+        from flowx.bundler.dab_writer import _infer_source_cluster_settings
 
         wf = _simple_workflow()
         wf.cluster_hints = [
@@ -1271,12 +1280,12 @@ class TestUnparseableClusterHintsFiltered:
                 "node_type_id": "@pipeline().parameters.unresolved",
             },
         ]
-        spark_version, node_type_id = _infer_bundle_cluster_defaults(wf)
+        spark_version, node_type_id = _infer_source_cluster_settings(wf)
         assert spark_version == "15.4.x-scala2.12"
-        assert node_type_id == _DEFAULT_NODE_TYPE_ID
+        assert node_type_id is None
 
     def test_real_spark_version_still_wins(self):
-        from flowx.bundler.dab_writer import _infer_bundle_cluster_defaults
+        from flowx.bundler.dab_writer import _infer_source_cluster_settings
 
         wf = _simple_workflow()
         wf.cluster_hints = [
@@ -1284,8 +1293,70 @@ class TestUnparseableClusterHintsFiltered:
             {"spark_version": "15.4.x-photon-scala2.12", "node_type_id": "Standard_D4s_v3"},
             {"spark_version": "@if(equals(item()?.photon,true),X,Y)", "node_type_id": "Standard_D4s_v3"},
         ]
-        spark_version, _ = _infer_bundle_cluster_defaults(wf)
+        spark_version, _ = _infer_source_cluster_settings(wf)
         assert spark_version == "15.4.x-photon-scala2.12"
+
+
+class TestRequiredClusterVariables:
+    """Airflow bundles declare node_type_id and spark_version as required variables listed in SETUP.md.
+
+    ADF bundles keep source-derived defaults until ADF node-type handling is revisited separately.
+    """
+
+    def _classic_workflow(self, source: str | None = "airflow"):
+        pipeline = Pipeline(
+            name="classic_job",
+            tags={"source": source} if source else {},
+            tasks=[
+                NotebookActivity(
+                    name="Run NB",
+                    task_key="run_nb",
+                    notebook_path="/Shared/ETL/transform",
+                    cluster={"spark_version": "14.3.x-scala2.12", "node_type_id": "Standard_D4s_v3"},
+                )
+            ],
+        )
+        return prepare_workflow(pipeline)
+
+    def test_cluster_variables_have_no_default(self, tmp_path):
+        write_bundle(self._classic_workflow(), tmp_path)
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        for name in ("node_type_id", "spark_version"):
+            assert name in variables
+            assert "default" not in variables[name]
+            assert variables[name]["description"].startswith("Required.")
+
+    def test_source_values_are_suggested_not_defaulted(self, tmp_path):
+        write_bundle(self._classic_workflow(), tmp_path)
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        assert "The source pipelines used Standard_D4s_v3." in variables["node_type_id"]["description"]
+        assert "The source pipelines used 14.3.x-scala2.12." in variables["spark_version"]["description"]
+
+    def test_setup_md_lists_required_variables(self, tmp_path):
+        write_bundle(self._classic_workflow(), tmp_path)
+        setup = (tmp_path / "SETUP.md").read_text()
+        assert "## Required bundle variables" in setup
+        assert "| `node_type_id` |" in setup
+        assert "| `spark_version` |" in setup
+        assert "--var node_type_id=<value> --var spark_version=<value>" in setup
+
+    def test_adf_bundle_defaults_cluster_variables_to_source_values(self, tmp_path):
+        write_bundle(self._classic_workflow(source="adf"), tmp_path)
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        assert variables["node_type_id"]["default"] == "Standard_D4s_v3"
+        assert variables["spark_version"]["default"] == "14.3.x-scala2.12"
+        assert "## Required bundle variables" not in (tmp_path / "SETUP.md").read_text()
+
+    def test_serverless_bundle_declares_no_cluster_variables(self, tmp_path):
+        pipeline = Pipeline(
+            name="serverless_job",
+            tasks=[WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10)],
+        )
+        write_bundle(prepare_workflow(pipeline), tmp_path)
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        assert "node_type_id" not in variables
+        assert "spark_version" not in variables
+        assert "## Required bundle variables" not in (tmp_path / "SETUP.md").read_text()
 
 
 class TestSingleUserNameOnSingleUserClusters:

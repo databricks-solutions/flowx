@@ -303,20 +303,33 @@ def download_notebook(workspace_path: str) -> str | None:
     return None
 
 
+def is_dbfs_path(path: str) -> bool:
+    """Returns True when *path* is something the DBFS API can read: ``dbfs:`` or an absolute path.
+
+    Cloud storage URIs (``gs://``, ``s3://``, ``abfss://``, ...) and other schemes are not DBFS
+    paths; the bundle ships a placeholder with copy instructions for them instead.
+    """
+    return path.startswith("dbfs:") or path.startswith("/")
+
+
 def download_dbfs_file(dbfs_path: str) -> bytes | None:
-    """Downloads a file from DBFS.
+    """Downloads a file from DBFS, or returns ``None`` without any network call when it cannot.
+
+    Nothing is downloaded when workspace downloads are disabled (``--no-download-workspace-files``)
+    or when *dbfs_path* is not a DBFS path.
 
     Args:
         dbfs_path: DBFS path (e.g., ``"dbfs:/scripts/process.py"`` or
             ``"dbfs:/jars/app.jar"``).
 
     Returns:
-        File content as bytes, or ``None`` if download failed.
+        File content as bytes, or ``None`` if nothing was downloaded.
     """
+    if not _downloads_enabled or not is_dbfs_path(dbfs_path):
+        return None
     try:
         w = _get_workspace_client()
-        # Strip "dbfs:" prefix for the SDK call
-        path = dbfs_path.replace("dbfs:", "", 1)
+        path = dbfs_path.removeprefix("dbfs:")
         with w.dbfs.open(path, read=True) as f:
             return f.read()
     except ImportError:

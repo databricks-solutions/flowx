@@ -17,6 +17,7 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 | `BranchPythonOperator` / `ShortCircuitOperator` | Failing placeholder + review gap (runtime branch selection can't be lowered statically). |
 | `BashOperator` / `SSHOperator` | `%sh` notebook; a single unchained `spark-submit` invocation is lifted only when every option arity is known. |
 | `SparkSubmitOperator` | Spark JAR or Python task. |
+| Dataproc / Managed Spark (`DataprocSubmitJobOperator`, `DataprocCreateBatchOperator`, and the `ManagedSpark*` aliases) | Routed by the nested payload key, never the class: PySpark → Spark Python task, JVM Spark → Spark JAR task, inline Spark SQL → `sql_task`. Cluster lifecycle tasks and paired sensors are absorbed into Jobs compute when provably safe; see [Dataproc](#dataproc-and-managed-spark). |
 | Databricks provider operators (`DatabricksSubmitRun*`, `DatabricksRunNow*`, `DatabricksNotebookOperator`) | Notebook / run-job tasks. |
 | SQL operators (`DatabricksSql*`, `SQLExecuteQueryOperator`, `PostgresOperator`, `MySqlOperator`, `HiveOperator`, `DatabricksCopyIntoOperator`) | `sql_task` (SqlActivity); Jinja values → `:name`, identifier positions → `IDENTIFIER(:name)`, with `sql_task.parameters`. |
 | `TriggerDagRunOperator` | `run_job_task` referencing the target DAG by sanitized job name. |
@@ -34,9 +35,10 @@ Airflow, and never executes a DAG. Anything the static walk can't see, it can't 
 | Dependencies | `>>` / `<<` chains (incl. list/tuple fan-out and inline TaskFlow calls) and `set_upstream` / `set_downstream`. |
 | **TaskGroups** (context-manager `with TaskGroup(...)`) | Static nesting → task-key namespacing (`group__subgroup__task`); group-level edges (`group_a >> group_b`, `task >> group`) expand to leaf→root edges between member tasks. |
 | **`@task_group`** (decorator form) | Placeholder + gap with dependency edges preserved; a decorator group is a sub-pipeline flowx doesn't lower deterministically. |
-| Schedule | Cron `schedule_interval` → Quartz (Unix DOW 0–6 → Quartz 1–7); exact sub-hour `timedelta` → Quartz, longer intervals → periodic, `@continuous` → continuous mode. Airflow 3 Asset/Dataset lists and uniform `&` / `|` expressions map to `ALL_UPDATED` / `ANY_UPDATED` table triggers when each asset declares `extra={"databricks_table": "catalog.schema.table"}` or an `x-databricks-table:` URI. |
+| Schedule | Cron `schedule_interval` → Quartz (Unix DOW 0–6 → Quartz 1–7); a `timedelta` whose length divides an hour or a day, with a literal `start_date`, → a Quartz cron anchored to `start_date` so runs fire on Airflow's interval boundaries (a one-day interval in the DAG timezone, unless its local start time is skipped or repeated by daylight saving; shorter intervals in UTC); other `timedelta` schedules → periodic, whose phase follows deployment time, so their interval macros become gaps. `@continuous` → continuous mode. Airflow 3 Asset/Dataset lists and uniform `&` / `|` expressions map to `ALL_UPDATED` / `ANY_UPDATED` table triggers when each asset declares `extra={"databricks_table": "catalog.schema.table"}` or an `x-databricks-table:` URI. |
 | `trigger_rule` | Exact supported rules map to `run_if`; `none_failed_min_one_success` and its legacy `none_failed_or_skipped` spelling map to `NONE_FAILED` with the all-skipped delta recorded. Rules without an equivalent become linked placeholders. |
-| Job parameters | `params={...}` / `Param(default=...)` → job parameters with defaults. User `params.x` keeps the name `x`; logical-date macros, `var.value.x`, `dag_run.conf['x']`, and `run_id` use collision-free `__flowx_airflow_*` bindings. User parameter names beginning with `__flowx_` become explicit gaps. |
+| Job parameters | `params={...}` / `Param(default=...)` → job parameters with defaults. User `params.x` keeps the name `x`; `var.value.x`, `dag_run.conf['x']`, and `run_id` use collision-free `__flowx_airflow_*` bindings. User parameter names beginning with `__flowx_` become explicit gaps. |
+| Interval macros | `ds`, `ds_nodash`, `ts`, `ts_nodash`, `logical_date` / `execution_date`, `data_interval_start` / `data_interval_end`, and (Airflow 2 data-interval timetables only) `prev_ds` / `next_ds` are rendered as Airflow renders them, in UTC, by a generated first task `__flowx_airflow_dates`; consumers read `{{tasks.__flowx_airflow_dates.values.<macro>}}`. Airflow 2 cron / preset and `timedelta` schedules (and an explicit `CronDataIntervalTimetable`) use the previous schedule tick as the logical date; an Airflow 3 raw cron uses the fire time (assuming the default `create_cron_data_intervals = False`, disclosed); manual and triggered-job runs use the trigger time. The Airflow version comes from source (`schedule_interval`, `airflow.operators.*`, `airflow.utils.dates` → 2; `airflow.sdk`, `airflow.providers.standard` → 3). An undeterminable version or timetable, an event-triggered job, `macros.*`, and Airflow 3 `prev_ds` / `next_ds` become gaps. A native backfill overrides `__flowx_airflow_trigger_time` with `{{backfill.iso_datetime}}` and sets `__flowx_airflow_trigger_type` to `periodic`; `__flowx_airflow_logical_date` replays one exact partition. |
 | Job policy | Static positive `dagrun_timeout` → Job `timeout_seconds`; static failure recipients → Job `email_notifications.on_failure`. Explicitly disabled `depends_on_past`, retry/failure email, SLA callback, auto-pause, and empty environment settings are recorded as intentional no-ops. |
 | `Variable.get` in a callable | `Variable.get('literal_name')` is rewritten to a collision-free `__flowx_airflow_variable_*` widget. Dynamic keys, Airflow defaults/deserialization options, other Airflow runtime imports, and Airflow `Connection` objects route to placeholders rather than emitting notebooks that require Airflow. |
 | Multiple DAGs | Every DAG, including multiple declarations and repeated static `@dag` factory invocations in one Python file, becomes a sibling job in one shared Airflow bundle so `TriggerDagRunOperator` resource references resolve. Narrow classic factories shaped as one DAG declaration followed by `return dag` are expanded with statically bindable arguments. |
@@ -76,6 +78,67 @@ decisions.
   flags must be statically visible. Selectors, excludes, and vars are rendered by static explosion
   only; in `--dbt-mode pydabs` they force a static fallback. Missing project, profile, or manifest
   inputs produce a failing setup-required placeholder rather than a partially deployable dbt job.
+
+## Dataproc and Managed Spark
+
+flowx recognizes the Google provider's Dataproc operators and sensors, and the `ManagedSpark*` names
+that alias them, and applies one set of rules to both names. A job or batch payload must resolve
+statically to exactly one engine key; its value decides the task:
+
+| Payload | Result |
+| --- | --- |
+| `pyspark_job` / `pyspark_batch` | `spark_python_task`; `args` → `parameters`, `jar_file_uris` → task libraries. |
+| `spark_job` / `spark_batch` | `spark_jar_task`; `main_class` → `main_class_name`, main and dependency JARs → task libraries. |
+| `spark_sql_job` with an inline `query_list` | `sql_task`, with Jinja values bound as named parameters. |
+| `spark_r_*`, `pyspark_notebook_batch`, `hive_job`, `hadoop_job`, `pig_job`, `flink_job`, `presto_job`, `trino_job` | Failing placeholder + gap with engine-specific migration guidance. |
+
+These fail closed rather than guessing a mapping:
+- zero or several engine keys, or a payload that isn't static;
+- a query file, auxiliary `python_file_uris` / `file_uris` / `archive_uris`, or a missing `main_class`;
+- a `file://` Dataproc node path, or a templated artifact location;
+- a non-Spark job property, `cancel_on_kill=False`, an `asynchronous` that is not a static boolean, or
+  any argument without declared semantics.
+
+`spark_submit_task` is never emitted.
+
+**Compute.** The job's `placement.cluster_name` links it to its `DataprocCreateClusterOperator`. From
+that cluster, flowx carries over:
+- `worker_config.num_instances` as `num_workers`, when there are no secondary workers (zero workers
+  becomes a single-node cluster profile);
+- `spark:`-prefixed software properties, as `spark_conf`.
+
+The job's own `spark.*` properties are added to the same `spark_conf`, and every Spark workload binds
+to the default job cluster. A job placed by `cluster_labels`, or on a cluster this DAG does not create,
+also runs there, and that compute change is reported. Other property prefixes (`yarn:`, `hdfs:`, `mapred:`, `dataproc:`, …) are
+removed and reported. Machine types and image versions are reported but never mapped, so the node
+type and Databricks Runtime remain bundle variables.
+
+Secondary workers, init actions, autoscaling policies, a Dataproc Metastore, GKE placement, and
+optional components block absorption.
+
+**Collapse.** Cluster create, delete, start, and stop tasks are removed, with dependencies rewired, only
+when all of these hold:
+- every job placed on the cluster migrates deterministically;
+- nothing else in the DAG reads a removed task's output through XCom;
+- no task updates, scales, or diagnoses the cluster;
+- removing a task with a non-default trigger rule would not change when its downstream tasks run.
+
+A `DataprocJobSensor` is removed when its `dataproc_job_id` is the `xcom_pull` of an asynchronous
+submission that nothing else reads. A `DataprocBatchSensor` is removed when its `batch_id` matches the
+creating operator's `batch_id`. Either sensor must also be downstream of the workload it waits on.
+No task timeout is inferred from a sensor's timing: an Airflow sensor timeout failed the wait without
+cancelling the Dataproc workload, while a Databricks task timeout cancels it, so the native task waits
+for completion and the removed wait is reported with each timing setting and its source (sensor,
+`default_args`, operator default, or unknown deployment configuration). Configure an explicit task timeout if cancellation is
+wanted. An asynchronous workload also drops its own timeout and retries, which in Airflow covered only
+the submission call. A synchronous batch keeps its timeout and retries, and its sensor, which only
+confirmed the finished batch, is removed.
+
+Every removal is recorded in the transformation ledger. The changed retry, teardown, and wait
+behavior is reported as a gap finding, as are the GCS artifacts the job's Databricks identity must
+be able to read. Tasks that cannot be removed stay as failing placeholders with the reason attached.
+Workflow templates, cluster update, scale, and diagnose, batch control, and cancel-operation tasks
+always stay as placeholders.
 
 ## dbt factory mode
 

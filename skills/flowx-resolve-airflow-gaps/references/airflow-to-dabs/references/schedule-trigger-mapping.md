@@ -335,14 +335,14 @@ is ambiguous** — do not default silently.
 `{{ ds }}` must map to a named **job parameter** (e.g. `run_date`), never a hardcoded date or an
 inline `{{job.start_time...}}` buried in a task. Native [Databricks backfill](https://docs.databricks.com/aws/en/jobs/backfill-jobs)
 replays a job over a historical range by **overriding an existing date/time job parameter** per
-replayed window with `{{backfill.iso_date}}` (the start of that window's range). What makes a job
+replayed window with `{{backfill.iso_date}}` (the replayed run's scheduled trigger date, not Airflow's prior data-interval date). What makes a job
 backfillable is that such a parameter **exists** to be overridden — a job that hardcodes the date or
 computes it inline from `{{job.start_time...}}` gives backfill nothing to override, so history cannot
 be replayed for the right window. (During a backfill the override wins regardless of the parameter's
 default; the default only governs **normal** runs — which is why a logical/partition date should
 default to `{{job.trigger.time.iso_date}}`, not `{{job.start_time.iso_date}}`, whose drift on delayed
 or retried runs would process the wrong date.) So: expose `run_date`, default it to the Step-1 choice,
-and record in `MIGRATION_NOTES.md` that a backfill should override `run_date` with `{{backfill.iso_date}}`. (Backfills always run the whole job; **pipeline tasks are not parameterized**
+and record in `MIGRATION_NOTES.md` that a backfill should override `run_date` with `{{backfill.iso_date}}`. If the migration preserves an Airflow 2 previous-interval offset by keeping `run_date` empty and deriving it from a separate trigger/logical-instant parameter, the backfill must instead override that trigger/logical-instant parameter with `{{backfill.iso_date}}`; overriding `run_date` would bypass the offset and replay the wrong partition. (Backfills always run the whole job; **pipeline tasks are not parameterized**
 and run as-is, so a pipeline-only workload can't carry a backfill date — flag it.)
 
 ## Jinja Template Variable Conversion

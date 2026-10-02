@@ -135,13 +135,17 @@ class Prereqs:
     # dbt-factory PyDABs hooks; each entry is the SetupTask config dict ({hook_module, job_key,
     # manifest_path, note}). The user must `pip install databricks-dbt-factory` before deploy.
     pydabs_dbt_factories: list[dict[str, Any]] = field(default_factory=list)
-    # Airflow catchup=True jobs; each entry is the SetupTask config dict ({pipeline}). History is
-    # replayed via a native Databricks backfill overriding the reserved Airflow date parameter.
+    # Airflow jobs with catchup=True or a generated logical-date resolver; each entry is the SetupTask
+    # config dict ({pipeline, catchup, date_resolver}). History is replayed via a native Databricks
+    # backfill that overrides the resolver's trigger-instant parameters.
     airflow_backfills: list[dict[str, Any]] = field(default_factory=list)
     # Report entries dropped by _load_report because they were not a dict with 'name' and 'tasks'.
     # Each entry is a human-readable identifier (the pipeline name, or ``index N`` when unnamed) so a
     # skipped pipeline is surfaced rather than silently missing from the bundle.
     skipped_pipelines: list[str] = field(default_factory=list)
+    # Bundle variables declared without a default (name -> description); `bundle validate` fails until
+    # the user supplies each one.
+    required_variables: dict[str, str] = field(default_factory=dict)
 
     def is_empty(self) -> bool:
         """Return ``True`` when nothing needs to happen before ``bundle run``."""
@@ -165,6 +169,7 @@ class Prereqs:
             and not self.pydabs_dbt_factories
             and not self.airflow_backfills
             and not self.skipped_pipelines
+            and not self.required_variables
         )
 
 
@@ -380,6 +385,7 @@ def build_prereqs(
     pydabs_dbt_factories: list[dict[str, Any]] | None = None,
     airflow_backfills: list[dict[str, Any]] | None = None,
     skipped_pipelines: list[str] | None = None,
+    required_variables: dict[str, str] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
 
@@ -431,6 +437,7 @@ def build_prereqs(
         pydabs_dbt_factories=list(pydabs_dbt_factories or []),
         airflow_backfills=list(airflow_backfills or []),
         skipped_pipelines=list(skipped_pipelines or []),
+        required_variables=dict(required_variables or {}),
     )
 
 
@@ -469,6 +476,28 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
         "Deployment itself is **not** listed — it is the step that comes *after* everything here."
     )
     lines.append("")
+
+    if prereqs.required_variables:
+        lines.append("## Required bundle variables")
+        lines.append("")
+        lines.append(
+            "These variables have no default. `databricks bundle validate` reports them as missing until you "
+            "supply a value for the target workspace, either under `targets.<target>.variables` in "
+            "`databricks.yml` or with `--var name=value`:"
+        )
+        lines.append("")
+        lines.append("| Variable | What to set |")
+        lines.append("|---|---|")
+        for name, description in sorted(prereqs.required_variables.items()):
+            lines.append(f"| `{name}` | {description} |")
+        lines.append("")
+        lines.append("```bash")
+        lines.append(
+            "databricks bundle validate -t dev "
+            + " ".join(f"--var {name}=<value>" for name in sorted(prereqs.required_variables))
+        )
+        lines.append("```")
+        lines.append("")
 
     if prereqs.secrets:
         lines.append("## Secret scopes and values")
@@ -723,18 +752,60 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
         lines.append("")
 
     if prereqs.airflow_backfills:
-        lines.append("## Backfill (Airflow catchup)")
+        backfills = sorted(prereqs.airflow_backfills, key=lambda config: config.get("pipeline", ""))
+        lines.append("## Backfill and Airflow logical dates")
         lines.append("")
         lines.append(
-            "The DAG(s) below set `catchup=True`, so Airflow backfilled missed intervals.  There is "
-            "no equivalent DABs schedule setting.  To replay history, run a "
-            "[native Databricks backfill](https://docs.databricks.com/aws/en/jobs/backfill-jobs), which "
-            "overrides the `__flowx_airflow_run_date` job parameter with `{{backfill.iso_date}}` per "
-            "replayed window (the parameter is emitted for exactly this reason)."
+            "Replay history with a "
+            "[native Databricks backfill](https://docs.databricks.com/aws/en/jobs/backfill-jobs). Airflow "
+            "`catchup=True` has no DABs schedule setting, so a backfill is how missed intervals are run."
         )
         lines.append("")
-        for entry in sorted(prereqs.airflow_backfills, key=lambda config: config.get("pipeline", "")):
-            lines.append(f"- `{entry.get('pipeline', '')}`")
+        if any(entry.get("date_resolver") for entry in backfills):
+            lines.append(
+                "Jobs that read Airflow interval macros (`ds`, `ts`, `data_interval_start`, ...) compute them "
+                "in the generated first task `__flowx_airflow_dates`, which reproduces Airflow's rendering "
+                "from the run's trigger instant. For a data-interval timetable (Airflow 2 cron and "
+                "`timedelta` schedules) the logical date is the previous schedule tick, not the fire time. "
+                "These jobs declare three parameters:"
+            )
+            lines.append("")
+            lines.append("| Parameter | Default | Role |")
+            lines.append("|---|---|---|")
+            lines.append(
+                "| `__flowx_airflow_trigger_time` | `{{job.trigger.time.iso_datetime}}` | "
+                "The fire instant the macros are derived from. |"
+            )
+            lines.append(
+                "| `__flowx_airflow_trigger_type` | `{{job.trigger.type}}` | "
+                "`one_time` and `run_job_task` runs keep the trigger instant as their logical date, "
+                "as an Airflow manual run does. |"
+            )
+            lines.append(
+                "| `__flowx_airflow_logical_date` | empty | "
+                "An explicit logical date for an exact partition replay; it wins and is not shifted. |"
+            )
+            lines.append("")
+            lines.append(
+                "In a backfill, override `__flowx_airflow_trigger_time` with `{{backfill.iso_datetime}}` "
+                "and set `__flowx_airflow_trigger_type` to `periodic`, so each replayed window is shifted "
+                "exactly as its scheduled run would be. Setting the trigger type matters: a backfill run's "
+                "own trigger type is not documented, and a manual value would skip the shift. Never "
+                "override a derived date. To rerun one specific partition instead, set "
+                "`__flowx_airflow_logical_date` to that logical date."
+            )
+            lines.append("")
+        for entry in backfills:
+            notes = [
+                label
+                for label, present in (
+                    ("catchup=True", entry.get("catchup")),
+                    ("resolves Airflow logical dates", entry.get("date_resolver")),
+                )
+                if present
+            ]
+            suffix = f" ({', '.join(notes)})" if notes else ""
+            lines.append(f"- `{entry.get('pipeline', '')}`{suffix}")
         lines.append("")
 
     if prereqs.manual_credentials:

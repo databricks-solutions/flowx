@@ -11,7 +11,7 @@ from flowx.sources.airflow.loader import load_airflow_dag, load_airflow_dags
 _REPROS = Path(__file__).parents[1] / "resources" / "airflow" / "review_repros"
 
 _REPRO_CORPUS = {
-    "a1_assigned_dag.py": [("legacy_etl", "verified", 2)],
+    "a1_assigned_dag.py": [("legacy_etl", "verified", 3)],
     "a2_task_key_collision.py": [("collide", "verified", 3)],
     "a8_classic_mapping.py": [("fan", "verified_with_gaps", 1)],
     "t1_loop.py": [("loop_dag", "verified", 3)],
@@ -26,14 +26,14 @@ _REPRO_CORPUS = {
     "t10_loopliteral.py": [("loop2", "verified", 2)],
     "t11_dagvar.py": [("assigned_dag", "verified", 2)],
     "t12_globals.py": [("etl_alpha", "verified", 1), ("etl_beta", "verified", 1)],
-    "t13_sqlescape.py": [("sqlesc", "verified_with_gaps", 1)],
+    "t13_sqlescape.py": [("sqlesc", "verified", 2)],
     "t14_retries.py": [("ret", "verified", 2)],
     "t15_magic.py": [("magic", "verified", 1)],
     "t16_sensor.py": [("sensor_mid", "verified", 3)],
     "t17_taskflow.py": [("tf", "verified", 3)],
     "t18_xcompush.py": [("deps", "verified", 1)],
     "t19_fncollide.py": [("fnc", "verified", 1)],
-    "t20_sqlesc.py": [("sqlq", "verified", 2)],
+    "t20_sqlesc.py": [("sqlq", "verified", 3)],
     "t21_partialexpand.py": [("pe", "verified_with_gaps", 1)],
     "t22_expandbash.py": [("eb", "verified_with_gaps", 2)],
     "t23_tr2.py": [("tr2", "verified_with_gaps", 5)],
@@ -41,9 +41,9 @@ _REPRO_CORPUS = {
     "t25_tr3.py": [("tr3", "verified_with_gaps", 4)],
     "t26_loopedge.py": [("le", "verified", 3)],
     "t27_ss.py": [("ss3", "verified_with_gaps", 1)],
-    "t28_nodash.py": [("nd", "verified_with_gaps", 1)],
+    "t28_nodash.py": [("nd", "verified", 2)],
     "t29_dagsem.py": [("dsem", "verified_with_gaps", 2)],
-    "t30_dagvar2.py": [("legacy_etl", "verified", 2)],
+    "t30_dagvar2.py": [("legacy_etl", "verified", 3)],
     "t31_inject.py": [("inj", "verified", 1)],
     "t32_multiassigned.py": [("team_a_etl", "verified", 2), ("team_b_etl", "verified", 2)],
 }
@@ -73,7 +73,7 @@ def test_assigned_dag_preserves_configuration_and_tasks() -> None:
         "pause_status": "UNPAUSED",
     }
     assert pipeline.tags["airflow_catchup"] == "true"
-    assert {task.task_key for task in pipeline.tasks} == {"extract", "load"}
+    assert {task.task_key for task in pipeline.tasks} == {"__flowx_airflow_dates", "extract", "load"}
     assert _dependencies(pipeline)["load"] == ["extract"]
     assert next(task for task in pipeline.tasks if task.task_key == "extract").max_retries == 5
 
