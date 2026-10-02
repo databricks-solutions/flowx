@@ -45,8 +45,8 @@ state machines almost always have). Genuinely irreducible graphs degrade to a pl
   in the condition's `left` operand with an `expr` operator; only the branch structure is guaranteed.
 - **Glue / Lambda bodies.** Agentic placeholders for now (Open Question 2, Option 1). Deterministic
   GlueContext/DynamicFrame → Spark rewrites are a later increment.
-- **Glue Workflows.** A separate `glue` source (PRD Open Question 1 leans to two sources); not in this
-  increment.
+- **Glue Workflows.** A separate `glue` source (PRD Open Question 1 leans to two sources); see
+  `glue-ir-mapping.md`.
 
 ## Shared helpers added
 

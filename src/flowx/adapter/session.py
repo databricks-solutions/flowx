@@ -21,6 +21,7 @@ from flowx.adapter.constants import (
     INPUT_CATALOG,
     INPUT_DATABRICKS_PROFILE,
     INPUT_GLOBAL_PARAMETER_RESOLUTION,
+    INPUT_GLUE_SOURCE_PATH,
     INPUT_INSTALL_DASHBOARD,
     INPUT_INVENTORY_PATH,
     INPUT_OUTPUT_BUNDLE_PATH,
@@ -263,6 +264,14 @@ _SOURCE_PATH_OPTION: dict[str, dict[str, str]] = {
         "description": (
             "A state machine ``.json`` file or a local directory of exported definitions "
             "(bare Amazon States Language documents or ``describe-state-machine`` payloads)."
+        ),
+    },
+    "glue": {
+        "option_id": INPUT_GLUE_SOURCE_PATH,
+        "prompt": "Where are the Glue Workflow definitions?",
+        "description": (
+            "A workflow ``.json`` file or a local directory of exported "
+            "``aws glue get-workflow --include-graph`` payloads."
         ),
     },
 }

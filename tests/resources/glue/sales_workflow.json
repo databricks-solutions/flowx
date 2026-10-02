@@ -1,0 +1,72 @@
+{
+  "Workflow": {
+    "Name": "sales_workflow",
+    "Graph": {
+      "Nodes": [
+        {
+          "Type": "TRIGGER",
+          "Name": "daily-start",
+          "UniqueId": "wf_trigger_1",
+          "TriggerDetails": {
+            "Trigger": {
+              "Name": "daily-start",
+              "Type": "SCHEDULED",
+              "Schedule": "cron(0 7 * * ? *)",
+              "Actions": [{ "JobName": "ingest_sales" }]
+            }
+          }
+        },
+        { "Type": "JOB", "Name": "ingest_sales", "UniqueId": "wf_job_1" },
+        {
+          "Type": "TRIGGER",
+          "Name": "after-ingest",
+          "UniqueId": "wf_trigger_2",
+          "TriggerDetails": {
+            "Trigger": {
+              "Name": "after-ingest",
+              "Type": "CONDITIONAL",
+              "Predicate": {
+                "Logical": "AND",
+                "Conditions": [
+                  { "LogicalOperator": "EQUALS", "JobName": "ingest_sales", "State": "SUCCEEDED" }
+                ]
+              },
+              "Actions": [{ "CrawlerName": "sales_crawler" }, { "JobName": "transform_sales" }]
+            }
+          }
+        },
+        { "Type": "CRAWLER", "Name": "sales_crawler", "UniqueId": "wf_crawler_1" },
+        { "Type": "JOB", "Name": "transform_sales", "UniqueId": "wf_job_2" },
+        {
+          "Type": "TRIGGER",
+          "Name": "after-transform",
+          "UniqueId": "wf_trigger_3",
+          "TriggerDetails": {
+            "Trigger": {
+              "Name": "after-transform",
+              "Type": "CONDITIONAL",
+              "Predicate": {
+                "Logical": "AND",
+                "Conditions": [
+                  { "LogicalOperator": "EQUALS", "CrawlerName": "sales_crawler", "CrawlState": "SUCCEEDED" },
+                  { "LogicalOperator": "EQUALS", "JobName": "transform_sales", "State": "SUCCEEDED" }
+                ]
+              },
+              "Actions": [{ "JobName": "publish_sales" }]
+            }
+          }
+        },
+        { "Type": "JOB", "Name": "publish_sales", "UniqueId": "wf_job_3" }
+      ],
+      "Edges": [
+        { "SourceId": "wf_trigger_1", "DestinationId": "wf_job_1" },
+        { "SourceId": "wf_job_1", "DestinationId": "wf_trigger_2" },
+        { "SourceId": "wf_trigger_2", "DestinationId": "wf_crawler_1" },
+        { "SourceId": "wf_trigger_2", "DestinationId": "wf_job_2" },
+        { "SourceId": "wf_crawler_1", "DestinationId": "wf_trigger_3" },
+        { "SourceId": "wf_job_2", "DestinationId": "wf_trigger_3" },
+        { "SourceId": "wf_trigger_3", "DestinationId": "wf_job_3" }
+      ]
+    }
+  }
+}
