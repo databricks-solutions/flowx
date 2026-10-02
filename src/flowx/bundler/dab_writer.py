@@ -1905,14 +1905,14 @@ def _report_reconciliation_failures(report_path: Path) -> list[str]:
             continue
         tags = pipeline.get("tags")
         source = tags.get("source") if isinstance(tags, dict) else None
-        if source not in {"adf", "airflow"}:
-            failures.append(f"{label}: pipeline tags.source must be 'adf' or 'airflow'")
+        if source not in {"adf", "airflow", "stepfunctions"}:
+            failures.append(f"{label}: pipeline tags.source must be 'adf', 'airflow', or 'stepfunctions'")
             continue
 
         status = pipeline.get("reconciliation_status")
-        if source == "adf":
-            if status not in {None, "not_applicable"}:
-                failures.append(f"{label}: unknown reconciliation_status {status!r} for ADF")
+        if source in {"adf", "stepfunctions"}:
+            if status not in {None, "not_applicable", "verified"}:
+                failures.append(f"{label}: unknown reconciliation_status {status!r} for {source}")
             continue
 
         audit = pipeline.get("audit")
