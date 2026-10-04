@@ -1,0 +1,55 @@
+{
+  "Comment": "Sample retail ETL orchestration",
+  "StartAt": "IngestRaw",
+  "States": {
+    "IngestRaw": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": { "JobName": "ingest_raw" },
+      "Next": "CheckRowCount"
+    },
+    "CheckRowCount": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.rowCount", "NumericGreaterThan": 0, "Next": "TransformPartitions" }
+      ],
+      "Default": "NoData"
+    },
+    "TransformPartitions": {
+      "Type": "Map",
+      "ItemsPath": "$.partitions",
+      "MaxConcurrency": 4,
+      "ItemProcessor": {
+        "StartAt": "TransformPartition",
+        "States": {
+          "TransformPartition": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": { "JobName": "transform_partition" },
+            "End": true
+          }
+        }
+      },
+      "Next": "PublishMarts"
+    },
+    "NoData": {
+      "Type": "Pass",
+      "Result": { "status": "skipped" },
+      "Next": "PublishMarts"
+    },
+    "PublishMarts": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::states:startExecution.sync:2",
+      "Parameters": {
+        "StateMachineArn": "arn:aws:states:us-east-1:123456789012:stateMachine:publish_marts"
+      },
+      "Next": "Settle"
+    },
+    "Settle": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "Done"
+    },
+    "Done": { "Type": "Succeed" }
+  }
+}

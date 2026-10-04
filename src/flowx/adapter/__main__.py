@@ -41,6 +41,7 @@ from flowx.adapter.operations import (
 )
 from flowx.adapter.session import MigrationInputSession
 from flowx.sources import available_sources, get_source
+from flowx.utils import normalize_task_key
 
 # bundler.dab_writer + translator.engine (sqlglot) are imported lazily inside inspect/modify only, so
 # the cheap commands (inputs, phase pass-throughs, materialize-lookup, workspace-paths) skip ~0.15s of
@@ -89,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_record_results(args)
     if args.command == "install-dashboard":
         return _run_install_dashboard(args)
+    if args.command == "combine":
+        return _run_combine(args)
     parser.print_help(sys.stderr)
     return 2
 
@@ -183,6 +186,47 @@ def _run_install_dashboard(args: argparse.Namespace) -> int:
     print(f"Installed coverage dashboard (id={dashboard_id}).")
     if url:
         print(f"  {url}")
+    return 0
+
+
+def _run_combine(args: argparse.Namespace) -> int:
+    """Implements ``combine``: merge several translation reports into one.
+
+    Reads each ``--report`` (a single pipeline IR dict or a ``{"pipelines": [...]}``
+    wrapper), flattens them into one multi-pipeline report, and writes it to
+    ``--out``. This is how a Step Functions job that starts a Glue workflow ends
+    up in the same bundle as the converted Glue job: convert each source, then
+    combine, then package the merged report. Source-independent -- it works for
+    any mix of sources.
+
+    Returns ``0`` on success, ``1`` when a report cannot be read or none held a
+    pipeline, and ``2`` when two pipelines share a bundle job-resource key.
+    """
+    pipelines: list[dict[str, Any]] = []
+    seen: dict[str, str] = {}
+    for report_path in args.report:
+        try:
+            raw = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"Failed to read {report_path}: {error}", file=sys.stderr)
+            return 1
+        for pipeline in _extract_pipeline_dicts(raw):
+            resource_key = normalize_task_key(str(pipeline.get("name", "")))
+            if resource_key in seen:
+                print(
+                    f"Duplicate job name {pipeline.get('name')!r} (resource key {resource_key!r}) in "
+                    f"{report_path} and {seen[resource_key]}; rename one before combining.",
+                    file=sys.stderr,
+                )
+                return 2
+            seen[resource_key] = str(report_path)
+            pipelines.append(pipeline)
+    if not pipelines:
+        print("No pipelines found in the provided reports.", file=sys.stderr)
+        return 1
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps({"pipelines": pipelines}, indent=2, default=str) + "\n", encoding="utf-8")
+    print(f"Combined {len(pipelines)} pipeline(s) from {len(args.report)} report(s) into {args.out}")
     return 0
 
 
@@ -525,6 +569,25 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Workspace folder for the dashboard (defaults to the current user's home).",
+    )
+
+    combine = subparsers.add_parser(
+        "combine",
+        help="Merge several translation reports into one multi-pipeline report for a single bundle.",
+    )
+    combine.add_argument(
+        "--report",
+        type=Path,
+        action="append",
+        required=True,
+        default=[],
+        help="A translation report to include (single-pipeline or multi-pipeline). Repeatable; pass once per source.",
+    )
+    combine.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help='Destination for the merged {"pipelines": [...]} report that the package phase consumes.',
     )
 
     # Unified phase runners: `adapter <phase> --source <name> -- <flags>` routes discover/convert

@@ -444,6 +444,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Keep the transient .work/ folder (translation report + IR) instead of pruning it.",
     )
+    parser.add_argument(
+        "--single-bundle",
+        action="store_true",
+        help=(
+            "Package every pipeline in the report into one bundle (one job per pipeline) instead of a "
+            "separate bundle per pipeline. Use when one pipeline's run_job_task targets another in the "
+            "same report -- e.g. a Step Functions job that starts a converted Glue workflow -- so the "
+            "${resources.jobs.<name>.id} reference resolves in-bundle."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.report is None:
@@ -494,7 +504,9 @@ def main(argv: list[str] | None = None) -> int:
         print("No translated pipelines found in the report.", file=sys.stderr)
         return 1
 
-    shared_airflow_bundle = len(workflows) > 1 and all(workflow.source == "airflow" for workflow in workflows)
+    combined_bundle = len(workflows) > 1 and (
+        args.single_bundle or all(workflow.source == "airflow" for workflow in workflows)
+    )
     from flowx.validate.bundle_invariants import check_bundle_dir, format_result
 
     # Render and validate away from the destination. This keeps a reconciliation or structural
@@ -502,9 +514,9 @@ def main(argv: list[str] | None = None) -> int:
     args.output_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".flowx-preflight-", dir=args.output_dir.parent) as temporary:
         staging_root = Path(temporary)
-        if shared_airflow_bundle:
+        if combined_bundle:
             write_bundle(
-                workflow=_combine_airflow_workflows(workflows),
+                workflow=_combine_workflows(workflows),
                 output_dir=staging_root,
                 catalog=args.catalog,
                 schema=args.schema,
@@ -538,8 +550,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     all_created: list[Path] = []
-    if shared_airflow_bundle:
-        combined = _combine_airflow_workflows(workflows)
+    if combined_bundle:
+        combined = _combine_workflows(workflows)
         all_created.extend(
             write_bundle(
                 workflow=combined,
@@ -572,7 +584,7 @@ def main(argv: list[str] | None = None) -> int:
     # dangling depends_on, undeclared {{job.parameters.X}}, leaked YAML anchors. Source-agnostic.
     bundle_dirs = (
         [args.output_dir]
-        if shared_airflow_bundle or len(workflows) == 1
+        if combined_bundle or len(workflows) == 1
         else [args.output_dir / normalize_task_key(workflow.name) for workflow in workflows]
     )
     invariant_violations = 0
@@ -605,8 +617,16 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if invariant_violations else 0
 
 
-def _combine_airflow_workflows(workflows: list[PreparedWorkflow]) -> PreparedWorkflow:
-    """Combines Airflow DAG workflows into one bundle containing one job per DAG."""
+def _combine_workflows(workflows: list[PreparedWorkflow]) -> PreparedWorkflow:
+    """Combines workflows into one bundle containing one job per pipeline.
+
+    The first workflow is the primary; the rest become its inner workflows, so
+    every pipeline is written as a sibling job resource in a single bundle and a
+    ``run_job_task`` targeting another pipeline resolves in-bundle. Assets are
+    namespaced per pipeline to avoid notebook-path and job-key collisions. Used
+    for both the all-Airflow bundle and the opt-in ``--single-bundle`` path
+    (e.g. a Step Functions job that starts a converted Glue workflow).
+    """
     namespaced = [_namespace_workflow_assets(workflow) for workflow in workflows]
     primary = namespaced[0]
     inner_workflows = list(primary.inner_workflows)
@@ -1905,14 +1925,14 @@ def _report_reconciliation_failures(report_path: Path) -> list[str]:
             continue
         tags = pipeline.get("tags")
         source = tags.get("source") if isinstance(tags, dict) else None
-        if source not in {"adf", "airflow"}:
-            failures.append(f"{label}: pipeline tags.source must be 'adf' or 'airflow'")
+        if source not in {"adf", "airflow", "stepfunctions", "glue"}:
+            failures.append(f"{label}: pipeline tags.source must be 'adf', 'airflow', 'stepfunctions', or 'glue'")
             continue
 
         status = pipeline.get("reconciliation_status")
-        if source == "adf":
-            if status not in {None, "not_applicable"}:
-                failures.append(f"{label}: unknown reconciliation_status {status!r} for ADF")
+        if source in {"adf", "stepfunctions", "glue"}:
+            if status not in {None, "not_applicable", "verified"}:
+                failures.append(f"{label}: unknown reconciliation_status {status!r} for {source}")
             continue
 
         audit = pipeline.get("audit")
@@ -2285,6 +2305,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             notebook_path=task_ir.get("notebook_path", "/UNSUPPORTED_ADF_ACTIVITY"),
             comment=task_ir.get("comment"),
             raw_definition=task_ir.get("raw_definition"),
+            base_parameters=task_ir.get("base_parameters"),
         )
     return PlaceholderActivity(
         **base,

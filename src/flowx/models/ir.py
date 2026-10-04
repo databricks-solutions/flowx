@@ -564,6 +564,7 @@ class PlaceholderActivity(Activity):
     notebook_path: str = "/UNSUPPORTED_ADF_ACTIVITY"
     comment: str | None = None
     raw_definition: dict[str, Any] | None = None
+    base_parameters: dict[str, str] | None = None
 
 
 @dataclass(slots=True, kw_only=True)

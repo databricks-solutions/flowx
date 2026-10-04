@@ -21,6 +21,7 @@ from flowx.adapter.constants import (
     INPUT_CATALOG,
     INPUT_DATABRICKS_PROFILE,
     INPUT_GLOBAL_PARAMETER_RESOLUTION,
+    INPUT_GLUE_SOURCE_PATH,
     INPUT_INSTALL_DASHBOARD,
     INPUT_INVENTORY_PATH,
     INPUT_OUTPUT_BUNDLE_PATH,
@@ -28,6 +29,7 @@ from flowx.adapter.constants import (
     INPUT_RESULTS_TABLE,
     INPUT_RESULTS_WAREHOUSE,
     INPUT_SCHEMA,
+    INPUT_STEPFUNCTIONS_SOURCE_PATH,
     INPUT_TRANSLATION_REPORT_PATH,
     MOTIF_CONSOLIDATE_OPTION_PREFIX,
     PHASE_CONVERT,
@@ -255,6 +257,22 @@ _SOURCE_PATH_OPTION: dict[str, dict[str, str]] = {
         "option_id": INPUT_AIRFLOW_SOURCE_PATH,
         "prompt": "Where are the Airflow DAG files?",
         "description": "A DAG ``.py`` file or a local directory of DAG modules to migrate.",
+    },
+    "stepfunctions": {
+        "option_id": INPUT_STEPFUNCTIONS_SOURCE_PATH,
+        "prompt": "Where are the Step Functions definitions?",
+        "description": (
+            "A state machine ``.json`` file or a local directory of exported definitions "
+            "(bare Amazon States Language documents or ``describe-state-machine`` payloads)."
+        ),
+    },
+    "glue": {
+        "option_id": INPUT_GLUE_SOURCE_PATH,
+        "prompt": "Where are the Glue Workflow definitions?",
+        "description": (
+            "A workflow ``.json`` file or a local directory of exported "
+            "``aws glue get-workflow --include-graph`` payloads."
+        ),
     },
 }
 

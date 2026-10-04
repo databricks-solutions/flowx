@@ -51,6 +51,18 @@ _REGISTRY: dict[str, Source] = {
         convert_module="flowx.sources.airflow.convert",
         source_path_flag="--airflow-source-path",
     ),
+    "stepfunctions": Source(
+        name="stepfunctions",
+        discover_module="flowx.sources.stepfunctions.discover",
+        convert_module="flowx.sources.stepfunctions.convert",
+        source_path_flag="--stepfunctions-source-path",
+    ),
+    "glue": Source(
+        name="glue",
+        discover_module="flowx.sources.glue.discover",
+        convert_module="flowx.sources.glue.convert",
+        source_path_flag="--glue-source-path",
+    ),
 }
 
 

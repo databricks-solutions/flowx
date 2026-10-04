@@ -358,6 +358,8 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             extra["comment"] = activity.comment
             if activity.raw_definition is not None:
                 extra["raw_definition"] = activity.raw_definition
+            if activity.base_parameters:
+                extra["base_parameters"] = activity.base_parameters
         case UnsupportedActivity():
             extra["original_type"] = activity.original_type
             extra["reason"] = activity.reason
