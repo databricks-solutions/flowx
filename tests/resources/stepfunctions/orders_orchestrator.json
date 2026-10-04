@@ -1,0 +1,18 @@
+{
+  "Comment": "Orchestrates the sales Glue workflow, then notifies",
+  "StartAt": "RunSalesWorkflow",
+  "States": {
+    "RunSalesWorkflow": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:startWorkflowRun.sync",
+      "Parameters": { "Name": "sales_workflow" },
+      "Next": "Notify"
+    },
+    "Notify": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": { "TopicArn": "arn:aws:sns:us-east-1:123456789012:done" },
+      "End": true
+    }
+  }
+}

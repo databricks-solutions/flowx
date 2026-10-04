@@ -1,0 +1,27 @@
+{
+  "Comment": "Exercises Retry and Catch translation",
+  "StartAt": "Extract",
+  "States": {
+    "Extract": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:123456789012:function:extract",
+      "Retry": [
+        {"ErrorEquals": ["Lambda.ServiceException"], "MaxAttempts": 6, "IntervalSeconds": 2, "BackoffRate": 2},
+        {"ErrorEquals": ["States.TaskFailed"], "MaxAttempts": 3, "IntervalSeconds": 10}
+      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleError"}],
+      "Next": "Load"
+    },
+    "Load": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:123456789012:function:load",
+      "End": true
+    },
+    "HandleError": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {"TopicArn": "arn:aws:sns:us-east-1:123456789012:errors"},
+      "End": true
+    }
+  }
+}

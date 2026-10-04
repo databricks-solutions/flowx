@@ -58,12 +58,23 @@ Deterministic:      71.4%
 For `agentic` states, name the service the `Task` invokes (Lambda / Glue / SNS / ...) and note it will
 be emitted as a placeholder for the convert phase to fill via LLM-assisted translation.
 
+## Schedules
+
+Step Functions state machines have no schedule information in their ASL definition. Schedules live
+in a separate AWS resource — an EventBridge Scheduler schedule or an EventBridge Rule — that triggers
+`StartExecution` on the state machine ARN. flowx does not read EventBridge resources, so the
+converted Lakeflow Job will have no schedule set. Configure the Job schedule manually after migration
+using the cron expression from the EventBridge Scheduler or EventBridge Rule that was triggering the
+state machine.
+
 ## Coverage notes
 
-Deterministic today: `Choice` (single and cascaded rules → condition), `Map` → for-each, `Parallel` →
-concurrent branches, `Wait`, `Pass`, and nested-state-machine `Task` → run-job. `Task` states for
-Lambda/Glue/service integrations become placeholders. Deferred this increment: EventBridge schedule
-ingestion (schedules live outside the ASL), `Retry`/`Catch` error edges, JSONPath input/output
-rewriting, and irreducible or cyclic state graphs (routed to a placeholder). See
-[`../../flowx-convert/sources/stepfunctions.md`](../../flowx-convert/sources/stepfunctions.md) and the
-repo's `design/stepfunctions-ir-mapping.md` for the full mapping and deferrals.
+Deterministic: `Choice` (single and cascaded rules → condition), `Map` → for-each, `Parallel` →
+concurrent branches, `Wait`, `Pass`, nested-state-machine `Task` → run-job, Glue workflow `Task` →
+run-job, `Retry` → task retries, `Catch` → sibling task with failure dependency. `Task` states for
+Lambda/single-Glue-job/service integrations become agentic placeholders. Deferred: JSONPath
+`InputPath`/`OutputPath`/`ResultSelector`, compound Choice predicates (structure is correct;
+predicate kept verbatim), irreducible and cyclic graphs (routed to placeholder), `BackoffRate`
+(noted), catch handlers that rejoin the main path (partially wired). See
+[`../../flowx-convert/sources/stepfunctions.md`](../../flowx-convert/sources/stepfunctions.md) and
+`design/stepfunctions-ir-mapping.md` for the full mapping.

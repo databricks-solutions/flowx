@@ -147,3 +147,56 @@ def test_cyclic_graph_falls_back_to_placeholder() -> None:
     pipeline = translate_state_machine(machine)
     assert any(isinstance(task, PlaceholderActivity) for task in pipeline.tasks)
     assert any("cyclic" in note["issue"] for note in pipeline.not_translatable)
+
+
+def _translate_one(definition: dict) -> object:
+    """Translates a single-Task state machine and returns its one task."""
+    machine = parse_state_machine({"StartAt": "T", "States": {"T": {**definition, "End": True}}}, default_name="m")
+    return translate_state_machine(machine).tasks[0]
+
+
+def test_glue_start_workflow_run_becomes_run_job() -> None:
+    """A Task starting a Glue workflow becomes a run-job targeting the normalised workflow key."""
+    task = _translate_one(
+        {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:glue:startWorkflowRun.sync",
+            "Parameters": {"Name": "Sales-Workflow"},
+        }
+    )
+    assert isinstance(task, RunJobActivity)
+    assert task.job_name == "sales_workflow"
+
+
+def test_glue_start_workflow_run_without_literal_name_is_placeholder() -> None:
+    """A dynamic workflow name (Name.$) cannot be wired, so it stays an agentic placeholder."""
+    machine = parse_state_machine(
+        {
+            "StartAt": "T",
+            "States": {
+                "T": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::aws-sdk:glue:startWorkflowRun",
+                    "Parameters": {"Name.$": "$.workflowName"},
+                    "End": True,
+                }
+            },
+        },
+        default_name="m",
+    )
+    pipeline = translate_state_machine(machine)
+    assert isinstance(pipeline.tasks[0], PlaceholderActivity)
+    assert any("startWorkflowRun has no literal Name" in note["issue"] for note in pipeline.not_translatable)
+
+
+def test_glue_single_job_task_stays_placeholder() -> None:
+    """A plain Glue job start (not a workflow) remains an agentic placeholder."""
+    task = _translate_one(
+        {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": {"JobName": "ingest"},
+        }
+    )
+    assert isinstance(task, PlaceholderActivity)
+    assert task.original_type == "Task:glue"

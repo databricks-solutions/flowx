@@ -35,16 +35,24 @@ state machines almost always have). Genuinely irreducible graphs degrade to a pl
 
 ## Deferred (next increments)
 
-- **EventBridge schedules.** Schedules are EventBridge rules that live *outside* the ASL. Populating
-  `Pipeline.schedule` needs the rule export as a second input. (PRD P0.)
-- **`Retry` / `Catch`.** Not yet mapped to `max_retries` and `Dependency(outcome="Failed")` edges.
-- **JSONPath I/O processing.** `InputPath` / `Parameters` / `ResultPath` / `ResultSelector` /
-  `OutputPath` are not rewritten into task parameters and task values. (PRD P0 — this is the analogue
-  of ADF's `@{...}` expression rewriting and deserves its own pass.)
+- **Job schedule.** Step Functions state machines carry no schedule in their ASL; schedules live in
+  EventBridge Scheduler or EventBridge Rules as separate AWS resources. Adding a second input (e.g.
+  `--stepfunctions-schedule-path`) to read those exports was evaluated and deferred — the schedule is
+  the shallowest part of the migration and the export friction is real. The converted Job has no
+  schedule set; users configure it manually. This is documented in the skill guides and the PRD.
+- **`Retry` / `Catch`.** Done. `Retry` → `max_retries` + `min_retry_interval_millis` (highest
+  `MaxAttempts` entry governs; `BackoffRate` noted). `Catch` → catch handler translated as a
+  top-level sibling task with `Dependency(outcome="ALL_FAILED")`. Catch handlers that rejoin the
+  main path are translated but the rejoin state does not automatically pick up the handler's exit dep.
+- **JSONPath I/O processing.** `Parameters` → task parameters, `ResultPath` → task values, and
+  machine-input references → declared job parameters are done; see `stepfunctions-jsonpath.md`.
+  `InputPath` / `OutputPath` / `ResultSelector` and nested result-path indexing are still deferred.
 - **Choice predicates.** Compound (`And`/`Or`/`Not`), `*Path`, and `Is*` rules keep the raw rule JSON
   in the condition's `left` operand with an `expr` operator; only the branch structure is guaranteed.
 - **Glue / Lambda bodies.** Agentic placeholders for now (Open Question 2, Option 1). Deterministic
-  GlueContext/DynamicFrame → Spark rewrites are a later increment.
+  GlueContext/DynamicFrame → Spark rewrites are a later increment. A Task that starts a whole Glue
+  *workflow* (`glue:startWorkflowRun`) is the exception — it becomes a `RunJobActivity` targeting the
+  Glue source's converted job; see `aws-composition.md`.
 - **Glue Workflows.** A separate `glue` source (PRD Open Question 1 leans to two sources); see
   `glue-ir-mapping.md`.
 

@@ -280,9 +280,10 @@ def _prepare_placeholder(activity: Activity) -> PreparedActivity:
         f"raise NotImplementedError(\"Activity '{activity.name}' ({original_type}) needs agentic translation.\")\n"
     )
 
-    task["notebook_task"] = {
-        "notebook_path": f"../src/{notebook_path}",
-    }
+    notebook_task: dict[str, Any] = {"notebook_path": f"../src/{notebook_path}"}
+    if isinstance(activity, PlaceholderActivity) and activity.base_parameters:
+        notebook_task["base_parameters"] = dict(activity.base_parameters)
+    task["notebook_task"] = notebook_task
 
     notebook = DabNotebook(
         relative_path=notebook_path,
