@@ -1,4 +1,4 @@
-"""Source-faithful shared discovery AST.
+"""Source-neutral discovery graph contract (``SourceGraph``), kept faithful to each source.
 
 The Databricks IR in :mod:`flowx.models.ir` is a *target* model: it keeps only
 what Databricks needs to run a workflow, so it is deliberately lossy about the
@@ -6,7 +6,9 @@ source. The discovery layer needs the opposite -- a source-*faithful*,
 standardised model that both Azure Data Factory and Apache Airflow map onto
 without either being flattened to a lowest common denominator. This module
 defines that model. It is the contract the per-source mappers (#62 for ADF, #63
-for Airflow) align to.
+for Airflow) align to. Each source keeps its own parser -- the ADF JSON AST, and
+Airflow's Python AST capture and claim pass -- and projects what it captured into
+this graph; the contract does not replace either parser.
 
 Design shape: a small shared **core** of genuinely common concepts as typed
 fields, plus an explicit **extension seam** so nothing platform-specific is
@@ -26,7 +28,7 @@ a deliberate expansion point, not an oversight.
 
 The lineage primitives from #61 (:class:`~flowx.models.ir.DataAsset`) are
 reused here rather than duplicated: a node's reads and writes are lists of
-``DataAsset``, so the discovery AST and the lineage substrate share one
+``DataAsset``, so the discovery graph and the lineage substrate share one
 vocabulary for describing data references. That description is general and
 best-effort, not physical-only -- ``identity`` is the strong physical id when
 resolvable (else ``None``, never guessed), ``signature`` is the always-present
@@ -284,7 +286,7 @@ class SourceGraph:
             :class:`ContainerNode`.
         lineage: Source-neutral lineage block (control/data edges) derived over
             this graph, or ``None`` when lineage has not been derived. Reuses the
-            #61 :class:`~flowx.models.ir.Lineage` type so the discovery AST and
+            #61 :class:`~flowx.models.ir.Lineage` type so the discovery graph and
             the IR lineage substrate share one vocabulary; populated by
             :mod:`flowx.discovery_lineage` in the discover phase.
         properties: Free-form bag for graph-level platform-specific attributes.

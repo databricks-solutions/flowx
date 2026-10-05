@@ -73,9 +73,9 @@ intermediates under `.work/` (pruned by `package`).
 | `models/adf_ast.py` | Typed AST nodes for ADF definitions |
 | `models/ir.py` | Databricks intermediate representation |
 | `models/dab.py` | DAB output schema types |
-| `models/discovery.py` | Source-faithful shared discovery AST (`SourceGraph`) that both ADF and Airflow map onto |
+| `models/discovery.py` | Source-neutral discovery graph contract (`SourceGraph`); each source keeps its own parser and projects into it |
 | `sources/adf/loader.py` | Parses ADF exports, produces `metadata/inventory.json` + `metadata/profile_report.csv` |
-| `sources/adf/discovery_mapping.py` | Maps the ADF AST onto the shared `SourceGraph` discovery model (1:1, lossless) |
+| `sources/adf/discovery_mapping.py` | Maps the ADF AST onto the `SourceGraph` discovery graph contract (1:1, lossless) |
 | `sources/adf/translate.py` | Registry dispatch, topological sort, context threading |
 | `sources/adf/translators/` | One module per deterministic activity type (16 total) |
 | `sources/airflow/` | Airflow source: loader, discover, and convert (mirrors the ADF source layout) |

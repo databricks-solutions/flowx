@@ -46,7 +46,7 @@ def _edge(source: str, target: str, via: str, *, resolved: bool = True) -> Contr
 
 
 def _inventory(graphs: list[SourceGraph]) -> dict[str, Any]:
-    return build_source_inventory(graphs, source="unit", source_dir="/tmp/src")
+    return build_source_inventory(graphs, source="adf", source_dir="/tmp/src")
 
 
 def test_isolated_pipelines_each_form_their_own_component() -> None:

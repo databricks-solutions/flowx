@@ -31,36 +31,53 @@ option, not part of the binding. The write is atomic (temp file + ``os.replace``
 re-recording the same decision against the same inventory rewrites byte-identical bytes.
 
 This is additive, opt-in routing metadata only: with no recorded plan, ``convert`` and ``package``
-behave exactly as today. Component computation reads ``lineage.control_edges``, which both ADF
-(``ExecutePipeline``) and Airflow (``RunJob``) emit, so the artifact is source-neutral.
+behave exactly as today. Component computation reads ``lineage.control_edges``, so the artifact's
+shape is source-neutral, but agentic decisions are accepted only for ADF inventories in Phase 1 (see
+:data:`AGENTIC_ROUTING_SOURCES`). Airflow gaps stay with the fingerprint-bound per-gap resolver, so
+for an Airflow inventory route recommends and records deterministic decisions only.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from flowx.discovery_insights import inventory_fingerprint
-from flowx.models.conversion_plan import DECISIONS, SCHEMA_VERSION
+from flowx.models.conversion_plan import DECISIONS, PLAN_FILENAME, SCHEMA_VERSION, ComponentPlan, ConversionPlan
 
 # The strategy value that marks an activity as individually engine-capable (a 1:1 deterministic
 # translation). Any other value (``"agentic"`` / ``"unsupported"`` / missing) is a gap unless the
 # activity is claimed by a detected motif -- the multi-activity capability signal from #64.
 _DETERMINISTIC_STRATEGY = "deterministic"
 
-# The recorded conversion-plan artifact lives beside inventory.json under metadata/.
-PLAN_FILENAME = "conversion_plan.json"
+
+# Sources whose inventories route may send agentic in Phase 1. An inventory with no top-level
+# ``source`` predates the unified emitter and is ADF.
+AGENTIC_ROUTING_SOURCES = frozenset({"adf"})
+_LEGACY_INVENTORY_SOURCE = "adf"
 
 # Authored top-level keys (everything else the library owns and rejects on input).
 _PLAN_TOP_KEYS = {"components"}
-_LIBRARY_TOP_KEYS = {"schema_version", "inventory_sha256", "findings"}
+_LIBRARY_TOP_KEYS = {"schema_version", "inventory_sha256", "source_graphs_sha256", "source_insights_sha256", "findings"}
 # Authored per-component keys vs the fields the library recomputes and rejects on input.
-_COMPONENT_AUTHORED_KEYS = {"component_id", "members", "decision", "rationale"}
+_COMPONENT_AUTHORED_KEYS = {"component_id", "members", "decision", "rationale", "assignments"}
 _COMPONENT_LIBRARY_KEYS = {"recommended", "options"}
+
+
+def agentic_routing_supported(inventory: dict[str, Any]) -> bool:
+    """Whether route may take an agentic decision for this inventory's source (ADF only in Phase 1)."""
+    return inventory.get("source", _LEGACY_INVENTORY_SOURCE) in AGENTIC_ROUTING_SOURCES
+
+
+def _agentic_routing_unsupported_note(inventory: dict[str, Any]) -> str:
+    """The finding / violation text that explains why a non-ADF inventory routes deterministic only."""
+    return (
+        f"agentic routing is ADF-only in Phase 1 (inventory source {inventory.get('source')!r}); "
+        "route every component 'deterministic' and resolve its gaps with the flowx-resolve-airflow-gaps skill"
+    )
 
 
 def _pipeline_names(inventory: dict[str, Any]) -> set[str]:
@@ -317,12 +334,14 @@ def recommend_component(members: list[str], inventory: dict[str, Any]) -> tuple[
 
     Returns:
         ``(recommended, options)`` where ``recommended`` is ``"deterministic"`` when the whole
-        component is engine-capable, else ``"agentic"``; and ``options`` carries the ``deterministic``
-        and ``agentic`` peers as first-class entries.
+        component is engine-capable or the inventory's source cannot be routed agentic, else
+        ``"agentic"``; and ``options`` carries the ``deterministic`` and ``agentic`` peers as
+        first-class entries.
     """
     deterministic = _deterministic_option(members, inventory)
     agentic = _agentic_option(members, inventory)
-    recommended = _DETERMINISTIC_STRATEGY if deterministic["capable"] else "agentic"
+    route_deterministic = deterministic["capable"] or not agentic_routing_supported(inventory)
+    recommended = _DETERMINISTIC_STRATEGY if route_deterministic else "agentic"
     return recommended, {"deterministic": deterministic, "agentic": agentic}
 
 
@@ -336,6 +355,8 @@ def build_recommendation(inventory: dict[str, Any]) -> dict[str, Any]:
     per component for overrides.
     """
     components, findings = build_components(inventory)
+    if not agentic_routing_supported(inventory):
+        findings = [*findings, _agentic_routing_unsupported_note(inventory)]
     component_entries: list[dict[str, Any]] = []
     default_plan_components: list[dict[str, Any]] = []
     for index, members in enumerate(components, start=1):
@@ -377,7 +398,8 @@ def validate_plan(raw: Any, inventory: dict[str, Any]) -> list[str]:
     * every member must be a real inventory pipeline, and a component's ``members`` must exactly match
       one computed connected component -- so a decision can never split a component or span two;
     * the plan is a **bijection** over components: every component is decided exactly once (no
-      partial plan, no duplicate/conflicting decisions).
+      partial plan, no duplicate/conflicting decisions);
+    * an ``agentic`` decision is only accepted for an ADF inventory (:func:`agentic_routing_supported`).
     """
     if not isinstance(raw, dict):
         return [f"conversion plan must be a JSON object, got {type(raw).__name__}"]
@@ -402,6 +424,11 @@ def validate_plan(raw: Any, inventory: dict[str, Any]) -> list[str]:
         matched_id = _validate_component_entry(component, loc, names, computed_by_members, violations)
         if matched_id is not None:
             decided_ids.append(matched_id)
+
+    if not agentic_routing_supported(inventory):
+        for index, component in enumerate(components):
+            if isinstance(component, dict) and component.get("decision") == "agentic":
+                violations.append(f"components[{index}]: {_agentic_routing_unsupported_note(inventory)}")
 
     for component_id, count in Counter(decided_ids).items():
         if count > 1:
@@ -443,6 +470,12 @@ def _validate_component_entry(
     rationale = component.get("rationale")
     if rationale is not None and (not isinstance(rationale, str) or not rationale.strip()):
         violations.append(f"{loc}: 'rationale' must be a non-empty string when present")
+
+    if component.get("assignments"):
+        violations.append(
+            f"{loc}: 'assignments' (per-node or subgraph routing) is reserved for Phase 2; "
+            "decide the whole component and leave it empty"
+        )
 
     component_id = component.get("component_id")
     if not isinstance(component_id, str) or not component_id:
@@ -498,13 +531,14 @@ def load_plan(*, plan: dict[str, Any] | None = None, plan_path: Path | None = No
     return json.loads(Path(plan_path).read_text(encoding="utf-8"))
 
 
-def build_plan_document(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
-    """Build the recorded plan document from a validated authored plan.
+def build_plan(inventory: dict[str, Any], raw: dict[str, Any]) -> ConversionPlan:
+    """Build the typed plan from a validated authored plan.
 
     The library recomputes ``members`` / ``recommended`` / both ``options`` and overlays only the
     authored ``decision`` (and optional ``rationale``) per component, so the recorded facts cannot
-    drift from the inventory. Stamps the library-owned ``schema_version`` and ``inventory_sha256``.
-    Does not mutate the inputs and performs no I/O.
+    drift from the inventory. It stamps the schema version and the hashes that bind the plan to what
+    it was decided on: the inventory fingerprint, the saved source graphs the inventory records, and
+    the saved source insights when enrich ran. Does not mutate the inputs and performs no I/O.
     """
     recommendation = build_recommendation(inventory)
     computed_by_id = _components_by_id(inventory)
@@ -515,36 +549,53 @@ def build_plan_document(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[
         component_id = members_to_id[frozenset(component["members"])]
         authored_by_id[component_id] = component
 
-    components_out: list[dict[str, Any]] = []
-    for entry in recommendation["components"]:
-        component_id = entry["component_id"]
-        authored = authored_by_id[component_id]
-        recorded: dict[str, Any] = {
-            "component_id": component_id,
-            "members": entry["members"],
-            "recommended": entry["recommended"],
-            "decision": authored["decision"],
-            "options": entry["options"],
-        }
-        rationale = authored.get("rationale")
-        if rationale is not None:
-            recorded["rationale"] = rationale
-        components_out.append(recorded)
-
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "inventory_sha256": inventory_fingerprint(inventory),
-        "components": components_out,
-        "findings": recommendation["findings"],
-    }
+    components = [
+        ComponentPlan(
+            component_id=entry["component_id"],
+            members=entry["members"],
+            recommended=entry["recommended"],
+            decision=authored_by_id[entry["component_id"]]["decision"],
+            options=entry["options"],
+            rationale=authored_by_id[entry["component_id"]].get("rationale"),
+        )
+        for entry in recommendation["components"]
+    ]
+    insights = inventory.get("insights")
+    return ConversionPlan(
+        schema_version=SCHEMA_VERSION,
+        inventory_sha256=inventory_fingerprint(inventory),
+        source_graphs_sha256=inventory.get("source_graphs_sha256"),
+        source_insights_sha256=insights.get("source_insights_sha256") if isinstance(insights, dict) else None,
+        components=components,
+        findings=recommendation["findings"],
+    )
 
 
-def _write_plan_atomic(path: Path, document: dict[str, Any]) -> None:
-    """Write the plan JSON atomically (temp file + ``os.replace``), matching the inventory formatting."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(document, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
+def build_plan_document(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """The recorded JSON form of :func:`build_plan`."""
+    return build_plan(inventory, raw).to_dict()
+
+
+def plan_binding_violations(plan: ConversionPlan, inventory: dict[str, Any]) -> list[str]:
+    """Check a recorded plan still matches the inventory, source graphs and insights it was decided on.
+
+    Returns one message per mismatch; an empty list means the plan is current. A plan is stale when
+    discover or enrich ran again after it was recorded.
+    """
+    violations: list[str] = []
+    current = inventory_fingerprint(inventory)
+    if plan.inventory_sha256 != current:
+        violations.append(
+            f"{PLAN_FILENAME} was recorded against inventory {plan.inventory_sha256!r} but the current "
+            f"inventory is {current!r}; re-run route against the current inventory"
+        )
+    if plan.source_graphs_sha256 != inventory.get("source_graphs_sha256"):
+        violations.append(f"{PLAN_FILENAME} was recorded against different source graphs; re-run route")
+    insights = inventory.get("insights")
+    current_insights = insights.get("source_insights_sha256") if isinstance(insights, dict) else None
+    if plan.source_insights_sha256 != current_insights:
+        violations.append(f"{PLAN_FILENAME} was recorded against different source insights; re-run route")
+    return violations
 
 
 def record_plan(
@@ -580,12 +631,14 @@ def record_plan(
     if violations:
         return {"ok": False, "violations": violations, "components": 0}
 
-    document = build_plan_document(inventory, raw)
-    _write_plan_atomic(inventory_path.with_name(PLAN_FILENAME), document)
+    recorded = build_plan(inventory, raw)
+    recorded.write(Path(output_dir))
     return {
         "ok": True,
         "violations": [],
-        "inventory_sha256": document["inventory_sha256"],
-        "components": len(document["components"]),
-        "findings": len(document["findings"]),
+        "inventory_sha256": recorded.inventory_sha256,
+        "source_graphs_sha256": recorded.source_graphs_sha256,
+        "source_insights_sha256": recorded.source_insights_sha256,
+        "components": len(recorded.components),
+        "findings": len(recorded.findings),
     }

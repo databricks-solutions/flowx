@@ -1,8 +1,8 @@
-"""Source-neutral lineage derivation over the shared discovery AST.
+"""Source-neutral lineage derivation over the discovery graph contract.
 
 The parallel of :mod:`flowx.lineage`, which derives a
 :class:`~flowx.models.ir.Lineage` block over the Databricks IR. This module
-derives the same block over the shared discovery AST
+derives the same block over the source-neutral discovery graph
 (:mod:`flowx.models.discovery`) instead, so the discover phase can attach lineage
 to a :class:`~flowx.models.discovery.SourceGraph` before any IR translation
 exists.
@@ -107,8 +107,10 @@ def build_graph_data_edges(graph: SourceGraph) -> list[DataEdge]:
 def build_graph_lineage(graph: SourceGraph) -> Lineage:
     """Compose the source-neutral lineage block for a discovery graph.
 
-    Motif annotations are a convert-time IR concern (motifs are detected during
-    translation, not discovery), so the discovery lineage block leaves them empty.
+    Edges are derived here from the graph alone. Motifs come from a source's own
+    detector, so this leaves ``motifs`` empty; a source that detects motifs at
+    discover attaches them to ``lineage.motifs`` afterwards, so they are saved
+    (and hashed) with the graph.
 
     Args:
         graph: The source graph to derive lineage for.

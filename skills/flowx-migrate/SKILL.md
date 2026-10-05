@@ -25,10 +25,10 @@ via Declarative Automation Bundles. This skill runs the full flow in sequence: d
 This is the top-level orchestration skill. It runs the full migration pipeline:
 
 > **Scope:** deterministic discover → convert → package works for **both ADF and Airflow**. The
-> **routing + agentic-conversion path (enrich → route → fill)** applies to **ADF today** — Airflow
-> discovery does not yet emit control lineage or motifs, so it cannot form routing components, and
-> `convert --merge-agentic --source airflow` is disabled. Airflow follows its own
-> `flowx-resolve-airflow-gaps` path and aligns with routing via #63.
+> **routing + agentic-conversion path (enrich → route → fill)** applies to **ADF today**, and
+> `route` enforces it: an Airflow inventory is routed `deterministic` only, and
+> `convert --merge-agentic --source airflow` is disabled. Airflow gaps follow their own
+> `flowx-resolve-airflow-gaps` path.
 
 1. **Discover** — Parse the source's definitions into a typed inventory
 2. **Enrich** *(default)* — Author the agentic `insights` layer over the inventory and merge it

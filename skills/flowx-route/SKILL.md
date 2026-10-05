@@ -26,11 +26,12 @@ edits the translation report so routed-agentic groups become placeholder gaps, a
 the fill.
 
 **ADF only (current scope).** The discover → enrich → route → edit → fill agentic-conversion flow is
-supported for **ADF today**. Airflow is **not** yet wired for routing: its discovery does not emit
-control lineage or motifs, so it cannot form multi-DAG routing components, and `convert
---merge-agentic --source airflow` is disabled. Airflow aligns with routing once #63 maps it onto the
-shared discovery AST. For **Airflow agentic gaps today, use the `flowx-resolve-airflow-gaps` skill**
-(the strict per-gap resolver) — not this routing flow.
+supported for **ADF today**, and `route` enforces it: for an Airflow inventory it recommends and
+records only `deterministic` decisions and rejects an `agentic` one (the plan is not recorded and the
+report is left untouched). `convert --merge-agentic --source airflow` is disabled too. Airflow
+DAGs are often one connected component, so Airflow agentic conversion follows the Airflow track's own
+per-gap and patch contract rather than this whole-component flow. For **Airflow agentic gaps today,
+use the `flowx-resolve-airflow-gaps` skill** (the strict per-gap resolver), not this routing flow.
 
 **There is no LLM inside flowx.** The library computes the recommendation deterministically and only
 *validates and records* the decision and the authored fill — the same author → validate → merge
@@ -56,9 +57,10 @@ placeholders, the only convert is the additive `convert --merge-agentic` fill �
 
 Pipelines are grouped into weak/undirected **connected components** over the inventory's control
 lineage (`lineage.control_edges`), so mutually-referencing pipelines are decided together and a
-caller/callee reference is never split across incompatible routes. ADF emits these control edges
-(from `ExecutePipeline`) in discovery; Airflow discovery does not emit control lineage yet, which is
-why routing is ADF-only today (see the scope note above).
+caller/callee reference is never split across incompatible routes. Only resolved control edges join
+a component; an unresolved call is reported as a finding. ADF emits these control edges (from
+`ExecutePipeline`) in discovery. Agentic routing is ADF-only today whatever lineage an inventory
+carries (see the scope note above).
 
 Run the **`setup`** skill first if you haven't. Everything below has an MCP-tool path (Genie Code, or
 a local stdio registration — call the single **`flowx`** tool, run no `python3`/`$PY`) and a venv-CLI
@@ -222,8 +224,8 @@ MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [.
 `combine` is the only action. Its guarantees:
 
 - `--members` (comma-separated; MCP accepts a list) must **exactly match** a routed-**agentic**
-  component in the recorded `metadata/conversion_plan.json`, whose `inventory_sha256` must still match
-  the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
+  component in the recorded `metadata/conversion_plan.json`, whose `inventory_sha256`,
+  `source_graphs_sha256` and `source_insights_sha256` must still match the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
   — you can't swap pipelines the plan didn't route agentic.
 - `--pipelines-path` is a JSON **list** of pipeline IR dicts (the authored replacements), typically
   carrying `AgenticComponentActivity` nodes (see below).
@@ -302,7 +304,11 @@ applies when authoring recommended patterns.)
 
 Once the routed-agentic groups are filled and the report validates, continue with `flowx-convert`'s
 just-in-time configuration (`inspect`/`modify`) as usual, then `flowx-package`. The recorded
-`metadata/conversion_plan.json` is kept alongside `inventory.json` as the routing record.
+`metadata/conversion_plan.json` is kept alongside `inventory.json` as the routing record. It is the
+library's typed `ConversionPlan` (schema 2): one decision per component, bound to the inventory
+fingerprint, the saved `source_graphs.json` and the saved `source_insights.json` it was decided on,
+with a reserved, empty `assignments` list per component for per-node routing later. Package refuses
+to run when any of those no longer match.
 
 ## Reference
 

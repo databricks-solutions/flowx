@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import re
 import sys
@@ -378,38 +379,128 @@ def _default_report_path(output_dir: Path) -> Path:
     return work / "translation_report.json"
 
 
-def _write_route_audit(output_dir: Path) -> Path | None:
+def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
+    """Check a recorded routing plan still matches what is about to be packaged.
+
+    A plan is bound to the inventory, the saved source graphs and the saved source insights it was
+    decided on. If discover or enrich ran again since route, or a combine fill was applied under a
+    different plan, the report no longer reflects the user's decision, so package refuses rather
+    than shipping it. Returns one message per problem; an empty list means there is no recorded plan
+    or it still matches.
+    """
+    from flowx.discovery_insights import inventory_fingerprint
+    from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
+    from flowx.route_agentic import COMBINE_PROVENANCE_KEY
+    from flowx.routing import plan_binding_violations
+
+    metadata_dir = Path(output_dir) / "metadata"
+    try:
+        plan = ConversionPlan.load(Path(output_dir))
+    except (OSError, ValueError) as error:
+        return [f"metadata/conversion_plan.json is unreadable: {error}"]
+    if plan is None:
+        return []
+
+    inventory_path = metadata_dir / "inventory.json"
+    if not inventory_path.is_file():
+        return ["metadata/conversion_plan.json was recorded but metadata/inventory.json is missing"]
+    try:
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"metadata/inventory.json is unreadable: {error}"]
+    if not isinstance(inventory, dict):
+        return ["metadata/inventory.json must contain a JSON object"]
+
+    stale = plan_binding_violations(plan, inventory)
+    if stale:
+        return [f"metadata/{message}" if message.startswith("conversion_plan.json") else message for message in stale]
+
+    try:
+        report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    provenance = report.get(COMBINE_PROVENANCE_KEY) if isinstance(report, dict) else None
+    if not isinstance(provenance, list):
+        return []
+    current = inventory_fingerprint(inventory)
+    agentic_components = {
+        (component.component_id, tuple(sorted(component.members)))
+        for component in plan.components
+        if component.decision == DECISION_AGENTIC
+    }
+    failures: list[str] = []
+    for entry in provenance:
+        if not isinstance(entry, dict):
+            continue
+        component_id = entry.get("component_id")
+        if entry.get("inventory_sha256") != current:
+            failures.append(f"combine for {component_id!r} was applied against a different inventory")
+        elif (component_id, tuple(sorted(entry.get("members") or []))) not in agentic_components:
+            failures.append(f"combine for {component_id!r} does not match an agentic component in the recorded plan")
+    return failures
+
+
+def _file_sha256(path: Path) -> str | None:
+    """SHA-256 of a file's bytes, or ``None`` when it cannot be read."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Path | None:
     """Persist a compact routing/gaps audit to ``metadata/route_audit.json`` before the prune.
 
     Package prunes the transient ``.work/`` folder (translation report + ``gaps.json``) by default,
     which erases the "what did routing change?" trail. When a routing decision was recorded
     (``metadata/conversion_plan.json`` exists), summarise the routed components, their decisions, and
-    the gaps routing introduced into an additive ``metadata/`` artifact that survives the prune.
+    the gaps routing introduced into an additive ``metadata/`` artifact that survives the prune. It
+    also records hashes of the inventory, the saved source graphs and source insights the plan was
+    bound to, the plan, and the packaged report, plus the report route started from when route
+    recorded one, so the trail can be checked against those files later.
 
     Returns the written path, or ``None`` when there is no recorded plan (no routing happened) -- so
     the no-route path writes nothing and stays byte-identical.
     """
+    from flowx.discovery_insights import inventory_fingerprint
+    from flowx.models.conversion_plan import DECISION_AGENTIC, PLAN_FILENAME, ConversionPlan
+    from flowx.route_agentic import ROUTE_PROVENANCE_KEY
+
     metadata_dir = Path(output_dir) / "metadata"
-    plan_path = metadata_dir / "conversion_plan.json"
-    if not plan_path.is_file():
-        return None
+    plan_path = metadata_dir / PLAN_FILENAME
     try:
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan = ConversionPlan.load(Path(output_dir))
+    except (OSError, ValueError):
+        return None
+    if plan is None:
+        return None
+
+    inventory_sha256: str | None = None
+    try:
+        inventory = json.loads((metadata_dir / "inventory.json").read_text(encoding="utf-8"))
+        if isinstance(inventory, dict):
+            inventory_sha256 = inventory_fingerprint(inventory)
     except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(plan, dict):
-        return None
+        pass
+
+    baseline_report_sha256: str | None = None
+    if report_path is not None:
+        try:
+            report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            report = None
+        route_provenance = report.get(ROUTE_PROVENANCE_KEY) if isinstance(report, dict) else None
+        if isinstance(route_provenance, dict):
+            baseline_report_sha256 = route_provenance.get("baseline_report_sha256")
 
     components: list[dict[str, Any]] = []
     agentic_pipelines: list[str] = []
-    for component in plan.get("components", []):
-        if not isinstance(component, dict):
-            continue
-        members = [str(member) for member in component.get("members", []) if isinstance(member, str)]
-        decision = component.get("decision")
-        components.append({"component_id": component.get("component_id"), "members": members, "decision": decision})
-        if decision == "agentic":
-            agentic_pipelines.extend(members)
+    for component in plan.components:
+        components.append(
+            {"component_id": component.component_id, "members": list(component.members), "decision": component.decision}
+        )
+        if component.decision == DECISION_AGENTIC:
+            agentic_pipelines.extend(component.members)
 
     gaps_introduced: list[dict[str, Any]] = []
     gaps_path = Path(output_dir) / ".work" / "gaps.json"
@@ -430,7 +521,13 @@ def _write_route_audit(output_dir: Path) -> Path | None:
 
     audit = {
         "schema": "flowx.route_audit/v1",
-        "recorded_against_inventory_sha256": plan.get("inventory_sha256"),
+        "recorded_against_inventory_sha256": plan.inventory_sha256,
+        "inventory_sha256": inventory_sha256,
+        "source_graphs_sha256": plan.source_graphs_sha256,
+        "source_insights_sha256": plan.source_insights_sha256,
+        "conversion_plan_sha256": _file_sha256(plan_path),
+        "baseline_report_sha256": baseline_report_sha256,
+        "translation_report_sha256": _file_sha256(report_path) if report_path is not None else None,
         "components": components,
         "agentic_pipelines": sorted(set(agentic_pipelines)),
         "gaps_count": len(gaps_introduced),
@@ -522,6 +619,13 @@ def main(argv: list[str] | None = None) -> int:
     if report_failures:
         print("Error: translation report preflight failed; no bundle files were written.", file=sys.stderr)
         for failure in report_failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+
+    plan_failures = _routing_plan_failures(args.output_dir, args.report)
+    if plan_failures:
+        print("Error: routing plan preflight failed; no bundle files were written.", file=sys.stderr)
+        for failure in plan_failures:
             print(f"  - {failure}", file=sys.stderr)
         return 1
 
@@ -650,7 +754,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Persist the routing/gaps audit to metadata/ before pruning .work/, so the "what did routing
     # change?" trail survives the default prune. No-ops (writes nothing) when no plan was recorded.
-    audit_path = _write_route_audit(args.output_dir)
+    audit_path = _write_route_audit(args.output_dir, args.report)
     if audit_path is not None:
         print(f"Wrote routing audit to {audit_path}")
 

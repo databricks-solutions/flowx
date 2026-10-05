@@ -161,7 +161,7 @@ def _routed_inventory() -> dict[str, Any]:
         ),
     )
     child = SourceGraph(name="child", source="unit", tasks=[_node("copy_orders", "Copy")])
-    return build_source_inventory([parent, child], source="unit", source_dir="/tmp/src")
+    return build_source_inventory([parent, child], source="adf", source_dir="/tmp/src")
 
 
 def _setup_routed_agentic(output_dir: Path, *, decision: str = "agentic") -> None:
