@@ -1,4 +1,4 @@
-"""Validate agent-authored insights against the discover inventory, then merge them in.
+"""Validate agent-authored insights against the discover inventory, then record them.
 
 The discover phase writes a purely deterministic ``metadata/inventory.json`` (source,
 pipelines, per-pipeline ``lineage``, summary). An external agent then *authors* an
@@ -20,20 +20,26 @@ keeps the deterministic inventory trustworthy and every insight accountable:
 * an ``inferred`` edge has nothing to resolve against, so it must instead carry a non-empty
   ``evidence`` string and a ``confidence`` level.
 
-The merge is **atomic** (temp file + ``os.replace``) and **idempotent**: it recomputes the
-``inventory_sha256`` fingerprint from the deterministic inventory (with any prior ``insights``
-stripped) and *replaces* the whole ``insights`` block, so re-running with the same authored
-insights rewrites byte-identical bytes and never stacks. The library owns ``schema_version``
-and ``inventory_sha256``; authored insights carrying either are rejected as unknown keys.
+Validated insights are written to their own file, ``metadata/source_insights.json``, which
+records the persisted ``source_graphs.json`` hash it was checked against
+(``source_graphs_sha256``) and carries its own content hash (``source_insights_sha256``).
+``inventory.json`` is then re-rendered as the deterministic inventory discover wrote plus that
+same block under ``insights``, so the inventory is always built from those two pieces rather
+than patched. Both writes are **atomic** (temp file + ``os.replace``) and **idempotent**:
+re-running with the same authored insights rewrites byte-identical bytes and never stacks. The
+library owns ``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and
+``source_insights_sha256``; authored insights carrying any of them are rejected as unknown keys.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 from typing import Any
 
+from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, source_graphs_from_document
 from flowx.models.insights import (
     CONFIDENCE_LEVELS,
     MAX_RECOMMENDED_PATTERNS,
@@ -42,12 +48,18 @@ from flowx.models.insights import (
     SCHEMA_VERSION,
 )
 
-# The single additive top-level key insights merge into.
+# The single additive top-level key the insights block is rendered under in inventory.json.
 INSIGHTS_KEY = "insights"
 
-# Library-owned keys injected on merge; authored insights must not supply them.
+# The file enrich writes; inventory.json's insights block is always a copy of it.
+SOURCE_INSIGHTS_FILENAME = "source_insights.json"
+
+# Library-owned keys stamped on record; authored insights must not supply them.
 _SCHEMA_VERSION_KEY = "schema_version"
 _FINGERPRINT_KEY = "inventory_sha256"
+_SOURCE_GRAPHS_HASH_KEY = "source_graphs_sha256"
+_SOURCE_INSIGHTS_HASH_KEY = "source_insights_sha256"
+_LIBRARY_KEYS = (_SCHEMA_VERSION_KEY, _FINGERPRINT_KEY, _SOURCE_GRAPHS_HASH_KEY, _SOURCE_INSIGHTS_HASH_KEY)
 
 _INSIGHTS_TOP_KEYS = {"overview", "system_recommendation", "pipeline_insights", "pipeline_relationships"}
 _INSIGHT_KEYS = {
@@ -130,7 +142,7 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
 
     violations: list[str] = []
     for key in sorted(set(raw) - _INSIGHTS_TOP_KEYS):
-        hint = " (set by the library, not the author)" if key in (_SCHEMA_VERSION_KEY, _FINGERPRINT_KEY) else ""
+        hint = " (set by the library, not the author)" if key in _LIBRARY_KEYS else ""
         violations.append(f"unknown top-level key: {key!r}{hint}")
 
     overview = raw.get("overview")
@@ -424,39 +436,94 @@ def inventory_fingerprint(inventory: dict[str, Any]) -> str:
     Canonicalised with ``sort_keys`` so the digest is independent of key insertion order --
     it binds the authored insights to *what the inventory says*, not to a particular byte layout.
     """
-    import hashlib
-
     canonical = json.dumps(_base_inventory(inventory), sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
 
-def merge_into_inventory(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
-    """Return a new inventory dict with exactly one additive ``insights`` key.
+def _canonical_sha256(value: Any) -> str:
+    """Hash *value* as canonical JSON so the digest ignores key order and whitespace."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
-    Does not mutate the input and performs no I/O. Existing keys are preserved in their original
-    order and values, so re-serialising them is byte-identical to the deterministic write. The
-    ``insights`` block is the authored content plus the library-owned ``schema_version`` and
-    ``inventory_sha256`` fingerprint, and *replaces* any prior block (idempotent).
+
+def build_source_insights(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``source_insights.json`` document from validated authored insights.
+
+    The document is the authored content plus the library-owned ``schema_version``, the
+    ``inventory_sha256`` fingerprint of the deterministic inventory, the persisted
+    ``source_graphs_sha256`` the inventory records (when it records one), and finally
+    ``source_insights_sha256``, a hash over everything above it. Does not mutate the inputs.
     """
     base = _base_inventory(inventory)
-    block: dict[str, Any] = {_SCHEMA_VERSION_KEY: SCHEMA_VERSION, _FINGERPRINT_KEY: inventory_fingerprint(base)}
+    document: dict[str, Any] = {_SCHEMA_VERSION_KEY: SCHEMA_VERSION, _FINGERPRINT_KEY: inventory_fingerprint(base)}
+    source_graphs_sha256 = base.get(_SOURCE_GRAPHS_HASH_KEY)
+    if source_graphs_sha256 is not None:
+        document[_SOURCE_GRAPHS_HASH_KEY] = source_graphs_sha256
     for key in ("overview", "system_recommendation", "pipeline_insights", "pipeline_relationships"):
         if key in raw:
-            block[key] = raw[key]
-    base[INSIGHTS_KEY] = block
+            document[key] = raw[key]
+    document[_SOURCE_INSIGHTS_HASH_KEY] = _canonical_sha256(document)
+    return document
+
+
+def source_insights_hash_violations(document: dict[str, Any]) -> list[str]:
+    """Check a ``source_insights.json`` document's own hash; an empty list means it is intact."""
+    recorded = document.get(_SOURCE_INSIGHTS_HASH_KEY)
+    content = {key: value for key, value in document.items() if key != _SOURCE_INSIGHTS_HASH_KEY}
+    if recorded != _canonical_sha256(content):
+        return ["source_insights.json does not match its recorded source_insights_sha256"]
+    return []
+
+
+def render_inventory(inventory: dict[str, Any], source_insights: dict[str, Any]) -> dict[str, Any]:
+    """Return the inventory built from its deterministic part plus the source insights document.
+
+    Does not mutate the input and performs no I/O. The deterministic keys keep their original
+    order and values, so re-serialising them is byte-identical to discover's write, and the
+    ``insights`` block is exactly the ``source_insights.json`` content, replacing any prior block.
+    """
+    base = _base_inventory(inventory)
+    base[INSIGHTS_KEY] = dict(source_insights)
     return base
 
 
-def _write_inventory_atomic(path: Path, inventory: dict[str, Any]) -> None:
-    """Write the inventory JSON atomically, matching the deterministic write's formatting.
+def merge_into_inventory(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """Return the inventory rendered with the source insights built from *raw* (no I/O)."""
+    return render_inventory(inventory, build_source_insights(inventory, raw))
+
+
+def _source_graphs_violations(output_dir: Path, inventory: dict[str, Any]) -> list[str]:
+    """Check the inventory still describes the saved ``source_graphs.json`` it records.
+
+    An inventory without a recorded hash (an older discover, or a source that does not persist
+    graphs yet) has nothing to check. Otherwise the saved file must be intact and its document
+    hash must be the one the inventory records, so insights are never bound to a stale graph.
+    """
+    recorded = inventory.get(_SOURCE_GRAPHS_HASH_KEY)
+    if recorded is None:
+        return []
+    graphs_path = Path(output_dir) / "metadata" / SOURCE_GRAPHS_FILENAME
+    if not graphs_path.is_file():
+        return [f"inventory.json records source_graphs_sha256 but {SOURCE_GRAPHS_FILENAME} is missing; re-run discover"]
+    try:
+        document = json.loads(graphs_path.read_text(encoding="utf-8"))
+        source_graphs_from_document(document)
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        return [f"{SOURCE_GRAPHS_FILENAME} is not usable: {error}"]
+    if document.get("document_sha256") != recorded:
+        return [f"inventory.json was projected from a different {SOURCE_GRAPHS_FILENAME}; re-run discover"]
+    return []
+
+
+def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
+    """Write a JSON document atomically, matching the deterministic write's formatting.
 
     Uses ``json.dumps(..., indent=2)`` with no trailing newline -- exactly how the discover
     phase writes ``inventory.json`` -- so every pre-existing key stays byte-identical. The temp
-    file + ``os.replace`` keeps the on-disk inventory intact if the process dies mid-write.
+    file + ``os.replace`` keeps the file on disk intact if the process dies mid-write.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+    temporary.write_text(json.dumps(document, indent=2), encoding="utf-8")
     os.replace(temporary, path)
 
 
@@ -466,18 +533,20 @@ def enrich_inventory(
     insights: dict[str, Any] | None = None,
     insights_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Validate authored insights against the inventory, then merge them in on success.
+    """Validate authored insights against the inventory, then record them on success.
 
-    Reads ``<output_dir>/metadata/inventory.json``, validates the authored insights, and -- only
-    when there are no violations -- writes the merged inventory back atomically (adding just the
-    additive ``insights`` key, every existing key byte-unchanged). On any validation failure the
-    inventory file is left untouched.
+    Reads ``<output_dir>/metadata/inventory.json``, validates the authored insights and checks the
+    inventory still matches the saved ``source_graphs.json`` it records. Only when there are no
+    violations does it write ``metadata/source_insights.json`` and re-render ``inventory.json``
+    from its deterministic part plus that document (every existing key byte-unchanged). On any
+    violation both files are left untouched.
 
     Provide the authored insights via exactly one of ``insights`` (an inline dict) or
     ``insights_path`` (a JSON file).
 
-    Returns a result dict ``{"ok", "violations", "inventory_sha256", "pipeline_insights",
-    "relationships"}``. ``ok`` is ``False`` (and the file untouched) when there are violations.
+    Returns a result dict ``{"ok", "violations", "inventory_sha256", "source_insights_sha256",
+    "pipeline_insights", "relationships"}``. ``ok`` is ``False`` (and the files untouched) when
+    there are violations.
 
     Raises:
         FileNotFoundError: when ``inventory.json`` does not exist (run discover first).
@@ -492,16 +561,18 @@ def enrich_inventory(
         raise ValueError(f"inventory.json must contain a JSON object, got {type(inventory).__name__}")
 
     raw = load_insights(insights=insights, insights_path=insights_path)
-    violations = validate_insights(raw, inventory)
+    violations = validate_insights(raw, inventory) + _source_graphs_violations(Path(output_dir), inventory)
     if violations:
         return {"ok": False, "violations": violations, "pipeline_insights": 0, "relationships": 0}
 
-    merged = merge_into_inventory(inventory, raw)
-    _write_inventory_atomic(inventory_path, merged)
+    source_insights = build_source_insights(inventory, raw)
+    _write_json_atomic(inventory_path.with_name(SOURCE_INSIGHTS_FILENAME), source_insights)
+    _write_json_atomic(inventory_path, render_inventory(inventory, source_insights))
     return {
         "ok": True,
         "violations": [],
-        "inventory_sha256": merged[INSIGHTS_KEY][_FINGERPRINT_KEY],
+        "inventory_sha256": source_insights[_FINGERPRINT_KEY],
+        "source_insights_sha256": source_insights[_SOURCE_INSIGHTS_HASH_KEY],
         "pipeline_insights": len(raw.get("pipeline_insights", [])),
         "relationships": len(raw.get("pipeline_relationships", [])),
     }

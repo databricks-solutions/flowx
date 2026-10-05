@@ -1,13 +1,17 @@
-"""JSON serialisation for the shared discovery AST (:mod:`flowx.models.discovery`).
+"""JSON serialisation for the source-neutral discovery graph contract (:mod:`flowx.models.discovery`).
 
 Kept separate from :mod:`flowx.ir_serde` on purpose: ``ir_serde`` owns the
 ``translation_report.json`` convert->package contract for the Databricks IR, and
-the discovery AST is a different model with a different lifecycle. This module is
-its own round-trip pair so evolving one shape never disturbs the other.
+the discovery graph is a different model with a different lifecycle. This module is
+its own round-trip pair so evolving one shape never disturbs the other. It also
+owns the persisted ``metadata/source_graphs.json`` envelope
+(:func:`source_graphs_document`), versioned and content-hashed, so every source's
+discover phase writes the same file and a later phase can read the graphs back
+without going to the source again.
 
 The DataAsset (de)serialisers are reused from ``ir_serde`` (``data_asset_to_dict``
 / ``data_asset_from_dict``) so the data-asset shape has a single definition
-shared by the lineage substrate and the discovery AST. That shape is a general,
+shared by the lineage substrate and the discovery graph. That shape is a general,
 best-effort description of what a task reads/writes -- not physical-only: a
 resolvable physical ``identity`` when there is one (else ``None``), an
 always-present ``signature``, and an open ``asset_type`` that also covers
@@ -24,6 +28,9 @@ always emitted as lists (never ``None``) for stable golden diffs.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 from flowx.ir_serde import data_asset_from_dict, data_asset_to_dict, lineage_to_dict
@@ -38,6 +45,11 @@ from flowx.models.discovery import (
     SourceNode,
 )
 from flowx.models.ir import ControlEdge, DataEdge, Lineage, MotifAnnotation
+
+SOURCE_GRAPHS_FILENAME = "source_graphs.json"
+SOURCE_GRAPHS_CONTRACT_VERSION = "1"
+
+_HASHED_DOCUMENT_KEYS = ("contract_version", "source", "graphs")
 
 
 def source_graph_to_dict(graph: SourceGraph) -> dict[str, Any]:
@@ -92,6 +104,90 @@ def source_graph_from_dict(raw: dict[str, Any]) -> SourceGraph:
     )
 
 
+def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[str, Any]:
+    """Build the ``metadata/source_graphs.json`` document a discover run persists.
+
+    The envelope is ``{contract_version, source, graphs}``, the same keys the Airflow
+    discover phase writes, plus two content hashes so a later phase can prove it is
+    reading exactly what discover produced: ``graph_sha256`` holds one hash per graph,
+    in the same order as ``graphs``, and ``document_sha256`` covers the whole envelope.
+    Both are taken over canonical JSON (sorted keys, compact separators), so they do
+    not depend on how the file happens to be indented.
+
+    Args:
+        graphs: The workflows discover mapped onto the discovery graph contract.
+        source: Source discriminator (``SOURCE_ADF`` / ``SOURCE_AIRFLOW``).
+
+    Returns:
+        The JSON-friendly document, ready to write.
+    """
+    document: dict[str, Any] = {
+        "contract_version": SOURCE_GRAPHS_CONTRACT_VERSION,
+        "source": source,
+        "graphs": [source_graph_to_dict(graph) for graph in graphs],
+    }
+    document["graph_sha256"] = [_canonical_sha256(graph) for graph in document["graphs"]]
+    document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
+    return document
+
+
+def write_source_graphs(path: Path, graphs: list[SourceGraph], *, source: str) -> dict[str, Any]:
+    """Write the persisted source-graph document to *path* and return what was written."""
+    document = source_graphs_document(graphs, source=source)
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    return document
+
+
+def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
+    """Read the graphs back out of a ``source_graphs.json`` document, failing closed on drift.
+
+    Any document on contract version ``"1"`` is accepted, including one written
+    without the content hashes. When hashes are present they must all match the
+    content, so a hand-edited or truncated file raises instead of quietly handing a
+    different graph to a later phase.
+
+    Args:
+        document: The parsed JSON document.
+
+    Returns:
+        The rehydrated graphs, in file order.
+
+    Raises:
+        ValueError: The contract version is unsupported, ``graphs`` is not a list, or
+            a recorded hash does not match the content.
+    """
+    version = document.get("contract_version")
+    if version != SOURCE_GRAPHS_CONTRACT_VERSION:
+        raise ValueError(
+            f"Unsupported source_graphs contract_version {version!r}; expected {SOURCE_GRAPHS_CONTRACT_VERSION!r}"
+        )
+    graphs = document.get("graphs")
+    if not isinstance(graphs, list):
+        raise ValueError("source_graphs document has no 'graphs' list")
+    recorded_graph_hashes = document.get("graph_sha256")
+    if recorded_graph_hashes is not None:
+        actual_graph_hashes = [_canonical_sha256(graph) for graph in graphs]
+        if recorded_graph_hashes != actual_graph_hashes:
+            raise ValueError("source_graphs graph_sha256 does not match the graphs it was recorded for")
+    recorded_document_hash = document.get("document_sha256")
+    if recorded_document_hash is not None:
+        actual_document_hash = _canonical_sha256({key: document.get(key) for key in _HASHED_DOCUMENT_KEYS})
+        if recorded_document_hash != actual_document_hash:
+            raise ValueError("source_graphs document_sha256 does not match the document content")
+    return [source_graph_from_dict(graph) for graph in graphs]
+
+
+def read_source_graphs(path: Path) -> list[SourceGraph]:
+    """Load and verify the persisted source graphs at *path* (see :func:`source_graphs_from_document`)."""
+    return source_graphs_from_document(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _canonical_sha256(value: Any) -> str:
+    """Hash *value* as canonical JSON so the digest ignores key order and whitespace."""
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _lineage_from_dict(raw: dict[str, Any]) -> Lineage:
     """Rehydrate a :class:`Lineage` block from the dict ``ir_serde.lineage_to_dict`` emits.
 
@@ -127,6 +223,7 @@ def _lineage_from_dict(raw: dict[str, Any]) -> Lineage:
                 display_name=motif.get("display_name"),
                 databricks_replacement=motif.get("databricks_replacement"),
                 notes=list(motif.get("notes") or []),
+                source_type_hint=motif.get("source_type_hint"),
             )
             for motif in raw.get("motifs") or []
         ],

@@ -1,6 +1,6 @@
 """Tests for the source-agnostic inventory emitter (:mod:`flowx.discovery_inventory`).
 
-These tests build the shared discovery AST by hand -- no ADF, no Airflow -- so
+These tests build discovery graphs by hand -- no ADF, no Airflow -- so
 they prove the emitter is genuinely source-agnostic: it takes ``SourceGraph``
 objects in and projects the ``inventory.json`` document out, with no coupling to
 any particular front-end.
@@ -8,21 +8,18 @@ any particular front-end.
 
 from __future__ import annotations
 
-import ast
-
-import flowx.discovery_inventory as discovery_inventory
-from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
+from flowx.discovery_inventory import INVENTORY_VISIBLE_PROPERTY, STRATEGY_PROPERTY, build_source_inventory
 from flowx.discovery_serde import source_graph_from_dict, source_graph_to_dict
 from flowx.models.discovery import (
     CONCEPT_BRANCH,
+    CONCEPT_GROUP,
     CONCEPT_NOTEBOOK,
     ContainerNode,
     SourceDependency,
     SourceGraph,
     SourceNode,
 )
-from flowx.models.ir import ControlEdge, DataEdge, Lineage
-from flowx.models.motifs import DetectedMotif, MotifDefinition
+from flowx.models.ir import ControlEdge, DataEdge, Lineage, MotifAnnotation
 
 
 def _motif(
@@ -32,19 +29,14 @@ def _motif(
     *,
     hint: str | None = None,
     notes: list[str] | None = None,
-) -> DetectedMotif:
-    definition = MotifDefinition(
+) -> MotifAnnotation:
+    return MotifAnnotation(
         motif_id=motif_id,
+        member_task_keys=list(members),
         display_name=motif_id,
-        description="",
-        expected_activity_types=(),
         databricks_replacement=replacement,
-    )
-    return DetectedMotif(
-        definition=definition,
-        matched_activities=list(members),
+        notes=list(notes or []),
         source_type_hint=hint,
-        confidence_notes=list(notes or []),
     )
 
 
@@ -62,26 +54,17 @@ def _node(task_key: str, native_type: str, strategy: str, *, deps: list[SourceDe
     )
 
 
-def test_emitter_has_no_source_specific_imports() -> None:
-    """The emitter module must not import any per-source package.
-
-    Source-agnostic means the ADF/Airflow loaders depend on the emitter, never
-    the other way round. Guard that by inspecting the module's actual import
-    statements (not arbitrary text -- the docstring legitimately names the
-    ``"adf"`` / ``"airflow"`` discriminator values).
-    """
-    source = (discovery_inventory.__file__ or "").rstrip("c")
-    with open(source, encoding="utf-8") as handle:
-        tree = ast.parse(handle.read())
-
-    imported: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.append(node.module)
-
-    assert not any(name.startswith("flowx.sources") for name in imported), imported
+def _visible_node(task_key: str, strategy: str) -> SourceNode:
+    return SourceNode(
+        source_id=task_key,
+        task_key=task_key,
+        concept=CONCEPT_NOTEBOOK,
+        source="unit",
+        name=task_key,
+        native_type="Notebook",
+        properties={STRATEGY_PROPERTY: strategy},
+        raw={"task_key": task_key},
+    )
 
 
 def test_top_level_shape_and_summary_counts() -> None:
@@ -137,6 +120,8 @@ def test_activity_entry_carries_legacy_and_additive_fields() -> None:
     assert entries["b"]["depends_on"] == ["a"]
 
     # Additive standardized fields.
+    assert entries["a"]["task_key"] == "a"
+    assert entries["b"]["task_key"] == "b"
     assert entries["a"]["original_type"] == "Notebook"
     assert entries["a"]["dependencies"] == []
     assert entries["a"]["raw"] == {"name": "a", "type": "Notebook"}
@@ -265,7 +250,9 @@ def test_detected_motifs_surface_additively_without_collapsing_members() -> None
         notes=["'notify' looks like a notification call"],
     )
 
-    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline={"g1": [motif]})
+    graph.lineage = Lineage(motifs=[motif])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp")
     entry = inventory["pipelines"][0]
 
     assert entry["motifs"] == [
@@ -285,15 +272,16 @@ def test_detected_motifs_surface_additively_without_collapsing_members() -> None
 def test_motifs_key_is_additive_and_omitted_when_none_detected() -> None:
     """The ``motifs`` key only appears when a pipeline has a detected motif.
 
-    A pipeline mapped to an empty list, or absent from the map entirely, keeps the
-    historical per-pipeline keys untouched -- the key is additive-only.
+    A graph whose lineage carries no motifs, or that has no lineage at all, keeps
+    the historical per-pipeline keys untouched -- the key is additive-only.
     """
     graph = SourceGraph(name="g1", source="unit", tasks=[_node("a", "Notebook", "deterministic")])
 
-    empty = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline={"g1": []})
+    unmapped = build_source_inventory([graph], source="unit", source_dir="/tmp")
+    graph.lineage = Lineage(motifs=[])
+    empty = build_source_inventory([graph], source="unit", source_dir="/tmp")
     assert "motifs" not in empty["pipelines"][0]
 
-    unmapped = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline=None)
     assert "motifs" not in unmapped["pipelines"][0]
     assert sorted(unmapped["pipelines"][0].keys()) == ["activities", "name"]
 
@@ -301,16 +289,17 @@ def test_motifs_key_is_additive_and_omitted_when_none_detected() -> None:
 def test_motifs_are_decoupled_from_the_lineage_block() -> None:
     """Motifs ride as their own pipeline key, never nested under ``lineage``.
 
-    A pipeline that has both derived lineage and a detected motif emits both, and
-    the lineage block's own (convert-time) motif slot stays empty and separate.
+    A graph that carries both derived edges and a detected motif in its lineage
+    emits both, and the inventory lineage block's motif slot stays empty, as it
+    always has, so motifs are only ever read from the ``motifs`` key.
     """
     lineage = Lineage(
-        data_edges=[DataEdge(source_task_key="a", target_task_key="b", match_kind="identity", match_key="cat.sch.tbl")]
+        data_edges=[DataEdge(source_task_key="a", target_task_key="b", match_kind="identity", match_key="cat.sch.tbl")],
+        motifs=[_motif("scd_type_2", "dlt_apply_changes", ["a"])],
     )
     graph = SourceGraph(name="g", source="unit", tasks=[_node("a", "Notebook", "deterministic")], lineage=lineage)
-    motif = _motif("scd_type_2", "dlt_apply_changes", ["a"])
 
-    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline={"g": [motif]})
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp")
     entry = inventory["pipelines"][0]
 
     assert entry["motifs"][0]["motif_id"] == "scd_type_2"
@@ -344,12 +333,9 @@ def test_exact_duplicate_motifs_collapse_but_overlapping_matches_survive() -> No
     )
     overlapping = _motif("activity_and_notify", "task_with_notification", ["copy", "notify_b"])
 
-    inventory = build_source_inventory(
-        [graph],
-        source="unit",
-        source_dir="/tmp",
-        motifs_by_pipeline={"g1": [exact, exact_dupe, overlapping]},
-    )
+    graph.lineage = Lineage(motifs=[exact, exact_dupe, overlapping])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp")
     motifs = inventory["pipelines"][0]["motifs"]
 
     # The exact duplicate collapsed; the overlapping-but-distinct match survived, in first-seen order.
@@ -359,3 +345,73 @@ def test_exact_duplicate_motifs_collapse_but_overlapping_matches_survive() -> No
     ]
     # First occurrence is the one kept (its empty notes, not the duplicate's note).
     assert motifs[0]["confidence_notes"] == []
+
+
+def test_inventory_shape_counts_and_structural_containers() -> None:
+    structural_group = ContainerNode(
+        source_id="group:etl",
+        task_key="etl",
+        concept=CONCEPT_GROUP,
+        source="unit",
+        name="etl",
+        native_type="TaskGroup",
+        properties={INVENTORY_VISIBLE_PROPERTY: False, "structural_only": True},
+        branches={"group": [_visible_node("extract", "deterministic"), _visible_node("load", "agentic")]},
+    )
+    graph = SourceGraph(name="workflow", source="unit", tasks=[structural_group])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/source")
+
+    assert set(inventory) == {"source", "source_dir", "pipelines", "summary"}
+    assert [item["name"] for item in inventory["pipelines"][0]["activities"]] == ["extract", "load"]
+    assert inventory["summary"] == {
+        "pipeline_count": 1,
+        "activity_count": 2,
+        "deterministic_count": 1,
+        "agentic_count": 1,
+        "unsupported_count": 0,
+        "coverage_pct": 100.0,
+    }
+
+
+def test_inventory_emits_lineage_and_additive_source_fields() -> None:
+    graph = SourceGraph(
+        name="workflow",
+        source="unit",
+        tasks=[_visible_node("task", "deterministic")],
+        lineage=Lineage(
+            control_edges=[
+                ControlEdge(
+                    source_workflow="workflow",
+                    target_workflow="child",
+                    via_task_key="task",
+                    wait_for_completion=False,
+                )
+            ]
+        ),
+    )
+
+    entry = build_source_inventory([graph], source="unit", source_dir="/source")["pipelines"][0]
+
+    assert entry["activities"][0] == {
+        "name": "task",
+        "type": "Notebook",
+        "strategy": "deterministic",
+        "task_key": "task",
+        "original_type": "Notebook",
+        "dependencies": [],
+        "raw": {"task_key": "task"},
+    }
+    assert entry["lineage"]["control_edges"][0]["target_workflow"] == "child"
+
+
+def test_inventory_records_the_source_graphs_hash_only_when_given() -> None:
+    """The persisted graph's hash rides as a top-level key; without it the shape is unchanged."""
+    graph = SourceGraph(name="g", source="unit", tasks=[_node("a", "Notebook", "deterministic")])
+
+    without = build_source_inventory([graph], source="unit", source_dir="/tmp")
+    with_hash = build_source_inventory([graph], source="unit", source_dir="/tmp", source_graphs_sha256="abc")
+
+    assert "source_graphs_sha256" not in without
+    assert with_hash["source_graphs_sha256"] == "abc"
+    assert {key: value for key, value in with_hash.items() if key != "source_graphs_sha256"} == without

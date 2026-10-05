@@ -20,7 +20,10 @@ triggers:
 The deterministic discover pass records what each source workflow **is**; it cannot record what to
 **do** about it. That judgment — a factory-wide architectural recommendation, each pipeline's intent
 and recommended Databricks patterns, and how pipelines couple — is authored by **you, the agent**,
-and merged back into `metadata/inventory.json` under a single additive `insights` key.
+and recorded by the library in its own file, `metadata/source_insights.json`, bound to the saved
+`metadata/source_graphs.json` it was checked against. `metadata/inventory.json` is then rebuilt from
+discover's deterministic projection plus that file, so it carries the same block under a single
+additive `insights` key.
 
 This is the standard step **between discover and route** in the flowx workflow. `flowx-discover`
 chains into this skill by default; the routing step (`flowx-route`) reads the `insights` block to
@@ -35,8 +38,8 @@ every insight accountable: foreign keys must point at real pipelines, and every 
 is either an annotation of a proven lineage edge or an explicitly-flagged inference with cited
 evidence.
 
-`enrich` is **additive**: it merges only an `insights` block and leaves every existing inventory key
-byte-identical. It changes no conversion, IR, or routing decision on its own — the `insights` are
+`enrich` is **additive**: it writes `source_insights.json` and adds only the matching `insights`
+block to the inventory, leaving every existing inventory key byte-identical. It changes no conversion, IR, or routing decision on its own — the `insights` are
 descriptive data that `flowx-route` later consumes.
 
 ## When to skip enrich (deterministic-only)
@@ -93,8 +96,9 @@ narrative.
    and it does not relax the rule above: you still **verify the release state against the current public
    Databricks docs before recommending** (never "recommend now, verify later").
 3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
-   and, only when clean, merges it in atomically. On any violation the inventory is left untouched
-   and you get the full list of problems to fix in one pass.
+   and the saved source graphs and, only when clean, writes `source_insights.json` and rebuilds the
+   inventory atomically. On any violation both files are left untouched and you get the full list of
+   problems to fix in one pass.
 
 See **`insights.md`** in this skill directory for the exact insights shape, every field, and the
 validation rules the library enforces.
