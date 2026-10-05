@@ -39,9 +39,11 @@ Lineage is placed per pipeline -- one block beside that pipeline's ``activities`
 -- to mirror the shared discovery serde, where lineage is a per-graph field
 (:func:`flowx.discovery_serde.source_graph_to_dict`). The block is produced by the
 one shared serialiser (:func:`flowx.ir_serde.lineage_to_dict`, the same one the
-serde consumes), so an emitted block is byte-identical to the serde's and
-round-trips through :func:`flowx.discovery_serde.source_graph_from_dict`. It is a
-new key only: a graph with no derived lineage (``graph.lineage is None``) omits it
+serde consumes), so its edges have the same shape as the serde's. Unlike the
+serde's block, its ``motifs`` is always empty: motifs appear only under the
+pipeline's own ``motifs`` key, so reading the inventory block back through
+:func:`flowx.discovery_serde.source_graph_from_dict` recovers the edges but not the
+motifs. It is a new key only: a graph with no derived lineage (``graph.lineage is None``) omits it
 entirely, so the historical consumer keys (``source`` / ``pipelines`` /
 ``activities`` / ``summary``) are untouched.
 
