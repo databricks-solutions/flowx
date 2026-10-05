@@ -1,4 +1,4 @@
-"""Tests for the ADF -> shared discovery AST mapper (:mod:`flowx.sources.adf.discovery_mapping`).
+"""Tests for the ADF -> discovery graph mapper (:mod:`flowx.sources.adf.discovery_mapping`).
 
 Proves the mapping is 1:1 and lossless: every activity becomes one discovery
 node, the ADF type is retained verbatim as ``native_type`` / ``original_type``,

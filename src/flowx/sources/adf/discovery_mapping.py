@@ -1,4 +1,4 @@
-"""Map the ADF AST onto the shared, source-faithful discovery AST.
+"""Map the ADF AST onto the source-neutral discovery graph contract (``SourceGraph``).
 
 This is the ADF half of the discovery contract (issue #62): it turns the typed
 ADF AST (:mod:`flowx.models.adf_ast`) into the shared
