@@ -10,7 +10,7 @@ import yaml
 
 from flowx.bundler.dab_writer import _combine_airflow_workflows, pipeline_dict_to_ir, write_bundle
 from flowx.ir_serde import activity_to_dict, pipeline_to_dict
-from flowx.models.ir import AgenticComponentActivity, Pipeline
+from flowx.models.ir import AgenticComponentActivity, Dependency, Pipeline
 from flowx.preparer.workflow_preparer import prepare_workflow
 from flowx.validate.bundle_invariants import check_bundle_dir
 
@@ -161,3 +161,50 @@ def test_agentic_component_rejects_file_paths_that_escape_src(path):
 
     with pytest.raises(ValueError, match="relative to the bundle src directory"):
         prepare_workflow(Pipeline(name="unsafe", tasks=[activity]))
+
+
+@pytest.mark.parametrize(
+    "owned_field",
+    [
+        "task_key",
+        "depends_on",
+        "run_if",
+        "timeout_seconds",
+        "max_retries",
+        "min_retry_interval_millis",
+        "retry_on_timeout",
+    ],
+)
+def test_agentic_component_rejects_task_wiring_that_sets_flowx_owned_fields(owned_field):
+    activity = AgenticComponentActivity(
+        name="Rewired",
+        task_key="rewired",
+        resources=RESOURCES,
+        task={**TASK, owned_field: "authored"},
+    )
+
+    with pytest.raises(ValueError, match="flowx-owned"):
+        prepare_workflow(Pipeline(name="rewired", tasks=[activity]))
+
+
+def test_agentic_component_task_identity_dependencies_and_policy_come_from_the_activity(tmp_path):
+    upstream = AgenticComponentActivity(name="Upstream", task_key="upstream", resources=RESOURCES, task=TASK)
+    downstream = AgenticComponentActivity(
+        name="Downstream",
+        task_key="downstream",
+        depends_on=[Dependency(task_key="upstream", outcome="Succeeded")],
+        timeout_seconds=600,
+        max_retries=2,
+        task={"notebook_task": {"notebook_path": "../src/notebooks/downstream.py"}},
+        files=[{"path": "notebooks/downstream.py", "content": "print('downstream')\n"}],
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[upstream, downstream])), tmp_path)
+
+    job_resource = yaml.safe_load((tmp_path / "resources" / "orders.yml").read_text(encoding="utf-8"))
+    tasks = {task["task_key"]: task for task in job_resource["resources"]["jobs"]["orders"]["tasks"]}
+    assert tasks["downstream"]["depends_on"] == [{"task_key": "upstream"}]
+    assert tasks["downstream"]["timeout_seconds"] == 600
+    assert tasks["downstream"]["max_retries"] == 2
+    assert "notebook_task" in tasks["downstream"]
+    assert check_bundle_dir(tmp_path).ok
