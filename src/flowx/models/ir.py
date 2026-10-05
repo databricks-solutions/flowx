@@ -168,6 +168,8 @@ class MotifAnnotation:
         display_name: Human-readable motif name, if any.
         databricks_replacement: Target Databricks construct the motif maps to.
         notes: Detector notes explaining the match rationale.
+        source_type_hint: Optional source-specific hint the detector attached
+            (for example the ADF copy source type), or ``None``.
     """
 
     motif_id: str
@@ -175,6 +177,7 @@ class MotifAnnotation:
     display_name: str | None = None
     databricks_replacement: str | None = None
     notes: list[str] = field(default_factory=list)
+    source_type_hint: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)

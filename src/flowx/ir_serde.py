@@ -33,6 +33,7 @@ from flowx.models.ir import (
     Lineage,
     LookupActivity,
     MotifActivity,
+    MotifAnnotation,
     NotebookActivity,
     Pipeline,
     PlaceholderActivity,
@@ -143,17 +144,26 @@ def lineage_to_dict(lineage: Lineage) -> dict[str, Any]:
             }
             for edge in lineage.data_edges
         ],
-        "motifs": [
-            {
-                "motif_id": motif.motif_id,
-                "member_task_keys": list(motif.member_task_keys),
-                "display_name": motif.display_name,
-                "databricks_replacement": motif.databricks_replacement,
-                "notes": list(motif.notes),
-            }
-            for motif in lineage.motifs
-        ],
+        "motifs": [_motif_annotation_to_dict(motif) for motif in lineage.motifs],
     }
+
+
+def _motif_annotation_to_dict(motif: MotifAnnotation) -> dict[str, Any]:
+    """Serialise one motif annotation; ``source_type_hint`` is written only when set.
+
+    Leaving the key out when it is ``None`` keeps every existing lineage block
+    byte-identical, since only discovery-time detections carry a hint.
+    """
+    result: dict[str, Any] = {
+        "motif_id": motif.motif_id,
+        "member_task_keys": list(motif.member_task_keys),
+        "display_name": motif.display_name,
+        "databricks_replacement": motif.databricks_replacement,
+        "notes": list(motif.notes),
+    }
+    if motif.source_type_hint is not None:
+        result["source_type_hint"] = motif.source_type_hint
+    return result
 
 
 def configuration_to_dict(configuration: Any) -> dict[str, Any]:

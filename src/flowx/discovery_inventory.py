@@ -22,16 +22,18 @@ The projection is deliberately small and additive over the historical ADF shape:
   the counts, while its children are still listed;
 * each pipeline entry gains an additive ``lineage`` block (control + data edges)
   when its :class:`~flowx.models.discovery.SourceGraph` carries derived lineage;
-* each pipeline entry gains an additive ``motifs`` list -- the multi-activity ADF
-  patterns the profiler *detects* at discover time (see
-  :mod:`flowx.motifs.detector`) surfaced verbatim, **without** collapsing the
-  member activities. Motifs are their own inventory concept and are deliberately
-  **decoupled from the lineage block** (they do not nest under ``lineage.motifs``,
-  which stays a convert-time IR concern); the key is omitted when a pipeline has
-  no detected motif. Collapse remains a *convert* decision
+* each pipeline entry gains an additive ``motifs`` list -- the multi-activity
+  patterns a source *detects* at discover time and records on the graph itself
+  (``SourceGraph.lineage.motifs``, so they sit inside the hashed source graph),
+  surfaced here **without** collapsing the member activities. In the inventory
+  they stay **decoupled from the lineage block**: the inventory's
+  ``lineage.motifs`` is always empty, as it always has been; the key is omitted
+  when a pipeline has no detected motif. Collapse remains a *convert* decision
   (:mod:`flowx.motifs.collapser`), never a discover one, so every member activity
   still appears as its own entry in ``activities``;
-* the ``summary`` keeps the historical count block.
+* the ``summary`` keeps the historical count block, and a top-level
+  ``source_graphs_sha256`` records which persisted ``source_graphs.json`` the
+  inventory was projected from, when the caller passes it.
 
 Lineage is placed per pipeline -- one block beside that pipeline's ``activities``
 -- to mirror the shared discovery serde, where lineage is a per-graph field
@@ -47,22 +49,20 @@ A node's translation ``strategy`` is a Databricks-*target* classification rather
 than a source concept, so it is not a typed field on the discovery graph. By
 convention a mapper stashes it under ``node.properties["strategy"]`` (see
 :data:`STRATEGY_PROPERTY`); this module reads it there. Detected motifs are
-handled the same way -- they carry a Databricks-*target* replacement and are not
-a shared source concept, so they are not a typed field on the graph either; a
-source supplies them per pipeline via ``motifs_by_pipeline`` and this module
-projects them. Anything else a source wants to layer on -- Airflow's
+different: they are deterministic facts about the source, so a source records
+them on the graph as :class:`~flowx.models.ir.MotifAnnotation` entries in
+``lineage.motifs`` and this module projects them. Anything else a source wants to layer on -- Airflow's
 audited-count block, findings, reconciliation status -- rides additively on top
 of this base and is out of scope here.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 from flowx.ir_serde import lineage_to_dict
 from flowx.models.discovery import ContainerNode, SourceGraph, SourceNode
-from flowx.models.motifs import DetectedMotif
+from flowx.models.ir import Lineage, MotifAnnotation
 
 # Well-known property key under which a mapper records a node's Databricks-target
 # translation strategy ("deterministic" / "agentic" / "unsupported"). Kept in the
@@ -81,7 +81,7 @@ def build_source_inventory(
     source: str,
     source_dir: str,
     include_empty_pipelines: bool = True,
-    motifs_by_pipeline: Mapping[str, list[DetectedMotif]] | None = None,
+    source_graphs_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Project a list of source graphs into the ``inventory.json`` document.
 
@@ -97,22 +97,20 @@ def build_source_inventory(
             behaviour of omitting zero-activity pipelines from the per-pipeline
             listing while still reporting them in the totals. Sources that list
             every workflow (Airflow) leave this ``True``.
-        motifs_by_pipeline: Optional map from pipeline name to the motifs a source
-            detected in it (see :mod:`flowx.motifs.detector`). A pipeline with a
-            non-empty entry gains an additive ``motifs`` list; the key is omitted
-            otherwise. This is surfacing only -- the member activities are never
-            collapsed here (collapse is a convert decision). Exact-duplicate
-            detections (same ``motif_id`` and same member set) are collapsed to one
-            (see :func:`_dedupe_motif_entries`); overlapping-but-distinct matches
-            are all kept. Keyed by
-            :attr:`~flowx.models.discovery.SourceGraph.name`, so a source with no
-            motif detector simply passes ``None``.
+        source_graphs_sha256: The ``document_sha256`` of the persisted
+            ``source_graphs.json`` these graphs were written to, recorded as a
+            top-level key so later phases can tell which saved graph the
+            inventory describes. Omitted when ``None``.
+
+    A graph whose ``lineage.motifs`` is non-empty gives its pipeline entry an
+    additive ``motifs`` list. Exact-duplicate detections (same ``motif_id`` and
+    same member set) collapse to one (see :func:`_dedupe_motif_entries`);
+    overlapping-but-distinct matches are all kept.
 
     Returns:
         A JSON-friendly dict with ``source``, ``source_dir``, ``pipelines`` and
-        ``summary`` keys.
+        ``summary`` keys, plus ``source_graphs_sha256`` when given.
     """
-    motifs_by_pipeline = motifs_by_pipeline or {}
     pipeline_entries: list[dict[str, Any]] = []
     deterministic = 0
     agentic = 0
@@ -136,16 +134,16 @@ def build_source_inventory(
                 "activities": [_activity_entry(node) for node in flattened],
             }
             if graph.lineage is not None:
-                entry["lineage"] = lineage_to_dict(graph.lineage)
-            detected = motifs_by_pipeline.get(graph.name)
-            if detected:
-                entry["motifs"] = _dedupe_motif_entries([_motif_entry(motif) for motif in detected])
+                edges_only = Lineage(control_edges=graph.lineage.control_edges, data_edges=graph.lineage.data_edges)
+                entry["lineage"] = lineage_to_dict(edges_only)
+                if graph.lineage.motifs:
+                    entry["motifs"] = _dedupe_motif_entries([_motif_entry(motif) for motif in graph.lineage.motifs])
             pipeline_entries.append(entry)
 
     total = deterministic + agentic + unsupported
     coverage_pct = round((deterministic + agentic) / total * 100, 1) if total else 0.0
 
-    return {
+    inventory: dict[str, Any] = {
         "source": source,
         "source_dir": source_dir,
         "pipelines": pipeline_entries,
@@ -158,6 +156,9 @@ def build_source_inventory(
             "coverage_pct": coverage_pct,
         },
     }
+    if source_graphs_sha256 is not None:
+        inventory["source_graphs_sha256"] = source_graphs_sha256
+    return inventory
 
 
 def _flatten_nodes(nodes: list[SourceNode]) -> list[SourceNode]:
@@ -208,25 +209,24 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
     return entry
 
 
-def _motif_entry(motif: DetectedMotif) -> dict[str, Any]:
-    """Project one detected motif into its additive inventory entry.
+def _motif_entry(motif: MotifAnnotation) -> dict[str, Any]:
+    """Project one motif annotation into its additive inventory entry.
 
     Surfacing only: ``member_task_keys`` names the participating activities as the
     detector claimed them (for ADF these are the activity names, which are the
-    same values used as each activity entry's ``name`` / task key, so a consumer
-    can join a motif back to its members). The field names mirror the existing
-    :class:`~flowx.models.ir.MotifAnnotation` vocabulary so the two motif views
-    read the same, while staying a separate key from the ``lineage`` block. The
-    detector reports its confidence as human-readable rationale rather than a
-    numeric score, so ``confidence_notes`` carries that verbatim.
+    same values used as each activity entry's ``task_key``, so a consumer can join
+    a motif back to its members). The detector reports its confidence as
+    human-readable rationale rather than a numeric score, so the annotation's
+    ``notes`` are surfaced verbatim as ``confidence_notes``, the inventory's
+    long-standing key.
     """
     return {
-        "motif_id": motif.definition.motif_id,
-        "display_name": motif.definition.display_name,
-        "databricks_replacement": motif.definition.databricks_replacement,
-        "member_task_keys": list(motif.matched_activities),
+        "motif_id": motif.motif_id,
+        "display_name": motif.display_name,
+        "databricks_replacement": motif.databricks_replacement,
+        "member_task_keys": list(motif.member_task_keys),
         "source_type_hint": motif.source_type_hint,
-        "confidence_notes": list(motif.confidence_notes),
+        "confidence_notes": list(motif.notes),
     }
 
 

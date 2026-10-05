@@ -15,7 +15,9 @@ from flowx.discovery_serde import (
     source_graphs_from_document,
     write_source_graphs,
 )
+from flowx.ir_serde import lineage_to_dict
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceDependency, SourceGraph, SourceNode
+from flowx.models.ir import Lineage, MotifAnnotation
 
 
 def _graph(name: str) -> SourceGraph:
@@ -107,3 +109,44 @@ def test_unknown_contract_version_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="contract_version"):
         source_graphs_from_document(document)
+
+
+def _motif(hint: str | None) -> MotifAnnotation:
+    return MotifAnnotation(
+        motif_id="activity_and_notify",
+        member_task_keys=["a", "b"],
+        display_name="Activity and notify",
+        databricks_replacement="task_with_notification",
+        notes=["b looks like a notification"],
+        source_type_hint=hint,
+    )
+
+
+def test_motifs_round_trip_inside_the_hashed_graph() -> None:
+    """Motifs recorded on a graph are saved with it, so the graph hash covers them."""
+    graph = _graph("first")
+    graph.lineage = Lineage(motifs=[_motif("database")])
+
+    document = source_graphs_document([graph], source="unit")
+    restored = source_graphs_from_document(json.loads(json.dumps(document)))
+
+    assert restored[0].lineage is not None
+    assert restored[0].lineage.motifs == [_motif("database")]
+    document["graphs"][0]["lineage"]["motifs"][0]["member_task_keys"] = ["a"]
+    with pytest.raises(ValueError, match="graph_sha256"):
+        source_graphs_from_document(document)
+
+
+def test_lineage_without_a_motif_hint_serialises_as_before() -> None:
+    """source_type_hint is written only when set, so existing lineage blocks stay byte-identical."""
+    without_hint = lineage_to_dict(Lineage(motifs=[_motif(None)]))
+    with_hint = lineage_to_dict(Lineage(motifs=[_motif("database")]))
+
+    assert list(without_hint["motifs"][0]) == [
+        "motif_id",
+        "member_task_keys",
+        "display_name",
+        "databricks_replacement",
+        "notes",
+    ]
+    assert with_hint["motifs"][0]["source_type_hint"] == "database"

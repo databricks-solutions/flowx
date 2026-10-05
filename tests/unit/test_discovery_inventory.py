@@ -19,8 +19,7 @@ from flowx.models.discovery import (
     SourceGraph,
     SourceNode,
 )
-from flowx.models.ir import ControlEdge, DataEdge, Lineage
-from flowx.models.motifs import DetectedMotif, MotifDefinition
+from flowx.models.ir import ControlEdge, DataEdge, Lineage, MotifAnnotation
 
 
 def _motif(
@@ -30,19 +29,14 @@ def _motif(
     *,
     hint: str | None = None,
     notes: list[str] | None = None,
-) -> DetectedMotif:
-    definition = MotifDefinition(
+) -> MotifAnnotation:
+    return MotifAnnotation(
         motif_id=motif_id,
+        member_task_keys=list(members),
         display_name=motif_id,
-        description="",
-        expected_activity_types=(),
         databricks_replacement=replacement,
-    )
-    return DetectedMotif(
-        definition=definition,
-        matched_activities=list(members),
+        notes=list(notes or []),
         source_type_hint=hint,
-        confidence_notes=list(notes or []),
     )
 
 
@@ -256,7 +250,9 @@ def test_detected_motifs_surface_additively_without_collapsing_members() -> None
         notes=["'notify' looks like a notification call"],
     )
 
-    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline={"g1": [motif]})
+    graph.lineage = Lineage(motifs=[motif])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp")
     entry = inventory["pipelines"][0]
 
     assert entry["motifs"] == [
@@ -276,15 +272,16 @@ def test_detected_motifs_surface_additively_without_collapsing_members() -> None
 def test_motifs_key_is_additive_and_omitted_when_none_detected() -> None:
     """The ``motifs`` key only appears when a pipeline has a detected motif.
 
-    A pipeline mapped to an empty list, or absent from the map entirely, keeps the
-    historical per-pipeline keys untouched -- the key is additive-only.
+    A graph whose lineage carries no motifs, or that has no lineage at all, keeps
+    the historical per-pipeline keys untouched -- the key is additive-only.
     """
     graph = SourceGraph(name="g1", source="unit", tasks=[_node("a", "Notebook", "deterministic")])
 
-    empty = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline={"g1": []})
+    unmapped = build_source_inventory([graph], source="unit", source_dir="/tmp")
+    graph.lineage = Lineage(motifs=[])
+    empty = build_source_inventory([graph], source="unit", source_dir="/tmp")
     assert "motifs" not in empty["pipelines"][0]
 
-    unmapped = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline=None)
     assert "motifs" not in unmapped["pipelines"][0]
     assert sorted(unmapped["pipelines"][0].keys()) == ["activities", "name"]
 
@@ -292,16 +289,17 @@ def test_motifs_key_is_additive_and_omitted_when_none_detected() -> None:
 def test_motifs_are_decoupled_from_the_lineage_block() -> None:
     """Motifs ride as their own pipeline key, never nested under ``lineage``.
 
-    A pipeline that has both derived lineage and a detected motif emits both, and
-    the lineage block's own (convert-time) motif slot stays empty and separate.
+    A graph that carries both derived edges and a detected motif in its lineage
+    emits both, and the inventory lineage block's motif slot stays empty, as it
+    always has, so motifs are only ever read from the ``motifs`` key.
     """
     lineage = Lineage(
-        data_edges=[DataEdge(source_task_key="a", target_task_key="b", match_kind="identity", match_key="cat.sch.tbl")]
+        data_edges=[DataEdge(source_task_key="a", target_task_key="b", match_kind="identity", match_key="cat.sch.tbl")],
+        motifs=[_motif("scd_type_2", "dlt_apply_changes", ["a"])],
     )
     graph = SourceGraph(name="g", source="unit", tasks=[_node("a", "Notebook", "deterministic")], lineage=lineage)
-    motif = _motif("scd_type_2", "dlt_apply_changes", ["a"])
 
-    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp", motifs_by_pipeline={"g": [motif]})
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp")
     entry = inventory["pipelines"][0]
 
     assert entry["motifs"][0]["motif_id"] == "scd_type_2"
@@ -335,12 +333,9 @@ def test_exact_duplicate_motifs_collapse_but_overlapping_matches_survive() -> No
     )
     overlapping = _motif("activity_and_notify", "task_with_notification", ["copy", "notify_b"])
 
-    inventory = build_source_inventory(
-        [graph],
-        source="unit",
-        source_dir="/tmp",
-        motifs_by_pipeline={"g1": [exact, exact_dupe, overlapping]},
-    )
+    graph.lineage = Lineage(motifs=[exact, exact_dupe, overlapping])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp")
     motifs = inventory["pipelines"][0]["motifs"]
 
     # The exact duplicate collapsed; the overlapping-but-distinct match survived, in first-seen order.
@@ -408,3 +403,15 @@ def test_inventory_emits_lineage_and_additive_source_fields() -> None:
         "raw": {"task_key": "task"},
     }
     assert entry["lineage"]["control_edges"][0]["target_workflow"] == "child"
+
+
+def test_inventory_records_the_source_graphs_hash_only_when_given() -> None:
+    """The persisted graph's hash rides as a top-level key; without it the shape is unchanged."""
+    graph = SourceGraph(name="g", source="unit", tasks=[_node("a", "Notebook", "deterministic")])
+
+    without = build_source_inventory([graph], source="unit", source_dir="/tmp")
+    with_hash = build_source_inventory([graph], source="unit", source_dir="/tmp", source_graphs_sha256="abc")
+
+    assert "source_graphs_sha256" not in without
+    assert with_hash["source_graphs_sha256"] == "abc"
+    assert {key: value for key, value in with_hash.items() if key != "source_graphs_sha256"} == without
