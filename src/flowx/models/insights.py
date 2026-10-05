@@ -1,17 +1,17 @@
-"""Agentic insights (discover phase) -- agent-authored judgment merged into ``inventory.json``.
+"""Agentic insights (discover phase) -- agent-authored judgment recorded in ``source_insights.json``.
 
 The deterministic discover layer captures what a source workflow *is*; these models
 capture what to *do* about it -- the judgment the deterministic pass can never derive:
 a factory-wide architectural recommendation, per-pipeline intent + recommended
 Databricks patterns, and how pipelines couple. An external agent *authors* this object
-by reading the inventory and the source artifacts; the library only validates and merges
+by reading the inventory and the source artifacts; the library only validates and records
 it (see :mod:`flowx.discovery_insights`). There is **no LLM in the tool** -- the same
-author-then-validate-merge contract :mod:`flowx.agentic` uses for gap resolution.
+author-then-validate-record contract :mod:`flowx.agentic` uses for gap resolution.
 
 These models are **source-neutral**: they describe the shape of the ``insights`` object
 independent of whether the pipelines came from ADF or Airflow, because the inventory they
-attach to is itself standardised across sources via the shared discovery AST (#61/#62).
-The validate/merge engine works on the raw dict form; these dataclasses document the
+attach to is itself standardised across sources via the source-neutral discovery graph
+contract (#61/#62). The validate/record engine works on the raw dict form; these dataclasses document the
 contract and back the unit tests.
 
 Cross-pipeline couplings come in two accountable tiers (:class:`LineageEdgeRef`):
@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-# The insights schema version stamped onto the merged block. Bump on any
+# The insights schema version stamped onto the recorded block. Bump on any
 # backwards-incompatible change to the authored shape.
 SCHEMA_VERSION = "1"
 
@@ -223,10 +223,12 @@ class PipelineRelationship:
 
 @dataclass(slots=True, kw_only=True)
 class Insights:
-    """Agent-authored insights merged into ``inventory.json`` under the additive ``insights`` key.
+    """Agent-authored insights, recorded in ``source_insights.json`` and in ``inventory.json``.
+
+    In the inventory they sit under the additive ``insights`` key.
 
     The agent authors only these four content fields. The library injects the ``schema_version``
-    and the ``inventory_sha256`` fingerprint on merge (see :mod:`flowx.discovery_insights`), so
+    and the ``inventory_sha256`` fingerprint on record (see :mod:`flowx.discovery_insights`), so
     the authored insights stay bound to the exact deterministic inventory they describe.
 
     Attributes:
