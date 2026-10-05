@@ -16,6 +16,7 @@ from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import ControlEdge, Lineage
 from flowx.models.motifs import MOTIF_METADATA_DRIVEN_BULK_COPY, DetectedMotif
 from flowx.routing import build_recommendation, recommend_component
+from flowx.sources.adf.loader import attach_motifs_to_graphs
 
 
 def _node(task_key: str, native_type: str, *, strategy: str = "deterministic") -> SourceNode:
@@ -37,7 +38,8 @@ def _inventory(
     motifs: dict[str, list[DetectedMotif]] | None = None,
     insights: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    inventory = build_source_inventory(graphs, source="adf", source_dir="/tmp/src", motifs_by_pipeline=motifs)
+    attach_motifs_to_graphs(graphs, motifs or {})
+    inventory = build_source_inventory(graphs, source="adf", source_dir="/tmp/src")
     if insights is not None:
         inventory["insights"] = insights
     return inventory
