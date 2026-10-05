@@ -56,7 +56,7 @@ All three phases write into one shared `<output_dir>` (default `./flowx_output`)
 the DAB bundle at the top level, kept artifacts under `metadata/`, and transient
 intermediates under `.work/` (pruned by `package`).
 
-1. **Discover** -- Parse ADF JSON from UC volumes -> typed AST -> `metadata/inventory.json` + `metadata/profile_report.csv` + verbatim `metadata/<pipeline>.arm.json`
+1. **Discover** -- Parse ADF JSON from UC volumes -> typed AST -> `SourceGraph` -> `metadata/source_graphs.json` (versioned, hashed, motifs inside) + `metadata/inventory.json` + `metadata/profile_report.csv` + verbatim `metadata/<pipeline>.arm.json`; optional enrich adds `metadata/source_insights.json` and rebuilds the inventory with it
 2. **Convert** -- Registry dispatch + topological sort -> Pipeline IR (deterministic + agentic gaps); transient report at `.work/translation_report.json`
 3. **Package** -- IR -> DAB YAML + generated notebooks + setup scripts; prunes `.work/`
 
@@ -74,7 +74,10 @@ intermediates under `.work/` (pruned by `package`).
 | `models/ir.py` | Databricks intermediate representation |
 | `models/dab.py` | DAB output schema types |
 | `models/discovery.py` | Source-neutral discovery graph contract (`SourceGraph`); each source keeps its own parser and projects into it |
-| `sources/adf/loader.py` | Parses ADF exports, produces `metadata/inventory.json` + `metadata/profile_report.csv` |
+| `discovery_serde.py` | SourceGraph JSON round trip and the persisted `source_graphs.json` envelope (contract version, per-graph and document hashes) |
+| `discovery_inventory.py` | The one source-agnostic emitter that projects source graphs into `inventory.json` |
+| `discovery_insights.py` | `enrich`: validates agent-authored insights, records `source_insights.json` and rebuilds `inventory.json` with it |
+| `sources/adf/loader.py` | Parses ADF exports, produces `metadata/source_graphs.json` + `metadata/inventory.json` + `metadata/profile_report.csv` |
 | `sources/adf/discovery_mapping.py` | Maps the ADF AST onto the `SourceGraph` discovery graph contract (1:1, lossless) |
 | `sources/adf/translate.py` | Registry dispatch, topological sort, context threading |
 | `sources/adf/translators/` | One module per deterministic activity type (16 total) |
@@ -89,9 +92,9 @@ intermediates under `.work/` (pruned by `package`).
 | `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/` |
 | `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK |
 | `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table |
-| `routing.py` | Groups pipelines into connected components over control lineage; recommends deterministic/agentic per component (both options) and records the user's decision as `metadata/conversion_plan.json` (additive; convert untouched) |
+| `routing.py` | Groups pipelines into connected components over control lineage; recommends deterministic/agentic per component (both options) and records the user's decision as `metadata/conversion_plan.json` (additive; convert untouched). Agentic decisions are ADF-only |
 | `route_agentic.py` | Applies a routing decision after convert: rewrites the translation report for agentic-routed groups (placeholder tasks + per-task `AgenticGap`), keeping the fill in-engine |
-| `models/conversion_plan.py` | Source-neutral conversion-plan artifact model (per-component decision + both options), the routing counterpart to `models/insights.py` |
+| `models/conversion_plan.py` | Typed `ConversionPlan` (schema 2): the library's load/validate/record API for `conversion_plan.json`, one decision per component, bound to the inventory, `source_graphs.json` and `source_insights.json` hashes; package fails closed on a mismatch |
 
 ## Activity Types
 

@@ -8,8 +8,8 @@ and recommended Databricks patterns, and cross-pipeline relationships (see
 authored JSON against the real inventory and, **only when clean**, adds a single additive
 ``insights`` key while leaving every existing key byte-identical.
 
-There is **no LLM here** -- the tool only validates and merges, mirroring the
-author-then-validate-merge contract :mod:`flowx.agentic` uses for gap resolution. That
+There is **no LLM here** -- the tool only validates and records, mirroring the
+author-then-validate-record contract :mod:`flowx.agentic` uses for gap resolution. That
 keeps the deterministic inventory trustworthy and every insight accountable:
 
 * every ``pipeline`` and every relationship endpoint must be a real pipeline in the
@@ -402,7 +402,7 @@ def _validate_system_recommendation(value: Any) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Loading, fingerprinting, and the atomic idempotent merge.
+# Loading, fingerprinting, and the atomic idempotent record.
 # --------------------------------------------------------------------------- #
 
 
@@ -421,7 +421,7 @@ def load_insights(*, insights: dict[str, Any] | None = None, insights_path: Path
 
 
 def _base_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
-    """The deterministic inventory with any previously-merged ``insights`` block stripped.
+    """The deterministic inventory with any previously-rendered ``insights`` block stripped.
 
     Fingerprinting and re-serialisation both work off this so re-enriching an already-enriched
     inventory is stable: the fingerprint reflects only the deterministic layer, never a prior
