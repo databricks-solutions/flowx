@@ -1,6 +1,6 @@
 """Tests for the source-agnostic inventory emitter (:mod:`flowx.discovery_inventory`).
 
-These tests build the shared discovery AST by hand -- no ADF, no Airflow -- so
+These tests build discovery graphs by hand -- no ADF, no Airflow -- so
 they prove the emitter is genuinely source-agnostic: it takes ``SourceGraph``
 objects in and projects the ``inventory.json`` document out, with no coupling to
 any particular front-end.
@@ -11,10 +11,11 @@ from __future__ import annotations
 import ast
 
 import flowx.discovery_inventory as discovery_inventory
-from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
+from flowx.discovery_inventory import INVENTORY_VISIBLE_PROPERTY, STRATEGY_PROPERTY, build_source_inventory
 from flowx.discovery_serde import source_graph_from_dict, source_graph_to_dict
 from flowx.models.discovery import (
     CONCEPT_BRANCH,
+    CONCEPT_GROUP,
     CONCEPT_NOTEBOOK,
     ContainerNode,
     SourceDependency,
@@ -59,6 +60,19 @@ def _node(task_key: str, native_type: str, strategy: str, *, deps: list[SourceDe
         dependencies=deps or [],
         properties={STRATEGY_PROPERTY: strategy},
         raw={"name": task_key, "type": native_type},
+    )
+
+
+def _visible_node(task_key: str, strategy: str) -> SourceNode:
+    return SourceNode(
+        source_id=task_key,
+        task_key=task_key,
+        concept=CONCEPT_NOTEBOOK,
+        source="unit",
+        name=task_key,
+        native_type="Notebook",
+        properties={STRATEGY_PROPERTY: strategy},
+        raw={"task_key": task_key},
     )
 
 
@@ -137,6 +151,8 @@ def test_activity_entry_carries_legacy_and_additive_fields() -> None:
     assert entries["b"]["depends_on"] == ["a"]
 
     # Additive standardized fields.
+    assert entries["a"]["task_key"] == "a"
+    assert entries["b"]["task_key"] == "b"
     assert entries["a"]["original_type"] == "Notebook"
     assert entries["a"]["dependencies"] == []
     assert entries["a"]["raw"] == {"name": "a", "type": "Notebook"}
@@ -359,3 +375,61 @@ def test_exact_duplicate_motifs_collapse_but_overlapping_matches_survive() -> No
     ]
     # First occurrence is the one kept (its empty notes, not the duplicate's note).
     assert motifs[0]["confidence_notes"] == []
+
+
+def test_inventory_shape_counts_and_structural_containers() -> None:
+    structural_group = ContainerNode(
+        source_id="group:etl",
+        task_key="etl",
+        concept=CONCEPT_GROUP,
+        source="unit",
+        name="etl",
+        native_type="TaskGroup",
+        properties={INVENTORY_VISIBLE_PROPERTY: False, "structural_only": True},
+        branches={"group": [_visible_node("extract", "deterministic"), _visible_node("load", "agentic")]},
+    )
+    graph = SourceGraph(name="workflow", source="unit", tasks=[structural_group])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/source")
+
+    assert set(inventory) == {"source", "source_dir", "pipelines", "summary"}
+    assert [item["name"] for item in inventory["pipelines"][0]["activities"]] == ["extract", "load"]
+    assert inventory["summary"] == {
+        "pipeline_count": 1,
+        "activity_count": 2,
+        "deterministic_count": 1,
+        "agentic_count": 1,
+        "unsupported_count": 0,
+        "coverage_pct": 100.0,
+    }
+
+
+def test_inventory_emits_lineage_and_additive_source_fields() -> None:
+    graph = SourceGraph(
+        name="workflow",
+        source="unit",
+        tasks=[_visible_node("task", "deterministic")],
+        lineage=Lineage(
+            control_edges=[
+                ControlEdge(
+                    source_workflow="workflow",
+                    target_workflow="child",
+                    via_task_key="task",
+                    wait_for_completion=False,
+                )
+            ]
+        ),
+    )
+
+    entry = build_source_inventory([graph], source="unit", source_dir="/source")["pipelines"][0]
+
+    assert entry["activities"][0] == {
+        "name": "task",
+        "type": "Notebook",
+        "strategy": "deterministic",
+        "task_key": "task",
+        "original_type": "Notebook",
+        "dependencies": [],
+        "raw": {"task_key": "task"},
+    }
+    assert entry["lineage"]["control_edges"][0]["target_workflow"] == "child"

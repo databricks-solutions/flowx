@@ -11,7 +11,7 @@ primitive-level cores -- :func:`control_edges_from_calls` and
 :func:`data_edges_from_endpoints` -- that take only ``task_key`` strings and
 :class:`DataAsset` values, never a ``Pipeline``. The IR entry points
 (:func:`build_control_edges` / :func:`build_data_edges`) gather those primitives
-from a pipeline and delegate, and the source-neutral discovery-AST derivation in
+from a pipeline and delegate, and the source-neutral discovery-graph derivation in
 :mod:`flowx.discovery_lineage` gathers the same primitives from a
 :class:`~flowx.models.discovery.SourceGraph` and delegates too, so both phases
 join edges through exactly one implementation.
@@ -79,7 +79,7 @@ def control_edges_from_calls(
 ) -> list[ControlEdge]:
     """Assemble deduplicated control edges from raw invocation primitives.
 
-    The shared core behind :func:`build_control_edges` (IR) and the discovery-AST
+    The shared core behind :func:`build_control_edges` (IR) and the discovery-graph
     control-edge derivation: it owns the self-edge drop, the dedup, and the
     unresolved-callee recording so those rules live in exactly one place and both
     phases behave identically.
@@ -176,7 +176,7 @@ def data_edges_from_endpoints(
 ) -> list[DataEdge]:
     """Join producer endpoints to consumer endpoints via the two-tier match.
 
-    The shared core behind :func:`build_data_edges` (IR) and the discovery-AST
+    The shared core behind :func:`build_data_edges` (IR) and the discovery-graph
     data-edge derivation: it owns the :func:`_match_assets` tier logic, the
     no-self-edge rule, and the dedup, so both phases join identically.
 

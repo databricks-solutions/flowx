@@ -1,4 +1,4 @@
-"""Unit tests for the shared discovery AST (models/discovery.py + discovery_serde.py).
+"""Unit tests for the discovery graph contract (models/discovery.py + discovery_serde.py).
 
 Covers construction of the node set and an exact serialize<->deserialize round
 trip, including a ContainerNode with labelled branches, a node carrying

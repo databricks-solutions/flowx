@@ -1,10 +1,10 @@
-"""Source-agnostic projection of the shared discovery AST to ``inventory.json``.
+"""Source-agnostic projection of the discovery graph contract to ``inventory.json``.
 
 The discover phase writes ``metadata/inventory.json`` and the reporting layer
 (:mod:`flowx.reporting.coverage`) and MCP surface (:mod:`flowx.mcp.runner`) read
 it back. Historically each source built that JSON straight from its own AST, so
 the shape drifted per source. This module is the single place that turns the
-shared discovery AST (:mod:`flowx.models.discovery`) into the inventory shape, so
+discovery graph contract (:mod:`flowx.models.discovery`) into the inventory shape, so
 every source that maps onto :class:`~flowx.models.discovery.SourceGraph` emits the
 *same* top-level document -- ``{source, source_dir, pipelines, summary}`` -- from
 one code path.
@@ -13,9 +13,13 @@ The projection is deliberately small and additive over the historical ADF shape:
 
 * top level gains a ``source`` discriminator (``"adf"`` / ``"airflow"``);
 * each activity keeps its byte-compatible ``name`` / ``type`` / ``strategy`` (and
-  ``depends_on`` names when present) and gains the standardised
-  ``original_type``, ``dependencies`` (upstream **with conditions**), and the
-  verbatim per-node ``raw``;
+  ``depends_on`` names when present) and gains the standardised ``task_key``
+  (the node's unique key, which motif ``member_task_keys`` and source-specific
+  layers join on), ``original_type``, ``dependencies`` (upstream **with
+  conditions**), and the verbatim per-node ``raw``;
+* a node whose ``properties`` mark it ``inventory_visible: False`` (for example an
+  Airflow TaskGroup kept only for structure) is left out of the activity list and
+  the counts, while its children are still listed;
 * each pipeline entry gains an additive ``lineage`` block (control + data edges)
   when its :class:`~flowx.models.discovery.SourceGraph` carries derived lineage;
 * each pipeline entry gains an additive ``motifs`` list -- the multi-activity ADF
@@ -40,11 +44,11 @@ entirely, so the historical consumer keys (``source`` / ``pipelines`` /
 ``activities`` / ``summary``) are untouched.
 
 A node's translation ``strategy`` is a Databricks-*target* classification rather
-than a source concept, so it is not a typed field on the discovery AST. By
+than a source concept, so it is not a typed field on the discovery graph. By
 convention a mapper stashes it under ``node.properties["strategy"]`` (see
 :data:`STRATEGY_PROPERTY`); this module reads it there. Detected motifs are
 handled the same way -- they carry a Databricks-*target* replacement and are not
-a shared source concept, so they are not a typed field on the AST either; a
+a shared source concept, so they are not a typed field on the graph either; a
 source supplies them per pipeline via ``motifs_by_pipeline`` and this module
 projects them. Anything else a source wants to layer on -- Airflow's
 audited-count block, findings, reconciliation status -- rides additively on top
@@ -63,8 +67,9 @@ from flowx.models.motifs import DetectedMotif
 # Well-known property key under which a mapper records a node's Databricks-target
 # translation strategy ("deterministic" / "agentic" / "unsupported"). Kept in the
 # free-form properties seam because strategy is a target concern, not a shared
-# source concept, so it earns no typed field on the discovery AST.
+# source concept, so it earns no typed field on the discovery graph.
 STRATEGY_PROPERTY = "strategy"
+INVENTORY_VISIBLE_PROPERTY = "inventory_visible"
 
 _DETERMINISTIC = "deterministic"
 _AGENTIC = "agentic"
@@ -81,8 +86,8 @@ def build_source_inventory(
     """Project a list of source graphs into the ``inventory.json`` document.
 
     Args:
-        graphs: The source workflows to inventory, already mapped onto the shared
-            discovery AST.
+        graphs: The source workflows to inventory, already mapped onto the
+            discovery graph contract.
         source: Source discriminator for the top-level ``source`` field
             (``SOURCE_ADF`` / ``SOURCE_AIRFLOW``).
         source_dir: Original source directory, echoed back for provenance.
@@ -114,7 +119,9 @@ def build_source_inventory(
     unsupported = 0
 
     for graph in graphs:
-        flattened = _flatten_nodes(graph.tasks)
+        flattened = [
+            node for node in _flatten_nodes(graph.tasks) if node.properties.get(INVENTORY_VISIBLE_PROPERTY, True)
+        ]
         for node in flattened:
             strategy = node.properties.get(STRATEGY_PROPERTY)
             if strategy == _DETERMINISTIC:
@@ -186,6 +193,7 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
     if upstream_names:
         entry["depends_on"] = upstream_names
 
+    entry["task_key"] = node.task_key
     entry["original_type"] = node.native_type
     entry["dependencies"] = [
         {

@@ -1,4 +1,4 @@
-"""Tests for lineage over the shared discovery AST (:mod:`flowx.discovery_lineage`).
+"""Tests for lineage over the discovery graph contract (:mod:`flowx.discovery_lineage`).
 
 The source-neutral derivation itself -- the identity vs signature join tiers, no
 self-edges, no duplicates, fan-out, and Switch / ForEach / If recursion -- driven
