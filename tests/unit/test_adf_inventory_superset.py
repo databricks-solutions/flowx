@@ -207,3 +207,21 @@ def test_discover_persists_source_graphs_that_match_the_inventory(tmp_path: Path
     assert len(document["graph_sha256"]) == len(graphs) == inventory["summary"]["pipeline_count"]
     listed = {pipeline["name"] for pipeline in inventory["pipelines"]}
     assert listed <= {graph.name for graph in graphs}
+    assert inventory["source_graphs_sha256"] == document["document_sha256"]
+
+
+def test_detected_motifs_are_saved_inside_the_hashed_graphs(tmp_path: Path) -> None:
+    """Every motif the inventory lists is also recorded on that pipeline's saved graph."""
+    metadata = _run_discover(tmp_path)
+
+    graphs = {graph.name: graph for graph in read_source_graphs(metadata / "source_graphs.json")}
+    inventory = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+
+    with_motifs = [pipeline for pipeline in inventory["pipelines"] if pipeline.get("motifs")]
+    assert with_motifs, "the ADF fixtures are expected to contain at least one detected motif"
+    for pipeline in with_motifs:
+        lineage = graphs[pipeline["name"]].lineage
+        assert lineage is not None
+        saved = sorted((motif.motif_id, tuple(motif.member_task_keys)) for motif in lineage.motifs)
+        listed = sorted((motif["motif_id"], tuple(motif["member_task_keys"])) for motif in pipeline["motifs"])
+        assert set(listed) <= set(saved)
