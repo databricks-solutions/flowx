@@ -182,8 +182,8 @@ def test_empty_input_yields_zero_coverage() -> None:
 def test_pipeline_carries_derived_lineage_block_that_round_trips() -> None:
     """A graph with derived lineage emits a per-pipeline block via the shared serialiser.
 
-    The emitted block must be byte-identical to what the shared discovery serde
-    produces for the same graph, and it must rehydrate through that serde back to
+    For a graph with no motifs, the emitted block must be byte-identical to what the
+    shared discovery serde produces for the same graph, and it must rehydrate through that serde back to
     the original :class:`Lineage` -- proving the emitter consumes the one shared
     lineage serialisation rather than a second hand-rolled one.
     """
