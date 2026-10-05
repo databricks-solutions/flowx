@@ -3,7 +3,7 @@
 Primitive-level building blocks for deriving lineage edges. They take only
 ``task_key`` strings and :class:`~flowx.models.ir.DataAsset` values -- never a
 ``Pipeline`` or any ``Activity`` -- so the tier-matching, self-edge drop, and
-dedup rules live in exactly one place. The discovery-AST derivation in
+dedup rules live in exactly one place. The discovery-graph derivation in
 :mod:`flowx.discovery_lineage` gathers those primitives from a
 :class:`~flowx.models.discovery.SourceGraph` and delegates here; the IR-facing
 derivation that gathers them from a :class:`~flowx.models.ir.Pipeline` is added
@@ -27,7 +27,7 @@ def control_edges_from_calls(
 ) -> list[ControlEdge]:
     """Assemble deduplicated control edges from raw invocation primitives.
 
-    The shared core behind the discovery-AST control-edge derivation (and the
+    The shared core behind the discovery-graph control-edge derivation (and the
     IR-facing derivation added in the convert->package work): it owns the
     self-edge drop, the dedup, and the unresolved-callee recording so those rules
     live in exactly one place and every phase behaves identically.
@@ -95,7 +95,7 @@ def data_edges_from_endpoints(
 ) -> list[DataEdge]:
     """Join producer endpoints to consumer endpoints via the two-tier match.
 
-    The shared core behind the discovery-AST data-edge derivation (and the
+    The shared core behind the discovery-graph data-edge derivation (and the
     IR-facing derivation added in the convert->package work): it owns the
     :func:`_match_assets` tier logic, the no-self-edge rule, and the dedup, so
     every phase joins identically.

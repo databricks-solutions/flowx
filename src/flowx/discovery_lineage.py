@@ -1,8 +1,8 @@
-"""Source-neutral lineage derivation over the shared discovery AST.
+"""Source-neutral lineage derivation over the discovery graph contract.
 
 The parallel of :mod:`flowx.lineage`, which derives a
 :class:`~flowx.models.ir.Lineage` block over the Databricks IR. This module
-derives the same block over the shared discovery AST
+derives the same block over the source-neutral discovery graph
 (:mod:`flowx.models.discovery`) instead, so the discover phase can attach lineage
 to a :class:`~flowx.models.discovery.SourceGraph` before any IR translation
 exists.
