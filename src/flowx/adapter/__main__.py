@@ -143,11 +143,11 @@ def _run_resolve_agentic(args: argparse.Namespace) -> int:
 
 
 def _run_enrich(args: argparse.Namespace) -> int:
-    """Implements ``enrich``: validate agent-authored insights and merge them into inventory.json.
+    """Implements ``enrich``: validate agent-authored insights and record them in source_insights.json.
 
     Emits the enrich result JSON (``ok`` / ``violations`` / counts) to stdout so the caller can
-    surface every violation at once. Returns 0 when the insights merged cleanly, 1 on validation
-    failure (inventory left untouched) or when the inputs cannot be read.
+    surface every violation at once. Returns 0 when the insights were recorded, 1 on validation
+    failure (both files left untouched) or when the inputs cannot be read.
     """
     from flowx.discovery_insights import enrich_inventory
 
@@ -500,7 +500,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     enrich = subparsers.add_parser(
         "enrich",
-        help="Validate agent-authored insights and merge them into inventory.json (additive, atomic).",
+        help="Validate agent-authored insights, record them in source_insights.json, rebuild inventory.json.",
     )
     enrich.add_argument(
         "--output-dir",
@@ -512,7 +512,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--insights-path",
         type=Path,
         required=True,
-        help="Path to the agent-authored insights JSON to validate and merge.",
+        help="Path to the agent-authored insights JSON to validate and record.",
     )
     enrich.add_argument(
         "--out",

@@ -51,7 +51,7 @@ airflow_source_path (a DAG .py file or directory).
 Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("inputs", {"phase": "discover", "source": "adf"})   # learn a phase's inputs
   flowx("discover", {"source": "adf", "adf_source_path": "...", "output_dir": "..."})
-  flowx("enrich", {"output_dir": "...", "insights": {...}})   # optional: merge agent-authored insights
+  flowx("enrich", {"output_dir": "...", "insights": {...}})   # optional: record agent-authored insights
   flowx("convert", {"source": "adf", "output_dir": "..."})
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
@@ -298,7 +298,7 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
-    """Validate agent-authored insights and merge them into inventory.json.
+    """Validate agent-authored insights, record them in source_insights.json and rebuild inventory.json.
 
     Accepts the insights either inline as ``insights`` (a JSON object) or via ``insights_path``
     (a file the server can read); exactly one is required. Inline insights are staged to a temp
