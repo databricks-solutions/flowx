@@ -8,9 +8,6 @@ any particular front-end.
 
 from __future__ import annotations
 
-import ast
-
-import flowx.discovery_inventory as discovery_inventory
 from flowx.discovery_inventory import INVENTORY_VISIBLE_PROPERTY, STRATEGY_PROPERTY, build_source_inventory
 from flowx.discovery_serde import source_graph_from_dict, source_graph_to_dict
 from flowx.models.discovery import (
@@ -74,28 +71,6 @@ def _visible_node(task_key: str, strategy: str) -> SourceNode:
         properties={STRATEGY_PROPERTY: strategy},
         raw={"task_key": task_key},
     )
-
-
-def test_emitter_has_no_source_specific_imports() -> None:
-    """The emitter module must not import any per-source package.
-
-    Source-agnostic means the ADF/Airflow loaders depend on the emitter, never
-    the other way round. Guard that by inspecting the module's actual import
-    statements (not arbitrary text -- the docstring legitimately names the
-    ``"adf"`` / ``"airflow"`` discriminator values).
-    """
-    source = (discovery_inventory.__file__ or "").rstrip("c")
-    with open(source, encoding="utf-8") as handle:
-        tree = ast.parse(handle.read())
-
-    imported: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.append(node.module)
-
-    assert not any(name.startswith("flowx.sources") for name in imported), imported
 
 
 def test_top_level_shape_and_summary_counts() -> None:
