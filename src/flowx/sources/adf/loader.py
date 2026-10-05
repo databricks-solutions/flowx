@@ -1078,7 +1078,7 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("./flowx_output"),
         help=(
             "Migration output directory. Profile artifacts are written into its "
-            "metadata/ subfolder (inventory.json, profile_report.csv, <pipeline>.arm.json)."
+            "metadata/ subfolder (inventory.json, source_graphs.json, profile_report.csv, <pipeline>.arm.json)."
         ),
     )
     parser.add_argument(
@@ -1121,10 +1121,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         logger.info("Filtered to pipeline: %s", args.pipeline)
 
-    # Inventory JSON is projected from the shared discovery AST via the
+    # Inventory JSON is projected from the discovery graph contract via the
     # source-agnostic emitter (so ADF and Airflow emit one shape); imported here
     # to avoid a module-level cycle (discovery_mapping imports this loader).
     from flowx.discovery_inventory import build_source_inventory
+    from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, write_source_graphs
     from flowx.models.discovery import SOURCE_ADF
     from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
 
@@ -1149,6 +1150,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     inventory_path.write_text(json.dumps(inventory_dict, indent=2), encoding="utf-8")
     logger.info("Wrote inventory to %s", inventory_path)
+
+    # Persist the full graphs too, not just the lossy inventory projection, so a later phase can
+    # read exactly what discover saw without parsing the source again.
+    source_graphs_path = metadata_dir / SOURCE_GRAPHS_FILENAME
+    write_source_graphs(source_graphs_path, source_graphs, source=SOURCE_ADF)
+    logger.info("Wrote source graphs to %s", source_graphs_path)
 
     profile_rows = build_profile_rows(definitions, motifs_by_pipeline)
     csv_path = metadata_dir / "profile_report.csv"

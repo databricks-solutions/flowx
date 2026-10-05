@@ -1,4 +1,4 @@
-"""Consumer-safety tests for the ADF inventory emitted via the shared AST + emitter.
+"""Consumer-safety tests for the ADF inventory emitted via the discovery graph + emitter.
 
 Two guarantees:
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from flowx.discovery_serde import read_source_graphs
 from flowx.reporting.coverage import build_coverage_rows
 from flowx.sources.adf.loader import build_inventory, load_adf_definitions, main
 
@@ -191,3 +192,18 @@ def test_coverage_output_matches_golden(tmp_path: Path) -> None:
     rows = json.loads(json.dumps(build_coverage_rows(metadata), sort_keys=True))
     golden = json.loads(GOLDEN_COVERAGE.read_text())
     assert rows == golden
+
+
+def test_discover_persists_source_graphs_that_match_the_inventory(tmp_path: Path) -> None:
+    """Discover writes the full, hashed source graphs beside the inventory, one per parsed pipeline."""
+    metadata = _run_discover(tmp_path)
+
+    document = json.loads((metadata / "source_graphs.json").read_text(encoding="utf-8"))
+    graphs = read_source_graphs(metadata / "source_graphs.json")
+    inventory = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+
+    assert document["contract_version"] == "1"
+    assert document["source"] == "adf"
+    assert len(document["graph_sha256"]) == len(graphs) == inventory["summary"]["pipeline_count"]
+    listed = {pipeline["name"] for pipeline in inventory["pipelines"]}
+    assert listed <= {graph.name for graph in graphs}
