@@ -3,8 +3,9 @@ name: flowx-enrich
 description: >
   Enrich the discover inventory with an agent-authored layer of judgment — a factory-wide
   architecture recommendation, per-pipeline intent + recommended Databricks patterns, and
-  cross-pipeline relationships — then validate and merge it into inventory.json. The default next
-  step after flowx-discover and the input the routing step consumes.
+  cross-pipeline relationships. The library validates it, records it in source_insights.json and
+  rebuilds inventory.json from discovery plus that file. The default next step after flowx-discover
+  and the input the routing step consumes.
 triggers:
   - "enrich inventory"
   - "enrich pipelines"
@@ -29,10 +30,10 @@ This is the standard step **between discover and route** in the flowx workflow. 
 chains into this skill by default; the routing step (`flowx-route`) reads the `insights` block to
 present the agentic conversion option per connected component.
 
-## No LLM inside flowx — you author, the library validates and merges
+## No LLM inside flowx: you author, the library validates and records
 
 **There is no LLM inside flowx.** You author the insights JSON; the library (`enrich`) only
-*validates and merges* it — the same author → validate → merge, fingerprint-bound contract the
+*validates and records* it, using the same author, validate, record, fingerprint-bound contract the
 agentic gap-resolution and routing paths use. That keeps the deterministic inventory trustworthy and
 every insight accountable: foreign keys must point at real pipelines, and every cross-pipeline edge
 is either an annotation of a proven lineage edge or an explicitly-flagged inference with cited
@@ -105,7 +106,7 @@ validation rules the library enforces.
 
 ## Run enrich — MCP tool or venv CLI
 
-Run the **`setup`** skill first if you haven't. Both paths run the same validate-and-merge contract.
+Run the **`setup`** skill first if you haven't. Both paths run the same validate-and-record contract.
 
 - **MCP tool (Databricks Genie Code, or a local stdio registration):** call the single **`flowx`**
   tool with `command="enrich"` and either inline insights or a file:
@@ -123,11 +124,11 @@ Run the **`setup`** skill first if you haven't. Both paths run the same validate
   ```bash
   export PYTHONPATH="<plugin_dir>/src"
   PY="$(cat <plugin_dir>/.migration-venv)"
-  "$PY" -m flowx.adapter enrich --output-dir <dir> --insights-path insights.json
+  "$PY" -m flowx.adapter enrich --output-dir <dir> --insights-path authored_insights.json
   ```
 
   Both `--output-dir` and `--insights-path` are required; `--out <file>` optionally writes the result
-  JSON to a file instead of stdout. **Exit code 0** means the insights merged; **exit code 1** prints
+  JSON to a file instead of stdout. **Exit code 0** means the insights were recorded; **exit code 1** prints
   the violations JSON and leaves the inventory untouched.
 
 ## Idempotency & safety
