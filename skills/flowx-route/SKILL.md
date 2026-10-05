@@ -163,7 +163,7 @@ Exit 1 (nothing written) on a missing report it cannot produce, or a plan that f
 
 Every routed-agentic pipeline's tasks are now `PlaceholderActivity` nodes with one pipeline-tagged
 `AgenticGap` each. Two fills exist depending on the grain; you author the replacement (no LLM in the
-library — it validates and merges).
+library, which validates and records).
 
 ### 3a — Per-pipeline fill (keep the pipeline 1:1)
 

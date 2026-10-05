@@ -259,6 +259,8 @@ flowx_output/
     inventory.json            # discover: activity inventory
     profile_report.csv        # discover: per-pipeline complexity report
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
+    source_insights.json      # enrich: agent-authored insights, bound to source_graphs.json
+    conversion_plan.json      # route: the recorded per-component conversion decision
     configuration.json        # modify: collected configuration answers
   .work/                      # transient intermediates (translation report, IR, gaps.json); pruned by package
 ```

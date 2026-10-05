@@ -285,8 +285,9 @@ For failures, suggest:
 
 **ADF only today.** Routing (and the agentic fill in Step 8) applies to **ADF**. For **Airflow**, skip
 Steps 7–8 and take the deterministic report straight to configuration/package; resolve any Airflow
-agentic gaps with the **`flowx-resolve-airflow-gaps`** skill instead (Airflow discovery does not yet
-emit control lineage or motifs — routing aligns via #63).
+agentic gaps with the **`flowx-resolve-airflow-gaps`** skill instead. `route` refuses an agentic
+decision for an Airflow inventory; Airflow agentic conversion follows the Airflow track's own per-gap
+contract.
 
 Routing reads the deterministic baseline report `.work/translation_report.json` (built in Step 5) and
 edits it. Invoke the **`flowx:flowx-route`** skill to present the per-connected-component
