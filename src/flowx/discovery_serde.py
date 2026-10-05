@@ -223,6 +223,7 @@ def _lineage_from_dict(raw: dict[str, Any]) -> Lineage:
                 display_name=motif.get("display_name"),
                 databricks_replacement=motif.get("databricks_replacement"),
                 notes=list(motif.get("notes") or []),
+                source_type_hint=motif.get("source_type_hint"),
             )
             for motif in raw.get("motifs") or []
         ],
