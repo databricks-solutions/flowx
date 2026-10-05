@@ -41,7 +41,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from flowx.models.conversion_plan import DECISION_AGENTIC
+from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
 
 # The report + gaps live under the shared output dir's transient .work/ folder, beside the pipeline IR.
 WORK_DIRNAME = ".work"
@@ -306,6 +306,30 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
     return {"agentic_pipelines": sorted(agentic), "gaps": len(new_gaps), "altered": True}
 
 
+def apply_plan(output_dir: Path, plan: ConversionPlan) -> dict[str, Any]:
+    """Apply a recorded, typed plan to the IR after convert: the library's one routing entry point.
+
+    Checks the plan still matches the inventory, source graphs and source insights it was decided
+    on, then placeholders the routed-agentic components in the translation report (see
+    :func:`apply_plan_to_report`); the fills (``convert --merge-agentic`` per pipeline,
+    ``fill-agentic combine`` across pipelines) then replace those placeholders. Phase 1 decides whole
+    components, so the reserved per-node assignments are not read here.
+
+    Raises:
+        FileNotFoundError: The inventory or translation report is missing.
+        ValueError: The plan is stale against the current discovery outputs.
+    """
+    from flowx.routing import plan_binding_violations
+
+    inventory_path = Path(output_dir) / METADATA_DIRNAME / INVENTORY_FILENAME
+    if not inventory_path.exists():
+        raise FileNotFoundError(f"No {INVENTORY_FILENAME} under {inventory_path.parent}; run the discover phase first.")
+    stale = plan_binding_violations(plan, json.loads(inventory_path.read_text(encoding="utf-8")))
+    if stale:
+        raise ValueError("; ".join(stale))
+    return apply_plan_to_report(output_dir, plan.to_dict())
+
+
 # --------------------------------------------------------------------------- #
 # Cross-pipeline COMBINE: the pipeline-grain fill.
 # --------------------------------------------------------------------------- #
@@ -342,28 +366,25 @@ def _resolve_agentic_component(output_dir: Path, members: set[str]) -> tuple[str
     record its provenance keyed on the exact inventory it was applied against.
     """
     from flowx.discovery_insights import inventory_fingerprint
+    from flowx.routing import plan_binding_violations
 
     metadata = Path(output_dir) / METADATA_DIRNAME
-    plan_path = metadata / "conversion_plan.json"
     inventory_path = metadata / INVENTORY_FILENAME
-    if not plan_path.exists():
+    try:
+        recorded = ConversionPlan.load(Path(output_dir))
+    except ValueError as error:
+        return None, None, str(error)
+    if recorded is None:
         return None, None, "No metadata/conversion_plan.json; record a routing decision with `route` first."
     if not inventory_path.exists():
         return None, None, "No metadata/inventory.json; run the discover phase first."
 
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
-    recorded_fingerprint = plan.get("inventory_sha256")
     current_fingerprint = inventory_fingerprint(inventory)
-    if recorded_fingerprint != current_fingerprint:
-        return (
-            None,
-            None,
-            (
-                "conversion_plan.json is stale: it was recorded against a different inventory "
-                f"({recorded_fingerprint!r} != {current_fingerprint!r}); re-run `route` before filling."
-            ),
-        )
+    stale = plan_binding_violations(recorded, inventory)
+    if stale:
+        return None, None, f"conversion_plan.json is stale: {stale[0]}; re-run `route` before filling."
+    plan = recorded.to_dict()
 
     for component in plan.get("components", []):
         if not isinstance(component, dict):

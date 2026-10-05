@@ -224,8 +224,8 @@ MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [.
 `combine` is the only action. Its guarantees:
 
 - `--members` (comma-separated; MCP accepts a list) must **exactly match** a routed-**agentic**
-  component in the recorded `metadata/conversion_plan.json`, whose `inventory_sha256` must still match
-  the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
+  component in the recorded `metadata/conversion_plan.json`, whose `inventory_sha256`,
+  `source_graphs_sha256` and `source_insights_sha256` must still match the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
   — you can't swap pipelines the plan didn't route agentic.
 - `--pipelines-path` is a JSON **list** of pipeline IR dicts (the authored replacements), typically
   carrying `AgenticComponentActivity` nodes (see below).
@@ -304,7 +304,11 @@ applies when authoring recommended patterns.)
 
 Once the routed-agentic groups are filled and the report validates, continue with `flowx-convert`'s
 just-in-time configuration (`inspect`/`modify`) as usual, then `flowx-package`. The recorded
-`metadata/conversion_plan.json` is kept alongside `inventory.json` as the routing record.
+`metadata/conversion_plan.json` is kept alongside `inventory.json` as the routing record. It is the
+library's typed `ConversionPlan` (schema 2): one decision per component, bound to the inventory
+fingerprint, the saved `source_graphs.json` and the saved `source_insights.json` it was decided on,
+with a reserved, empty `assignments` list per component for per-node routing later. Package refuses
+to run when any of those no longer match.
 
 ## Reference
 

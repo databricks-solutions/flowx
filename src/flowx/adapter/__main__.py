@@ -186,7 +186,8 @@ def _run_route(args: argparse.Namespace) -> int:
     that fails validation (report + plan left untouched).
     """
     from flowx import routing
-    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan_to_report
+    from flowx.models.conversion_plan import ConversionPlan
+    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan
 
     inventory_path = args.output_dir / "metadata" / "inventory.json"
     if not inventory_path.exists():
@@ -231,7 +232,10 @@ def _run_route(args: argparse.Namespace) -> int:
         _emit_json(result, args.out)
         return 1
     try:
-        edit = apply_plan_to_report(args.output_dir, plan)
+        recorded = ConversionPlan.load(args.output_dir)
+        if recorded is None:
+            raise FileNotFoundError("route recorded no conversion_plan.json")
+        edit = apply_plan(args.output_dir, recorded)
     except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
         print(f"Failed to edit translation report: {error}", file=sys.stderr)
         return 1
