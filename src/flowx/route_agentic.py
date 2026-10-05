@@ -32,6 +32,7 @@ agentic flow.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -62,7 +63,11 @@ REQUIRED_COMBINE_SOURCE_TAG = "adf"
 # lives *in* the report, so a fresh convert (which rewrites the report) naturally clears it, and it is
 # ignored by the package phase (not one of the recognized report shape keys) and by ir_serde (which
 # reads per-pipeline IR, not the report wrapper).
-_COMBINE_PROVENANCE_KEY = "_combine_provenance"
+COMBINE_PROVENANCE_KEY = "_combine_provenance"
+
+# Top-level report key where route records the hash of the report it edited, so package can show
+# what the routing edit started from after .work/ is pruned. Written once, on the first edit.
+ROUTE_PROVENANCE_KEY = "_route_provenance"
 
 # Guidance stamped onto every placeholder the alteration produces.
 _PLACEHOLDER_COMMENT = (
@@ -267,8 +272,10 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
     """Apply a routing decision to the report on disk: placeholder the routed-agentic groups.
 
     Reads ``<output_dir>/.work/translation_report.json`` (and ``gaps.json`` when present), rewrites
-    them for the plan's agentic components, and writes them back atomically. When no component is
-    routed agentic the files are left untouched, so the non-breaking guarantee holds.
+    them for the plan's agentic components, and writes them back atomically. The first edit also
+    records the SHA-256 of the report it started from under ``_route_provenance`` so the package
+    audit can name it. When no component is routed agentic the files are left untouched, so the
+    non-breaking guarantee holds.
 
     Returns a summary dict with the altered pipeline names and the resulting gap count.
 
@@ -285,12 +292,15 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
     if not agentic:
         return {"agentic_pipelines": [], "gaps": 0, "altered": False}
 
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    baseline_bytes = report_path.read_bytes()
+    report = json.loads(baseline_bytes)
     gaps = json.loads(gaps_path.read_text(encoding="utf-8")) if gaps_path.exists() else []
     if not isinstance(gaps, list):
         gaps = []
 
     new_report, new_gaps = alter_report(report, gaps, agentic)
+    if isinstance(new_report, dict) and ROUTE_PROVENANCE_KEY not in new_report:
+        new_report[ROUTE_PROVENANCE_KEY] = {"baseline_report_sha256": hashlib.sha256(baseline_bytes).hexdigest()}
     _write_json_atomic(report_path, new_report)
     _write_json_atomic(gaps_path, new_gaps)
     return {"agentic_pipelines": sorted(agentic), "gaps": len(new_gaps), "altered": True}
@@ -410,7 +420,7 @@ def _combine_already_applied(report: dict[str, Any], component_id: str, fingerpr
     pipeline names to member names -- so a re-run is recognised as already-combined no matter what the
     authored replacement is named, and even when an authored name collides with a former member.
     """
-    provenance = report.get(_COMBINE_PROVENANCE_KEY) if isinstance(report, dict) else None
+    provenance = report.get(COMBINE_PROVENANCE_KEY) if isinstance(report, dict) else None
     if not isinstance(provenance, list):
         return False
     return any(
@@ -486,12 +496,12 @@ def apply_combine_fill(
     merged = combine_group_fill(report, members, authored_pipelines)
     # Carry any prior provenance forward (combine_group_fill returns only ``pipelines``) and record
     # this combine so a later re-run detects it.
-    prior_provenance = report.get(_COMBINE_PROVENANCE_KEY) if isinstance(report, dict) else None
+    prior_provenance = report.get(COMBINE_PROVENANCE_KEY) if isinstance(report, dict) else None
     provenance = (
         [entry for entry in prior_provenance if isinstance(entry, dict)] if isinstance(prior_provenance, list) else []
     )
     provenance.append({"component_id": component_id, "inventory_sha256": fingerprint, "members": sorted(members)})
-    merged[_COMBINE_PROVENANCE_KEY] = provenance
+    merged[COMBINE_PROVENANCE_KEY] = provenance
 
     result = validate_report_structurally(merged)
     if not result.ok:
