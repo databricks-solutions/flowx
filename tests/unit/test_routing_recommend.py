@@ -37,7 +37,7 @@ def _inventory(
     motifs: dict[str, list[DetectedMotif]] | None = None,
     insights: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    inventory = build_source_inventory(graphs, source="unit", source_dir="/tmp/src", motifs_by_pipeline=motifs)
+    inventory = build_source_inventory(graphs, source="adf", source_dir="/tmp/src", motifs_by_pipeline=motifs)
     if insights is not None:
         inventory["insights"] = insights
     return inventory

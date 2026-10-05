@@ -31,8 +31,10 @@ option, not part of the binding. The write is atomic (temp file + ``os.replace``
 re-recording the same decision against the same inventory rewrites byte-identical bytes.
 
 This is additive, opt-in routing metadata only: with no recorded plan, ``convert`` and ``package``
-behave exactly as today. Component computation reads ``lineage.control_edges``, which both ADF
-(``ExecutePipeline``) and Airflow (``RunJob``) emit, so the artifact is source-neutral.
+behave exactly as today. Component computation reads ``lineage.control_edges``, so the artifact's
+shape is source-neutral, but agentic decisions are accepted only for ADF inventories in Phase 1 (see
+:data:`AGENTIC_ROUTING_SOURCES`). Airflow gaps stay with the fingerprint-bound per-gap resolver, so
+for an Airflow inventory route recommends and records deterministic decisions only.
 """
 
 from __future__ import annotations
@@ -55,12 +57,30 @@ _DETERMINISTIC_STRATEGY = "deterministic"
 # The recorded conversion-plan artifact lives beside inventory.json under metadata/.
 PLAN_FILENAME = "conversion_plan.json"
 
+# Sources whose inventories route may send agentic in Phase 1. An inventory with no top-level
+# ``source`` predates the unified emitter and is ADF.
+AGENTIC_ROUTING_SOURCES = frozenset({"adf"})
+_LEGACY_INVENTORY_SOURCE = "adf"
+
 # Authored top-level keys (everything else the library owns and rejects on input).
 _PLAN_TOP_KEYS = {"components"}
 _LIBRARY_TOP_KEYS = {"schema_version", "inventory_sha256", "findings"}
 # Authored per-component keys vs the fields the library recomputes and rejects on input.
 _COMPONENT_AUTHORED_KEYS = {"component_id", "members", "decision", "rationale"}
 _COMPONENT_LIBRARY_KEYS = {"recommended", "options"}
+
+
+def agentic_routing_supported(inventory: dict[str, Any]) -> bool:
+    """Whether route may take an agentic decision for this inventory's source (ADF only in Phase 1)."""
+    return inventory.get("source", _LEGACY_INVENTORY_SOURCE) in AGENTIC_ROUTING_SOURCES
+
+
+def _agentic_routing_unsupported_note(inventory: dict[str, Any]) -> str:
+    """The finding / violation text that explains why a non-ADF inventory routes deterministic only."""
+    return (
+        f"agentic routing is ADF-only in Phase 1 (inventory source {inventory.get('source')!r}); "
+        "route every component 'deterministic' and resolve its gaps with the flowx-resolve-airflow-gaps skill"
+    )
 
 
 def _pipeline_names(inventory: dict[str, Any]) -> set[str]:
@@ -317,12 +337,14 @@ def recommend_component(members: list[str], inventory: dict[str, Any]) -> tuple[
 
     Returns:
         ``(recommended, options)`` where ``recommended`` is ``"deterministic"`` when the whole
-        component is engine-capable, else ``"agentic"``; and ``options`` carries the ``deterministic``
-        and ``agentic`` peers as first-class entries.
+        component is engine-capable or the inventory's source cannot be routed agentic, else
+        ``"agentic"``; and ``options`` carries the ``deterministic`` and ``agentic`` peers as
+        first-class entries.
     """
     deterministic = _deterministic_option(members, inventory)
     agentic = _agentic_option(members, inventory)
-    recommended = _DETERMINISTIC_STRATEGY if deterministic["capable"] else "agentic"
+    route_deterministic = deterministic["capable"] or not agentic_routing_supported(inventory)
+    recommended = _DETERMINISTIC_STRATEGY if route_deterministic else "agentic"
     return recommended, {"deterministic": deterministic, "agentic": agentic}
 
 
@@ -336,6 +358,8 @@ def build_recommendation(inventory: dict[str, Any]) -> dict[str, Any]:
     per component for overrides.
     """
     components, findings = build_components(inventory)
+    if not agentic_routing_supported(inventory):
+        findings = [*findings, _agentic_routing_unsupported_note(inventory)]
     component_entries: list[dict[str, Any]] = []
     default_plan_components: list[dict[str, Any]] = []
     for index, members in enumerate(components, start=1):
@@ -377,7 +401,8 @@ def validate_plan(raw: Any, inventory: dict[str, Any]) -> list[str]:
     * every member must be a real inventory pipeline, and a component's ``members`` must exactly match
       one computed connected component -- so a decision can never split a component or span two;
     * the plan is a **bijection** over components: every component is decided exactly once (no
-      partial plan, no duplicate/conflicting decisions).
+      partial plan, no duplicate/conflicting decisions);
+    * an ``agentic`` decision is only accepted for an ADF inventory (:func:`agentic_routing_supported`).
     """
     if not isinstance(raw, dict):
         return [f"conversion plan must be a JSON object, got {type(raw).__name__}"]
@@ -402,6 +427,11 @@ def validate_plan(raw: Any, inventory: dict[str, Any]) -> list[str]:
         matched_id = _validate_component_entry(component, loc, names, computed_by_members, violations)
         if matched_id is not None:
             decided_ids.append(matched_id)
+
+    if not agentic_routing_supported(inventory):
+        for index, component in enumerate(components):
+            if isinstance(component, dict) and component.get("decision") == "agentic":
+                violations.append(f"components[{index}]: {_agentic_routing_unsupported_note(inventory)}")
 
     for component_id, count in Counter(decided_ids).items():
         if count > 1:

@@ -64,7 +64,7 @@ def _inventory() -> dict[str, Any]:
     )
     child = SourceGraph(name="child", source="unit", tasks=[_node("copy_orders", "Copy")])
     solo = SourceGraph(name="solo", source="unit", tasks=[_node("load", "Notebook")])
-    inventory = build_source_inventory([parent, child, solo], source="unit", source_dir="/tmp/src")
+    inventory = build_source_inventory([parent, child, solo], source="adf", source_dir="/tmp/src")
     inventory["insights"] = {
         "pipeline_insights": [
             {
