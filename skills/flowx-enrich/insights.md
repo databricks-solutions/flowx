@@ -65,6 +65,10 @@ Do not author any of those four keys yourself:
 
 - **Foreign keys.** Every `pipeline_insights[].pipeline` and every relationship
   `from_pipeline` / `to_pipeline` must be a real pipeline name in the inventory.
+- **Field types.** Pipeline names are strings. When present, `pattern_name`, `intent`,
+  `databricks_pattern` and `risk_if_ignored` (per pipeline) and `relationship_summary`,
+  `databricks_pattern` and `risk_if_ignored` (per relationship) must be strings, and
+  `conversion_notes` a list of strings.
 - **`recommended_patterns`** (per pipeline and system-wide): **1–4** patterns. The validator enforces
   the count and that each has a non-empty `pattern` and `fit` and a boolean `simplification_pattern`;
   it does **not** enforce ordering. Set `simplification_pattern: true` **only** for a distinctive
@@ -76,8 +80,9 @@ Do not author any of those four keys yourself:
   Databricks release state and the doc that grounds it. `release_state` is one of `ga`,
   `public_preview`, `private_preview`, `beta`, `unknown`. It is **required** on any pattern with
   `simplification_pattern: true` (a distinctive capability must declare its verified release state);
-  optional otherwise. `release_state_source` (a non-empty citation) is **required** when
-  `release_state` is `public_preview` / `private_preview` / `beta`; not required for `ga` / `unknown`.
+  optional otherwise. `release_state_source` must be a string whenever it is set, and a non-empty
+  citation is **required** when `release_state` is `public_preview` / `private_preview` / `beta`; not
+  required for `ga` / `unknown`.
   The state is a factual **disclosure**, not a warning: `flowx-route` surfaces `public_preview` as the
   label "Public Preview (production-ready)" and `private_preview` / `beta` as plain labels, while `ga`
   and `unknown` are silent (`unknown` is treated exactly like `ga`). Verify against the current public
@@ -127,7 +132,4 @@ writes a table (or file) that another pipeline reads, record it on the `inferred
 
 ## Idempotency & safety
 
-`enrich` is atomic and idempotent: it replaces the whole `insights` block (never stacks), recomputes
-the fingerprint from the deterministic inventory, and leaves every existing inventory key
-byte-identical. Re-running with the same insights rewrites the same bytes; re-running with different
-insights replaces the block. A validation failure writes nothing.
+See the `flowx-enrich` SKILL.md "Idempotency & safety" section: a validation failure writes nothing.
