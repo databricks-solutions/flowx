@@ -396,6 +396,7 @@ def test_serde_round_trip_new_activity_fields_and_lineage_block():
                     display_name="Auto Loader",
                     databricks_replacement="auto_loader",
                     notes=["note"],
+                    source_type_hint="AzureBlobFSReadSettings",
                 )
             ],
         ),

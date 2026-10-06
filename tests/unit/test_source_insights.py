@@ -100,6 +100,35 @@ def test_enrich_refuses_an_inventory_from_a_different_source_graphs_file(tmp_pat
     assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
 
 
+def test_enrich_refuses_when_the_saved_source_graphs_file_is_missing(tmp_path: Path) -> None:
+    inventory_path = _discover(tmp_path)
+    (tmp_path / "metadata" / SOURCE_GRAPHS_FILENAME).unlink()
+    inventory_bytes = inventory_path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights=_insights())
+
+    assert result["ok"] is False
+    assert any(f"{SOURCE_GRAPHS_FILENAME} is missing" in violation for violation in result["violations"])
+    assert inventory_path.read_bytes() == inventory_bytes
+    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+
+
+def test_enrich_refuses_when_the_saved_source_graphs_content_was_changed(tmp_path: Path) -> None:
+    inventory_path = _discover(tmp_path)
+    graphs_path = tmp_path / "metadata" / SOURCE_GRAPHS_FILENAME
+    document = json.loads(graphs_path.read_text(encoding="utf-8"))
+    document["graphs"][0]["name"] = "edited_after_discover"
+    graphs_path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    inventory_bytes = inventory_path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights=_insights())
+
+    assert result["ok"] is False
+    assert any(f"{SOURCE_GRAPHS_FILENAME} is not usable" in violation for violation in result["violations"])
+    assert inventory_path.read_bytes() == inventory_bytes
+    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+
+
 def test_inventory_without_a_recorded_graph_hash_still_enriches(tmp_path: Path) -> None:
     """An inventory from a source that does not persist graphs yet has nothing to check."""
     metadata = tmp_path / "metadata"
