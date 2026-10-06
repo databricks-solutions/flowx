@@ -14,6 +14,7 @@ from flowx.bundler.dab_writer import (
     _prefixed_notebook_relative_path,
     write_bundle_group,
 )
+from flowx.models.dab import DabNotebook, SetupTask
 from flowx.models.ir import (
     CopyActivity,
     ExecutePipelineActivity,
@@ -23,7 +24,7 @@ from flowx.models.ir import (
     SparkPythonActivity,
     WaitActivity,
 )
-from flowx.preparer.workflow_preparer import prepare_workflow
+from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
 
 
 def _workflow(name: str, calls: list[str] | None = None):
@@ -233,6 +234,53 @@ class TestMultiPipelineArtifactCollisions:
         notebooks = {str(p.relative_to(tmp_path / "src")) for p in (tmp_path / "src").rglob("*.py")}
         assert "notebooks/copy_data.py" in notebooks
         assert not any("/solo/" in n for n in notebooks)
+
+    def test_dbt_factory_hook_module_namespaced_consistently(self, tmp_path):
+        # A grouped bundle's dbt-factory hook module must stay importable: file, python.resources
+        # registration, and run_job ref must agree after namespacing, and two same-named hooks must not
+        # collide.
+        def dbt_wf(pipeline: str) -> PreparedWorkflow:
+            # Both pipelines use the SAME dbt task key, so this also covers the would-be collision.
+            return PreparedWorkflow(
+                name=pipeline,
+                tasks=[{"task_key": "call", "run_job_task": {"job_id": "${resources.jobs.run_dbt.id}"}}],
+                notebooks=[
+                    DabNotebook(
+                        relative_path="resources/run_dbt_job.py", content="resources.add_job('run_dbt', Job())\n"
+                    ),
+                    DabNotebook(relative_path="resources/__init__.py", content=""),
+                    DabNotebook(relative_path="pyproject.toml", content="[project]\n"),
+                ],
+                secrets=[],
+                setup_tasks=[
+                    SetupTask(
+                        type="pydabs_dbt_factory",
+                        config={"hook_module": "resources.run_dbt_job", "job_key": "run_dbt"},
+                    )
+                ],
+            )
+
+        write_bundle_group([dbt_wf("sales"), dbt_wf("marketing")], tmp_path, bundle_name="combined")
+
+        config = yaml.safe_load((tmp_path / "databricks.yml").read_text())
+        registrations = config["python"]["resources"]
+        # Every python.resources entry has a matching hook file on disk (else bundle deploy can't import).
+        for entry in registrations:
+            module = entry.split(":", 1)[0]
+            hook_file = tmp_path / f"resources/{module.removeprefix('resources.')}.py"
+            assert hook_file.exists(), f"{entry} registered but no hook file at {hook_file}"
+        # The two same-named hooks are namespaced apart (no silent overwrite), not left colliding.
+        hooks = {str(p.relative_to(tmp_path)) for p in tmp_path.glob("resources/*_job.py")}
+        assert hooks == {"resources/sales_run_dbt_job.py", "resources/marketing_run_dbt_job.py"}
+        # Hooks are namespaced as modules, not buried under resources/<prefix>/; pyproject stays at root.
+        assert not (tmp_path / "resources" / "sales").exists()
+        assert (tmp_path / "pyproject.toml").exists()
+        # The run_job ref follows the namespaced job key, and the hook body registers that same key.
+        sales = yaml.safe_load((tmp_path / "resources" / "sales.yml").read_text())
+        assert sales["resources"]["jobs"]["sales"]["tasks"][0]["run_job_task"]["job_id"] == (
+            "${resources.jobs.sales_run_dbt.id}"
+        )
+        assert "sales_run_dbt" in (tmp_path / "resources" / "sales_run_dbt_job.py").read_text()
 
 
 def _write_two_pipeline_report(tmp_path):

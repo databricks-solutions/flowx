@@ -186,6 +186,52 @@ def _rewrite_task_string_values(tasks: list[dict[str, Any]], replacements: dict[
         visit(task)
 
 
+def _namespace_pydabs_hooks(
+    nested_workflows: list[PreparedWorkflow],
+    prefix: str,
+    replacements: dict[str, str],
+    *,
+    relocate_dbt_sources: bool,
+) -> None:
+    """Namespaces dbt-factory PyDABs hook modules by *prefix*, in place (shared by both namespacers).
+
+    A hook is imported by dotted path from ``python.resources`` (built from ``hook_module``), so it is
+    namespaced by *module* (``resources.<prefix>__<module>``), not by directory — the file is renamed
+    and ``hook_module`` / ``job_key`` / the ``${resources.jobs.X.id}`` ref / the job key the body
+    registers are remapped to match.
+
+    *relocate_dbt_sources* (DAG-combine path only, which prepends ``<prefix>/`` to every source file)
+    also rewrites the hook's ``manifest_path`` and dbt project/profile references to ``src/<prefix>/…``.
+    """
+    hooks: dict[str, tuple[str, str, str]] = {}
+    for nested in nested_workflows:
+        for setup_task in nested.setup_tasks:
+            if setup_task.type != "pydabs_dbt_factory":
+                continue
+            module_name = str(setup_task.config["hook_module"]).removeprefix("resources.")
+            namespaced_module = normalize_task_key(f"{prefix}__{module_name}")
+            old_job_key = str(setup_task.config["job_key"])
+            new_job_key = normalize_task_key(f"{prefix}__{old_job_key}")
+            hooks[f"resources/{module_name}.py"] = (f"resources/{namespaced_module}.py", old_job_key, new_job_key)
+            setup_task.config["hook_module"] = f"resources.{namespaced_module}"
+            setup_task.config["job_key"] = new_job_key
+            if relocate_dbt_sources:
+                setup_task.config["manifest_path"] = f"src/{prefix}/dbt_project/target/manifest.json"
+            replacements[f"${{resources.jobs.{old_job_key}.id}}"] = f"${{resources.jobs.{new_job_key}.id}}"
+
+    for nested in nested_workflows:
+        for notebook in nested.notebooks:
+            if notebook.relative_path not in hooks:
+                continue
+            new_path, old_job_key, new_job_key = hooks[notebook.relative_path]
+            notebook.relative_path = new_path
+            notebook.content = notebook.content.replace(old_job_key, new_job_key)
+            if relocate_dbt_sources:
+                notebook.content = notebook.content.replace("src/notebooks/", f"src/{prefix}/notebooks/")
+                notebook.content = notebook.content.replace("src/dbt_project", f"src/{prefix}/dbt_project")
+                notebook.content = notebook.content.replace("src/dbt_profiles", f"src/{prefix}/dbt_profiles")
+
+
 def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None:
     """Namespaces a workflow's notebooks and inner ForEach job keys by *prefix*, in place.
 
@@ -205,6 +251,9 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
     never collide, and namespacing them would break cross-bundle ``${var.<callee>}`` wiring.
     """
     replacements: dict[str, str] = {}
+
+    # 0. dbt-factory hook modules (dbt source trees are not relocated on this path).
+    _namespace_pydabs_hooks([workflow, *workflow.inner_workflows], prefix, replacements, relocate_dbt_sources=False)
 
     # 1. Inner ForEach job keys: rename inner.name, map old resources.jobs ref -> new.
     seen_new_keys: dict[str, str] = {}
@@ -230,6 +279,10 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
     for wf in (workflow, *workflow.inner_workflows):
         for notebook in wf.notebooks:
             old_path = notebook.relative_path
+            # Bundle-root Python resources — the dbt hook modules namespaced in step 0, the resources
+            # package marker, pyproject.toml — import by path from the root, so leave them in place.
+            if old_path.startswith("resources/") or old_path == "pyproject.toml":
+                continue
             new_path = _prefixed_notebook_relative_path(old_path, prefix)
             if old_path != new_path:
                 notebook.relative_path = new_path
@@ -1158,37 +1211,14 @@ def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
     cloned = copy.deepcopy(workflow)
     prefix = normalize_task_key(cloned.name)
     replacements: dict[str, str] = {}
-    pydabs_hooks: dict[str, tuple[str, str, str]] = {}
 
     nested_workflows = [cloned, *cloned.inner_workflows]
+    # dbt-factory hooks; this path relocates source files under <prefix>/, so relocate dbt refs too.
+    _namespace_pydabs_hooks(nested_workflows, prefix, replacements, relocate_dbt_sources=True)
     for nested in nested_workflows:
-        for setup_task in nested.setup_tasks:
-            if setup_task.type != "pydabs_dbt_factory":
-                continue
-            module = str(setup_task.config["hook_module"])
-            module_name = module.removeprefix("resources.")
-            namespaced_module_name = normalize_task_key(f"{prefix}__{module_name}")
-            namespaced_module = f"resources.{namespaced_module_name}"
-            original_job_key = str(setup_task.config["job_key"])
-            namespaced_job_key = normalize_task_key(f"{prefix}__{original_job_key}")
-            original_hook_path = f"resources/{module_name}.py"
-            namespaced_hook_path = f"resources/{namespaced_module_name}.py"
-            pydabs_hooks[original_hook_path] = (namespaced_hook_path, original_job_key, namespaced_job_key)
-            setup_task.config["hook_module"] = namespaced_module
-            setup_task.config["job_key"] = namespaced_job_key
-            setup_task.config["manifest_path"] = f"src/{prefix}/dbt_project/target/manifest.json"
-            replacements[f"${{resources.jobs.{original_job_key}.id}}"] = f"${{resources.jobs.{namespaced_job_key}.id}}"
-
         for notebook in nested.notebooks:
             original_path = notebook.relative_path
-            if original_path in pydabs_hooks:
-                namespaced_path, original_job_key, namespaced_job_key = pydabs_hooks[original_path]
-                notebook.relative_path = namespaced_path
-                notebook.content = notebook.content.replace(original_job_key, namespaced_job_key)
-                notebook.content = notebook.content.replace("src/notebooks/", f"src/{prefix}/notebooks/")
-                notebook.content = notebook.content.replace("src/dbt_project", f"src/{prefix}/dbt_project")
-                notebook.content = notebook.content.replace("src/dbt_profiles", f"src/{prefix}/dbt_profiles")
-                continue
+            # Hook modules (renamed above) + pyproject.toml import by path from the root; leave them.
             if original_path.startswith("resources/") or original_path == "pyproject.toml":
                 continue
             notebook.relative_path = f"{prefix}/{original_path}"
