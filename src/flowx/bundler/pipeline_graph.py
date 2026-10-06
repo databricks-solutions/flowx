@@ -135,42 +135,50 @@ def connected_components(deps: dict[str, set[str]]) -> list[list[str]]:
     return components
 
 
-def topo_order(deps: dict[str, set[str]]) -> list[str]:
-    """Returns pipeline keys callees-first (a called pipeline precedes its caller).
+def kahn_topo_sort(graph: dict[str, set[str]]) -> tuple[list[str], list[str]]:
+    """Topologically sorts *graph* (node -> the nodes it depends on), dependencies first.
 
-    Uses Kahn's algorithm over only the keys present in *deps* (callee keys outside the migration
-    are ignored, matching :func:`connected_components`). Deterministic: ready nodes are drained in
-    sorted order.
+    Edges to nodes absent from *graph* are ignored. Ready nodes are drained in sorted order so the
+    result is deterministic.
 
-    Raises:
-        PipelineCycleError: when the Run Pipeline graph has a cycle (cyclic factories cannot be
-            ordered into a deploy sequence).
+    Returns:
+        An ``(ordered, unordered)`` tuple. ``unordered`` is the sorted list of nodes a cycle left
+        unplaced; it is empty when the graph is acyclic.
     """
-    nodes = set(deps)
-    # in_degree[node] = number of callees node waits on (within the migration).
-    in_degree = {node: len({c for c in callees if c in nodes}) for node, callees in deps.items()}
-    # callers[callee] = nodes that depend on callee (edges to decrement once callee is placed).
-    callers: dict[str, list[str]] = {node: [] for node in nodes}
-    for node, callees in deps.items():
-        for callee in callees:
-            if callee in nodes:
-                callers[callee].append(node)
+    nodes = set(graph)
+    in_degree = {node: len({dep for dep in deps if dep in nodes}) for node, deps in graph.items()}
+    dependents: dict[str, list[str]] = {node: [] for node in nodes}
+    for node, deps in graph.items():
+        for dep in deps:
+            if dep in nodes:
+                dependents[dep].append(node)
 
     queue = sorted(node for node, degree in in_degree.items() if degree == 0)
     ordered: list[str] = []
     while queue:
         node = queue.pop(0)
         ordered.append(node)
-        for caller in sorted(callers[node]):
-            in_degree[caller] -= 1
-            if in_degree[caller] == 0:
-                queue.append(caller)
+        for dependent in sorted(dependents[node]):
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                queue.append(dependent)
         queue.sort()
 
-    if len(ordered) != len(nodes):
-        remaining = sorted(node for node in nodes if node not in ordered)
+    unordered = sorted(node for node in nodes if node not in ordered)
+    return ordered, unordered
+
+
+def topo_order(deps: dict[str, set[str]]) -> list[str]:
+    """Returns pipeline keys callees-first (a called pipeline precedes its caller).
+
+    Raises:
+        PipelineCycleError: when the Run Pipeline graph has a cycle (cyclic factories cannot be
+            ordered into a deploy sequence).
+    """
+    ordered, unordered = kahn_topo_sort(deps)
+    if unordered:
         raise PipelineCycleError(
-            "Cyclic Run Pipeline dependency between: " + ", ".join(remaining) + ". "
+            "Cyclic Run Pipeline dependency between: " + ", ".join(unordered) + ". "
             "A cyclic call graph cannot be ordered into a deploy sequence."
         )
     return ordered

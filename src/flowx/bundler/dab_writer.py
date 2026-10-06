@@ -426,12 +426,15 @@ def write_bundle_group(
     # SETUP.md — declare the UNION across every workflow in the group, while each individual job resource
     # (in the loop below) gets only its own workflow's globals. For a single-workflow bundle the union
     # equals that one workflow's set, so per-pipeline output is unchanged.
-    hoisted_globals_by_workflow: dict[int, set[str]] = {}
+    hoisted_globals_by_workflow: list[set[str]] = []
     hoisted_global_union: dict[str, Any] = {}
     for workflow in workflows:
         wf_hoisted = _collect_hoisted_global_variables(workflow)
-        hoisted_globals_by_workflow[id(workflow)] = set(wf_hoisted)
-        hoisted_global_union.update(wf_hoisted)
+        hoisted_globals_by_workflow.append(set(wf_hoisted))
+        for name, declaration in wf_hoisted.items():
+            if name in hoisted_global_union and hoisted_global_union[name] != declaration:
+                _warn(name, "factory global declared with conflicting definitions across grouped pipelines; last wins.")
+            hoisted_global_union[name] = declaration
     extra_variable_declarations = {**pipeline_variable_declarations, **hoisted_global_union}
 
     # dbt-factory PyDABs hooks: each `resources.<key>_dbt_job:load_resources` module must be
@@ -439,8 +442,9 @@ def write_bundle_group(
     # Union across every workflow in the group.
     pydabs_resource_entries: list[str] = []
     for workflow in workflows:
-        pydabs_resource_entries.extend(_collect_pydabs_resource_entries(workflow))
-    pydabs_resource_entries = list(dict.fromkeys(pydabs_resource_entries))
+        for entry in _collect_pydabs_resource_entries(workflow):
+            if entry not in pydabs_resource_entries:
+                pydabs_resource_entries.append(entry)
 
     # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id
     #    defaults come from the ADF linked-service configs; when every task is serverless, they're omitted.
@@ -477,11 +481,11 @@ def write_bundle_group(
     manual_parameters: list[ManualParameter] = []
     resources_dir = output_dir / "resources"
     resources_dir.mkdir(parents=True, exist_ok=True)
-    for workflow in workflows:
+    for index, workflow in enumerate(workflows):
         resource_key = normalize_task_key(workflow.name)
         # Each job resource (parent + its inner ForEach jobs) gets only this workflow's hoisted globals,
         # not the group-wide union, so a widget is bound to ${var.X} only in the pipelines that declare X.
-        wf_hoisted_globals = hoisted_globals_by_workflow[id(workflow)]
+        wf_hoisted_globals = hoisted_globals_by_workflow[index]
         manual_parameters.extend(_extract_manual_parameters_from_existing_notebook_tasks(workflow.tasks))
         for inner in workflow.inner_workflows:
             manual_parameters.extend(_extract_manual_parameters_from_existing_notebook_tasks(inner.tasks))
@@ -1607,9 +1611,10 @@ def _collect_pydabs_resource_entries(workflow: PreparedWorkflow) -> list[str]:
             if task.type == "pydabs_dbt_factory":
                 module = task.config.get("hook_module")
                 if module:
-                    entries.append(f"{module}:load_resources")
-    # De-dup while preserving order.
-    return list(dict.fromkeys(entries))
+                    entry = f"{module}:load_resources"
+                    if entry not in entries:
+                        entries.append(entry)
+    return entries
 
 
 def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:

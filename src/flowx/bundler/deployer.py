@@ -32,6 +32,8 @@ from typing import Any
 
 import yaml
 
+from flowx.bundler.pipeline_graph import kahn_topo_sort
+
 # The cross-bundle variable form dab_writer writes into a run_job_task.job_id: ${var.<name>}, where
 # <name> is `<callee_resource_key>_job_id` (with a `_<n>` disambiguation suffix on the rare collision).
 _VAR_REF = re.compile(r"\$\{var\.([A-Za-z0-9_]+)\}")
@@ -182,32 +184,15 @@ def _build_graph(bundles: list[DiscoveredBundle], *, allow_missing_deps: bool = 
 
 
 def _topo_sort(graph: dict[str, list[str]]) -> list[str]:
-    """Returns bundle dirs in dependency-first order (Kahn's algorithm).
+    """Returns bundle dirs in dependency-first order.
 
     Raises:
         CycleError: when the graph has a cycle.
     """
-    in_degree = {node: len(deps) for node, deps in graph.items()}
-    dependents: dict[str, list[str]] = {node: [] for node in graph}
-    for node, deps in graph.items():
-        for dep in deps:
-            dependents[dep].append(node)
-
-    queue = sorted(node for node, deg in in_degree.items() if deg == 0)
-    ordered: list[str] = []
-    while queue:
-        node = queue.pop(0)
-        ordered.append(node)
-        for dependent in sorted(dependents[node]):
-            in_degree[dependent] -= 1
-            if in_degree[dependent] == 0:
-                queue.append(dependent)
-        queue.sort()
-
-    if len(ordered) != len(graph):
-        remaining = sorted(node for node in graph if node not in ordered)
+    ordered, unordered = kahn_topo_sort({node: set(deps) for node, deps in graph.items()})
+    if unordered:
         raise CycleError(
-            "Cyclic dependency between bundles: " + ", ".join(remaining) + ". "
+            "Cyclic dependency between bundles: " + ", ".join(unordered) + ". "
             "Cyclic factories cannot be deployed as ordered separate bundles."
         )
     return ordered

@@ -260,6 +260,25 @@ def test_cycle_returns_error(tmp_path, monkeypatch):
     assert run(tmp_path) == 1
 
 
+def test_run_missing_dependency_returns_error(tmp_path, monkeypatch):
+    # Without --allow-missing-deps a reference to an absent callee aborts the whole run.
+    _make_bundle(tmp_path, "a", jobs=["a"], deps=["ghost"])
+    fake = _FakeCli(summary_ids={"a": {"a": 1}})
+    monkeypatch.setattr(deployer, "_run_cli", fake)
+    assert run(tmp_path) == 1
+    assert fake.commands == []
+
+
+def test_run_allow_missing_deps_deploys_without_absent_var(tmp_path, monkeypatch):
+    # With the flag the absent callee is dropped from ordering and no --var is injected for it.
+    _make_bundle(tmp_path, "a", jobs=["a"], deps=["ghost"])
+    fake = _FakeCli(summary_ids={"a": {"a": 1}})
+    monkeypatch.setattr(deployer, "_run_cli", fake)
+    assert run(tmp_path, allow_missing_deps=True) == 0
+    deploy_cmd = next(cmd for cmd, cwd in fake.commands if "deploy" in cmd)
+    assert "--var" not in deploy_cmd
+
+
 class TestAmbiguousLayout:
     """A root databricks.yml *and* subdirectory bundles both present (a mode-switch on one output dir,
     since package never clears the dir) must be refused, not silently resolved to one layout."""
