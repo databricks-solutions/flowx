@@ -134,6 +134,9 @@ def write_bundle(
     )
 
     pipeline_resources = _collect_pipeline_resources(workflow)
+    _check_pipeline_resource_keys(
+        pipeline_resources, {resource_key} | {normalize_task_key(inner.name) for inner in workflow.inner_workflows}
+    )
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
     # sql_task references ${var.warehouse_id}; declare it (no default -> user supplies at deploy).
     if _bundle_uses_sql_task(workflow):
@@ -1059,6 +1062,32 @@ def _collect_pipeline_resources(workflow: PreparedWorkflow) -> list[dict[str, An
     for inner in workflow.inner_workflows:
         resources.extend(inner.pipeline_resources)
     return resources
+
+
+def _check_pipeline_resource_keys(pipeline_resources: list[dict[str, Any]], job_resource_keys: set[str]) -> None:
+    """Fail when a pipeline resource would overwrite another resource file.
+
+    Every job and pipeline resource is written to ``resources/<key>.yml``, so a pipeline key that
+    matches a job key or an earlier pipeline key would silently replace that file and drop the
+    other resource from the bundle.
+
+    Raises:
+        ValueError: A pipeline resource key matches a job resource key or repeats an earlier one.
+    """
+    seen_pipeline_keys: set[str] = set()
+    for resource in pipeline_resources:
+        pipeline_key = resource["resource_key"]
+        if pipeline_key in job_resource_keys:
+            raise ValueError(
+                f"Pipeline resource key {pipeline_key!r} matches a job resource key; "
+                f"both would be written to resources/{pipeline_key}.yml"
+            )
+        if pipeline_key in seen_pipeline_keys:
+            raise ValueError(
+                f"Pipeline resource key {pipeline_key!r} is used by more than one pipeline resource; "
+                f"each would overwrite resources/{pipeline_key}.yml"
+            )
+        seen_pipeline_keys.add(pipeline_key)
 
 
 def _collect_pydabs_resource_entries(workflow: PreparedWorkflow) -> list[str]:
