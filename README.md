@@ -170,22 +170,47 @@ agent using LLM-assisted reasoning from the activity's ARM JSON.
 
 ## Supported Airflow Operators
 
-The Airflow source parses DAG `.py` modules **statically** (via `ast`, no Airflow install or DAG
-execution) and maps ~35 operator/sensor families to the shared IR. Highlights:
+The Airflow source parses DAG `.py` modules **statically** (via `ast`, no Airflow install or DAG execution) and maps the constructs below to the shared IR — 38 operator/sensor types in the parser registry, plus the dbt CLI, Cosmos, and TaskFlow constructs.
 
-- **Compute / scripts** — `PythonOperator` (callable → runnable notebook with transitive deps),
-  `BashOperator` / `SSHOperator` (incl. `spark-submit` lift), `SparkSubmitOperator`, the Databricks
-  provider operators, and SQL operators (`DatabricksSql*`, `SQLExecuteQueryOperator`, `HiveOperator`,
-  …) → `sql_task`.
-- **TaskFlow API** — `@dag` / `@task`; implicit XCom data flow lowers to `dbutils.jobs.taskValues`.
-  `@task.expand([literal])` → `for_each_task`; non-literal / `.partial().expand()` / `@task_group` →
-  a linked placeholder notebook that raises `NotImplementedError`.
-- **Sensors** — file/table/time sensors → job triggers or polling notebooks; `ExternalTaskSensor` →
-  cross-DAG wait; Http/Python/DateTime → polling tasks.
-- **dbt** — dbt CLI operators and astronomer-cosmos `DbtDag` / `DbtTaskGroup` → a dbt-factory job
-  (static per-node explosion by default, or PyDABs via `--dbt-mode pydabs`).
-- **Scheduling & semantics** — cron → Quartz, `timedelta` → periodic, `trigger_rule` → `run_if`,
-  `params={...}` → job parameters, `>>` / `<<` / `set_upstream` / TaskGroup edges.
+Unlike the ADF path, an Airflow operator's path is decided **per instance** by whether its inputs are statically resolvable. A recognized operator lowers to a real Databricks task (**deterministic**), or — when a value can't be resolved from source alone — to a failing placeholder + `gaps.json` entry (**agentic**). A few constructs are always agentic because their behavior is inherently runtime.
+
+| Category | Operator(s) | Databricks target | Path |
+|---|---|---|---|
+| Compute / scripts | `PythonOperator` | Notebook task (callable + transitive deps) | Deterministic † |
+| Compute / scripts | `PythonVirtualenvOperator`, `ExternalPythonOperator` | Notebook task + `%pip install` | Deterministic |
+| Compute / scripts | `BashOperator`, `SSHOperator` | `%sh` notebook (`spark-submit` lifted when option arity is known) | Deterministic † |
+| Compute / scripts | `SparkSubmitOperator` | Spark JAR / Python task | Deterministic |
+| Databricks provider | `DatabricksSubmitRunOperator` (+ `…DeferrableOperator`) | Notebook / run task | Deterministic |
+| Databricks provider | `DatabricksRunNowOperator` (+ `…DeferrableOperator`) | `run_job_task` | Deterministic |
+| Databricks provider | `DatabricksNotebookOperator` | Notebook task | Deterministic |
+| SQL | `DatabricksSqlOperator`, `DatabricksSQLStatementsOperator`, `SQLExecuteQueryOperator`, `PostgresOperator`, `MySqlOperator`, `HiveOperator` | `sql_task` | Deterministic † |
+| SQL | `DatabricksCopyIntoOperator` | `sql_task` (COPY INTO) | Deterministic |
+| Orchestration | `TriggerDagRunOperator` | `run_job_task` (target DAG by sanitized job name) | Deterministic |
+| Control flow | `BranchPythonOperator`, `ShortCircuitOperator` | Placeholder + gap | Agentic |
+| Control flow | `DummyOperator`, `EmptyOperator` | — (dropped, dependencies rewired) | Dropped |
+| Notification | `EmailOperator` | Placeholder + gap | Agentic |
+| Sensors — file | `S3KeySensor`, `GCSObjectExistenceSensor`, `FileSensor`, `HdfsSensor`, `WebHdfsSensor` | `file_arrival` trigger (root, no schedule) or `dbutils.fs` polling task | Deterministic † |
+| Sensors — table/SQL | `DatabricksPartitionSensor`, `DatabricksSqlSensor`, `DatabricksSQLStatementsSensor`, `SqlSensor` | `table_update` trigger (root literal table, no schedule) or `spark.sql` polling task | Deterministic † |
+| Sensors — poll | `HttpSensor`, `PythonSensor`, `DateTimeSensor` (+ `…Async`) | Polling notebook task | Deterministic † |
+| Sensors — cross-DAG | `ExternalTaskSensor` (+ `…Async`) | Placeholder + gap | Agentic |
+| Sensors — time | `TimeSensor`, `TimeDeltaSensor` | Placeholder + gap | Agentic |
+| dbt | `DbtRun/Test/Seed/Snapshot/Build/DepsOperator`, Cosmos `DbtDag` / `DbtTaskGroup` | single `DbtFactoryActivity` (static explosion, or PyDABs via `--dbt-mode pydabs`) | Deterministic |
+| TaskFlow API | `@dag`, `@task`, `@task.virtualenv` | task; implicit XCom → `dbutils.jobs.taskValues` | Deterministic † |
+| TaskFlow API | `@task.expand([literal])` | `for_each_task` | Deterministic † |
+| TaskFlow API | `@task.branch`, `@task.short_circuit`, `@task_group` (decorator form) | Placeholder + gap | Agentic |
+
+**†** Deterministic when the relevant values are statically resolvable; otherwise the instance routes
+to an agentic gap — e.g. a non-literal command / SQL / endpoint / path, a callable that reads Airflow
+task context or XCom, an unsafe inline template context, or a non-literal `.expand()` /
+`.partial().expand()`.
+**Agentic** emits a failing placeholder + `gaps.json` entry (eligible for the leaf-gap
+resolver) because the construct's behavior is inherently runtime.
+
+**Scheduling & semantics** (source-level, applied alongside the operators above): cron → Quartz,
+`timedelta` → periodic, `@continuous` → continuous mode, Airflow-3 Asset/Dataset lists →
+`ALL_UPDATED` / `ANY_UPDATED` table triggers, `trigger_rule` → `run_if`, `params={...}` / `Param` →
+job parameters, and `>>` / `<<` / `set_upstream` / `set_downstream` / TaskGroup edges → task
+dependencies.
 
 Operators without a deterministic mapping become a failing placeholder and are recorded in
 `gaps.json` for review. Eligible leaf gaps can use the fingerprint-bound resolver backed by the pinned [`airflow-to-dabs`](https://github.com/park-peter/airflow-to-dabs/tree/main/providers/flowx-gap-resolver) provider profile; flowx retains ownership of parsing, graph identity, policy, IR, and packaging. Full matrix:

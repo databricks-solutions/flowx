@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from flowx.sources.airflow.loader import _cron_to_quartz
+from flowx.sources.airflow.loader.schedule import _cron_to_quartz
 from flowx.sources.airflow.templating import (
     convert_shell_template,
     convert_sql_template,

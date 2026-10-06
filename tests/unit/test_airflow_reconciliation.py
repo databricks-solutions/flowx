@@ -13,6 +13,8 @@ from flowx.bundler import dab_writer
 from flowx.models.ir import Dependency, Pipeline, PlaceholderActivity
 from flowx.sources.airflow import audit
 from flowx.sources.airflow import loader as airflow_loader
+from flowx.sources.airflow.loader import reconcile as airflow_reconcile
+from flowx.sources.airflow.loader import visitor as airflow_visitor
 
 _SIMPLE_DAG = (
     "from airflow import DAG\n"
@@ -86,15 +88,15 @@ def test_source_capture_mutations_fail_reconciliation(
 
         monkeypatch.setattr(audit, "audit_module", mutate)
     elif mutation == "setting":
-        original_apply = airflow_loader._DagVisitor._apply_dag_kwargs
+        original_apply = airflow_visitor._DagVisitor._apply_dag_kwargs
 
         def drop_setting(self, kwargs):
             original_apply(self, kwargs)
             self.captured_dag_settings.discard("schedule")
 
-        monkeypatch.setattr(airflow_loader._DagVisitor, "_apply_dag_kwargs", drop_setting)
+        monkeypatch.setattr(airflow_visitor._DagVisitor, "_apply_dag_kwargs", drop_setting)
     else:
-        original_register = airflow_loader._DagVisitor._register_operator_call
+        original_register = airflow_visitor._DagVisitor._register_operator_call
 
         def drop_argument(self, node, var, *, binding=None):
             registered = original_register(self, node, var, binding=binding)
@@ -102,7 +104,7 @@ def test_source_capture_mutations_fail_reconciliation(
                 self.operators[var][2].pop("bash_command", None)
             return registered
 
-        monkeypatch.setattr(airflow_loader._DagVisitor, "_register_operator_call", drop_argument)
+        monkeypatch.setattr(airflow_visitor._DagVisitor, "_register_operator_call", drop_argument)
 
     pipeline = airflow_loader.load_airflow_dag(dag_path)
 
@@ -153,13 +155,13 @@ def test_failed_report_blocks_package_before_bundle_writes(tmp_path: Path) -> No
 def test_captured_task_removed_from_ir_fails_reconciliation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dag_path = tmp_path / "audited.py"
     dag_path.write_text(_SIMPLE_DAG, encoding="utf-8")
-    original_reconcile = airflow_loader._reconcile_pipeline
+    original_reconcile = airflow_reconcile._reconcile_pipeline
 
     def remove_emitted_task(pipeline, **kwargs):
         pipeline.tasks.pop()
         return original_reconcile(pipeline, **kwargs)
 
-    monkeypatch.setattr(airflow_loader, "_reconcile_pipeline", remove_emitted_task)
+    monkeypatch.setattr(airflow_reconcile, "_reconcile_pipeline", remove_emitted_task)
 
     pipeline = airflow_loader.load_airflow_dag(dag_path)
 
@@ -205,12 +207,12 @@ def test_unclaimed_dag_task_construction_fails_closed(tmp_path: Path, body: str,
 def test_source_edge_identity_mismatch_fails_reconciliation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dag_path = tmp_path / "rewired.py"
     dag_path.write_text(_SIMPLE_DAG, encoding="utf-8")
-    original_add_edges = airflow_loader._DagVisitor._add_edges
+    original_add_edges = airflow_visitor._DagVisitor._add_edges
 
     def reverse_edge(self, upstreams, downstreams, node):
         return original_add_edges(self, downstreams, upstreams, node)
 
-    monkeypatch.setattr(airflow_loader._DagVisitor, "_add_edges", reverse_edge)
+    monkeypatch.setattr(airflow_visitor._DagVisitor, "_add_edges", reverse_edge)
 
     pipeline = airflow_loader.load_airflow_dag(dag_path)
 
@@ -272,13 +274,13 @@ def test_bare_taskflow_shift_uses_source_identity_in_reconciliation(tmp_path: Pa
 def test_captured_edge_removed_from_ir_fails_reconciliation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dag_path = tmp_path / "missing_ir_edge.py"
     dag_path.write_text(_SIMPLE_DAG, encoding="utf-8")
-    original_reconcile = airflow_loader._reconcile_pipeline
+    original_reconcile = airflow_reconcile._reconcile_pipeline
 
     def remove_emitted_edge(pipeline, **kwargs):
         pipeline.tasks[-1].depends_on = None
         return original_reconcile(pipeline, **kwargs)
 
-    monkeypatch.setattr(airflow_loader, "_reconcile_pipeline", remove_emitted_edge)
+    monkeypatch.setattr(airflow_reconcile, "_reconcile_pipeline", remove_emitted_edge)
 
     pipeline = airflow_loader.load_airflow_dag(dag_path)
 
@@ -317,7 +319,7 @@ def test_removing_real_helper_capture_is_detected(tmp_path: Path, monkeypatch: p
         "    work = make('work')\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(airflow_loader._DagVisitor, "_register_helper_factory_call", lambda *args, **kwargs: False)
+    monkeypatch.setattr(airflow_visitor._DagVisitor, "_register_helper_factory_call", lambda *args, **kwargs: False)
 
     pipeline = airflow_loader.load_airflow_dag(dag_path)
 
