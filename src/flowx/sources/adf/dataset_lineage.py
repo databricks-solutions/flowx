@@ -211,30 +211,28 @@ def resolve_dataset_identity(
     names differ.
 
     A table name is only unique within the store that holds it, so the table is
-    prefixed with the backing linked service's server (and database, when known),
-    or with the linked service name when no server literal resolves. Otherwise a
-    source ``dbo.Orders`` and a warehouse ``dbo.Orders`` would look like one table.
+    prefixed with the backing linked service's server (and database, when given),
+    or with the linked service name when the server is hidden in a secret.
+    Otherwise a source ``dbo.Orders`` and a warehouse ``dbo.Orders`` would look like
+    one table.
 
-    Parameterised values (ADF expressions or DAB-ref placeholders) are treated as
-    unresolvable and return ``None`` -- they must never be used as identity keys
-    because two unrelated pipelines sharing a parameter name would collide on the
-    same placeholder string.
+    Parameterised values (ADF expressions or DAB-ref placeholders), including a
+    parameterised linked service, are treated as unresolvable and return ``None``
+    -- they must never be used as identity keys because two unrelated pipelines
+    sharing a parameter name would collide on the same placeholder string.
     """
     resolution_context = context if context is not None else TranslationContext()
     properties = _dataset_props(dataset_ref, definitions)
     if properties is None:
         return None
-    linked_service_name, linked_service = _backing_linked_service(properties, definitions)
     schema, table = _resolve_table_reference(dataset_ref, properties, resolution_context)
     if table:
-        if not linked_service_name:
-            return None
         qualified_table = f"{schema}.{table}" if schema else table
         if not _is_physical(qualified_table):
             return None
-        store = _resolve_table_store(linked_service) or linked_service_name
-        return f"{store}/{qualified_table}"
-    return _resolve_dataset_path(properties, linked_service)
+        store = _resolve_table_store(properties, definitions)
+        return f"{store}/{qualified_table}" if store else None
+    return _resolve_dataset_path(properties, _backing_linked_service(properties, definitions))
 
 
 def _dataset_props(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> dict[str, Any] | None:
@@ -350,43 +348,56 @@ def _pick_dataset_field(
     return None
 
 
-def _backing_linked_service(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> tuple[str, Any]:
-    """Return the dataset's linked service name and its loaded definition (``None`` when not loaded)."""
+def _linked_service_reference(dataset_props: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Return the dataset's linked service name and the parameters its reference binds."""
     linked_service_reference = dataset_props.get("linkedServiceName") or {}
-    if isinstance(linked_service_reference, dict):
-        linked_service_name = linked_service_reference.get("referenceName") or ""
-    else:
-        linked_service_name = str(linked_service_reference)
-    linked_service = definitions.get_linked_service(linked_service_name) if linked_service_name else None
-    return linked_service_name, linked_service
+    if not isinstance(linked_service_reference, dict):
+        return str(linked_service_reference), {}
+    parameters = linked_service_reference.get("parameters")
+    return linked_service_reference.get("referenceName") or "", parameters if isinstance(parameters, dict) else {}
 
 
-def _resolve_table_store(linked_service: Any) -> str | None:
-    """Literal ``server`` or ``server/database`` behind a database linked service, or ``None``.
+def _backing_linked_service(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> Any:
+    """Return the loaded definition of the dataset's linked service, or ``None``."""
+    linked_service_name, _ = _linked_service_reference(dataset_props)
+    return definitions.get_linked_service(linked_service_name) if linked_service_name else None
 
-    Reads the explicit ``server`` / ``database`` properties first and falls back to
-    a plaintext connection string. A Key Vault reference, a masked secret, or a
-    parameterised server gives ``None`` so the caller qualifies by linked service
-    name instead of guessing.
+
+def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> str | None:
+    """Name the store that holds a dataset's table, or ``None`` when it is not provable.
+
+    Uses the literal ``server`` (plus ``database`` when given) from the backing
+    linked service's properties or plaintext connection string, exactly as written.
+    When the server is hidden (a Key Vault reference or a masked secret) the linked
+    service name stands in for it. A parameterised server, database, or connection
+    string, or a linked service that takes parameters, gives ``None``: each binding
+    may point at a different store, so no single name identifies it.
     """
-    if linked_service is None:
+    linked_service_name, reference_parameters = _linked_service_reference(dataset_props)
+    if not linked_service_name:
         return None
-    type_props = linked_service.properties.get("typeProperties") or linked_service.properties
+    linked_service = definitions.get_linked_service(linked_service_name)
+    linked_service_properties = linked_service.properties if linked_service is not None else {}
+    type_props = linked_service_properties.get("typeProperties") or linked_service_properties
     connection_string = type_props.get("connectionString")
     if isinstance(connection_string, dict):
         connection_string = connection_string.get("value")
+    if isinstance(connection_string, str) and not _is_physical(connection_string):
+        return None
     connection_fields = _connection_string_fields(connection_string) if isinstance(connection_string, str) else {}
 
     server = type_props.get("server") or connection_fields.get("server") or connection_fields.get("data source")
     database = (
         type_props.get("database") or connection_fields.get("database") or connection_fields.get("initial catalog")
     )
-    if not isinstance(server, str) or not server.strip() or not _is_physical(server):
+    store_parts = [part for part in (server, database) if part]
+    if not all(isinstance(part, str) and part.strip() and _is_physical(part) for part in store_parts):
         return None
-    store = _normalize_server(server)
-    if isinstance(database, str) and database.strip() and _is_physical(database):
-        store = f"{store}/{database.strip()}"
-    return store
+    if server:
+        return "/".join(part.strip() for part in store_parts)
+    if reference_parameters or linked_service_properties.get("parameters"):
+        return None
+    return linked_service_name
 
 
 def _connection_string_fields(connection_string: str) -> dict[str, str]:
@@ -399,20 +410,12 @@ def _connection_string_fields(connection_string: str) -> dict[str, str]:
     return fields
 
 
-def _normalize_server(server: str) -> str:
-    """Drop the ``tcp:`` prefix and port so ``tcp:host,1433`` and ``host`` name the same server."""
-    host = server.strip()
-    if host.lower().startswith("tcp:"):
-        host = host[len("tcp:") :]
-    return host.split(",", 1)[0].lower()
-
-
 def _resolve_dataset_path(dataset_props: dict[str, Any], linked_service: Any) -> str | None:
     """Resolve a dataset's storage path from its location + backing linked service.
 
     The path runs down to the literal ``fileName`` when the dataset names one, so
     two files in the same folder stay distinct. Any parameterised or unresolved
-    location part (file system, folder, or file name) yields ``None``.
+    part (file system, folder, file name, or storage account) yields ``None``.
     """
     type_props = dataset_props.get("typeProperties") or dataset_props
     location = type_props.get("location") or {}
@@ -427,7 +430,7 @@ def _resolve_dataset_path(dataset_props: dict[str, Any], linked_service: Any) ->
         return None
 
     account = _resolve_storage_account(linked_service)
-    if not account:
+    if not account or not _is_physical(account):
         return None
 
     relative_path = "/".join(part.strip("/") for part in (folder_path, file_name) if part.strip("/"))

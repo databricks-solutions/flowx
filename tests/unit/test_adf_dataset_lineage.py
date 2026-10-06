@@ -176,7 +176,7 @@ def test_same_table_name_on_different_servers_resolves_to_distinct_identities() 
     copy_a_reads, _ = activity_data_assets(_copy("Copy A", source="ds_source_orders", sink="ds_lake"), definitions)
     _, copy_b_writes = activity_data_assets(_copy("Copy B", source="ds_lake", sink="ds_warehouse_orders"), definitions)
 
-    assert copy_a_reads[0].identity == "onprem-sql.contoso.local/Sales/dbo.Orders"
+    assert copy_a_reads[0].identity == "tcp:onprem-sql.contoso.local,1433/Sales/dbo.Orders"
     assert copy_b_writes[0].identity == "dw.contoso.net/dbo.Orders"
     assert copy_a_reads[0].signature != copy_b_writes[0].signature
 
@@ -195,6 +195,103 @@ def test_table_identity_falls_back_to_linked_service_name_when_server_is_secret(
     )
     identity = resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orders"), definitions)
     assert identity == "ls_vaulted/dbo.Orders"
+
+
+def test_parameterised_storage_account_has_no_path_identity() -> None:
+    """A generic ADLS linked service names its account per binding, so the account is never part of an identity."""
+    generic_lake = AdfLinkedService(
+        name="ls_generic_lake",
+        type="AzureBlobFS",
+        properties={
+            "typeProperties": {"url": "https://@{linkedService().accountName}.dfs.core.windows.net"},
+            "parameters": {"accountName": {"type": "String"}},
+        },
+    )
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_orders": _adls_dataset(
+                "ds_orders",
+                file_system="data",
+                folder_path="raw",
+                linked_service="ls_generic_lake",
+                file_name="orders.csv",
+            )
+        },
+        linked_services={"ls_generic_lake": generic_lake},
+    )
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orders"), definitions) is None
+
+
+def test_parameterised_database_has_no_table_identity() -> None:
+    """A literal server with a parameterised database does not say which database holds the table."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_property": _table_dataset("ds_property", schema="dbo", table="Orders", linked_service="ls_property"),
+            "ds_connection": _table_dataset(
+                "ds_connection", schema="dbo", table="Orders", linked_service="ls_connection"
+            ),
+        },
+        linked_services={
+            "ls_property": AdfLinkedService(
+                name="ls_property",
+                type="SqlServer",
+                properties={"typeProperties": {"server": "sql.contoso.net", "database": "@{linkedService().dbName}"}},
+            ),
+            "ls_connection": _sql_linked_service(
+                "ls_connection", connection_string="Server=sql.contoso.net;Initial Catalog=@{linkedService().dbName}"
+            ),
+        },
+    )
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_property"), definitions) is None
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_connection"), definitions) is None
+
+
+def test_generic_linked_service_called_with_different_bindings_has_no_table_identity() -> None:
+    """One generic SQL linked service bound to a source and a warehouse server never yields one shared identity."""
+    generic_sql = AdfLinkedService(
+        name="ls_generic_sql",
+        type="AzureSqlDatabase",
+        properties={
+            "typeProperties": {
+                "connectionString": {
+                    "type": "AzureKeyVaultSecret",
+                    "store": {"referenceName": "ls_key_vault", "type": "LinkedServiceReference"},
+                    "secretName": "@{linkedService().secretName}",
+                }
+            },
+            "parameters": {"secretName": {"type": "String"}},
+        },
+    )
+
+    def _bound_orders(name: str, secret_name: str) -> AdfDataset:
+        return AdfDataset(
+            name=name,
+            type="AzureSqlTable",
+            properties={
+                "typeProperties": {"schema": "dbo", "table": "Orders"},
+                "linkedServiceName": {
+                    "referenceName": "ls_generic_sql",
+                    "parameters": {"secretName": secret_name},
+                },
+            },
+        )
+
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_source_orders": _bound_orders("ds_source_orders", "source-sql"),
+            "ds_warehouse_orders": _bound_orders("ds_warehouse_orders", "warehouse-sql"),
+        },
+        linked_services={"ls_generic_sql": generic_sql},
+    )
+    copy_reads, copy_writes = activity_data_assets(
+        _copy("Copy", source="ds_source_orders", sink="ds_warehouse_orders"), definitions
+    )
+
+    assert copy_reads[0].identity is None
+    assert copy_writes[0].identity is None
 
 
 def test_table_without_linked_service_has_no_identity() -> None:
