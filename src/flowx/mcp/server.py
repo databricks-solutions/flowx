@@ -16,7 +16,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from flowx.agentic import airflow_gap_required_capability, validate_persisted_agentic_report
+from flowx.agentic import airflow_finding_required_capability, validate_persisted_agentic_report
 from flowx.mcp import runner
 
 
@@ -178,14 +178,11 @@ def _has_source_reference(parameters: dict[str, Any], source: str) -> bool:
 
 def _gap_capability(gap: dict[str, Any], finding_codes: dict[str, str]) -> str | None:
     """Returns the contract capability a prepared gap needs beyond leaf replacement, if any."""
-    operator = str(gap.get("operator", ""))
+    allowed_replacement_kinds = gap.get("allowed_replacement_kinds")
+    if isinstance(allowed_replacement_kinds, list) and allowed_replacement_kinds:
+        return None
     codes = {finding_codes.get(str(fingerprint), "") for fingerprint in gap.get("finding_fingerprints") or []}
-    required_capability = airflow_gap_required_capability(operator, codes)
-    if required_capability is not None:
-        return required_capability
-    if gap.get("allowed_replacement_kinds") == []:
-        return "non_leaf_patch"
-    return None
+    return airflow_finding_required_capability(codes) or "non_leaf_patch"
 
 
 def _airflow_gap_state(report: Any, prepared_gaps: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -231,7 +228,7 @@ def _airflow_gap_state(report: Any, prepared_gaps: list[dict[str, Any]]) -> dict
         if isinstance(fingerprint, str) and fingerprint in bound_fingerprints:
             continue
         code = str(finding.get("code", ""))
-        capability = airflow_gap_required_capability("", {code}) or "source_semantics"
+        capability = airflow_finding_required_capability({code}) or "source_semantics"
         unsupported.append(
             {
                 "gap_id": fingerprint,

@@ -179,17 +179,39 @@ def _airflow_report(*, operator: str | None = "KubernetesPodOperator") -> dict:
 
 
 def _gap(operator: str) -> dict:
+    normalized_operator = operator.casefold().replace("_", "")
+    is_structural = any(marker in normalized_operator for marker in ("branch", "shortcircuit", "taskgroup", "subdag"))
     return {
         "contract_version": "1",
         "gap_id": "gap-1",
         "pipeline_name": "example",
         "operator": operator,
         "finding_fingerprints": ["gap-1"],
+        "allowed_replacement_kinds": [] if is_structural else ["notebook", "sql", "spark_python"],
     }
 
 
 def test_airflow_gap_state_never_advertises_contract_restricted_gap_as_leaf_eligible() -> None:
     gap = {**_gap("CustomOperator"), "allowed_replacement_kinds": []}
+
+    state = server._airflow_gap_state(_airflow_report(operator="CustomOperator"), [gap])
+
+    assert state["eligible_gaps"] == []
+    assert state["structural_gaps"][0]["required_capability"] == "non_leaf_patch"
+
+
+def test_airflow_gap_state_trusts_hash_bound_leaf_eligibility_over_operator_heuristics() -> None:
+    gap = {**_gap("BranchPythonOperator"), "allowed_replacement_kinds": ["notebook"]}
+
+    state = server._airflow_gap_state(_airflow_report(operator="BranchPythonOperator"), [gap])
+
+    assert state["eligible_gaps"] == [gap]
+    assert state["structural_gaps"] == []
+
+
+def test_airflow_gap_state_fails_closed_when_leaf_eligibility_is_missing() -> None:
+    gap = _gap("CustomOperator")
+    del gap["allowed_replacement_kinds"]
 
     state = server._airflow_gap_state(_airflow_report(operator="CustomOperator"), [gap])
 
@@ -291,7 +313,7 @@ def test_airflow_migrate_reports_graph_structural_gaps_as_unsupported(monkeypatc
     assert result["status"] == "needs_agentic_resolution"
     assert result["eligible_gaps"] == []
     assert result["structural_gaps"][0]["gap_id"] == "gap-1"
-    assert result["structural_gaps"][0]["required_capability"] == "graph_patch"
+    assert result["structural_gaps"][0]["required_capability"] == "non_leaf_patch"
     assert not any(argv[0] == "package" for argv in calls)
 
 

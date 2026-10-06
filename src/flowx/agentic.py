@@ -58,16 +58,18 @@ _COMMON_TASK_FIELDS = (
 )
 
 
-def airflow_gap_required_capability(operator: str, finding_codes: set[str]) -> str | None:
-    """Returns the contract capability required when a gap cannot use a leaf replacement."""
-    normalized_operator = operator.casefold().replace("_", "")
-    if any(marker in normalized_operator for marker in _STRUCTURAL_OPERATOR_MARKERS):
-        return "graph_patch"
+def airflow_finding_required_capability(finding_codes: set[str]) -> str | None:
+    """Returns the non-leaf capability label implied by reconciled finding codes."""
     if finding_codes & _GRAPH_PATCH_FINDING_CODES:
         return "graph_patch"
     if finding_codes & _TASK_POLICY_FINDING_CODES:
         return "task_policy_patch"
     return None
+
+
+def _operator_requires_graph_patch(operator: str) -> bool:
+    normalized_operator = operator.casefold().replace("_", "")
+    return any(marker in normalized_operator for marker in _STRUCTURAL_OPERATOR_MARKERS)
 
 
 _FLOWX_OWNED_ARGUMENTS = {
@@ -916,7 +918,7 @@ def _build_gap_envelopes(
 def _allowed_replacement_kinds(operator: str, findings: list[dict[str, Any]]) -> tuple[str, ...]:
     """Returns leaf replacement kinds only when the gap needs no graph or task-policy mutation."""
     finding_codes = {str(finding.get("code", "")) for finding in findings}
-    if airflow_gap_required_capability(operator, finding_codes) is not None:
+    if _operator_requires_graph_patch(operator) or airflow_finding_required_capability(finding_codes) is not None:
         return ()
     return _ALLOWED_REPLACEMENT_KINDS
 
