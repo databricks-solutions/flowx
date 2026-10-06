@@ -51,15 +51,19 @@ Read `<output_dir>/metadata/inventory.json`:
     {
       "name": "PipelineName",
       "activities": [
-        {"name": "CopyFromBlob", "type": "Copy", "strategy": "deterministic", "translator": "copy.py"},
-        {"name": "RunDataFlow", "type": "ExecuteDataFlow", "strategy": "agentic"}
+        {"name": "CopyFromBlob", "type": "Copy", "strategy": "deterministic", "task_key": "CopyFromBlob"},
+        {"name": "RunDataFlow", "type": "ExecuteDataFlow", "strategy": "agentic", "task_key": "RunDataFlow"}
       ]
     }
   ],
   "summary": {"pipeline_count": 12, "activity_count": 47, "deterministic_count": 35,
-              "agentic_count": 10, "unsupported_count": 2, "coverage_pct": 95.7}
+              "agentic_count": 10, "unsupported_count": 2, "coverage_pct": 95.7},
+  "source_graphs_sha256": "<document_sha256 of metadata/source_graphs.json>"
 }
 ```
+
+Each activity's `task_key` equals its ADF activity name. `source_graphs_sha256` names the saved
+`metadata/source_graphs.json` the inventory was built from.
 
 ## Step 4b — Review the complexity report
 
