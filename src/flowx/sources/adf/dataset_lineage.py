@@ -9,8 +9,9 @@ bespoke edge type, so the source-neutral join in :mod:`flowx.lineage` /
 
 Two tiers, exactly as #36 established them:
 
-* **identity** -- the resolved physical location of the asset (``schema.table`` or
-  a concrete ``abfss://`` path). Present only when it resolves *deterministically*
+* **identity** -- the resolved physical location of the asset (a store-qualified
+  ``<server>/schema.table`` or a concrete ``abfss://`` path down to the literal
+  file name). Present only when it resolves *deterministically*
   from literals; a parameterised reference is never guessed at and leaves
   ``identity`` unset. This is the strong join key.
 * **signature** -- the *path-derived* weak key. For an asset with a resolved
@@ -204,9 +205,15 @@ def resolve_dataset_identity(
 ) -> str | None:
     """Deterministic physical identity for a dataset reference.
 
-    Returns ``"schema.table"`` when a table is resolvable, else a storage path,
-    else ``None`` (never a guess). Used to join producers to consumers on the same
-    physical asset even when their ADF dataset names differ.
+    Returns ``"<store>/schema.table"`` when a table is resolvable, else a storage
+    path down to the literal file name, else ``None`` (never a guess). Used to join
+    producers to consumers on the same physical asset even when their ADF dataset
+    names differ.
+
+    A table name is only unique within the store that holds it, so the table is
+    prefixed with the backing linked service's server (and database, when known),
+    or with the linked service name when no server literal resolves. Otherwise a
+    source ``dbo.Orders`` and a warehouse ``dbo.Orders`` would look like one table.
 
     Parameterised values (ADF expressions or DAB-ref placeholders) are treated as
     unresolvable and return ``None`` -- they must never be used as identity keys
@@ -217,12 +224,17 @@ def resolve_dataset_identity(
     properties = _dataset_props(dataset_ref, definitions)
     if properties is None:
         return None
+    linked_service_name, linked_service = _backing_linked_service(properties, definitions)
     schema, table = _resolve_table_reference(dataset_ref, properties, resolution_context)
     if table:
-        identity = f"{schema}.{table}" if schema else table
-        return identity if _is_physical(identity) else None
-    path = _resolve_dataset_path(properties, definitions)
-    return path if (path and _is_physical(path)) else None
+        if not linked_service_name:
+            return None
+        qualified_table = f"{schema}.{table}" if schema else table
+        if not _is_physical(qualified_table):
+            return None
+        store = _resolve_table_store(linked_service) or linked_service_name
+        return f"{store}/{qualified_table}"
+    return _resolve_dataset_path(properties, linked_service)
 
 
 def _dataset_props(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> dict[str, Any] | None:
@@ -338,8 +350,70 @@ def _pick_dataset_field(
     return None
 
 
-def _resolve_dataset_path(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> str | None:
-    """Resolve a dataset's storage path from its location + backing linked service."""
+def _backing_linked_service(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> tuple[str, Any]:
+    """Return the dataset's linked service name and its loaded definition (``None`` when not loaded)."""
+    linked_service_reference = dataset_props.get("linkedServiceName") or {}
+    if isinstance(linked_service_reference, dict):
+        linked_service_name = linked_service_reference.get("referenceName") or ""
+    else:
+        linked_service_name = str(linked_service_reference)
+    linked_service = definitions.get_linked_service(linked_service_name) if linked_service_name else None
+    return linked_service_name, linked_service
+
+
+def _resolve_table_store(linked_service: Any) -> str | None:
+    """Literal ``server`` or ``server/database`` behind a database linked service, or ``None``.
+
+    Reads the explicit ``server`` / ``database`` properties first and falls back to
+    a plaintext connection string. A Key Vault reference, a masked secret, or a
+    parameterised server gives ``None`` so the caller qualifies by linked service
+    name instead of guessing.
+    """
+    if linked_service is None:
+        return None
+    type_props = linked_service.properties.get("typeProperties") or linked_service.properties
+    connection_string = type_props.get("connectionString")
+    if isinstance(connection_string, dict):
+        connection_string = connection_string.get("value")
+    connection_fields = _connection_string_fields(connection_string) if isinstance(connection_string, str) else {}
+
+    server = type_props.get("server") or connection_fields.get("server") or connection_fields.get("data source")
+    database = (
+        type_props.get("database") or connection_fields.get("database") or connection_fields.get("initial catalog")
+    )
+    if not isinstance(server, str) or not server.strip() or not _is_physical(server):
+        return None
+    store = _normalize_server(server)
+    if isinstance(database, str) and database.strip() and _is_physical(database):
+        store = f"{store}/{database.strip()}"
+    return store
+
+
+def _connection_string_fields(connection_string: str) -> dict[str, str]:
+    """Split a ``key=value;`` connection string into a lower-cased key map."""
+    fields: dict[str, str] = {}
+    for part in connection_string.split(";"):
+        key, separator, value = part.partition("=")
+        if separator:
+            fields[key.strip().lower()] = value.strip()
+    return fields
+
+
+def _normalize_server(server: str) -> str:
+    """Drop the ``tcp:`` prefix and port so ``tcp:host,1433`` and ``host`` name the same server."""
+    host = server.strip()
+    if host.lower().startswith("tcp:"):
+        host = host[len("tcp:") :]
+    return host.split(",", 1)[0].lower()
+
+
+def _resolve_dataset_path(dataset_props: dict[str, Any], linked_service: Any) -> str | None:
+    """Resolve a dataset's storage path from its location + backing linked service.
+
+    The path runs down to the literal ``fileName`` when the dataset names one, so
+    two files in the same folder stay distinct. Any parameterised or unresolved
+    location part (file system, folder, or file name) yields ``None``.
+    """
     type_props = dataset_props.get("typeProperties") or dataset_props
     location = type_props.get("location") or {}
     if not isinstance(location, dict):
@@ -347,20 +421,17 @@ def _resolve_dataset_path(dataset_props: dict[str, Any], definitions: AdfDefinit
 
     file_system = location.get("fileSystem") or location.get("container") or ""
     folder_path = location.get("folderPath") or ""
-    if isinstance(file_system, dict) or isinstance(folder_path, dict):
-        return None  # parameterised location; not a deterministic identity
+    file_name = location.get("fileName") or ""
+    location_parts = (file_system, folder_path, file_name)
+    if not all(isinstance(part, str) and _is_physical(part) for part in location_parts) or not file_system:
+        return None
 
-    linked_service_reference = dataset_props.get("linkedServiceName") or {}
-    if isinstance(linked_service_reference, dict):
-        linked_service_name = linked_service_reference.get("referenceName", "")
-    else:
-        linked_service_name = str(linked_service_reference)
-    linked_service = definitions.get_linked_service(linked_service_name) if linked_service_name else None
     account = _resolve_storage_account(linked_service)
     if not account:
         return None
 
-    return f"abfss://{file_system}@{account}.dfs.core.windows.net/{folder_path}".rstrip("/")
+    relative_path = "/".join(part.strip("/") for part in (folder_path, file_name) if part.strip("/"))
+    return f"abfss://{file_system}@{account}.dfs.core.windows.net/{relative_path}".rstrip("/")
 
 
 def _resolve_storage_account(linked_service: Any) -> str | None:
