@@ -366,6 +366,7 @@ def _validate_release_state(pattern: dict[str, Any], loc: str) -> list[str]:
     * ``release_state_source`` (a non-empty citation) is **required** whenever ``release_state`` is a
       non-GA preview/beta state (:data:`~flowx.models.insights.RELEASE_STATES_REQUIRING_SOURCE`); it
       is not required for ``"ga"`` (the stable default) or ``"unknown"`` (no claim to ground).
+    * ``release_state_source``, when set, must be a string whatever the ``release_state``.
     """
     problems: list[str] = []
     release_state = pattern.get("release_state")
@@ -381,7 +382,9 @@ def _validate_release_state(pattern: dict[str, Any], loc: str) -> list[str]:
             f"(a distinctive capability must declare its verified GA/Preview release state)"
         )
 
-    if release_state in RELEASE_STATES_REQUIRING_SOURCE and (not isinstance(source, str) or not source.strip()):
+    if source is not None and not isinstance(source, str):
+        problems.append(f"{loc}: 'release_state_source' must be a string when present, got {type(source).__name__}")
+    elif release_state in RELEASE_STATES_REQUIRING_SOURCE and (source is None or not source.strip()):
         problems.append(
             f"{loc}: 'release_state_source' (a non-empty doc URL / citation) is required when "
             f"'release_state' is {release_state!r}"

@@ -11,8 +11,10 @@ The `flowx-route` step reads this block to present the agentic conversion option
 
 ## The insights shape
 
-You author only these four fields (the library injects `schema_version` and an `inventory_sha256`
-fingerprint that binds your insights to the exact inventory they describe):
+You author only these four fields. The library stamps `schema_version`, the `inventory_sha256`
+fingerprint, the `source_graphs_sha256` it was checked against and its own `source_insights_sha256`
+when it records them, binding your insights to the exact inventory and source graphs they describe.
+Do not author any of those four keys yourself:
 
 ```json
 {

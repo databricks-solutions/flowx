@@ -361,6 +361,23 @@ def test_release_state_source_required_for_preview_and_beta_states() -> None:
         )
 
 
+@pytest.mark.parametrize("section", ["system_recommendation", "pipeline_insight"])
+def test_release_state_source_must_be_a_string_whatever_the_release_state(section: str) -> None:
+    raw = _valid_insights()
+    if section == "system_recommendation":
+        pattern = raw["system_recommendation"]["recommended_patterns"][0]
+        loc = "system_recommendation.recommended_patterns[0]"
+    else:
+        pattern = raw["pipeline_insights"][0]["recommended_patterns"][0]
+        loc = "pipeline_insights[0].recommended_patterns[0]"
+    pattern["release_state"] = "ga"
+    pattern["release_state_source"] = 42
+
+    violations = validate_insights(raw, _inventory())
+
+    assert violations == [f"{loc}: 'release_state_source' must be a string when present, got int"]
+
+
 def test_release_state_source_not_required_for_ga_or_unknown() -> None:
     for state in ("ga", "unknown"):
         raw = _valid_insights()
