@@ -27,15 +27,13 @@ from flowx.bundler.inner_job_params import normalize_value
 from flowx.bundler.notebook_writer import write_notebooks
 from flowx.bundler.prereqs_writer import ManualParameter, build_prereqs, render_setup_md
 from flowx.bundler.setup_generator import generate_setup_tasks
+from flowx.ir_serde import data_asset_from_dict, lineage_from_dict
 from flowx.models.dab import DabNotebook
 from flowx.models.ir import (
     Activity,
     AgenticComponentActivity,
     AppendVariableActivity,
-    ControlEdge,
     CopyActivity,
-    DataAsset,
-    DataEdge,
     DbtFactoryActivity,
     DeleteActivity,
     Dependency,
@@ -43,10 +41,8 @@ from flowx.models.ir import (
     FilterActivity,
     ForEachActivity,
     IfConditionActivity,
-    Lineage,
     LookupActivity,
     MotifActivity,
-    MotifAnnotation,
     NotebookActivity,
     Pipeline,
     PlaceholderActivity,
@@ -2204,6 +2200,7 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         ):
             raise ValueError(f"Invalid Pipeline email notification entry: {event!r}")
         email_notifications[str(event)] = list(recipients)
+    raw_lineage = pipeline_dict.get("lineage")
 
     pipeline = Pipeline(
         name=pipeline_dict.get("name", "unknown"),
@@ -2220,7 +2217,7 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         reconciliation_status=pipeline_dict.get("reconciliation_status"),
         migration_status=pipeline_dict.get("migration_status", "included"),
         audit=dict(pipeline_dict.get("audit") or {}),
-        lineage=_reconstruct_lineage(pipeline_dict.get("lineage")),
+        lineage=lineage_from_dict(raw_lineage) if raw_lineage else None,
     )
     return pipeline, parameters
 
@@ -2505,63 +2502,9 @@ def _common_activity_kwargs(task_ir: dict[str, Any]) -> dict[str, Any]:
         "compute_mode": task_ir.get("compute_mode"),
         "notifications": task_ir.get("notifications"),
         "motif_id": task_ir.get("motif_id"),
-        "data_reads": _reconstruct_data_assets(task_ir.get("data_reads")),
-        "data_writes": _reconstruct_data_assets(task_ir.get("data_writes")),
+        "data_reads": [data_asset_from_dict(asset) for asset in task_ir.get("data_reads") or []],
+        "data_writes": [data_asset_from_dict(asset) for asset in task_ir.get("data_writes") or []],
     }
-
-
-def _reconstruct_data_assets(raw: list[dict[str, Any]] | None) -> list[DataAsset]:
-    """Rehydrates serialised DataAsset dicts into typed :class:`DataAsset` nodes."""
-    if not raw:
-        return []
-    return [
-        DataAsset(
-            signature=asset.get("signature", ""),
-            identity=asset.get("identity"),
-            asset_type=asset.get("asset_type"),
-            properties=dict(asset.get("properties") or {}),
-        )
-        for asset in raw
-    ]
-
-
-def _reconstruct_lineage(raw: dict[str, Any] | None) -> Lineage | None:
-    """Rehydrates a serialised lineage block into a typed :class:`Lineage`, or ``None``."""
-    if not raw:
-        return None
-    return Lineage(
-        control_edges=[
-            ControlEdge(
-                source_workflow=edge.get("source_workflow", ""),
-                target_workflow=edge.get("target_workflow", ""),
-                via_task_key=edge.get("via_task_key", ""),
-                wait_for_completion=edge.get("wait_for_completion"),
-                resolved=bool(edge.get("resolved", True)),
-            )
-            for edge in raw.get("control_edges") or []
-        ],
-        data_edges=[
-            DataEdge(
-                source_task_key=edge.get("source_task_key", ""),
-                target_task_key=edge.get("target_task_key", ""),
-                match_kind=edge.get("match_kind", ""),
-                match_key=edge.get("match_key", ""),
-                identity=edge.get("identity"),
-                asset_type=edge.get("asset_type"),
-            )
-            for edge in raw.get("data_edges") or []
-        ],
-        motifs=[
-            MotifAnnotation(
-                motif_id=motif.get("motif_id", ""),
-                member_task_keys=list(motif.get("member_task_keys") or []),
-                display_name=motif.get("display_name"),
-                databricks_replacement=motif.get("databricks_replacement"),
-                notes=list(motif.get("notes") or []),
-            )
-            for motif in raw.get("motifs") or []
-        ],
-    )
 
 
 def _reconstruct_dependencies(raw: list[dict[str, Any]] | None) -> list[Dependency] | None:

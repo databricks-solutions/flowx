@@ -257,6 +257,7 @@ flowx_output/
   SETUP.md                    # Setup instructions (package)
   metadata/
     inventory.json            # discover: activity inventory
+    source_graphs.json        # discover (ADF): saved source graphs the inventory is built from
     profile_report.csv        # discover: per-pipeline complexity report
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
     source_insights.json      # enrich: agent-authored insights, bound to source_graphs.json

@@ -56,7 +56,7 @@ All three phases write into one shared `<output_dir>` (default `./flowx_output`)
 the DAB bundle at the top level, kept artifacts under `metadata/`, and transient
 intermediates under `.work/` (pruned by `package`).
 
-1. **Discover** -- Parse ADF JSON from UC volumes -> typed AST -> `SourceGraph` -> `metadata/source_graphs.json` (versioned, hashed, motifs inside) + `metadata/inventory.json` + `metadata/profile_report.csv` + verbatim `metadata/<pipeline>.arm.json`; optional enrich adds `metadata/source_insights.json` and rebuilds the inventory with it
+1. **Discover** -- Parse ADF JSON from UC volumes -> typed AST -> `SourceGraph` -> `metadata/source_graphs.json` (versioned, hashed, motifs inside) -> `metadata/inventory.json` (built from the saved graphs, records their hash) + `metadata/profile_report.csv` + verbatim `metadata/<pipeline>.arm.json`; optional enrich adds `metadata/source_insights.json` and rebuilds the inventory with it
 2. **Convert** -- Registry dispatch + topological sort -> Pipeline IR (deterministic + agentic gaps); transient report at `.work/translation_report.json`
 3. **Package** -- IR -> DAB YAML + generated notebooks + setup scripts; prunes `.work/`
 
