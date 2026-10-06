@@ -8,6 +8,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from flowx.models.dab import DabNotebook
 from flowx.models.ir import AgenticComponentActivity
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
+from flowx.utils import normalize_task_key
 
 # flowx owns a task's identity, its upstream wiring, and its run policy; these come from
 # the activity itself, so an authored task fragment may only say what the task runs.
@@ -39,6 +40,19 @@ def _source_relative_path(raw_path: object) -> str:
     return relative_path.as_posix()
 
 
+def _check_resource_key(task_key: str, resource_key: object) -> None:
+    """Reject a resource key that is not a plain identifier.
+
+    Each resource is written to ``resources/<resource_key>.yml``, so a key with path characters
+    could land outside the ``resources`` directory or overwrite another bundle file.
+    """
+    if not isinstance(resource_key, str) or not resource_key or resource_key != normalize_task_key(resource_key):
+        raise ValueError(
+            f"Agentic component {task_key!r} resource key {resource_key!r} must be a plain identifier "
+            "of lowercase letters, digits, and single underscores"
+        )
+
+
 def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedActivity:
     """Pass authored files, resources, and the authored task payload to the bundle writer.
 
@@ -47,8 +61,9 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     a task behind flowx's back. A fragment that tries to set any of them is rejected.
 
     Raises:
-        ValueError: The authored task fragment sets a flowx-owned field, or a file
-            path escapes the bundle's ``src`` directory.
+        ValueError: The authored task fragment sets a flowx-owned field, a file path
+            escapes the bundle's ``src`` directory, a resource key is not a plain
+            identifier, or a binary file is not valid base64.
     """
     del scope
     owned_fields = sorted(FLOWX_OWNED_TASK_FIELDS & activity.task.keys())
@@ -57,11 +72,15 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
             f"Agentic component {activity.task_key!r} task wiring sets flowx-owned field(s) "
             f"{', '.join(owned_fields)}; set dependencies and run policy on the activity instead"
         )
+    for resource in activity.resources:
+        _check_resource_key(activity.task_key, resource.get("resource_key"))
     notebooks = [
         DabNotebook(
             relative_path=_source_relative_path(file["path"]),
             content=str(file.get("content", "")),
-            binary_content=(base64.b64decode(str(file["binary_content"])) if "binary_content" in file else None),
+            binary_content=(
+                base64.b64decode(str(file["binary_content"]), validate=True) if "binary_content" in file else None
+            ),
             write_to_bundle_root=False,
         )
         for file in activity.files

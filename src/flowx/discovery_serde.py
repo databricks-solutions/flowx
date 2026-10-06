@@ -16,9 +16,8 @@ best-effort description of what a task reads/writes -- not physical-only: a
 resolvable physical ``identity`` when there is one (else ``None``), an
 always-present ``signature``, and an open ``asset_type`` that also covers
 non-physical / logical / value hand-offs (e.g. an Airflow XCom). A graph's derived
-:class:`~flowx.models.ir.Lineage` block is serialised through ``ir_serde``'s
-``lineage_to_dict`` for the same reason; its inverse (:func:`_lineage_from_dict`)
-lives here because ``ir_serde`` ships only the forward direction.
+:class:`~flowx.models.ir.Lineage` block goes through ``ir_serde``'s
+``lineage_to_dict`` / ``lineage_from_dict`` pair for the same reason.
 
 Every node dict carries a ``node_type`` discriminator (the dataclass name) so a
 :class:`~flowx.models.discovery.ContainerNode` or
@@ -33,7 +32,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from flowx.ir_serde import data_asset_from_dict, data_asset_to_dict, lineage_to_dict
+from flowx.ir_serde import data_asset_from_dict, data_asset_to_dict, lineage_from_dict, lineage_to_dict
 from flowx.models.discovery import (
     ContainerNode,
     GapNode,
@@ -44,7 +43,6 @@ from flowx.models.discovery import (
     SourceGraph,
     SourceNode,
 )
-from flowx.models.ir import ControlEdge, DataEdge, Lineage, MotifAnnotation
 
 SOURCE_GRAPHS_FILENAME = "source_graphs.json"
 SOURCE_GRAPHS_CONTRACT_VERSION = "1"
@@ -97,7 +95,7 @@ def source_graph_from_dict(raw: dict[str, Any]) -> SourceGraph:
         run_timeout_seconds=raw.get("run_timeout_seconds"),
         tags=list(raw.get("tags") or []),
         tasks=[_node_from_dict(node) for node in raw.get("tasks") or []],
-        lineage=_lineage_from_dict(lineage) if lineage else None,
+        lineage=lineage_from_dict(lineage) if lineage else None,
         properties=dict(raw.get("properties") or {}),
         extensions=dict(raw.get("extensions") or {}),
         raw=raw.get("raw"),
@@ -126,8 +124,8 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
         "source": source,
         "graphs": [source_graph_to_dict(graph) for graph in graphs],
     }
-    document["graph_sha256"] = [_canonical_sha256(graph) for graph in document["graphs"]]
-    document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
+    document["graph_sha256"] = [canonical_sha256(graph) for graph in document["graphs"]]
+    document["document_sha256"] = canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
     return document
 
 
@@ -166,12 +164,12 @@ def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
         raise ValueError("source_graphs document has no 'graphs' list")
     recorded_graph_hashes = document.get("graph_sha256")
     if recorded_graph_hashes is not None:
-        actual_graph_hashes = [_canonical_sha256(graph) for graph in graphs]
+        actual_graph_hashes = [canonical_sha256(graph) for graph in graphs]
         if recorded_graph_hashes != actual_graph_hashes:
             raise ValueError("source_graphs graph_sha256 does not match the graphs it was recorded for")
     recorded_document_hash = document.get("document_sha256")
     if recorded_document_hash is not None:
-        actual_document_hash = _canonical_sha256({key: document.get(key) for key in _HASHED_DOCUMENT_KEYS})
+        actual_document_hash = canonical_sha256({key: document.get(key) for key in _HASHED_DOCUMENT_KEYS})
         if recorded_document_hash != actual_document_hash:
             raise ValueError("source_graphs document_sha256 does not match the document content")
     return [source_graph_from_dict(graph) for graph in graphs]
@@ -182,52 +180,10 @@ def read_source_graphs(path: Path) -> list[SourceGraph]:
     return source_graphs_from_document(json.loads(path.read_text(encoding="utf-8")))
 
 
-def _canonical_sha256(value: Any) -> str:
+def canonical_sha256(value: Any) -> str:
     """Hash *value* as canonical JSON so the digest ignores key order and whitespace."""
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _lineage_from_dict(raw: dict[str, Any]) -> Lineage:
-    """Rehydrate a :class:`Lineage` block from the dict ``ir_serde.lineage_to_dict`` emits.
-
-    The inverse of that forward serialiser (which ``ir_serde`` does not itself
-    ship), so a discovery graph's lineage round-trips through this module.
-    """
-    return Lineage(
-        control_edges=[
-            ControlEdge(
-                source_workflow=edge.get("source_workflow", ""),
-                target_workflow=edge.get("target_workflow", ""),
-                via_task_key=edge.get("via_task_key", ""),
-                wait_for_completion=edge.get("wait_for_completion"),
-                resolved=bool(edge.get("resolved", True)),
-            )
-            for edge in raw.get("control_edges") or []
-        ],
-        data_edges=[
-            DataEdge(
-                source_task_key=edge.get("source_task_key", ""),
-                target_task_key=edge.get("target_task_key", ""),
-                match_kind=edge.get("match_kind", ""),
-                match_key=edge.get("match_key", ""),
-                identity=edge.get("identity"),
-                asset_type=edge.get("asset_type"),
-            )
-            for edge in raw.get("data_edges") or []
-        ],
-        motifs=[
-            MotifAnnotation(
-                motif_id=motif.get("motif_id", ""),
-                member_task_keys=list(motif.get("member_task_keys") or []),
-                display_name=motif.get("display_name"),
-                databricks_replacement=motif.get("databricks_replacement"),
-                notes=list(motif.get("notes") or []),
-                source_type_hint=motif.get("source_type_hint"),
-            )
-            for motif in raw.get("motifs") or []
-        ],
-    )
 
 
 def _parameter_to_dict(spec: ParameterSpec) -> dict[str, Any]:

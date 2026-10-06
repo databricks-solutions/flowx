@@ -133,9 +133,11 @@ Run the **`setup`** skill first if you haven't. Both paths run the same validate
 
 ## Idempotency & safety
 
-`enrich` is atomic and idempotent: it replaces the whole `insights` block (never stacks), recomputes
-the `inventory_sha256` fingerprint from the deterministic inventory, and leaves every existing
-inventory key byte-identical. Re-running with the same insights rewrites the same bytes; re-running
+`enrich` is atomic and idempotent: it records the validated insights in
+`metadata/source_insights.json` (stamping `schema_version`, `inventory_sha256`, `source_graphs_sha256`
+and `source_insights_sha256`), then rebuilds `inventory.json` from the deterministic inventory plus that
+document rather than patching it in place. The `insights` block is replaced wholesale (never stacks),
+and every deterministic inventory key stays byte-identical. Re-running with the same insights rewrites the same bytes; re-running
 with different insights replaces the block. A validation failure writes nothing.
 
 ## Next step

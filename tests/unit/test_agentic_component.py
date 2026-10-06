@@ -10,6 +10,7 @@ import yaml
 
 from flowx.bundler.dab_writer import _combine_airflow_workflows, pipeline_dict_to_ir, write_bundle
 from flowx.ir_serde import activity_to_dict, pipeline_to_dict
+from flowx.models.dab import SetupTask
 from flowx.models.ir import AgenticComponentActivity, Dependency, Pipeline
 from flowx.preparer.workflow_preparer import prepare_workflow
 from flowx.validate.bundle_invariants import check_bundle_dir
@@ -208,3 +209,64 @@ def test_agentic_component_task_identity_dependencies_and_policy_come_from_the_a
     assert tasks["downstream"]["max_retries"] == 2
     assert "notebook_task" in tasks["downstream"]
     assert check_bundle_dir(tmp_path).ok
+
+
+@pytest.mark.parametrize("resource_key", ["../databricks", "../../outside", "nested/pipeline", "nested\\pipeline", ""])
+def test_agentic_component_rejects_resource_keys_that_are_not_plain_identifiers(resource_key):
+    activity = AgenticComponentActivity(
+        name="Unsafe resource",
+        task_key="unsafe_resource",
+        resources=[{"resource_key": resource_key, "definition": PIPELINE_DEFINITION}],
+        task=TASK,
+    )
+
+    with pytest.raises(ValueError, match="must be a plain identifier"):
+        prepare_workflow(Pipeline(name="unsafe", tasks=[activity]))
+
+
+def test_agentic_component_resource_key_matching_the_job_key_fails_instead_of_overwriting_the_job(tmp_path):
+    activity = AgenticComponentActivity(name="Ingest orders", task_key="ingest_orders", resources=RESOURCES, task=TASK)
+
+    with pytest.raises(ValueError, match="matches a job resource key"):
+        write_bundle(prepare_workflow(Pipeline(name="orders_ingestion", tasks=[activity])), tmp_path)
+
+    assert not (tmp_path / "resources" / "orders_ingestion.yml").exists()
+
+
+def test_agentic_component_resource_key_matching_a_dbt_factory_job_key_fails(tmp_path):
+    activity = AgenticComponentActivity(
+        name="Ingest orders",
+        task_key="ingest_orders",
+        resources=[{"resource_key": "orders_dbt", "definition": PIPELINE_DEFINITION}],
+        task={"pipeline_task": {"pipeline_id": "${resources.pipelines.orders_dbt.id}"}},
+    )
+    workflow = prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+    workflow.setup_tasks.append(
+        SetupTask(
+            type="pydabs_dbt_factory",
+            config={"hook_module": "resources.orders_dbt_job", "job_key": "orders_dbt"},
+        )
+    )
+
+    with pytest.raises(ValueError, match="matches a job resource key"):
+        write_bundle(workflow, tmp_path)
+
+
+def test_agentic_components_sharing_a_resource_key_fail_instead_of_overwriting_each_other(tmp_path):
+    first = AgenticComponentActivity(name="First", task_key="first", resources=RESOURCES, task=TASK)
+    second = AgenticComponentActivity(name="Second", task_key="second", resources=RESOURCES, task=TASK)
+
+    with pytest.raises(ValueError, match="more than one pipeline resource"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
+
+
+def test_agentic_component_rejects_binary_content_that_is_not_plain_base64():
+    activity = AgenticComponentActivity(
+        name="Wheel",
+        task_key="wheel",
+        files=[{"path": "libraries/orders.whl", "binary_content": "data:application/zip;base64,UEsDBAoAAAAA"}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/orders.py"}},
+    )
+
+    with pytest.raises(ValueError):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))

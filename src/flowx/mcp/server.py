@@ -682,10 +682,11 @@ def build_server() -> FastMCP:
           review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "enrich": output_dir(req), one of insights(inline object) | insights_path(req) — validate
-          agent-authored discover insights against inventory.json and merge them under one additive
-          `insights` key (atomic, idempotent). `ok` reflects validation; `result.violations` lists any
-          problems and the inventory is left untouched on failure. Author the insights by reading
-          inventory.json + the source artifacts first (see the flowx-discover skill's insights guide).
+          agent-authored discover insights against inventory.json, record them in source_insights.json,
+          and rebuild inventory.json from the deterministic inventory plus that document (atomic,
+          idempotent). `ok` reflects validation; `result.violations` lists any problems and both files
+          are left untouched on failure. Author the insights by reading inventory.json + the source
+          artifacts first (see the flowx-enrich skill's insights.md).
         - "route": output_dir(req), at most one of plan(inline object) | plan_path, plus optional
           source + a source path (forwarded so route can trigger convert if the report is absent, like
           the CLI) — one command that groups pipelines into connected components over control lineage

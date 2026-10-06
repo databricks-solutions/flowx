@@ -23,8 +23,10 @@ from flowx.models.ir import (
     Activity,
     AgenticComponentActivity,
     AppendVariableActivity,
+    ControlEdge,
     CopyActivity,
     DataAsset,
+    DataEdge,
     DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
@@ -149,6 +151,48 @@ def lineage_to_dict(lineage: Lineage) -> dict[str, Any]:
         ],
         "motifs": [_motif_annotation_to_dict(motif) for motif in lineage.motifs],
     }
+
+
+def lineage_from_dict(raw: dict[str, Any]) -> Lineage:
+    """Rehydrate a :class:`Lineage` block from the dict :func:`lineage_to_dict` emits.
+
+    The one inverse shared by the translation report and the discovery graph, so a
+    lineage block reads back the same way wherever it was written.
+    """
+    return Lineage(
+        control_edges=[
+            ControlEdge(
+                source_workflow=edge.get("source_workflow", ""),
+                target_workflow=edge.get("target_workflow", ""),
+                via_task_key=edge.get("via_task_key", ""),
+                wait_for_completion=edge.get("wait_for_completion"),
+                resolved=bool(edge.get("resolved", True)),
+            )
+            for edge in raw.get("control_edges") or []
+        ],
+        data_edges=[
+            DataEdge(
+                source_task_key=edge.get("source_task_key", ""),
+                target_task_key=edge.get("target_task_key", ""),
+                match_kind=edge.get("match_kind", ""),
+                match_key=edge.get("match_key", ""),
+                identity=edge.get("identity"),
+                asset_type=edge.get("asset_type"),
+            )
+            for edge in raw.get("data_edges") or []
+        ],
+        motifs=[
+            MotifAnnotation(
+                motif_id=motif.get("motif_id", ""),
+                member_task_keys=list(motif.get("member_task_keys") or []),
+                display_name=motif.get("display_name"),
+                databricks_replacement=motif.get("databricks_replacement"),
+                notes=list(motif.get("notes") or []),
+                source_type_hint=motif.get("source_type_hint"),
+            )
+            for motif in raw.get("motifs") or []
+        ],
+    )
 
 
 def _motif_annotation_to_dict(motif: MotifAnnotation) -> dict[str, Any]:
