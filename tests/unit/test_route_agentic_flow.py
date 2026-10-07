@@ -808,3 +808,88 @@ def test_combine_requires_a_recorded_plan(tmp_path: Path) -> None:
 def test_apply_combine_fill_has_no_validation_bypass() -> None:
     # There must be no surface that writes the combined report without structural validation.
     assert "validate" not in inspect.signature(apply_combine_fill).parameters
+
+
+def test_combine_same_hash_returns_already_combined_true_with_unchanged_message(tmp_path: Path) -> None:
+    """Same authored pipelines hash returns already_combined: True with message 'already applied, unchanged'."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+
+    first = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert first["ok"] is True and first["already_combined"] is False
+    report_before = report_path.read_bytes()
+    combines_before = combines_path.read_bytes()
+
+    second = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert second["ok"] is True
+    assert second["already_combined"] is True
+    assert second.get("message") == "already applied, unchanged"
+
+    assert report_path.read_bytes() == report_before
+    assert combines_path.read_bytes() == combines_before
+
+
+def test_combine_empty_pipelines_list_is_refused(tmp_path: Path) -> None:
+    """Empty pipelines list is refused and writes nothing."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    report_before = report_path.read_bytes()
+
+    result = apply_combine_fill(tmp_path, ["parent", "child"], [])
+
+    assert result["ok"] is False
+    assert "cannot be empty" in result["error"]
+    assert report_path.read_bytes() == report_before
+    assert not combines_path.exists()
+
+
+def test_combine_validation_failure_writes_nothing(tmp_path: Path) -> None:
+    """When structural validation fails, neither the store nor the report is written."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    report_before = report_path.read_bytes()
+
+    bad_pipeline = copy.deepcopy(_lfc_pipeline())
+    bad_pipeline["name"] = "orders_lfc_bad"
+    bad_task = bad_pipeline["tasks"][0]
+    bad_task["depends_on"] = [{"task_key": "nonexistent"}]
+
+    result = apply_combine_fill(tmp_path, ["parent", "child"], [bad_pipeline])
+
+    assert result["ok"] is False
+    assert "violations" in result
+    assert report_path.read_bytes() == report_before
+    assert not combines_path.exists()
+
+
+def test_combine_re_apply_after_reroute_rebuilds_unchanged(tmp_path: Path) -> None:
+    """After a re-route, re-applying the same combine rebuilds from baseline."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+
+    first = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert first["ok"] is True
+    report_after_combine = report_path.read_bytes()
+
+    plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
+    apply_plan_to_report(tmp_path, plan)
+    report_after_reroute = report_path.read_bytes()
+
+    assert report_after_combine == report_after_reroute
+
+
+def test_merge_agentic_refuses_routed_agentic_pipeline(tmp_path: Path) -> None:
+    """merge_agentic refuses a result landing in a routed-agentic pipeline."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "parent", "Extract", "extract")
+
+    with pytest.raises(ValueError) as exc:
+        merge_agentic_results(report_path, results_dir)
+    assert "routed agentic" in str(exc.value)

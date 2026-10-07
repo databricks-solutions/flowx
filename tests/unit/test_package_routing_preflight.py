@@ -247,3 +247,120 @@ def test_package_with_a_current_plan_writes_an_audit_with_hashes(tmp_path: Path)
     )
     assert audit["baseline_report_sha256"] == baseline_sha256
     assert audit["translation_report_sha256"] == hashlib.sha256(report_path.read_bytes()).hexdigest()
+
+
+def test_package_refuses_tampered_baseline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Package refuses when the baseline hash in the record doesn't match the actual file."""
+    _setup(tmp_path, _inventory("agentic"))
+    _record(tmp_path, "agentic")
+    plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
+    apply_plan_to_report(tmp_path, plan)
+
+    baseline_path = tmp_path / "metadata" / ".work" / "route_baseline" / "translation_report.json"
+    if not baseline_path.exists():
+        baseline_path = tmp_path / ".work" / "route_baseline" / "translation_report.json"
+    baseline_path.write_text("tampered", encoding="utf-8")
+
+    assert _package(tmp_path) == 1
+    assert "baseline is missing or changed" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_package_refuses_stale_unstamped_report(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Package refuses when unstamped report doesn't match fresh rebuild (suggests re-run route)."""
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    _record(tmp_path, "agentic")
+    plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
+    apply_plan_to_report(tmp_path, plan)
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["pipelines"][0]["name"] = "tampered"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    assert _package(tmp_path) == 1
+    error = capsys.readouterr().err
+    assert "does not match" in error or "re-run" in error.lower()
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_package_refuses_edited_combine_store(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Package refuses when agentic_combines.json pipelines were edited after the combine."""
+    _setup(tmp_path, _inventory("agentic"))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps({"components": [{"component_id": "component-1", "members": ["solo"], "decision": "agentic"}]}),
+        encoding="utf-8",
+    )
+    authored_path = tmp_path / "authored.json"
+    authored_path.write_text(json.dumps([_authored_pipeline()]), encoding="utf-8")
+
+    from flowx.adapter.__main__ import main as adapter_main
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)]) == 0
+    assert (
+        adapter_main(
+            [
+                "fill-agentic",
+                "combine",
+                "--output-dir",
+                str(tmp_path),
+                "--members",
+                "solo",
+                "--pipelines-path",
+                str(authored_path),
+            ]
+        )
+        == 0
+    )
+
+    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    combines = json.loads(combines_path.read_text(encoding="utf-8"))
+    combines["component-1"]["pipelines"][0]["name"] = "tampered_name"
+    combines_path.write_text(json.dumps(combines, indent=2), encoding="utf-8")
+
+    assert _package(tmp_path) == 1
+    error = capsys.readouterr().err
+    assert "combine" in error.lower() or "re-run" in error.lower()
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_package_refuses_stale_stamped_report(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Package refuses a stamped report whose record no longer matches the rebuild."""
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps({"components": [{"component_id": "component-1", "members": ["solo"], "decision": "agentic"}]}),
+        encoding="utf-8",
+    )
+    authored_path = tmp_path / "authored.json"
+    authored_path.write_text(json.dumps([_authored_pipeline()]), encoding="utf-8")
+
+    from flowx.adapter.__main__ import main as adapter_main
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)]) == 0
+    assert (
+        adapter_main(
+            [
+                "fill-agentic",
+                "combine",
+                "--output-dir",
+                str(tmp_path),
+                "--members",
+                "solo",
+                "--pipelines-path",
+                str(authored_path),
+            ]
+        )
+        == 0
+    )
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
+
+    stamped_path = tmp_path / ".work" / "translation_report.stamped.json"
+    stamped_report = json.loads(stamped_path.read_text(encoding="utf-8"))
+    record = stamped_report["_routing_record"]
+    record["components"]["component-1"]["outcome"] = "agentic-not-viable"
+    stamped_path.write_text(json.dumps(stamped_report, indent=2), encoding="utf-8")
+
+    assert _package(tmp_path) == 1
+    assert "out of date; re-run modify" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
