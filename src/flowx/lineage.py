@@ -168,7 +168,8 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
             return "identity", producer.identity, producer.identity
         return None
     if producer.signature and producer.signature == consumer.signature:
-        return "signature", producer.signature, producer.identity or consumer.identity
+        # A signature match proves nothing physical, so it never claims either side's identity.
+        return "signature", producer.signature, None
     return None
 
 
