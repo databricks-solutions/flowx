@@ -798,13 +798,18 @@ def apply_combine_fill(
     Validates the group's membership against the recorded plan, stores the authored pipelines in
     ``metadata/agentic_combines.json``, and rebuilds (applying it deterministically). The group's
     membership must exactly match a routed-agentic component in the plan, and every authored pipeline
-    must carry the correct source tag. The merged report is always validated structurally before
-    writing.
+    must carry the correct source tag.
 
-    Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_combined"}``. ``ok``
-    is ``False`` (and nothing written) on a plan/membership error, source tag violation, or structural
-    issue. Empty ``authored_pipelines`` is refused. Same combine_sha256 is a no-op; different hash
-    replaces the stored entry and rebuilds. Different authored pipelines after applying are refused.
+    Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_combined", "message"}``.
+    ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation,
+    structural validation failure, or any other error. Empty ``authored_pipelines`` is refused.
+
+    When the combine's hash matches the stored one and is already reflected in the live report,
+    returns ``ok: true, already_combined: true, message: 'already applied, unchanged'`` and writes
+    nothing. After a re-route, if the report no longer reflects the stored combine, rebuilds from
+    baseline and stored combines and writes the result. A different hash replaces the stored entry
+    for that component only and rebuilds. Nothing is written until structural validation passes
+    (all-or-nothing).
     """
     members = {str(member) for member in group_members}
     if not authored_pipelines:
@@ -838,6 +843,7 @@ def apply_combine_fill(
     stored_combine = combines.get(component_id, {})
     stored_sha256 = stored_combine.get("combine_sha256")
     in_report = {pipeline.get("name"): pipeline for pipeline in _report_pipelines(report)}
+
     if stored_sha256 == new_combine_sha256:
         if all(in_report.get(pipeline.get("name")) == pipeline for pipeline in authored_pipelines):
             return {
@@ -847,41 +853,50 @@ def apply_combine_fill(
                 "component_id": component_id,
                 "pipelines": len(_report_pipelines(report)),
                 "already_combined": True,
+                "message": "already applied, unchanged",
             }
-        return {
-            "ok": False,
-            "error": COMPONENT_ALREADY_FILLED,
-            "violations": [],
-            "pipelines": 0,
+        baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes, _ = _load_baseline(output_dir)
+        new_report, new_gaps, new_record = rebuild(
+            baseline_report,
+            baseline_gaps,
+            plan,
+            combines,
+            record,
+            baseline_report_bytes,
+            baseline_gaps_bytes,
+        )
+    else:
+        combines[component_id] = {
+            "members": list(members),
+            "pipelines": authored_pipelines,
+            "combine_sha256": new_combine_sha256,
         }
-    combines[component_id] = {
-        "members": list(members),
-        "pipelines": authored_pipelines,
-        "combine_sha256": new_combine_sha256,
-    }
-    _save_combines(output_dir, combines)
-    baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes, _ = _load_baseline(output_dir)
-    new_report, new_gaps, new_record = rebuild(
-        baseline_report,
-        baseline_gaps,
-        plan,
-        combines,
-        record,
-        baseline_report_bytes,
-        baseline_gaps_bytes,
-    )
+        baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes, _ = _load_baseline(output_dir)
+        new_report, new_gaps, new_record = rebuild(
+            baseline_report,
+            baseline_gaps,
+            plan,
+            combines,
+            record,
+            baseline_report_bytes,
+            baseline_gaps_bytes,
+        )
+
     if not isinstance(new_report.get("pipelines"), list):
         new_report = {"pipelines": [new_report]}
     new_report[ROUTING_RECORD_KEY] = new_record
+
     result = validate_report_structurally(new_report)
     if not result.ok:
         violations = [f"[{finding.code}] {finding.location}: {finding.message}" for finding in result.violations]
         return {"ok": False, "error": None, "violations": violations, "pipelines": 0}
 
+    _save_combines(output_dir, combines)
     _write_json_atomic(report_path, new_report)
     _write_json_atomic(work / GAPS_FILENAME, new_gaps)
     if (work / STAMPED_REPORT_FILENAME).exists():
         _write_json_atomic(work / STAMPED_REPORT_FILENAME, new_report)
+
     return {
         "ok": True,
         "error": None,
