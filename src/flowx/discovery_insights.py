@@ -30,6 +30,9 @@ than patched. Both writes are **atomic** (temp file + ``os.replace``) and **idem
 re-running with the same authored insights rewrites byte-identical bytes and never stacks. The
 library owns ``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and
 ``source_insights_sha256``; authored insights carrying any of them are rejected as unknown keys.
+The author instead supplies ``authored_against``, the ``source_graphs_sha256`` copied from the
+``inventory.json`` it read; it is required whenever the inventory records one, verified, and not
+recorded.
 """
 
 from __future__ import annotations
