@@ -94,19 +94,24 @@ option's patterns (flag any `has_simplification` re-architecture prominently).
 
 ## Step 2 — Decide and record the plan
 
-Take the per-component decision and record it. `route` validates the plan, writes the fingerprint-bound
-`metadata/conversion_plan.json`, and then edits `.work/translation_report.json` + `gaps.json` so every
-routed-**agentic** group's tasks become placeholder gaps (deterministic groups are left byte-identical;
-when nothing is routed agentic the report is untouched — the non-breaking guarantee).
+Take the per-component decision and record it. The plan is **freely editable** — change a component's
+decision from agentic to deterministic, or vice versa, without restriction. `route` validates the plan,
+writes the fingerprint-bound `metadata/conversion_plan.json`, and then rebuilds `.work/translation_report.json`
++ `gaps.json` from the immutable deterministic baseline, the plan, and any stored combines:
+
+- **deterministic** components: the baseline pipelines stay (deterministic outcome).
+- **agentic components with a stored combine** whose members match: the combine's pipelines replace the
+  members; gaps are dropped (agentic-applied outcome).
+- **agentic components without a matching combine**: placeholders and gaps as before (agentic-not-viable).
+- **switching back to deterministic**: restores that component's baseline exactly (deterministic outcome,
+  no record when the whole plan is deterministic — the non-breaking guarantee).
 
 When it edits the report, route also stamps a **routing record** onto it (the top-level
-`_routing_record` key): the plan's hash, the hash of the deterministic report it started from, and one
-entry per `component_id` with its `members`, `decision` and `outcome` — `deterministic`,
-`agentic-not-viable` (nothing filled yet) or `agentic-applied` (`fill-agentic combine` filled it).
-Every later rewrite (combine and `modify`) carries the record forward and only combine updates
-outcomes. Re-running route under the **same** decisions only refreshes the record's
-plan hash (in the report and in the stamped copy `modify` wrote); under different components or
-decisions it refuses and writes nothing — re-run convert, then route.
+`_routing_record` key): the plan's hash, the hashes of the immutable deterministic baseline report and
+gaps it started from, and one entry per `component_id` with its `members`, `decision`, `outcome`,
+`combine_sha256`, `fingerprint`, and `replacements` (tracking changes to a component's fingerprint
+across re-routes). Every re-route rebuilds from the baseline and current plan; identical input gives
+identical output (byte-for-byte, deterministic and idempotent).
 
 There are three ways to supply the decision:
 
@@ -208,21 +213,24 @@ MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [.
   `source_graphs_sha256` and `source_insights_sha256` must still match the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
   — you can't swap pipelines the plan didn't route agentic. The report must carry a routing record
   that matches that plan (route has applied it).
-- Combine marks the component `agentic-applied`. Re-running it with the same authored pipelines as
-  those now in the report is a no-op (`already_combined: true`), even when authored names reuse
-  member names, so the authored pipelines are never appended twice. A combine with different
-  authored pipelines on an applied component is refused with "component already filled; re-run
-  convert and route to start again" and writes nothing.
+- **Same authored pipelines** (hashed): `already_combined: true` with the message "already applied,
+  unchanged"; nothing is written. This is a no-op even after a re-route, allowing idempotent tooling.
+  If the report no longer reflects the stored combine (e.g. after a re-route with different decisions),
+  rebuilds from the baseline and stored combines to restore the combine, validating and writing the result.
+- **Different authored pipelines**: replaces the stored combine for that component only, rebuilds,
+  and writes the result (if structural validation passes). The `route_audit.json` records the replacement,
+  showing the old `fingerprint` in `replacements` and the new `fingerprint`.
 - `--pipelines-path` is a JSON **list** of pipeline IR dicts (the authored replacements), typically
-  carrying `AgenticComponentActivity` nodes (see below).
+  carrying `AgenticComponentActivity` nodes (see below). Empty `pipelines` list is refused.
 - Each authored pipeline **must** carry the source tag `"tags": {"source": "adf"}` (routing/agentic
   conversion is ADF-only). Combine asserts this up front and **fails closed** (nothing written, with
   a clear message) on a missing or non-`adf` tag, so a mis-tagged pipeline is caught here rather than
   surviving to the package preflight.
 - The merged report is **always** validated with the structural bundle invariants (a real
-  `prepare → write_bundle` pass) before it is written — no bypass — so a duplicate key, dangling
-  dependency, cycle, or dangling pipeline/run_job reference can never land on disk. On any violation,
-  `ok` is `false`, `violations` lists them, and nothing is written.
+  `prepare → write_bundle` pass) **before it is written** — no bypass — so a duplicate key, dangling
+  dependency, cycle, or dangling pipeline/run_job reference can never land on disk. Validation happens
+  first; if any violation is found, `ok` is `false`, `violations` lists them, and nothing is written
+  (all-or-nothing).
 
 ### Authoring an `AgenticComponentActivity` (the escape hatch)
 
@@ -293,12 +301,19 @@ just-in-time configuration (`inspect`/`modify`) as usual, then `flowx-package`. 
 `metadata/conversion_plan.json` is kept alongside `inventory.json` as the decision of record. It is the
 library's typed `ConversionPlan` (schema 2): one decision per component, bound to the inventory
 fingerprint, the saved `source_graphs.json` and the saved `source_insights.json` it was decided on,
-with a reserved, empty `assignments` list per component for per-node routing later. Package refuses
-to run when any of those no longer match, or when the packaged report's routing record no longer
-matches the plan (a different plan hash, different components, members or decisions, or no record
-although the plan routes a component agentic). `metadata/route_audit.json` keeps each component's
-decision and outcome from the record, the baseline report hash, and the gaps in agentic-routed
-pipelines.
+with a reserved, empty `assignments` list per component for per-node routing later.
+
+Package verifies the routing plan is still current against the inventory, then replays `rebuild`
+from the baseline (reusing it if it exists), the plan, and stored combines. For an unstamped report
+(not through `modify`), it must match the rebuild exactly; otherwise it refuses with "re-run route"
+(or "re-run fill-agentic combine" if the combine store changed). For a stamped report from `modify`,
+the routing record must match the rebuild; otherwise it refuses with "the configured report is out of
+date; re-run modify".
+
+`metadata/route_audit.json` records per component the `decision`, `outcome`, `fingerprint`,
+`combine_sha256`, and `replacements` (changes to the fingerprint across re-routes), plus the hashes
+of the plan, the baseline report and gaps, the inventory, and the packaged report. It survives the
+prune of `.work/` and documents what was packaged and how.
 
 ## Reference
 

@@ -679,7 +679,9 @@ def build_server() -> FastMCP:
         - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
           merge ADF agent results for convert's own agentic gaps. Refuses (writing nothing) any
           result landing in a pipeline the routing record routes agentic — fill those with
-          fill_agentic. Airflow's legacy name-based merge is disabled; use resolve_agentic.
+          fill_agentic. After routing, merges into non-routed pipelines are applied to both the live
+          report and the stored immutable baseline (so the next rebuild keeps them) and the routing
+          record's baseline hash is refreshed. Airflow's legacy name-based merge is disabled; use resolve_agentic.
         - "resolve_agentic": source(req: "airflow"), action(req: prepare | stage | apply), output_dir,
           airflow_source_path, report_path, gap_id, candidates, replace, accept_gap | accept_gaps, accept_all,
           review_complete, review_manifest, reset —
@@ -696,24 +698,24 @@ def build_server() -> FastMCP:
           and routes each. With NO plan it emits the components with BOTH conversion options
           (deterministic capability + motif/coverage evidence, and the agentic recommended patterns
           with any simplification pattern surfaced), plus a ready-to-record default plan — the dry run
-          to read first. With a plan it validates + records metadata/conversion_plan.json AND edits the
-          translation report so every routed-agentic group's tasks become placeholder gaps
-          (deterministic groups untouched; convert's deterministic translation is never modified, and
-          with no agentic decision the report is byte-identical to today). The edit stamps a routing
-          record onto the report (per component_id: members, decision, outcome; plus the plan and
-          baseline report hashes) that fill_agentic and apply_answers carry forward; re-routing under
-          different decisions is refused (re-run convert, then route). Routed-agentic groups are
-          filled only by fill_agentic.
+          to read first. With a plan it validates + records metadata/conversion_plan.json AND rebuilds
+          the translation report from an immutable baseline, the plan, and stored combines: deterministic
+          components stay as-is, agentic components with a stored combine get it applied, agentic without
+          a combine become placeholders (with no agentic decision the report stays byte-identical to the
+          baseline). The plan is freely editable — change any component's route without restriction.
+          Route stamps a routing record onto the report (per component_id: members, decision, outcome,
+          combine_sha256, fingerprint, replacements) that fill_agentic carries forward; every re-route
+          rebuilds deterministically and idempotently from the baseline and current plan.
         - "fill_agentic": output_dir(req), members(req: list of pipeline names or comma-separated
           string), one of pipelines(inline list of pipeline IR dicts) | pipelines_path — cross-pipeline
-          COMBINE fill: replace a routed-agentic group's pipelines with the agent-authored pipeline(s)
-          (typically AgenticComponentActivity nodes). `members` must exactly match a routed-agentic
-          component in the recorded, fingerprint-bound conversion_plan.json and the report's routing
-          record, and the merged report is always validated structurally before writing (no bypass);
-          the component's outcome becomes agentic-applied. It is the only fill for a routed-agentic
-          group (to keep a pipeline 1:1, author one same-named pipeline). Re-running it with the same
-          authored pipelines returns already_combined; different ones are refused ("component already
-          filled; re-run convert and route to start again").
+          COMBINE fill: apply agent-authored pipeline(s) to a routed-agentic component (typically
+          AgenticComponentActivity nodes). `members` must exactly match a routed-agentic component in
+          the recorded, fingerprint-bound conversion_plan.json and the report's routing record. Same
+          authored pipelines as already stored returns already_combined: true (idempotent, no writes).
+          Different pipelines replace the stored combine and rebuild. The merged report is always
+          validated structurally before writing (all-or-nothing: any violation and nothing is written).
+          It is the only fill for a routed-agentic group (to keep a pipeline 1:1, author one
+          same-named pipeline).
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

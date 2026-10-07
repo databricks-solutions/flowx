@@ -74,18 +74,21 @@ merges:
   rebuilds `metadata/inventory.json` with it under a single additive `insights` key, leaving every
   deterministic key byte-identical. Skippable for a deterministic-only, headless pass.
 - **Route:** groups pipelines into connected components over control lineage and, per component,
-  records a `deterministic` or `agentic` decision as the fingerprint-bound
-  `metadata/conversion_plan.json`. Recording an agentic decision edits `.work/translation_report.json`
-  so those groups' tasks become placeholder gaps and stamps a routing record onto it (per component:
-  members, decision and outcome, plus the plan and baseline report hashes); a fully-deterministic
-  plan (or no plan) leaves convert/package behaving exactly as before — the non-breaking guarantee.
-  Combine and `modify` carry the record forward; re-routing under different decisions is refused
-  (re-run convert, then route), and package refuses a report whose record no longer matches the plan.
+  records a freely-editable `deterministic` or `agentic` decision as the fingerprint-bound
+  `metadata/conversion_plan.json`. Route rebuilds `.work/translation_report.json` and `gaps.json`
+  from an immutable deterministic baseline, the routing plan, and stored combines: deterministic
+  components stay as-is; agentic components with a stored combine get the combine applied; agentic
+  without a combine become placeholders. A fully-deterministic plan (or no plan) leaves the report
+  byte-identical to the baseline — the non-breaking guarantee. Route stamps a routing record onto
+  the report (per component: members, decision, outcome, combine hash, and fingerprint) and every
+  re-route rebuilds deterministically and idempotently from the baseline and current plan.
 
-Routed-agentic groups are then filled only by `fill-agentic combine`, which replaces each group with
-authored pipelines (N→M, e.g. a Lakeflow Connect collapse, or one same-named pipeline to stay 1:1),
-typically using `AgenticComponentActivity` nodes. `convert --merge-agentic` fills convert's own gaps
-and refuses routed-agentic pipelines.
+Routed-agentic groups are then filled only by `fill-agentic combine`, which applies authored pipelines
+(N→M, e.g. a Lakeflow Connect collapse, or one same-named pipeline to stay 1:1), typically using
+`AgenticComponentActivity` nodes. Same authored pipelines as already applied returns "already applied,
+unchanged" and writes nothing (idempotent). Different pipelines replace and rebuild. `convert --merge-agentic`
+fills convert's own gaps and refuses routed-agentic pipelines. After routing, merging convert's own gaps
+updates both the live report and the stored baseline so the next rebuild keeps them.
 
 ## Phase 2: Convert
 

@@ -93,7 +93,7 @@ intermediates under `.work/` (pruned by `package`).
 | `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK |
 | `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table |
 | `routing.py` | Groups pipelines into connected components over control lineage; recommends deterministic/agentic per component (both options) and records the user's decision as `metadata/conversion_plan.json` (additive; convert untouched). Agentic decisions are ADF-only |
-| `route_agentic.py` | Applies a routing decision after convert: rewrites the translation report for agentic-routed groups (placeholder tasks + per-task `AgenticGap`), keeping the fill in-engine |
+| `route_agentic.py` | Rebuilds the report from the immutable deterministic baseline, the routing plan, and stored combines; applies combines deterministically and idempotently. |
 | `models/conversion_plan.py` | Typed `ConversionPlan` (schema 2): the library's load/validate/record API for `conversion_plan.json`, one decision per component, bound to the inventory, `source_graphs.json` and `source_insights.json` hashes; package fails closed on a mismatch |
 
 ## Activity Types
