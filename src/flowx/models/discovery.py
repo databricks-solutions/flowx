@@ -234,7 +234,9 @@ class ContainerNode(SourceNode):
     ``{"true": [...], "false": [...]}``, a ``Switch`` becomes
     ``{"<case value>": [...], "default": [...]}``, and an Airflow ``TaskGroup``
     becomes ``{"group": [...]}``. The branch label is the source's own, so no
-    control-flow structure is flattened away.
+    control-flow structure is flattened away. The one exception is a Switch case
+    whose value is literally ``"default"``: it is keyed ``"case:default"`` so it
+    never collides with the Switch's own default branch.
 
     Attributes:
         branches: Branch label -> ordered child nodes.
