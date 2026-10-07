@@ -32,6 +32,8 @@ an ``IfCondition`` becomes ``{"true": [...], "false": [...]}``, a ``ForEach`` /
 ``Until`` becomes ``{"body": [...]}``, and a ``Switch`` becomes
 ``{"<case value>": [...], "default": [...]}``. Branch insertion order matches the
 order ADF declares the branches so a downstream flatten reproduces source order.
+A case whose value is literally ``"default"`` is keyed ``"case:default"`` so it never
+collides with the Switch's own default branch.
 """
 
 from __future__ import annotations
@@ -346,7 +348,8 @@ def _control_flow_branches(activity: AdfActivity, definitions: AdfDefinitions) -
         # from the raw typeProperties; that keeps every named branch, empty ones included.
         declared_cases = (activity.type_properties or {}).get("cases")
         for case_value in (str(case.get("value", "")) for case in declared_cases or []):
-            branches[case_value] = [_activity_to_node(child, definitions) for child in parsed_cases.get(case_value, [])]
+            case_label = "case:default" if case_value == "default" else case_value
+            branches[case_label] = [_activity_to_node(child, definitions) for child in parsed_cases.get(case_value, [])]
         branches["default"] = [
             _activity_to_node(child, definitions) for child in (activity.switch_default_activities or [])
         ]
