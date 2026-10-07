@@ -341,8 +341,17 @@ def _control_flow_branches(activity: AdfActivity, definitions: AdfDefinitions) -
         return {"body": [_activity_to_node(child, definitions) for child in (activity.activities or [])]}
     if activity.type == "Switch":
         branches: dict[str, list[SourceNode]] = {}
-        for case_value, case_activities in (activity.switch_cases or {}).items():
-            branches[case_value] = [_activity_to_node(child, definitions) for child in case_activities]
+        parsed_cases = activity.switch_cases or {}
+        # The parser drops a case whose activities list is empty, so the declared case labels come
+        # from the raw typeProperties; that keeps every named branch, empty ones included.
+        declared_cases = (activity.type_properties or {}).get("cases")
+        declared_values = [
+            str(case["value"])
+            for case in declared_cases or []
+            if isinstance(case, dict) and case.get("value") is not None
+        ]
+        for case_value in declared_values + [value for value in parsed_cases if value not in declared_values]:
+            branches[case_value] = [_activity_to_node(child, definitions) for child in parsed_cases.get(case_value, [])]
         branches["default"] = [
             _activity_to_node(child, definitions) for child in (activity.switch_default_activities or [])
         ]

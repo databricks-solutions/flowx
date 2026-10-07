@@ -161,9 +161,12 @@ def _dataset_ref_to_asset(
     signature is falsy, so :func:`~flowx.lineage._match_assets` cannot use it as a
     join key -- the asset is still captured as a read / write for reporting, it just
     cannot manufacture a signature-tier edge. When *location_overridden* is set the
-    dataset's location is not what the activity touches, so no identity is resolved.
+    dataset's location is not what the activity touches, so neither an identity nor a
+    signature is derived from it.
     """
-    identity = None if location_overridden else resolve_dataset_identity(dataset_ref, definitions, context)
+    if location_overridden:
+        return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))
+    identity = resolve_dataset_identity(dataset_ref, definitions, context)
     if identity is not None:
         # Mirror the identity into the signature so the weak tier never joins a
         # resolved asset to an unresolved one that merely shares a physical value.

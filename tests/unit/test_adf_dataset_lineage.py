@@ -766,3 +766,45 @@ def test_parameterised_file_location_bound_to_literals_resolves_to_its_path() ->
     )
     # An unbound file-name parameter is unknown, so the folder alone is never used as the identity.
     assert resolve_dataset_identity(unbound, definitions) is None
+
+
+def test_overridden_read_carries_no_signature_so_it_cannot_join_on_the_weak_tier() -> None:
+    """With the writer's identity unresolved, a shared dataset binding must not join a wildcard reader by signature."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_param": _adls_dataset(
+                "ds_param",
+                file_system="data",
+                folder_path="@dataset().folderPath",
+                linked_service="ls_secret",
+            )
+        },
+        linked_services={
+            "ls_secret": AdfLinkedService(name="ls_secret", type="AzureBlobFS", properties={"typeProperties": {}})
+        },
+    )
+    binding = {"folderPath": {"value": "@concat('landing/', pipeline().parameters.run)", "type": "Expression"}}
+    ingest = AdfActivity(
+        name="Ingest",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_param", parameters=binding)],
+        type_properties={"sink": {"type": "DelimitedTextSink"}},
+    )
+    publish = AdfActivity(
+        name="Publish",
+        type="Copy",
+        inputs=[AdfDatasetReference(reference_name="ds_param", parameters=binding)],
+        type_properties={"source": {"type": "DelimitedTextSource", "storeSettings": {"wildcardFileName": "*.csv"}}},
+    )
+    _, ingest_writes = activity_data_assets(ingest, definitions)
+    publish_reads, _ = activity_data_assets(publish, definitions)
+
+    assert ingest_writes[0].identity is None
+    assert ingest_writes[0].signature  # the writer still has a path-anchored signature to join on
+    assert publish_reads[0].identity is None
+    assert publish_reads[0].signature == ""
+    edges = data_edges_from_endpoints(
+        [("Ingest", asset) for asset in ingest_writes], [("Publish", asset) for asset in publish_reads]
+    )
+    assert edges == []

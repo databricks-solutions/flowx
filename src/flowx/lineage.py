@@ -278,6 +278,7 @@ def build_motif_annotations(pipeline: Pipeline) -> list[MotifAnnotation]:
                 display_name=activity.display_name,
                 databricks_replacement=activity.databricks_replacement,
                 notes=list(activity.confidence_notes),
+                source_type_hint=getattr(activity, "source_type_hint", None),
             )
         )
     return annotations
