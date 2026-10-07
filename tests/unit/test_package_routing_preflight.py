@@ -198,9 +198,10 @@ def test_rerouting_the_same_decisions_after_enrich_refreshes_the_stamped_report(
     assert audit["components"][0]["outcome"] == "agentic-applied"
 
 
-def test_route_agentic_then_deterministic_is_refused_and_writes_nothing(
+def test_route_agentic_then_deterministic_switches_back_to_deterministic(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Re-routing from agentic to deterministic is allowed; the record is cleared (spec change)."""
     report_path = _setup(tmp_path, _inventory("agentic"))
     plan_path = tmp_path / "plan.json"
 
@@ -210,14 +211,13 @@ def test_route_agentic_then_deterministic_is_refused_and_writes_nothing(
         return adapter_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)])
 
     assert _route("agentic") == 0
-    recorded_plan = (tmp_path / "metadata" / "conversion_plan.json").read_bytes()
     routed_report = report_path.read_bytes()
     capsys.readouterr()
 
-    assert _route("deterministic") == 1
-    assert "re-run convert, then route" in capsys.readouterr().err
-    assert (tmp_path / "metadata" / "conversion_plan.json").read_bytes() == recorded_plan
-    assert report_path.read_bytes() == routed_report
+    assert _route("deterministic") == 0
+    capsys.readouterr()
+    deterministic_report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert "_routing_record" not in deterministic_report
 
 
 def test_package_with_a_current_plan_writes_an_audit_with_hashes(tmp_path: Path) -> None:

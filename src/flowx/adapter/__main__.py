@@ -188,7 +188,7 @@ def _run_route(args: argparse.Namespace) -> int:
     """
     from flowx import routing
     from flowx.models.conversion_plan import ConversionPlan
-    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan, reroute_conflict
+    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan
 
     inventory_path = args.output_dir / "metadata" / "inventory.json"
     if not inventory_path.exists():
@@ -224,15 +224,10 @@ def _run_route(args: argparse.Namespace) -> int:
             )
             return 1
 
-    if not routing.validate_plan(plan, inventory):
-        try:
-            conflict = reroute_conflict(args.output_dir, plan)
-        except (OSError, json.JSONDecodeError) as error:
-            print(f"Failed to read {report_path}: {error}", file=sys.stderr)
-            return 1
-        if conflict is not None:
-            print(f"Refusing to route: {conflict}.", file=sys.stderr)
-            return 1
+    violations = routing.validate_plan(plan, inventory)
+    if violations:
+        _emit_json({"ok": False, "violations": violations, "components": 0}, args.out)
+        return 1
 
     try:
         result = routing.record_plan(args.output_dir, plan=plan)
