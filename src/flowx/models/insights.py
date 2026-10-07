@@ -227,10 +227,13 @@ class Insights:
 
     In the inventory they sit under the additive ``insights`` key.
 
-    The agent authors only these four content fields. The library stamps ``schema_version``, the
-    ``inventory_sha256`` fingerprint, the ``source_graphs_sha256`` it was checked against and its own
-    ``source_insights_sha256`` on record (see :mod:`flowx.discovery_insights`), so the authored
-    insights stay bound to the exact deterministic inventory and source graphs they describe.
+    The agent authors only these four content fields, plus ``authored_against``: the
+    ``source_graphs_sha256`` copied from the ``inventory.json`` it read. It is required whenever the
+    inventory records one, and enrich verifies it but does not record it. The library stamps
+    ``schema_version``, the ``inventory_sha256`` fingerprint, the ``source_graphs_sha256`` it was
+    checked against and its own ``source_insights_sha256`` on record (see
+    :mod:`flowx.discovery_insights`), so the authored insights stay bound to the exact deterministic
+    inventory and source graphs they describe.
 
     Attributes:
         overview: A short factory-wide narrative -- what this collection of pipelines is.

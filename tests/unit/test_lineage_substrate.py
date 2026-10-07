@@ -123,6 +123,16 @@ def test_control_edges_run_job_activity_is_source_neutral():
     assert edges[0].resolved is True
 
 
+def test_run_now_of_an_existing_job_is_not_a_cross_workflow_edge():
+    """A run-now by job ID targets a job outside the source; its job_name is only the caller's task key."""
+    pipeline = Pipeline(
+        name="dag_main",
+        tasks=[RunJobActivity(name="trigger", task_key="trigger", job_name="trigger", existing_job_id="123")],
+    )
+
+    assert build_control_edges(pipeline) == []
+
+
 def test_control_edges_unresolved_callee_is_recorded_not_dropped():
     """An empty callee is kept with resolved=False rather than silently dropped."""
     pipeline = Pipeline(name="parent", tasks=[_execute("call", "")])

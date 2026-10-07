@@ -8,8 +8,11 @@ later phase can tell exactly which graph and which insights a decision was made 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from flowx.discovery_insights import (
     INSIGHTS_KEY,
@@ -50,6 +53,12 @@ def _discover(output_dir: Path) -> Path:
     return path
 
 
+def _authored(output_dir: Path) -> dict[str, Any]:
+    """Insights authored against the inventory now on disk, as an agent records what it read."""
+    inventory = json.loads((output_dir / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+    return {**_insights(), "authored_against": inventory["source_graphs_sha256"]}
+
+
 def _insights() -> dict[str, Any]:
     return {
         "overview": "One ingestion pipeline.",
@@ -61,7 +70,7 @@ def test_enrich_writes_source_insights_and_renders_the_inventory_from_it(tmp_pat
     inventory_path = _discover(tmp_path)
     before = json.loads(inventory_path.read_text(encoding="utf-8"))
 
-    result = enrich_inventory(tmp_path, insights=_insights())
+    result = enrich_inventory(tmp_path, insights=_authored(tmp_path))
 
     assert result["ok"] is True
     source_insights = json.loads((tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
@@ -69,6 +78,8 @@ def test_enrich_writes_source_insights_and_renders_the_inventory_from_it(tmp_pat
     assert inventory[INSIGHTS_KEY] == source_insights
     assert {key: value for key, value in inventory.items() if key != INSIGHTS_KEY} == before
     assert source_insights["source_graphs_sha256"] == before["source_graphs_sha256"]
+    assert "authored_against" not in source_insights
+    assert "authored_against" not in inventory[INSIGHTS_KEY]
     assert source_insights["inventory_sha256"] == inventory_fingerprint(before)
     assert result["source_insights_sha256"] == source_insights["source_insights_sha256"]
     assert source_insights_hash_violations(source_insights) == []
@@ -78,9 +89,9 @@ def test_re_enriching_is_byte_identical_and_keeps_the_routing_fingerprint(tmp_pa
     inventory_path = _discover(tmp_path)
     fingerprint_before = inventory_fingerprint(json.loads(inventory_path.read_text(encoding="utf-8")))
 
-    enrich_inventory(tmp_path, insights=_insights())
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
     first = (inventory_path.read_bytes(), (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).read_bytes())
-    enrich_inventory(tmp_path, insights=_insights())
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
     second = (inventory_path.read_bytes(), (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).read_bytes())
 
     assert first == second
@@ -155,8 +166,78 @@ def test_authored_insights_cannot_set_the_library_hashes() -> None:
 
 def test_an_edited_source_insights_file_fails_its_hash_check(tmp_path: Path) -> None:
     _discover(tmp_path)
-    enrich_inventory(tmp_path, insights=_insights())
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
     document = json.loads((tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
     document["overview"] = "Edited after enrich."
 
     assert source_insights_hash_violations(document) != []
+
+
+def test_insights_authored_against_an_older_inventory_are_refused(tmp_path: Path) -> None:
+    """A missing or different authored_against means discover ran again after the insights were written."""
+    inventory_path = _discover(tmp_path)
+    inventory_bytes = inventory_path.read_bytes()
+
+    missing = enrich_inventory(tmp_path, insights=_insights())
+    stale = enrich_inventory(tmp_path, insights={**_insights(), "authored_against": "an-older-discover"})
+
+    assert missing["ok"] is False
+    assert any("'authored_against' is required" in violation for violation in missing["violations"])
+    assert stale["ok"] is False
+    assert any("authored against a different inventory" in violation for violation in stale["violations"])
+    assert inventory_path.read_bytes() == inventory_bytes
+    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+
+
+def test_authored_against_is_refused_when_the_inventory_records_no_graph_hash() -> None:
+    inventory = build_source_inventory(_graphs(), source="airflow", source_dir="/dags")
+
+    violations = validate_insights({**_insights(), "authored_against": "a-placeholder"}, inventory)
+
+    assert any(
+        "'authored_against' was given" in violation and "source_graphs_sha256" in violation for violation in violations
+    )
+
+
+def test_a_failed_first_inventory_write_leaves_no_insights_behind(tmp_path: Path, monkeypatch: Any) -> None:
+    """With no previous source_insights.json, a failed inventory replace removes the new one."""
+    inventory_path = _discover(tmp_path)
+    metadata = tmp_path / "metadata"
+    files_before = sorted(path.name for path in metadata.iterdir())
+    inventory_before = inventory_path.read_bytes()
+    real_replace = os.replace
+
+    def failing_replace(source: Any, destination: Any) -> None:
+        if Path(destination) == inventory_path:
+            raise OSError("disk full")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError, match="disk full"):
+        enrich_inventory(tmp_path, insights=_authored(tmp_path))
+
+    assert not (metadata / SOURCE_INSIGHTS_FILENAME).exists()
+    assert inventory_path.read_bytes() == inventory_before
+    assert sorted(path.name for path in metadata.iterdir()) == files_before
+
+
+def test_a_failed_inventory_write_leaves_the_previous_insights_in_place(tmp_path: Path, monkeypatch: Any) -> None:
+    """source_insights.json and inventory.json are replaced together or not at all."""
+    inventory_path = _discover(tmp_path)
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    insights_path = tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME
+    insights_before, inventory_before = insights_path.read_bytes(), inventory_path.read_bytes()
+    real_replace = os.replace
+
+    def failing_replace(source: Any, destination: Any) -> None:
+        if Path(destination) == inventory_path:
+            raise OSError("disk full")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    changed = {**_authored(tmp_path), "overview": "A different overview."}
+    with pytest.raises(OSError, match="disk full"):
+        enrich_inventory(tmp_path, insights=changed)
+
+    assert insights_path.read_bytes() == insights_before
+    assert inventory_path.read_bytes() == inventory_before

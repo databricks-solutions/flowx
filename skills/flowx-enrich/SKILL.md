@@ -57,7 +57,9 @@ narrative.
 1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json`. Note every
    pipeline `name` (these are the only valid foreign keys), and each pipeline's `lineage` block — in
    particular `lineage.control_edges`, each `{source_workflow, target_workflow, via_task_key}`. A
-   deterministic **control** relationship you annotate must match one of these exactly.
+   deterministic **control** relationship you annotate must match one of these exactly. When the
+   inventory records a top-level `source_graphs_sha256` (ADF discover does), copy it into
+   `authored_against`; when it records none, leave `authored_against` out.
 2. **Read the source artifacts** you need to form judgment — the per-pipeline `raw` payloads in the
    inventory, the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source — enough to state
    each pipeline's *intent* and the Databricks patterns that fit. Ground every recommended pattern in

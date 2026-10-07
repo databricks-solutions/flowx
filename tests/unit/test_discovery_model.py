@@ -297,6 +297,17 @@ def test_graph_default_policy_and_run_timeout_round_trip_and_default_none():
     assert rehydrated.run_timeout_seconds is None
 
 
+def test_declared_but_empty_policies_survive_the_round_trip():
+    """An empty PolicySpec serialises as {} and must come back as PolicySpec(), not None."""
+    node = SourceNode(source_id="t", task_key="t", concept=CONCEPT_NOTEBOOK, source=SOURCE_AIRFLOW, policy=PolicySpec())
+    graph = SourceGraph(name="dag", source=SOURCE_AIRFLOW, default_policy=PolicySpec(), tasks=[node])
+
+    reloaded = source_graph_from_dict(json.loads(json.dumps(source_graph_to_dict(graph))))
+    assert reloaded.default_policy == PolicySpec()
+    assert reloaded.tasks[0].policy == PolicySpec()
+    assert reloaded == graph
+
+
 def test_non_physical_asset_type_and_empty_reads_writes_are_valid():
     """A value/logical asset_type round-trips, and empty reads/writes are valid (best-effort)."""
     producer = SourceNode(

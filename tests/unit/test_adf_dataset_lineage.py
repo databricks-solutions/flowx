@@ -9,6 +9,9 @@ captured, not just index 0.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from flowx.lineage import data_edges_from_endpoints
 from flowx.models.adf_ast import (
     AdfActivity,
     AdfDataset,
@@ -17,6 +20,9 @@ from flowx.models.adf_ast import (
     AdfLinkedService,
 )
 from flowx.sources.adf.dataset_lineage import activity_data_assets, resolve_dataset_identity
+from flowx.sources.adf.loader import load_adf_definitions
+
+FIXTURES_DIR = Path(__file__).parent.parent / "resources" / "json"
 
 
 def _definitions(**datasets: AdfDataset) -> AdfDefinitions:
@@ -476,3 +482,287 @@ def _ref_dict(reference: AdfDatasetReference) -> dict:
     if reference.parameters:
         payload["parameters"] = reference.parameters
     return payload
+
+
+def test_unevaluated_arm_expressions_never_become_identities() -> None:
+    """An ARM template expression the export left unevaluated is unresolved, so it never forms an identity."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_table": _table_dataset("ds_table", schema="[parameters('schemaName')]", table="Orders"),
+            "ds_file": _adls_dataset(
+                "ds_file", file_system="[concat('raw', parameters('env'))]", folder_path="in", linked_service="ls"
+            ),
+            "ds_escaped": _adls_dataset("ds_escaped", file_system="[[literal]", folder_path="in", linked_service="ls"),
+        },
+        linked_services={
+            "ls_sql": AdfLinkedService(
+                name="ls_sql", type="AzureSqlDatabase", properties={"typeProperties": {"server": "sql.example.net"}}
+            ),
+            "ls": _adls_linked_service("ls", account="acct"),
+        },
+    )
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_table"), definitions) is None
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_file"), definitions) is None
+    # ARM's "[[" escape is a literal value that starts with "[", so it stays physical.
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_escaped"), definitions) is not None
+
+
+def test_bracket_quoted_sql_names_keep_their_identity() -> None:
+    """Bracket-quoted SQL names are literal table names, not ARM expressions, so they keep their identity."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_legacy": AdfDataset(
+                name="ds_legacy",
+                type="AzureSqlTable",
+                properties={
+                    "typeProperties": {"tableName": "[dbo].[Orders]"},
+                    "linkedServiceName": {"referenceName": "ls_sql"},
+                },
+            ),
+            "ds_spaced": _table_dataset("ds_spaced", schema="dbo", table="[Order Details]"),
+        },
+        linked_services={
+            "ls_sql": AdfLinkedService(
+                name="ls_sql", type="AzureSqlDatabase", properties={"typeProperties": {"server": "sql.example.net"}}
+            ),
+        },
+    )
+    assert (
+        resolve_dataset_identity(AdfDatasetReference(reference_name="ds_legacy"), definitions)
+        == "sql.example.net/[dbo].[Orders]"
+    )
+    assert (
+        resolve_dataset_identity(AdfDatasetReference(reference_name="ds_spaced"), definitions)
+        == "sql.example.net/dbo.[Order Details]"
+    )
+
+
+def test_arm_expression_storage_url_has_no_path_identity() -> None:
+    """An unevaluated ARM ``url`` is checked whole, so a cut-off fragment never stands in for the account."""
+    arm_lake = AdfLinkedService(
+        name="ls_arm_lake",
+        type="AzureBlobFS",
+        properties={
+            "typeProperties": {"url": "[concat('https://', parameters('storageAccountName'), '.dfs.core.windows.net')]"}
+        },
+    )
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_orders": _adls_dataset(
+                "ds_orders", file_system="raw", folder_path="in", linked_service="ls_arm_lake", file_name="orders.csv"
+            )
+        },
+        linked_services={"ls_arm_lake": arm_lake},
+    )
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orders"), definitions) is None
+
+
+def _lake_definitions() -> AdfDefinitions:
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_lake": _adls_dataset("ds_lake", file_system="data", folder_path="landing", linked_service="ls")},
+        linked_services={"ls": _adls_linked_service("ls", account="acct")},
+    )
+
+
+def test_store_settings_path_override_read_gets_no_identity_edge() -> None:
+    """A Copy that reads through a wildcard override does not read the dataset's folder, so no identity edge forms."""
+    definitions = _lake_definitions()
+    ingest = AdfActivity(
+        name="Ingest",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_lake")],
+        type_properties={"sink": {"type": "DelimitedTextSink"}},
+    )
+    publish = AdfActivity(
+        name="Publish",
+        type="Copy",
+        inputs=[AdfDatasetReference(reference_name="ds_lake")],
+        type_properties={
+            "source": {
+                "type": "DelimitedTextSource",
+                "storeSettings": {"wildcardFolderPath": "archive/2023", "wildcardFileName": "*.csv"},
+            }
+        },
+    )
+    _, ingest_writes = activity_data_assets(ingest, definitions)
+    publish_reads, _ = activity_data_assets(publish, definitions)
+
+    assert ingest_writes[0].identity == "abfss://data@acct.dfs.core.windows.net/landing"
+    assert publish_reads[0].identity is None
+    edges = data_edges_from_endpoints(
+        [("Ingest", asset) for asset in ingest_writes], [("Publish", asset) for asset in publish_reads]
+    )
+    assert edges == []
+
+
+def test_store_settings_path_override_covers_lookup_and_dataset_activities() -> None:
+    """Lookup overrides on its ``source``; Delete and GetMetadata override directly on ``typeProperties``."""
+    definitions = _lake_definitions()
+    lookup = AdfActivity(
+        name="Lookup",
+        type="Lookup",
+        type_properties={
+            "source": {"type": "DelimitedTextSource", "storeSettings": {"prefix": "orders_"}},
+            "dataset": {"referenceName": "ds_lake"},
+        },
+    )
+    get_metadata = AdfActivity(
+        name="GetMetadata",
+        type="GetMetadata",
+        type_properties={"dataset": {"referenceName": "ds_lake"}, "storeSettings": {"fileListPath": "lists/today.txt"}},
+    )
+    recursive_delete = AdfActivity(
+        name="Delete",
+        type="Delete",
+        type_properties={"dataset": {"referenceName": "ds_lake"}, "storeSettings": {"recursive": True}},
+    )
+
+    assert [asset.identity for asset in activity_data_assets(lookup, definitions)[0]] == [None]
+    assert [asset.identity for asset in activity_data_assets(get_metadata, definitions)[0]] == [None]
+    assert [asset.identity for asset in activity_data_assets(recursive_delete, definitions)[0]] == [
+        "abfss://data@acct.dfs.core.windows.net/landing"
+    ]
+
+
+def test_source_query_read_gets_no_identity_edge() -> None:
+    """A Lookup that runs its own query reads what the query returns, not the dataset's table."""
+    definitions = load_adf_definitions(FIXTURES_DIR)
+    load_orders = AdfActivity(
+        name="LoadOrders",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_azure_sql_orders")],
+        type_properties={"sink": {"type": "AzureSqlSink"}},
+    )
+    get_watermark = AdfActivity(
+        name="GetWatermark",
+        type="Lookup",
+        type_properties={
+            "source": {"type": "AzureSqlSource", "sqlReaderQuery": "SELECT MAX(ts) AS wm FROM dbo.watermarks"},
+            "dataset": {"referenceName": "ds_azure_sql_orders"},
+        },
+    )
+    _, load_orders_writes = activity_data_assets(load_orders, definitions)
+    get_watermark_reads, _ = activity_data_assets(get_watermark, definitions)
+
+    assert load_orders_writes[0].identity == "ls_azure_sql/dbo.orders"
+    assert get_watermark_reads[0].identity is None
+    edges = data_edges_from_endpoints(
+        [("LoadOrders", asset) for asset in load_orders_writes],
+        [("GetWatermark", asset) for asset in get_watermark_reads],
+    )
+    assert edges == []
+
+
+def test_stored_procedure_source_and_sink_get_no_identity() -> None:
+    """A stored procedure decides what is read or written, so neither side keeps the dataset's table identity."""
+    definitions = _definitions(ds_orders=_table_dataset("ds_orders", schema="dbo", table="Orders"))
+    lookup = AdfActivity(
+        name="LookupStoredProc",
+        type="Lookup",
+        type_properties={
+            "source": {"type": "SqlSource", "sqlReaderStoredProcedureName": "dbo.usp_get_orders"},
+            "dataset": {"referenceName": "ds_orders"},
+        },
+    )
+    copy = AdfActivity(
+        name="UpsertOrders",
+        type="Copy",
+        inputs=[AdfDatasetReference(reference_name="ds_orders")],
+        outputs=[AdfDatasetReference(reference_name="ds_orders")],
+        type_properties={
+            "source": {"type": "SqlSource"},
+            "sink": {"type": "SqlSink", "sqlWriterStoredProcedureName": "dbo.usp_upsert_orders"},
+        },
+    )
+    copy_reads, copy_writes = activity_data_assets(copy, definitions)
+
+    assert [asset.identity for asset in activity_data_assets(lookup, definitions)[0]] == [None]
+    assert [asset.identity for asset in copy_writes] == [None]
+    assert [asset.identity for asset in copy_reads] == ["ls_sql/dbo.Orders"]
+
+
+def test_connector_specific_query_read_gets_no_identity_edge() -> None:
+    """An Oracle ``oracleReaderQuery`` overrides the read like ``sqlReaderQuery``; an empty one does not."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_oracle_control": AdfDataset(
+                name="ds_oracle_control",
+                type="OracleTable",
+                properties={
+                    "typeProperties": {"schema": "HR", "table": "ETL_CONTROL"},
+                    "linkedServiceName": {"referenceName": "ls_oracle"},
+                },
+            )
+        },
+        linked_services={
+            "ls_oracle": AdfLinkedService(
+                name="ls_oracle",
+                type="Oracle",
+                properties={"typeProperties": {"connectionString": "host=ora.example.net;port=1521;serviceName=HR"}},
+            )
+        },
+    )
+    stage_control = AdfActivity(
+        name="StageControl",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_oracle_control")],
+        type_properties={"sink": {"type": "OracleSink"}},
+    )
+
+    def _lookup(name: str, query: str) -> AdfActivity:
+        return AdfActivity(
+            name=name,
+            type="Lookup",
+            type_properties={
+                "source": {"type": "OracleSource", "oracleReaderQuery": query},
+                "dataset": {"referenceName": "ds_oracle_control"},
+            },
+        )
+
+    _, stage_control_writes = activity_data_assets(stage_control, definitions)
+    get_watermark_reads, _ = activity_data_assets(
+        _lookup("GetWatermark", "SELECT MAX(loaded_at) FROM HR.ETL_AUDIT"), definitions
+    )
+    read_control_reads, _ = activity_data_assets(_lookup("ReadControl", ""), definitions)
+
+    assert stage_control_writes[0].identity == "ls_oracle/HR.ETL_CONTROL"
+    assert get_watermark_reads[0].identity is None
+    assert (
+        data_edges_from_endpoints(
+            [("StageControl", asset) for asset in stage_control_writes],
+            [("GetWatermark", asset) for asset in get_watermark_reads],
+        )
+        == []
+    )
+    assert read_control_reads[0].identity == "ls_oracle/HR.ETL_CONTROL"
+
+
+def test_parameterised_file_location_bound_to_literals_resolves_to_its_path() -> None:
+    """``@dataset().x`` location parts resolve against the call-site bindings, as table names do."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_param": _adls_dataset(
+                "ds_param",
+                file_system="data",
+                folder_path={"value": "@dataset().folder", "type": "Expression"},
+                linked_service="ls",
+                file_name="@dataset().entity",
+            ),
+        },
+        linked_services={"ls": _adls_linked_service("ls", account="acct")},
+    )
+    orders = AdfDatasetReference(reference_name="ds_param", parameters={"folder": "raw", "entity": "orders.csv"})
+    customers = AdfDatasetReference(reference_name="ds_param", parameters={"folder": "raw", "entity": "customers.csv"})
+    unbound = AdfDatasetReference(reference_name="ds_param", parameters={"folder": "raw"})
+    assert resolve_dataset_identity(orders, definitions) == "abfss://data@acct.dfs.core.windows.net/raw/orders.csv"
+    assert (
+        resolve_dataset_identity(customers, definitions) == "abfss://data@acct.dfs.core.windows.net/raw/customers.csv"
+    )
+    # An unbound file-name parameter is unknown, so the folder alone is never used as the identity.
+    assert resolve_dataset_identity(unbound, definitions) is None
