@@ -522,12 +522,13 @@ def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Pat
 
     Package prunes the transient ``.work/`` folder (translation report + ``gaps.json``) by default,
     which erases the "what did routing change?" trail. When a routing decision was recorded
-    (``metadata/conversion_plan.json`` exists), summarise the routed components, their decisions and
-    their outcomes from the report's routing record, and the gaps routing introduced in agentic-routed
-    pipelines, into an additive ``metadata/`` artifact that survives the prune. It also records hashes
-    of the inventory, the saved source graphs and source insights the plan was bound to, the plan, and
-    the packaged report, plus the report route started from as the routing record names it, so the
-    trail can be checked against those files later.
+    (``metadata/conversion_plan.json`` exists), summarise the routed components -- their decisions,
+    and from the report's routing record their outcomes, fingerprints, applied combine hashes and
+    replacements -- and the gaps routing introduced in agentic-routed pipelines, into an additive
+    ``metadata/`` artifact that survives the prune. It also records hashes of the inventory, the saved
+    source graphs and source insights the plan was bound to, the plan, and the packaged report, plus
+    the baseline report and gaps route started from as the routing record names them, so the trail
+    can be checked against those files later.
 
     Returns the written path, or ``None`` when there is no recorded plan (no routing happened) -- so
     the no-route path writes nothing and stays byte-identical.
