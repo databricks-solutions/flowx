@@ -23,7 +23,7 @@ from flowx.bundler.constants import (
     SINGLE_NODE_JOB_CLUSTER_KEY,
 )
 from flowx.bundler.inner_job_params import normalize_value
-from flowx.bundler.notebook_writer import write_notebooks
+from flowx.bundler.notebook_writer import _content_signature, write_notebooks
 from flowx.bundler.prereqs_writer import ManualParameter, build_prereqs, render_setup_md
 from flowx.bundler.setup_generator import generate_setup_tasks
 from flowx.ir_serde import data_asset_from_dict, lineage_from_dict
@@ -113,6 +113,7 @@ def write_bundle(
     _cross_bundle_variables.clear()
     _neutralized_conditions.clear()
 
+    _check_agentic_file_collisions(workflow)
     workflow = copy.deepcopy(workflow)
 
     output_dir = Path(output_dir)
@@ -229,8 +230,6 @@ def write_bundle(
             encoding="utf-8",
         )
         created_files.append(resource_yml_path.resolve())
-
-    _check_agentic_file_collisions(workflow)
 
     # 3. Write generated notebooks. PyDABs hook modules (relative_path under ``resources/``) are
     #    Python resources the bundle imports as ``resources.<module>`` from the bundle root, so they
@@ -656,7 +655,7 @@ def _known_bundle_job_keys(workflow: PreparedWorkflow, resource_key: str) -> set
     return keys
 
 
-def _check_agentic_file_collisions(workflow: Any) -> None:
+def _check_agentic_file_collisions(workflow: PreparedWorkflow) -> None:
     """Refuse two agent-authored files that share a path but differ in content.
 
     The notebook writer gives a clashing generated file a ``__N`` suffix, but an authored task
@@ -664,15 +663,11 @@ def _check_agentic_file_collisions(workflow: Any) -> None:
     are the ones kept out of the bundle root (``write_to_bundle_root=False``).
     """
     authored: dict[str, object] = {}
-    for prepared in [workflow, *getattr(workflow, "inner_workflows", [])]:
+    for prepared in [workflow, *workflow.inner_workflows]:
         for notebook in prepared.notebooks:
             if notebook.write_to_bundle_root is not False:
                 continue
-            signature = (
-                ("binary", notebook.binary_content)
-                if notebook.binary_content is not None
-                else ("text", notebook.content)
-            )
+            signature = _content_signature(notebook)
             previous = authored.setdefault(notebook.relative_path, signature)
             if previous != signature:
                 raise ValueError(

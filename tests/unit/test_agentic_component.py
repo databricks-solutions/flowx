@@ -317,7 +317,9 @@ def test_agentic_components_authoring_different_content_at_one_path_fail(tmp_pat
 
     with pytest.raises(ValueError, match="same file 'jobs/run.py'"):
         write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
-    assert not (tmp_path / "src" / "jobs" / "run.py").exists()
+    assert not (tmp_path / "databricks.yml").exists()
+    assert not (tmp_path / "resources").exists()
+    assert not (tmp_path / "src").exists()
 
 
 def test_agentic_components_sharing_identical_file_content_still_package(tmp_path):
