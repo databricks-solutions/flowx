@@ -65,6 +65,10 @@ Read `<output_dir>/metadata/inventory.json`:
 Each activity's `task_key` equals its ADF activity name. `source_graphs_sha256` names the saved
 `metadata/source_graphs.json` the inventory was built from.
 
+The inventory deliberately has no top-level `generated_at` timestamp any more, so the same export
+always produces byte-identical `inventory.json` and any hash taken over it stays stable. Use the
+file's modification time if you need to know when discover ran.
+
 ## Step 4b — Review the complexity report
 
 `<output_dir>/metadata/profile_report.csv` has one row per pipeline: `pipeline`, `activities`,
