@@ -26,10 +26,11 @@ records the persisted ``source_graphs.json`` hash it was checked against
 (``source_graphs_sha256``) and carries its own content hash (``source_insights_sha256``).
 ``inventory.json`` is then re-rendered as the deterministic inventory discover wrote plus that
 same block under ``insights``, so the inventory is always built from those two pieces rather
-than patched. Both writes are **atomic** (temp file + ``os.replace``) and **idempotent**:
-re-running with the same authored insights rewrites byte-identical bytes and never stacks. The
-library owns ``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and
-``source_insights_sha256``; authored insights carrying any of them are rejected as unknown keys.
+than patched. The two files are replaced together, never one without the other (see
+``_write_both_or_neither``), and the record is **idempotent**: re-running with the same
+authored insights rewrites byte-identical bytes and never stacks. The library owns
+``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and ``source_insights_sha256``;
+authored insights carrying any of them are rejected as unknown keys.
 The author instead supplies ``authored_against``, the ``source_graphs_sha256`` copied from the
 ``inventory.json`` it read; it is required whenever the inventory records one, verified, and not
 recorded.
