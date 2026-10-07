@@ -583,32 +583,47 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
     }
 
 
-def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, replacement: dict[str, Any]) -> bool:
-    """Replace the task named *activity_name* with *replacement*, recursing into containers.
+def _locate_task(tasks: list[dict[str, Any]], activity_name: str) -> tuple[list[dict[str, Any]], int] | None:
+    """Find the first task named *activity_name*, recursing into containers.
 
-    Searches top-level tasks and the nested activity lists of IfCondition /
-    ForEach / Switch containers.  Preserves the placeholder's ``task_key`` and
-    ``depends_on`` when the replacement omits them so downstream dependency
-    edges stay intact.  Returns True when a match was replaced.
+    Searches top-level tasks and the nested activity lists of IfCondition / ForEach / Switch
+    containers. Returns the list holding the task and its index, or ``None`` when there is none.
     """
     nested_keys = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
     for index, task in enumerate(tasks):
         if task.get("name") == activity_name:
-            replacement.setdefault("task_key", task.get("task_key"))
-            replacement.setdefault("name", activity_name)
-            if "depends_on" not in replacement and task.get("depends_on"):
-                replacement["depends_on"] = task["depends_on"]
-            tasks[index] = replacement
-            return True
+            return tasks, index
         for key in nested_keys:
             child = task.get(key)
-            if isinstance(child, list) and _find_and_replace_task(child, activity_name, replacement):
-                return True
+            if isinstance(child, list):
+                found = _locate_task(child, activity_name)
+                if found is not None:
+                    return found
         for case in task.get("cases") or []:
             if isinstance(case, dict) and isinstance(case.get("activities"), list):
-                if _find_and_replace_task(case["activities"], activity_name, replacement):
-                    return True
-    return False
+                found = _locate_task(case["activities"], activity_name)
+                if found is not None:
+                    return found
+    return None
+
+
+def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, replacement: dict[str, Any]) -> bool:
+    """Replace the task named *activity_name* with *replacement*, recursing into containers.
+
+    Preserves the placeholder's ``task_key`` and ``depends_on`` when the replacement omits them so
+    downstream dependency edges stay intact.  Returns True when a match was replaced.
+    """
+    found = _locate_task(tasks, activity_name)
+    if found is None:
+        return False
+    container, index = found
+    task = container[index]
+    replacement.setdefault("task_key", task.get("task_key"))
+    replacement.setdefault("name", activity_name)
+    if "depends_on" not in replacement and task.get("depends_on"):
+        replacement["depends_on"] = task["depends_on"]
+    container[index] = replacement
+    return True
 
 
 def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Path | None = None) -> tuple[int, int]:
@@ -627,6 +642,18 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     ``NotebookActivity`` whose ``notebook_path`` points at a notebook the agent
     wrote to the workspace; the prepare phase then references it directly.
 
+    This fills convert's own agentic gaps. A pipeline the routing record routes agentic is filled
+    only by ``fill-agentic combine``, so a result that names one, or an untargeted result that would
+    land in one, is refused and nothing is written. Results apply one by one in file-name order, and
+    each is checked against the pipeline it actually lands in.
+
+    When the report has a routing record and the merge is written in place into the live
+    ``<output_dir>/.work/translation_report.json``, every merge is applied to the same pipeline of
+    route's saved deterministic baseline too, so the next rebuild keeps it, and the record's
+    ``baseline_report_sha256`` is refreshed. A merge written anywhere else (``output_path``, or into
+    a copy such as modify's configured report) leaves the baseline alone. Nothing is written until
+    every result has been applied.
+
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
         results_dir: Directory of per-activity result JSON files.
@@ -635,9 +662,40 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
 
     Returns:
         ``(merged, unmatched)`` counts.
+
+    Raises:
+        ValueError: A result would land in a pipeline the routing record routes agentic, or the
+            routing baseline is missing or lacks the task a merge replaced.
     """
+    import hashlib
+
+    from flowx.route_agentic import (
+        BASELINE_DIRNAME,
+        BASELINE_REPORT_FILENAME,
+        REPORT_FILENAME,
+        ROUTED_AGENTIC_MERGE_REFUSED,
+        WORK_DIRNAME,
+        load_baseline,
+        routed_agentic_pipelines,
+        routing_record,
+    )
+
     report = json.loads(report_path.read_text(encoding="utf-8"))
     pipelines = report["pipelines"] if isinstance(report, dict) and "pipelines" in report else [report]
+    routed = routed_agentic_pipelines(report)
+    record = routing_record(report)
+    output_dir = report_path.parent.parent
+    destination = output_path or report_path
+    live_report_path = output_dir / WORK_DIRNAME / REPORT_FILENAME
+    updates_baseline = (
+        record is not None and destination.resolve() == report_path.resolve() == live_report_path.resolve()
+    )
+    baseline_report: Any = None
+    baseline_by_name: dict[Any, dict[str, Any]] = {}
+    if updates_baseline:
+        baseline_report = load_baseline(output_dir, fresh=False)[0]
+        baseline_pipelines = baseline_report["pipelines"] if "pipelines" in baseline_report else [baseline_report]
+        baseline_by_name = {pipeline.get("name"): pipeline for pipeline in baseline_pipelines}
 
     merged = 0
     unmatched = 0
@@ -650,15 +708,39 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
             unmatched += 1
             continue
         wanted = data.get("pipeline")
-        candidates = [pipeline for pipeline in pipelines if not wanted or pipeline.get("name") == wanted]
-        if any(_find_and_replace_task(pipeline.get("tasks", []), activity_name, dict(task)) for pipeline in candidates):
-            merged += 1
-            logger.info("Merged agentic result for '%s' from %s", activity_name, result_file.name)
-        else:
+        target = next(
+            (
+                pipeline
+                for pipeline in pipelines
+                if (not wanted or pipeline.get("name") == wanted)
+                and _locate_task(pipeline.get("tasks", []), activity_name) is not None
+            ),
+            None,
+        )
+        landing = wanted or (target.get("name") if target is not None else None)
+        if landing in routed:
+            raise ValueError(ROUTED_AGENTIC_MERGE_REFUSED)
+        if target is None:
             logger.warning("No placeholder named '%s' found for %s", activity_name, result_file.name)
             unmatched += 1
+            continue
+        _find_and_replace_task(target["tasks"], activity_name, dict(task))
+        if updates_baseline:
+            baseline_pipeline = baseline_by_name.get(target.get("name"))
+            if baseline_pipeline is None or not _find_and_replace_task(
+                baseline_pipeline.get("tasks", []), activity_name, dict(task)
+            ):
+                raise ValueError(
+                    f"the routing baseline has no task {activity_name!r} in pipeline {target.get('name')!r}; "
+                    "re-run route, then merge again"
+                )
+        merged += 1
+        logger.info("Merged agentic result for '%s' from %s", activity_name, result_file.name)
 
-    destination = output_path or report_path
+    if record is not None and updates_baseline and merged:
+        baseline_bytes = json.dumps(baseline_report, indent=2, default=str).encode("utf-8")
+        (output_dir / WORK_DIRNAME / BASELINE_DIRNAME / BASELINE_REPORT_FILENAME).write_bytes(baseline_bytes)
+        record["baseline_report_sha256"] = hashlib.sha256(baseline_bytes).hexdigest()
     destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote merged report to %s (%d merged, %d unmatched)", destination, merged, unmatched)
     return merged, unmatched

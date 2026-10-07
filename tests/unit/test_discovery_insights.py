@@ -18,10 +18,11 @@ import pytest
 from flowx.adapter.__main__ import main as adapter_cli_main
 from flowx.discovery_insights import (
     INSIGHTS_KEY,
+    build_source_insights,
     enrich_inventory,
     inventory_fingerprint,
     load_insights,
-    merge_into_inventory,
+    render_inventory,
     validate_insights,
 )
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
@@ -360,6 +361,23 @@ def test_release_state_source_required_for_preview_and_beta_states() -> None:
         )
 
 
+@pytest.mark.parametrize("section", ["system_recommendation", "pipeline_insight"])
+def test_release_state_source_must_be_a_string_whatever_the_release_state(section: str) -> None:
+    raw = _valid_insights()
+    if section == "system_recommendation":
+        pattern = raw["system_recommendation"]["recommended_patterns"][0]
+        loc = "system_recommendation.recommended_patterns[0]"
+    else:
+        pattern = raw["pipeline_insights"][0]["recommended_patterns"][0]
+        loc = "pipeline_insights[0].recommended_patterns[0]"
+    pattern["release_state"] = "ga"
+    pattern["release_state_source"] = 42
+
+    violations = validate_insights(raw, _inventory())
+
+    assert violations == [f"{loc}: 'release_state_source' must be a string when present, got int"]
+
+
 def test_release_state_source_not_required_for_ga_or_unknown() -> None:
     for state in ("ga", "unknown"):
         raw = _valid_insights()
@@ -378,6 +396,55 @@ def test_release_state_source_empty_string_is_rejected_for_preview() -> None:
     assert any("'release_state_source'" in v and "'private_preview'" in v for v in violations)
 
 
+@pytest.mark.parametrize("bad_name", [["parent"], {"name": "parent"}, 7])
+def test_non_string_pipeline_references_are_violations_not_crashes(bad_name: Any) -> None:
+    raw = _valid_insights()
+    raw["pipeline_insights"][0]["pipeline"] = bad_name
+    raw["pipeline_relationships"][0]["from_pipeline"] = bad_name
+    raw["pipeline_relationships"][0]["to_pipeline"] = bad_name
+
+    violations = validate_insights(raw, _inventory())
+
+    assert any("pipeline_insights[0]: 'pipeline' must be a string" in v for v in violations)
+    assert any("pipeline_relationships[0]: 'from_pipeline' must be a string" in v for v in violations)
+    assert any("pipeline_relationships[0]: 'to_pipeline' must be a string" in v for v in violations)
+
+
+def test_enrich_reports_a_non_string_pipeline_reference_instead_of_raising(tmp_path: Path) -> None:
+    path = _write_inventory(tmp_path, _inventory())
+    original_bytes = path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights={"pipeline_insights": [{"pipeline": ["parent"]}]})
+
+    assert result["ok"] is False
+    assert result["violations"] == ["pipeline_insights[0]: 'pipeline' must be a string, got list"]
+    assert path.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("field_name", ["pattern_name", "intent", "databricks_pattern", "risk_if_ignored"])
+def test_pipeline_insight_text_fields_must_be_strings(field_name: str) -> None:
+    raw = _valid_insights()
+    raw["pipeline_insights"][0][field_name] = ["not", "a", "string"]
+    violations = validate_insights(raw, _inventory())
+    assert violations == [f"pipeline_insights[0]: {field_name!r} must be a string when present, got list"]
+
+
+@pytest.mark.parametrize("notes", ["one note", ["fine", 3]])
+def test_conversion_notes_must_be_a_list_of_strings(notes: Any) -> None:
+    raw = _valid_insights()
+    raw["pipeline_insights"][0]["conversion_notes"] = notes
+    violations = validate_insights(raw, _inventory())
+    assert violations == ["pipeline_insights[0]: 'conversion_notes' must be a list of strings when present"]
+
+
+@pytest.mark.parametrize("field_name", ["relationship_summary", "databricks_pattern", "risk_if_ignored"])
+def test_relationship_text_fields_must_be_strings(field_name: str) -> None:
+    raw = _valid_insights()
+    raw["pipeline_relationships"][0][field_name] = {"text": "nested"}
+    violations = validate_insights(raw, _inventory())
+    assert violations == [f"pipeline_relationships[0]: {field_name!r} must be a string when present, got dict"]
+
+
 def test_system_recommendation_requires_headline_and_patterns() -> None:
     raw = _valid_insights()
     raw["system_recommendation"] = {"cascade": ["x"]}
@@ -393,7 +460,7 @@ def test_system_recommendation_requires_headline_and_patterns() -> None:
 
 def test_merge_adds_single_additive_block_with_fingerprint_and_schema_version() -> None:
     inventory = _inventory()
-    merged = merge_into_inventory(inventory, _valid_insights())
+    merged = render_inventory(inventory, build_source_insights(inventory, _valid_insights()))
     # Original keys are untouched and one additive key is appended, last.
     assert list(merged) == ["source", "source_dir", "pipelines", "summary", "insights"]
     block = merged[INSIGHTS_KEY]
@@ -459,7 +526,7 @@ def test_enrich_is_idempotent_and_replaces_prior_block(tmp_path: Path) -> None:
 def test_fingerprint_ignores_any_prior_insights_block() -> None:
     inventory = _inventory()
     base_fingerprint = inventory_fingerprint(inventory)
-    enriched = merge_into_inventory(inventory, _valid_insights())
+    enriched = render_inventory(inventory, build_source_insights(inventory, _valid_insights()))
     # Fingerprinting the already-enriched inventory yields the same digest (insights excluded).
     assert inventory_fingerprint(enriched) == base_fingerprint
 

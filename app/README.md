@@ -22,6 +22,9 @@ operation; `parameters` is its keyword-argument dict.
 | `convert` | `adapter convert` | ADF activities → Databricks IR |
 | `merge_agentic` | `adapter convert --merge-agentic` | Merge ADF agent-produced results into the report |
 | `resolve_agentic` | `adapter resolve-agentic` | Prepare, stage, and apply reviewed Airflow leaf-gap resolutions |
+| `enrich` | `adapter enrich` | Validate and record agent-authored insights, rebuild the inventory |
+| `route` | `adapter route` | Recommend deterministic vs. agentic per component; record the plan and rebuild the report |
+| `fill_agentic` | `adapter fill-agentic combine` | Replace a routed-agentic group with agent-authored pipelines (ADF) |
 | `inspect` | `adapter inspect` | Surface pending translation options |
 | `apply_answers` | `adapter modify` | Apply answers → stamped IR |
 | `materialize_lookup` | `adapter materialize-lookup` | CSV → lookup-values JSON |

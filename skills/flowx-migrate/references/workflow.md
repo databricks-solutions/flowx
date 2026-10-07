@@ -74,14 +74,24 @@ merges:
   rebuilds `metadata/inventory.json` with it under a single additive `insights` key, leaving every
   deterministic key byte-identical. Skippable for a deterministic-only, headless pass.
 - **Route:** groups pipelines into connected components over control lineage and, per component,
-  records a `deterministic` or `agentic` decision as the fingerprint-bound
-  `metadata/conversion_plan.json`. Recording an agentic decision edits `.work/translation_report.json`
-  so those groups' tasks become placeholder gaps; a fully-deterministic plan (or no plan) leaves
-  convert/package behaving exactly as before — the non-breaking guarantee.
+  records a freely-editable `deterministic` or `agentic` decision as the fingerprint-bound
+  `metadata/conversion_plan.json`. Route rebuilds `.work/translation_report.json` and `gaps.json`
+  from an immutable deterministic baseline, the routing plan, and stored combines: deterministic
+  components stay as-is; agentic components with a stored combine get the combine applied; agentic
+  without a combine become placeholders. A fully-deterministic plan (or no plan) leaves the report
+  byte-identical to the baseline — the non-breaking guarantee. Route stamps a routing record onto
+  the report (per component: members, decision, outcome, combine hash, and fingerprint) and every
+  re-route rebuilds deterministically and idempotently from the baseline and current plan. A fresh
+  convert (a report without a routing record) becomes the new baseline on the next route.
 
-Routed-agentic groups are then filled during convert: per-pipeline via `convert --merge-agentic`, or
-cross-pipeline (N→M, e.g. a Lakeflow Connect collapse) via `fill-agentic combine` using authored
-`AgenticComponentActivity` nodes.
+Routed-agentic groups are then filled only by `fill-agentic combine`, which applies authored pipelines
+(N→M, e.g. a Lakeflow Connect collapse, or one same-named pipeline to stay 1:1), typically using
+`AgenticComponentActivity` nodes. Same authored pipelines as already applied returns "already applied,
+unchanged" and writes nothing (idempotent). Different pipelines replace and rebuild. `convert --merge-agentic`
+fills convert's own gaps and refuses routed-agentic pipelines. After routing, merging convert's own gaps
+in place into `.work/translation_report.json` updates both that report and the stored baseline so the
+next rebuild keeps them. Route, combine and
+merge never rewrite modify's configured report; package asks to re-run `modify` when it is out of date.
 
 ## Phase 2: Convert
 

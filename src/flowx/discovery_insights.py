@@ -5,8 +5,9 @@ pipelines, per-pipeline ``lineage``, summary). An external agent then *authors* 
 ``insights`` object -- its judgment about factory-wide architecture, per-pipeline intent
 and recommended Databricks patterns, and cross-pipeline relationships (see
 :mod:`flowx.models.insights`). This module *enriches* the inventory: it validates the
-authored JSON against the real inventory and, **only when clean**, adds a single additive
-``insights`` key while leaving every existing key byte-identical.
+authored JSON against the real inventory and, **only when clean**, records it in
+``metadata/source_insights.json`` and rebuilds ``inventory.json`` from the deterministic
+inventory plus that document -- it never patches the inventory in place.
 
 There is **no LLM here** -- the tool only validates and records, mirroring the
 author-then-validate-record contract :mod:`flowx.agentic` uses for gap resolution. That
@@ -33,13 +34,12 @@ library owns ``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` 
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
 from typing import Any
 
-from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, source_graphs_from_document
+from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, canonical_sha256, source_graphs_from_document
 from flowx.models.insights import (
     CONFIDENCE_LEVELS,
     MAX_RECOMMENDED_PATTERNS,
@@ -71,6 +71,7 @@ _INSIGHT_KEYS = {
     "conversion_notes",
     "risk_if_ignored",
 }
+_INSIGHT_TEXT_FIELDS = ("pattern_name", "intent", "databricks_pattern", "risk_if_ignored")
 _RECOMMENDED_PATTERN_KEYS = {"pattern", "fit", "simplification_pattern", "release_state", "release_state_source"}
 _SYSTEM_RECOMMENDATION_KEYS = {"headline", "recommended_patterns", "cascade", "decision_driver"}
 _RELATIONSHIP_KEYS = {
@@ -81,6 +82,7 @@ _RELATIONSHIP_KEYS = {
     "databricks_pattern",
     "risk_if_ignored",
 }
+_RELATIONSHIP_TEXT_FIELDS = ("relationship_summary", "databricks_pattern", "risk_if_ignored")
 _EDGE_KEYS = {"edge_type", "edge_identity", "evidence", "confidence"}
 _EDGE_TYPES = ("control", "inferred")
 
@@ -175,8 +177,14 @@ def _validate_pipeline_insights(insights: Any, names: set[str]) -> list[str]:
         name = item.get("pipeline")
         if not name:
             violations.append(f"{loc}: missing required field 'pipeline'")
+        elif not isinstance(name, str):
+            violations.append(f"{loc}: 'pipeline' must be a string, got {type(name).__name__}")
         elif name not in names:
             violations.append(f"{loc}: pipeline {name!r} not in inventory")
+        violations.extend(_validate_optional_strings(item, _INSIGHT_TEXT_FIELDS, loc))
+        notes = item.get("conversion_notes")
+        if notes is not None and (not isinstance(notes, list) or not all(isinstance(note, str) for note in notes)):
+            violations.append(f"{loc}: 'conversion_notes' must be a list of strings when present")
         if "recommended_patterns" in item:
             violations.extend(_validate_recommended_patterns(item["recommended_patterns"], loc))
     return violations
@@ -203,12 +211,24 @@ def _validate_relationships(
         for endpoint, value in (("from_pipeline", from_pipeline), ("to_pipeline", to_pipeline)):
             if not value:
                 violations.append(f"{loc}: missing required field {endpoint!r}")
+            elif not isinstance(value, str):
+                violations.append(f"{loc}: {endpoint!r} must be a string, got {type(value).__name__}")
             elif value not in names:
                 violations.append(f"{loc}: {endpoint} {value!r} not in inventory")
+        violations.extend(_validate_optional_strings(relationship, _RELATIONSHIP_TEXT_FIELDS, loc))
         violations.extend(
             _validate_edge(relationship.get("lineage_edge"), loc, from_pipeline, to_pipeline, control_triples)
         )
     return violations
+
+
+def _validate_optional_strings(record: dict[str, Any], fields: tuple[str, ...], loc: str) -> list[str]:
+    """Report each of *fields* that *record* sets to something other than a string (``null`` is allowed)."""
+    return [
+        f"{loc}: {field_name!r} must be a string when present, got {type(record[field_name]).__name__}"
+        for field_name in fields
+        if record.get(field_name) is not None and not isinstance(record[field_name], str)
+    ]
 
 
 def _validate_edge(
@@ -346,6 +366,7 @@ def _validate_release_state(pattern: dict[str, Any], loc: str) -> list[str]:
     * ``release_state_source`` (a non-empty citation) is **required** whenever ``release_state`` is a
       non-GA preview/beta state (:data:`~flowx.models.insights.RELEASE_STATES_REQUIRING_SOURCE`); it
       is not required for ``"ga"`` (the stable default) or ``"unknown"`` (no claim to ground).
+    * ``release_state_source``, when set, must be a string whatever the ``release_state``.
     """
     problems: list[str] = []
     release_state = pattern.get("release_state")
@@ -361,7 +382,9 @@ def _validate_release_state(pattern: dict[str, Any], loc: str) -> list[str]:
             f"(a distinctive capability must declare its verified GA/Preview release state)"
         )
 
-    if release_state in RELEASE_STATES_REQUIRING_SOURCE and (not isinstance(source, str) or not source.strip()):
+    if source is not None and not isinstance(source, str):
+        problems.append(f"{loc}: 'release_state_source' must be a string when present, got {type(source).__name__}")
+    elif release_state in RELEASE_STATES_REQUIRING_SOURCE and (source is None or not source.strip()):
         problems.append(
             f"{loc}: 'release_state_source' (a non-empty doc URL / citation) is required when "
             f"'release_state' is {release_state!r}"
@@ -436,13 +459,7 @@ def inventory_fingerprint(inventory: dict[str, Any]) -> str:
     Canonicalised with ``sort_keys`` so the digest is independent of key insertion order --
     it binds the authored insights to *what the inventory says*, not to a particular byte layout.
     """
-    canonical = json.dumps(_base_inventory(inventory), sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
-
-
-def _canonical_sha256(value: Any) -> str:
-    """Hash *value* as canonical JSON so the digest ignores key order and whitespace."""
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return canonical_sha256(_base_inventory(inventory))
 
 
 def build_source_insights(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
@@ -461,7 +478,7 @@ def build_source_insights(inventory: dict[str, Any], raw: dict[str, Any]) -> dic
     for key in ("overview", "system_recommendation", "pipeline_insights", "pipeline_relationships"):
         if key in raw:
             document[key] = raw[key]
-    document[_SOURCE_INSIGHTS_HASH_KEY] = _canonical_sha256(document)
+    document[_SOURCE_INSIGHTS_HASH_KEY] = canonical_sha256(document)
     return document
 
 
@@ -469,7 +486,7 @@ def source_insights_hash_violations(document: dict[str, Any]) -> list[str]:
     """Check a ``source_insights.json`` document's own hash; an empty list means it is intact."""
     recorded = document.get(_SOURCE_INSIGHTS_HASH_KEY)
     content = {key: value for key, value in document.items() if key != _SOURCE_INSIGHTS_HASH_KEY}
-    if recorded != _canonical_sha256(content):
+    if recorded != canonical_sha256(content):
         return ["source_insights.json does not match its recorded source_insights_sha256"]
     return []
 
@@ -484,11 +501,6 @@ def render_inventory(inventory: dict[str, Any], source_insights: dict[str, Any])
     base = _base_inventory(inventory)
     base[INSIGHTS_KEY] = dict(source_insights)
     return base
-
-
-def merge_into_inventory(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
-    """Return the inventory rendered with the source insights built from *raw* (no I/O)."""
-    return render_inventory(inventory, build_source_insights(inventory, raw))
 
 
 def _source_graphs_violations(output_dir: Path, inventory: dict[str, Any]) -> list[str]:

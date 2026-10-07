@@ -177,13 +177,14 @@ def _run_route(args: argparse.Namespace) -> int:
       findings + a ready-to-record default plan) and exits -- the dry run an agent reads first;
     * with a **decision** -- ``--plan-path FILE`` (or ``--plan-path -`` to read the plan from stdin),
       or an interactive TTY prompt -- it validates and records the fingerprint-bound
-      ``metadata/conversion_plan.json`` and then edits ``.work/translation_report.json`` +
-      ``gaps.json`` so every routed-agentic group's tasks become placeholder gaps (deterministic
-      groups untouched; nothing routed agentic leaves the report byte-identical).
+      ``metadata/conversion_plan.json`` and then rebuilds ``.work/translation_report.json`` +
+      ``gaps.json`` from the deterministic baseline, so every routed-agentic group's tasks become
+      placeholder gaps or its stored combine (deterministic groups keep the baseline; nothing routed
+      agentic leaves convert's report byte-identical). Re-routing under any decisions is allowed.
 
     Triggers the convert phase in-process when the report is missing and ``--source`` /
-    ``--source-path`` are supplied. Returns 1 on a missing report it cannot produce, or on a plan
-    that fails validation (report + plan left untouched).
+    ``--source-path`` are supplied. Returns 1 on a missing report it cannot produce or on a plan that
+    fails validation (report + plan left untouched in each case).
     """
     from flowx import routing
     from flowx.models.conversion_plan import ConversionPlan
@@ -222,6 +223,11 @@ def _run_route(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+
+    violations = routing.validate_plan(plan, inventory)
+    if violations:
+        _emit_json({"ok": False, "violations": violations, "components": 0}, args.out)
+        return 1
 
     try:
         result = routing.record_plan(args.output_dir, plan=plan)
@@ -285,7 +291,7 @@ def _run_fill_agentic(args: argparse.Namespace) -> int:
     typically carrying ``AgenticComponentActivity`` nodes). The membership must exactly match a
     routed-agentic component in the recorded, fingerprint-bound ``metadata/conversion_plan.json``, and
     the merged report is always validated structurally before it is written back -- there is no bypass.
-    Per-pipeline agentic fills reuse ``convert --merge-agentic`` instead and are not handled here.
+    It is the only fill for a routed-agentic group; ``convert --merge-agentic`` fills convert's own gaps.
     """
     from flowx.route_agentic import apply_combine_fill
 
@@ -723,7 +729,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "fill-agentic",
         help=(
             "Cross-pipeline COMBINE fill: replace a routed group's pipelines with agent-authored "
-            "pipeline(s), validated structurally before writing. Per-pipeline fills use convert --merge-agentic."
+            "pipeline(s), validated structurally before writing. It is the only fill for a routed-agentic "
+            "group; convert --merge-agentic fills convert's own gaps."
         ),
     )
     fill_agentic.add_argument("action", choices=("combine",), help="'combine' performs the pipeline-grain fill.")
@@ -1247,13 +1254,18 @@ def _emit_json(payload: dict[str, Any], out: Path | None) -> None:
 def _write_modified_report(report_path: Path, pipelines: list[dict[str, Any]], out: Path) -> None:
     """Writes the configuration-stamped IR to *out* using the input report's shape.
 
+    A routing record on the input report is carried over unchanged, inside the ``pipelines``
+    wrapper, so package can still check the stamped report against the recorded plan.
+
     Args:
         report_path: Path the modified report was sourced from.  Used
-            only to detect whether the input was a single pipeline IR
-            or an aggregated translation report.
+            to detect whether the input was a single pipeline IR or an
+            aggregated translation report, and to read its routing record.
         pipelines: Stamped pipeline IR dicts to write.
         out: Destination path for the modified report.
     """
+    from flowx.route_agentic import ROUTING_RECORD_KEY, routing_record
+
     raw = json.loads(report_path.read_text(encoding="utf-8"))
     if isinstance(raw, dict) and "translations" in raw:
         by_name = {pipeline["name"]: pipeline for pipeline in pipelines}
@@ -1264,7 +1276,11 @@ def _write_modified_report(report_path: Path, pipelines: list[dict[str, Any]], o
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(raw, indent=2, default=str) + "\n", encoding="utf-8")
         return
-    payload = pipelines[0] if len(pipelines) == 1 else {"pipelines": pipelines}
+    record = routing_record(raw)
+    if record is not None:
+        payload: Any = {"pipelines": pipelines, ROUTING_RECORD_KEY: record}
+    else:
+        payload = pipelines[0] if len(pipelines) == 1 else {"pipelines": pipelines}
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
 

@@ -9,7 +9,7 @@ decision against the inventory lives in :mod:`flowx.routing`.
 
 The agent authors **only** :attr:`ComponentPlan.decision` (and an optional
 :attr:`ComponentPlan.rationale`). Everything else -- ``component_id``, ``members``, ``recommended``,
-and both :class:`ComponentOptions` -- is recomputed by the library on record so the recorded facts
+and both conversion options -- is recomputed by the library on record so the recorded facts
 can never drift from the inventory or be faked. The library also owns :attr:`ConversionPlan.schema_version`
 and the hashes that bind the plan to what it was decided on: :attr:`ConversionPlan.inventory_sha256`
 (the deterministic inventory), :attr:`ConversionPlan.source_graphs_sha256` (the saved
@@ -27,7 +27,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 # The plan schema version stamped onto the recorded artifact. Bump on any backwards-incompatible
 # change to the recorded shape. Version 2 adds the source graph and source insights hashes and the
@@ -47,90 +47,11 @@ DECISIONS: tuple[str, ...] = (DECISION_DETERMINISTIC, DECISION_AGENTIC)
 ROUTE_MIXED = "mixed"
 ASSIGNMENT_ROUTES: tuple[str, ...] = (DECISION_DETERMINISTIC, DECISION_AGENTIC, ROUTE_MIXED)
 
-# Recommended-pattern release states surfaced as a neutral disclosure label on the agentic option
-# (:attr:`AgenticOption.release_disclosures`). ``"ga"`` and ``"unknown"`` are deliberately **silent**
+# Recommended-pattern release states surfaced as a neutral disclosure label on the agentic option's
+# ``release_disclosures``. ``"ga"`` and ``"unknown"`` are deliberately **silent**
 # -- they contribute no entry, and ``"unknown"`` is treated exactly like ``"ga"`` (we do not surface
 # or distinguish it). This is factual labelling, never a warning or an alarm.
 DISCLOSED_RELEASE_STATES: tuple[str, ...] = ("public_preview", "private_preview", "beta")
-
-
-@dataclass(slots=True, kw_only=True)
-class DeterministicOption:
-    """The deterministic (1:1 engine) conversion option for a component.
-
-    Attributes:
-        capable: ``True`` when every activity in the component is engine-capable -- each either has a
-            ``"deterministic"`` strategy or is claimed by a detected motif -- so the whole component
-            can convert deterministically with no gap.
-        activity_counts: Count of activities by strategy bucket (``deterministic`` / ``agentic`` /
-            ``unsupported``) across the component's pipelines.
-        motifs: The motif ids detected in the component (the #64 multi-activity capability signal),
-            sorted and de-duplicated.
-        uncovered: One entry per activity that keeps the component from being fully deterministic --
-            a dict of ``pipeline`` / ``activity`` / ``type`` / ``strategy``. Empty when ``capable``.
-    """
-
-    capable: bool
-    activity_counts: dict[str, int] = field(default_factory=dict)
-    motifs: list[str] = field(default_factory=list)
-    uncovered: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass(slots=True, kw_only=True)
-class AgenticPattern:
-    """One recommended Databricks pattern for the agentic option, drawn from a pipeline's insights.
-
-    Attributes:
-        pipeline: The member pipeline the pattern was recommended for.
-        pattern: The named, publicly-documented Databricks capability (verbatim from the insight).
-        fit: One line on why it fits / what it replaces.
-        simplification_pattern: ``True`` when the pattern uses a distinctive capability that collapses
-            a whole legacy pattern (e.g. a multi-pipeline -> Lakeflow Connect re-architecture).
-        release_state: The pattern's verified Databricks GA/Preview release state, carried verbatim
-            from the insight (one of :data:`~flowx.models.insights.RELEASE_STATES`, or ``None`` when
-            the insight left it unstated). Drives the neutral release-state disclosure on
-            :class:`AgenticOption`.
-        release_state_source: The doc URL / citation grounding :attr:`release_state`, carried verbatim
-            from the insight; ``None`` when unstated.
-    """
-
-    pipeline: str
-    pattern: str
-    fit: str
-    simplification_pattern: bool
-    release_state: Literal["ga", "public_preview", "private_preview", "beta", "unknown"] | None = None
-    release_state_source: str | None = None
-
-
-@dataclass(slots=True, kw_only=True)
-class AgenticOption:
-    """The agentic conversion option for a component.
-
-    Attributes:
-        recommended_patterns: The recommended patterns gathered from the member pipelines' insights,
-            each tagged with its pipeline. Empty when the inventory carries no insights.
-        has_simplification: ``True`` when any recommended pattern is a ``simplification_pattern`` --
-            surfaced prominently so the user sees a re-architecture option, not a buried sub-key.
-        release_disclosures: A neutral, per-pattern **disclosure** of any non-silent ``release_state``
-            -- one entry per recommended pattern whose state is in :data:`DISCLOSED_RELEASE_STATES`,
-            carrying the ``pipeline``, ``pattern``, ``release_state``, and a factual ``label``
-            (``public_preview`` labelled "Public Preview (production-ready)"; ``private_preview`` /
-            ``beta`` stated as the plain labels "Private Preview" / "Beta"). ``"ga"`` and ``"unknown"``
-            are **silent** -- they add nothing (``"unknown"`` is treated exactly like ``"ga"``). Empty
-            when nothing needs disclosing. Factual labelling, never a warning or an alarm.
-    """
-
-    recommended_patterns: list[AgenticPattern] = field(default_factory=list)
-    has_simplification: bool = False
-    release_disclosures: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass(slots=True, kw_only=True)
-class ComponentOptions:
-    """Both conversion options for a component, as first-class peers."""
-
-    deterministic: DeterministicOption
-    agentic: AgenticOption
 
 
 @dataclass(slots=True, kw_only=True)
@@ -185,8 +106,8 @@ class ComponentPlan:
             engine-capable, else ``"agentic"``.
         decision: The user's authored per-component choice (may override :attr:`recommended`).
         options: Both conversion options with their evidence (library-computed), in the recorded
-            JSON shape that :class:`ComponentOptions` documents. Optional so the authored input --
-            which carries only the decision -- can round-trip through this model.
+            JSON shape :mod:`flowx.routing` builds. Optional so the authored input -- which carries
+            only the decision -- can round-trip through this model.
         rationale: Optional author note on why this decision was chosen.
         assignments: Reserved per-node or per-subgraph routing (Phase 2); empty in Phase 1.
     """
@@ -250,10 +171,6 @@ class ConversionPlan:
     inventory_sha256: str | None = None
     source_graphs_sha256: str | None = None
     source_insights_sha256: str | None = None
-
-    def agentic_members(self) -> list[list[str]]:
-        """The member lists of every component routed agentic."""
-        return [list(component.members) for component in self.components if component.decision == DECISION_AGENTIC]
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to the recorded ``conversion_plan.json`` shape."""

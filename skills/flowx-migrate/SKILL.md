@@ -38,10 +38,11 @@ This is the top-level orchestration skill. It runs the full migration pipeline:
 4. **Route** — Decide, per connected component, deterministic vs. agentic conversion; record the
    fingerprint-bound `metadata/conversion_plan.json`; edit the baseline report so routed-agentic
    groups become placeholder gaps (`flowx-route`)
-5. **Fill agentic gaps** — Replace the routed-agentic placeholders: per-pipeline
-   `convert --merge-agentic` (ADF only) or cross-pipeline `fill-agentic combine`; Airflow gaps go
-   through `flowx-resolve-airflow-gaps`. **Never re-run a plain `convert` after routing** — it
-   rewrites the report and erases the placeholders
+5. **Fill agentic gaps** — Replace each routed-agentic group with `fill-agentic combine` (one
+   same-named authored pipeline keeps a pipeline 1:1); `convert --merge-agentic` (ADF only) fills
+   convert's own gaps and refuses routed-agentic pipelines; Airflow gaps go through
+   `flowx-resolve-airflow-gaps`. If you re-run `convert` after routing, re-run `route` next: it
+   takes the fresh report as its new baseline and re-applies the plan and stored combines
 6. **Package** — Generate Databricks Declarative Automation Bundles for deployment
 
 Each phase builds on the output of the previous phase. The user is shown a summary and asked to confirm before proceeding to the next phase.
@@ -121,8 +122,8 @@ flowx(command="discover", parameters={"source": "adf", "adf_definitions": {...},
 flowx(command="enrich", parameters={"output_dir": ..., "insights": {...}})  # default: author + merge the insights layer (see flowx-enrich)
 flowx(command="convert", parameters={"source": "adf", "output_dir": ..., "pipeline": ...})  # deterministic baseline, BEFORE route
 flowx(command="route", parameters={"output_dir": ...})  # recommend; re-call with "plan": {...} to record + edit the report (see flowx-route)
-flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # ADF only, per-pipeline agentic fill
-flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [...], "pipelines": [...]})  # cross-pipeline combine of a routed-agentic group
+flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # ADF only, fills convert's own gaps
+flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [...], "pipelines": [...]})  # the only fill for a routed-agentic group
 flowx(command="inspect", parameters={"report_path": ...})
 flowx(command="apply_answers", parameters={"report_path": ..., "answers": [...], "output_dir": ...})
 flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema": ...})
@@ -254,9 +255,10 @@ reads and edits this report. Invoke the `flowx:flowx-convert` skill with:
 - Source path: the original source path (same one discover used)
 - Output dir: the same shared `<output_dir>` (convert writes its report to `<output_dir>/.work/`)
 
-Run this deterministic convert **exactly once, here, before routing.** The only convert *after*
-routing is the additive `convert --merge-agentic` fill in Step 8 — a second plain `convert` would
-rewrite `.work/translation_report.json` and erase the routed-agentic placeholders.
+Run this deterministic convert **before routing.** If you re-run it after routing (for example with
+different options), re-run `route` straight after: a fresh report carries no routing record, so route
+takes it as the new deterministic baseline and re-applies the plan and the stored combines. Merges of
+convert's own gaps made before that convert must be merged again.
 
 Wait for the translation to complete and present the summary:
 
@@ -300,28 +302,38 @@ untouched — non-breaking.
 
 If Step 5 was skipped and the report is missing, `route` can trigger the convert phase in-process
 once (pass `--source` / `--source-path`); it never runs a second plain convert once a report exists.
+Re-running `route` is always allowed: it rebuilds the report from the saved deterministic baseline,
+the current plan and the stored combines, so switching a component back to deterministic restores
+convert's output for it.
 If the user wants a straight deterministic migration, they accept the all-deterministic recommendation
 here and the rest of the flow is unchanged (no placeholders, so Step 8 is a no-op).
 
 ### Step 8 — Fill routed-agentic gaps
 
 If Step 7 routed any component **agentic**, its pipelines' tasks are now `PlaceholderActivity` nodes
-with one tagged gap each. Author the replacements and merge them (no LLM in the library — it validates
-and merges) **before** the just-in-time config below, so the filled tasks get configuration-stamped
+with one tagged gap each. Author the replacement and apply it (no LLM in the library — it validates
+and records) **before** the just-in-time config below, so the filled tasks get configuration-stamped
 and packaged:
 
-- **Per-pipeline** (the pipeline stays 1:1, **ADF only**): author one result JSON per gap and merge
-  with `convert --source adf --merge-agentic --report .work/translation_report.json --agentic-results <dir>`
-  (`--source adf` is mandatory; the convert phase exits 2 without it). The merge replaces, per result,
-  the **first task whose `name` matches `activity_name`** — it matches by name and does **not** check
-  the target is a placeholder, so make sure each name targets the intended agentic gap. Airflow's
-  `--merge-agentic` is disabled (exits 2) — for Airflow per-gap fills use the
-  **`flowx-resolve-airflow-gaps`** skill instead.
-- **Cross-pipeline COMBINE** (N pipelines → M, e.g. one Lakeflow Connect pipeline): author the
-  replacement pipeline IR (typically with `AgenticComponentActivity` nodes) and run
+- **COMBINE is the only fill for a routed-agentic group** (N pipelines → M, e.g. one Lakeflow Connect
+  pipeline, or one same-named pipeline to keep a pipeline 1:1): author the replacement pipeline IR
+  (typically with `AgenticComponentActivity` nodes) and run
   `fill-agentic combine --output-dir <output_dir> --members "<a,b,...>" --pipelines-path <file>`;
   the members must exactly match the routed-agentic component and the merged report is validated
-  structurally before it is written.
+  structurally before it is written. The authored pipelines are stored in
+  `metadata/agentic_combines.json`, so a later re-route re-applies them.
+- **Convert's own agentic gaps** (in pipelines not routed agentic, **ADF only**): author one result
+  JSON per gap and merge with
+  `convert --source adf --merge-agentic --report .work/translation_report.json --agentic-results <dir>`
+  (`--source adf` is mandatory; the convert phase exits 2 without it). The merge replaces, per result,
+  the **first task whose `name` matches `activity_name`**, so make sure each name targets the intended
+  gap. It refuses, writing nothing, any result that lands in a routed-agentic pipeline. After routing
+  an in-place merge into `.work/translation_report.json` updates the saved baseline too, so a re-route
+  keeps the merge (a merge written to an `--output` copy does not). Airflow's `--merge-agentic` is
+  disabled (exits 2) — for Airflow per-gap fills use the **`flowx-resolve-airflow-gaps`** skill.
+
+Run `modify` (Step 9) after the last route, combine or merge: none of them rewrites modify's
+configured report, and package asks you to re-run modify when it is out of date.
 
 Skip this step entirely when no component was routed agentic. See the **`flowx-route`** skill for the
 full fill details and the `AgenticComponentActivity` shape.

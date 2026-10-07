@@ -55,7 +55,7 @@ Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("convert", {"source": "adf", "output_dir": "..."})
   flowx("route", {"output_dir": "..."})                       # optional: recommend, then re-call with a plan
   flowx("route", {"output_dir": "...", "plan": {...}})        # record the decision + edit the report
-  flowx("fill_agentic", {"output_dir": "...", "members": [...], "pipelines": [...]})  # combine fill (or merge_agentic)
+  flowx("fill_agentic", {"output_dir": "...", "members": [...], "pipelines": [...]})  # fill a routed-agentic group
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
   flowx("package", {"output_dir": "...", "catalog": "main", "schema": "default"})
@@ -393,7 +393,8 @@ def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
     replace; the authored pipeline IR dicts come inline as ``pipelines`` (a JSON list) or via
     ``pipelines_path`` (exactly one, staged to a temp file so the same CLI contract runs on both). The
     merged report is validated structurally before it is written back; ``ok`` is False (nothing
-    written) when a structural invariant is violated. Per-pipeline agentic fills use ``merge_agentic``.
+    written) when a structural invariant is violated. It is the only fill for a routed-agentic group;
+    ``merge_agentic`` fills convert's own gaps only.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     members = p.get("members")
@@ -676,33 +677,46 @@ def build_server() -> FastMCP:
         - "convert": source(req), (one ADF source key | airflow_source_path), output_dir, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list).
         - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
-          merge ADF agent results. Airflow's legacy name-based merge is disabled; use resolve_agentic.
+          merge ADF agent results for convert's own agentic gaps. Refuses (writing nothing) any
+          result landing in a pipeline the routing record routes agentic — fill those with
+          fill_agentic. After routing, a merge written in place into the live
+          .work/translation_report.json also updates the stored deterministic baseline (so the next
+          rebuild keeps it) and the routing record's baseline hash; a merge written to output_path
+          leaves the baseline alone. Airflow's legacy name-based merge is disabled; use resolve_agentic.
         - "resolve_agentic": source(req: "airflow"), action(req: prepare | stage | apply), output_dir,
           airflow_source_path, report_path, gap_id, candidates, replace, accept_gap | accept_gaps, accept_all,
           review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "enrich": output_dir(req), one of insights(inline object) | insights_path(req) — validate
-          agent-authored discover insights against inventory.json and merge them under one additive
-          `insights` key (atomic, idempotent). `ok` reflects validation; `result.violations` lists any
-          problems and the inventory is left untouched on failure. Author the insights by reading
-          inventory.json + the source artifacts first (see the flowx-discover skill's insights guide).
+          agent-authored discover insights against inventory.json, record them in source_insights.json,
+          and rebuild inventory.json from the deterministic inventory plus that document (atomic,
+          idempotent). `ok` reflects validation; `result.violations` lists any problems and both files
+          are left untouched on failure. Author the insights by reading inventory.json + the source
+          artifacts first (see the flowx-enrich skill's insights.md).
         - "route": output_dir(req), at most one of plan(inline object) | plan_path, plus optional
           source + a source path (forwarded so route can trigger convert if the report is absent, like
           the CLI) — one command that groups pipelines into connected components over control lineage
           and routes each. With NO plan it emits the components with BOTH conversion options
           (deterministic capability + motif/coverage evidence, and the agentic recommended patterns
           with any simplification pattern surfaced), plus a ready-to-record default plan — the dry run
-          to read first. With a plan it validates + records metadata/conversion_plan.json AND edits the
-          translation report so every routed-agentic group's tasks become placeholder gaps
-          (deterministic groups untouched; convert's deterministic translation is never modified, and
-          with no agentic decision the report is byte-identical to today).
+          to read first. With a plan it validates + records metadata/conversion_plan.json AND rebuilds
+          the translation report from an immutable baseline, the plan, and stored combines: deterministic
+          components stay as-is, agentic components with a stored combine get it applied, agentic without
+          a combine become placeholders (with no agentic decision the report stays byte-identical to the
+          baseline). The plan is freely editable — change any component's route without restriction.
+          Route stamps a routing record onto the report (per component_id: members, decision, outcome,
+          combine_sha256, fingerprint, replacements) that fill_agentic carries forward; every re-route
+          rebuilds deterministically and idempotently from the baseline and current plan.
         - "fill_agentic": output_dir(req), members(req: list of pipeline names or comma-separated
           string), one of pipelines(inline list of pipeline IR dicts) | pipelines_path — cross-pipeline
-          COMBINE fill: replace a routed-agentic group's pipelines with the agent-authored pipeline(s)
-          (typically AgenticComponentActivity nodes). `members` must exactly match a routed-agentic
-          component in the recorded, fingerprint-bound conversion_plan.json, and the merged report is
-          always validated structurally before writing (no bypass). Per-pipeline agentic fills use
-          "merge_agentic" instead.
+          COMBINE fill: apply agent-authored pipeline(s) to a routed-agentic component (typically
+          AgenticComponentActivity nodes). `members` must exactly match a routed-agentic component in
+          the recorded, fingerprint-bound conversion_plan.json and the report's routing record. Same
+          authored pipelines as already stored returns already_combined: true (idempotent, no writes).
+          Different pipelines replace the stored combine and rebuild. The merged report is always
+          validated structurally before writing (all-or-nothing: any violation and nothing is written).
+          It is the only fill for a routed-agentic group (to keep a pipeline 1:1, author one
+          same-named pipeline).
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

@@ -84,7 +84,9 @@ are inherited from the placeholder when omitted, preserving dependency edges.
 ```
 
 Placeholders are replaced in place, status → `translated`. Exits non-zero if any result can't be
-matched. Add `--output <path>` to write a copy instead of overwriting.
+matched. Add `--output <path>` to write a copy instead of overwriting. After routing, only an
+in-place merge into `.work/translation_report.json` also updates route's saved deterministic baseline
+(so a re-route keeps it); a merge written to an `--output` copy leaves the baseline untouched.
 
 ## Step 6.1 — Just-in-time translation configuration
 
