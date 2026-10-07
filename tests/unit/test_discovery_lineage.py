@@ -78,6 +78,18 @@ def test_signature_tier_when_identity_unresolved() -> None:
     assert edges[0].identity is None
 
 
+def test_signature_tier_with_one_resolved_side_claims_no_identity() -> None:
+    """A signature match where only one endpoint resolved stays a weak match with no identity."""
+    graph = _graph(
+        _node("writer", writes=[DataAsset(signature="shared", identity="curated.orders")]),
+        _node("reader", reads=[DataAsset(signature="shared")]),
+    )
+    edges = build_graph_lineage(graph).data_edges
+    assert len(edges) == 1
+    assert edges[0].match_kind == "signature"
+    assert edges[0].identity is None
+
+
 def test_distinct_identities_do_not_fall_back_to_signature() -> None:
     """Two resolved-but-different identities never manufacture a signature edge (#36)."""
     graph = _graph(
