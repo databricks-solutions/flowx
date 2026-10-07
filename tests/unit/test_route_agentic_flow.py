@@ -34,6 +34,7 @@ from flowx.models.conversion_plan import ConversionPlan
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import ControlEdge, Lineage
 from flowx.route_agentic import (
+    COMPONENT_ALREADY_FILLED,
     GAPS_FILENAME,
     REPORT_FILENAME,
     REROUTED_UNDER_DIFFERENT_PLAN,
@@ -49,6 +50,7 @@ from flowx.route_agentic import (
     validate_report_structurally,
 )
 from flowx.routing import record_plan
+from flowx.sources.adf.translate import main as translate_main
 
 # --------------------------------------------------------------------------- #
 # Fixtures.
@@ -694,6 +696,52 @@ def test_combine_marks_the_component_applied(tmp_path: Path) -> None:
     assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
 
     assert _record_outcomes(report_path) == {"component-1": "agentic-applied"}
+
+
+def _write_merge_result(results_dir: Path, pipeline: str, activity_name: str, task_key: str) -> None:
+    results_dir.mkdir(exist_ok=True)
+    (results_dir / f"{task_key}.json").write_text(
+        json.dumps(
+            {
+                "pipeline": pipeline,
+                "activity_name": activity_name,
+                "task": _notebook_task(activity_name, task_key, f"/Workspace/Shared/agentic_{task_key}"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_combine_after_a_per_pipeline_merge_is_refused(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "parent", "Extract", "extract")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+    merged_report = report_path.read_bytes()
+
+    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    assert result["ok"] is False
+    assert result["error"] == COMPONENT_ALREADY_FILLED
+    assert report_path.read_bytes() == merged_report
+
+
+def test_merge_after_a_combine_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combined_report = report_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "parent", "Extract", "extract")
+
+    with pytest.raises(ValueError, match=COMPONENT_ALREADY_FILLED):
+        merge_agentic_results(report_path, results_dir)
+    exit_code = translate_main(["--merge-agentic", "--report", str(report_path), "--agentic-results", str(results_dir)])
+
+    assert exit_code == 1
+    assert COMPONENT_ALREADY_FILLED in capsys.readouterr().err
+    assert report_path.read_bytes() == combined_report
 
 
 def test_combine_requires_route_to_have_applied_the_plan(tmp_path: Path) -> None:

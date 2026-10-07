@@ -105,8 +105,8 @@ entry per `component_id` with its `members`, `decision` and `outcome` — `deter
 `agentic-not-viable` (nothing filled yet) or `agentic-applied` (a fill left none of its members with a
 routed placeholder). Every later rewrite (the fills and `modify`) carries the record forward and only
 the fills update outcomes. Re-running route under the **same** decisions only refreshes the record's
-plan hash; under different components or decisions it refuses and writes nothing — re-run convert,
-then route.
+plan hash (in the report and in the stamped copy `modify` wrote); under different components or
+decisions it refuses and writes nothing — re-run convert, then route.
 
 There are three ways to supply the decision:
 
@@ -238,8 +238,11 @@ MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [.
   `source_graphs_sha256` and `source_insights_sha256` must still match the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
   — you can't swap pipelines the plan didn't route agentic. The report must carry a routing record
   that matches that plan (route has applied it).
-- Re-running combine once the component's outcome is `agentic-applied` is a no-op
-  (`already_combined: true`), so the authored pipelines are never appended twice.
+- One kind of fill per component: combine on a component a per-pipeline merge already filled, or
+  a merge aimed at a component a combine already filled, is refused with "component already filled;
+  re-run convert and route to start again" and writes nothing. Re-running combine on a component it
+  already combined is a no-op (`already_combined: true`), so the authored pipelines are never
+  appended twice.
 - `--pipelines-path` is a JSON **list** of pipeline IR dicts (the authored replacements), typically
   carrying `AgenticComponentActivity` nodes (see below).
 - Each authored pipeline **must** carry the source tag `"tags": {"source": "adf"}` (routing/agentic

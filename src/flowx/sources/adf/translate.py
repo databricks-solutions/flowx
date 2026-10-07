@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import re
+import sys
 from collections import defaultdict
 from dataclasses import asdict, replace
 from datetime import datetime
@@ -1368,7 +1369,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.merge_agentic:
         if not args.report or not args.agentic_results:
             parser.error("--merge-agentic requires --report and --agentic-results")
-        merged_count, unmatched_count = ir_serde.merge_agentic_results(args.report, args.agentic_results, args.output)
+        try:
+            merged_count, unmatched_count = ir_serde.merge_agentic_results(
+                args.report, args.agentic_results, args.output
+            )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
         print("\nAgentic Merge Summary")
         print("=====================")
         print(f"Merged:    {merged_count}")

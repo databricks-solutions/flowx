@@ -628,7 +628,8 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     wrote to the workspace; the prepare phase then references it directly.
 
     When the report carries a routing record, each agentic component's outcome is updated to show
-    whether the merge left any of its routed placeholders unfilled.
+    whether the merge left any of its routed placeholders unfilled, and a result aimed at a pipeline
+    of a component a combine already filled is refused before anything is written.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
@@ -638,14 +639,25 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
 
     Returns:
         ``(merged, unmatched)`` counts.
+
+    Raises:
+        ValueError: A result targets a pipeline of a component a combine already filled.
     """
+    from flowx.route_agentic import COMPONENT_ALREADY_FILLED, combined_pipelines, refresh_routing_outcomes
+
     report = json.loads(report_path.read_text(encoding="utf-8"))
     pipelines = report["pipelines"] if isinstance(report, dict) and "pipelines" in report else [report]
+    results = [
+        (result_file, json.loads(result_file.read_text(encoding="utf-8")))
+        for result_file in sorted(results_dir.glob("*.json"))
+    ]
+    combined = combined_pipelines(report) if isinstance(report, dict) else set()
+    if any(data.get("pipeline") in combined for _, data in results):
+        raise ValueError(COMPONENT_ALREADY_FILLED)
 
     merged = 0
     unmatched = 0
-    for result_file in sorted(results_dir.glob("*.json")):
-        data = json.loads(result_file.read_text(encoding="utf-8"))
+    for result_file, data in results:
         activity_name = data.get("activity_name") or data.get("activity")
         task = data.get("task") or data.get("ir")
         if not activity_name or not isinstance(task, dict):
@@ -660,8 +672,6 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         else:
             logger.warning("No placeholder named '%s' found for %s", activity_name, result_file.name)
             unmatched += 1
-
-    from flowx.route_agentic import refresh_routing_outcomes
 
     refresh_routing_outcomes(report)
     destination = output_path or report_path

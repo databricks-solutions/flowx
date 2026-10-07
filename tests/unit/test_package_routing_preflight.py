@@ -19,6 +19,7 @@ import pytest
 from flowx import routing
 from flowx.adapter.__main__ import main as adapter_main
 from flowx.bundler.dab_writer import main as package_main
+from flowx.discovery_insights import enrich_inventory
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.ir_serde import pipeline_to_dict
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
@@ -171,6 +172,30 @@ def test_route_combine_modify_then_package_keeps_the_routing_record(tmp_path: Pa
     ]
     assert audit["baseline_report_sha256"] == baseline_sha256
     assert audit["translation_report_sha256"] == hashlib.sha256(stamped_path.read_bytes()).hexdigest()
+
+
+def test_rerouting_the_same_decisions_after_enrich_refreshes_the_stamped_report(tmp_path: Path) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps({"components": [{"component_id": "component-1", "members": ["solo"], "decision": "agentic"}]}),
+        encoding="utf-8",
+    )
+    authored_path = tmp_path / "authored.json"
+    authored_path.write_text(json.dumps([_authored_pipeline()]), encoding="utf-8")
+    route = ["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)]
+
+    assert adapter_main(route) == 0
+    combine = ["fill-agentic", "combine", "--output-dir", str(tmp_path), "--members", "solo"]
+    assert adapter_main([*combine, "--pipelines-path", str(authored_path)]) == 0
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
+    assert enrich_inventory(tmp_path, insights={"overview": "Solo loads one table."})["ok"] is True
+    assert _package(tmp_path) == 1  # the plan is now stale against the new insights
+
+    assert adapter_main(route) == 0
+    assert _package(tmp_path) == 0
+    audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
+    assert audit["components"][0]["outcome"] == "agentic-applied"
 
 
 def test_route_agentic_then_deterministic_is_refused_and_writes_nothing(
