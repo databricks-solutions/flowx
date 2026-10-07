@@ -383,12 +383,26 @@ def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
     decided on. If discover or enrich ran again since route, package refuses rather than shipping a
     report that no longer reflects the user's decision. It also refuses when the report's routing
     record disagrees with the plan: a different plan hash, different components, members or
-    decisions, or no record although the plan routes a component agentic. Returns one message per
-    problem; an empty list means there is no recorded plan or it still matches.
+    decisions, or no record although the plan routes a component agentic.
+
+    When the plan has an agentic component or the report has a routing record, also verifies that the
+    immutable baseline exists and its hashes match the record, then replays rebuild to check that the
+    packaged report matches (or for a stamped report, that its record matches).
+
+    Returns one message per problem; an empty list means there is no recorded plan or it still matches.
     """
     from flowx.discovery_serde import canonical_sha256
     from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
-    from flowx.route_agentic import routing_record, routing_record_mismatches
+    from flowx.route_agentic import (
+        BASELINE_DIRNAME,
+        BASELINE_GAPS_FILENAME,
+        BASELINE_REPORT_FILENAME,
+        STAMPED_REPORT_FILENAME,
+        WORK_DIRNAME,
+        rebuild,
+        routing_record,
+        routing_record_mismatches,
+    )
     from flowx.routing import plan_binding_violations
 
     metadata_dir = Path(output_dir) / "metadata"
@@ -429,7 +443,76 @@ def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
     if record.get("conversion_plan_sha256") != canonical_sha256(plan_document):
         failures.append(f"{report_name} was routed under a different conversion plan; {remedy}")
     failures.extend(f"{mismatch}; {remedy}" for mismatch in routing_record_mismatches(record, plan_document))
-    return failures
+    if failures:
+        return failures
+
+    has_agentic = any(component.decision == DECISION_AGENTIC for component in plan.components)
+    if not (has_agentic or record):
+        return []
+
+    work_dir = Path(output_dir) / WORK_DIRNAME
+    baseline_dir = work_dir / BASELINE_DIRNAME
+    baseline_report_path = baseline_dir / BASELINE_REPORT_FILENAME
+    baseline_gaps_path = baseline_dir / BASELINE_GAPS_FILENAME
+
+    if not baseline_report_path.exists() or not baseline_gaps_path.exists():
+        return ["the deterministic baseline is missing or changed; re-run convert, then route"]
+
+    recorded_report_sha256 = record.get("baseline_report_sha256")
+    recorded_gaps_sha256 = record.get("baseline_gaps_sha256")
+    actual_report_sha256 = _file_sha256(baseline_report_path)
+    actual_gaps_sha256 = _file_sha256(baseline_gaps_path)
+
+    if recorded_report_sha256 != actual_report_sha256 or recorded_gaps_sha256 != actual_gaps_sha256:
+        return ["the deterministic baseline is missing or changed; re-run convert, then route"]
+
+    try:
+        baseline_report = json.loads(baseline_report_path.read_text(encoding="utf-8"))
+        baseline_gaps = json.loads(baseline_gaps_path.read_text(encoding="utf-8"))
+        baseline_report_bytes = baseline_report_path.read_bytes()
+        baseline_gaps_bytes = baseline_gaps_path.read_bytes()
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"Failed to load baseline files: {error}"]
+
+    combines_path = metadata_dir / "agentic_combines.json"
+    combines = {}
+    if combines_path.exists():
+        try:
+            combines_raw = json.loads(combines_path.read_text(encoding="utf-8"))
+            combines = combines_raw if isinstance(combines_raw, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    rebuilt_report, rebuilt_gaps, rebuilt_record = rebuild(
+        baseline_report,
+        baseline_gaps,
+        plan_document,
+        combines,
+        record,
+        baseline_report_bytes,
+        baseline_gaps_bytes,
+    )
+
+    stamped_report_path = work_dir / STAMPED_REPORT_FILENAME
+    if stamped_report_path.exists():
+        try:
+            stamped_report = json.loads(stamped_report_path.read_text(encoding="utf-8"))
+            stamped_record = routing_record(stamped_report)
+            if stamped_record != rebuilt_record:
+                return ["the configured report is out of date; re-run modify"]
+        except (OSError, json.JSONDecodeError):
+            pass
+    else:
+        report_without_record = {k: v for k, v in report.items() if k != "_routing_record"}
+        rebuilt_without_record = {k: v for k, v in rebuilt_report.items() if k != "_routing_record"}
+        report_json = json.dumps(report_without_record, separators=(",", ":"), sort_keys=True, default=str)
+        rebuilt_json = json.dumps(rebuilt_without_record, separators=(",", ":"), sort_keys=True, default=str)
+        if report_json != rebuilt_json:
+            if combines:
+                return ["the combine store has been edited; re-run fill-agentic combine"]
+            return [f"{report_name} does not match a fresh rebuild; {remedy}"]
+
+    return []
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -490,18 +573,21 @@ def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Pat
     agentic_pipelines: set[str] = set()
     for component in plan.components:
         recorded = recorded_components.get(component.component_id)
+        component_entry: dict[str, Any] = {
+            "component_id": component.component_id,
+            "members": list(component.members),
+            "decision": component.decision,
+        }
         if isinstance(recorded, dict):
-            outcome = recorded.get("outcome")
+            component_entry["outcome"] = recorded.get("outcome")
+            component_entry["combine_sha256"] = recorded.get("combine_sha256")
+            component_entry["fingerprint"] = recorded.get("fingerprint")
+            if recorded.get("replacements"):
+                component_entry["replacements"] = recorded.get("replacements")
         else:
-            outcome = OUTCOME_DETERMINISTIC if component.decision == DECISION_DETERMINISTIC else None
-        components.append(
-            {
-                "component_id": component.component_id,
-                "members": list(component.members),
-                "decision": component.decision,
-                "outcome": outcome,
-            }
-        )
+            component_entry["outcome"] = OUTCOME_DETERMINISTIC if component.decision == DECISION_DETERMINISTIC else None
+            component_entry["combine_sha256"] = None
+        components.append(component_entry)
         if component.decision == DECISION_AGENTIC:
             agentic_pipelines.update(component.members)
 
@@ -530,6 +616,7 @@ def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Pat
         "source_insights_sha256": plan.source_insights_sha256,
         "conversion_plan_sha256": _file_sha256(plan_path),
         "baseline_report_sha256": record.get("baseline_report_sha256") if record is not None else None,
+        "baseline_gaps_sha256": record.get("baseline_gaps_sha256") if record is not None else None,
         "translation_report_sha256": _file_sha256(report_path) if report_path is not None else None,
         "components": components,
         "agentic_pipelines": sorted(agentic_pipelines),

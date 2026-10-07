@@ -120,7 +120,13 @@ def test_package_with_a_deterministic_plan_and_no_record_passes(tmp_path: Path) 
     assert _package(tmp_path) == 0
     audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
     assert audit["components"] == [
-        {"component_id": "component-1", "members": ["solo"], "decision": "deterministic", "outcome": "deterministic"}
+        {
+            "component_id": "component-1",
+            "members": ["solo"],
+            "decision": "deterministic",
+            "outcome": "deterministic",
+            "combine_sha256": None,
+        }
     ]
     assert audit["baseline_report_sha256"] is None
 
@@ -167,9 +173,13 @@ def test_route_combine_modify_then_package_keeps_the_routing_record(tmp_path: Pa
 
     assert _package(tmp_path) == 0
     audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
-    assert audit["components"] == [
-        {"component_id": "component-1", "members": ["solo"], "decision": "agentic", "outcome": "agentic-applied"}
-    ]
+    component_audit = audit["components"][0]
+    assert component_audit["component_id"] == "component-1"
+    assert component_audit["members"] == ["solo"]
+    assert component_audit["decision"] == "agentic"
+    assert component_audit["outcome"] == "agentic-applied"
+    assert "combine_sha256" in component_audit
+    assert "fingerprint" in component_audit
     assert audit["baseline_report_sha256"] == baseline_sha256
     assert audit["translation_report_sha256"] == hashlib.sha256(stamped_path.read_bytes()).hexdigest()
 
@@ -211,7 +221,6 @@ def test_route_agentic_then_deterministic_switches_back_to_deterministic(
         return adapter_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)])
 
     assert _route("agentic") == 0
-    routed_report = report_path.read_bytes()
     capsys.readouterr()
 
     assert _route("deterministic") == 0

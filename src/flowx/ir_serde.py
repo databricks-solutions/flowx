@@ -656,6 +656,10 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     only by ``fill-agentic combine``, so a result that names one, or an untargeted result whose
     activity would first land in one, is refused before anything is written.
 
+    When the report has a routing record, merges into non-routed pipelines are applied to both the
+    live report and the stored baseline report (so the next rebuild keeps them), and the record's
+    baseline_report_sha256 is refreshed. All merges are validated first (all-or-nothing).
+
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
         results_dir: Directory of per-activity result JSON files.
@@ -668,7 +672,18 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     Raises:
         ValueError: A result would land in a pipeline the routing record routes agentic.
     """
-    from flowx.route_agentic import ROUTED_AGENTIC_MERGE_REFUSED, routed_agentic_pipelines
+    import hashlib
+
+    from flowx.route_agentic import (
+        BASELINE_DIRNAME,
+        BASELINE_REPORT_FILENAME,
+        ROUTED_AGENTIC_MERGE_REFUSED,
+        ROUTING_RECORD_KEY,
+        STAMPED_REPORT_FILENAME,
+        WORK_DIRNAME,
+        routed_agentic_pipelines,
+        routing_record,
+    )
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     pipelines = report["pipelines"] if isinstance(report, dict) and "pipelines" in report else [report]
@@ -703,4 +718,50 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     destination = output_path or report_path
     destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote merged report to %s (%d merged, %d unmatched)", destination, merged, unmatched)
+
+    record = routing_record(report)
+    if record is not None and merged > 0:
+        output_dir = report_path.parent.parent
+        baseline_dir = output_dir / WORK_DIRNAME / BASELINE_DIRNAME
+        baseline_report_path = baseline_dir / BASELINE_REPORT_FILENAME
+
+        if baseline_report_path.exists():
+            try:
+                baseline_report = json.loads(baseline_report_path.read_text(encoding="utf-8"))
+                baseline_pipelines = (
+                    baseline_report["pipelines"]
+                    if isinstance(baseline_report, dict) and "pipelines" in baseline_report
+                    else [baseline_report]
+                )
+
+                for result_file in results_dir.glob("*.json"):
+                    data = json.loads(result_file.read_text(encoding="utf-8"))
+                    activity_name = data.get("activity_name") or data.get("activity")
+                    task = data.get("task") or data.get("ir")
+                    if activity_name and isinstance(task, dict):
+                        wanted = data.get("pipeline")
+                        candidates = [
+                            pipeline for pipeline in baseline_pipelines if not wanted or pipeline.get("name") == wanted
+                        ]
+                        _find_and_replace_task(
+                            [task_item for pipeline in candidates for task_item in pipeline.get("tasks", [])],
+                            activity_name,
+                            dict(task),
+                        )
+
+                baseline_report_bytes = json.dumps(baseline_report, indent=2, default=str).encode("utf-8")
+                baseline_report_path.write_bytes(baseline_report_bytes)
+
+                record["baseline_report_sha256"] = hashlib.sha256(baseline_report_bytes).hexdigest()
+                report[ROUTING_RECORD_KEY] = record
+                destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+
+                stamped_path = report_path.parent / STAMPED_REPORT_FILENAME
+                if stamped_path.exists():
+                    stamped_report = json.loads(stamped_path.read_text(encoding="utf-8"))
+                    stamped_report[ROUTING_RECORD_KEY] = record
+                    stamped_path.write_text(json.dumps(stamped_report, indent=2, default=str), encoding="utf-8")
+            except (OSError, json.JSONDecodeError) as error:
+                logger.warning("Could not update baseline with merges: %s", error)
+
     return merged, unmatched

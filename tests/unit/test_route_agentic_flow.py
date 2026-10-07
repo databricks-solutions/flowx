@@ -35,10 +35,8 @@ from flowx.models.conversion_plan import ConversionPlan
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import ControlEdge, Lineage
 from flowx.route_agentic import (
-    COMPONENT_ALREADY_FILLED,
     GAPS_FILENAME,
     REPORT_FILENAME,
-    REROUTED_UNDER_DIFFERENT_PLAN,
     ROUTED_AGENTIC_MERGE_REFUSED,
     ROUTING_RECORD_KEY,
     WORK_DIRNAME,

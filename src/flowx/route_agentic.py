@@ -236,41 +236,46 @@ def _baseline_exists(output_dir: Path) -> bool:
     return (baseline_dir / BASELINE_REPORT_FILENAME).exists() or (baseline_dir / BASELINE_GAPS_FILENAME).exists()
 
 
-def _load_baseline(output_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
+def _load_baseline(output_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]], bytes, bytes, str | None]:
     """Load the immutable baseline report and gaps, creating it from current live ones if needed.
 
-    Returns ``(report, gaps, error)`` where error is set when trying to load an existing baseline
-    and it fails to read.
+    Returns ``(report, gaps, report_bytes, gaps_bytes, error)`` where error is set when trying to
+    load an existing baseline and it fails to read. The bytes are used to compute baseline hashes
+    for the routing record.
     """
     baseline_dir = Path(output_dir) / WORK_DIRNAME / BASELINE_DIRNAME
     baseline_report_path = baseline_dir / BASELINE_REPORT_FILENAME
     baseline_gaps_path = baseline_dir / BASELINE_GAPS_FILENAME
     if baseline_report_path.exists() or baseline_gaps_path.exists():
         try:
-            report = (
-                json.loads(baseline_report_path.read_text(encoding="utf-8")) if baseline_report_path.exists() else {}
-            )
-            gaps = json.loads(baseline_gaps_path.read_text(encoding="utf-8")) if baseline_gaps_path.exists() else []
-            return report, gaps if isinstance(gaps, list) else [], None
+            report_bytes = baseline_report_path.read_bytes() if baseline_report_path.exists() else b"{}"
+            gaps_bytes = baseline_gaps_path.read_bytes() if baseline_gaps_path.exists() else b"[]"
+            report = json.loads(report_bytes) if report_bytes else {}
+            gaps = json.loads(gaps_bytes) if gaps_bytes else []
+            return report, gaps if isinstance(gaps, list) else [], report_bytes, gaps_bytes, None
         except (OSError, json.JSONDecodeError) as error:
-            return {}, [], str(error)
+            return {}, [], b"{}", b"[]", str(error)
     work_dir = Path(output_dir) / WORK_DIRNAME
     live_report_path = work_dir / REPORT_FILENAME
     live_gaps_path = work_dir / GAPS_FILENAME
     try:
-        report = json.loads(live_report_path.read_text(encoding="utf-8")) if live_report_path.exists() else {}
-        gaps = json.loads(live_gaps_path.read_text(encoding="utf-8")) if live_gaps_path.exists() else []
-        return report, gaps if isinstance(gaps, list) else [], None
+        report_bytes = live_report_path.read_bytes() if live_report_path.exists() else b"{}"
+        gaps_bytes = live_gaps_path.read_bytes() if live_gaps_path.exists() else b"[]"
+        report = json.loads(report_bytes) if report_bytes else {}
+        gaps = json.loads(gaps_bytes) if gaps_bytes else []
+        return report, gaps if isinstance(gaps, list) else [], report_bytes, gaps_bytes, None
     except (OSError, json.JSONDecodeError):
-        return {}, [], None
+        return {}, [], b"{}", b"[]", None
 
 
-def _save_baseline(output_dir: Path, report: dict[str, Any], gaps: list[dict[str, Any]]) -> None:
-    """Save an immutable copy of the report and gaps to the baseline folder."""
+def _save_baseline_bytes(output_dir: Path, report_bytes: bytes, gaps_bytes: bytes) -> None:
+    """Save an immutable copy of the baseline files as exact bytes (byte-for-byte)."""
     baseline_dir = Path(output_dir) / WORK_DIRNAME / BASELINE_DIRNAME
     baseline_dir.mkdir(parents=True, exist_ok=True)
-    _write_json_atomic(baseline_dir / BASELINE_REPORT_FILENAME, report)
-    _write_json_atomic(baseline_dir / BASELINE_GAPS_FILENAME, gaps)
+    baseline_report_path = baseline_dir / BASELINE_REPORT_FILENAME
+    baseline_gaps_path = baseline_dir / BASELINE_GAPS_FILENAME
+    baseline_report_path.write_bytes(report_bytes)
+    baseline_gaps_path.write_bytes(gaps_bytes)
 
 
 def _load_combines(output_dir: Path) -> dict[str, dict[str, Any]] | None:
@@ -356,6 +361,8 @@ def rebuild(
     plan: dict[str, Any],
     combines: dict[str, dict[str, Any]] | None,
     previous_record: dict[str, Any] | None,
+    baseline_report_bytes: bytes | None = None,
+    baseline_gaps_bytes: bytes | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """Pure rebuild: derive the routed report, gaps, and record from baseline and plan.
 
@@ -369,6 +376,17 @@ def rebuild(
     The record holds per-component members, decision, outcome, combine_sha256, and fingerprint. When
     fingerprint differs from previous_record's, a replacement entry is appended to track the change.
     An all-deterministic plan returns no record (byte-identical to baseline).
+
+    Args:
+        baseline_report: Parsed baseline report JSON.
+        baseline_gaps: Parsed baseline gaps JSON.
+        plan: Routing plan dict.
+        combines: Stored combines from metadata/agentic_combines.json.
+        previous_record: Prior routing record for change tracking.
+        baseline_report_bytes: Raw bytes of baseline report file for hashing. If not provided,
+            computed from baseline_report as compact JSON.
+        baseline_gaps_bytes: Raw bytes of baseline gaps file for hashing. If not provided,
+            computed from baseline_gaps as compact JSON.
     """
     combines_store = combines or {}
     planned = _planned_components(plan)
@@ -380,8 +398,10 @@ def rebuild(
     new_report, new_gaps = alter_report(report, gaps, agentic_names)
     if not isinstance(new_report.get("pipelines"), list):
         new_report = {"pipelines": [new_report]}
-    baseline_report_bytes = json.dumps(baseline_report, separators=(",", ":")).encode("utf-8")
-    baseline_gaps_bytes = json.dumps(baseline_gaps, separators=(",", ":")).encode("utf-8")
+    if baseline_report_bytes is None:
+        baseline_report_bytes = json.dumps(baseline_report, separators=(",", ":")).encode("utf-8")
+    if baseline_gaps_bytes is None:
+        baseline_gaps_bytes = json.dumps(baseline_gaps, separators=(",", ":")).encode("utf-8")
     components: dict[str, dict[str, Any]] = {}
     for component_id, planned_entry in planned.items():
         decision = planned_entry["decision"]
@@ -585,7 +605,9 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
     if not report_path.exists():
         raise FileNotFoundError(f"No {REPORT_FILENAME} under {work}; run the convert phase first.")
 
-    baseline_report, baseline_gaps, baseline_error = _load_baseline(output_dir)
+    baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes, baseline_error = _load_baseline(
+        output_dir
+    )
     if baseline_error is not None:
         raise ValueError(f"Failed to load baseline: {baseline_error}")
     old_report_bytes = report_path.read_bytes()
@@ -600,6 +622,8 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
         plan,
         combines,
         record,
+        baseline_report_bytes,
+        baseline_gaps_bytes,
     )
     if not new_record:
         if record is not None:
@@ -611,7 +635,7 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
                 _write_json_atomic(work / STAMPED_REPORT_FILENAME, report_without_record)
         return {"agentic_pipelines": sorted(agentic), "gaps": len(baseline_gaps), "altered": record is not None}
     if not _baseline_exists(output_dir):
-        _save_baseline(output_dir, baseline_report, baseline_gaps)
+        _save_baseline_bytes(output_dir, baseline_report_bytes, baseline_gaps_bytes)
     new_report[ROUTING_RECORD_KEY] = new_record
     old_report_without_record = copy.deepcopy(report)
     old_report_without_record.pop(ROUTING_RECORD_KEY, None)
@@ -836,13 +860,15 @@ def apply_combine_fill(
         "combine_sha256": new_combine_sha256,
     }
     _save_combines(output_dir, combines)
-    baseline_report, baseline_gaps, _ = _load_baseline(output_dir)
+    baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes, _ = _load_baseline(output_dir)
     new_report, new_gaps, new_record = rebuild(
         baseline_report,
         baseline_gaps,
         plan,
         combines,
         record,
+        baseline_report_bytes,
+        baseline_gaps_bytes,
     )
     if not isinstance(new_report.get("pipelines"), list):
         new_report = {"pipelines": [new_report]}
