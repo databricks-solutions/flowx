@@ -227,12 +227,17 @@ def resolve_dataset_identity(
         return None
     schema, table = _resolve_table_reference(dataset_ref, properties, resolution_context)
     if table:
-        qualified_table = f"{schema}.{table}" if schema else table
-        if not _is_physical(qualified_table):
+        if not all(_is_physical(part) for part in (schema, table) if part):
             return None
+        qualified_table = f"{schema}.{table}" if schema else table
         store = _resolve_table_store(properties, definitions)
         return f"{store}/{qualified_table}" if store else None
-    return _resolve_dataset_path(properties, _backing_linked_service(properties, definitions))
+    return _resolve_dataset_path(
+        properties,
+        _backing_linked_service(properties, definitions),
+        _effective_dataset_params(dataset_ref, properties),
+        resolution_context,
+    )
 
 
 def _dataset_props(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> dict[str, Any] | None:
@@ -410,23 +415,39 @@ def _connection_string_fields(connection_string: str) -> dict[str, str]:
     return fields
 
 
-def _resolve_dataset_path(dataset_props: dict[str, Any], linked_service: Any) -> str | None:
+def _resolve_dataset_path(
+    dataset_props: dict[str, Any],
+    linked_service: Any,
+    dataset_params: dict[str, Any],
+    context: TranslationContext,
+) -> str | None:
     """Resolve a dataset's storage path from its location + backing linked service.
 
     The path runs down to the literal ``fileName`` when the dataset names one, so
-    two files in the same folder stay distinct. Any parameterised or unresolved
-    part (file system, folder, file name, or storage account) yields ``None``.
+    two files in the same folder stay distinct. Location parts written as
+    ``@dataset().x`` resolve against the reference's effective parameters, as table
+    names do, so a parameterised dataset bound to literals still gets its identity.
+    Any part that stays parameterised or unresolved (file system, folder, file name,
+    or storage account) yields ``None``.
     """
     type_props = dataset_props.get("typeProperties") or dataset_props
     location = type_props.get("location") or {}
     if not isinstance(location, dict):
         return None
 
-    file_system = location.get("fileSystem") or location.get("container") or ""
-    folder_path = location.get("folderPath") or ""
-    file_name = location.get("fileName") or ""
-    location_parts = (file_system, folder_path, file_name)
-    if not all(isinstance(part, str) and _is_physical(part) for part in location_parts) or not file_system:
+    def _resolved_part(raw: Any) -> str | None:
+        if raw is None or raw == "":
+            return ""
+        resolved = _resolve_param_value(raw, dataset_params, context)
+        # A part that was written but resolves to nothing (an unbound parameter) is unknown, not absent.
+        if not resolved or not _is_physical(resolved):
+            return None
+        return resolved
+
+    file_system = _resolved_part(location.get("fileSystem") or location.get("container"))
+    folder_path = _resolved_part(location.get("folderPath"))
+    file_name = _resolved_part(location.get("fileName"))
+    if file_system is None or folder_path is None or file_name is None or not file_system:
         return None
 
     account = _resolve_storage_account(linked_service)
@@ -478,10 +499,15 @@ def _is_physical(value: str) -> bool:
 
     A value is NOT physical when it still contains an unresolved marker -- a
     DAB-ref placeholder (``{{`` ... ``}}``), a leftover ADF interpolation
-    fragment (``@{``), or a bare ADF expression (starts with ``@``).
+    fragment (``@{``), a bare ADF expression (starts with ``@``), or an ARM
+    template expression the export left unevaluated (``[parameters('x')]``,
+    ``[concat(...)]``). ARM writes a literal that starts with ``[`` as ``[[``.
     """
-    stripped = value.lstrip()
-    return not ("{{" in value or "@{" in value or stripped.startswith("@"))
+    stripped = value.strip()
+    if "{{" in value or "@{" in value or stripped.startswith("@"):
+        return False
+    is_arm_expression = stripped.startswith("[") and not stripped.startswith("[[") and stripped.endswith("]")
+    return not is_arm_expression
 
 
 # --------------------------------------------------------------------------- #

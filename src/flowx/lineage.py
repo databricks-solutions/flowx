@@ -140,7 +140,9 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
             match activity:
                 case ExecutePipelineActivity():
                     yield activity.pipeline_name or "", activity.wait_on_completion, activity.task_key
-                case RunJobActivity():
+                case RunJobActivity() if not activity.existing_job_id:
+                    # A run-now of an existing job by ID targets a job outside this source, and its
+                    # job_name is the caller's own task key, so it is not a cross-workflow edge.
                     yield activity.job_name or "", None, activity.task_key
 
     return control_edges_from_calls(pipeline.name, _calls())

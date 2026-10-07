@@ -476,3 +476,53 @@ def _ref_dict(reference: AdfDatasetReference) -> dict:
     if reference.parameters:
         payload["parameters"] = reference.parameters
     return payload
+
+
+def test_unevaluated_arm_expressions_never_become_identities() -> None:
+    """An ARM template expression the export left unevaluated is unresolved, so it never forms an identity."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_table": _table_dataset("ds_table", schema="[parameters('schemaName')]", table="Orders"),
+            "ds_file": _adls_dataset(
+                "ds_file", file_system="[concat('raw', parameters('env'))]", folder_path="in", linked_service="ls"
+            ),
+            "ds_escaped": _adls_dataset("ds_escaped", file_system="[[literal", folder_path="in", linked_service="ls"),
+        },
+        linked_services={
+            "ls_sql": AdfLinkedService(
+                name="ls_sql", type="AzureSqlDatabase", properties={"typeProperties": {"server": "sql.example.net"}}
+            ),
+            "ls": _adls_linked_service("ls", account="acct"),
+        },
+    )
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_table"), definitions) is None
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_file"), definitions) is None
+    # ARM's "[[" escape is a literal value that starts with "[", so it stays physical.
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_escaped"), definitions) is not None
+
+
+def test_parameterised_file_location_bound_to_literals_resolves_to_its_path() -> None:
+    """``@dataset().x`` location parts resolve against the call-site bindings, as table names do."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_param": _adls_dataset(
+                "ds_param",
+                file_system="data",
+                folder_path={"value": "@dataset().folder", "type": "Expression"},
+                linked_service="ls",
+                file_name="@dataset().entity",
+            ),
+        },
+        linked_services={"ls": _adls_linked_service("ls", account="acct")},
+    )
+    orders = AdfDatasetReference(reference_name="ds_param", parameters={"folder": "raw", "entity": "orders.csv"})
+    customers = AdfDatasetReference(reference_name="ds_param", parameters={"folder": "raw", "entity": "customers.csv"})
+    unbound = AdfDatasetReference(reference_name="ds_param", parameters={"folder": "raw"})
+    assert resolve_dataset_identity(orders, definitions) == "abfss://data@acct.dfs.core.windows.net/raw/orders.csv"
+    assert (
+        resolve_dataset_identity(customers, definitions) == "abfss://data@acct.dfs.core.windows.net/raw/customers.csv"
+    )
+    # An unbound file-name parameter is unknown, so the folder alone is never used as the identity.
+    assert resolve_dataset_identity(unbound, definitions) is None
