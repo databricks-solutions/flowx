@@ -40,6 +40,7 @@ from flowx.route_agentic import (
     REPORT_FILENAME,
     REROUTED_UNDER_DIFFERENT_PLAN,
     ROUTED_AGENTIC_MERGE_REFUSED,
+    ROUTING_RECORD_KEY,
     WORK_DIRNAME,
     agentic_pipeline_names,
     alter_report,
@@ -452,17 +453,18 @@ def test_route_writes_no_record_when_nothing_is_routed_agentic(tmp_path: Path) -
     assert report_path.read_bytes() == before
 
 
-def test_reroute_to_deterministic_is_refused_and_leaves_the_report_untouched(tmp_path: Path) -> None:
+def test_reroute_to_different_decision_rebuilds_the_report(tmp_path: Path) -> None:
+    """Re-routing with different decisions rebuilds deterministically; no longer refused."""
     _write_work(tmp_path, _report_two_pipelines(), gaps=[])
     apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
-    routed = report_path.read_bytes()
-
-    with pytest.raises(ValueError, match=REROUTED_UNDER_DIFFERENT_PLAN):
-        apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"))
-    with pytest.raises(ValueError, match=REROUTED_UNDER_DIFFERENT_PLAN):
-        apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="agentic"))
-    assert report_path.read_bytes() == routed
+    first = json.loads(report_path.read_text(encoding="utf-8"))
+    first_outcomes = {cid: entry["outcome"] for cid, entry in first[ROUTING_RECORD_KEY]["components"].items()}
+    assert first_outcomes["component-1"] == "agentic-not-viable"
+    assert first_outcomes["component-2"] == "deterministic"
+    apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"))
+    second = json.loads(report_path.read_text(encoding="utf-8"))
+    assert ROUTING_RECORD_KEY not in second
 
 
 def test_reroute_under_the_same_decisions_keeps_fills_and_updates_the_plan_hash(tmp_path: Path) -> None:
@@ -606,19 +608,21 @@ def test_combine_is_idempotent_running_twice_yields_no_duplicate(tmp_path: Path)
     assert names == ["orders_lfc"]  # exactly one authored pipeline, no duplicate
 
 
-def test_a_different_combine_on_an_applied_component_is_refused(tmp_path: Path) -> None:
-    """A second combine whose authored pipelines differ from those now in the report is refused."""
+def test_a_different_combine_on_an_applied_component_replaces_and_rebuilds(tmp_path: Path) -> None:
+    """A second combine with a different hash replaces the stored entry and rebuilds."""
     _setup_routed_agentic(tmp_path, decision="agentic")
     first = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc")])
     assert first["ok"] is True and first["already_combined"] is False
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
-    combined_report = report_path.read_bytes()
+    first_names = [p["name"] for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"]]
+    assert first_names == ["orders_lfc"]
 
     second = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc_v2")])
 
-    assert second["ok"] is False
-    assert second["error"] == COMPONENT_ALREADY_FILLED
-    assert report_path.read_bytes() == combined_report
+    assert second["ok"] is True
+    assert second["already_combined"] is False
+    second_names = [p["name"] for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"]]
+    assert second_names == ["orders_lfc_v2"]
 
 
 def test_combine_idempotent_when_authored_name_collides_with_a_former_member(tmp_path: Path) -> None:
