@@ -78,6 +78,8 @@ def test_enrich_writes_source_insights_and_renders_the_inventory_from_it(tmp_pat
     assert inventory[INSIGHTS_KEY] == source_insights
     assert {key: value for key, value in inventory.items() if key != INSIGHTS_KEY} == before
     assert source_insights["source_graphs_sha256"] == before["source_graphs_sha256"]
+    assert "authored_against" not in source_insights
+    assert "authored_against" not in inventory[INSIGHTS_KEY]
     assert source_insights["inventory_sha256"] == inventory_fingerprint(before)
     assert result["source_insights_sha256"] == source_insights["source_insights_sha256"]
     assert source_insights_hash_violations(source_insights) == []
@@ -185,6 +187,38 @@ def test_insights_authored_against_an_older_inventory_are_refused(tmp_path: Path
     assert any("authored against a different inventory" in violation for violation in stale["violations"])
     assert inventory_path.read_bytes() == inventory_bytes
     assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+
+
+def test_authored_against_is_refused_when_the_inventory_records_no_graph_hash() -> None:
+    inventory = build_source_inventory(_graphs(), source="airflow", source_dir="/dags")
+
+    violations = validate_insights({**_insights(), "authored_against": "a-placeholder"}, inventory)
+
+    assert any(
+        "'authored_against' was given" in violation and "source_graphs_sha256" in violation for violation in violations
+    )
+
+
+def test_a_failed_first_inventory_write_leaves_no_insights_behind(tmp_path: Path, monkeypatch: Any) -> None:
+    """With no previous source_insights.json, a failed inventory replace removes the new one."""
+    inventory_path = _discover(tmp_path)
+    metadata = tmp_path / "metadata"
+    files_before = sorted(path.name for path in metadata.iterdir())
+    inventory_before = inventory_path.read_bytes()
+    real_replace = os.replace
+
+    def failing_replace(source: Any, destination: Any) -> None:
+        if Path(destination) == inventory_path:
+            raise OSError("disk full")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError, match="disk full"):
+        enrich_inventory(tmp_path, insights=_authored(tmp_path))
+
+    assert not (metadata / SOURCE_INSIGHTS_FILENAME).exists()
+    assert inventory_path.read_bytes() == inventory_before
+    assert sorted(path.name for path in metadata.iterdir()) == files_before
 
 
 def test_a_failed_inventory_write_leaves_the_previous_insights_in_place(tmp_path: Path, monkeypatch: Any) -> None:
