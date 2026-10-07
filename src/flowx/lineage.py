@@ -126,7 +126,8 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
     (fan-out is preserved: each call site is its own edge). Edges whose callee
     equals the caller are dropped (no self-edges), and identical edges are
     collapsed (no duplicates). An unresolved callee is recorded with
-    ``resolved=False`` rather than dropped.
+    ``resolved=False`` rather than dropped. A ``RunJobActivity`` that runs an
+    existing job by ID emits no edge.
 
     Args:
         pipeline: The translated pipeline IR.
