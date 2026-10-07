@@ -9,6 +9,8 @@ captured, not just index 0.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from flowx.lineage import data_edges_from_endpoints
 from flowx.models.adf_ast import (
     AdfActivity,
@@ -18,6 +20,9 @@ from flowx.models.adf_ast import (
     AdfLinkedService,
 )
 from flowx.sources.adf.dataset_lineage import activity_data_assets, resolve_dataset_identity
+from flowx.sources.adf.loader import load_adf_definitions
+
+FIXTURES_DIR = Path(__file__).parent.parent / "resources" / "json"
 
 
 def _definitions(**datasets: AdfDataset) -> AdfDefinitions:
@@ -621,6 +626,63 @@ def test_store_settings_path_override_covers_lookup_and_dataset_activities() -> 
     assert [asset.identity for asset in activity_data_assets(recursive_delete, definitions)[0]] == [
         "abfss://data@acct.dfs.core.windows.net/landing"
     ]
+
+
+def test_source_query_read_gets_no_identity_edge() -> None:
+    """A Lookup that runs its own query reads what the query returns, not the dataset's table."""
+    definitions = load_adf_definitions(FIXTURES_DIR)
+    load_orders = AdfActivity(
+        name="LoadOrders",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_azure_sql_orders")],
+        type_properties={"sink": {"type": "AzureSqlSink"}},
+    )
+    get_watermark = AdfActivity(
+        name="GetWatermark",
+        type="Lookup",
+        type_properties={
+            "source": {"type": "AzureSqlSource", "sqlReaderQuery": "SELECT MAX(ts) AS wm FROM dbo.watermarks"},
+            "dataset": {"referenceName": "ds_azure_sql_orders"},
+        },
+    )
+    _, load_orders_writes = activity_data_assets(load_orders, definitions)
+    get_watermark_reads, _ = activity_data_assets(get_watermark, definitions)
+
+    assert load_orders_writes[0].identity == "ls_azure_sql/dbo.orders"
+    assert get_watermark_reads[0].identity is None
+    edges = data_edges_from_endpoints(
+        [("LoadOrders", asset) for asset in load_orders_writes],
+        [("GetWatermark", asset) for asset in get_watermark_reads],
+    )
+    assert edges == []
+
+
+def test_stored_procedure_source_and_sink_get_no_identity() -> None:
+    """A stored procedure decides what is read or written, so neither side keeps the dataset's table identity."""
+    definitions = _definitions(ds_orders=_table_dataset("ds_orders", schema="dbo", table="Orders"))
+    lookup = AdfActivity(
+        name="LookupStoredProc",
+        type="Lookup",
+        type_properties={
+            "source": {"type": "SqlSource", "sqlReaderStoredProcedureName": "dbo.usp_get_orders"},
+            "dataset": {"referenceName": "ds_orders"},
+        },
+    )
+    copy = AdfActivity(
+        name="UpsertOrders",
+        type="Copy",
+        inputs=[AdfDatasetReference(reference_name="ds_orders")],
+        outputs=[AdfDatasetReference(reference_name="ds_orders")],
+        type_properties={
+            "source": {"type": "SqlSource"},
+            "sink": {"type": "SqlSink", "sqlWriterStoredProcedureName": "dbo.usp_upsert_orders"},
+        },
+    )
+    copy_reads, copy_writes = activity_data_assets(copy, definitions)
+
+    assert [asset.identity for asset in activity_data_assets(lookup, definitions)[0]] == [None]
+    assert [asset.identity for asset in copy_writes] == [None]
+    assert [asset.identity for asset in copy_reads] == ["ls_sql/dbo.Orders"]
 
 
 def test_parameterised_file_location_bound_to_literals_resolves_to_its_path() -> None:

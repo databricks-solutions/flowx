@@ -43,6 +43,8 @@ _ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
 _DATASET_PARAM_RE = re.compile(r"^@dataset\(\)\.([A-Za-z_][A-Za-z0-9_]*)$")
 _ARM_EXPRESSION_RE = re.compile(r"^\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\(.*\]$", re.DOTALL)
 _RUN_TIME_PATH_OVERRIDES = ("wildcardFolderPath", "wildcardFileName", "fileListPath", "prefix")
+_SOURCE_QUERY_OVERRIDES = ("sqlReaderQuery", "query", "sqlReaderStoredProcedureName")
+_SINK_PROCEDURE_OVERRIDES = ("sqlWriterStoredProcedureName",)
 
 # Runtime references inside a path expression. Each is a value only knowable at
 # run time; for a *structural* signature we collapse them all to one slot token so
@@ -76,10 +78,12 @@ def activity_data_assets(
     included. A dataset named in both an activity-level slot and ``typeProperties``
     is counted once per side so an activity does not emit two identical assets.
 
-    When the activity's ``storeSettings`` override the read path at run time (a
-    wildcard folder or file name, a file list, or a prefix), the dataset's own
-    location is not what the activity reads, so its reads get no identity and fall
-    back to the structural signature.
+    When the activity overrides the dataset's physical source or target at run time,
+    the dataset's own location is not what the activity touches, so that side gets
+    no identity and falls back to the structural signature. Reads are overridden by
+    a source query or stored procedure, or by ``storeSettings`` that give a wildcard
+    folder or file name, a file list, or a prefix; writes by a sink stored procedure,
+    which decides the table itself.
 
     Args:
         activity: The ADF activity to resolve.
@@ -93,34 +97,44 @@ def activity_data_assets(
         ``(data_reads, data_writes)`` as lists of :class:`DataAsset`.
     """
     resolution_context = context if context is not None else TranslationContext()
-    read_location_overridden = _read_location_overridden(activity)
+    reads_overridden = _location_overridden(activity, produced=False)
     reads = [
-        _dataset_ref_to_asset(reference, definitions, resolution_context, location_overridden=read_location_overridden)
+        _dataset_ref_to_asset(reference, definitions, resolution_context, location_overridden=reads_overridden)
         for reference in _activity_dataset_refs(activity, produced=False)
     ]
+    writes_overridden = _location_overridden(activity, produced=True)
     writes = [
-        _dataset_ref_to_asset(reference, definitions, resolution_context)
+        _dataset_ref_to_asset(reference, definitions, resolution_context, location_overridden=writes_overridden)
         for reference in _activity_dataset_refs(activity, produced=True)
     ]
     return reads, writes
 
 
-def _read_location_overridden(activity: AdfActivity) -> bool:
-    """Say whether the activity's ``storeSettings`` replace the read dataset's path at run time.
+def _location_overridden(activity: AdfActivity, *, produced: bool) -> bool:
+    """Say whether the activity replaces its datasets' physical target (produced) or source (not) at run time.
 
-    Copy and Lookup carry them on ``typeProperties.source``; Delete and GetMetadata
-    carry them directly on ``typeProperties``.
+    A Copy sink that names a stored procedure writes wherever the procedure decides.
+    A Copy or Lookup ``source`` that names a query or stored procedure reads what it
+    returns. ``storeSettings`` with a wildcard, file list or prefix replace the read
+    path: Copy and Lookup carry them on ``source``, Delete and GetMetadata directly
+    on ``typeProperties``.
     """
     type_properties = activity.type_properties or {}
+    if produced:
+        return _names_any(type_properties.get("sink"), _SINK_PROCEDURE_OVERRIDES)
     source = type_properties.get("source")
     store_settings_candidates = (
         source.get("storeSettings") if isinstance(source, dict) else None,
         type_properties.get("storeSettings"),
     )
-    return any(
-        isinstance(store_settings, dict) and any(store_settings.get(key) for key in _RUN_TIME_PATH_OVERRIDES)
-        for store_settings in store_settings_candidates
+    return _names_any(source, _SOURCE_QUERY_OVERRIDES) or any(
+        _names_any(store_settings, _RUN_TIME_PATH_OVERRIDES) for store_settings in store_settings_candidates
     )
+
+
+def _names_any(settings: object, keys: tuple[str, ...]) -> bool:
+    """``True`` when *settings* is a dict that gives a non-empty value for any of *keys*."""
+    return isinstance(settings, dict) and any(settings.get(key) for key in keys)
 
 
 def _dataset_ref_to_asset(
@@ -128,7 +142,7 @@ def _dataset_ref_to_asset(
     definitions: AdfDefinitions,
     context: TranslationContext,
     *,
-    location_overridden: bool = False,
+    location_overridden: bool,
 ) -> DataAsset:
     """Turn one dataset reference into a two-tier :class:`DataAsset`.
 
