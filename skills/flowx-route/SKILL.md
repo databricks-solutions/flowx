@@ -51,9 +51,10 @@ discover → enrich (default) → convert (deterministic baseline) → route (de
 ```
 
 Convert builds the deterministic baseline report **before** routing (route can trigger it in-process
-via `--source` / `--source-path`); routing then edits that report. After routing has recorded agentic
-placeholders, never run a second plain `convert`: it would overwrite the report and erase the
-placeholders.
+via `--source` / `--source-path`); routing then edits that report. If you run `convert` again after
+routing, run `route` straight after it: a fresh report carries no routing record, so route takes it
+as the new baseline and re-applies the plan and the stored combines (merges of convert's own gaps
+made before that convert must be merged again).
 
 Pipelines are grouped into weak/undirected **connected components** over the inventory's control
 lineage (`lineage.control_edges`), so mutually-referencing pipelines are decided together and a
@@ -101,10 +102,11 @@ writes the fingerprint-bound `metadata/conversion_plan.json`, and then rebuilds 
 
 - **deterministic** components: the baseline pipelines stay (deterministic outcome).
 - **agentic components with a stored combine** whose members match: the combine's pipelines replace the
-  members; gaps are dropped (agentic-applied outcome).
+  members; `gaps.json` still lists the members' routed tasks (agentic-applied outcome).
 - **agentic components without a matching combine**: placeholders and gaps as before (agentic-not-viable).
-- **switching back to deterministic**: restores that component's baseline exactly (deterministic outcome,
-  no record when the whole plan is deterministic — the non-breaking guarantee).
+- **switching back to deterministic**: restores that component's baseline exactly (deterministic outcome).
+  When the whole plan is deterministic, route writes the baseline report and gaps back byte for byte,
+  with no record — the non-breaking guarantee.
 
 When it edits the report, route also stamps a **routing record** onto it (the top-level
 `_routing_record` key): the plan's hash, the hashes of the immutable deterministic baseline report and
@@ -171,8 +173,8 @@ the convert phase in-process first. Otherwise run `flowx-convert` before routing
   [--source adf --source-path <path>]     # only needed to trigger convert when the report is missing
 ```
 
-Exit 1 (nothing written) on a missing report it cannot produce, a plan that fails validation, or a
-report already routed under different components or decisions.
+Exit 1 (nothing written) on a missing report it cannot produce or a plan that fails validation.
+Re-routing under different decisions is always allowed; it rebuilds from the baseline.
 
 ## Step 3 — Fill the routed-agentic groups
 
@@ -213,13 +215,16 @@ MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [.
   `source_graphs_sha256` and `source_insights_sha256` must still match the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
   — you can't swap pipelines the plan didn't route agentic. The report must carry a routing record
   that matches that plan (route has applied it).
-- **Same authored pipelines** (hashed): `already_combined: true` with the message "already applied,
-  unchanged"; nothing is written. This is a no-op even after a re-route, allowing idempotent tooling.
-  If the report no longer reflects the stored combine (e.g. after a re-route with different decisions),
-  rebuilds from the baseline and stored combines to restore the combine, validating and writing the result.
+- **Same authored pipelines** (the canonical hash covers every field of every authored pipeline):
+  `already_combined: true` with the message "already applied, unchanged"; nothing is written. This
+  is a no-op even after a re-route, allowing idempotent tooling. If the report no longer reflects the
+  stored combine, or the stored entry was edited by hand, combine stores the pipelines again,
+  rebuilds, validates and writes the result.
 - **Different authored pipelines**: replaces the stored combine for that component only, rebuilds,
   and writes the result (if structural validation passes). The `route_audit.json` records the replacement,
   showing the old `fingerprint` in `replacements` and the new `fingerprint`.
+- **Unique names**: an authored pipeline name may reuse a member of this component, but not another
+  authored name or any other pipeline in the report; a clash is refused and nothing is written.
 - `--pipelines-path` is a JSON **list** of pipeline IR dicts (the authored replacements), typically
   carrying `AgenticComponentActivity` nodes (see below). Empty `pipelines` list is refused.
 - Each authored pipeline **must** carry the source tag `"tags": {"source": "adf"}` (routing/agentic
@@ -303,12 +308,14 @@ library's typed `ConversionPlan` (schema 2): one decision per component, bound t
 fingerprint, the saved `source_graphs.json` and the saved `source_insights.json` it was decided on,
 with a reserved, empty `assignments` list per component for per-node routing later.
 
-Package verifies the routing plan is still current against the inventory, then replays `rebuild`
-from the baseline (reusing it if it exists), the plan, and stored combines. For an unstamped report
-(not through `modify`), it must match the rebuild exactly; otherwise it refuses with "re-run route"
-(or "re-run fill-agentic combine" if the combine store changed). For a stamped report from `modify`,
-the routing record must match the rebuild; otherwise it refuses with "the configured report is out of
-date; re-run modify".
+Package verifies the routing plan is still current against the inventory, checks the saved baseline
+still has the hashes the routing record names ("re-run convert, then route" otherwise) and that no
+stored combine was edited ("re-run fill-agentic combine"), then replays `rebuild` from the baseline,
+the plan, and the stored combines. The live `.work/translation_report.json` must match the rebuild
+exactly, record included; otherwise it refuses with "re-run route". Modify's configured
+`.work/translation_report.stamped.json` must carry the rebuilt routing record; otherwise it refuses
+with "the configured report is out of date; re-run modify". Route, combine and merge never rewrite
+the configured report, so run `modify` again after any of them.
 
 `metadata/route_audit.json` records per component the `decision`, `outcome`, `fingerprint`,
 `combine_sha256`, and `replacements` (changes to the fingerprint across re-routes), plus the hashes

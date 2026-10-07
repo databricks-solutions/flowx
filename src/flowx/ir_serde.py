@@ -626,16 +626,6 @@ def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, repl
     return True
 
 
-def _merge_target(pipelines: list[dict[str, Any]], wanted: Any, activity_name: Any) -> Any:
-    """The pipeline a merge result lands in: the one it names, else the first holding its activity."""
-    if wanted:
-        return wanted
-    for pipeline in pipelines:
-        if _locate_task(pipeline.get("tasks", []), activity_name) is not None:
-            return pipeline.get("name")
-    return None
-
-
 def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Path | None = None) -> tuple[int, int]:
     """Merge agent-produced per-activity translations into a translation report.
 
@@ -653,12 +643,13 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     wrote to the workspace; the prepare phase then references it directly.
 
     This fills convert's own agentic gaps. A pipeline the routing record routes agentic is filled
-    only by ``fill-agentic combine``, so a result that names one, or an untargeted result whose
-    activity would first land in one, is refused before anything is written.
+    only by ``fill-agentic combine``, so a result that names one, or an untargeted result that would
+    land in one, is refused and nothing is written. Results apply one by one in file-name order, and
+    each is checked against the pipeline it actually lands in.
 
-    When the report has a routing record, merges into non-routed pipelines are applied to both the
-    live report and the stored baseline report (so the next rebuild keeps them), and the record's
-    baseline_report_sha256 is refreshed. All merges are validated first (all-or-nothing).
+    When the report has a routing record, every merge is applied to the same pipeline of route's
+    saved deterministic baseline too, so the next rebuild keeps it, and the record's
+    ``baseline_report_sha256`` is refreshed. Nothing is written until every result has been applied.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
@@ -670,7 +661,8 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         ``(merged, unmatched)`` counts.
 
     Raises:
-        ValueError: A result would land in a pipeline the routing record routes agentic.
+        ValueError: A result would land in a pipeline the routing record routes agentic, or the
+            routing baseline is missing or lacks the task a merge replaced.
     """
     import hashlib
 
@@ -678,28 +670,28 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         BASELINE_DIRNAME,
         BASELINE_REPORT_FILENAME,
         ROUTED_AGENTIC_MERGE_REFUSED,
-        ROUTING_RECORD_KEY,
-        STAMPED_REPORT_FILENAME,
         WORK_DIRNAME,
+        load_baseline,
         routed_agentic_pipelines,
         routing_record,
     )
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     pipelines = report["pipelines"] if isinstance(report, dict) and "pipelines" in report else [report]
-    results = [
-        (result_file, json.loads(result_file.read_text(encoding="utf-8")))
-        for result_file in sorted(results_dir.glob("*.json"))
-    ]
     routed = routed_agentic_pipelines(report)
-    for _, data in results:
-        activity_name = data.get("activity_name") or data.get("activity")
-        if routed and _merge_target(pipelines, data.get("pipeline"), activity_name) in routed:
-            raise ValueError(ROUTED_AGENTIC_MERGE_REFUSED)
+    record = routing_record(report)
+    output_dir = report_path.parent.parent
+    baseline_report: Any = None
+    baseline_by_name: dict[Any, dict[str, Any]] = {}
+    if record is not None:
+        baseline_report = load_baseline(output_dir, fresh=False)[0]
+        baseline_pipelines = baseline_report["pipelines"] if "pipelines" in baseline_report else [baseline_report]
+        baseline_by_name = {pipeline.get("name"): pipeline for pipeline in baseline_pipelines}
 
     merged = 0
     unmatched = 0
-    for result_file, data in results:
+    for result_file in sorted(results_dir.glob("*.json")):
+        data = json.loads(result_file.read_text(encoding="utf-8"))
         activity_name = data.get("activity_name") or data.get("activity")
         task = data.get("task") or data.get("ir")
         if not activity_name or not isinstance(task, dict):
@@ -707,61 +699,40 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
             unmatched += 1
             continue
         wanted = data.get("pipeline")
-        candidates = [pipeline for pipeline in pipelines if not wanted or pipeline.get("name") == wanted]
-        if any(_find_and_replace_task(pipeline.get("tasks", []), activity_name, dict(task)) for pipeline in candidates):
-            merged += 1
-            logger.info("Merged agentic result for '%s' from %s", activity_name, result_file.name)
-        else:
+        target = next(
+            (
+                pipeline
+                for pipeline in pipelines
+                if (not wanted or pipeline.get("name") == wanted)
+                and _locate_task(pipeline.get("tasks", []), activity_name) is not None
+            ),
+            None,
+        )
+        landing = wanted or (target.get("name") if target is not None else None)
+        if landing in routed:
+            raise ValueError(ROUTED_AGENTIC_MERGE_REFUSED)
+        if target is None:
             logger.warning("No placeholder named '%s' found for %s", activity_name, result_file.name)
             unmatched += 1
+            continue
+        _find_and_replace_task(target["tasks"], activity_name, dict(task))
+        if record is not None:
+            baseline_pipeline = baseline_by_name.get(target.get("name"))
+            if baseline_pipeline is None or not _find_and_replace_task(
+                baseline_pipeline.get("tasks", []), activity_name, dict(task)
+            ):
+                raise ValueError(
+                    f"the routing baseline has no task {activity_name!r} in pipeline {target.get('name')!r}; "
+                    "re-run route, then merge again"
+                )
+        merged += 1
+        logger.info("Merged agentic result for '%s' from %s", activity_name, result_file.name)
 
+    if record is not None and merged:
+        baseline_bytes = json.dumps(baseline_report, indent=2, default=str).encode("utf-8")
+        (output_dir / WORK_DIRNAME / BASELINE_DIRNAME / BASELINE_REPORT_FILENAME).write_bytes(baseline_bytes)
+        record["baseline_report_sha256"] = hashlib.sha256(baseline_bytes).hexdigest()
     destination = output_path or report_path
     destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote merged report to %s (%d merged, %d unmatched)", destination, merged, unmatched)
-
-    record = routing_record(report)
-    if record is not None and merged > 0:
-        output_dir = report_path.parent.parent
-        baseline_dir = output_dir / WORK_DIRNAME / BASELINE_DIRNAME
-        baseline_report_path = baseline_dir / BASELINE_REPORT_FILENAME
-
-        if baseline_report_path.exists():
-            try:
-                baseline_report = json.loads(baseline_report_path.read_text(encoding="utf-8"))
-                baseline_pipelines = (
-                    baseline_report["pipelines"]
-                    if isinstance(baseline_report, dict) and "pipelines" in baseline_report
-                    else [baseline_report]
-                )
-
-                for result_file in results_dir.glob("*.json"):
-                    data = json.loads(result_file.read_text(encoding="utf-8"))
-                    activity_name = data.get("activity_name") or data.get("activity")
-                    task = data.get("task") or data.get("ir")
-                    if activity_name and isinstance(task, dict):
-                        wanted = data.get("pipeline")
-                        candidates = [
-                            pipeline for pipeline in baseline_pipelines if not wanted or pipeline.get("name") == wanted
-                        ]
-                        _find_and_replace_task(
-                            [task_item for pipeline in candidates for task_item in pipeline.get("tasks", [])],
-                            activity_name,
-                            dict(task),
-                        )
-
-                baseline_report_bytes = json.dumps(baseline_report, indent=2, default=str).encode("utf-8")
-                baseline_report_path.write_bytes(baseline_report_bytes)
-
-                record["baseline_report_sha256"] = hashlib.sha256(baseline_report_bytes).hexdigest()
-                report[ROUTING_RECORD_KEY] = record
-                destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
-
-                stamped_path = report_path.parent / STAMPED_REPORT_FILENAME
-                if stamped_path.exists():
-                    stamped_report = json.loads(stamped_path.read_text(encoding="utf-8"))
-                    stamped_report[ROUTING_RECORD_KEY] = record
-                    stamped_path.write_text(json.dumps(stamped_report, indent=2, default=str), encoding="utf-8")
-            except (OSError, json.JSONDecodeError) as error:
-                logger.warning("Could not update baseline with merges: %s", error)
-
     return merged, unmatched

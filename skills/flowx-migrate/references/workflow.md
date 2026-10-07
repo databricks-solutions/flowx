@@ -81,14 +81,16 @@ merges:
   without a combine become placeholders. A fully-deterministic plan (or no plan) leaves the report
   byte-identical to the baseline — the non-breaking guarantee. Route stamps a routing record onto
   the report (per component: members, decision, outcome, combine hash, and fingerprint) and every
-  re-route rebuilds deterministically and idempotently from the baseline and current plan.
+  re-route rebuilds deterministically and idempotently from the baseline and current plan. A fresh
+  convert (a report without a routing record) becomes the new baseline on the next route.
 
 Routed-agentic groups are then filled only by `fill-agentic combine`, which applies authored pipelines
 (N→M, e.g. a Lakeflow Connect collapse, or one same-named pipeline to stay 1:1), typically using
 `AgenticComponentActivity` nodes. Same authored pipelines as already applied returns "already applied,
 unchanged" and writes nothing (idempotent). Different pipelines replace and rebuild. `convert --merge-agentic`
 fills convert's own gaps and refuses routed-agentic pipelines. After routing, merging convert's own gaps
-updates both the live report and the stored baseline so the next rebuild keeps them.
+updates both the live report and the stored baseline so the next rebuild keeps them. Route, combine and
+merge never rewrite modify's configured report; package asks to re-run `modify` when it is out of date.
 
 ## Phase 2: Convert
 

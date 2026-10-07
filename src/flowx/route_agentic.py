@@ -8,11 +8,13 @@ records the fingerprint-bound ``metadata/conversion_plan.json``). This module ca
 pattern similar to :mod:`flowx.agentic`, always keeping the work in-engine so the package phase,
 structural validation, and provenance all still apply:
 
-* When route runs with at least one agentic component on a fresh convert (no routing record), it saves
-  an immutable copy of ``.work/translation_report.json`` and ``.work/gaps.json`` to
-  ``.work/route_baseline/``, records their hashes, and never modifies them. Later routes verify and
-  reuse the baseline. Combines are stored in ``metadata/agentic_combines.json`` and are idempotent:
-  the same combine is a no-op, a different combine replaces the stored entry.
+* A report without a routing record is a fresh convert. When route first routes a component agentic
+  from one, it saves an exact copy of ``.work/translation_report.json`` and ``.work/gaps.json`` to
+  ``.work/route_baseline/`` and records their hashes; later routes rebuild from that copy (only a
+  merge of convert's own gaps changes it). Combines are stored in ``metadata/agentic_combines.json``
+  with a canonical hash of their pipelines and are idempotent: the same combine is a no-op, a
+  different combine replaces the stored entry. Switching every component back to deterministic writes
+  the baseline back byte for byte. Route and combine never write modify's configured copy.
 * :func:`rebuild` is a pure function that takes the immutable baseline, the routing plan, and stored
   combines, and produces edited report + gaps + routing record. It implements both re-routing and
   re-applying combines deterministically: every rebuild call with the same inputs produces identical
@@ -47,6 +49,7 @@ import json
 import os
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -79,10 +82,6 @@ OUTCOME_DETERMINISTIC = "deterministic"
 OUTCOME_AGENTIC_APPLIED = "agentic-applied"
 OUTCOME_AGENTIC_NOT_VIABLE = "agentic-not-viable"
 
-# Legacy: kept for backward compatibility with tests, but no longer used by route.
-REROUTED_UNDER_DIFFERENT_PLAN = "the report was routed under a different plan; re-run convert, then route"
-
-COMPONENT_ALREADY_FILLED = "component already filled; re-run convert and route to start again"
 ROUTED_AGENTIC_MERGE_REFUSED = (
     "this pipeline is routed agentic; fill it with fill-agentic combine "
     "(to change the approach, change the plan, re-run convert and route, then combine again)"
@@ -127,43 +126,6 @@ def _planned_components(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
         }
         for component in plan.get("components", [])
         if isinstance(component, dict)
-    }
-
-
-def build_routing_record(
-    plan: dict[str, Any],
-    baseline_report_bytes: bytes,
-    baseline_gaps_bytes: bytes,
-    combines: dict[str, dict[str, Any]],
-) -> dict[str, Any]:
-    """Build a routing record for a plan applied to a fresh convert.
-
-    Records the plan hash, baseline file hashes, and per-component information (members, decision,
-    outcome, combine hash, and fingerprint).
-    """
-    planned = _planned_components(plan)
-    components: dict[str, dict[str, Any]] = {}
-    for component_id, entry in planned.items():
-        combine_data = combines.get(component_id)
-        combine_sha256 = combine_data.get("combine_sha256") if combine_data else None
-        decision = entry["decision"]
-        outcome = OUTCOME_AGENTIC_NOT_VIABLE if decision == DECISION_AGENTIC else OUTCOME_DETERMINISTIC
-        fingerprint_input = {
-            "members": entry["members"],
-            "decision": decision,
-            "combine_sha256": combine_sha256,
-        }
-        components[component_id] = {
-            **entry,
-            "outcome": outcome,
-            "combine_sha256": combine_sha256,
-            "fingerprint": canonical_sha256(fingerprint_input),
-        }
-    return {
-        "conversion_plan_sha256": canonical_sha256(plan),
-        "baseline_report_sha256": hashlib.sha256(baseline_report_bytes).hexdigest(),
-        "baseline_gaps_sha256": hashlib.sha256(baseline_gaps_bytes).hexdigest(),
-        "components": components,
     }
 
 
@@ -230,42 +192,33 @@ def routed_agentic_pipelines(report: Any) -> set[str]:
 # --------------------------------------------------------------------------- #
 
 
-def _baseline_exists(output_dir: Path) -> bool:
-    """Check whether a baseline has been saved."""
-    baseline_dir = Path(output_dir) / WORK_DIRNAME / BASELINE_DIRNAME
-    return (baseline_dir / BASELINE_REPORT_FILENAME).exists() or (baseline_dir / BASELINE_GAPS_FILENAME).exists()
+def load_baseline(output_dir: Path, *, fresh: bool) -> tuple[dict[str, Any], list[dict[str, Any]], bytes, bytes]:
+    """Read the deterministic baseline a rebuild starts from: ``(report, gaps, report_bytes, gaps_bytes)``.
 
+    With ``fresh`` (the live report carries no routing record, so convert just wrote it) the live
+    report and gaps *are* the baseline. Otherwise this reads the copy route saved under
+    ``.work/route_baseline/``. The exact bytes are kept so the routing record can hash them.
 
-def _load_baseline(output_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]], bytes, bytes, str | None]:
-    """Load the immutable baseline report and gaps, creating it from current live ones if needed.
-
-    Returns ``(report, gaps, report_bytes, gaps_bytes, error)`` where error is set when trying to
-    load an existing baseline and it fails to read. The bytes are used to compute baseline hashes
-    for the routing record.
+    Raises:
+        ValueError: The saved baseline is missing or is not valid JSON.
     """
-    baseline_dir = Path(output_dir) / WORK_DIRNAME / BASELINE_DIRNAME
-    baseline_report_path = baseline_dir / BASELINE_REPORT_FILENAME
-    baseline_gaps_path = baseline_dir / BASELINE_GAPS_FILENAME
-    if baseline_report_path.exists() or baseline_gaps_path.exists():
-        try:
-            report_bytes = baseline_report_path.read_bytes() if baseline_report_path.exists() else b"{}"
-            gaps_bytes = baseline_gaps_path.read_bytes() if baseline_gaps_path.exists() else b"[]"
-            report = json.loads(report_bytes) if report_bytes else {}
-            gaps = json.loads(gaps_bytes) if gaps_bytes else []
-            return report, gaps if isinstance(gaps, list) else [], report_bytes, gaps_bytes, None
-        except (OSError, json.JSONDecodeError) as error:
-            return {}, [], b"{}", b"[]", str(error)
-    work_dir = Path(output_dir) / WORK_DIRNAME
-    live_report_path = work_dir / REPORT_FILENAME
-    live_gaps_path = work_dir / GAPS_FILENAME
+    work = Path(output_dir) / WORK_DIRNAME
+    if fresh:
+        report_path, gaps_path = work / REPORT_FILENAME, work / GAPS_FILENAME
+    else:
+        report_path = work / BASELINE_DIRNAME / BASELINE_REPORT_FILENAME
+        gaps_path = work / BASELINE_DIRNAME / BASELINE_GAPS_FILENAME
+        if not report_path.exists() or not gaps_path.exists():
+            raise ValueError("the deterministic baseline is missing; re-run convert, then route")
+    report_bytes = report_path.read_bytes()
+    gaps_bytes = gaps_path.read_bytes() if gaps_path.exists() else b"[]"
     try:
-        report_bytes = live_report_path.read_bytes() if live_report_path.exists() else b"{}"
-        gaps_bytes = live_gaps_path.read_bytes() if live_gaps_path.exists() else b"[]"
-        report = json.loads(report_bytes) if report_bytes else {}
-        gaps = json.loads(gaps_bytes) if gaps_bytes else []
-        return report, gaps if isinstance(gaps, list) else [], report_bytes, gaps_bytes, None
-    except (OSError, json.JSONDecodeError):
-        return {}, [], b"{}", b"[]", None
+        report = json.loads(report_bytes)
+        gaps = json.loads(gaps_bytes)
+    except json.JSONDecodeError as error:
+        message = f"the deterministic baseline is not valid JSON ({error}); re-run convert, then route"
+        raise ValueError(message) from error
+    return report, gaps if isinstance(gaps, list) else [], report_bytes, gaps_bytes
 
 
 def _save_baseline_bytes(output_dir: Path, report_bytes: bytes, gaps_bytes: bytes) -> None:
@@ -278,16 +231,39 @@ def _save_baseline_bytes(output_dir: Path, report_bytes: bytes, gaps_bytes: byte
     baseline_gaps_path.write_bytes(gaps_bytes)
 
 
-def _load_combines(output_dir: Path) -> dict[str, dict[str, Any]] | None:
-    """Load the agentic combines store, or ``None`` when it doesn't exist."""
+def _combine_checks_out(entry: Any) -> bool:
+    """Whether a stored combine is as combine wrote it: sorted members, and a hash matching its pipelines."""
+    if not isinstance(entry, dict):
+        return False
+    members = entry.get("members")
+    pipelines = entry.get("pipelines")
+    return (
+        isinstance(members, list)
+        and all(isinstance(member, str) for member in members)
+        and members == sorted(set(members))
+        and isinstance(pipelines, list)
+        and bool(pipelines)
+        and entry.get("combine_sha256") == canonical_sha256(pipelines)
+    )
+
+
+def load_combines(output_dir: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Read ``metadata/agentic_combines.json``: every entry as stored, and the entries that check out.
+
+    Route, combine and package all read the store here. A rebuild applies only the entries that check
+    out, so an edited entry is never applied: package refuses while one exists, and re-running combine
+    for that component replaces it. Both are empty when there is no store yet.
+
+    Raises:
+        ValueError: The store is not valid JSON or not a JSON object.
+    """
     combines_path = Path(output_dir) / METADATA_DIRNAME / COMBINES_FILENAME
     if not combines_path.exists():
-        return None
-    try:
-        raw = json.loads(combines_path.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else None
-    except (OSError, json.JSONDecodeError):
-        return None
+        return {}, {}
+    stored = json.loads(combines_path.read_text(encoding="utf-8"))
+    if not isinstance(stored, dict):
+        raise ValueError(f"{COMBINES_FILENAME} must contain a JSON object")
+    return stored, {component_id: entry for component_id, entry in stored.items() if _combine_checks_out(entry)}
 
 
 def _save_combines(output_dir: Path, combines: dict[str, dict[str, Any]]) -> None:
@@ -361,8 +337,8 @@ def rebuild(
     plan: dict[str, Any],
     combines: dict[str, dict[str, Any]] | None,
     previous_record: dict[str, Any] | None,
-    baseline_report_bytes: bytes | None = None,
-    baseline_gaps_bytes: bytes | None = None,
+    baseline_report_bytes: bytes,
+    baseline_gaps_bytes: bytes,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """Pure rebuild: derive the routed report, gaps, and record from baseline and plan.
 
@@ -381,12 +357,10 @@ def rebuild(
         baseline_report: Parsed baseline report JSON.
         baseline_gaps: Parsed baseline gaps JSON.
         plan: Routing plan dict.
-        combines: Stored combines from metadata/agentic_combines.json.
+        combines: The stored combines that check out (see :func:`load_combines`).
         previous_record: Prior routing record for change tracking.
-        baseline_report_bytes: Raw bytes of baseline report file for hashing. If not provided,
-            computed from baseline_report as compact JSON.
-        baseline_gaps_bytes: Raw bytes of baseline gaps file for hashing. If not provided,
-            computed from baseline_gaps as compact JSON.
+        baseline_report_bytes: Raw bytes of the baseline report file, hashed into the record.
+        baseline_gaps_bytes: Raw bytes of the baseline gaps file, hashed into the record.
     """
     combines_store = combines or {}
     planned = _planned_components(plan)
@@ -398,10 +372,6 @@ def rebuild(
     new_report, new_gaps = alter_report(report, gaps, agentic_names)
     if not isinstance(new_report.get("pipelines"), list):
         new_report = {"pipelines": [new_report]}
-    if baseline_report_bytes is None:
-        baseline_report_bytes = json.dumps(baseline_report, separators=(",", ":")).encode("utf-8")
-    if baseline_gaps_bytes is None:
-        baseline_gaps_bytes = json.dumps(baseline_gaps, separators=(",", ":")).encode("utf-8")
     components: dict[str, dict[str, Any]] = {}
     for component_id, planned_entry in planned.items():
         decision = planned_entry["decision"]
@@ -563,58 +533,48 @@ def alter_report(
     return report, kept_gaps + fresh_gaps
 
 
-def _write_json_atomic(path: Path, document: Any) -> None:
-    """Write JSON atomically (temp file + ``os.replace``), matching the report's 2-space indentation."""
+def _write_atomic(path: Path, content: bytes) -> None:
+    """Write bytes atomically (temp file + ``os.replace``)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(document, indent=2, default=str), encoding="utf-8")
+    temporary.write_bytes(content)
     os.replace(temporary, path)
 
 
-def _refresh_record_plan_hash(report_path: Path, plan: dict[str, Any]) -> None:
-    """Bring a report copy's recorded plan hash up to date when it was routed under these decisions.
-
-    A copy without a record, or routed under other decisions, is left for package to refuse.
-    """
-    if not report_path.exists():
-        return
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    record = routing_record(report)
-    plan_sha256 = canonical_sha256(plan)
-    if record is None or routing_record_mismatches(record, plan) or record.get("conversion_plan_sha256") == plan_sha256:
-        return
-    record["conversion_plan_sha256"] = plan_sha256
-    _write_json_atomic(report_path, report)
+def _write_json_atomic(path: Path, document: Any) -> None:
+    """Write JSON atomically, matching the report's 2-space indentation."""
+    _write_atomic(path, json.dumps(document, indent=2, default=str).encode("utf-8"))
 
 
 def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, Any]:
-    """Apply a routing decision to the report on disk by rebuilding from baseline.
+    """Apply a routing decision to the report on disk by rebuilding it from the deterministic baseline.
 
-    Reads or creates the immutable baseline at ``.work/route_baseline/``, loads stored combines from
-    ``metadata/agentic_combines.json``, rebuilds the report + gaps + record deterministically, and
-    writes them atomically. When no component is routed agentic and no record exists, files are left
-    untouched (non-breaking guarantee). Re-routing with different decisions rebuilds (not refused).
+    A report without a routing record is a fresh convert, so it becomes the baseline: the first time
+    the plan routes a component agentic, route saves it and its gaps to ``.work/route_baseline/``. A
+    routed report is rebuilt from that saved copy. The rebuild applies the plan and the stored combines
+    from ``metadata/agentic_combines.json``, and the report + gaps are written atomically. When no
+    component is routed agentic the baseline bytes are written back unchanged, so switching back to
+    deterministic restores convert's output exactly and a never-routed report is left untouched. Route
+    never writes modify's configured copy; package asks for ``modify`` again when it is out of date.
 
     Returns a summary dict with the altered pipeline names and the resulting gap count.
 
     Raises:
         FileNotFoundError: when the translation report is missing (run convert first).
+        ValueError: when a routed report's saved baseline or the combine store cannot be read.
     """
     work = Path(output_dir) / WORK_DIRNAME
     report_path = work / REPORT_FILENAME
+    gaps_path = work / GAPS_FILENAME
     if not report_path.exists():
         raise FileNotFoundError(f"No {REPORT_FILENAME} under {work}; run the convert phase first.")
 
-    baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes, baseline_error = _load_baseline(
-        output_dir
-    )
-    if baseline_error is not None:
-        raise ValueError(f"Failed to load baseline: {baseline_error}")
-    old_report_bytes = report_path.read_bytes()
-    report = json.loads(old_report_bytes)
-    old_gaps_bytes = (work / GAPS_FILENAME).read_bytes() if (work / GAPS_FILENAME).exists() else b"[]"
+    report = json.loads(report_path.read_bytes())
     record = routing_record(report)
-    combines = _load_combines(output_dir) or {}
+    baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_baseline(
+        output_dir, fresh=record is None
+    )
+    _, combines = load_combines(output_dir)
     agentic = agentic_pipeline_names(plan)
     new_report, new_gaps, new_record = rebuild(
         baseline_report,
@@ -627,32 +587,18 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
     )
     if not new_record:
         if record is not None:
-            report_without_record = copy.deepcopy(report)
-            report_without_record.pop(ROUTING_RECORD_KEY, None)
-            _write_json_atomic(report_path, report_without_record)
-            _write_json_atomic(work / GAPS_FILENAME, baseline_gaps)
-            if (work / STAMPED_REPORT_FILENAME).exists():
-                _write_json_atomic(work / STAMPED_REPORT_FILENAME, report_without_record)
+            _write_atomic(report_path, baseline_report_bytes)
+            _write_atomic(gaps_path, baseline_gaps_bytes)
         return {"agentic_pipelines": sorted(agentic), "gaps": len(baseline_gaps), "altered": record is not None}
-    if not _baseline_exists(output_dir):
+    if record is None:
         _save_baseline_bytes(output_dir, baseline_report_bytes, baseline_gaps_bytes)
-    new_report[ROUTING_RECORD_KEY] = new_record
-    old_report_without_record = copy.deepcopy(report)
-    old_report_without_record.pop(ROUTING_RECORD_KEY, None)
+    old_gaps_bytes = gaps_path.read_bytes() if gaps_path.exists() else b"[]"
+    old_report_without_record = {key: value for key, value in report.items() if key != ROUTING_RECORD_KEY}
     new_gaps_bytes = json.dumps(new_gaps, indent=2, default=str).encode("utf-8")
-    altered = (
-        json.dumps(old_report_without_record, separators=(",", ":"), sort_keys=True, default=str)
-        != json.dumps(
-            {k: v for k, v in new_report.items() if k != ROUTING_RECORD_KEY},
-            separators=(",", ":"),
-            sort_keys=True,
-            default=str,
-        )
-    ) or (old_gaps_bytes != new_gaps_bytes)
+    altered = old_report_without_record != new_report or old_gaps_bytes != new_gaps_bytes
+    new_report[ROUTING_RECORD_KEY] = new_record
     _write_json_atomic(report_path, new_report)
-    _write_json_atomic(work / GAPS_FILENAME, new_gaps)
-    if (work / STAMPED_REPORT_FILENAME).exists():
-        _write_json_atomic(work / STAMPED_REPORT_FILENAME, new_report)
+    _write_atomic(gaps_path, new_gaps_bytes)
     return {"agentic_pipelines": sorted(agentic), "gaps": len(new_gaps), "altered": altered}
 
 
@@ -660,10 +606,10 @@ def apply_plan(output_dir: Path, plan: ConversionPlan) -> dict[str, Any]:
     """Apply a recorded, typed plan to the IR after convert: the library's one routing entry point.
 
     Checks the plan still matches the inventory, source graphs and source insights it was decided
-    on, then placeholders the routed-agentic components in the translation report (see
-    :func:`apply_plan_to_report`); the fills (``convert --merge-agentic`` per pipeline,
-    ``fill-agentic combine`` across pipelines) then replace those placeholders. Phase 1 decides whole
-    components, so the reserved per-node assignments are not read here.
+    on, then rebuilds the translation report from the deterministic baseline (see
+    :func:`apply_plan_to_report`). Each routed-agentic component is then filled only by
+    ``fill-agentic combine``; ``convert --merge-agentic`` stays for convert's own gaps. Phase 1 decides
+    whole components, so the reserved per-node assignments are not read here.
 
     Raises:
         FileNotFoundError: The inventory or translation report is missing.
@@ -798,18 +744,18 @@ def apply_combine_fill(
     Validates the group's membership against the recorded plan, stores the authored pipelines in
     ``metadata/agentic_combines.json``, and rebuilds (applying it deterministically). The group's
     membership must exactly match a routed-agentic component in the plan, and every authored pipeline
-    must carry the correct source tag.
+    must carry the correct source tag and a name no other pipeline in the rebuilt report uses.
 
     Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_combined", "message"}``.
-    ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation,
-    structural validation failure, or any other error. Empty ``authored_pipelines`` is refused.
+    ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation, name
+    clash, structural validation failure, or any other error. Empty ``authored_pipelines`` is refused.
 
-    When the combine's hash matches the stored one and is already reflected in the live report,
-    returns ``ok: true, already_combined: true, message: 'already applied, unchanged'`` and writes
-    nothing. After a re-route, if the report no longer reflects the stored combine, rebuilds from
-    baseline and stored combines and writes the result. A different hash replaces the stored entry
-    for that component only and rebuilds. Nothing is written until structural validation passes
-    (all-or-nothing).
+    The stored entry carries the canonical hash of the complete authored pipelines. When that hash
+    matches the stored one and the live report already holds those pipelines, this returns
+    ``ok: true, already_combined: true, message: 'already applied, unchanged'`` and writes nothing.
+    Otherwise (different pipelines, an edited stored entry, or a report that no longer reflects the
+    combine) it replaces that component's entry only and rebuilds. Nothing is written until
+    structural validation passes (all-or-nothing). Modify's configured copy is never written.
     """
     members = {str(member) for member in group_members}
     if not authored_pipelines:
@@ -835,55 +781,43 @@ def apply_combine_fill(
         error = f"{REPORT_FILENAME} carries no routing record; run `route` to apply the plan before filling."
         return {"ok": False, "error": error, "violations": [], "pipelines": 0}
     if routing_record_mismatches(record, plan):
-        error = "the report was routed under a different plan; re-run convert, then route, then combine again"
+        error = "the report was routed under a different plan; re-run route, then combine again"
         return {"ok": False, "error": error, "violations": [], "pipelines": 0}
 
-    new_combine_sha256 = canonical_sha256([pipeline_to_store(p) for p in authored_pipelines])
-    combines = _load_combines(output_dir) or {}
-    stored_combine = combines.get(component_id, {})
-    stored_sha256 = stored_combine.get("combine_sha256")
+    combine_sha256 = canonical_sha256(authored_pipelines)
+    stored, combines = load_combines(output_dir)
     in_report = {pipeline.get("name"): pipeline for pipeline in _report_pipelines(report)}
-
-    if stored_sha256 == new_combine_sha256:
-        if all(in_report.get(pipeline.get("name")) == pipeline for pipeline in authored_pipelines):
-            return {
-                "ok": True,
-                "error": None,
-                "violations": [],
-                "component_id": component_id,
-                "pipelines": len(_report_pipelines(report)),
-                "already_combined": True,
-                "message": "already applied, unchanged",
-            }
-        baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes, _ = _load_baseline(output_dir)
-        new_report, new_gaps, new_record = rebuild(
-            baseline_report,
-            baseline_gaps,
-            plan,
-            combines,
-            record,
-            baseline_report_bytes,
-            baseline_gaps_bytes,
-        )
-    else:
-        combines[component_id] = {
-            "members": list(members),
-            "pipelines": authored_pipelines,
-            "combine_sha256": new_combine_sha256,
+    if (combines.get(component_id) or {}).get("combine_sha256") == combine_sha256 and all(
+        in_report.get(pipeline.get("name")) == pipeline for pipeline in authored_pipelines
+    ):
+        return {
+            "ok": True,
+            "error": None,
+            "violations": [],
+            "component_id": component_id,
+            "pipelines": len(_report_pipelines(report)),
+            "already_combined": True,
+            "message": "already applied, unchanged",
         }
-        baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes, _ = _load_baseline(output_dir)
-        new_report, new_gaps, new_record = rebuild(
-            baseline_report,
-            baseline_gaps,
-            plan,
-            combines,
-            record,
-            baseline_report_bytes,
-            baseline_gaps_bytes,
-        )
 
-    if not isinstance(new_report.get("pipelines"), list):
-        new_report = {"pipelines": [new_report]}
+    entry = {"members": sorted(members), "pipelines": authored_pipelines, "combine_sha256": combine_sha256}
+    stored[component_id] = entry
+    combines[component_id] = entry
+    baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_baseline(output_dir, fresh=False)
+    new_report, new_gaps, new_record = rebuild(
+        baseline_report,
+        baseline_gaps,
+        plan,
+        combines,
+        record,
+        baseline_report_bytes,
+        baseline_gaps_bytes,
+    )
+    name_counts = Counter(str(pipeline.get("name")) for pipeline in _report_pipelines(new_report))
+    clashes = sorted(name for name, count in name_counts.items() if count > 1)
+    if clashes:
+        error = f"authored pipeline names {clashes} clash with another pipeline in the report; give each a unique name"
+        return {"ok": False, "error": error, "violations": [], "pipelines": 0}
     new_report[ROUTING_RECORD_KEY] = new_record
 
     result = validate_report_structurally(new_report)
@@ -891,11 +825,9 @@ def apply_combine_fill(
         violations = [f"[{finding.code}] {finding.location}: {finding.message}" for finding in result.violations]
         return {"ok": False, "error": None, "violations": violations, "pipelines": 0}
 
-    _save_combines(output_dir, combines)
+    _save_combines(output_dir, stored)
     _write_json_atomic(report_path, new_report)
     _write_json_atomic(work / GAPS_FILENAME, new_gaps)
-    if (work / STAMPED_REPORT_FILENAME).exists():
-        _write_json_atomic(work / STAMPED_REPORT_FILENAME, new_report)
 
     return {
         "ok": True,
@@ -904,15 +836,6 @@ def apply_combine_fill(
         "component_id": component_id,
         "pipelines": len(new_report["pipelines"]),
         "already_combined": False,
-    }
-
-
-def pipeline_to_store(pipeline: dict[str, Any]) -> dict[str, Any]:
-    """Extract the storable parts of a pipeline IR dict for hashing (excluding dynamic fields)."""
-    return {
-        "name": pipeline.get("name"),
-        "tags": pipeline.get("tags"),
-        "tasks": pipeline.get("tasks"),
     }
 
 

@@ -105,7 +105,7 @@ def test_package_refuses_an_agentic_plan_when_the_report_has_no_routing_record(
     _record(tmp_path, "agentic")  # recorded, but never applied to the report
 
     assert _package(tmp_path) == 1
-    assert "carries no routing record; re-run convert, then route" in capsys.readouterr().err
+    assert "carries no routing record; re-run route" in capsys.readouterr().err
     assert not (tmp_path / "databricks.yml").exists()
 
 
@@ -184,7 +184,9 @@ def test_route_combine_modify_then_package_keeps_the_routing_record(tmp_path: Pa
     assert audit["translation_report_sha256"] == hashlib.sha256(stamped_path.read_bytes()).hexdigest()
 
 
-def test_rerouting_the_same_decisions_after_enrich_refreshes_the_stamped_report(tmp_path: Path) -> None:
+def test_route_after_modify_leaves_the_stamped_report_and_package_asks_to_re_run_modify(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     report_path = _setup(tmp_path, _inventory("agentic"))
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(
@@ -194,6 +196,7 @@ def test_rerouting_the_same_decisions_after_enrich_refreshes_the_stamped_report(
     authored_path = tmp_path / "authored.json"
     authored_path.write_text(json.dumps([_authored_pipeline()]), encoding="utf-8")
     route = ["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)]
+    stamped_path = tmp_path / WORK_DIRNAME / "translation_report.stamped.json"
 
     assert adapter_main(route) == 0
     combine = ["fill-agentic", "combine", "--output-dir", str(tmp_path), "--members", "solo"]
@@ -201,8 +204,16 @@ def test_rerouting_the_same_decisions_after_enrich_refreshes_the_stamped_report(
     assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
     assert enrich_inventory(tmp_path, insights={"overview": "Solo loads one table."})["ok"] is True
     assert _package(tmp_path) == 1  # the plan is now stale against the new insights
+    stamped_before = stamped_path.read_bytes()
+    capsys.readouterr()
 
     assert adapter_main(route) == 0
+    assert stamped_path.read_bytes() == stamped_before
+    assert _package(tmp_path) == 1
+    assert "re-run modify" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
+
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
     assert _package(tmp_path) == 0
     audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
     assert audit["components"][0]["outcome"] == "agentic-applied"
@@ -211,8 +222,9 @@ def test_rerouting_the_same_decisions_after_enrich_refreshes_the_stamped_report(
 def test_route_agentic_then_deterministic_switches_back_to_deterministic(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Re-routing from agentic to deterministic is allowed; the record is cleared (spec change)."""
+    """Re-routing from agentic to deterministic writes convert's report and gaps back byte for byte."""
     report_path = _setup(tmp_path, _inventory("agentic"))
+    converted = report_path.read_bytes()
     plan_path = tmp_path / "plan.json"
 
     def _route(decision: str) -> int:
@@ -225,8 +237,10 @@ def test_route_agentic_then_deterministic_switches_back_to_deterministic(
 
     assert _route("deterministic") == 0
     capsys.readouterr()
-    deterministic_report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert "_routing_record" not in deterministic_report
+    assert report_path.read_bytes() == converted
+    baseline_gaps = tmp_path / WORK_DIRNAME / "route_baseline" / "gaps.json"
+    assert (tmp_path / WORK_DIRNAME / "gaps.json").read_bytes() == baseline_gaps.read_bytes()
+    assert _package(tmp_path) == 0
 
 
 def test_package_with_a_current_plan_writes_an_audit_with_hashes(tmp_path: Path) -> None:
@@ -287,8 +301,7 @@ def test_package_refuses_stale_unstamped_report(tmp_path: Path, capsys: pytest.C
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     assert _package(tmp_path) == 1
-    error = capsys.readouterr().err
-    assert "does not match" in error or "re-run" in error.lower()
+    assert "translation_report.json does not match a fresh rebuild; re-run route" in capsys.readouterr().err
     assert not (tmp_path / "databricks.yml").exists()
 
 
@@ -328,9 +341,12 @@ def test_package_refuses_edited_combine_store(tmp_path: Path, capsys: pytest.Cap
     combines_path.write_text(json.dumps(combines, indent=2), encoding="utf-8")
 
     assert _package(tmp_path) == 1
-    error = capsys.readouterr().err
-    assert "combine" in error.lower() or "re-run" in error.lower()
+    assert "the combine store has been edited (component-1); re-run fill-agentic combine" in capsys.readouterr().err
     assert not (tmp_path / "databricks.yml").exists()
+
+    combine = ["fill-agentic", "combine", "--output-dir", str(tmp_path), "--members", "solo"]
+    assert adapter_main([*combine, "--pipelines-path", str(authored_path)]) == 0
+    assert _package(tmp_path) == 0
 
 
 def test_package_refuses_stale_stamped_report(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -372,4 +388,29 @@ def test_package_refuses_stale_stamped_report(tmp_path: Path, capsys: pytest.Cap
 
     assert _package(tmp_path) == 1
     assert "out of date; re-run modify" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_package_replays_an_explicit_live_report_even_when_a_stamped_copy_exists(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps({"components": [{"component_id": "component-1", "members": ["solo"], "decision": "agentic"}]}),
+        encoding="utf-8",
+    )
+    assert adapter_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)]) == 0
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["pipelines"][0]["tasks"] = []
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    capsys.readouterr()
+
+    exit_code = package_main(
+        ["--output-dir", str(tmp_path), "--report", str(report_path), "--no-download-workspace-files"]
+    )
+
+    assert exit_code == 1
+    assert "translation_report.json does not match a fresh rebuild; re-run route" in capsys.readouterr().err
     assert not (tmp_path / "databricks.yml").exists()

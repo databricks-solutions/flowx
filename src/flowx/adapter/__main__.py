@@ -177,14 +177,14 @@ def _run_route(args: argparse.Namespace) -> int:
       findings + a ready-to-record default plan) and exits -- the dry run an agent reads first;
     * with a **decision** -- ``--plan-path FILE`` (or ``--plan-path -`` to read the plan from stdin),
       or an interactive TTY prompt -- it validates and records the fingerprint-bound
-      ``metadata/conversion_plan.json`` and then edits ``.work/translation_report.json`` +
-      ``gaps.json`` so every routed-agentic group's tasks become placeholder gaps (deterministic
-      groups untouched; nothing routed agentic leaves the report byte-identical).
+      ``metadata/conversion_plan.json`` and then rebuilds ``.work/translation_report.json`` +
+      ``gaps.json`` from the deterministic baseline, so every routed-agentic group's tasks become
+      placeholder gaps or its stored combine (deterministic groups keep the baseline; nothing routed
+      agentic leaves convert's report byte-identical). Re-routing under any decisions is allowed.
 
     Triggers the convert phase in-process when the report is missing and ``--source`` /
-    ``--source-path`` are supplied. Returns 1 on a missing report it cannot produce, on a plan that
-    fails validation, or when the report was already routed under different components or decisions
-    (report + plan left untouched in each case).
+    ``--source-path`` are supplied. Returns 1 on a missing report it cannot produce or on a plan that
+    fails validation (report + plan left untouched in each case).
     """
     from flowx import routing
     from flowx.models.conversion_plan import ConversionPlan
@@ -291,7 +291,7 @@ def _run_fill_agentic(args: argparse.Namespace) -> int:
     typically carrying ``AgenticComponentActivity`` nodes). The membership must exactly match a
     routed-agentic component in the recorded, fingerprint-bound ``metadata/conversion_plan.json``, and
     the merged report is always validated structurally before it is written back -- there is no bypass.
-    Per-pipeline agentic fills reuse ``convert --merge-agentic`` instead and are not handled here.
+    It is the only fill for a routed-agentic group; ``convert --merge-agentic`` fills convert's own gaps.
     """
     from flowx.route_agentic import apply_combine_fill
 
@@ -729,7 +729,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "fill-agentic",
         help=(
             "Cross-pipeline COMBINE fill: replace a routed group's pipelines with agent-authored "
-            "pipeline(s), validated structurally before writing. Per-pipeline fills use convert --merge-agentic."
+            "pipeline(s), validated structurally before writing. It is the only fill for a routed-agentic "
+            "group; convert --merge-agentic fills convert's own gaps."
         ),
     )
     fill_agentic.add_argument("action", choices=("combine",), help="'combine' performs the pipeline-grain fill.")
