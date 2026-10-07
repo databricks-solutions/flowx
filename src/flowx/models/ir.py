@@ -694,12 +694,14 @@ class AgenticComponentActivity(Activity):
 
     Attributes:
         files: Files to write below the bundle's ``src`` directory. Each entry
-            carries ``path`` and either UTF-8 ``content`` or base64-encoded
-            ``binary_content``.
+            carries a relative ``path`` and either UTF-8 ``content`` or
+            base64-encoded ``binary_content``. Two components may share a path
+            only when they author identical content.
         resources: Pipeline resources in the existing ``resource_key`` plus
             raw ``definition`` shape used by the bundle writer.
-        task: Raw Databricks task fragment containing either ``pipeline_task``
-            or ``notebook_task`` wiring to an authored resource or file.
+        task: Raw Databricks task fragment carrying exactly one executable
+            payload (a ``<kind>_task`` key such as ``pipeline_task`` or
+            ``notebook_task``) wired to an authored resource or file.
         raw_definition: Original source definition retained for auditing.
     """
 
