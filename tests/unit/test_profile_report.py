@@ -15,7 +15,7 @@ from flowx.models.adf_ast import (
     AdfLinkedServiceReference,
     AdfPipeline,
 )
-from flowx.parser.adf_loader import (
+from flowx.sources.adf.loader import (
     _activity_category,
     _complexity_score,
     _tshirt_size,

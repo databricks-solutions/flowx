@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from flowx.bundler.dab_writer import _build_job_resource, _pipeline_dict_to_workflow
+from flowx.ir_serde import pipeline_to_dict
+from flowx.models.ir import Pipeline, WaitActivity
 
 
 def _report(default="us"):
@@ -34,3 +38,35 @@ def test_build_job_resource_dedupes_parameters():
     job = _build_job_resource(wf, "pipeline_simple")["resources"]["jobs"]["pipeline_simple"]
     names = [p["name"] for p in job["parameters"]]
     assert names == ["region"]
+
+
+def test_airflow_job_policy_survives_report_round_trip():
+    pipeline = Pipeline(
+        name="airflow_policy",
+        tasks=[WaitActivity(name="Pause", task_key="pause", wait_time_seconds=1)],
+        tags={"source": "airflow"},
+        timeout_seconds=900,
+        email_notifications={"on_failure": ["alerts@example.com"]},
+    )
+
+    workflow = _pipeline_dict_to_workflow(pipeline_to_dict(pipeline))
+    job = _build_job_resource(workflow, "airflow_policy")["resources"]["jobs"]["airflow_policy"]
+
+    assert job["timeout_seconds"] == 900
+    assert job["email_notifications"] == {"on_failure": ["alerts@example.com"]}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("timeout_seconds", "900"),
+        ("email_notifications", {"on_failure": "alerts@example.com"}),
+        ("email_notifications", {"task_key": ["alerts@example.com"]}),
+    ],
+)
+def test_airflow_job_policy_report_rejects_malformed_values(field, value):
+    report = _report()
+    report[field] = value
+
+    with pytest.raises(ValueError):
+        _pipeline_dict_to_workflow(report)

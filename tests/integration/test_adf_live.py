@@ -6,7 +6,7 @@ the output is correct.
 
 Requires:
 - Azure CLI authenticated (``az login``)
-- Access to subscription edd4cc45-85c7-4aec-8bf5-648062d519bf
+- Access to subscription 00000000-0000-0000-0000-000000000000
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ import yaml
 
 from flowx.bundler.dab_writer import write_bundle
 from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
-from flowx.translator.engine import translate_pipeline
+from flowx.sources.adf.translate import translate_pipeline
 
-SUBSCRIPTION = "edd4cc45-85c7-4aec-8bf5-648062d519bf"
-RESOURCE_GROUP = "ghansen-flowx-rg"
-FACTORY_NAME = "ghansen-flowx-adf"
+SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
+RESOURCE_GROUP = "flowx-rg"
+FACTORY_NAME = "flowx-adf"
 API_VERSION = "2018-06-01"
 
 
@@ -138,7 +138,7 @@ def adf_export_dir(tmp_path_factory):
 @pytest.fixture(scope="module")
 def live_definitions(adf_export_dir):
     """Load all exported ADF definitions."""
-    from flowx.parser.adf_loader import load_adf_definitions
+    from flowx.sources.adf.loader import load_adf_definitions
 
     return load_adf_definitions(adf_export_dir)
 

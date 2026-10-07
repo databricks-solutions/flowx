@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from flowx.translator.query_analysis import QueryAnalysis, analyze_copy_query, dialect_for_source_type
+from flowx.sources.adf.query_analysis import QueryAnalysis, analyze_copy_query, dialect_for_source_type
 
 
 class TestParseabilityRejections:

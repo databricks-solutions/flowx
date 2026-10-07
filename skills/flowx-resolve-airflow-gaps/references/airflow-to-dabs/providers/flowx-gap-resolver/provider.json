@@ -1,0 +1,70 @@
+{
+  "fixtures": [
+    "fixtures/gap-notebook.json",
+    "fixtures/resolution-notebook.json",
+    "fixtures/gap-sql.json",
+    "fixtures/resolution-sql.json",
+    "fixtures/gap-spark-python.json",
+    "fixtures/resolution-spark-python.json",
+    "fixtures/gap-needs-input.json",
+    "fixtures/resolution-needs-input.json",
+    "fixtures/gap-deferred.json",
+    "fixtures/resolution-deferred.json"
+  ],
+  "flowx_pin": {
+    "commit": "dee6efe51b6264025dd69ee136b81029c15c1dbc",
+    "content_sha256": "87ee069f050eacc34db7c186770805fa3a9c83744120632b4753f673b809f7ae",
+    "contract_version": "1",
+    "repository": "https://github.com/park-peter/airflow-to-dabs",
+    "tag": "v0.2.3"
+  },
+  "interface": {
+    "contract_versions": [
+      "1"
+    ],
+    "entrypoint": "PROFILE.md",
+    "name": "flowx-gap-resolver",
+    "replacement_kinds": [
+      "notebook",
+      "sql",
+      "spark_python"
+    ],
+    "source": "airflow",
+    "statuses": [
+      "resolved",
+      "needs_input",
+      "deferred"
+    ]
+  },
+  "knowledge": [
+    {
+      "path": "../../references/operator-mapping.md",
+      "purpose": "Operator intent, semantic mappings, and unsupported boundaries"
+    },
+    {
+      "path": "../../references/dab-schema-reference.md",
+      "purpose": "Notebook and SQL task runtime constraints"
+    },
+    {
+      "path": "../../references/schedule-trigger-mapping.md",
+      "purpose": "Trigger-rule, schedule, sensor, and template semantics"
+    },
+    {
+      "path": "../../references/airflow3-migration.md",
+      "purpose": "Airflow 3 operator and import-path semantics"
+    },
+    {
+      "path": "../../references/lakeflow-connect.md",
+      "purpose": "Detect resolutions that require resources outside the leaf-only contract"
+    },
+    {
+      "path": "../../references/hadoop-migration-guide.md",
+      "purpose": "Spark-submit, HDFS, Hive, and Hadoop semantic guidance"
+    }
+  ],
+  "profile_schema_version": "1",
+  "provider": {
+    "name": "airflow-to-dabs",
+    "repository": "https://github.com/park-peter/airflow-to-dabs"
+  }
+}

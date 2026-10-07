@@ -889,7 +889,7 @@ class TestRunJobPreparer:
         import yaml
 
         from flowx.bundler.dab_writer import _load_report, write_bundle
-        from flowx.translator.engine import _activity_to_dict, _pipeline_to_dict
+        from flowx.ir_serde import activity_to_dict, pipeline_to_dict
 
         run_job = RunJobActivity(
             **_make_base("Nightly Aggregator", "nightly_aggregator"),
@@ -898,15 +898,15 @@ class TestRunJobPreparer:
             job_parameters={"window_start": "2024-01-01", "table": "orders"},
         )
         pipeline = Pipeline(name="rj_pipeline", tasks=[run_job])
-        pipeline_dict = _pipeline_to_dict(pipeline)
+        pipeline_dict = pipeline_to_dict(pipeline)
         # Sanity: serialiser must include job_parameters.
         run_job_dict = next(t for t in pipeline_dict["tasks"] if t["task_key"] == "nightly_aggregator")
         assert run_job_dict["job_parameters"] == {"window_start": "2024-01-01", "table": "orders"}
-        assert _activity_to_dict(run_job)["job_parameters"] == run_job.job_parameters
+        assert activity_to_dict(run_job)["job_parameters"] == run_job.job_parameters
 
         report_path = tmp_path / "rj.json"
         report_path.write_text(json.dumps(pipeline_dict))
-        workflows = _load_report(report_path)
+        workflows, _ = _load_report(report_path)
         bundle_dir = tmp_path / "bundle"
         bundle_dir.mkdir()
         write_bundle(workflows[0], bundle_dir)
@@ -1146,7 +1146,7 @@ class TestSwitchPreparer:
         }
         report_path = tmp_path / "switch.json"
         report_path.write_text(json.dumps(pipeline_dict))
-        workflows = _load_report(report_path)
+        workflows, _ = _load_report(report_path)
         bundle_dir = tmp_path / "bundle"
         bundle_dir.mkdir()
         write_bundle(workflows[0], bundle_dir)

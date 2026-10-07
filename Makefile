@@ -1,4 +1,4 @@
-.PHONY: clean dev ci test integration fmt help docs-install docs-clean docs-build docs-serve lock-dependencies requirements precommit
+.PHONY: clean dev ci test integration integration-live fmt help docs-install docs-clean docs-build docs-serve lock-dependencies requirements precommit
 
 clean:
 	rm -rf .venv .pytest_cache .ruff_cache .mypy_cache __pycache__
@@ -15,6 +15,9 @@ test:
 	PYTHONPATH=src uv run pytest tests/unit -v
 
 integration:
+	PYTHONPATH=src uv run pytest tests/integration -v -m "not slow and not integration"
+
+integration-live:
 	PYTHONPATH=src uv run pytest tests/integration -v -m "not slow"
 
 fmt:

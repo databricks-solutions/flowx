@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+import sqlglot
 
 from flowx.reporting import dashboard as D
 
@@ -16,10 +17,36 @@ def test_build_serialized_dashboard_injects_table_and_is_valid_json():
     # every dataset query references the fully-qualified table
     joined = " ".join(line for ds in spec["datasets"] for line in ds["queryLines"])
     assert "cat.sch.results" in joined
+    assert "audited_activities" in joined
+    assert "failed_activities" in joined
+    assert "excluded_activities" in joined
+    assert "reconciliation_status" in joined
+    assert "deterministic_coverage_pct" in joined
+    assert "code_attached_coverage_pct" in joined
+    assert "resolved_agentic_count" in joined
+    assert "unresolved_agentic_count" in joined
+    assert "agentic_resolution_outcomes" in joined
+    assert "agentic_provider_version" in joined
     assert spec["pages"][0]["pageType"] == "PAGE_TYPE_CANVAS"
     # widget field names match their dataset fields (counter references a real column)
     widget_names = {w["widget"]["name"] for w in spec["pages"][0]["layout"]}
     assert {"kpi-coverage", "by-size", "coverage-trend", "pipeline-table"} <= widget_names
+    assert "mechanically validated" in serialized
+    subtitle = next(item["widget"] for item in spec["pages"][0]["layout"] if item["widget"]["name"] == "subtitle")
+    assert subtitle["multilineTextboxSpec"]["lines"] == [
+        "Code attached — deterministic or reviewed agentic; semantic correctness not verified"
+    ]
+
+    dataset_fields = {}
+    for dataset in spec["datasets"]:
+        query = "".join(dataset["queryLines"])
+        expression = sqlglot.parse_one(query, dialect="databricks")
+        dataset_fields[dataset["name"]] = {projection.alias_or_name for projection in expression.expressions}
+    for layout_item in spec["pages"][0]["layout"]:
+        for query in layout_item["widget"].get("queries", []):
+            dataset_name = query["query"]["datasetName"]
+            for field in query["query"]["fields"]:
+                assert field["name"] in dataset_fields[dataset_name]
 
 
 def test_build_serialized_dashboard_requires_table():

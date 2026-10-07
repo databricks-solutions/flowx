@@ -371,7 +371,7 @@ yq = [
 [package.metadata]
 requires-dist = [
     { name = "databricks-sdk", specifier = ">=0.40" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.12" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.12,<2" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "sqlglot", specifier = ">=25.0" },
     { name = "starlette", marker = "extra == 'mcp'", specifier = ">=0.40" },

@@ -20,7 +20,8 @@ operation; `parameters` is its keyword-argument dict.
 | `inputs` | `adapter inputs` | List a phase's input prompts/defaults |
 | `discover` | `adapter discover` | Parse ADF JSON, classify activities |
 | `convert` | `adapter convert` | ADF activities → Databricks IR |
-| `merge_agentic` | `adapter convert --merge-agentic` | Merge agent-produced results into the report |
+| `merge_agentic` | `adapter convert --merge-agentic` | Merge ADF agent-produced results into the report |
+| `resolve_agentic` | `adapter resolve-agentic` | Prepare, stage, and apply reviewed Airflow leaf-gap resolutions |
 | `inspect` | `adapter inspect` | Surface pending translation options |
 | `apply_answers` | `adapter modify` | Apply answers → stamped IR |
 | `materialize_lookup` | `adapter materialize-lookup` | CSV → lookup-values JSON |
@@ -30,7 +31,7 @@ operation; `parameters` is its keyword-argument dict.
 | `record_results` | `adapter record-results` | Write coverage to a UC table |
 | `install_dashboard` | `adapter install-dashboard` | Publish the coverage dashboard |
 
-Example: `flowx(command="discover", parameters={"adf_source_path": "/Volumes/main/default/adf_export", "output_dir": "./out"})`.
+Example: `flowx(command="discover", parameters={"source": "adf", "adf_source_path": "/Volumes/main/default/adf_export", "output_dir": "./out"})`.
 
 Each command is a thin bridge over `python -m flowx.adapter` (the same entry point the agent
 skills use), then reads back the JSON/CSV artifacts each phase writes — so the MCP surface stays in

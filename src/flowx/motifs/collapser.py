@@ -65,11 +65,18 @@ def collapse_motifs(
 
     return Pipeline(
         name=pipeline.name,
+        description=pipeline.description,
         parameters=pipeline.parameters,
         schedule=pipeline.schedule,
+        timeout_seconds=pipeline.timeout_seconds,
+        email_notifications=dict(pipeline.email_notifications),
         tasks=new_tasks,
         tags=pipeline.tags,
         not_translatable=pipeline.not_translatable,
+        reconciliation_status=pipeline.reconciliation_status,
+        migration_status=pipeline.migration_status,
+        audit=dict(pipeline.audit),
+        translation_configuration=pipeline.translation_configuration,
     )
 
 

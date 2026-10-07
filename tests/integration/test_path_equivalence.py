@@ -10,9 +10,10 @@ import pytest
 import yaml
 
 from flowx.bundler.dab_writer import _pipeline_dict_to_workflow, write_bundle
-from flowx.parser.adf_loader import load_adf_definitions
+from flowx.ir_serde import pipeline_to_dict
 from flowx.preparer.workflow_preparer import prepare_workflow
-from flowx.translator.engine import _pipeline_to_dict, translate_pipeline
+from flowx.sources.adf.loader import load_adf_definitions
+from flowx.sources.adf.translate import translate_pipeline
 from flowx.validate.bundle_invariants import check_bundle_dir, format_result
 
 FIXTURES_DIR = Path(__file__).parent.parent / "resources" / "json"
@@ -36,7 +37,7 @@ def test_inprocess_and_report_paths_agree(name: str, tmp_path: Path) -> None:
 
     # Serialize the report BEFORE the in-process write (write_bundle mutates the
     # workflow it is given, not the IR, but serialize first to be safe).
-    report_dict = _pipeline_to_dict(report.pipeline)
+    report_dict = pipeline_to_dict(report.pipeline)
 
     in_process = tmp_path / "in_process"
     write_bundle(prepare_workflow(report.pipeline), in_process, catalog="c", schema="s")
@@ -54,6 +55,6 @@ def test_generated_bundle_satisfies_invariants(name: str, tmp_path: Path) -> Non
     pipeline = next(p for p in _DEFS.pipelines if p.name == name)
     report = translate_pipeline(pipeline, _DEFS)
     out = tmp_path / "bundle"
-    write_bundle(_pipeline_dict_to_workflow(_pipeline_to_dict(report.pipeline)), out, catalog="c", schema="s")
+    write_bundle(_pipeline_dict_to_workflow(pipeline_to_dict(report.pipeline)), out, catalog="c", schema="s")
     result = check_bundle_dir(out)
     assert result.ok, format_result(result)

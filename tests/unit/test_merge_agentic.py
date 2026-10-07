@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from flowx.translator.engine import merge_agentic_results
+from flowx.ir_serde import merge_agentic_results
 
 
 def _write(path: Path, obj: object) -> None:

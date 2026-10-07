@@ -28,7 +28,7 @@ Each activity is classified with a `TranslationStrategy`:
 * `AGENTIC` (LLM-assisted gaps)
 * `UNSUPPORTED`
 
-The reporting layer (`reporting/`) can write per-run coverage to a Unity Catalog table and publish an AI/BI dashboard.
+The reporting layer (`reporting/`) can write per-run coverage to a Unity Catalog table and publish an AI/BI dashboard. Airflow rows use independently audited candidates as the denominator and persist reconciliation status, failed/excluded counts, stable finding fingerprints, translation-path coverage, deterministic coverage, reviewed agentic outcomes, and mechanically validated code-attached coverage. Provider-authored code remains distinct from deterministic translation and requires human review.
 
 ## Two surfaces over one core
 
@@ -59,7 +59,7 @@ The unified `flowx.adapter` CLI is the single contract. Both surfaces go through
 | `mcp/runner.py`   | Subprocess bridge to `flowx.adapter` with artifact summarizers (for running translation without the `mcp` dependency) |
 | `mcp/__main__.py` | `python -m flowx.mcp` entry point (stdio default, `--http` for hosting)                                               |
 
-The `flowx` tool's `command` selects the adapter operation: `inputs`, `discover`, `convert`, `merge_agentic`, `inspect`, `apply_answers`, `materialize_lookup`, `workspace_paths`, `package`, `migrate`, `record_results`, and `install_dashboard` (with `parameters` carrying that command's arguments).
+The `flowx` tool's `command` selects the adapter operation: `inputs`, `discover`, `convert`, `merge_agentic` (ADF only), `resolve_agentic` (Airflow only), `inspect`, `apply_answers`, `materialize_lookup`, `workspace_paths`, `package`, `migrate`, `record_results`, and `install_dashboard` (with `parameters` carrying that command's arguments).
 
 ## Deployment topology
 
@@ -78,7 +78,7 @@ The MCP server runs in whichever transport fits the calling tool. This is chosen
                                                                        own service principal
 ```
 
-See [Installation](/docs/installation#running-flowx-as-an-mcp-server) for the exact commands and the [app README](https://github.com/databricks-solutions/flowx/tree/main/app) for deployment details.
+See [Installation](/flowx/docs/installation#running-flowx-as-an-mcp-server) for the exact commands and the [app README](https://github.com/databricks-solutions/flowx/tree/main/app) for deployment details.
 
 <Callout type="info" title="Inputs and outputs on a hosted app">
 A Databricks App can't read the user's workspace / UC Volume files (`/Volumes/...` is **not** auto-mounted). Two ways to get data in/out of the `flowx` tool:

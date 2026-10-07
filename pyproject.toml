@@ -30,7 +30,7 @@ dependencies = [
 # Install with `pip install -e .[mcp]` to host the flowx MCP tools
 # (locally over stdio, or as a streamable-HTTP server / Databricks App).
 mcp = [
-    "mcp>=1.12",
+    "mcp>=1.12,<2",
     "uvicorn>=0.30",
     "starlette>=0.40",
 ]
@@ -81,10 +81,15 @@ markers = [
 cache-dir = ".venv/ruff-cache"
 target-version = "py312"
 line-length = 120
-exclude = ["templates/*"]
+exclude = ["templates/*", "tests/resources/airflow/review_repros/*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Sample Airflow DAG fixtures are parsed statically, never executed; they
+# reference runtime globals (spark, dbutils) and Airflow imports by design.
+"tests/resources/airflow/*" = ["F821", "F401"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["flowx"]

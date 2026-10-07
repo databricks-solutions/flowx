@@ -6,8 +6,8 @@ from __future__ import annotations
 from flowx.models.adf_ast import AdfActivity, AdfDefinitions, AdfParameter, AdfPipeline
 from flowx.models.ir import TranslationContext
 from flowx.preparer.code_generator import generate_web_activity_notebook
-from flowx.translator.activity_translators import web_activity
-from flowx.translator.engine import translate_pipeline
+from flowx.sources.adf.translate import translate_pipeline
+from flowx.sources.adf.translators import web_activity
 
 _DEFS = AdfDefinitions(pipelines=[], datasets={}, linked_services={}, triggers=[])
 
