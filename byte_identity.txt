@@ -1,0 +1,3 @@
+echo "### discover -> convert -> package (--no-download-workspace-files --keep-intermediates), 79f70e3 vs bb6763e"
+for corpus in fixtures scenario
+for corpus in fixtures scenario
