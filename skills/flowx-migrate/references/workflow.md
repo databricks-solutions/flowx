@@ -79,12 +79,13 @@ merges:
   so those groups' tasks become placeholder gaps and stamps a routing record onto it (per component:
   members, decision and outcome, plus the plan and baseline report hashes); a fully-deterministic
   plan (or no plan) leaves convert/package behaving exactly as before — the non-breaking guarantee.
-  The fills and `modify` carry the record forward; re-routing under different decisions is refused
+  Combine and `modify` carry the record forward; re-routing under different decisions is refused
   (re-run convert, then route), and package refuses a report whose record no longer matches the plan.
 
-Routed-agentic groups are then filled during convert: per-pipeline via `convert --merge-agentic`, or
-cross-pipeline (N→M, e.g. a Lakeflow Connect collapse) via `fill-agentic combine` using authored
-`AgenticComponentActivity` nodes.
+Routed-agentic groups are then filled only by `fill-agentic combine`, which replaces each group with
+authored pipelines (N→M, e.g. a Lakeflow Connect collapse, or one same-named pipeline to stay 1:1),
+typically using `AgenticComponentActivity` nodes. `convert --merge-agentic` fills convert's own gaps
+and refuses routed-agentic pipelines.
 
 ## Phase 2: Convert
 

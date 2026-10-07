@@ -38,9 +38,10 @@ This is the top-level orchestration skill. It runs the full migration pipeline:
 4. **Route** — Decide, per connected component, deterministic vs. agentic conversion; record the
    fingerprint-bound `metadata/conversion_plan.json`; edit the baseline report so routed-agentic
    groups become placeholder gaps (`flowx-route`)
-5. **Fill agentic gaps** — Replace the routed-agentic placeholders: per-pipeline
-   `convert --merge-agentic` (ADF only) or cross-pipeline `fill-agentic combine`; Airflow gaps go
-   through `flowx-resolve-airflow-gaps`. **Never re-run a plain `convert` after routing** — it
+5. **Fill agentic gaps** — Replace each routed-agentic group with `fill-agentic combine` (one
+   same-named authored pipeline keeps a pipeline 1:1); `convert --merge-agentic` (ADF only) fills
+   convert's own gaps and refuses routed-agentic pipelines; Airflow gaps go through
+   `flowx-resolve-airflow-gaps`. **Never re-run a plain `convert` after routing** — it
    rewrites the report and erases the placeholders
 6. **Package** — Generate Databricks Declarative Automation Bundles for deployment
 

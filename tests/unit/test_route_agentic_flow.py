@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ from flowx.route_agentic import (
     GAPS_FILENAME,
     REPORT_FILENAME,
     REROUTED_UNDER_DIFFERENT_PLAN,
+    ROUTED_AGENTIC_MERGE_REFUSED,
     WORK_DIRNAME,
     agentic_pipeline_names,
     alter_report,
@@ -393,38 +395,46 @@ def test_apply_plan_to_report_all_deterministic_leaves_files_byte_identical(tmp_
 # --------------------------------------------------------------------------- #
 
 
-def test_per_pipeline_fill_reuses_merge_agentic_results(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pipeline", ["parent", None])
+def test_merge_into_a_routed_agentic_pipeline_is_refused(tmp_path: Path, pipeline: str | None) -> None:
     _write_work(tmp_path, _report_two_pipelines(), gaps=[])
     apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
-
+    routed_report = report_path.read_bytes()
     results_dir = tmp_path / "agentic_results"
     results_dir.mkdir()
-    (results_dir / "extract.json").write_text(
-        json.dumps(
-            {
-                "pipeline": "parent",
-                "activity_name": "Extract",
-                "task": {
-                    "type": "NotebookActivity",
-                    "name": "Extract",
-                    "task_key": "extract",
-                    "notebook_path": "/Workspace/Shared/agentic_extract",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert _record_outcomes(report_path) == {"component-1": "agentic-not-viable", "component-2": "deterministic"}
-    merged, unmatched = merge_agentic_results(report_path, results_dir)
-    assert (merged, unmatched) == (1, 0)
+    result: dict[str, Any] = {"activity_name": "Extract", "task": _notebook_task("Extract", "extract")}
+    if pipeline is not None:
+        result["pipeline"] = pipeline
+    (results_dir / "extract.json").write_text(json.dumps(result), encoding="utf-8")
 
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    parent = next(p for p in report["pipelines"] if p["name"] == "parent")
-    assert parent["tasks"][0]["type"] == "NotebookActivity"
-    assert validate_report_structurally(report).ok
-    # The merge left no routed placeholder in component-1, so its outcome is now applied.
-    assert _record_outcomes(report_path) == {"component-1": "agentic-applied", "component-2": "deterministic"}
+    with pytest.raises(ValueError, match=re.escape(ROUTED_AGENTIC_MERGE_REFUSED)):
+        merge_agentic_results(report_path, results_dir)
+    assert report_path.read_bytes() == routed_report
+
+
+@pytest.mark.parametrize("pipeline", ["child", None])
+def test_merge_still_fills_convert_gaps_in_a_deterministic_pipeline(tmp_path: Path, pipeline: str | None) -> None:
+    report = _report_two_pipelines()
+    report["pipelines"][1]["tasks"] = [
+        {"name": "Load", "task_key": "load", "type": "PlaceholderActivity", "original_type": "Script"}
+    ]
+    _write_work(tmp_path, report, gaps=[])
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    results_dir.mkdir()
+    result: dict[str, Any] = {"activity_name": "Load", "task": _notebook_task("Load", "load", "/Workspace/Shared/l")}
+    if pipeline is not None:
+        result["pipeline"] = pipeline
+    (results_dir / "load.json").write_text(json.dumps(result), encoding="utf-8")
+
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+
+    merged = json.loads(report_path.read_text(encoding="utf-8"))
+    child = next(p for p in merged["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+    assert _record_outcomes(report_path) == {"component-1": "agentic-not-viable", "component-2": "deterministic"}
 
 
 # --------------------------------------------------------------------------- #
@@ -596,26 +606,19 @@ def test_combine_is_idempotent_running_twice_yields_no_duplicate(tmp_path: Path)
     assert names == ["orders_lfc"]  # exactly one authored pipeline, no duplicate
 
 
-def test_combine_idempotent_with_a_differently_named_authored_pipeline(tmp_path: Path) -> None:
-    """FIX 3 (a): a second combine whose authored replacement is renamed must NOT duplicate.
-
-    Name-set matching would fail here (the new name is absent from the report, the old members are
-    already gone), fall through, and append a second authored pipeline. The routing record's outcome
-    catches the re-run regardless of the authored name.
-    """
+def test_a_different_combine_on_an_applied_component_is_refused(tmp_path: Path) -> None:
+    """A second combine whose authored pipelines differ from those now in the report is refused."""
     _setup_routed_agentic(tmp_path, decision="agentic")
-
     first = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc")])
     assert first["ok"] is True and first["already_combined"] is False
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combined_report = report_path.read_bytes()
 
-    # Same members, but the authored replacement is named differently this time.
     second = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc_v2")])
-    assert second["ok"] is True
-    assert second["already_combined"] is True
 
-    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
-    names = [pipeline["name"] for pipeline in report["pipelines"]]
-    assert names == ["orders_lfc"]  # first authored pipeline kept; the renamed re-run added nothing
+    assert second["ok"] is False
+    assert second["error"] == COMPONENT_ALREADY_FILLED
+    assert report_path.read_bytes() == combined_report
 
 
 def test_combine_idempotent_when_authored_name_collides_with_a_former_member(tmp_path: Path) -> None:
@@ -712,21 +715,6 @@ def _write_merge_result(results_dir: Path, pipeline: str, activity_name: str, ta
     )
 
 
-def test_combine_after_a_per_pipeline_merge_is_refused(tmp_path: Path) -> None:
-    _setup_routed_agentic(tmp_path, decision="agentic")
-    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
-    results_dir = tmp_path / "agentic_results"
-    _write_merge_result(results_dir, "parent", "Extract", "extract")
-    assert merge_agentic_results(report_path, results_dir) == (1, 0)
-    merged_report = report_path.read_bytes()
-
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
-
-    assert result["ok"] is False
-    assert result["error"] == COMPONENT_ALREADY_FILLED
-    assert report_path.read_bytes() == merged_report
-
-
 def test_merge_after_a_combine_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
     assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
@@ -735,19 +723,21 @@ def test_merge_after_a_combine_is_refused(tmp_path: Path, capsys: pytest.Capture
     results_dir = tmp_path / "agentic_results"
     _write_merge_result(results_dir, "parent", "Extract", "extract")
 
-    with pytest.raises(ValueError, match=COMPONENT_ALREADY_FILLED):
+    with pytest.raises(ValueError, match=re.escape(ROUTED_AGENTIC_MERGE_REFUSED)):
         merge_agentic_results(report_path, results_dir)
     exit_code = translate_main(["--merge-agentic", "--report", str(report_path), "--agentic-results", str(results_dir)])
 
     assert exit_code == 1
-    assert COMPONENT_ALREADY_FILLED in capsys.readouterr().err
+    assert ROUTED_AGENTIC_MERGE_REFUSED in capsys.readouterr().err
     assert report_path.read_bytes() == combined_report
 
 
 def _colliding_authored_pipelines() -> list[dict[str, Any]]:
-    """Authored combine pipelines that reuse both member names but none of the routed task names."""
-    publish = {"name": "child", "tags": {"source": "adf"}, "tasks": [_notebook_task("Publish", "publish")]}
-    return [_named_lfc_pipeline("parent"), publish]
+    """Authored combine pipelines that reuse both member names and the routed task names."""
+    parent = _named_lfc_pipeline("parent")
+    parent["tasks"][0]["name"] = "Extract"
+    child = {"name": "child", "tags": {"source": "adf"}, "tasks": [_notebook_task("Load", "load")]}
+    return [parent, child]
 
 
 def test_combine_rerun_is_idempotent_when_authored_names_reuse_every_member(tmp_path: Path) -> None:
@@ -765,7 +755,7 @@ def test_combine_rerun_is_idempotent_when_authored_names_reuse_every_member(tmp_
 
 @pytest.mark.parametrize(
     ("pipeline", "activity_name"),
-    [("parent", "Ingest orders"), (None, "Publish"), (None, "Extract")],
+    [("parent", "Extract"), ("child", "Load"), (None, "Load")],
 )
 def test_merge_after_a_combine_reusing_every_member_name_is_refused(
     tmp_path: Path, pipeline: str | None, activity_name: str
@@ -781,7 +771,7 @@ def test_merge_after_a_combine_reusing_every_member_name_is_refused(
         result["pipeline"] = pipeline
     (results_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
 
-    with pytest.raises(ValueError, match=COMPONENT_ALREADY_FILLED):
+    with pytest.raises(ValueError, match=re.escape(ROUTED_AGENTIC_MERGE_REFUSED)):
         merge_agentic_results(report_path, results_dir)
     assert report_path.read_bytes() == combined_report
 
@@ -792,7 +782,7 @@ def test_merge_into_an_authored_combine_pipeline_is_refused(tmp_path: Path) -> N
     results_dir = tmp_path / "agentic_results"
     _write_merge_result(results_dir, "orders_lfc", "Ingest orders", "ingest_orders")
 
-    with pytest.raises(ValueError, match=COMPONENT_ALREADY_FILLED):
+    with pytest.raises(ValueError, match=re.escape(ROUTED_AGENTIC_MERGE_REFUSED)):
         merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir)
 
 

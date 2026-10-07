@@ -67,9 +67,14 @@ _COMPONENT_AUTHORED_KEYS = {"component_id", "members", "decision", "rationale", 
 _COMPONENT_LIBRARY_KEYS = {"recommended", "options"}
 
 
+def inventory_source(inventory: dict[str, Any]) -> str:
+    """The source an inventory was discovered from (an inventory without one is ADF)."""
+    return str(inventory.get("source", _LEGACY_INVENTORY_SOURCE))
+
+
 def agentic_routing_supported(inventory: dict[str, Any]) -> bool:
     """Whether route may take an agentic decision for this inventory's source (ADF only in Phase 1)."""
-    return inventory.get("source", _LEGACY_INVENTORY_SOURCE) in AGENTIC_ROUTING_SOURCES
+    return inventory_source(inventory) in AGENTIC_ROUTING_SOURCES
 
 
 def _agentic_routing_unsupported_note(inventory: dict[str, Any]) -> str:

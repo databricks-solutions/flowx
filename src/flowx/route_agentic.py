@@ -14,11 +14,12 @@ package phase, structural validation, and provenance all still apply:
   path handles them without duplicates and the edit is idempotent. Pipelines in deterministic groups
   are left byte-identical, and when nothing is routed agentic the report and gaps are returned
   unchanged -- the non-breaking guarantee.
-* the agent authors the fill. **Per-pipeline** agentic reuses the existing name-matched
-  :func:`flowx.ir_serde.merge_agentic_results`. **Cross-pipeline COMBINE**
-  (N pipelines -> M, e.g. one Lakeflow Connect pipeline) is the one net-new capability:
-  :func:`combine_group_fill` swaps the routed group's pipelines for the agent-authored pipeline(s),
-  which carry :class:`~flowx.models.ir.AgenticComponentActivity` nodes (the escape hatch).
+* the agent authors the fill. A routed-agentic component is filled **only** by the cross-pipeline
+  COMBINE (N pipelines -> M, e.g. one Lakeflow Connect pipeline, or one same-named pipeline to keep
+  it 1:1): :func:`combine_group_fill` swaps the routed group's pipelines for the agent-authored
+  pipeline(s), which carry :class:`~flowx.models.ir.AgenticComponentActivity` nodes (the escape
+  hatch). The name-matched :func:`flowx.ir_serde.merge_agentic_results` stays for convert's own
+  gaps and refuses routed-agentic pipelines.
 * :func:`validate_report_structurally` packages the merged report through the same
   ``prepare -> write_bundle`` path the package phase uses and runs the existing
   :func:`flowx.validate.bundle_invariants.check_bundle_dir` over the output, so a fill can never
@@ -26,8 +27,9 @@ package phase, structural validation, and provenance all still apply:
 
 Route stamps one routing record onto the report (:data:`ROUTING_RECORD_KEY`), keyed by the plan's
 component ids, holding each component's members, decision and outcome plus the plan hash and the hash
-of the report route started from. Every later rewrite of the report carries it forward, the fills
-update the outcomes, and package refuses a report whose record no longer matches the recorded plan.
+of the report route started from. Every later rewrite of the report carries it forward, combine
+marks its component applied, and package refuses a report whose record no longer matches the
+recorded plan.
 
 There is no LLM here: the tool edits the report and validates the authored fill; the fill itself is
 supplied by the agent/harness, following the same ask -> author -> continue pattern as the existing
@@ -59,33 +61,28 @@ GAPS_FILENAME = "gaps.json"
 METADATA_DIRNAME = "metadata"
 INVENTORY_FILENAME = "inventory.json"
 
-# Routing / in-engine agentic conversion is ADF-only, so every agent-authored combine pipeline must
-# carry this source tag. The package preflight enforces it too, but combine asserts it up front so a
-# mis-tagged authored pipeline fails closed here (nothing written) instead of surviving to package.
-REQUIRED_COMBINE_SOURCE_TAG = "adf"
-
 # Top-level report key holding the routing record. It lives in the report, so a fresh convert (which
 # rewrites the report) clears it; the package phase and ir_serde read only the pipelines beside it.
 ROUTING_RECORD_KEY = "_routing_record"
 
 # What became of each component in the record: a deterministic component is left as convert wrote it;
-# an agentic one stays "not viable" until a fill leaves none of its members with a routed placeholder.
+# an agentic one stays "not viable" until combine fills it.
 OUTCOME_DETERMINISTIC = "deterministic"
 OUTCOME_AGENTIC_APPLIED = "agentic-applied"
 OUTCOME_AGENTIC_NOT_VIABLE = "agentic-not-viable"
 
 REROUTED_UNDER_DIFFERENT_PLAN = "the report was routed under a different plan; re-run convert, then route"
 
-# Each routed-agentic component takes exactly one kind of fill: a cross-pipeline combine or
-# per-pipeline merges, never both.
 COMPONENT_ALREADY_FILLED = "component already filled; re-run convert and route to start again"
-FILL_COMBINE = "combine"
-FILL_MERGE = "merge"
+ROUTED_AGENTIC_MERGE_REFUSED = (
+    "this pipeline is routed agentic; fill it with fill-agentic combine "
+    "(to change the approach, change the plan, re-run convert and route, then combine again)"
+)
 
 # Guidance stamped onto every placeholder the alteration produces.
 _PLACEHOLDER_COMMENT = (
-    "Routed agentic by the conversion plan; author a replacement task (per-pipeline fill) or replace "
-    "the whole group with agent-authored pipeline(s) (cross-pipeline combine)."
+    "Routed agentic by the conversion plan; replace the whole group with agent-authored pipeline(s) "
+    "using fill-agentic combine."
 )
 
 
@@ -176,73 +173,11 @@ def routing_record_mismatches(record: dict[str, Any], plan: dict[str, Any]) -> l
     return mismatches
 
 
-def refresh_routing_outcomes(report: dict[str, Any]) -> None:
-    """Update each agentic component's outcome in the report's record after a fill, in place.
+def routed_agentic_pipelines(report: Any) -> set[str]:
+    """The pipelines only combine may fill: routed-agentic members and the pipelines combine authored.
 
-    A component is applied once none of its member pipelines left in the report still holds a routed
-    placeholder; a combine removes the members entirely. A report without a record is left alone.
-    """
-    record = routing_record(report)
-    if record is None or not isinstance(record.get("components"), dict):
-        return
-    with_placeholders = {
-        pipeline.get("name")
-        for pipeline in _report_pipelines(report)
-        for task in pipeline.get("tasks", [])
-        if isinstance(task, dict) and task.get("type") == "PlaceholderActivity"
-    }
-    for entry in record["components"].values():
-        if isinstance(entry, dict) and entry.get("decision") == DECISION_AGENTIC:
-            unfilled = any(member in with_placeholders for member in entry.get("members") or [])
-            entry["outcome"] = OUTCOME_AGENTIC_NOT_VIABLE if unfilled else OUTCOME_AGENTIC_APPLIED
-
-
-def load_gaps(work_dir: Path) -> list[dict[str, Any]]:
-    """The gaps recorded beside a translation report in ``work_dir``, or an empty list when none were."""
-    gaps_path = Path(work_dir) / GAPS_FILENAME
-    gaps = json.loads(gaps_path.read_text(encoding="utf-8")) if gaps_path.exists() else []
-    return [gap for gap in gaps if isinstance(gap, dict)] if isinstance(gaps, list) else []
-
-
-def _routed_task_names(gaps: list[dict[str, Any]]) -> dict[str, set[str]]:
-    """The task names route turned into placeholders, per pipeline, from its pipeline-tagged gaps."""
-    names: dict[str, set[str]] = {}
-    for gap in gaps:
-        if gap.get("pipeline") is not None:
-            names.setdefault(str(gap["pipeline"]), set()).add(str(gap.get("activity_name")))
-    return names
-
-
-def component_fill(report: dict[str, Any], members: Iterable[str], gaps: list[dict[str, Any]]) -> str | None:
-    """Which kind of fill has touched a routed-agentic component, read from the report and its gaps.
-
-    Route turns every top-level task of a member into a placeholder and records one gap per task. A
-    per-pipeline merge replaces those placeholders by name, so a merged member keeps the routed task
-    names. A combine replaces the members with authored pipelines, so a member is combined when it
-    is gone from the report, or when an authored pipeline reusing its name holds no placeholder and
-    none of the routed task names. Returns :data:`FILL_COMBINE`, :data:`FILL_MERGE`, or ``None``
-    when neither has run.
-    """
-    by_name = {pipeline.get("name"): pipeline for pipeline in _report_pipelines(report)}
-    routed = _routed_task_names(gaps)
-    filled = False
-    for member in members:
-        pipeline = by_name.get(member)
-        if pipeline is None:
-            return FILL_COMBINE
-        tasks = [task for task in pipeline.get("tasks", []) if isinstance(task, dict)]
-        placeholders = [task for task in tasks if task.get("type") == "PlaceholderActivity"]
-        if tasks and not placeholders and not {str(task.get("name")) for task in tasks} & routed.get(member, set()):
-            return FILL_COMBINE
-        filled = filled or len(placeholders) < len(tasks)
-    return FILL_MERGE if filled else None
-
-
-def combined_pipelines(report: dict[str, Any], gaps: list[dict[str, Any]]) -> set[str]:
-    """The pipelines a combine has filled: combined members, and the authored pipelines beside them.
-
-    A pipeline that is no member of any routed component was authored by a combine, so once any
-    component is combined those pipelines count too. Empty when the report has no routing record.
+    Every pipeline convert wrote is a member of some recorded component, so a pipeline in the report
+    that belongs to none was authored by a combine. Empty when the report has no routing record.
     """
     record = routing_record(report)
     components = record.get("components") if record is not None else None
@@ -251,16 +186,13 @@ def combined_pipelines(report: dict[str, Any], gaps: list[dict[str, Any]]) -> se
     names: set[str] = set()
     all_members: set[str] = set()
     for entry in components.values():
-        if not isinstance(entry, dict):
-            continue
-        members = [str(member) for member in entry.get("members") or []]
-        all_members.update(members)
-        if entry.get("decision") == DECISION_AGENTIC and component_fill(report, members, gaps) == FILL_COMBINE:
-            names.update(members)
-    if names:
-        authored = {str(pipeline.get("name")) for pipeline in _report_pipelines(report)} - all_members
-        names.update(authored)
-    return names
+        if isinstance(entry, dict):
+            members = {str(member) for member in entry.get("members") or []}
+            all_members.update(members)
+            if entry.get("decision") == DECISION_AGENTIC:
+                names.update(members)
+    authored = {str(pipeline.get("name")) for pipeline in _report_pipelines(report)} - all_members
+    return names | authored
 
 
 def reroute_conflict(output_dir: Path, plan: dict[str, Any]) -> str | None:
@@ -496,7 +428,10 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
     if record is None and not agentic:
         return {"agentic_pipelines": [], "gaps": 0, "altered": False}
 
-    gaps = load_gaps(work)
+    gaps_path = work / GAPS_FILENAME
+    gaps = json.loads(gaps_path.read_text(encoding="utf-8")) if gaps_path.exists() else []
+    if not isinstance(gaps, list):
+        gaps = []
 
     if record is not None:
         if routing_record_mismatches(record, plan):
@@ -510,7 +445,7 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
         new_report = {"pipelines": [new_report]}
     new_report[ROUTING_RECORD_KEY] = build_routing_record(plan, baseline_bytes)
     _write_json_atomic(report_path, new_report)
-    _write_json_atomic(work / GAPS_FILENAME, new_gaps)
+    _write_json_atomic(gaps_path, new_gaps)
     return {"agentic_pipelines": sorted(agentic), "gaps": len(new_gaps), "altered": True}
 
 
@@ -563,35 +498,39 @@ def combine_group_fill(
 
 def _resolve_agentic_component(
     output_dir: Path, members: set[str]
-) -> tuple[str | None, dict[str, Any] | None, str | None]:
+) -> tuple[str | None, dict[str, Any] | None, str | None, str | None]:
     """Bind ``members`` to a routed-**agentic** component in the recorded, fingerprint-bound plan.
 
     Reads ``metadata/conversion_plan.json`` and ``metadata/inventory.json`` and returns
-    ``(component_id, plan, error)``, where ``plan`` is the recorded plan document. The error is set
-    (and the other two are ``None``) when: the plan or inventory is missing; the plan's
+    ``(component_id, plan, source, error)``, where ``plan`` is the recorded plan document and
+    ``source`` the inventory's source, which every authored pipeline must carry. The error is set
+    (and the other three are ``None``) when: the inventory's source cannot be routed agentic
+    (:data:`flowx.routing.AGENTIC_ROUTING_SOURCES`); the plan or inventory is missing; the plan's
     ``inventory_sha256`` no longer matches the current inventory (a stale plan); ``members`` do not
     exactly equal one component's members (a partial, superset, or mistyped group); or the
     exactly-matching component is routed deterministic rather than agentic. Requiring an exact match
     to a routed-agentic component stops a caller from swapping deterministic pipelines or a partial
     group. The plan is returned so the combine can check the report's routing record against it.
     """
-    from flowx.routing import plan_binding_violations
+    from flowx.routing import agentic_routing_supported, inventory_source, plan_binding_violations
 
     metadata = Path(output_dir) / METADATA_DIRNAME
     inventory_path = metadata / INVENTORY_FILENAME
     try:
         recorded = ConversionPlan.load(Path(output_dir))
     except ValueError as error:
-        return None, None, str(error)
+        return None, None, None, str(error)
     if recorded is None:
-        return None, None, "No metadata/conversion_plan.json; record a routing decision with `route` first."
+        return None, None, None, "No metadata/conversion_plan.json; record a routing decision with `route` first."
     if not inventory_path.exists():
-        return None, None, "No metadata/inventory.json; run the discover phase first."
+        return None, None, None, "No metadata/inventory.json; run the discover phase first."
 
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    if not agentic_routing_supported(inventory):
+        return None, None, None, f"inventory source {inventory_source(inventory)!r} cannot be routed agentic."
     stale = plan_binding_violations(recorded, inventory)
     if stale:
-        return None, None, f"conversion_plan.json is stale: {stale[0]}; re-run `route` before filling."
+        return None, None, None, f"conversion_plan.json is stale: {stale[0]}; re-run `route` before filling."
     plan = recorded.to_dict()
 
     for component in plan.get("components", []):
@@ -601,8 +540,9 @@ def _resolve_agentic_component(
         if component_members != members:
             continue
         if component.get("decision") == DECISION_AGENTIC:
-            return str(component.get("component_id")), plan, None
+            return str(component.get("component_id")), plan, inventory_source(inventory), None
         return (
+            None,
             None,
             None,
             (
@@ -613,6 +553,7 @@ def _resolve_agentic_component(
     return (
         None,
         None,
+        None,
         (
             f"members {sorted(members)} do not exactly match any component in the recorded plan "
             "(partial, superset, or mistyped); pass the exact member set of one routed-agentic component."
@@ -620,11 +561,11 @@ def _resolve_agentic_component(
     )
 
 
-def _authored_source_tag_violations(authored_pipelines: list[dict[str, Any]]) -> list[str]:
-    """Reports each authored combine pipeline that is missing the required ``tags.source == 'adf'``.
+def _authored_source_tag_violations(authored_pipelines: list[dict[str, Any]], source: str) -> list[str]:
+    """Reports each authored combine pipeline that does not carry ``tags.source`` equal to ``source``.
 
-    Routing / in-engine agentic conversion is ADF-only, so an authored combine pipeline that omits or
-    mis-sets the source tag is an authoring error. Catching it here fails the combine closed (nothing
+    The authored pipelines replace pipelines of the routed inventory, so one that omits or mis-sets
+    the source tag is an authoring error. Catching it here fails the combine closed (nothing
     written) with a clear message, rather than letting the mis-tagged pipeline reach the package
     preflight where it is only rejected much later.
     """
@@ -632,11 +573,10 @@ def _authored_source_tag_violations(authored_pipelines: list[dict[str, Any]]) ->
     for index, pipeline in enumerate(authored_pipelines):
         label = pipeline.get("name") if isinstance(pipeline, dict) and pipeline.get("name") else f"pipeline[{index}]"
         tags = pipeline.get("tags") if isinstance(pipeline, dict) else None
-        source = tags.get("source") if isinstance(tags, dict) else None
-        if source != REQUIRED_COMBINE_SOURCE_TAG:
+        authored_source = tags.get("source") if isinstance(tags, dict) else None
+        if authored_source != source:
             violations.append(
-                f"{label}: authored combine pipeline must carry tags.source == "
-                f"{REQUIRED_COMBINE_SOURCE_TAG!r}, got {source!r}"
+                f"{label}: authored combine pipeline must carry tags.source == {source!r}, got {authored_source!r}"
             )
     return violations
 
@@ -652,19 +592,19 @@ def apply_combine_fill(
     routed-agentic component in ``metadata/conversion_plan.json`` (whose fingerprint must still match
     the current inventory), so a caller cannot swap deterministic pipelines or a partial/typoed group.
     The report must carry a routing record that matches that plan, so route has to have applied it.
-    Every authored pipeline must carry ``tags.source == 'adf'`` (routing/agentic is ADF-only); a
-    mis-tagged pipeline fails the combine closed here rather than surviving to the package preflight.
+    Every authored pipeline must carry the inventory's source as ``tags.source`` (only sources in
+    :data:`flowx.routing.AGENTIC_ROUTING_SOURCES` route agentic, ADF today); a mis-tagged pipeline
+    fails the combine closed here rather than surviving to the package preflight.
     The merged report is then **always** validated with the structural bundle invariants (a real
     ``prepare -> write_bundle`` pass over :func:`validate_report_structurally`) -- there is no bypass --
     and written back only when it passes, so a dangling reference or duplicate key never lands on disk.
 
-    Each component takes one kind of fill: a component a per-pipeline merge has already filled is
-    refused with :data:`COMPONENT_ALREADY_FILLED`. The combine is **idempotent**: once a combine has
-    replaced the component's members (see :func:`component_fill`) a re-run no-ops (``already_combined`` true)
-    instead of collapsing/appending again, so it never duplicates the authored pipeline(s) even when
-    the authored replacement is renamed or an authored name collides with a former member. A fresh
-    ``convert`` rewrites the report without the record, so the combine applies again after a
-    re-convert and route.
+    Combine is the only fill for a routed-agentic component and marks its outcome
+    ``agentic-applied``. It is **idempotent**: on an applied component, re-running it with the same
+    authored pipelines as those now in the report no-ops (``already_combined`` true), even when the
+    authored names reuse member names; different authored pipelines are refused with
+    :data:`COMPONENT_ALREADY_FILLED`. A fresh ``convert`` rewrites the report without the record, so
+    the combine applies again after a re-convert and route.
 
     Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_combined"}``. ``ok``
     is ``False`` (and nothing written) on a plan/membership error (``error`` set), a missing source tag,
@@ -674,12 +614,12 @@ def apply_combine_fill(
         FileNotFoundError: when the translation report is missing (run convert first).
     """
     members = {str(member) for member in group_members}
-    component_id, plan, error = _resolve_agentic_component(output_dir, members)
+    component_id, plan, source, error = _resolve_agentic_component(output_dir, members)
     if error is not None:
         return {"ok": False, "error": error, "violations": [], "pipelines": 0}
-    assert component_id is not None and plan is not None  # guaranteed when error is None
+    assert component_id is not None and plan is not None and source is not None  # guaranteed when error is None
 
-    tag_violations = _authored_source_tag_violations(authored_pipelines)
+    tag_violations = _authored_source_tag_violations(authored_pipelines, source)
     if tag_violations:
         return {"ok": False, "error": None, "violations": tag_violations, "pipelines": 0}
 
@@ -696,10 +636,10 @@ def apply_combine_fill(
     if routing_record_mismatches(record, plan):
         return {"ok": False, "error": REROUTED_UNDER_DIFFERENT_PLAN, "violations": [], "pipelines": 0}
 
-    fill = component_fill(report, members, load_gaps(work))
-    if fill == FILL_MERGE:
-        return {"ok": False, "error": COMPONENT_ALREADY_FILLED, "violations": [], "pipelines": 0}
-    if fill == FILL_COMBINE:
+    if record["components"][component_id].get("outcome") == OUTCOME_AGENTIC_APPLIED:
+        in_report = {pipeline.get("name"): pipeline for pipeline in _report_pipelines(report)}
+        if not all(in_report.get(pipeline.get("name")) == pipeline for pipeline in authored_pipelines):
+            return {"ok": False, "error": COMPONENT_ALREADY_FILLED, "violations": [], "pipelines": 0}
         return {
             "ok": True,
             "error": None,
@@ -711,7 +651,7 @@ def apply_combine_fill(
 
     merged = combine_group_fill(report, members, authored_pipelines)
     merged[ROUTING_RECORD_KEY] = copy.deepcopy(record)
-    refresh_routing_outcomes(merged)
+    merged[ROUTING_RECORD_KEY]["components"][component_id]["outcome"] = OUTCOME_AGENTIC_APPLIED
 
     result = validate_report_structurally(merged)
     if not result.ok:

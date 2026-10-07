@@ -626,14 +626,14 @@ def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, repl
     return True
 
 
-def _lands_on_open_placeholder(pipelines: list[dict[str, Any]], activity_name: Any, blocked: set[str]) -> bool:
-    """Whether an untargeted merge result would replace a placeholder outside the *blocked* pipelines."""
+def _merge_target(pipelines: list[dict[str, Any]], wanted: Any, activity_name: Any) -> Any:
+    """The pipeline a merge result lands in: the one it names, else the first holding its activity."""
+    if wanted:
+        return wanted
     for pipeline in pipelines:
-        found = _locate_task(pipeline.get("tasks", []), activity_name)
-        if found is not None:
-            container, index = found
-            return pipeline.get("name") not in blocked and container[index].get("type") == "PlaceholderActivity"
-    return False
+        if _locate_task(pipeline.get("tasks", []), activity_name) is not None:
+            return pipeline.get("name")
+    return None
 
 
 def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Path | None = None) -> tuple[int, int]:
@@ -652,10 +652,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     ``NotebookActivity`` whose ``notebook_path`` points at a notebook the agent
     wrote to the workspace; the prepare phase then references it directly.
 
-    When the report carries a routing record, each agentic component's outcome is updated to show
-    whether the merge left any of its routed placeholders unfilled. Once a combine has filled a
-    component, a result aimed at one of its pipelines, or an untargeted result that would not replace
-    a remaining placeholder elsewhere, is refused before anything is written.
+    This fills convert's own agentic gaps. A pipeline the routing record routes agentic is filled
+    only by ``fill-agentic combine``, so a result that names one, or an untargeted result whose
+    activity would first land in one, is refused before anything is written.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
@@ -667,9 +666,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         ``(merged, unmatched)`` counts.
 
     Raises:
-        ValueError: A result would land in a component a combine already filled.
+        ValueError: A result would land in a pipeline the routing record routes agentic.
     """
-    from flowx.route_agentic import COMPONENT_ALREADY_FILLED, combined_pipelines, load_gaps, refresh_routing_outcomes
+    from flowx.route_agentic import ROUTED_AGENTIC_MERGE_REFUSED, routed_agentic_pipelines
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     pipelines = report["pipelines"] if isinstance(report, dict) and "pipelines" in report else [report]
@@ -677,14 +676,11 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         (result_file, json.loads(result_file.read_text(encoding="utf-8")))
         for result_file in sorted(results_dir.glob("*.json"))
     ]
-    combined = combined_pipelines(report, load_gaps(report_path.parent)) if isinstance(report, dict) else set()
+    routed = routed_agentic_pipelines(report)
     for _, data in results:
-        wanted = data.get("pipeline")
         activity_name = data.get("activity_name") or data.get("activity")
-        if wanted in combined or (
-            combined and not wanted and not _lands_on_open_placeholder(pipelines, activity_name, combined)
-        ):
-            raise ValueError(COMPONENT_ALREADY_FILLED)
+        if routed and _merge_target(pipelines, data.get("pipeline"), activity_name) in routed:
+            raise ValueError(ROUTED_AGENTIC_MERGE_REFUSED)
 
     merged = 0
     unmatched = 0
@@ -704,7 +700,6 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
             logger.warning("No placeholder named '%s' found for %s", activity_name, result_file.name)
             unmatched += 1
 
-    refresh_routing_outcomes(report)
     destination = output_path or report_path
     destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote merged report to %s (%d merged, %d unmatched)", destination, merged, unmatched)
