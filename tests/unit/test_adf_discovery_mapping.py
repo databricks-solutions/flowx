@@ -437,6 +437,29 @@ def test_switch_keeps_named_cases_that_have_no_activities() -> None:
     assert container.branches["gold"][0].name == "G"
 
 
+def test_switch_case_without_a_value_keeps_its_declared_position() -> None:
+    """A case with no ``value`` is keyed like the parser keys it ("") and stays where it was declared."""
+    activities = [
+        {
+            "name": "Route",
+            "type": "Switch",
+            "typeProperties": {
+                "cases": [
+                    {"activities": [{"name": "A", "type": "Wait"}]},
+                    {"value": "x", "activities": []},
+                ],
+            },
+        }
+    ]
+    graph = _pipeline(activities)
+
+    container = graph.tasks[0]
+    assert isinstance(container, ContainerNode)
+    assert list(container.branches.keys()) == ["", "x", "default"]
+    assert [child.name for child in container.branches[""]] == ["A"]
+    assert container.branches["x"] == []
+
+
 def test_empty_switch_stays_a_container_with_default_branch() -> None:
     """A Switch with no cases still maps to a ContainerNode with an empty default."""
     graph = _pipeline([{"name": "Route", "type": "Switch", "typeProperties": {}}])

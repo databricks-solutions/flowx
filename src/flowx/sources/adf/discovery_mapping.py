@@ -345,12 +345,7 @@ def _control_flow_branches(activity: AdfActivity, definitions: AdfDefinitions) -
         # The parser drops a case whose activities list is empty, so the declared case labels come
         # from the raw typeProperties; that keeps every named branch, empty ones included.
         declared_cases = (activity.type_properties or {}).get("cases")
-        declared_values = [
-            str(case["value"])
-            for case in declared_cases or []
-            if isinstance(case, dict) and case.get("value") is not None
-        ]
-        for case_value in declared_values + [value for value in parsed_cases if value not in declared_values]:
+        for case_value in (str(case.get("value", "")) for case in declared_cases or []):
             branches[case_value] = [_activity_to_node(child, definitions) for child in parsed_cases.get(case_value, [])]
         branches["default"] = [
             _activity_to_node(child, definitions) for child in (activity.switch_default_activities or [])

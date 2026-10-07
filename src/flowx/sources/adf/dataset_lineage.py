@@ -23,6 +23,10 @@ Two tiers, exactly as #36 established them:
   references that merely share a name must not join (#36's explicit rule), so when
   neither a physical identity nor a path-anchored signature is available the
   signature is left empty and the asset cannot participate in signature matching.
+  The signature is also left empty when the activity overrides the dataset's
+  location at run time (a source query, stored procedure or ``storeSettings`` path
+  override on a read; a sink stored procedure on a write), because the dataset's
+  path is then not what the activity touches.
 
 Only literal, provable values ever become an ``identity`` -- the resolver returns
 ``None`` rather than guessing, which is what stopped #36's spurious edges.
@@ -78,7 +82,7 @@ def activity_data_assets(
 
     When the activity overrides the dataset's physical source or target at run time,
     the dataset's own location is not what the activity touches, so that side gets
-    no identity and falls back to the structural signature. Reads are overridden by
+    neither an identity nor a signature and cannot join on either tier. Reads are overridden by
     a source query or stored procedure, or by ``storeSettings`` that give a wildcard
     folder or file name, a file list, or a prefix; writes by a sink stored procedure,
     which decides the table itself.
