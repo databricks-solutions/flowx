@@ -9,6 +9,7 @@ captured, not just index 0.
 
 from __future__ import annotations
 
+from flowx.lineage import data_edges_from_endpoints
 from flowx.models.adf_ast import (
     AdfActivity,
     AdfDataset,
@@ -531,6 +532,95 @@ def test_bracket_quoted_sql_names_keep_their_identity() -> None:
         resolve_dataset_identity(AdfDatasetReference(reference_name="ds_spaced"), definitions)
         == "sql.example.net/dbo.[Order Details]"
     )
+
+
+def test_arm_expression_storage_url_has_no_path_identity() -> None:
+    """An unevaluated ARM ``url`` is checked whole, so a cut-off fragment never stands in for the account."""
+    arm_lake = AdfLinkedService(
+        name="ls_arm_lake",
+        type="AzureBlobFS",
+        properties={
+            "typeProperties": {"url": "[concat('https://', parameters('storageAccountName'), '.dfs.core.windows.net')]"}
+        },
+    )
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_orders": _adls_dataset(
+                "ds_orders", file_system="raw", folder_path="in", linked_service="ls_arm_lake", file_name="orders.csv"
+            )
+        },
+        linked_services={"ls_arm_lake": arm_lake},
+    )
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orders"), definitions) is None
+
+
+def _lake_definitions() -> AdfDefinitions:
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_lake": _adls_dataset("ds_lake", file_system="data", folder_path="landing", linked_service="ls")},
+        linked_services={"ls": _adls_linked_service("ls", account="acct")},
+    )
+
+
+def test_store_settings_path_override_read_gets_no_identity_edge() -> None:
+    """A Copy that reads through a wildcard override does not read the dataset's folder, so no identity edge forms."""
+    definitions = _lake_definitions()
+    ingest = AdfActivity(
+        name="Ingest",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_lake")],
+        type_properties={"sink": {"type": "DelimitedTextSink"}},
+    )
+    publish = AdfActivity(
+        name="Publish",
+        type="Copy",
+        inputs=[AdfDatasetReference(reference_name="ds_lake")],
+        type_properties={
+            "source": {
+                "type": "DelimitedTextSource",
+                "storeSettings": {"wildcardFolderPath": "archive/2023", "wildcardFileName": "*.csv"},
+            }
+        },
+    )
+    _, ingest_writes = activity_data_assets(ingest, definitions)
+    publish_reads, _ = activity_data_assets(publish, definitions)
+
+    assert ingest_writes[0].identity == "abfss://data@acct.dfs.core.windows.net/landing"
+    assert publish_reads[0].identity is None
+    edges = data_edges_from_endpoints(
+        [("Ingest", asset) for asset in ingest_writes], [("Publish", asset) for asset in publish_reads]
+    )
+    assert edges == []
+
+
+def test_store_settings_path_override_covers_lookup_and_dataset_activities() -> None:
+    """Lookup overrides on its ``source``; Delete and GetMetadata override directly on ``typeProperties``."""
+    definitions = _lake_definitions()
+    lookup = AdfActivity(
+        name="Lookup",
+        type="Lookup",
+        type_properties={
+            "source": {"type": "DelimitedTextSource", "storeSettings": {"prefix": "orders_"}},
+            "dataset": {"referenceName": "ds_lake"},
+        },
+    )
+    get_metadata = AdfActivity(
+        name="GetMetadata",
+        type="GetMetadata",
+        type_properties={"dataset": {"referenceName": "ds_lake"}, "storeSettings": {"fileListPath": "lists/today.txt"}},
+    )
+    recursive_delete = AdfActivity(
+        name="Delete",
+        type="Delete",
+        type_properties={"dataset": {"referenceName": "ds_lake"}, "storeSettings": {"recursive": True}},
+    )
+
+    assert [asset.identity for asset in activity_data_assets(lookup, definitions)[0]] == [None]
+    assert [asset.identity for asset in activity_data_assets(get_metadata, definitions)[0]] == [None]
+    assert [asset.identity for asset in activity_data_assets(recursive_delete, definitions)[0]] == [
+        "abfss://data@acct.dfs.core.windows.net/landing"
+    ]
 
 
 def test_parameterised_file_location_bound_to_literals_resolves_to_its_path() -> None:

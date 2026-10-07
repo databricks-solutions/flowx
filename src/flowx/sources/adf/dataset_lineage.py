@@ -42,6 +42,7 @@ from flowx.parser.expression_parser import resolve_expression, resolve_interpola
 _ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
 _DATASET_PARAM_RE = re.compile(r"^@dataset\(\)\.([A-Za-z_][A-Za-z0-9_]*)$")
 _ARM_EXPRESSION_RE = re.compile(r"^\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\(.*\]$", re.DOTALL)
+_RUN_TIME_PATH_OVERRIDES = ("wildcardFolderPath", "wildcardFileName", "fileListPath", "prefix")
 
 # Runtime references inside a path expression. Each is a value only knowable at
 # run time; for a *structural* signature we collapse them all to one slot token so
@@ -75,6 +76,11 @@ def activity_data_assets(
     included. A dataset named in both an activity-level slot and ``typeProperties``
     is counted once per side so an activity does not emit two identical assets.
 
+    When the activity's ``storeSettings`` override the read path at run time (a
+    wildcard folder or file name, a file list, or a prefix), the dataset's own
+    location is not what the activity reads, so its reads get no identity and fall
+    back to the structural signature.
+
     Args:
         activity: The ADF activity to resolve.
         definitions: All loaded ADF definitions (datasets + linked services),
@@ -87,8 +93,9 @@ def activity_data_assets(
         ``(data_reads, data_writes)`` as lists of :class:`DataAsset`.
     """
     resolution_context = context if context is not None else TranslationContext()
+    read_location_overridden = _read_location_overridden(activity)
     reads = [
-        _dataset_ref_to_asset(reference, definitions, resolution_context)
+        _dataset_ref_to_asset(reference, definitions, resolution_context, location_overridden=read_location_overridden)
         for reference in _activity_dataset_refs(activity, produced=False)
     ]
     writes = [
@@ -98,10 +105,30 @@ def activity_data_assets(
     return reads, writes
 
 
+def _read_location_overridden(activity: AdfActivity) -> bool:
+    """Say whether the activity's ``storeSettings`` replace the read dataset's path at run time.
+
+    Copy and Lookup carry them on ``typeProperties.source``; Delete and GetMetadata
+    carry them directly on ``typeProperties``.
+    """
+    type_properties = activity.type_properties or {}
+    source = type_properties.get("source")
+    store_settings_candidates = (
+        source.get("storeSettings") if isinstance(source, dict) else None,
+        type_properties.get("storeSettings"),
+    )
+    return any(
+        isinstance(store_settings, dict) and any(store_settings.get(key) for key in _RUN_TIME_PATH_OVERRIDES)
+        for store_settings in store_settings_candidates
+    )
+
+
 def _dataset_ref_to_asset(
     dataset_ref: AdfDatasetReference,
     definitions: AdfDefinitions,
     context: TranslationContext,
+    *,
+    location_overridden: bool = False,
 ) -> DataAsset:
     """Turn one dataset reference into a two-tier :class:`DataAsset`.
 
@@ -112,9 +139,10 @@ def _dataset_ref_to_asset(
     path-anchored signature is available the signature is left empty. An empty
     signature is falsy, so :func:`~flowx.lineage._match_assets` cannot use it as a
     join key -- the asset is still captured as a read / write for reporting, it just
-    cannot manufacture a signature-tier edge.
+    cannot manufacture a signature-tier edge. When *location_overridden* is set the
+    dataset's location is not what the activity touches, so no identity is resolved.
     """
-    identity = resolve_dataset_identity(dataset_ref, definitions, context)
+    identity = None if location_overridden else resolve_dataset_identity(dataset_ref, definitions, context)
     if identity is not None:
         # Mirror the identity into the signature so the weak tier never joins a
         # resolved asset to an unresolved one that merely shares a physical value.
@@ -460,13 +488,20 @@ def _resolve_dataset_path(
 
 
 def _resolve_storage_account(linked_service: Any) -> str | None:
-    """Pull a storage account name out of a linked service, if present."""
+    """Pull a storage account name out of a linked service, if present.
+
+    The whole ``url``, ``sasUri`` or connection string must be physical before the
+    account is cut out of it: cutting first would drop the closing ``]`` of an ARM
+    expression or the tail of an ``@{...}`` and leave a fragment that looks literal.
+    """
     if linked_service is None:
         return None
     type_props = linked_service.properties.get("typeProperties") or linked_service.properties
 
     url = type_props.get("url") or ""
     if isinstance(url, str) and url:
+        if not _is_physical(url):
+            return None
         host = url.replace("https://", "").split("/", 1)[0]
         host_no_port = host.split(":", 1)[0]
         if "." in host_no_port:
@@ -474,19 +509,20 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
 
     sas_uri = type_props.get("sasUri") or ""
     if isinstance(sas_uri, str) and sas_uri:
+        if not _is_physical(sas_uri):
+            return None
         host = sas_uri.split("?", 1)[0].replace("https://", "").split("/", 1)[0]
         if "." in host:
             return host.split(".", 1)[0]
 
     # Plaintext connection string (rare in az exports -- usually masked).
     connection_string = type_props.get("connectionString")
-    if isinstance(connection_string, str):
-        match = _ACCOUNT_NAME_RE.search(connection_string)
-        if match:
-            return match.group(1)
     if isinstance(connection_string, dict):
-        value = connection_string.get("value", "")
-        match = _ACCOUNT_NAME_RE.search(value)
+        connection_string = connection_string.get("value", "")
+    if isinstance(connection_string, str):
+        if not _is_physical(connection_string):
+            return None
+        match = _ACCOUNT_NAME_RE.search(connection_string)
         if match:
             return match.group(1)
 
