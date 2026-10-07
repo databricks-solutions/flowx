@@ -66,8 +66,8 @@ Each activity's `task_key` equals its ADF activity name. `source_graphs_sha256` 
 `metadata/source_graphs.json` the inventory was built from.
 
 The inventory deliberately has no top-level `generated_at` timestamp any more, so the same export
-always produces the same `inventory.json` bytes and the hashes that bind enrich and route to it stay
-stable. Use the file's modification time if you need to know when discover ran.
+always produces byte-identical `inventory.json` and any hash taken over it stays stable. Use the
+file's modification time if you need to know when discover ran.
 
 ## Step 4b — Review the complexity report
 

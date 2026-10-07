@@ -487,7 +487,7 @@ def test_unevaluated_arm_expressions_never_become_identities() -> None:
             "ds_file": _adls_dataset(
                 "ds_file", file_system="[concat('raw', parameters('env'))]", folder_path="in", linked_service="ls"
             ),
-            "ds_escaped": _adls_dataset("ds_escaped", file_system="[[literal", folder_path="in", linked_service="ls"),
+            "ds_escaped": _adls_dataset("ds_escaped", file_system="[[literal]", folder_path="in", linked_service="ls"),
         },
         linked_services={
             "ls_sql": AdfLinkedService(
@@ -500,6 +500,37 @@ def test_unevaluated_arm_expressions_never_become_identities() -> None:
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_file"), definitions) is None
     # ARM's "[[" escape is a literal value that starts with "[", so it stays physical.
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_escaped"), definitions) is not None
+
+
+def test_bracket_quoted_sql_names_keep_their_identity() -> None:
+    """Bracket-quoted SQL names are literal table names, not ARM expressions, so they keep their identity."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_legacy": AdfDataset(
+                name="ds_legacy",
+                type="AzureSqlTable",
+                properties={
+                    "typeProperties": {"tableName": "[dbo].[Orders]"},
+                    "linkedServiceName": {"referenceName": "ls_sql"},
+                },
+            ),
+            "ds_spaced": _table_dataset("ds_spaced", schema="dbo", table="[Order Details]"),
+        },
+        linked_services={
+            "ls_sql": AdfLinkedService(
+                name="ls_sql", type="AzureSqlDatabase", properties={"typeProperties": {"server": "sql.example.net"}}
+            ),
+        },
+    )
+    assert (
+        resolve_dataset_identity(AdfDatasetReference(reference_name="ds_legacy"), definitions)
+        == "sql.example.net/[dbo].[Orders]"
+    )
+    assert (
+        resolve_dataset_identity(AdfDatasetReference(reference_name="ds_spaced"), definitions)
+        == "sql.example.net/dbo.[Order Details]"
+    )
 
 
 def test_parameterised_file_location_bound_to_literals_resolves_to_its_path() -> None:

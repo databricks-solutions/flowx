@@ -41,6 +41,7 @@ from flowx.parser.expression_parser import resolve_expression, resolve_interpola
 
 _ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
 _DATASET_PARAM_RE = re.compile(r"^@dataset\(\)\.([A-Za-z_][A-Za-z0-9_]*)$")
+_ARM_EXPRESSION_RE = re.compile(r"^\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\(.*\]$", re.DOTALL)
 
 # Runtime references inside a path expression. Each is a value only knowable at
 # run time; for a *structural* signature we collapse them all to one slot token so
@@ -501,13 +502,14 @@ def _is_physical(value: str) -> bool:
     DAB-ref placeholder (``{{`` ... ``}}``), a leftover ADF interpolation
     fragment (``@{``), a bare ADF expression (starts with ``@``), or an ARM
     template expression the export left unevaluated (``[parameters('x')]``,
-    ``[concat(...)]``). ARM writes a literal that starts with ``[`` as ``[[``.
+    ``[concat(...)]``). An ARM expression always opens with a function call, so
+    bracket-quoted SQL names such as ``[dbo].[Orders]`` stay physical, and so
+    does ARM's ``[[`` escape for a literal that starts with ``[``.
     """
     stripped = value.strip()
     if "{{" in value or "@{" in value or stripped.startswith("@"):
         return False
-    is_arm_expression = stripped.startswith("[") and not stripped.startswith("[[") and stripped.endswith("]")
-    return not is_arm_expression
+    return not _ARM_EXPRESSION_RE.match(stripped)
 
 
 # --------------------------------------------------------------------------- #
