@@ -587,8 +587,8 @@ def build_server() -> FastMCP:
           and rebuild inventory.json from the deterministic inventory plus that document (atomic,
           idempotent). `ok` reflects validation; `result.violations` lists any problems and both files
           are left untouched on failure. Author the insights by reading inventory.json + the source
-          artifacts first, setting `authored_against` to its source_graphs_sha256 (see the flowx-enrich
-          skill's insights.md).
+          artifacts first, setting `authored_against` to its source_graphs_sha256 when it records one
+          and leaving it out otherwise (see the flowx-enrich skill's insights.md).
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
