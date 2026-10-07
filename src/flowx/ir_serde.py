@@ -583,31 +583,56 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
     }
 
 
-def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, replacement: dict[str, Any]) -> bool:
-    """Replace the task named *activity_name* with *replacement*, recursing into containers.
+def _locate_task(tasks: list[dict[str, Any]], activity_name: str) -> tuple[list[dict[str, Any]], int] | None:
+    """Find the first task named *activity_name*, recursing into containers.
 
-    Searches top-level tasks and the nested activity lists of IfCondition /
-    ForEach / Switch containers.  Preserves the placeholder's ``task_key`` and
-    ``depends_on`` when the replacement omits them so downstream dependency
-    edges stay intact.  Returns True when a match was replaced.
+    Searches top-level tasks and the nested activity lists of IfCondition / ForEach / Switch
+    containers. Returns the list holding the task and its index, or ``None`` when there is none.
     """
     nested_keys = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
     for index, task in enumerate(tasks):
         if task.get("name") == activity_name:
-            replacement.setdefault("task_key", task.get("task_key"))
-            replacement.setdefault("name", activity_name)
-            if "depends_on" not in replacement and task.get("depends_on"):
-                replacement["depends_on"] = task["depends_on"]
-            tasks[index] = replacement
-            return True
+            return tasks, index
         for key in nested_keys:
             child = task.get(key)
-            if isinstance(child, list) and _find_and_replace_task(child, activity_name, replacement):
-                return True
+            if isinstance(child, list):
+                found = _locate_task(child, activity_name)
+                if found is not None:
+                    return found
         for case in task.get("cases") or []:
             if isinstance(case, dict) and isinstance(case.get("activities"), list):
-                if _find_and_replace_task(case["activities"], activity_name, replacement):
-                    return True
+                found = _locate_task(case["activities"], activity_name)
+                if found is not None:
+                    return found
+    return None
+
+
+def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, replacement: dict[str, Any]) -> bool:
+    """Replace the task named *activity_name* with *replacement*, recursing into containers.
+
+    Preserves the placeholder's ``task_key`` and ``depends_on`` when the replacement omits them so
+    downstream dependency edges stay intact.  Returns True when a match was replaced.
+    """
+    found = _locate_task(tasks, activity_name)
+    if found is None:
+        return False
+    container, index = found
+    task = container[index]
+    replacement.setdefault("task_key", task.get("task_key"))
+    replacement.setdefault("name", activity_name)
+    if "depends_on" not in replacement and task.get("depends_on"):
+        replacement["depends_on"] = task["depends_on"]
+    container[index] = replacement
+    return True
+
+
+def _lands_on_open_placeholder(pipelines: list[dict[str, Any]], activity_name: Any, blocked: set[str]) -> bool:
+    """Whether an untargeted merge result would replace a placeholder outside the *blocked* pipelines."""
+    for pipeline in pipelines:
+        found = _locate_task(pipeline.get("tasks", []), activity_name)
+        if found is not None:
+            container, index = found
+            return pipeline.get("name") not in blocked and container[index].get("type") == "PlaceholderActivity"
     return False
 
 
@@ -628,8 +653,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     wrote to the workspace; the prepare phase then references it directly.
 
     When the report carries a routing record, each agentic component's outcome is updated to show
-    whether the merge left any of its routed placeholders unfilled, and a result aimed at a pipeline
-    of a component a combine already filled is refused before anything is written.
+    whether the merge left any of its routed placeholders unfilled. Once a combine has filled a
+    component, a result aimed at one of its pipelines, or an untargeted result that would not replace
+    a remaining placeholder elsewhere, is refused before anything is written.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
@@ -641,9 +667,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         ``(merged, unmatched)`` counts.
 
     Raises:
-        ValueError: A result targets a pipeline of a component a combine already filled.
+        ValueError: A result would land in a component a combine already filled.
     """
-    from flowx.route_agentic import COMPONENT_ALREADY_FILLED, combined_pipelines, refresh_routing_outcomes
+    from flowx.route_agentic import COMPONENT_ALREADY_FILLED, combined_pipelines, load_gaps, refresh_routing_outcomes
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     pipelines = report["pipelines"] if isinstance(report, dict) and "pipelines" in report else [report]
@@ -651,9 +677,14 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         (result_file, json.loads(result_file.read_text(encoding="utf-8")))
         for result_file in sorted(results_dir.glob("*.json"))
     ]
-    combined = combined_pipelines(report) if isinstance(report, dict) else set()
-    if any(data.get("pipeline") in combined for _, data in results):
-        raise ValueError(COMPONENT_ALREADY_FILLED)
+    combined = combined_pipelines(report, load_gaps(report_path.parent)) if isinstance(report, dict) else set()
+    for _, data in results:
+        wanted = data.get("pipeline")
+        activity_name = data.get("activity_name") or data.get("activity")
+        if wanted in combined or (
+            combined and not wanted and not _lands_on_open_placeholder(pipelines, activity_name, combined)
+        ):
+            raise ValueError(COMPONENT_ALREADY_FILLED)
 
     merged = 0
     unmatched = 0

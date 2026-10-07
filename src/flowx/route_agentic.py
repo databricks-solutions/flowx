@@ -197,35 +197,69 @@ def refresh_routing_outcomes(report: dict[str, Any]) -> None:
             entry["outcome"] = OUTCOME_AGENTIC_NOT_VIABLE if unfilled else OUTCOME_AGENTIC_APPLIED
 
 
-def component_fill(report: dict[str, Any], members: Iterable[str]) -> str | None:
-    """Which kind of fill has touched a routed-agentic component, read from the report itself.
+def load_gaps(work_dir: Path) -> list[dict[str, Any]]:
+    """The gaps recorded beside a translation report in ``work_dir``, or an empty list when none were."""
+    gaps_path = Path(work_dir) / GAPS_FILENAME
+    gaps = json.loads(gaps_path.read_text(encoding="utf-8")) if gaps_path.exists() else []
+    return [gap for gap in gaps if isinstance(gap, dict)] if isinstance(gaps, list) else []
 
-    Only a combine removes member pipelines from the report, and route turns every top-level task of
-    a member into a placeholder, so a member task that is no longer a placeholder came from a
-    per-pipeline merge. Returns :data:`FILL_COMBINE`, :data:`FILL_MERGE`, or ``None`` when neither
-    has run.
+
+def _routed_task_names(gaps: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """The task names route turned into placeholders, per pipeline, from its pipeline-tagged gaps."""
+    names: dict[str, set[str]] = {}
+    for gap in gaps:
+        if gap.get("pipeline") is not None:
+            names.setdefault(str(gap["pipeline"]), set()).add(str(gap.get("activity_name")))
+    return names
+
+
+def component_fill(report: dict[str, Any], members: Iterable[str], gaps: list[dict[str, Any]]) -> str | None:
+    """Which kind of fill has touched a routed-agentic component, read from the report and its gaps.
+
+    Route turns every top-level task of a member into a placeholder and records one gap per task. A
+    per-pipeline merge replaces those placeholders by name, so a merged member keeps the routed task
+    names. A combine replaces the members with authored pipelines, so a member is combined when it
+    is gone from the report, or when an authored pipeline reusing its name holds no placeholder and
+    none of the routed task names. Returns :data:`FILL_COMBINE`, :data:`FILL_MERGE`, or ``None``
+    when neither has run.
     """
     by_name = {pipeline.get("name"): pipeline for pipeline in _report_pipelines(report)}
-    members = list(members)
-    if any(member not in by_name for member in members):
-        return FILL_COMBINE
+    routed = _routed_task_names(gaps)
+    filled = False
     for member in members:
-        for task in by_name[member].get("tasks", []):
-            if isinstance(task, dict) and task.get("type") != "PlaceholderActivity":
-                return FILL_MERGE
-    return None
+        pipeline = by_name.get(member)
+        if pipeline is None:
+            return FILL_COMBINE
+        tasks = [task for task in pipeline.get("tasks", []) if isinstance(task, dict)]
+        placeholders = [task for task in tasks if task.get("type") == "PlaceholderActivity"]
+        if tasks and not placeholders and not {str(task.get("name")) for task in tasks} & routed.get(member, set()):
+            return FILL_COMBINE
+        filled = filled or len(placeholders) < len(tasks)
+    return FILL_MERGE if filled else None
 
 
-def combined_pipelines(report: dict[str, Any]) -> set[str]:
-    """The member pipelines of every routed-agentic component a combine has already filled."""
+def combined_pipelines(report: dict[str, Any], gaps: list[dict[str, Any]]) -> set[str]:
+    """The pipelines a combine has filled: combined members, and the authored pipelines beside them.
+
+    A pipeline that is no member of any routed component was authored by a combine, so once any
+    component is combined those pipelines count too. Empty when the report has no routing record.
+    """
     record = routing_record(report)
     components = record.get("components") if record is not None else None
+    if not isinstance(components, dict):
+        return set()
     names: set[str] = set()
-    for entry in components.values() if isinstance(components, dict) else []:
-        if isinstance(entry, dict) and entry.get("decision") == DECISION_AGENTIC:
-            members = [str(member) for member in entry.get("members") or []]
-            if component_fill(report, members) == FILL_COMBINE:
-                names.update(members)
+    all_members: set[str] = set()
+    for entry in components.values():
+        if not isinstance(entry, dict):
+            continue
+        members = [str(member) for member in entry.get("members") or []]
+        all_members.update(members)
+        if entry.get("decision") == DECISION_AGENTIC and component_fill(report, members, gaps) == FILL_COMBINE:
+            names.update(members)
+    if names:
+        authored = {str(pipeline.get("name")) for pipeline in _report_pipelines(report)} - all_members
+        names.update(authored)
     return names
 
 
@@ -454,7 +488,6 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
     report_path = work / REPORT_FILENAME
     if not report_path.exists():
         raise FileNotFoundError(f"No {REPORT_FILENAME} under {work}; run the convert phase first.")
-    gaps_path = work / GAPS_FILENAME
 
     agentic = agentic_pipeline_names(plan)
     baseline_bytes = report_path.read_bytes()
@@ -463,9 +496,7 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
     if record is None and not agentic:
         return {"agentic_pipelines": [], "gaps": 0, "altered": False}
 
-    gaps = json.loads(gaps_path.read_text(encoding="utf-8")) if gaps_path.exists() else []
-    if not isinstance(gaps, list):
-        gaps = []
+    gaps = load_gaps(work)
 
     if record is not None:
         if routing_record_mismatches(record, plan):
@@ -479,7 +510,7 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
         new_report = {"pipelines": [new_report]}
     new_report[ROUTING_RECORD_KEY] = build_routing_record(plan, baseline_bytes)
     _write_json_atomic(report_path, new_report)
-    _write_json_atomic(gaps_path, new_gaps)
+    _write_json_atomic(work / GAPS_FILENAME, new_gaps)
     return {"agentic_pipelines": sorted(agentic), "gaps": len(new_gaps), "altered": True}
 
 
@@ -629,7 +660,7 @@ def apply_combine_fill(
 
     Each component takes one kind of fill: a component a per-pipeline merge has already filled is
     refused with :data:`COMPONENT_ALREADY_FILLED`. The combine is **idempotent**: once a combine has
-    removed the component's members from the report a re-run no-ops (``already_combined`` true)
+    replaced the component's members (see :func:`component_fill`) a re-run no-ops (``already_combined`` true)
     instead of collapsing/appending again, so it never duplicates the authored pipeline(s) even when
     the authored replacement is renamed or an authored name collides with a former member. A fresh
     ``convert`` rewrites the report without the record, so the combine applies again after a
@@ -665,7 +696,7 @@ def apply_combine_fill(
     if routing_record_mismatches(record, plan):
         return {"ok": False, "error": REROUTED_UNDER_DIFFERENT_PLAN, "violations": [], "pipelines": 0}
 
-    fill = component_fill(report, members)
+    fill = component_fill(report, members, load_gaps(work))
     if fill == FILL_MERGE:
         return {"ok": False, "error": COMPONENT_ALREADY_FILLED, "violations": [], "pipelines": 0}
     if fill == FILL_COMBINE:

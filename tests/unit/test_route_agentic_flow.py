@@ -744,6 +744,58 @@ def test_merge_after_a_combine_is_refused(tmp_path: Path, capsys: pytest.Capture
     assert report_path.read_bytes() == combined_report
 
 
+def _colliding_authored_pipelines() -> list[dict[str, Any]]:
+    """Authored combine pipelines that reuse both member names but none of the routed task names."""
+    publish = {"name": "child", "tags": {"source": "adf"}, "tasks": [_notebook_task("Publish", "publish")]}
+    return [_named_lfc_pipeline("parent"), publish]
+
+
+def test_combine_rerun_is_idempotent_when_authored_names_reuse_every_member(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+
+    first = apply_combine_fill(tmp_path, ["parent", "child"], _colliding_authored_pipelines())
+    assert first["ok"] is True and first["already_combined"] is False
+    second = apply_combine_fill(tmp_path, ["parent", "child"], _colliding_authored_pipelines())
+
+    assert second["ok"] is True
+    assert second["already_combined"] is True
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert [pipeline["name"] for pipeline in report["pipelines"]] == ["parent", "child"]
+
+
+@pytest.mark.parametrize(
+    ("pipeline", "activity_name"),
+    [("parent", "Ingest orders"), (None, "Publish"), (None, "Extract")],
+)
+def test_merge_after_a_combine_reusing_every_member_name_is_refused(
+    tmp_path: Path, pipeline: str | None, activity_name: str
+) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_combine_fill(tmp_path, ["parent", "child"], _colliding_authored_pipelines())["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combined_report = report_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    results_dir.mkdir()
+    result: dict[str, Any] = {"activity_name": activity_name, "task": _notebook_task(activity_name, "replaced")}
+    if pipeline is not None:
+        result["pipeline"] = pipeline
+    (results_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=COMPONENT_ALREADY_FILLED):
+        merge_agentic_results(report_path, results_dir)
+    assert report_path.read_bytes() == combined_report
+
+
+def test_merge_into_an_authored_combine_pipeline_is_refused(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "orders_lfc", "Ingest orders", "ingest_orders")
+
+    with pytest.raises(ValueError, match=COMPONENT_ALREADY_FILLED):
+        merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir)
+
+
 def test_combine_requires_route_to_have_applied_the_plan(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
     _write_work(tmp_path, _report_two_pipelines())  # convert ran again, so the report has no record
