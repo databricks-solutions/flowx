@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from flowx.models.adf_ast import AdfActivity, AdfDatasetReference, AdfDefinitions
@@ -43,8 +43,6 @@ _ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
 _DATASET_PARAM_RE = re.compile(r"^@dataset\(\)\.([A-Za-z_][A-Za-z0-9_]*)$")
 _ARM_EXPRESSION_RE = re.compile(r"^\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\(.*\]$", re.DOTALL)
 _RUN_TIME_PATH_OVERRIDES = ("wildcardFolderPath", "wildcardFileName", "fileListPath", "prefix")
-_SOURCE_QUERY_OVERRIDES = ("sqlReaderQuery", "query", "sqlReaderStoredProcedureName")
-_SINK_PROCEDURE_OVERRIDES = ("sqlWriterStoredProcedureName",)
 
 # Runtime references inside a path expression. Each is a value only knowable at
 # run time; for a *structural* signature we collapse them all to one slot token so
@@ -115,26 +113,35 @@ def _location_overridden(activity: AdfActivity, *, produced: bool) -> bool:
 
     A Copy sink that names a stored procedure writes wherever the procedure decides.
     A Copy or Lookup ``source`` that names a query or stored procedure reads what it
-    returns. ``storeSettings`` with a wildcard, file list or prefix replace the read
-    path: Copy and Lookup carry them on ``source``, Delete and GetMetadata directly
-    on ``typeProperties``.
+    returns. Connectors name these keys differently (``sqlReaderQuery``,
+    ``oracleReaderQuery``, ``sqlReaderStoredProcedureName``, ...), so they are
+    matched by kind: ``query`` or any key ending in ``Query`` or
+    ``StoredProcedureName``. ``storeSettings`` with a wildcard, file list or prefix
+    replace the read path: Copy and Lookup carry them on ``source``, Delete and
+    GetMetadata directly on ``typeProperties``.
     """
     type_properties = activity.type_properties or {}
     if produced:
-        return _names_any(type_properties.get("sink"), _SINK_PROCEDURE_OVERRIDES)
+        return _names_any(type_properties.get("sink"), lambda key: key.endswith("StoredProcedureName"))
     source = type_properties.get("source")
     store_settings_candidates = (
         source.get("storeSettings") if isinstance(source, dict) else None,
         type_properties.get("storeSettings"),
     )
-    return _names_any(source, _SOURCE_QUERY_OVERRIDES) or any(
-        _names_any(store_settings, _RUN_TIME_PATH_OVERRIDES) for store_settings in store_settings_candidates
+    return _names_any(source, _is_source_query_key) or any(
+        _names_any(store_settings, lambda key: key in _RUN_TIME_PATH_OVERRIDES)
+        for store_settings in store_settings_candidates
     )
 
 
-def _names_any(settings: object, keys: tuple[str, ...]) -> bool:
-    """``True`` when *settings* is a dict that gives a non-empty value for any of *keys*."""
-    return isinstance(settings, dict) and any(settings.get(key) for key in keys)
+def _is_source_query_key(key: str) -> bool:
+    """``True`` for a ``source`` key that names a query or stored procedure to read through."""
+    return key == "query" or key.endswith("Query") or key.endswith("StoredProcedureName")
+
+
+def _names_any(settings: object, is_override_key: Callable[[str], bool]) -> bool:
+    """``True`` when *settings* is a dict with a non-empty value under a key *is_override_key* accepts."""
+    return isinstance(settings, dict) and any(value and is_override_key(key) for key, value in settings.items())
 
 
 def _dataset_ref_to_asset(

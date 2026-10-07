@@ -685,6 +685,63 @@ def test_stored_procedure_source_and_sink_get_no_identity() -> None:
     assert [asset.identity for asset in copy_reads] == ["ls_sql/dbo.Orders"]
 
 
+def test_connector_specific_query_read_gets_no_identity_edge() -> None:
+    """An Oracle ``oracleReaderQuery`` overrides the read like ``sqlReaderQuery``; an empty one does not."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_oracle_control": AdfDataset(
+                name="ds_oracle_control",
+                type="OracleTable",
+                properties={
+                    "typeProperties": {"schema": "HR", "table": "ETL_CONTROL"},
+                    "linkedServiceName": {"referenceName": "ls_oracle"},
+                },
+            )
+        },
+        linked_services={
+            "ls_oracle": AdfLinkedService(
+                name="ls_oracle",
+                type="Oracle",
+                properties={"typeProperties": {"connectionString": "host=ora.example.net;port=1521;serviceName=HR"}},
+            )
+        },
+    )
+    stage_control = AdfActivity(
+        name="StageControl",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_oracle_control")],
+        type_properties={"sink": {"type": "OracleSink"}},
+    )
+
+    def _lookup(name: str, query: str) -> AdfActivity:
+        return AdfActivity(
+            name=name,
+            type="Lookup",
+            type_properties={
+                "source": {"type": "OracleSource", "oracleReaderQuery": query},
+                "dataset": {"referenceName": "ds_oracle_control"},
+            },
+        )
+
+    _, stage_control_writes = activity_data_assets(stage_control, definitions)
+    get_watermark_reads, _ = activity_data_assets(
+        _lookup("GetWatermark", "SELECT MAX(loaded_at) FROM HR.ETL_AUDIT"), definitions
+    )
+    read_control_reads, _ = activity_data_assets(_lookup("ReadControl", ""), definitions)
+
+    assert stage_control_writes[0].identity == "ls_oracle/HR.ETL_CONTROL"
+    assert get_watermark_reads[0].identity is None
+    assert (
+        data_edges_from_endpoints(
+            [("StageControl", asset) for asset in stage_control_writes],
+            [("GetWatermark", asset) for asset in get_watermark_reads],
+        )
+        == []
+    )
+    assert read_control_reads[0].identity == "ls_oracle/HR.ETL_CONTROL"
+
+
 def test_parameterised_file_location_bound_to_literals_resolves_to_its_path() -> None:
     """``@dataset().x`` location parts resolve against the call-site bindings, as table names do."""
     definitions = AdfDefinitions(
