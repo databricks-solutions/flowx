@@ -627,6 +627,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     ``NotebookActivity`` whose ``notebook_path`` points at a notebook the agent
     wrote to the workspace; the prepare phase then references it directly.
 
+    When the report carries a routing record, each agentic component's outcome is updated to show
+    whether the merge left any of its routed placeholders unfilled.
+
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
         results_dir: Directory of per-activity result JSON files.
@@ -658,6 +661,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
             logger.warning("No placeholder named '%s' found for %s", activity_name, result_file.name)
             unmatched += 1
 
+    from flowx.route_agentic import refresh_routing_outcomes
+
+    refresh_routing_outcomes(report)
     destination = output_path or report_path
     destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote merged report to %s (%d merged, %d unmatched)", destination, merged, unmatched)

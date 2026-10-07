@@ -99,6 +99,15 @@ Take the per-component decision and record it. `route` validates the plan, write
 routed-**agentic** group's tasks become placeholder gaps (deterministic groups are left byte-identical;
 when nothing is routed agentic the report is untouched — the non-breaking guarantee).
 
+When it edits the report, route also stamps a **routing record** onto it (the top-level
+`_routing_record` key): the plan's hash, the hash of the deterministic report it started from, and one
+entry per `component_id` with its `members`, `decision` and `outcome` — `deterministic`,
+`agentic-not-viable` (nothing filled yet) or `agentic-applied` (a fill left none of its members with a
+routed placeholder). Every later rewrite (the fills and `modify`) carries the record forward and only
+the fills update outcomes. Re-running route under the **same** decisions only refreshes the record's
+plan hash; under different components or decisions it refuses and writes nothing — re-run convert,
+then route.
+
 There are three ways to supply the decision:
 
 - **Interactive prompt (TTY).** Run `route` with no `--plan-path` on a real terminal and it asks, per
@@ -157,7 +166,8 @@ the convert phase in-process first. Otherwise run `flowx-convert` before routing
   [--source adf --source-path <path>]     # only needed to trigger convert when the report is missing
 ```
 
-Exit 1 (nothing written) on a missing report it cannot produce, or a plan that fails validation.
+Exit 1 (nothing written) on a missing report it cannot produce, a plan that fails validation, or a
+report already routed under different components or decisions.
 
 ## Step 3 — Fill the routed-agentic groups
 
@@ -226,7 +236,10 @@ MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [.
 - `--members` (comma-separated; MCP accepts a list) must **exactly match** a routed-**agentic**
   component in the recorded `metadata/conversion_plan.json`, whose `inventory_sha256`,
   `source_graphs_sha256` and `source_insights_sha256` must still match the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
-  — you can't swap pipelines the plan didn't route agentic.
+  — you can't swap pipelines the plan didn't route agentic. The report must carry a routing record
+  that matches that plan (route has applied it).
+- Re-running combine once the component's outcome is `agentic-applied` is a no-op
+  (`already_combined: true`), so the authored pipelines are never appended twice.
 - `--pipelines-path` is a JSON **list** of pipeline IR dicts (the authored replacements), typically
   carrying `AgenticComponentActivity` nodes (see below).
 - Each authored pipeline **must** carry the source tag `"tags": {"source": "adf"}` (routing/agentic
@@ -304,11 +317,15 @@ applies when authoring recommended patterns.)
 
 Once the routed-agentic groups are filled and the report validates, continue with `flowx-convert`'s
 just-in-time configuration (`inspect`/`modify`) as usual, then `flowx-package`. The recorded
-`metadata/conversion_plan.json` is kept alongside `inventory.json` as the routing record. It is the
+`metadata/conversion_plan.json` is kept alongside `inventory.json` as the decision of record. It is the
 library's typed `ConversionPlan` (schema 2): one decision per component, bound to the inventory
 fingerprint, the saved `source_graphs.json` and the saved `source_insights.json` it was decided on,
 with a reserved, empty `assignments` list per component for per-node routing later. Package refuses
-to run when any of those no longer match.
+to run when any of those no longer match, or when the packaged report's routing record no longer
+matches the plan (a different plan hash, different components, members or decisions, or no record
+although the plan routes a component agentic). `metadata/route_audit.json` keeps each component's
+decision and outcome from the record, the baseline report hash, and the gaps in agentic-routed
+pipelines.
 
 ## Reference
 

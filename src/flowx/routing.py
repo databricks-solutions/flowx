@@ -571,11 +571,6 @@ def build_plan(inventory: dict[str, Any], raw: dict[str, Any]) -> ConversionPlan
     )
 
 
-def build_plan_document(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
-    """The recorded JSON form of :func:`build_plan`."""
-    return build_plan(inventory, raw).to_dict()
-
-
 def plan_binding_violations(plan: ConversionPlan, inventory: dict[str, Any]) -> list[str]:
     """Check a recorded plan still matches the inventory, source graphs and insights it was decided on.
 

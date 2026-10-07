@@ -44,6 +44,8 @@ def _write_gaps(output_dir: Path) -> None:
             "raw_definition": {"name": "Load"},
             "pipeline": "child",
         },
+        {"activity_name": "Fail", "activity_type": "Fail", "raw_definition": {"name": "Fail"}},
+        {"activity_name": "Hook", "activity_type": "WebHook", "raw_definition": {}, "pipeline": "solo"},
     ]
     (work / "gaps.json").write_text(json.dumps(gaps, indent=2), encoding="utf-8")
 
@@ -64,7 +66,7 @@ def test_route_audit_summarises_components_decisions_and_gaps(tmp_path: Path) ->
     assert decisions == {"component-1": "agentic", "component-2": "deterministic"}
     # Only the agentic component's members are surfaced as agentic pipelines.
     assert audit["agentic_pipelines"] == ["child", "parent"]
-    # The gaps introduced survive as a compact summary (no verbose raw_definition).
+    # Only gaps in agentic-routed pipelines count as introduced by routing, as a compact summary.
     assert audit["gaps_count"] == 2
     assert {gap["pipeline"] for gap in audit["gaps_introduced"]} == {"parent", "child"}
     assert all("raw_definition" not in gap for gap in audit["gaps_introduced"])

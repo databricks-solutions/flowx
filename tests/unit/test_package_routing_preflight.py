@@ -1,9 +1,10 @@
 """Package refuses to ship a translation report whose routing plan has gone stale.
 
 A recorded ``metadata/conversion_plan.json`` is bound to the inventory fingerprint it was recorded
-against. When discover runs again, or a combine fill was applied under a different plan, the report
-no longer reflects the user's decision, so package fails closed before writing any bundle file.
-When the plan still matches, the route audit records hashes of what was packaged.
+against, and route stamps a routing record onto the report it edits. When discover runs again, or
+the report's routing record no longer matches the plan, the report no longer reflects the user's
+decision, so package fails closed before writing any bundle file. When the plan still matches, the
+route audit records hashes and outcomes of what was packaged.
 """
 
 from __future__ import annotations
@@ -16,12 +17,13 @@ from typing import Any
 import pytest
 
 from flowx import routing
+from flowx.adapter.__main__ import main as adapter_main
 from flowx.bundler.dab_writer import main as package_main
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.ir_serde import pipeline_to_dict
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import NotebookActivity, Pipeline
-from flowx.route_agentic import COMBINE_PROVENANCE_KEY, REPORT_FILENAME, WORK_DIRNAME, apply_plan_to_report
+from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan_to_report, routing_record
 
 
 def _inventory(strategy: str = "deterministic") -> dict[str, Any]:
@@ -76,19 +78,121 @@ def test_package_refuses_a_plan_recorded_against_a_different_inventory(
     assert not (tmp_path / "metadata" / "route_audit.json").exists()
 
 
-def test_package_refuses_a_combine_that_does_not_match_the_plan(
+def test_package_refuses_a_routing_record_that_does_not_match_the_plan(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    report_path = _setup(tmp_path, _inventory())
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    _record(tmp_path, "agentic")
+    plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
+    apply_plan_to_report(tmp_path, plan)
+    # The decision is recorded again as deterministic without re-converting, so the report still
+    # carries the agentic edit.
     _record(tmp_path, "deterministic")
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    current = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text())["inventory_sha256"]
-    report[COMBINE_PROVENANCE_KEY] = [{"component_id": "component-1", "inventory_sha256": current, "members": ["solo"]}]
-    report_path.write_text(json.dumps(report), encoding="utf-8")
 
     assert _package(tmp_path) == 1
-    assert "does not match an agentic component in the recorded plan" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "was routed under a different conversion plan" in error
+    assert "was routed 'agentic' but the plan decides 'deterministic'" in error
     assert not (tmp_path / "databricks.yml").exists()
+    assert routing_record(json.loads(report_path.read_text(encoding="utf-8"))) is not None
+
+
+def test_package_refuses_an_agentic_plan_when_the_report_has_no_routing_record(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup(tmp_path, _inventory("agentic"))
+    _record(tmp_path, "agentic")  # recorded, but never applied to the report
+
+    assert _package(tmp_path) == 1
+    assert "carries no routing record; re-run convert, then route" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_package_with_a_deterministic_plan_and_no_record_passes(tmp_path: Path) -> None:
+    report_path = _setup(tmp_path, _inventory())
+    before = report_path.read_bytes()
+    _record(tmp_path, "deterministic")
+    plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
+    apply_plan_to_report(tmp_path, plan)
+    assert report_path.read_bytes() == before
+
+    assert _package(tmp_path) == 0
+    audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
+    assert audit["components"] == [
+        {"component_id": "component-1", "members": ["solo"], "decision": "deterministic", "outcome": "deterministic"}
+    ]
+    assert audit["baseline_report_sha256"] is None
+
+
+def _authored_pipeline() -> dict[str, Any]:
+    pipeline = Pipeline(
+        name="solo_agentic",
+        tasks=[NotebookActivity(name="load", task_key="load", notebook_path="/Workspace/Shared/agentic_load")],
+        tags={"source": "adf"},
+    )
+    return pipeline_to_dict(pipeline)
+
+
+def test_route_combine_modify_then_package_keeps_the_routing_record(tmp_path: Path) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    baseline_sha256 = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps({"components": [{"component_id": "component-1", "members": ["solo"], "decision": "agentic"}]}),
+        encoding="utf-8",
+    )
+    authored_path = tmp_path / "authored.json"
+    authored_path.write_text(json.dumps([_authored_pipeline()]), encoding="utf-8")
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)]) == 0
+    assert (
+        adapter_main(
+            [
+                "fill-agentic",
+                "combine",
+                "--output-dir",
+                str(tmp_path),
+                "--members",
+                "solo",
+                "--pipelines-path",
+                str(authored_path),
+            ]
+        )
+        == 0
+    )
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
+    stamped_path = tmp_path / WORK_DIRNAME / "translation_report.stamped.json"
+    assert routing_record(json.loads(stamped_path.read_text(encoding="utf-8"))) is not None
+
+    assert _package(tmp_path) == 0
+    audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
+    assert audit["components"] == [
+        {"component_id": "component-1", "members": ["solo"], "decision": "agentic", "outcome": "agentic-applied"}
+    ]
+    assert audit["baseline_report_sha256"] == baseline_sha256
+    assert audit["translation_report_sha256"] == hashlib.sha256(stamped_path.read_bytes()).hexdigest()
+
+
+def test_route_agentic_then_deterministic_is_refused_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    plan_path = tmp_path / "plan.json"
+
+    def _route(decision: str) -> int:
+        plan = {"components": [{"component_id": "component-1", "members": ["solo"], "decision": decision}]}
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        return adapter_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)])
+
+    assert _route("agentic") == 0
+    recorded_plan = (tmp_path / "metadata" / "conversion_plan.json").read_bytes()
+    routed_report = report_path.read_bytes()
+    capsys.readouterr()
+
+    assert _route("deterministic") == 1
+    assert "re-run convert, then route" in capsys.readouterr().err
+    assert (tmp_path / "metadata" / "conversion_plan.json").read_bytes() == recorded_plan
+    assert report_path.read_bytes() == routed_report
 
 
 def test_package_with_a_current_plan_writes_an_audit_with_hashes(tmp_path: Path) -> None:

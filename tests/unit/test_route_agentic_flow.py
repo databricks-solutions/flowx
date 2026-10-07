@@ -26,20 +26,26 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.ir_serde import merge_agentic_results
+from flowx.models.conversion_plan import ConversionPlan
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import ControlEdge, Lineage
 from flowx.route_agentic import (
     GAPS_FILENAME,
     REPORT_FILENAME,
+    REROUTED_UNDER_DIFFERENT_PLAN,
     WORK_DIRNAME,
     agentic_pipeline_names,
     alter_report,
     apply_combine_fill,
+    apply_plan,
     apply_plan_to_report,
     combine_group_fill,
     prompt_for_decisions,
+    routing_record,
     validate_report_structurally,
 )
 from flowx.routing import record_plan
@@ -165,7 +171,7 @@ def _routed_inventory() -> dict[str, Any]:
 
 
 def _setup_routed_agentic(output_dir: Path, *, decision: str = "agentic") -> None:
-    """Write inventory + report + a recorded conversion_plan.json routing {child, parent} per ``decision``."""
+    """Write inventory + report, then record and apply a plan routing {child, parent} per ``decision``."""
     _write_work(output_dir, _report_two_pipelines())
     metadata = output_dir / "metadata"
     metadata.mkdir(parents=True, exist_ok=True)
@@ -173,6 +179,15 @@ def _setup_routed_agentic(output_dir: Path, *, decision: str = "agentic") -> Non
     plan = {"components": [{"component_id": "component-1", "members": ["child", "parent"], "decision": decision}]}
     result = record_plan(output_dir, plan=plan)
     assert result["ok"], result
+    recorded = ConversionPlan.load(output_dir)
+    assert recorded is not None
+    apply_plan(output_dir, recorded)
+
+
+def _record_outcomes(report_path: Path) -> dict[str, str]:
+    record = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
+    assert record is not None
+    return {component_id: entry["outcome"] for component_id, entry in record["components"].items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -398,6 +413,7 @@ def test_per_pipeline_fill_reuses_merge_agentic_results(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    assert _record_outcomes(report_path) == {"component-1": "agentic-not-viable", "component-2": "deterministic"}
     merged, unmatched = merge_agentic_results(report_path, results_dir)
     assert (merged, unmatched) == (1, 0)
 
@@ -405,6 +421,67 @@ def test_per_pipeline_fill_reuses_merge_agentic_results(tmp_path: Path) -> None:
     parent = next(p for p in report["pipelines"] if p["name"] == "parent")
     assert parent["tasks"][0]["type"] == "NotebookActivity"
     assert validate_report_structurally(report).ok
+    # The merge left no routed placeholder in component-1, so its outcome is now applied.
+    assert _record_outcomes(report_path) == {"component-1": "agentic-applied", "component-2": "deterministic"}
+
+
+# --------------------------------------------------------------------------- #
+# The routing record: re-routing under different decisions is refused.
+# --------------------------------------------------------------------------- #
+
+
+def test_route_writes_no_record_when_nothing_is_routed_agentic(tmp_path: Path) -> None:
+    _write_work(tmp_path, _report_two_pipelines(), gaps=[])
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    before = report_path.read_bytes()
+
+    apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"))
+
+    assert report_path.read_bytes() == before
+
+
+def test_reroute_to_deterministic_is_refused_and_leaves_the_report_untouched(tmp_path: Path) -> None:
+    _write_work(tmp_path, _report_two_pipelines(), gaps=[])
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    routed = report_path.read_bytes()
+
+    with pytest.raises(ValueError, match=REROUTED_UNDER_DIFFERENT_PLAN):
+        apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"))
+    with pytest.raises(ValueError, match=REROUTED_UNDER_DIFFERENT_PLAN):
+        apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="agentic"))
+    assert report_path.read_bytes() == routed
+
+
+def test_reroute_under_the_same_decisions_keeps_fills_and_updates_the_plan_hash(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    first_record = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
+    assert first_record is not None
+
+    rationale_plan = {
+        "components": [
+            {
+                "component_id": "component-1",
+                "members": ["child", "parent"],
+                "decision": "agentic",
+                "rationale": "same decision, recorded again",
+            }
+        ]
+    }
+    assert record_plan(tmp_path, plan=rationale_plan)["ok"] is True
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    assert apply_plan(tmp_path, recorded)["altered"] is False
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert [pipeline["name"] for pipeline in report["pipelines"]] == ["orders_lfc"]
+    second_record = routing_record(report)
+    assert second_record is not None
+    assert second_record["conversion_plan_sha256"] != first_record["conversion_plan_sha256"]
+    assert second_record["baseline_report_sha256"] == first_record["baseline_report_sha256"]
+    assert second_record["components"] == first_record["components"]
 
 
 # --------------------------------------------------------------------------- #
@@ -521,8 +598,8 @@ def test_combine_idempotent_with_a_differently_named_authored_pipeline(tmp_path:
     """FIX 3 (a): a second combine whose authored replacement is renamed must NOT duplicate.
 
     Name-set matching would fail here (the new name is absent from the report, the old members are
-    already gone), fall through, and append a second authored pipeline. Provenance keyed on
-    (component_id, fingerprint) catches the re-run regardless of the authored name.
+    already gone), fall through, and append a second authored pipeline. The routing record's outcome
+    catches the re-run regardless of the authored name.
     """
     _setup_routed_agentic(tmp_path, decision="agentic")
 
@@ -543,8 +620,8 @@ def test_combine_idempotent_when_authored_name_collides_with_a_former_member(tmp
     """FIX 3 (b): an authored name colliding with a former member is still detected as already-combined.
 
     After the first combine the report holds a pipeline named 'parent' (a former member). Name-based
-    detection would see 'parent' present and conclude the combine had not happened; provenance keeps
-    the detection correct and independent of names.
+    detection would see 'parent' present and conclude the combine had not happened; the routing record
+    keeps the detection correct and independent of names.
     """
     _setup_routed_agentic(tmp_path, decision="agentic")
 
@@ -607,6 +684,26 @@ def test_combine_rejects_a_stale_fingerprint_plan(tmp_path: Path) -> None:
     result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
     assert result["ok"] is False
     assert "stale" in result["error"]
+
+
+def test_combine_marks_the_component_applied(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    assert _record_outcomes(report_path) == {"component-1": "agentic-not-viable"}
+
+    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+
+    assert _record_outcomes(report_path) == {"component-1": "agentic-applied"}
+
+
+def test_combine_requires_route_to_have_applied_the_plan(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    _write_work(tmp_path, _report_two_pipelines())  # convert ran again, so the report has no record
+
+    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    assert result["ok"] is False
+    assert "routing record" in result["error"]
 
 
 def test_combine_requires_a_recorded_plan(tmp_path: Path) -> None:

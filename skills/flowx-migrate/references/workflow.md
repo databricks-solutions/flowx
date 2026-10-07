@@ -76,8 +76,11 @@ merges:
 - **Route:** groups pipelines into connected components over control lineage and, per component,
   records a `deterministic` or `agentic` decision as the fingerprint-bound
   `metadata/conversion_plan.json`. Recording an agentic decision edits `.work/translation_report.json`
-  so those groups' tasks become placeholder gaps; a fully-deterministic plan (or no plan) leaves
-  convert/package behaving exactly as before — the non-breaking guarantee.
+  so those groups' tasks become placeholder gaps and stamps a routing record onto it (per component:
+  members, decision and outcome, plus the plan and baseline report hashes); a fully-deterministic
+  plan (or no plan) leaves convert/package behaving exactly as before — the non-breaking guarantee.
+  The fills and `modify` carry the record forward; re-routing under different decisions is refused
+  (re-run convert, then route), and package refuses a report whose record no longer matches the plan.
 
 Routed-agentic groups are then filled during convert: per-pipeline via `convert --merge-agentic`, or
 cross-pipeline (N→M, e.g. a Lakeflow Connect collapse) via `fill-agentic combine` using authored

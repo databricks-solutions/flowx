@@ -696,13 +696,17 @@ def build_server() -> FastMCP:
           to read first. With a plan it validates + records metadata/conversion_plan.json AND edits the
           translation report so every routed-agentic group's tasks become placeholder gaps
           (deterministic groups untouched; convert's deterministic translation is never modified, and
-          with no agentic decision the report is byte-identical to today).
+          with no agentic decision the report is byte-identical to today). The edit stamps a routing
+          record onto the report (per component_id: members, decision, outcome; plus the plan and
+          baseline report hashes) that fills and apply_answers carry forward; re-routing under
+          different decisions is refused (re-run convert, then route).
         - "fill_agentic": output_dir(req), members(req: list of pipeline names or comma-separated
           string), one of pipelines(inline list of pipeline IR dicts) | pipelines_path — cross-pipeline
           COMBINE fill: replace a routed-agentic group's pipelines with the agent-authored pipeline(s)
           (typically AgenticComponentActivity nodes). `members` must exactly match a routed-agentic
-          component in the recorded, fingerprint-bound conversion_plan.json, and the merged report is
-          always validated structurally before writing (no bypass). Per-pipeline agentic fills use
+          component in the recorded, fingerprint-bound conversion_plan.json and the report's routing
+          record, and the merged report is always validated structurally before writing (no bypass);
+          the component's outcome becomes agentic-applied. Per-pipeline agentic fills use
           "merge_agentic" instead.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.

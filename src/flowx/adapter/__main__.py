@@ -182,12 +182,13 @@ def _run_route(args: argparse.Namespace) -> int:
       groups untouched; nothing routed agentic leaves the report byte-identical).
 
     Triggers the convert phase in-process when the report is missing and ``--source`` /
-    ``--source-path`` are supplied. Returns 1 on a missing report it cannot produce, or on a plan
-    that fails validation (report + plan left untouched).
+    ``--source-path`` are supplied. Returns 1 on a missing report it cannot produce, on a plan that
+    fails validation, or when the report was already routed under different components or decisions
+    (report + plan left untouched in each case).
     """
     from flowx import routing
     from flowx.models.conversion_plan import ConversionPlan
-    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan
+    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan, reroute_conflict
 
     inventory_path = args.output_dir / "metadata" / "inventory.json"
     if not inventory_path.exists():
@@ -221,6 +222,16 @@ def _run_route(args: argparse.Namespace) -> int:
                 "(or pass --source and --source-path so route can trigger it).",
                 file=sys.stderr,
             )
+            return 1
+
+    if not routing.validate_plan(plan, inventory):
+        try:
+            conflict = reroute_conflict(args.output_dir, plan)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"Failed to read {report_path}: {error}", file=sys.stderr)
+            return 1
+        if conflict is not None:
+            print(f"Refusing to route: {conflict}.", file=sys.stderr)
             return 1
 
     try:
@@ -1247,13 +1258,18 @@ def _emit_json(payload: dict[str, Any], out: Path | None) -> None:
 def _write_modified_report(report_path: Path, pipelines: list[dict[str, Any]], out: Path) -> None:
     """Writes the configuration-stamped IR to *out* using the input report's shape.
 
+    A routing record on the input report is carried over unchanged, inside the ``pipelines``
+    wrapper, so package can still check the stamped report against the recorded plan.
+
     Args:
         report_path: Path the modified report was sourced from.  Used
-            only to detect whether the input was a single pipeline IR
-            or an aggregated translation report.
+            to detect whether the input was a single pipeline IR or an
+            aggregated translation report, and to read its routing record.
         pipelines: Stamped pipeline IR dicts to write.
         out: Destination path for the modified report.
     """
+    from flowx.route_agentic import ROUTING_RECORD_KEY, routing_record
+
     raw = json.loads(report_path.read_text(encoding="utf-8"))
     if isinstance(raw, dict) and "translations" in raw:
         by_name = {pipeline["name"]: pipeline for pipeline in pipelines}
@@ -1264,7 +1280,11 @@ def _write_modified_report(report_path: Path, pipelines: list[dict[str, Any]], o
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(raw, indent=2, default=str) + "\n", encoding="utf-8")
         return
-    payload = pipelines[0] if len(pipelines) == 1 else {"pipelines": pipelines}
+    record = routing_record(raw)
+    if record is not None:
+        payload: Any = {"pipelines": pipelines, ROUTING_RECORD_KEY: record}
+    else:
+        payload = pipelines[0] if len(pipelines) == 1 else {"pipelines": pipelines}
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
 

@@ -380,14 +380,15 @@ def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
     """Check a recorded routing plan still matches what is about to be packaged.
 
     A plan is bound to the inventory, the saved source graphs and the saved source insights it was
-    decided on. If discover or enrich ran again since route, or a combine fill was applied under a
-    different plan, the report no longer reflects the user's decision, so package refuses rather
-    than shipping it. Returns one message per problem; an empty list means there is no recorded plan
-    or it still matches.
+    decided on. If discover or enrich ran again since route, package refuses rather than shipping a
+    report that no longer reflects the user's decision. It also refuses when the report's routing
+    record disagrees with the plan: a different plan hash, different components, members or
+    decisions, or no record although the plan routes a component agentic. Returns one message per
+    problem; an empty list means there is no recorded plan or it still matches.
     """
-    from flowx.discovery_insights import inventory_fingerprint
+    from flowx.discovery_serde import canonical_sha256
     from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
-    from flowx.route_agentic import COMBINE_PROVENANCE_KEY
+    from flowx.route_agentic import routing_record, routing_record_mismatches
     from flowx.routing import plan_binding_violations
 
     metadata_dir = Path(output_dir) / "metadata"
@@ -416,24 +417,18 @@ def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
         report = json.loads(Path(report_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
-    provenance = report.get(COMBINE_PROVENANCE_KEY) if isinstance(report, dict) else None
-    if not isinstance(provenance, list):
+    report_name = Path(report_path).name
+    remedy = "re-run convert, then route"
+    record = routing_record(report)
+    if record is None:
+        if any(component.decision == DECISION_AGENTIC for component in plan.components):
+            return [f"the plan routes a component agentic but {report_name} carries no routing record; {remedy}"]
         return []
-    current = inventory_fingerprint(inventory)
-    agentic_components = {
-        (component.component_id, tuple(sorted(component.members)))
-        for component in plan.components
-        if component.decision == DECISION_AGENTIC
-    }
+    plan_document = plan.to_dict()
     failures: list[str] = []
-    for entry in provenance:
-        if not isinstance(entry, dict):
-            continue
-        component_id = entry.get("component_id")
-        if entry.get("inventory_sha256") != current:
-            failures.append(f"combine for {component_id!r} was applied against a different inventory")
-        elif (component_id, tuple(sorted(entry.get("members") or []))) not in agentic_components:
-            failures.append(f"combine for {component_id!r} does not match an agentic component in the recorded plan")
+    if record.get("conversion_plan_sha256") != canonical_sha256(plan_document):
+        failures.append(f"{report_name} was routed under a different conversion plan; {remedy}")
+    failures.extend(f"{mismatch}; {remedy}" for mismatch in routing_record_mismatches(record, plan_document))
     return failures
 
 
@@ -450,18 +445,19 @@ def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Pat
 
     Package prunes the transient ``.work/`` folder (translation report + ``gaps.json``) by default,
     which erases the "what did routing change?" trail. When a routing decision was recorded
-    (``metadata/conversion_plan.json`` exists), summarise the routed components, their decisions, and
-    the gaps routing introduced into an additive ``metadata/`` artifact that survives the prune. It
-    also records hashes of the inventory, the saved source graphs and source insights the plan was
-    bound to, the plan, and the packaged report, plus the report route started from when route
-    recorded one, so the trail can be checked against those files later.
+    (``metadata/conversion_plan.json`` exists), summarise the routed components, their decisions and
+    their outcomes from the report's routing record, and the gaps routing introduced in agentic-routed
+    pipelines, into an additive ``metadata/`` artifact that survives the prune. It also records hashes
+    of the inventory, the saved source graphs and source insights the plan was bound to, the plan, and
+    the packaged report, plus the report route started from as the routing record names it, so the
+    trail can be checked against those files later.
 
     Returns the written path, or ``None`` when there is no recorded plan (no routing happened) -- so
     the no-route path writes nothing and stays byte-identical.
     """
     from flowx.discovery_insights import inventory_fingerprint
-    from flowx.models.conversion_plan import DECISION_AGENTIC, PLAN_FILENAME, ConversionPlan
-    from flowx.route_agentic import ROUTE_PROVENANCE_KEY
+    from flowx.models.conversion_plan import DECISION_AGENTIC, DECISION_DETERMINISTIC, PLAN_FILENAME, ConversionPlan
+    from flowx.route_agentic import OUTCOME_DETERMINISTIC, routing_record
 
     metadata_dir = Path(output_dir) / "metadata"
     plan_path = metadata_dir / PLAN_FILENAME
@@ -480,24 +476,34 @@ def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Pat
     except (OSError, json.JSONDecodeError):
         pass
 
-    baseline_report_sha256: str | None = None
+    record: dict[str, Any] | None = None
     if report_path is not None:
         try:
-            report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+            record = routing_record(json.loads(Path(report_path).read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
-            report = None
-        route_provenance = report.get(ROUTE_PROVENANCE_KEY) if isinstance(report, dict) else None
-        if isinstance(route_provenance, dict):
-            baseline_report_sha256 = route_provenance.get("baseline_report_sha256")
+            record = None
+    recorded_components = record.get("components") if record is not None else None
+    if not isinstance(recorded_components, dict):
+        recorded_components = {}
 
     components: list[dict[str, Any]] = []
-    agentic_pipelines: list[str] = []
+    agentic_pipelines: set[str] = set()
     for component in plan.components:
+        recorded = recorded_components.get(component.component_id)
+        if isinstance(recorded, dict):
+            outcome = recorded.get("outcome")
+        else:
+            outcome = OUTCOME_DETERMINISTIC if component.decision == DECISION_DETERMINISTIC else None
         components.append(
-            {"component_id": component.component_id, "members": list(component.members), "decision": component.decision}
+            {
+                "component_id": component.component_id,
+                "members": list(component.members),
+                "decision": component.decision,
+                "outcome": outcome,
+            }
         )
         if component.decision == DECISION_AGENTIC:
-            agentic_pipelines.extend(component.members)
+            agentic_pipelines.update(component.members)
 
     gaps_introduced: list[dict[str, Any]] = []
     gaps_path = Path(output_dir) / ".work" / "gaps.json"
@@ -507,7 +513,7 @@ def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Pat
         except (OSError, json.JSONDecodeError):
             gaps = []
         for gap in gaps if isinstance(gaps, list) else []:
-            if isinstance(gap, dict):
+            if isinstance(gap, dict) and gap.get("pipeline") in agentic_pipelines:
                 gaps_introduced.append(
                     {
                         "pipeline": gap.get("pipeline"),
@@ -523,10 +529,10 @@ def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Pat
         "source_graphs_sha256": plan.source_graphs_sha256,
         "source_insights_sha256": plan.source_insights_sha256,
         "conversion_plan_sha256": _file_sha256(plan_path),
-        "baseline_report_sha256": baseline_report_sha256,
+        "baseline_report_sha256": record.get("baseline_report_sha256") if record is not None else None,
         "translation_report_sha256": _file_sha256(report_path) if report_path is not None else None,
         "components": components,
-        "agentic_pipelines": sorted(set(agentic_pipelines)),
+        "agentic_pipelines": sorted(agentic_pipelines),
         "gaps_count": len(gaps_introduced),
         "gaps_introduced": gaps_introduced,
     }
