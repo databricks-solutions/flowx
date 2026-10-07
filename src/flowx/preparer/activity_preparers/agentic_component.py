@@ -32,12 +32,31 @@ def _source_relative_path(raw_path: object) -> str:
     if (
         relative_path.is_absolute()
         or windows_path.is_absolute()
+        # A drive or root without the other ("C:x.py", "\\tmp\\x.py") is not absolute on Windows but
+        # still resolves outside the bundle once joined to the output directory.
+        or windows_path.drive
+        or windows_path.root
         or relative_path.as_posix() == "."
         or ".." in relative_path.parts
         or ".." in windows_path.parts
     ):
         raise ValueError(f"Agentic component file path {raw_path!r} must be relative to the bundle src directory")
     return relative_path.as_posix()
+
+
+def _check_task_payload(task_key: str, task: dict[str, object]) -> None:
+    """Require exactly one executable task payload (``notebook_task``, ``pipeline_task``, ...).
+
+    Databricks names every task type ``<kind>_task``. A fragment with none packages fine but is
+    rejected at deploy time, and one with two leaves which runs undefined, so both fail here.
+    """
+    payloads = sorted(key for key in task if key.endswith("_task"))
+    if len(payloads) != 1:
+        found = ", ".join(payloads) if payloads else "none"
+        raise ValueError(
+            f"Agentic component {task_key!r} task must contain exactly one executable payload such as "
+            f"pipeline_task or notebook_task (found: {found})"
+        )
 
 
 def _check_resource_key(task_key: str, resource_key: object) -> None:
@@ -63,7 +82,8 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     Raises:
         ValueError: The authored task fragment sets a flowx-owned field, a file path
             escapes the bundle's ``src`` directory, a resource key is not a plain
-            identifier, or a binary file is not valid base64.
+            identifier, a binary file is not valid base64, or the task does not carry exactly
+            one executable payload.
     """
     del scope
     owned_fields = sorted(FLOWX_OWNED_TASK_FIELDS & activity.task.keys())
@@ -72,6 +92,7 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
             f"Agentic component {activity.task_key!r} task wiring sets flowx-owned field(s) "
             f"{', '.join(owned_fields)}; set dependencies and run policy on the activity instead"
         )
+    _check_task_payload(activity.task_key, activity.task)
     for resource in activity.resources:
         _check_resource_key(activity.task_key, resource.get("resource_key"))
     notebooks = [

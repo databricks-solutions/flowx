@@ -230,6 +230,8 @@ def write_bundle(
         )
         created_files.append(resource_yml_path.resolve())
 
+    _check_agentic_file_collisions(workflow)
+
     # 3. Write generated notebooks. PyDABs hook modules (relative_path under ``resources/``) are
     #    Python resources the bundle imports as ``resources.<module>`` from the bundle root, so they
     #    go to output_dir; all other generated notebooks go under ``src/``.
@@ -652,6 +654,31 @@ def _known_bundle_job_keys(workflow: PreparedWorkflow, resource_key: str) -> set
             if setup_task.type == "pydabs_dbt_factory" and setup_task.config.get("job_key")
         )
     return keys
+
+
+def _check_agentic_file_collisions(workflow: Any) -> None:
+    """Refuse two agent-authored files that share a path but differ in content.
+
+    The notebook writer gives a clashing generated file a ``__N`` suffix, but an authored task
+    still points at the original path, so it would run the other component's code. Authored files
+    are the ones kept out of the bundle root (``write_to_bundle_root=False``).
+    """
+    authored: dict[str, object] = {}
+    for prepared in [workflow, *getattr(workflow, "inner_workflows", [])]:
+        for notebook in prepared.notebooks:
+            if notebook.write_to_bundle_root is not False:
+                continue
+            signature = (
+                ("binary", notebook.binary_content)
+                if notebook.binary_content is not None
+                else ("text", notebook.content)
+            )
+            previous = authored.setdefault(notebook.relative_path, signature)
+            if previous != signature:
+                raise ValueError(
+                    f"Two agentic components author different content for the same file "
+                    f"{notebook.relative_path!r}; give each component its own file path"
+                )
 
 
 def _is_bundle_root_artifact(notebook: DabNotebook) -> bool:

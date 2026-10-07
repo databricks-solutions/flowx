@@ -270,3 +270,71 @@ def test_agentic_component_rejects_binary_content_that_is_not_plain_base64():
 
     with pytest.raises(ValueError):
         prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+@pytest.mark.parametrize("path", ["\\tmp\\outside.py", "C:outside.py", "\\\\server\\share\\outside.py"])
+def test_agentic_component_rejects_windows_rooted_or_drive_relative_paths(path):
+    """A path with a Windows root or drive but no full absolute form still escapes the bundle."""
+    activity = AgenticComponentActivity(
+        name="Unsafe file",
+        task_key="unsafe_file",
+        files=[{"path": path, "content": "unsafe\n"}],
+        task={"notebook_task": {"notebook_path": "../src/safe.py"}},
+    )
+
+    with pytest.raises(ValueError, match="relative to the bundle src directory"):
+        prepare_workflow(Pipeline(name="unsafe", tasks=[activity]))
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        {},
+        {"notebook_task": {"notebook_path": "../src/a.py"}, "pipeline_task": {"pipeline_id": "x"}},
+    ],
+)
+def test_agentic_component_requires_exactly_one_executable_payload(task):
+    activity = AgenticComponentActivity(name="No payload", task_key="no_payload", task=task)
+
+    with pytest.raises(ValueError, match="exactly one executable payload"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+def test_agentic_components_authoring_different_content_at_one_path_fail(tmp_path):
+    """The writer would rename the second file, leaving its task running the first component's code."""
+    first = AgenticComponentActivity(
+        name="First",
+        task_key="first",
+        files=[{"path": "jobs/run.py", "content": "print('first')\n"}],
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}},
+    )
+    second = AgenticComponentActivity(
+        name="Second",
+        task_key="second",
+        files=[{"path": "jobs/run.py", "content": "print('second')\n"}],
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}},
+    )
+
+    with pytest.raises(ValueError, match="same file 'jobs/run.py'"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
+    assert not (tmp_path / "src" / "jobs" / "run.py").exists()
+
+
+def test_agentic_components_sharing_identical_file_content_still_package(tmp_path):
+    shared = [{"path": "jobs/common.py", "content": "print('shared')\n"}]
+    first = AgenticComponentActivity(
+        name="First",
+        task_key="first",
+        files=shared,
+        task={"spark_python_task": {"python_file": "../src/jobs/common.py"}},
+    )
+    second = AgenticComponentActivity(
+        name="Second",
+        task_key="second",
+        files=shared,
+        task={"spark_python_task": {"python_file": "../src/jobs/common.py"}},
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
+
+    assert (tmp_path / "src" / "jobs" / "common.py").read_text(encoding="utf-8") == "print('shared')\n"
