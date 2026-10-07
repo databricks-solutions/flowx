@@ -235,6 +235,8 @@ def test_package_with_a_current_plan_writes_an_audit_with_hashes(tmp_path: Path)
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
     apply_plan_to_report(tmp_path, plan)
+    record = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
+    assert record is not None
 
     assert _package(tmp_path) in (0, 1)  # 1 only signals bundle-invariant warnings, not the preflight
     assert (tmp_path / "databricks.yml").exists()
@@ -246,7 +248,14 @@ def test_package_with_a_current_plan_writes_an_audit_with_hashes(tmp_path: Path)
         == hashlib.sha256((tmp_path / "metadata" / "conversion_plan.json").read_bytes()).hexdigest()
     )
     assert audit["baseline_report_sha256"] == baseline_sha256
+    assert audit["baseline_gaps_sha256"] == record["baseline_gaps_sha256"]
     assert audit["translation_report_sha256"] == hashlib.sha256(report_path.read_bytes()).hexdigest()
+    (component,) = audit["components"]
+    recorded = record["components"][component["component_id"]]
+    assert component["decision"] == "agentic"
+    assert component["outcome"] == recorded["outcome"] == "agentic-not-viable"
+    assert component["fingerprint"] == recorded["fingerprint"]
+    assert component["combine_sha256"] is None
 
 
 def test_package_refuses_tampered_baseline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
