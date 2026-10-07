@@ -61,7 +61,16 @@ _SOURCE_GRAPHS_HASH_KEY = "source_graphs_sha256"
 _SOURCE_INSIGHTS_HASH_KEY = "source_insights_sha256"
 _LIBRARY_KEYS = (_SCHEMA_VERSION_KEY, _FINGERPRINT_KEY, _SOURCE_GRAPHS_HASH_KEY, _SOURCE_INSIGHTS_HASH_KEY)
 
-_INSIGHTS_TOP_KEYS = {"overview", "system_recommendation", "pipeline_insights", "pipeline_relationships"}
+# The source_graphs_sha256 the author read from inventory.json, checked so stale insights never bind to a
+# newer discover. Verified, then not recorded: the library stamps the hash itself.
+_AUTHORED_AGAINST_KEY = "authored_against"
+_INSIGHTS_TOP_KEYS = {
+    "overview",
+    "system_recommendation",
+    "pipeline_insights",
+    "pipeline_relationships",
+    _AUTHORED_AGAINST_KEY,
+}
 _INSIGHT_KEYS = {
     "pipeline",
     "pattern_name",
@@ -147,6 +156,8 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
         hint = " (set by the library, not the author)" if key in _LIBRARY_KEYS else ""
         violations.append(f"unknown top-level key: {key!r}{hint}")
 
+    violations.extend(_authored_against_violations(raw.get(_AUTHORED_AGAINST_KEY), inventory))
+
     overview = raw.get("overview")
     if overview is not None and (not isinstance(overview, str) or not overview.strip()):
         violations.append("'overview' must be a non-empty string when present")
@@ -160,6 +171,32 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
     violations.extend(_validate_pipeline_insights(raw.get("pipeline_insights", []), names))
     violations.extend(_validate_relationships(raw.get("pipeline_relationships", []), names, control_triples))
     return violations
+
+
+def _authored_against_violations(authored_against: Any, inventory: dict[str, Any]) -> list[str]:
+    """Check the insights were authored against the inventory enrich is about to record them on.
+
+    When the inventory records the ``source_graphs_sha256`` it was built from, the author must copy
+    that value into ``authored_against``. A missing or different value means discover ran again
+    after the insights were written, so they would otherwise bind to a newer inventory unchecked.
+    """
+    recorded = inventory.get(_SOURCE_GRAPHS_HASH_KEY)
+    if recorded is None:
+        if authored_against is not None:
+            return [f"'{_AUTHORED_AGAINST_KEY}' was given but inventory.json records no {_SOURCE_GRAPHS_HASH_KEY}"]
+        return []
+    if authored_against is None:
+        return [
+            f"'{_AUTHORED_AGAINST_KEY}' is required: set it to the {_SOURCE_GRAPHS_HASH_KEY} of the "
+            "inventory.json the insights were authored from"
+        ]
+    if authored_against != recorded:
+        return [
+            f"the insights were authored against a different inventory ({_AUTHORED_AGAINST_KEY} "
+            f"{authored_against!r}, inventory {_SOURCE_GRAPHS_HASH_KEY} {recorded!r}); re-read inventory.json "
+            "and author the insights again"
+        ]
+    return []
 
 
 def _validate_pipeline_insights(insights: Any, names: set[str]) -> list[str]:
@@ -526,17 +563,29 @@ def _source_graphs_violations(output_dir: Path, inventory: dict[str, Any]) -> li
     return []
 
 
-def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
-    """Write a JSON document atomically, matching the deterministic write's formatting.
+def _write_both_or_neither(
+    insights_path: Path, insights_document: dict[str, Any], inventory_path: Path, inventory_document: dict[str, Any]
+) -> None:
+    """Replace ``source_insights.json`` and ``inventory.json`` together, keeping them consistent.
 
-    Uses ``json.dumps(..., indent=2)`` with no trailing newline -- exactly how the discover
-    phase writes ``inventory.json`` -- so every pre-existing key stays byte-identical. The temp
-    file + ``os.replace`` keeps the file on disk intact if the process dies mid-write.
+    Both temp files are written before either target is replaced. If replacing the inventory fails,
+    the previous insights file is put back (or the new one removed), so the two never disagree.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(document, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
+    previous_insights = insights_path.read_bytes() if insights_path.exists() else None
+    insights_temporary = insights_path.with_name(f".{insights_path.name}.tmp")
+    inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.tmp")
+    insights_temporary.write_text(json.dumps(insights_document, indent=2), encoding="utf-8")
+    inventory_temporary.write_text(json.dumps(inventory_document, indent=2), encoding="utf-8")
+    os.replace(insights_temporary, insights_path)
+    try:
+        os.replace(inventory_temporary, inventory_path)
+    except BaseException:
+        if previous_insights is None:
+            insights_path.unlink(missing_ok=True)
+        else:
+            insights_path.write_bytes(previous_insights)
+        inventory_temporary.unlink(missing_ok=True)
+        raise
 
 
 def enrich_inventory(
@@ -578,8 +627,12 @@ def enrich_inventory(
         return {"ok": False, "violations": violations, "pipeline_insights": 0, "relationships": 0}
 
     source_insights = build_source_insights(inventory, raw)
-    _write_json_atomic(inventory_path.with_name(SOURCE_INSIGHTS_FILENAME), source_insights)
-    _write_json_atomic(inventory_path, render_inventory(inventory, source_insights))
+    _write_both_or_neither(
+        inventory_path.with_name(SOURCE_INSIGHTS_FILENAME),
+        source_insights,
+        inventory_path,
+        render_inventory(inventory, source_insights),
+    )
     return {
         "ok": True,
         "violations": [],
