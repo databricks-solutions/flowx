@@ -194,20 +194,25 @@ def _two_component_inventory() -> dict[str, Any]:
     return build_source_inventory([parent, child], source="adf", source_dir="/tmp/src")
 
 
-def _route_parent_agentic(output_dir: Path, report: dict[str, Any]) -> None:
-    """Write ``report``, record a plan routing 'parent' agentic and 'child' deterministic, and apply it."""
-    _write_work(output_dir, report, gaps=[])
-    metadata = output_dir / "metadata"
-    metadata.mkdir(parents=True, exist_ok=True)
-    inventory = _two_component_inventory()
-    (metadata / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+def _route_two_components(output_dir: Path, *, parent: str, child: str) -> None:
+    """Record a plan deciding 'parent' and 'child' (each its own component) as given, and apply it."""
+    inventory = json.loads((output_dir / "metadata" / "inventory.json").read_text(encoding="utf-8"))
     plan = build_recommendation(inventory)["default_plan"]
     for component in plan["components"]:
-        component["decision"] = "agentic" if component["members"] == ["parent"] else "deterministic"
+        component["decision"] = parent if component["members"] == ["parent"] else child
     assert record_plan(output_dir, plan=plan)["ok"] is True
     recorded = ConversionPlan.load(output_dir)
     assert recorded is not None
     apply_plan(output_dir, recorded)
+
+
+def _route_parent_agentic(output_dir: Path, report: dict[str, Any], *, child: str = "deterministic") -> None:
+    """Write ``report`` and the two-component inventory, then route 'parent' agentic and 'child' as given."""
+    _write_work(output_dir, report, gaps=[])
+    metadata = output_dir / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "inventory.json").write_text(json.dumps(_two_component_inventory(), indent=2), encoding="utf-8")
+    _route_two_components(output_dir, parent="agentic", child=child)
 
 
 def _report_with_child_gap() -> dict[str, Any]:
@@ -486,6 +491,26 @@ def test_a_merged_top_level_gap_survives_a_re_route_and_package_accepts_it(
     package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"])
     assert "preflight failed" not in capsys.readouterr().err
     assert (tmp_path / "child" / "databricks.yml").exists()
+
+
+def test_a_merge_written_to_a_separate_copy_leaves_the_baseline_and_live_report_alone(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    baseline_path = tmp_path / WORK_DIRNAME / "route_baseline" / REPORT_FILENAME
+    live_before = report_path.read_bytes()
+    baseline_before = baseline_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    copy_path = tmp_path / WORK_DIRNAME / "merged.json"
+
+    assert merge_agentic_results(report_path, results_dir, copy_path) == (1, 0)
+
+    assert report_path.read_bytes() == live_before
+    assert baseline_path.read_bytes() == baseline_before
+    merged_copy = json.loads(copy_path.read_text(encoding="utf-8"))
+    child = next(p for p in merged_copy["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+    assert routing_record(merged_copy) == routing_record(json.loads(live_before))
 
 
 def test_an_untargeted_merge_is_checked_where_it_lands_after_earlier_merges(tmp_path: Path) -> None:
@@ -947,6 +972,40 @@ def test_combine_replaces_a_hand_edited_store_entry(tmp_path: Path) -> None:
 
     assert result["ok"] is True and result["already_combined"] is False
     assert combines_path.read_bytes() == combined
+
+
+def test_a_combine_routed_back_to_deterministic_records_no_combine_hash(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines(), child="agentic")
+    assert apply_combine_fill(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+
+    _route_two_components(tmp_path, parent="deterministic", child="agentic")
+
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    record = routing_record(report)
+    assert record is not None
+    (parent_entry,) = [entry for entry in record["components"].values() if entry["members"] == ["parent"]]
+    assert parent_entry["outcome"] == "deterministic"
+    assert parent_entry["combine_sha256"] is None
+    assert [pipeline["name"] for pipeline in report["pipelines"]] == ["parent", "child"]
+
+
+def test_combine_refuses_a_name_that_another_components_combine_would_drop(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines(), child="agentic")
+    child_lfc = _named_lfc_pipeline("child_lfc")
+    child_lfc["tasks"][0]["resources"][0]["resource_key"] = "child_ingestion"
+    child_lfc["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.child_ingestion.id}"}}
+    assert apply_combine_fill(tmp_path, ["child"], [child_lfc])["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    report_before = report_path.read_bytes()
+    combines_before = combines_path.read_bytes()
+
+    result = apply_combine_fill(tmp_path, ["parent"], [_named_lfc_pipeline("child")])
+
+    assert result["ok"] is False
+    assert "clash" in result["error"]
+    assert report_path.read_bytes() == report_before
+    assert combines_path.read_bytes() == combines_before
 
 
 @pytest.mark.parametrize(

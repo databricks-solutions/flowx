@@ -23,9 +23,9 @@ structural validation, and provenance all still apply:
 * The agent authors the fill. A routed-agentic component is filled **only** by the cross-pipeline
   COMBINE (N pipelines -> M, e.g. one Lakeflow Connect pipeline, or one same-named pipeline to keep
   it 1:1): stored in ``metadata/agentic_combines.json`` and applied via rebuild. The name-matched
-  :func:`flowx.ir_serde.merge_agentic_results` stays for convert's own gaps (after routing, merges
-  update both the live report and the stored baseline so the next rebuild keeps them) and refuses
-  routed-agentic pipelines.
+  :func:`flowx.ir_serde.merge_agentic_results` stays for convert's own gaps (after routing, a merge
+  written in place into the live report also updates the stored baseline so the next rebuild keeps
+  it) and refuses routed-agentic pipelines.
 * :func:`validate_report_structurally` packages the merged report through the same
   ``prepare -> write_bundle`` path the package phase uses and runs the existing
   :func:`flowx.validate.bundle_invariants.check_bundle_dir` over the output, so a fill can never
@@ -49,7 +49,6 @@ import json
 import os
 import sys
 import tempfile
-from collections import Counter
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -60,8 +59,6 @@ from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
 # The report + gaps live under the shared output dir's transient .work/ folder, beside the pipeline IR.
 WORK_DIRNAME = ".work"
 REPORT_FILENAME = "translation_report.json"
-# The configuration-stamped copy modify writes beside the report; package reads it when present.
-STAMPED_REPORT_FILENAME = "translation_report.stamped.json"
 GAPS_FILENAME = "gaps.json"
 # The immutable baseline copies, saved on first route with agentic components.
 BASELINE_DIRNAME = "route_baseline"
@@ -349,6 +346,9 @@ def rebuild(
     * **agentic without a matching combine:** placeholders and tagged gaps as ``alter_report`` does.
       Outcome is ``agentic-not-viable``.
 
+    Only a combine that is applied puts its ``combine_sha256`` in the record and the fingerprint; every
+    other component records ``None``, whatever the store holds for it.
+
     The record holds per-component members, decision, outcome, combine_sha256, and fingerprint. When
     fingerprint differs from previous_record's, a replacement entry is appended to track the change.
     An all-deterministic plan returns no record (byte-identical to baseline).
@@ -376,7 +376,12 @@ def rebuild(
     for component_id, planned_entry in planned.items():
         decision = planned_entry["decision"]
         members_set = set(planned_entry["members"])
-        combine_data = combines_store.get(component_id)
+        stored_combine = combines_store.get(component_id)
+        combine_data = (
+            stored_combine
+            if decision == DECISION_AGENTIC and stored_combine and set(stored_combine.get("members", [])) == members_set
+            else None
+        )
         combine_sha256 = combine_data.get("combine_sha256") if combine_data else None
         fingerprint_input = {
             "members": planned_entry["members"],
@@ -384,7 +389,7 @@ def rebuild(
             "combine_sha256": combine_sha256,
         }
         fingerprint = canonical_sha256(fingerprint_input)
-        if decision == DECISION_AGENTIC and combine_data and set(combine_data.get("members", [])) == members_set:
+        if combine_data:
             outcome = OUTCOME_AGENTIC_APPLIED
             new_report = combine_group_fill(new_report, members_set, combine_data.get("pipelines", []))
         elif decision == DECISION_AGENTIC:
@@ -744,7 +749,9 @@ def apply_combine_fill(
     Validates the group's membership against the recorded plan, stores the authored pipelines in
     ``metadata/agentic_combines.json``, and rebuilds (applying it deterministically). The group's
     membership must exactly match a routed-agentic component in the plan, and every authored pipeline
-    must carry the correct source tag and a name no other pipeline in the rebuilt report uses.
+    must carry the correct source tag and a name of its own: no repeat within the list, no member of
+    another component, and no pipeline another component's combine authored. A name may reuse a member
+    of this component, since the combine replaces it.
 
     Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_combined", "message"}``.
     ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation, name
@@ -786,6 +793,26 @@ def apply_combine_fill(
 
     combine_sha256 = canonical_sha256(authored_pipelines)
     stored, combines = load_combines(output_dir)
+    authored_names = [pipeline.get("name") for pipeline in authored_pipelines]
+    taken_names = {
+        member
+        for component in plan.get("components", [])
+        if isinstance(component, dict) and component.get("component_id") != component_id
+        for member in component.get("members", [])
+    } | {
+        pipeline.get("name")
+        for other_id, entry in combines.items()
+        if other_id != component_id
+        for pipeline in entry["pipelines"]
+        if isinstance(pipeline, dict)
+    }
+    clashes = sorted({str(name) for name in authored_names if name in taken_names or authored_names.count(name) > 1})
+    if clashes:
+        error = (
+            f"authored pipeline names {clashes} repeat or clash with a pipeline of another component; "
+            "give each a unique name"
+        )
+        return {"ok": False, "error": error, "violations": [], "pipelines": 0}
     in_report = {pipeline.get("name"): pipeline for pipeline in _report_pipelines(report)}
     if (combines.get(component_id) or {}).get("combine_sha256") == combine_sha256 and all(
         in_report.get(pipeline.get("name")) == pipeline for pipeline in authored_pipelines
@@ -813,11 +840,6 @@ def apply_combine_fill(
         baseline_report_bytes,
         baseline_gaps_bytes,
     )
-    name_counts = Counter(str(pipeline.get("name")) for pipeline in _report_pipelines(new_report))
-    clashes = sorted(name for name, count in name_counts.items() if count > 1)
-    if clashes:
-        error = f"authored pipeline names {clashes} clash with another pipeline in the report; give each a unique name"
-        return {"ok": False, "error": error, "violations": [], "pipelines": 0}
     new_report[ROUTING_RECORD_KEY] = new_record
 
     result = validate_report_structurally(new_report)

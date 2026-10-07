@@ -385,28 +385,17 @@ def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
     record disagrees with the plan: a different plan hash, different components, members or
     decisions, or no record although the plan routes a component agentic.
 
-    When the report has a routing record, also verifies that the saved deterministic baseline still
-    has the hashes the record names and that no stored combine was edited, then replays the rebuild.
-    The live ``.work/translation_report.json`` (or any report other than modify's configured copy)
-    must equal the rebuild, record included ("re-run route"). Modify's configured copy can't be
-    replayed, because modify changes its pipelines, so its record must equal the rebuilt record
-    ("re-run modify").
+    The live ``.work/translation_report.json`` is the report route, combine and merge keep in step
+    with the saved deterministic baseline, so it is always the one replayed (see
+    :func:`_live_report_failures`; its remedy is "re-run route"). Any other packaged report -- modify's
+    configured copy, or one written with ``modify --out`` -- can't be replayed, because modify changes
+    its pipelines, so its routing record must equal the live one; otherwise package refuses with "the
+    configured report is out of date; re-run modify".
 
     Returns one message per problem; an empty list means there is no recorded plan or it still matches.
     """
-    from flowx.discovery_serde import canonical_sha256
-    from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
-    from flowx.route_agentic import (
-        COMBINES_FILENAME,
-        ROUTING_RECORD_KEY,
-        STAMPED_REPORT_FILENAME,
-        WORK_DIRNAME,
-        load_baseline,
-        load_combines,
-        rebuild,
-        routing_record,
-        routing_record_mismatches,
-    )
+    from flowx.models.conversion_plan import ConversionPlan
+    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, routing_record
     from flowx.routing import plan_binding_violations
 
     metadata_dir = Path(output_dir) / "metadata"
@@ -435,25 +424,60 @@ def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
         report = json.loads(Path(report_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
-    report_name = Path(report_path).name
-    configured = Path(report_path).resolve() == (Path(output_dir) / WORK_DIRNAME / STAMPED_REPORT_FILENAME).resolve()
-    remedy = "re-run modify" if configured else "re-run route"
+    live_path = Path(output_dir) / WORK_DIRNAME / REPORT_FILENAME
+    configured = Path(report_path).resolve() != live_path.resolve()
+    live_report = report
+    if configured:
+        try:
+            live_report = json.loads(live_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            live_report = {}
+    failures = _live_report_failures(Path(output_dir), plan.to_dict(), live_report)
+    if failures:
+        return failures
+    if configured and routing_record(report) != routing_record(live_report):
+        return ["the configured report is out of date; re-run modify"]
+    return []
+
+
+def _live_report_failures(output_dir: Path, plan_document: dict[str, Any], report: Any) -> list[str]:
+    """Check the live translation report still equals a fresh replay of the rebuild.
+
+    The report's routing record must match the plan, the saved deterministic baseline must still have
+    the hashes the record names, and no stored combine may have been edited. The rebuild from the
+    baseline, the plan and the stored combines must then reproduce the report exactly, record included.
+    A report without a record passes only when the plan routes nothing agentic.
+    """
+    from flowx.discovery_serde import canonical_sha256
+    from flowx.models.conversion_plan import DECISION_AGENTIC
+    from flowx.route_agentic import (
+        COMBINES_FILENAME,
+        REPORT_FILENAME,
+        ROUTING_RECORD_KEY,
+        load_baseline,
+        load_combines,
+        rebuild,
+        routing_record,
+        routing_record_mismatches,
+    )
+
     record = routing_record(report)
     if record is None:
-        if any(component.decision == DECISION_AGENTIC for component in plan.components):
-            return [f"the plan routes a component agentic but {report_name} carries no routing record; {remedy}"]
+        if any(component.get("decision") == DECISION_AGENTIC for component in plan_document.get("components", [])):
+            return [
+                f"the plan routes a component agentic but {REPORT_FILENAME} carries no routing record; re-run route"
+            ]
         return []
-    plan_document = plan.to_dict()
     failures: list[str] = []
     if record.get("conversion_plan_sha256") != canonical_sha256(plan_document):
-        failures.append(f"{report_name} was routed under a different conversion plan; {remedy}")
-    failures.extend(f"{mismatch}; {remedy}" for mismatch in routing_record_mismatches(record, plan_document))
+        failures.append(f"{REPORT_FILENAME} was routed under a different conversion plan; re-run route")
+    failures.extend(f"{mismatch}; re-run route" for mismatch in routing_record_mismatches(record, plan_document))
     if failures:
         return failures
 
     try:
         baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_baseline(
-            Path(output_dir), fresh=False
+            output_dir, fresh=False
         )
     except (OSError, ValueError):
         return ["the deterministic baseline is missing or changed; re-run convert, then route"]
@@ -463,7 +487,7 @@ def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
         return ["the deterministic baseline is missing or changed; re-run convert, then route"]
 
     try:
-        stored, combines = load_combines(Path(output_dir))
+        stored, combines = load_combines(output_dir)
     except (OSError, ValueError) as error:
         return [f"metadata/{COMBINES_FILENAME} is unreadable: {error}"]
     edited = sorted(set(stored) - set(combines))
@@ -479,11 +503,9 @@ def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
         baseline_report_bytes,
         baseline_gaps_bytes,
     )
-    if configured:
-        return [] if rebuilt_record == record else ["the configured report is out of date; re-run modify"]
     report_without_record = {key: value for key, value in report.items() if key != ROUTING_RECORD_KEY}
     if rebuilt_record != record or report_without_record != rebuilt_report:
-        return [f"{report_name} does not match a fresh rebuild; re-run route"]
+        return [f"{REPORT_FILENAME} does not match a fresh rebuild; re-run route"]
     return []
 
 

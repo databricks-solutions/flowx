@@ -111,8 +111,9 @@ writes the fingerprint-bound `metadata/conversion_plan.json`, and then rebuilds 
 When it edits the report, route also stamps a **routing record** onto it (the top-level
 `_routing_record` key): the plan's hash, the hashes of the immutable deterministic baseline report and
 gaps it started from, and one entry per `component_id` with its `members`, `decision`, `outcome`,
-`combine_sha256`, `fingerprint`, and `replacements` (tracking changes to a component's fingerprint
-across re-routes). Every re-route rebuilds from the baseline and current plan; identical input gives
+`combine_sha256` (set only while that component's stored combine is applied, otherwise `null`),
+`fingerprint`, and `replacements` (tracking changes to a component's fingerprint across re-routes).
+Every re-route rebuilds from the baseline and current plan; identical input gives
 identical output (byte-for-byte, deterministic and idempotent).
 
 There are three ways to supply the decision:
@@ -224,7 +225,8 @@ MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [.
   and writes the result (if structural validation passes). The `route_audit.json` records the replacement,
   showing the old `fingerprint` in `replacements` and the new `fingerprint`.
 - **Unique names**: an authored pipeline name may reuse a member of this component, but not another
-  authored name or any other pipeline in the report; a clash is refused and nothing is written.
+  name in the same list, a member of another component, or a pipeline another component's combine
+  authored; a clash is refused and nothing is written.
 - `--pipelines-path` is a JSON **list** of pipeline IR dicts (the authored replacements), typically
   carrying `AgenticComponentActivity` nodes (see below). Empty `pipelines` list is refused.
 - Each authored pipeline **must** carry the source tag `"tags": {"source": "adf"}` (routing/agentic
@@ -312,9 +314,10 @@ Package verifies the routing plan is still current against the inventory, checks
 still has the hashes the routing record names ("re-run convert, then route" otherwise) and that no
 stored combine was edited ("re-run fill-agentic combine"), then replays `rebuild` from the baseline,
 the plan, and the stored combines. The live `.work/translation_report.json` must match the rebuild
-exactly, record included; otherwise it refuses with "re-run route". Modify's configured
-`.work/translation_report.stamped.json` must carry the rebuilt routing record; otherwise it refuses
-with "the configured report is out of date; re-run modify". Route, combine and merge never rewrite
+exactly, record included; otherwise it refuses with "re-run route". Any other packaged report —
+modify's configured `.work/translation_report.stamped.json`, or a `modify --out` copy — must carry
+the live report's routing record; otherwise it refuses with "the configured report is out of date;
+re-run modify". Route, combine and merge never rewrite
 the configured report, so run `modify` again after any of them.
 
 `metadata/route_audit.json` records per component the `decision`, `outcome`, `fingerprint`,

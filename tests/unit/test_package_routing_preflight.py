@@ -414,3 +414,49 @@ def test_package_replays_an_explicit_live_report_even_when_a_stamped_copy_exists
     assert exit_code == 1
     assert "translation_report.json does not match a fresh rebuild; re-run route" in capsys.readouterr().err
     assert not (tmp_path / "databricks.yml").exists()
+
+
+def _route_solo_agentic_and_modify(output_dir: Path, report_path: Path, *modify_args: str) -> list[str]:
+    """Route 'solo' agentic through the CLI, then run modify; returns the route command for re-runs."""
+    plan_path = output_dir / "plan.json"
+    plan_path.write_text(
+        json.dumps({"components": [{"component_id": "component-1", "members": ["solo"], "decision": "agentic"}]}),
+        encoding="utf-8",
+    )
+    route = ["route", "--output-dir", str(output_dir), "--plan-path", str(plan_path)]
+    assert adapter_main(route) == 0
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(output_dir), *modify_args]) == 0
+    return route
+
+
+def test_package_asks_to_re_run_modify_after_a_re_convert_and_re_route(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    route = _route_solo_agentic_and_modify(tmp_path, report_path)
+    _setup(tmp_path, _inventory("agentic"))
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["pipelines"][0]["tasks"][0]["notebook_path"] = "/Workspace/Shared/reconverted"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    assert adapter_main(route) == 0
+    capsys.readouterr()
+
+    assert _package(tmp_path) == 1
+    assert "the configured report is out of date; re-run modify" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
+
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
+    assert _package(tmp_path) == 0
+
+
+def test_package_checks_a_modify_out_copy_by_its_routing_record(tmp_path: Path) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    configured_path = tmp_path / "configured.json"
+    _route_solo_agentic_and_modify(tmp_path, report_path, "--out", str(configured_path))
+
+    exit_code = package_main(
+        ["--output-dir", str(tmp_path), "--report", str(configured_path), "--no-download-workspace-files"]
+    )
+
+    assert exit_code == 0
+    assert (tmp_path / "databricks.yml").exists()

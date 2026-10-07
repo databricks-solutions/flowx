@@ -89,7 +89,8 @@ Routed-agentic groups are then filled only by `fill-agentic combine`, which appl
 `AgenticComponentActivity` nodes. Same authored pipelines as already applied returns "already applied,
 unchanged" and writes nothing (idempotent). Different pipelines replace and rebuild. `convert --merge-agentic`
 fills convert's own gaps and refuses routed-agentic pipelines. After routing, merging convert's own gaps
-updates both the live report and the stored baseline so the next rebuild keeps them. Route, combine and
+in place into `.work/translation_report.json` updates both that report and the stored baseline so the
+next rebuild keeps them. Route, combine and
 merge never rewrite modify's configured report; package asks to re-run `modify` when it is out of date.
 
 ## Phase 2: Convert

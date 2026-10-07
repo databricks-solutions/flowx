@@ -328,7 +328,8 @@ and packaged:
   (`--source adf` is mandatory; the convert phase exits 2 without it). The merge replaces, per result,
   the **first task whose `name` matches `activity_name`**, so make sure each name targets the intended
   gap. It refuses, writing nothing, any result that lands in a routed-agentic pipeline. After routing
-  it updates the saved baseline too, so a re-route keeps the merge. Airflow's `--merge-agentic` is
+  an in-place merge into `.work/translation_report.json` updates the saved baseline too, so a re-route
+  keeps the merge (a merge written to an `--output` copy does not). Airflow's `--merge-agentic` is
   disabled (exits 2) — for Airflow per-gap fills use the **`flowx-resolve-airflow-gaps`** skill.
 
 Run `modify` (Step 9) after the last route, combine or merge: none of them rewrites modify's
