@@ -353,6 +353,22 @@ def test_a_lock_left_by_a_killed_enrich_blocks_the_next_one_until_removed(tmp_pa
     assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
 
 
+def test_running_discover_again_clears_a_leftover_lock(tmp_path: Path) -> None:
+    """The hosted recovery: an agent that cannot delete the lock runs discover again, then enriches."""
+    fixtures = Path(__file__).resolve().parents[1] / "resources" / "json"
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+    metadata = tmp_path / "metadata"
+    (metadata / ".enrich.lock").touch()
+    inventory = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+    authored = {"authored_against": inventory["source_graphs_sha256"], "overview": "The fixture factory."}
+    assert enrich_inventory(tmp_path, insights=authored)["ok"] is False
+
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+
+    assert not (metadata / ".enrich.lock").exists()
+    assert enrich_inventory(tmp_path, insights=authored)["ok"] is True
+
+
 _KILLED_ENRICH = """
 import json, os, sys
 from pathlib import Path
@@ -447,3 +463,112 @@ def test_projected_inventory_matches_adf_discover_for_an_empty_pipeline(tmp_path
     assert enrich_inventory(output_dir, insights=authored)["ok"] is True
     enriched = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
     assert json.dumps({key: value for key, value in enriched.items() if key != INSIGHTS_KEY}, indent=2) == discovered
+
+
+def test_a_failed_rollback_never_truncates_the_insights_file_and_keeps_the_lock(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """If putting the previous insights back also fails, the file stays whole and the next enrich refuses."""
+    inventory_path = _discover(tmp_path)
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    metadata = tmp_path / "metadata"
+    insights_path = metadata / AGENTIC_INSIGHTS_FILENAME
+    real_replace = os.replace
+
+    def failing_replace(source: Any, destination: Any) -> None:
+        if Path(destination) == inventory_path:
+            raise OSError("disk full")
+        real_replace(source, destination)
+
+    def truncate_then_fail(self: Path, data: bytes) -> int:
+        self.open("wb").close()
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    monkeypatch.setattr(Path, "write_bytes", truncate_then_fail)
+    with pytest.raises(OSError):
+        enrich_inventory(tmp_path, insights={**_authored(tmp_path), "overview": "A different overview."})
+    monkeypatch.undo()
+
+    assert json.loads(insights_path.read_text(encoding="utf-8"))["overview"]
+    assert (metadata / ".enrich.lock").exists()
+    refused = enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    assert refused["ok"] is False
+    assert any(".enrich.lock" in violation for violation in refused["violations"])
+
+
+@pytest.mark.parametrize("interrupted_file", [AGENTIC_INSIGHTS_FILENAME, "inventory.json"])
+def test_an_interrupt_after_a_replace_succeeds_keeps_the_lock_and_rolls_nothing_back(
+    tmp_path: Path, monkeypatch: Any, interrupted_file: str
+) -> None:
+    """Ctrl-C can land just after a rename finished, so it is treated like a kill rather than undone."""
+    inventory_path = _discover(tmp_path)
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    metadata = tmp_path / "metadata"
+    insights_path = metadata / AGENTIC_INSIGHTS_FILENAME
+    inventory_before = inventory_path.read_bytes()
+    real_replace = os.replace
+
+    def replace_then_interrupt(source: Any, destination: Any) -> None:
+        real_replace(source, destination)
+        if Path(destination) == metadata / interrupted_file:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "replace", replace_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        enrich_inventory(tmp_path, insights={**_authored(tmp_path), "overview": "Interrupted writer."})
+    monkeypatch.undo()
+
+    assert json.loads(insights_path.read_text(encoding="utf-8"))["overview"] == "Interrupted writer."
+    if interrupted_file == "inventory.json":
+        assert json.loads(inventory_path.read_text(encoding="utf-8"))[INSIGHTS_KEY]["overview"] == "Interrupted writer."
+    else:
+        assert inventory_path.read_bytes() == inventory_before
+    assert (metadata / ".enrich.lock").exists()
+    refused = enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    assert refused["ok"] is False
+    assert any(".enrich.lock" in violation for violation in refused["violations"])
+
+
+def test_an_interrupt_before_either_replace_releases_the_lock(tmp_path: Path, monkeypatch: Any) -> None:
+    """Nothing has been replaced yet, so both files still agree and the next enrich may run."""
+    inventory_path = _discover(tmp_path)
+    metadata = tmp_path / "metadata"
+    inventory_before = inventory_path.read_bytes()
+
+    def interrupted_write(self: Path, data: str, **kwargs: Any) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "write_text", interrupted_write)
+    with pytest.raises(KeyboardInterrupt):
+        enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    monkeypatch.undo()
+
+    assert inventory_path.read_bytes() == inventory_before
+    assert not (metadata / AGENTIC_INSIGHTS_FILENAME).exists()
+    assert not (metadata / ".enrich.lock").exists()
+    assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
+
+
+def test_a_failed_recovery_write_rolls_back_to_the_insights_the_inventory_holds(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """After a write left agentic_insights.json ahead, a failed re-run must not restore that ahead copy."""
+    inventory_path = _discover(tmp_path)
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    insights_path = tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME
+    ahead = {**json.loads(insights_path.read_text(encoding="utf-8")), "overview": "Written by a killed enrich."}
+    insights_path.write_text(json.dumps(ahead, indent=2), encoding="utf-8")
+    real_replace = os.replace
+
+    def failing_replace(source: Any, destination: Any) -> None:
+        if Path(destination) == inventory_path:
+            raise OSError("disk full")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError, match="disk full"):
+        enrich_inventory(tmp_path, insights={**_authored(tmp_path), "overview": "The recovery run."})
+
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    assert json.loads(insights_path.read_text(encoding="utf-8")) == inventory[INSIGHTS_KEY]

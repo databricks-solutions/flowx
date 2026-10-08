@@ -105,8 +105,8 @@ of those four keys yourself:
     the evidence.
   - `inferred` — a coupling the deterministic layer never found (data flow inside notebook code, an
     external trigger, a shared table the parser didn't resolve). There is nothing to resolve
-    against, so `edge_identity` is your descriptor of the coupling and you **must** supply a non-empty
-    `evidence` string and a `confidence` of `high` / `medium` / `low`.
+    against, so `edge_identity` is your own non-empty descriptor of the coupling, and you **must** also
+    supply a non-empty `evidence` string and a `confidence` of `high` / `medium` / `low`.
   - There is no deterministic cross-pipeline **data** tier in v1: the deterministic data edges are
     intra-pipeline and task-scoped, so a cross-pipeline data coupling rides the `inferred` tier.
 

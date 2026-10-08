@@ -54,7 +54,8 @@ narrative.
 
 ## How to author (three steps)
 
-1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json`. Note every
+1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json` (on the hosted
+   MCP server, through `enrich` with `action="prepare"`; see below). Note every
    pipeline `name` (these are the only valid foreign keys), and each pipeline's `lineage` block — in
    particular `lineage.control_edges`, each `{source_workflow, target_workflow, via_task_key}`. A
    deterministic **control** relationship you annotate must match one of these exactly. When the
@@ -112,9 +113,14 @@ validation rules the library enforces.
 Run the **`setup`** skill first if you haven't. Both paths run the same validate-and-record contract.
 
 - **MCP tool (Databricks Genie Code, or a local stdio registration):** call the single **`flowx`**
-  tool with `command="enrich"` and either inline insights or a file:
+  tool with `command="enrich"`. On the hosted server you cannot read `output_dir`, so first read the
+  inventory with `action="prepare"`. It returns `metadata/inventory.json` inline as
+  `bundle.files["inventory.json"]`, the same way `package` returns a bundle; pass `output_volume_path`
+  or `output_workspace_path` to have a large inventory uploaded there as `inventory.json` instead. Then
+  record the insights (the default `action="apply"`) with either inline insights or a file:
 
   ```
+  flowx(command="enrich", parameters={"output_dir": "<dir>", "action": "prepare"})   # read inventory.json
   flowx(command="enrich", parameters={"output_dir": "<dir>", "insights": { ... }})   # inline object
   flowx(command="enrich", parameters={"output_dir": "<dir>", "insights_path": "<file>"})
   ```
@@ -146,9 +152,16 @@ with different insights replaces the block. A validation failure writes nothing.
 
 Only one `enrich` writes an output directory at a time: it holds `metadata/.enrich.lock` from reading
 the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
-writes nothing. The two files are replaced one right after the other, so a process killed between those
-two steps can leave `agentic_insights.json` one write ahead of `inventory.json`. That run's lock stays
-behind, and the next `enrich` refuses until you delete the lock; running `enrich` again then rewrites both.
+writes nothing. The two files are replaced one right after the other. If replacing `inventory.json`
+fails, `agentic_insights.json` is put back to the insights the unchanged `inventory.json` holds (or
+removed when it holds none). A process killed or interrupted (Ctrl-C)
+between those two steps, or a failure while putting that file back, can leave
+`agentic_insights.json` one write ahead of `inventory.json`. That run's lock then stays behind, and the
+next `enrich` refuses until the lock is cleared:
+
+- **Locally**, delete `metadata/.enrich.lock` and run `enrich` again; it rewrites both files.
+- **On the hosted MCP server** you cannot delete files in `output_dir`, so run `discover` again (it
+  clears `metadata/`, the lock with it), then `enrich` with `action="prepare"` and apply the insights again.
 
 ## Next step
 
