@@ -56,6 +56,10 @@ SERVERLESS_ENVIRONMENT = {
     "environment_key": "serverless",
     "spec": {"environment_version": "2", "dependencies": ["requests==2.32.3"]},
 }
+WHEEL_ENVIRONMENT = {
+    "environment_key": "serverless",
+    "spec": {"environment_version": "2", "dependencies": ["../src/libraries/orders.whl"]},
+}
 
 
 def _activity() -> AgenticComponentActivity:
@@ -348,6 +352,30 @@ def test_agentic_components_declaring_an_identical_pipeline_resource_write_it_on
     assert check_bundle_dir(tmp_path).ok
 
 
+def test_agentic_components_declaring_one_pipeline_definition_with_different_extra_fields_write_it_once(tmp_path):
+    first = AgenticComponentActivity(
+        name="First",
+        task_key="first",
+        resources=[{**RESOURCES[0], "comment": "for first"}],
+        task=TASK,
+    )
+    second = AgenticComponentActivity(
+        name="Second",
+        task_key="second",
+        resources=[{**RESOURCES[0], "comment": "for second"}],
+        task=TASK,
+    )
+    serialized_pipeline = json.loads(json.dumps(pipeline_to_dict(Pipeline(name="orders", tasks=[first, second]))))
+    restored_pipeline, _ = pipeline_dict_to_ir(serialized_pipeline)
+
+    created_files = write_bundle(prepare_workflow(restored_pipeline), tmp_path)
+
+    resource_path = (tmp_path / "resources" / "orders_ingestion.yml").resolve()
+    assert created_files.count(resource_path) == 1
+    pipeline_resource = yaml.safe_load(resource_path.read_text(encoding="utf-8"))
+    assert pipeline_resource == {"resources": {"pipelines": {"orders_ingestion": PIPELINE_DEFINITION}}}
+
+
 def test_agentic_components_sharing_a_resource_key_with_different_definitions_fail(tmp_path):
     first = AgenticComponentActivity(name="First", task_key="first", resources=RESOURCES, task=TASK)
     second = AgenticComponentActivity(
@@ -417,7 +445,9 @@ def test_agentic_component_rejects_binary_content_that_is_not_plain_base64():
         task={"notebook_task": {"notebook_path": "../src/notebooks/orders.py"}},
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError, match="Agentic component 'wheel' file 'libraries/orders.whl' binary_content must be valid base64"
+    ):
         prepare_workflow(Pipeline(name="orders", tasks=[activity]))
 
 
@@ -737,14 +767,16 @@ def _serverless_component(payload_kind: str, task_key: str = "run") -> AgenticCo
     if payload_kind == "spark_python_task":
         files = [{"path": "jobs/run.py", "content": "print('run')\n"}]
         payload = {"spark_python_task": {"python_file": "../src/jobs/run.py"}}
+        environment = SERVERLESS_ENVIRONMENT
     else:
         files = [{"path": "libraries/orders.whl", "binary_content": "UEsDBAoAAAAA"}]
         payload = {"python_wheel_task": {"package_name": "orders", "entry_point": "main"}}
+        environment = WHEEL_ENVIRONMENT
     return AgenticComponentActivity(
         name=task_key.title(),
         task_key=task_key,
         files=files,
-        environments=[SERVERLESS_ENVIRONMENT],
+        environments=[environment],
         task={**payload, "environment_key": "serverless"},
     )
 
@@ -760,9 +792,12 @@ def test_serverless_agentic_component_gets_its_environment_in_the_job(tmp_path, 
     job = yaml.safe_load((tmp_path / "resources" / "orders.yml").read_text(encoding="utf-8"))["resources"]["jobs"][
         "orders"
     ]
-    assert job["environments"] == [SERVERLESS_ENVIRONMENT]
+    assert job["environments"] == component.environments
     assert job["tasks"] == [{"task_key": "run", **component.task}]
     assert "job_clusters" not in job
+    if payload_kind == "python_wheel_task":
+        assert job["environments"][0]["spec"]["dependencies"] == ["../src/libraries/orders.whl"]
+        assert (tmp_path / "src" / "libraries" / "orders.whl").exists()
     assert check_bundle_dir(tmp_path).ok
 
 

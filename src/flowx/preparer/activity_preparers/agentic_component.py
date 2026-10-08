@@ -119,9 +119,13 @@ def _authored_file(task_key: str, file: object) -> DabNotebook:
             raise ValueError(
                 f"Agentic component {task_key!r} file {relative_path!r} binary_content must be a base64 string"
             )
-        return DabNotebook(
-            relative_path=relative_path, binary_content=base64.b64decode(encoded, validate=True), authored=True
-        )
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except ValueError as error:
+            raise ValueError(
+                f"Agentic component {task_key!r} file {relative_path!r} binary_content must be valid base64"
+            ) from error
+        return DabNotebook(relative_path=relative_path, binary_content=decoded, authored=True)
     content = file.get("content", "")
     if not isinstance(content, str):
         raise ValueError(f"Agentic component {task_key!r} file {relative_path!r} content must be a string")
@@ -145,8 +149,11 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     flowx does not override or remove any other value the fragment sets, except in three
     wiring passes that run on authored tasks exactly as on generated ones:
 
-    - a ``{{tasks.X.values.Y}}`` reference to a task outside the same job is blanked and
-      listed in SETUP.md, because task values do not cross job boundaries;
+    - a ``{{tasks.X.values.Y}}`` reference to a task outside the same job is blanked,
+      because task values do not cross job boundaries. Only notebook ``base_parameters``,
+      ``run_job_task.job_parameters`` and ``condition_task`` operands are checked;
+      SETUP.md lists the blanked notebook parameters and neutralised conditions but not
+      blanked ``job_parameters``, and references in other payloads are left as they are;
     - inside a ForEach that runs as its own job, notebook ``base_parameters`` and
       ``condition_task`` operands are rewritten for that job: ``{{input.x}}`` becomes
       ``{{job.parameters.x}}``, ADF expressions become job-parameter references, and
@@ -155,10 +162,12 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
       this bundle is pointed at an ``X_job_id`` bundle variable instead.
 
     Where the fragment leaves a value out, flowx adds only the plumbing the task needs: the
-    ForEach ``item`` parameter, the source activity's notifications, or a cluster for a task
-    that names no compute. The task is marked ``_authored`` so the bundle writer skips the
-    parameter clean-ups meant for generated tasks; the marker is stripped before the job
-    YAML is written.
+    ForEach ``item`` parameter when the component is the ForEach's only child; the source
+    activity's collapsed notifications when the fragment sets neither ``email_notifications``
+    nor ``webhook_notifications``; and a cluster for a notebook task that names no compute.
+    No other task type is given a cluster, so it must name its own compute. The task is
+    marked ``_authored`` so the bundle writer skips the parameter clean-ups meant for
+    generated tasks; the marker is stripped before the job YAML is written.
 
     Raises:
         ValueError: The authored task fragment sets a flowx-owned field, a file entry is

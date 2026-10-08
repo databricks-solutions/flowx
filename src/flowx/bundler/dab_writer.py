@@ -1095,12 +1095,17 @@ def _collect_pipeline_resources(workflow: PreparedWorkflow) -> list[dict[str, An
         Flat list of pipeline-resource dicts (each with ``resource_key``
         and ``definition``), including entries from inner workflows. A
         resource declared more than once with the same key and definition
-        appears once, so it is written once.
+        appears once, so it is written once; other fields on the entry are
+        never written and play no part in that comparison.
     """
     resources: list[dict[str, Any]] = []
     for current in [workflow, *workflow.inner_workflows]:
         for resource in current.pipeline_resources:
-            if resource not in resources:
+            if not any(
+                existing["resource_key"] == resource["resource_key"]
+                and existing["definition"] == resource["definition"]
+                for existing in resources
+            ):
                 resources.append(resource)
     return resources
 
@@ -1111,9 +1116,9 @@ def _check_pipeline_resource_keys(pipeline_resources: list[dict[str, Any]], job_
     Every pipeline resource is written to ``resources/<key>.yml``, as is every static job, so a
     pipeline key that matches a job key or an earlier pipeline key would silently replace that file
     and drop the other resource. Bundle resource keys must also be unique across resource types, so
-    a match with a Python-generated dbt-factory job would fail at deploy time instead. Identical
-    repeats are already collapsed by :func:`_collect_pipeline_resources`, so a repeated key here
-    always carries a different definition.
+    a match with a Python-generated dbt-factory job would fail at deploy time instead. Repeats with
+    the same definition are already collapsed by :func:`_collect_pipeline_resources`, so a repeated
+    key here always carries a different definition.
 
     Raises:
         ValueError: A pipeline resource key matches a job resource key or repeats an earlier one.
