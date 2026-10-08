@@ -161,13 +161,20 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     - a ``run_job_task`` whose ``job_id`` is ``${resources.jobs.X.id}`` for a job outside
       this bundle is pointed at an ``X_job_id`` bundle variable instead.
 
-    Where the fragment leaves a value out, flowx adds only the plumbing the task needs: the
-    ForEach ``item`` parameter when the component is the ForEach's only child; the source
-    activity's collapsed notifications when the fragment sets neither ``email_notifications``
-    nor ``webhook_notifications``; and a cluster for a notebook task that names no compute.
-    No other task type is given a cluster, so it must name its own compute. The task is
-    marked ``_authored`` so the bundle writer skips the parameter clean-ups meant for
-    generated tasks; the marker is stripped before the job YAML is written.
+    Where the fragment leaves a value out, flowx adds only the plumbing the task needs:
+
+    - the ForEach ``item`` parameter, only to a ``notebook_task`` (``base_parameters``) or
+      ``run_job_task`` (``job_parameters``) that is the ForEach's only child; every other
+      payload must pass ``{{input}}`` itself;
+    - the source activity's collapsed notifications, when the fragment sets neither
+      ``email_notifications`` nor ``webhook_notifications``;
+    - a job-cluster binding, only for a notebook task that names no compute and
+      either has a classic compute mode, ships libraries, or (without a serverless compute
+      mode) points at a workspace path outside the bundle. A bundle ``../src/`` notebook
+      without libraries runs on serverless, and no other task type is given a cluster.
+
+    The task is marked ``_authored`` so the bundle writer skips the parameter clean-ups
+    meant for generated tasks; the marker is stripped before the job YAML is written.
 
     Raises:
         ValueError: The authored task fragment sets a flowx-owned field, a file entry is

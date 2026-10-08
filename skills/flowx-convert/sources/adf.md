@@ -105,11 +105,17 @@ to generated ones:
 - A `run_job_task` whose `job_id` is `${resources.jobs.X.id}` for a job outside this bundle is
   pointed at an `X_job_id` bundle variable instead.
 
-Where the fragment leaves a value out, flowx adds only the plumbing the task needs: the ForEach
-`item` parameter when the component is the ForEach's only child; the source activity's collapsed
-notifications when the fragment sets neither `email_notifications` nor `webhook_notifications`; and
-a cluster for a notebook task that names no compute. No other task type is given a cluster, so it
-must name its own compute.
+Where the fragment leaves a value out, flowx adds only the plumbing the task needs:
+
+- The ForEach `item` parameter, only to a `notebook_task` (`base_parameters`) or `run_job_task`
+  (`job_parameters`) that is the ForEach's only child. Every other payload must pass `{{input}}`
+  itself.
+- The source activity's collapsed notifications, when the fragment sets neither
+  `email_notifications` nor `webhook_notifications`.
+- A job-cluster binding, only for a notebook task that names no compute and either has a
+  classic compute mode, ships libraries, or (without a serverless compute mode) points at a
+  workspace path outside the bundle. A bundle `../src/` notebook without libraries runs on
+  serverless, and no other task type is given a cluster, so name the compute you need.
 
 ## Step 6 — Merge agentic results
 
