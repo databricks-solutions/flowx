@@ -157,7 +157,11 @@ fails, `agentic_insights.json` is put back to the insights the unchanged `invent
 removed when it holds none). A process killed or interrupted (Ctrl-C)
 between those two steps, or a failure while putting that file back, can leave
 `agentic_insights.json` one write ahead of `inventory.json`. That run's lock then stays behind, and the
-next `enrich` refuses until you delete the lock; running `enrich` again then rewrites both.
+next `enrich` refuses until the lock is cleared:
+
+- **Locally**, delete `metadata/.enrich.lock` and run `enrich` again; it rewrites both files.
+- **On the hosted MCP server** you cannot delete files in `output_dir`, so run `discover` again (it
+  clears `metadata/`, the lock with it), then `enrich` with `action="prepare"` and apply the insights again.
 
 ## Next step
 

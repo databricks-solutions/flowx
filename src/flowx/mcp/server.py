@@ -609,7 +609,9 @@ def build_server() -> FastMCP:
           against inventory.json, record them in agentic_insights.json, and rebuild inventory.json from
           source_graphs.json plus that document (one enrich per output_dir at a time, idempotent). `ok`
           reflects validation; `result.violations` lists any problems (including another enrich holding
-          metadata/.enrich.lock) and both files are left untouched on failure. Author the insights by
+          metadata/.enrich.lock) and both files are left untouched on failure. A lock a stopped enrich
+          left behind is cleared locally by deleting it and running enrich again; on the hosted server,
+          run discover again (it clears metadata/ and the lock), then prepare and apply. Author the insights by
           reading inventory.json + the source artifacts first, setting `authored_against` (optional,
           checked when given) to its source_graphs_sha256 when it records one and leaving it out
           otherwise (see the flowx-enrich skill's insights.md).

@@ -353,6 +353,22 @@ def test_a_lock_left_by_a_killed_enrich_blocks_the_next_one_until_removed(tmp_pa
     assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
 
 
+def test_running_discover_again_clears_a_leftover_lock(tmp_path: Path) -> None:
+    """The hosted recovery: an agent that cannot delete the lock runs discover again, then enriches."""
+    fixtures = Path(__file__).resolve().parents[1] / "resources" / "json"
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+    metadata = tmp_path / "metadata"
+    (metadata / ".enrich.lock").touch()
+    inventory = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+    authored = {"authored_against": inventory["source_graphs_sha256"], "overview": "The fixture factory."}
+    assert enrich_inventory(tmp_path, insights=authored)["ok"] is False
+
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+
+    assert not (metadata / ".enrich.lock").exists()
+    assert enrich_inventory(tmp_path, insights=authored)["ok"] is True
+
+
 _KILLED_ENRICH = """
 import json, os, sys
 from pathlib import Path

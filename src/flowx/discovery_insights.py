@@ -70,6 +70,12 @@ AGENTIC_INSIGHTS_FILENAME = "agentic_insights.json"
 # Held in metadata/ while one enrich reads, validates and writes, so two enrich calls never interleave.
 ENRICH_LOCK_FILENAME = ".enrich.lock"
 
+# A hosted agent cannot delete files in output_dir, but discover clears metadata/ and the lock with it.
+_LOCK_RECOVERY = (
+    f"locally, delete metadata/{ENRICH_LOCK_FILENAME} and run enrich again; on the hosted MCP server, run "
+    "discover again (it clears metadata/ and the lock), then enrich prepare and apply again"
+)
+
 # Library-owned keys stamped on record; authored insights must not supply them.
 _SCHEMA_VERSION_KEY = "schema_version"
 _FINGERPRINT_KEY = "inventory_sha256"
@@ -682,7 +688,7 @@ def _write_both_or_neither(
                 except OSError as rollback_error:
                     raise _UnrecoveredWriteError(
                         f"inventory.json was not updated and the previous {insights_path.name} could not be put "
-                        f"back ({rollback_error}); the enrich lock is kept, so delete it and run enrich again"
+                        f"back ({rollback_error}); the enrich lock is kept, so to recover: {_LOCK_RECOVERY}"
                     ) from rollback_error
                 raise
         except Exception:
@@ -690,7 +696,7 @@ def _write_both_or_neither(
         except BaseException as interrupt:
             raise interrupt from _UnrecoveredWriteError(
                 f"enrich was interrupted while replacing {insights_path.name} and inventory.json, so they may "
-                "disagree; the enrich lock is kept, so delete it and run enrich again"
+                f"disagree; the enrich lock is kept, so to recover: {_LOCK_RECOVERY}"
             )
     finally:
         insights_temporary.unlink(missing_ok=True)
@@ -737,8 +743,8 @@ def enrich_inventory(
                 "ok": False,
                 "violations": [
                     f"another enrich is writing to {inventory_path.parent} ({lock_path} exists); run enrich again "
-                    "once it finishes. If no enrich is running, a previous one was killed mid-write: delete the "
-                    "lock and run enrich again to rewrite both files"
+                    "once it finishes. If no enrich is running, a previous one stopped mid-write, so to rewrite "
+                    f"both files: {_LOCK_RECOVERY}"
                 ],
                 "pipeline_insights": 0,
                 "relationships": 0,
