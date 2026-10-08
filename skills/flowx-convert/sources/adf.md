@@ -108,8 +108,11 @@ to generated ones:
 Where the fragment leaves a value out, flowx adds only the plumbing the task needs:
 
 - The ForEach `item` parameter, only to a `notebook_task` (`base_parameters`) or `run_job_task`
-  (`job_parameters`) that is the ForEach's only child. Every other payload must pass `{{input}}`
-  itself.
+  (`job_parameters`) that is the ForEach's only child; any other payload of an only child passes
+  `{{input}}` itself. With siblings, the children run as a `<loop>_inner_tasks` job where
+  `{{input}}` does not resolve: reference `{{job.parameters.item}}` in a notebook
+  `base_parameters`, a `run_job_task.job_parameters` or a `condition_task` operand, which flowx
+  forwards. Other payloads are not scanned, so they cannot receive the item on their own.
 - The source activity's collapsed notifications, when the fragment sets neither
   `email_notifications` nor `webhook_notifications`.
 - A job-cluster binding, only for a notebook task that names no compute and either has a
