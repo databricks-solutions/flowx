@@ -97,6 +97,7 @@ Or run individual phases:
 
 ```
 /flowx:flowx-discover    # Parse the source (ADF JSON / Airflow DAGs), produce inventory + complexity report
+/flowx:flowx-enrich      # Validate and record agent-authored insights on the inventory
 /flowx:flowx-convert     # Deterministic + agentic translation
 /flowx:flowx-package     # Generate DABs project
 ```
@@ -258,6 +259,7 @@ flowx_output/
   metadata/
     inventory.json            # discover: activity inventory
     source_graphs.json        # discover (ADF): saved source graphs the inventory is built from
+    agentic_insights.json     # enrich: validated agent-authored insights, rebuilt into inventory.json
     profile_report.csv        # discover: per-pipeline complexity report
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
     configuration.json        # modify: collected configuration answers

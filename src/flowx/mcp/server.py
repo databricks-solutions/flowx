@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -51,6 +52,8 @@ airflow_source_path (a DAG .py file or directory).
 Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("inputs", {"phase": "discover", "source": "adf"})   # learn a phase's inputs
   flowx("discover", {"source": "adf", "adf_source_path": "...", "output_dir": "..."})
+  flowx("enrich", {"output_dir": "...", "action": "prepare"})  # optional: read inventory.json to author insights
+  flowx("enrich", {"output_dir": "...", "insights": {...}})   # optional: record agent-authored insights
   flowx("convert", {"source": "adf", "output_dir": "..."})
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
@@ -296,6 +299,53 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
     return {"ok": result.ok, "process": result.as_dict(), **extra}
 
 
+def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
+    """Validate agent-authored insights, record them in agentic_insights.json and rebuild inventory.json.
+
+    ``action`` is ``"apply"`` (the default) or ``"prepare"``. ``prepare`` hands the agent what it
+    authors against -- ``metadata/inventory.json`` -- because a hosted agent cannot read the
+    server's ``output_dir``. It reuses :func:`_bundle_output`, so the file comes back inline under
+    ``bundle`` (size-bounded), or is uploaded to ``output_volume_path`` / ``output_workspace_path``
+    like a packaged bundle.
+
+    ``apply`` accepts the insights either inline as ``insights`` (a JSON object) or via
+    ``insights_path`` (a file the server can read); exactly one is required. Inline insights are
+    staged to a temp file so the same ``enrich`` CLI contract runs on both paths. The returned
+    ``ok`` reflects *validation* success -- ``result.violations`` lists every problem when it is
+    False, and the inventory is left untouched on any failure.
+    """
+    output_dir = p.get("output_dir", "./flowx_output")
+    action = p.get("action", "apply")
+    if action not in {"prepare", "apply"}:
+        return {"ok": False, "error": "enrich action must be prepare or apply."}
+    insights = p.get("insights")
+    insights_path = p.get("insights_path")
+    if action == "prepare":
+        if insights is not None or insights_path is not None:
+            return {"ok": False, "error": "enrich prepare takes no insights; send them with action apply."}
+        inventory_path = Path(output_dir) / "metadata" / "inventory.json"
+        if not inventory_path.is_file():
+            return {"ok": False, "error": f"No inventory.json under {inventory_path.parent}; run discover first."}
+        with tempfile.TemporaryDirectory(prefix="flowx-inventory-") as temporary:
+            shutil.copy(inventory_path, temporary)
+            return {"ok": True, "output_dir": str(output_dir), **_bundle_output(p, Path(temporary))}
+    if (insights is None) == (insights_path is None):
+        return {"ok": False, "error": "provide exactly one of 'insights' (inline object) or 'insights_path'."}
+
+    def _run(path: str) -> dict[str, Any]:
+        result = runner.run_adapter(["enrich", "--output-dir", output_dir, "--insights-path", path])
+        payload = runner.parse_stdout_json(result)
+        ok = bool(isinstance(payload, dict) and payload.get("ok"))
+        return {"ok": ok, "result": payload, "process": result.as_dict()}
+
+    if insights_path is not None:
+        return _run(str(insights_path))
+    with tempfile.TemporaryDirectory(prefix="flowx-insights-") as temporary:
+        inline_path = Path(temporary) / "insights.json"
+        inline_path.write_text(json.dumps(insights, indent=2), encoding="utf-8")
+        return _run(str(inline_path))
+
+
 def _cmd_inspect(p: dict[str, Any]) -> dict[str, Any]:
     args: list[Any] = ["inspect", p["report_path"]]
     for answer in p.get("answers") or []:
@@ -498,6 +548,7 @@ _COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "convert": _cmd_convert,
     "merge_agentic": _cmd_merge_agentic,
     "resolve_agentic": _cmd_resolve_agentic,
+    "enrich": _cmd_enrich,
     "inspect": _cmd_inspect,
     "apply_answers": _cmd_apply_answers,
     "materialize_lookup": _cmd_materialize_lookup,
@@ -551,6 +602,19 @@ def build_server() -> FastMCP:
           airflow_source_path, report_path, gap_id, candidates, replace, accept_gap | accept_gaps, accept_all,
           review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
+        - "enrich": action(prepare | apply, default apply). prepare: output_dir, output_volume_path,
+          output_workspace_path — return metadata/inventory.json the same way package returns a
+          bundle, for the agent to author against when it cannot read output_dir. apply: output_dir(req),
+          one of insights(inline object) | insights_path(req) — validate agent-authored discover insights
+          against inventory.json, record them in agentic_insights.json, and rebuild inventory.json from
+          source_graphs.json plus that document (one enrich per output_dir at a time, idempotent). `ok`
+          reflects validation; `result.violations` lists any problems (including another enrich holding
+          metadata/.enrich.lock) and both files are left untouched on failure. A lock a stopped enrich
+          left behind is cleared locally by deleting it and running enrich again; on the hosted server,
+          run discover again (it clears metadata/ and the lock), then prepare and apply. Author the insights by
+          reading inventory.json + the source artifacts first, setting `authored_against` (optional,
+          checked when given) to its source_graphs_sha256 when it records one and leaving it out
+          otherwise (see the flowx-enrich skill's insights.md).
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
