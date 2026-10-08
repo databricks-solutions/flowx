@@ -20,16 +20,16 @@ class DabNotebook:
         language: Notebook language (``"python"``, ``"sql"``, ``"scala"``, ``"r"``).
         binary_content: Raw bytes for binary files (e.g. JARs).  When set,
             the notebook writer writes these bytes instead of ``content``.
-        write_to_bundle_root: Controls whether the bundle writer places this
-            file at the bundle root instead of below ``src``. ``None`` keeps
-            the legacy path-based routing for PyDABs artifacts.
+        authored: Marks a file an agent authored for an agentic component. The
+            bundle writer keeps it below ``src`` whatever its path and writes it
+            as given.
     """
 
     relative_path: str
     content: str = ""
     language: str = "python"
     binary_content: bytes | None = None
-    write_to_bundle_root: bool | None = None
+    authored: bool = False
 
 
 # ---------------------------------------------------------------------------

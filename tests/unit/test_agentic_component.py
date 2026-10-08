@@ -261,12 +261,85 @@ def test_agentic_component_resource_key_matching_a_dbt_factory_job_key_fails(tmp
         write_bundle(workflow, tmp_path)
 
 
-def test_agentic_components_sharing_a_resource_key_fail_instead_of_overwriting_each_other(tmp_path):
+def test_agentic_components_declaring_an_identical_pipeline_resource_write_it_once(tmp_path):
     first = AgenticComponentActivity(name="First", task_key="first", resources=RESOURCES, task=TASK)
     second = AgenticComponentActivity(name="Second", task_key="second", resources=RESOURCES, task=TASK)
+    serialized_pipeline = json.loads(json.dumps(pipeline_to_dict(Pipeline(name="orders", tasks=[first, second]))))
+    restored_pipeline, _ = pipeline_dict_to_ir(serialized_pipeline)
 
-    with pytest.raises(ValueError, match="more than one pipeline resource"):
+    created_files = write_bundle(prepare_workflow(restored_pipeline), tmp_path)
+
+    resource_path = (tmp_path / "resources" / "orders_ingestion.yml").resolve()
+    assert created_files.count(resource_path) == 1
+    pipeline_resource = yaml.safe_load(resource_path.read_text(encoding="utf-8"))
+    assert pipeline_resource == {"resources": {"pipelines": {"orders_ingestion": PIPELINE_DEFINITION}}}
+    job_resource = yaml.safe_load((tmp_path / "resources" / "orders.yml").read_text(encoding="utf-8"))
+    assert [task["pipeline_task"] for task in job_resource["resources"]["jobs"]["orders"]["tasks"]] == [
+        TASK["pipeline_task"],
+        TASK["pipeline_task"],
+    ]
+    assert check_bundle_dir(tmp_path).ok
+
+
+def test_agentic_components_sharing_a_resource_key_with_different_definitions_fail(tmp_path):
+    first = AgenticComponentActivity(name="First", task_key="first", resources=RESOURCES, task=TASK)
+    second = AgenticComponentActivity(
+        name="Second",
+        task_key="second",
+        resources=[{"resource_key": "orders_ingestion", "definition": {**PIPELINE_DEFINITION, "name": "other"}}],
+        task=TASK,
+    )
+
+    with pytest.raises(ValueError, match="more than one pipeline resource with different definitions"):
         write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+@pytest.mark.parametrize(
+    ("files", "resources", "task"),
+    [
+        ([{"path": "notebooks/a.py", "content": None}], [], TASK),
+        ([{"path": "notebooks/a.py", "content": ["line 1", "line 2"]}], [], TASK),
+        ([{"path": "libraries/a.whl", "binary_content": None}], [], TASK),
+        ([{"path": "libraries/a.whl", "content": "text", "binary_content": "UEsDBAoAAAAA"}], [], TASK),
+        (["notebooks/a.py"], [], TASK),
+        ([{"content": "print('no path')\n"}], [], TASK),
+        ([{"path": None, "content": "print('null path')\n"}], [], TASK),
+        ([], ["orders_ingestion"], TASK),
+        ([], [{"resource_key": "orders_ingestion"}], TASK),
+        ([], [{"resource_key": "orders_ingestion", "definition": "orders"}], TASK),
+        ([], [{"resource_key": "orders_ingestion", "definition": ["orders"]}], TASK),
+        ([], [], {"notebook_task": "../src/notebooks/a.py"}),
+    ],
+)
+def test_agentic_component_rejects_malformed_authored_payloads(files, resources, task):
+    activity = AgenticComponentActivity(name="Bad", task_key="bad", files=files, resources=resources, task=task)
+
+    with pytest.raises(ValueError, match="Agentic component 'bad'"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+def test_agentic_component_task_fragment_keeps_its_own_description_and_compute(tmp_path):
+    """Only the flowx-owned fields come from the activity; the fragment's compute is not overridden."""
+    activity = AgenticComponentActivity(
+        name="Run job",
+        task_key="run_job",
+        description="Copied from the source activity",
+        existing_cluster_id="0101-123456-abcdefgh",
+        files=[{"path": "jobs/run.py", "content": "print('run')\n"}],
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "job_cluster_key": "default_cluster"},
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[activity])), tmp_path)
+
+    job_resource = yaml.safe_load((tmp_path / "resources" / "orders.yml").read_text(encoding="utf-8"))
+    assert job_resource["resources"]["jobs"]["orders"]["tasks"] == [
+        {
+            "task_key": "run_job",
+            "spark_python_task": {"python_file": "../src/jobs/run.py"},
+            "job_cluster_key": "default_cluster",
+        }
+    ]
 
 
 def test_agentic_component_rejects_binary_content_that_is_not_plain_base64():
@@ -415,3 +488,51 @@ def test_agentic_component_pipeline_resource_survives_control_flow(tmp_path, wra
     pipeline_resource = yaml.safe_load((tmp_path / "resources" / "orders_ingestion.yml").read_text(encoding="utf-8"))
     assert pipeline_resource == {"resources": {"pipelines": {"orders_ingestion": PIPELINE_DEFINITION}}}
     assert check_bundle_dir(tmp_path).ok
+
+
+def _notebook_tasks_by_path(bundle_dir) -> dict[str, dict]:
+    """Collect every emitted ``notebook_task`` across the bundle's job resources, keyed by notebook path."""
+    found: dict[str, dict] = {}
+
+    def visit(value) -> None:
+        if isinstance(value, dict):
+            notebook_task = value.get("notebook_task")
+            if isinstance(notebook_task, dict):
+                found[notebook_task["notebook_path"]] = notebook_task
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    for resource_path in sorted((bundle_dir / "resources").glob("*.yml")):
+        visit(yaml.safe_load(resource_path.read_text(encoding="utf-8")))
+    return found
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [lambda activity: activity, _inside_for_each, _inside_for_each_with_siblings],
+    ids=["top_level", "for_each", "for_each_with_siblings"],
+)
+def test_agentic_component_notebook_widget_defaults_are_not_overridden(tmp_path, wrap):
+    """The authored notebook's own widget default must apply, not an injected empty base parameter."""
+    report = AgenticComponentActivity(
+        name="Report",
+        task_key="report",
+        files=[
+            {
+                "path": "notebooks/report.py",
+                "content": (
+                    'dbutils.widgets.text("lookback_days", "7")\n'
+                    'lookback_days = int(dbutils.widgets.get("lookback_days"))\n'
+                ),
+            }
+        ],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/report.py"}},
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[wrap(report)])), tmp_path)
+
+    notebook_task = _notebook_tasks_by_path(tmp_path)["../src/notebooks/report.py"]
+    assert "lookback_days" not in notebook_task.get("base_parameters", {})

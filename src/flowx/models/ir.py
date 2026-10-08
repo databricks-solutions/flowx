@@ -699,7 +699,9 @@ class AgenticComponentActivity(Activity):
             another component's file or a generated notebook only when the
             content is identical.
         resources: Pipeline resources in the existing ``resource_key`` plus
-            raw ``definition`` shape used by the bundle writer.
+            raw ``definition`` shape used by the bundle writer. Components may
+            declare the same resource only with an identical definition; it
+            is then written once.
         task: Raw Databricks task fragment carrying exactly one executable
             payload (a ``<kind>_task`` key such as ``pipeline_task`` or
             ``notebook_task``) wired to an authored resource or file.

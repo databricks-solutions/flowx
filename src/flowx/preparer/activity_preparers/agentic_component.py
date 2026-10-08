@@ -57,19 +57,57 @@ def _check_task_payload(task_key: str, task: dict[str, object]) -> None:
             f"Agentic component {task_key!r} task must contain exactly one executable payload such as "
             f"pipeline_task or notebook_task (found: {found})"
         )
+    if not isinstance(task[payloads[0]], dict):
+        raise ValueError(f"Agentic component {task_key!r} task payload {payloads[0]} must be a mapping")
 
 
-def _check_resource_key(task_key: str, resource_key: object) -> None:
-    """Reject a resource key that is not a plain identifier.
+def _check_resource(task_key: str, resource: object) -> None:
+    """Reject a resource that is not a mapping of a plain-identifier key to a definition mapping.
 
     Each resource is written to ``resources/<resource_key>.yml``, so a key with path characters
-    could land outside the ``resources`` directory or overwrite another bundle file.
+    could land outside the ``resources`` directory or overwrite another bundle file. The definition
+    becomes the body of ``resources.pipelines.<resource_key>``, which the bundle expects to be a mapping.
     """
+    if not isinstance(resource, dict):
+        raise ValueError(
+            f"Agentic component {task_key!r} resource {resource!r} must be a mapping with resource_key and definition"
+        )
+    resource_key = resource.get("resource_key")
     if not isinstance(resource_key, str) or not resource_key or resource_key != normalize_task_key(resource_key):
         raise ValueError(
             f"Agentic component {task_key!r} resource key {resource_key!r} must be a plain identifier "
             "of lowercase letters, digits, and single underscores"
         )
+    if not isinstance(resource.get("definition"), dict):
+        raise ValueError(f"Agentic component {task_key!r} resource {resource_key!r} definition must be a mapping")
+
+
+def _authored_file(task_key: str, file: object) -> DabNotebook:
+    """Turn one authored ``files`` entry into a file the bundle writer keeps below ``src``.
+
+    A file carries text ``content`` or base64 ``binary_content``, never both, and each must
+    already be a string so the file is written exactly as authored.
+    """
+    if not isinstance(file, dict) or not isinstance(file.get("path"), str):
+        raise ValueError(f"Agentic component {task_key!r} file {file!r} must be a mapping with a string path")
+    relative_path = _source_relative_path(file["path"])
+    if "content" in file and "binary_content" in file:
+        raise ValueError(
+            f"Agentic component {task_key!r} file {relative_path!r} must set content or binary_content, not both"
+        )
+    if "binary_content" in file:
+        encoded = file["binary_content"]
+        if not isinstance(encoded, str):
+            raise ValueError(
+                f"Agentic component {task_key!r} file {relative_path!r} binary_content must be a base64 string"
+            )
+        return DabNotebook(
+            relative_path=relative_path, binary_content=base64.b64decode(encoded, validate=True), authored=True
+        )
+    content = file.get("content", "")
+    if not isinstance(content, str):
+        raise ValueError(f"Agentic component {task_key!r} file {relative_path!r} content must be a string")
+    return DabNotebook(relative_path=relative_path, content=content, authored=True)
 
 
 def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedActivity:
@@ -78,12 +116,14 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     The task's key, dependencies, run condition, timeout, and retries always come from
     the activity, never from the authored fragment, so an agent cannot rewire or re-time
     a task behind flowx's back. A fragment that tries to set any of them is rejected.
+    Everything else in the task, such as its description or compute, is written as the
+    fragment gives it.
 
     Raises:
-        ValueError: The authored task fragment sets a flowx-owned field, a file path
-            escapes the bundle's ``src`` directory, a resource key is not a plain
-            identifier, a binary file is not valid base64, or the task does not carry exactly
-            one executable payload.
+        ValueError: The authored task fragment sets a flowx-owned field, a file entry is
+            malformed or its path escapes the bundle's ``src`` directory, a resource is
+            malformed or its key is not a plain identifier, a binary file is not valid
+            base64, or the task does not carry exactly one executable payload mapping.
     """
     del scope
     owned_fields = sorted(FLOWX_OWNED_TASK_FIELDS & activity.task.keys())
@@ -94,23 +134,13 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
         )
     _check_task_payload(activity.task_key, activity.task)
     for resource in activity.resources:
-        _check_resource_key(activity.task_key, resource.get("resource_key"))
-    notebooks = [
-        DabNotebook(
-            relative_path=_source_relative_path(file["path"]),
-            content=str(file.get("content", "")),
-            binary_content=(
-                base64.b64decode(str(file["binary_content"]), validate=True) if "binary_content" in file else None
-            ),
-            write_to_bundle_root=False,
-        )
-        for file in activity.files
-    ]
-    owned_task_fields = build_common_task_fields(activity)
-    task = {**owned_task_fields, **activity.task}
-    task.update(owned_task_fields)
+        _check_resource(activity.task_key, resource)
+    notebooks = [_authored_file(activity.task_key, file) for file in activity.files]
+    owned_task_fields = {
+        field: value for field, value in build_common_task_fields(activity).items() if field in FLOWX_OWNED_TASK_FIELDS
+    }
     return PreparedActivity(
-        task=task,
+        task={**owned_task_fields, **activity.task},
         notebooks=notebooks,
         pipeline_resources=list(activity.resources),
     )

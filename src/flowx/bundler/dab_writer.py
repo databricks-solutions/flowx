@@ -660,7 +660,7 @@ def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, sch
 
     The notebook writer gives a clashing file a ``__N`` suffix, and setup notebooks are written later and
     replace whatever is there, but every task still points at the original path, so one task would run the
-    other file's code. Authored files are the ones kept out of the bundle root (``write_to_bundle_root=False``).
+    other file's code.
     """
     authored_paths: set[str] = set()
     signatures_by_path: dict[str, set[object]] = {}
@@ -669,7 +669,7 @@ def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, sch
             secrets=prepared.secrets, setup_tasks=prepared.setup_tasks, catalog=catalog, schema=schema
         )
         for notebook in [*prepared.notebooks, *setup_notebooks]:
-            if notebook.write_to_bundle_root is False:
+            if notebook.authored:
                 authored_paths.add(notebook.relative_path)
             elif _is_bundle_root_artifact(notebook):
                 continue
@@ -683,9 +683,12 @@ def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, sch
 
 
 def _is_bundle_root_artifact(notebook: DabNotebook) -> bool:
-    """Return whether a generated file belongs at the bundle root instead of below ``src``."""
-    if notebook.write_to_bundle_root is not None:
-        return notebook.write_to_bundle_root
+    """Return whether a generated file belongs at the bundle root instead of below ``src``.
+
+    Authored files always stay below ``src``, even when their path looks like a PyDABs artifact.
+    """
+    if notebook.authored:
+        return False
     return notebook.relative_path.startswith("resources/") or notebook.relative_path == "pyproject.toml"
 
 
@@ -1082,11 +1085,15 @@ def _collect_pipeline_resources(workflow: PreparedWorkflow) -> list[dict[str, An
 
     Returns:
         Flat list of pipeline-resource dicts (each with ``resource_key``
-        and ``definition``), including entries from inner workflows.
+        and ``definition``), including entries from inner workflows. A
+        resource declared more than once with the same key and definition
+        appears once, so it is written once.
     """
-    resources = list(workflow.pipeline_resources)
-    for inner in workflow.inner_workflows:
-        resources.extend(inner.pipeline_resources)
+    resources: list[dict[str, Any]] = []
+    for current in [workflow, *workflow.inner_workflows]:
+        for resource in current.pipeline_resources:
+            if resource not in resources:
+                resources.append(resource)
     return resources
 
 
@@ -1096,7 +1103,9 @@ def _check_pipeline_resource_keys(pipeline_resources: list[dict[str, Any]], job_
     Every pipeline resource is written to ``resources/<key>.yml``, as is every static job, so a
     pipeline key that matches a job key or an earlier pipeline key would silently replace that file
     and drop the other resource. Bundle resource keys must also be unique across resource types, so
-    a match with a Python-generated dbt-factory job would fail at deploy time instead.
+    a match with a Python-generated dbt-factory job would fail at deploy time instead. Identical
+    repeats are already collapsed by :func:`_collect_pipeline_resources`, so a repeated key here
+    always carries a different definition.
 
     Raises:
         ValueError: A pipeline resource key matches a job resource key or repeats an earlier one.
@@ -1111,8 +1120,8 @@ def _check_pipeline_resource_keys(pipeline_resources: list[dict[str, Any]], job_
             )
         if pipeline_key in seen_pipeline_keys:
             raise ValueError(
-                f"Pipeline resource key {pipeline_key!r} is used by more than one pipeline resource; "
-                f"each would overwrite resources/{pipeline_key}.yml"
+                f"Pipeline resource key {pipeline_key!r} is used by more than one pipeline resource with "
+                f"different definitions; each would overwrite resources/{pipeline_key}.yml"
             )
         seen_pipeline_keys.add(pipeline_key)
 
@@ -1623,14 +1632,16 @@ def _augment_base_parameters(
 
     Args:
         tasks: Top-level task dicts (mutated in place).
-        notebooks: Generated notebooks to scan.
+        notebooks: Generated notebooks to scan. Authored files are skipped so
+            their tasks keep exactly the parameters the agent wrote and the
+            notebook's own widget defaults still apply.
         hoisted_globals: Names of factory globals hoisted to bundle variables.
             A widget matching one of these binds to ``${var.NAME}`` so the
             deploy-time bundle variable flows into the notebook; other widgets
             default to an empty string as before.
     """
     hoisted = hoisted_globals or set()
-    notebook_by_relpath = {notebook.relative_path: notebook for notebook in notebooks}
+    notebook_by_relpath = {notebook.relative_path: notebook for notebook in notebooks if not notebook.authored}
 
     def visit(task: dict[str, Any]) -> None:
         notebook_task = task.get("notebook_task")
