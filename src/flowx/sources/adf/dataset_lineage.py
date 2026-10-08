@@ -19,7 +19,11 @@ Two tiers, exactly as #36 established them:
   resolved asset to an unresolved one on a coincidence. For an unresolved reference
   the signature is the *structural path signature* (#36's "expression" tier: the
   literal path skeleton plus its parameter-slot count) when the path has a literal
-  anchor. It is **never** the bare dataset reference name: two unrelated opaque
+  anchor, prefixed ``ST[<store>]/`` when the dataset's store is known (see
+  :func:`_resolve_dataset_store`), so two datasets on different stores that merely
+  share a folder shape never join. An unknown store is never guessed: the signature
+  stays unqualified, and a qualified and an unqualified signature never join.
+  It is **never** the bare dataset reference name: two unrelated opaque
   references that merely share a name must not join (#36's explicit rule), so when
   neither a physical identity nor a path-anchored signature is available the
   signature is left empty and the asset cannot participate in signature matching.
@@ -168,9 +172,9 @@ def _dataset_ref_to_asset(
     dataset's location is not what the activity touches, so neither an identity nor a
     signature is derived from it.
 
-    A path signature is prefixed with the dataset's store when that store is literal,
-    so two datasets on different containers or accounts that merely share a folder
-    shape never join.
+    A path signature is prefixed with the dataset's store when that store is known
+    (see :func:`_resolve_dataset_store`), so two datasets on different containers or
+    accounts that merely share a folder shape never join.
     """
     if location_overridden:
         return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))
@@ -442,7 +446,7 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
     string, or a linked service that takes parameters, gives ``None``: each binding
     may point at a different store, so no single name identifies it.
     """
-    linked_service_name, reference_parameters = _linked_service_reference(dataset_props)
+    linked_service_name, _ = _linked_service_reference(dataset_props)
     if not linked_service_name:
         return None
     linked_service = definitions.get_linked_service(linked_service_name)
@@ -464,7 +468,22 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
         return None
     if server:
         return "/".join(part.strip() for part in store_parts)
-    if reference_parameters or linked_service_properties.get("parameters"):
+    return _unparameterised_linked_service_name(dataset_props, definitions)
+
+
+def _unparameterised_linked_service_name(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> str | None:
+    """The dataset's linked service name when that linked service takes no parameters, else ``None``.
+
+    A linked service with no parameters points at the same store on every use, so its
+    name can stand in for a server or account it hides in a secret. One that takes
+    parameters, on its reference or in its own definition, may point somewhere else
+    for each binding.
+    """
+    linked_service_name, reference_parameters = _linked_service_reference(dataset_props)
+    if not linked_service_name or reference_parameters:
+        return None
+    linked_service = definitions.get_linked_service(linked_service_name)
+    if linked_service is not None and linked_service.properties.get("parameters"):
         return None
     return linked_service_name
 
@@ -477,9 +496,12 @@ def _resolve_dataset_store(
     """Name the store a dataset lives in, even when its full path or table does not resolve.
 
     A table dataset's store is the one :func:`_resolve_table_store` names. A file
-    dataset's store is ``<file system>@<account>``, and only when both are literal.
-    ``None`` whenever the store is not provable, so the caller leaves the signature
-    unqualified rather than guess.
+    dataset's store is ``<file system>@<account>`` when both are literal. When the
+    file system is literal but the account cannot be read (a Key Vault or masked
+    connection string, for example), the linked service name stands in for the
+    account, as long as the linked service takes no parameters. ``None`` whenever
+    the store is not provable, so the caller leaves the signature unqualified rather
+    than guess.
     """
     properties = _dataset_props(dataset_ref, definitions)
     if properties is None:
@@ -491,14 +513,36 @@ def _resolve_dataset_store(
     location = type_props.get("location")
     if not isinstance(location, dict):
         return None
-    raw_file_system = location.get("fileSystem") or location.get("container")
-    if not raw_file_system:
+    file_system, account = _resolve_file_store(
+        location,
+        _backing_linked_service(properties, definitions),
+        _effective_dataset_params(dataset_ref, properties),
+        context,
+    )
+    if file_system is None:
         return None
-    file_system = _resolve_param_value(raw_file_system, _effective_dataset_params(dataset_ref, properties), context)
-    account = _resolve_storage_account(_backing_linked_service(properties, definitions))
-    if not file_system or not account or not _is_physical(file_system) or not _is_physical(account):
-        return None
-    return f"{file_system}@{account}"
+    store = account or _unparameterised_linked_service_name(properties, definitions)
+    return f"{file_system}@{store}" if store else None
+
+
+def _resolve_file_store(
+    location: dict[str, Any],
+    linked_service: Any,
+    dataset_params: dict[str, Any],
+    context: TranslationContext,
+) -> tuple[str | None, str | None]:
+    """Resolve a file dataset's ``(file system, storage account)``.
+
+    Each part is ``None`` unless it resolves to a literal. The path identity and the
+    signature's store qualifier both read the store here, so they always agree on
+    what counts as a known file system and account.
+    """
+    file_system = _resolve_param_value(location.get("fileSystem") or location.get("container"), dataset_params, context)
+    account = _resolve_storage_account(linked_service)
+    return (
+        file_system if file_system and _is_physical(file_system) else None,
+        account if account and _is_physical(account) else None,
+    )
 
 
 def _connection_string_fields(connection_string: str) -> dict[str, str]:
@@ -540,14 +584,10 @@ def _resolve_dataset_path(
             return None
         return resolved
 
-    file_system = _resolved_part(location.get("fileSystem") or location.get("container"))
+    file_system, account = _resolve_file_store(location, linked_service, dataset_params, context)
     folder_path = _resolved_part(location.get("folderPath"))
     file_name = _resolved_part(location.get("fileName"))
-    if file_system is None or folder_path is None or file_name is None or not file_system:
-        return None
-
-    account = _resolve_storage_account(linked_service)
-    if not account or not _is_physical(account):
+    if file_system is None or account is None or folder_path is None or file_name is None:
         return None
 
     relative_path = "/".join(part.strip("/") for part in (folder_path, file_name) if part.strip("/"))

@@ -861,3 +861,43 @@ def test_same_folder_shape_on_the_same_store_still_joins_by_signature() -> None:
     assert [(edge.match_kind, edge.match_key) for edge in edges] == [
         ("signature", "ST[sales@acctA]/FP[landing|slots=1]/FN[None]")
     ]
+
+
+def _vaulted_blob_definitions(**containers: str) -> AdfDefinitions:
+    """One parameterised-folder dataset per entry, on container ``containers[name]`` of the Key Vault blob fixture."""
+    vaulted_blob = load_adf_definitions(FIXTURES_DIR).get_linked_service("ls_azure_blob")
+    assert vaulted_blob is not None
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name, file_system=container, folder_path="@dataset().folderPath", linked_service="ls_azure_blob"
+            )
+            for name, container in containers.items()
+        },
+        linked_services={"ls_azure_blob": vaulted_blob},
+    )
+
+
+def test_same_folder_shape_on_different_containers_of_a_hidden_account_does_not_join() -> None:
+    """With the account in Key Vault, the linked service name still tells ``staging`` and ``archive`` apart."""
+    definitions = _vaulted_blob_definitions(ds_staging="staging", ds_archive="archive")
+    _, staging_writes = activity_data_assets(_landing_copy("Stage", dataset="ds_staging", produced=True), definitions)
+    archive_reads, _ = activity_data_assets(_landing_copy("Archive", dataset="ds_archive", produced=False), definitions)
+
+    edges = data_edges_from_endpoints(
+        [("Stage", asset) for asset in staging_writes], [("Archive", asset) for asset in archive_reads]
+    )
+    assert edges == []
+
+
+def test_same_folder_shape_on_one_container_of_a_hidden_account_still_joins() -> None:
+    """Two datasets on the same container of a Key Vault blob linked service join on that container and service."""
+    definitions = _vaulted_blob_definitions(ds_out="staging", ds_in="staging")
+    _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[staging@ls_azure_blob]/FP[landing|slots=1]/FN[None]")
+    ]
