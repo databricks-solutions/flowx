@@ -447,3 +447,35 @@ def test_projected_inventory_matches_adf_discover_for_an_empty_pipeline(tmp_path
     assert enrich_inventory(output_dir, insights=authored)["ok"] is True
     enriched = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
     assert json.dumps({key: value for key, value in enriched.items() if key != INSIGHTS_KEY}, indent=2) == discovered
+
+
+def test_a_failed_rollback_never_truncates_the_insights_file_and_keeps_the_lock(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """If putting the previous insights back also fails, the file stays whole and the next enrich refuses."""
+    inventory_path = _discover(tmp_path)
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    metadata = tmp_path / "metadata"
+    insights_path = metadata / AGENTIC_INSIGHTS_FILENAME
+    real_replace = os.replace
+
+    def failing_replace(source: Any, destination: Any) -> None:
+        if Path(destination) == inventory_path:
+            raise OSError("disk full")
+        real_replace(source, destination)
+
+    def truncate_then_fail(self: Path, data: bytes) -> int:
+        self.open("wb").close()
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    monkeypatch.setattr(Path, "write_bytes", truncate_then_fail)
+    with pytest.raises(OSError):
+        enrich_inventory(tmp_path, insights={**_authored(tmp_path), "overview": "A different overview."})
+    monkeypatch.undo()
+
+    assert json.loads(insights_path.read_text(encoding="utf-8"))["overview"]
+    assert (metadata / ".enrich.lock").exists()
+    refused = enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    assert refused["ok"] is False
+    assert any(".enrich.lock" in violation for violation in refused["violations"])
