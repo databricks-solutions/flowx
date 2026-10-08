@@ -583,21 +583,42 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
     }
 
 
+_PLACEHOLDER_OWNED_COMPONENT_FIELDS = (
+    "task_key",
+    "name",
+    "depends_on",
+    "timeout_seconds",
+    "max_retries",
+    "min_retry_interval_millis",
+)
+
+
 def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, replacement: dict[str, Any]) -> bool:
     """Replace the task named *activity_name* with *replacement*, recursing into containers.
 
     Searches top-level tasks and the nested activity lists of IfCondition /
     ForEach / Switch containers.  Preserves the placeholder's ``task_key`` and
     ``depends_on`` when the replacement omits them so downstream dependency
-    edges stay intact.  Returns True when a match was replaced.
+    edges stay intact.  An ``AgenticComponentActivity`` replacement instead
+    always takes its identity, dependencies, timeout, and retries from the
+    placeholder, dropping any value the agent set (or the placeholder lacks),
+    because flowx owns those for an authored component.  Returns True when a
+    match was replaced.
     """
     nested_keys = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
     for index, task in enumerate(tasks):
         if task.get("name") == activity_name:
-            replacement.setdefault("task_key", task.get("task_key"))
-            replacement.setdefault("name", activity_name)
-            if "depends_on" not in replacement and task.get("depends_on"):
-                replacement["depends_on"] = task["depends_on"]
+            if replacement.get("type") == "AgenticComponentActivity":
+                for field_name in _PLACEHOLDER_OWNED_COMPONENT_FIELDS:
+                    if field_name in task:
+                        replacement[field_name] = task[field_name]
+                    else:
+                        replacement.pop(field_name, None)
+            else:
+                replacement.setdefault("task_key", task.get("task_key"))
+                replacement.setdefault("name", activity_name)
+                if "depends_on" not in replacement and task.get("depends_on"):
+                    replacement["depends_on"] = task["depends_on"]
             tasks[index] = replacement
             return True
         for key in nested_keys:
@@ -625,7 +646,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     The matching placeholder task (located by ``name``, recursing into
     IfCondition / ForEach / Switch containers) is replaced by ``task``.  Use a
     ``NotebookActivity`` whose ``notebook_path`` points at a notebook the agent
-    wrote to the workspace; the prepare phase then references it directly.
+    wrote to the workspace; the prepare phase then references it directly.  An
+    ``AgenticComponentActivity`` keeps the placeholder's name, task key,
+    dependencies, timeout, and retries whatever the agent wrote.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.

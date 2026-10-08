@@ -80,8 +80,11 @@ When no typed task fits, use `"type": "AgenticComponentActivity"` instead. It ca
 pipeline `resources` (`resource_key` plus a `definition` mapping), and a raw Databricks `task`
 fragment with exactly one `<kind>_task` payload. flowx owns `task_key`, `depends_on`, `run_if`,
 `timeout_seconds`, `max_retries`, `min_retry_interval_millis` and `retry_on_timeout`; setting any of
-them in the fragment is an error. flowx does not override or remove any other value the fragment
-sets, except in three wiring passes that apply to authored tasks exactly as to generated ones:
+them in the fragment is an error. On merge, the component's `name`, `task_key`, `depends_on`,
+`timeout_seconds`, `max_retries` and `min_retry_interval_millis` always come from the placeholder;
+any values you set for them on the activity are replaced. flowx does not override or remove any
+other value the fragment sets, except in three wiring passes that apply to authored tasks exactly as
+to generated ones:
 
 - A `{{tasks.X.values.Y}}` reference to a task outside the same job is blanked and listed in
   SETUP.md, because task values do not cross job boundaries.

@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from flowx.bundler.dab_writer import _combine_airflow_workflows, pipeline_dict_to_ir, write_bundle
-from flowx.ir_serde import activity_to_dict, pipeline_to_dict
+from flowx.ir_serde import activity_to_dict, merge_agentic_results, pipeline_to_dict
 from flowx.models.dab import SetupTask
 from flowx.models.ir import (
     AgenticComponentActivity,
@@ -17,6 +17,7 @@ from flowx.models.ir import (
     ForEachActivity,
     IfConditionActivity,
     Pipeline,
+    PlaceholderActivity,
     SwitchActivity,
     SwitchCase,
     WaitActivity,
@@ -218,6 +219,68 @@ def test_agentic_component_task_identity_dependencies_and_policy_come_from_the_a
     assert tasks["downstream"]["max_retries"] == 2
     assert "notebook_task" in tasks["downstream"]
     assert check_bundle_dir(tmp_path).ok
+
+
+def test_merged_agentic_component_takes_identity_dependencies_and_policy_from_the_placeholder(tmp_path):
+    """The agent's own key, wiring, and run policy on a merged component are replaced by the placeholder's."""
+    report = tmp_path / "translation_report.json"
+    placeholders = Pipeline(
+        name="orders",
+        tasks=[
+            WaitActivity(name="Extract", task_key="extract", wait_time_seconds=5),
+            PlaceholderActivity(
+                name="Transform",
+                task_key="transform",
+                original_type="ExecuteDataFlow",
+                depends_on=[Dependency(task_key="extract", outcome="Succeeded")],
+                timeout_seconds=3600,
+                max_retries=2,
+                min_retry_interval_millis=60000,
+            ),
+            PlaceholderActivity(name="Load", task_key="load", original_type="Custom"),
+        ],
+    )
+    report.write_text(json.dumps(pipeline_to_dict(placeholders)), encoding="utf-8")
+    results = tmp_path / "agentic_results"
+    results.mkdir()
+    transform = {
+        "type": "AgenticComponentActivity",
+        "name": "Renamed",
+        "task_key": "rewired",
+        "depends_on": [],
+        "timeout_seconds": 5,
+        "resources": RESOURCES,
+        "task": TASK,
+    }
+    load = {
+        "type": "AgenticComponentActivity",
+        "depends_on": [{"task_key": "extract", "outcome": "Succeeded"}],
+        "max_retries": 9,
+        "files": [{"path": "jobs/load.py", "content": "print('load')\n"}],
+        "task": {"spark_python_task": {"python_file": "../src/jobs/load.py"}},
+    }
+    (results / "transform.json").write_text(
+        json.dumps({"activity_name": "Transform", "task": transform}), encoding="utf-8"
+    )
+    (results / "load.json").write_text(json.dumps({"activity_name": "Load", "task": load}), encoding="utf-8")
+
+    assert merge_agentic_results(report, results) == (2, 0)
+    merged_pipeline, _ = pipeline_dict_to_ir(json.loads(report.read_text(encoding="utf-8")))
+    write_bundle(prepare_workflow(merged_pipeline), tmp_path / "bundle")
+
+    job_resource = yaml.safe_load((tmp_path / "bundle" / "resources" / "orders.yml").read_text(encoding="utf-8"))
+    tasks = {task["task_key"]: task for task in job_resource["resources"]["jobs"]["orders"]["tasks"]}
+    assert tasks["transform"] == {
+        "task_key": "transform",
+        "depends_on": [{"task_key": "extract"}],
+        "timeout_seconds": 3600,
+        "retry_on_timeout": True,
+        "max_retries": 2,
+        "min_retry_interval_millis": 60000,
+        "pipeline_task": TASK["pipeline_task"],
+    }
+    assert tasks["load"] == {"task_key": "load", "spark_python_task": {"python_file": "../src/jobs/load.py"}}
+    assert [task.name for task in merged_pipeline.tasks] == ["Extract", "Transform", "Load"]
 
 
 @pytest.mark.parametrize("resource_key", ["../databricks", "../../outside", "nested/pipeline", "nested\\pipeline", ""])

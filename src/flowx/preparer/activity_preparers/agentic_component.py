@@ -115,7 +115,9 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
 
     The task's key, dependencies, run condition, timeout, and retries always come from
     the activity, never from the authored fragment, so an agent cannot rewire or re-time
-    a task behind flowx's back. A fragment that tries to set any of them is rejected.
+    a task behind flowx's back. A fragment that tries to set any of them is rejected. When
+    the component replaces a placeholder through ``merge_agentic``, the activity's own name,
+    key, dependencies, timeout, and retries are taken from that placeholder.
 
     flowx does not override or remove any other value the fragment sets, except in three
     wiring passes that run on authored tasks exactly as on generated ones:
