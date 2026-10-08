@@ -3,7 +3,7 @@ name: flowx-enrich
 description: >
   Enrich the discover inventory with an agent-authored layer of judgment — a factory-wide
   architecture recommendation, per-pipeline intent + recommended Databricks patterns, and
-  cross-pipeline relationships. The library validates it, records it in source_insights.json and
+  cross-pipeline relationships. The library validates it, records it in agentic_insights.json and
   rebuilds inventory.json from discovery plus that file. The default next step after flowx-discover
   and the input the routing step consumes.
 triggers:
@@ -21,10 +21,10 @@ triggers:
 The deterministic discover pass records what each source workflow **is**; it cannot record what to
 **do** about it. That judgment — a factory-wide architectural recommendation, each pipeline's intent
 and recommended Databricks patterns, and how pipelines couple — is authored by **you, the agent**,
-and recorded by the library in its own file, `metadata/source_insights.json`, bound to the saved
-`metadata/source_graphs.json` it was checked against. `metadata/inventory.json` is then rebuilt from
-discover's deterministic projection plus that file, so it carries the same block under a single
-additive `insights` key.
+and recorded by the library in its own file, `metadata/agentic_insights.json`, bound to the saved
+`metadata/source_graphs.json` it was checked against. The library then rebuilds
+`metadata/inventory.json` from `source_graphs.json` plus that file, so it carries the same block under
+a single additive `insights` key; you never pass it anything for that step.
 
 This is the standard step **between discover and route** in the flowx workflow. `flowx-discover`
 chains into this skill by default; the routing step (`flowx-route`) reads the `insights` block to
@@ -39,7 +39,7 @@ every insight accountable: foreign keys must point at real pipelines, and every 
 is either an annotation of a proven lineage edge or an explicitly-flagged inference with cited
 evidence.
 
-`enrich` is **additive**: it writes `source_insights.json` and adds only the matching `insights`
+`enrich` is **additive**: it writes `agentic_insights.json` and adds only the matching `insights`
 block to the inventory, leaving every existing inventory key byte-identical. It changes no conversion, IR, or routing decision on its own — the `insights` are
 descriptive data that `flowx-route` later consumes.
 
@@ -59,7 +59,8 @@ narrative.
    particular `lineage.control_edges`, each `{source_workflow, target_workflow, via_task_key}`. A
    deterministic **control** relationship you annotate must match one of these exactly. When the
    inventory records a top-level `source_graphs_sha256` (ADF discover does), copy it into
-   `authored_against`; when it records none, leave `authored_against` out.
+   `authored_against` by default, so enrich can refuse your insights if discover runs again before
+   you submit them; when it records none, leave `authored_against` out.
 2. **Read the source artifacts** you need to form judgment — the per-pipeline `raw` payloads in the
    inventory, the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source — enough to state
    each pipeline's *intent* and the Databricks patterns that fit. Ground every recommended pattern in
@@ -99,7 +100,7 @@ narrative.
    and it does not relax the rule above: you still **verify the release state against the current public
    Databricks docs before recommending** (never "recommend now, verify later").
 3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
-   and the saved source graphs and, only when clean, writes `source_insights.json` and rebuilds the
+   and the saved source graphs and, only when clean, writes `agentic_insights.json` and rebuilds the
    inventory. On any violation both files are left untouched and you get the full list of
    problems to fix in one pass.
 
@@ -136,8 +137,9 @@ Run the **`setup`** skill first if you haven't. Both paths run the same validate
 ## Idempotency & safety
 
 `enrich` is idempotent: it records the validated insights in
-`metadata/source_insights.json` (stamping `schema_version`, `inventory_sha256`, `source_graphs_sha256`
-and `source_insights_sha256`), then rebuilds `inventory.json` from the deterministic inventory plus that
+`metadata/agentic_insights.json` (stamping `schema_version`, `inventory_sha256`, `source_graphs_sha256`
+and `agentic_insights_sha256`), then rebuilds `inventory.json` itself from the saved `source_graphs.json`
+(or, for an inventory that records no graphs hash, from its existing deterministic part) plus that
 document rather than patching it in place. The `insights` block is replaced wholesale (never stacks),
 and every deterministic inventory key stays byte-identical. Re-running with the same insights rewrites the same bytes; re-running
 with different insights replaces the block. A validation failure writes nothing.
@@ -145,7 +147,7 @@ with different insights replaces the block. A validation failure writes nothing.
 Only one `enrich` writes an output directory at a time: it holds `metadata/.enrich.lock` from reading
 the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
 writes nothing. The two files are replaced one right after the other, so a process killed between those
-two steps can leave `source_insights.json` one write ahead of `inventory.json`. That run's lock stays
+two steps can leave `agentic_insights.json` one write ahead of `inventory.json`. That run's lock stays
 behind, and the next `enrich` refuses until you delete the lock; running `enrich` again then rewrites both.
 
 ## Next step

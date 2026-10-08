@@ -1,6 +1,6 @@
-"""Enrich writes its own ``source_insights.json`` and the inventory is rendered from it.
+"""Enrich writes its own ``agentic_insights.json`` and the inventory is rendered from it.
 
-The inventory's ``insights`` block is always a copy of ``source_insights.json``, which records
+The inventory's ``insights`` block is always a copy of ``agentic_insights.json``, which records
 the saved ``source_graphs.json`` hash it was checked against and its own content hash, so a
 later phase can tell exactly which graph and which insights a decision was made on.
 """
@@ -19,16 +19,18 @@ import pytest
 
 import flowx
 from flowx.discovery_insights import (
+    AGENTIC_INSIGHTS_FILENAME,
     INSIGHTS_KEY,
-    SOURCE_INSIGHTS_FILENAME,
+    agentic_insights_hash_violations,
     enrich_inventory,
     inventory_fingerprint,
-    source_insights_hash_violations,
+    project_inventory,
     validate_insights,
 )
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
-from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, write_source_graphs
+from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, read_source_graphs, write_source_graphs
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
+from flowx.sources.adf.loader import main as adf_discover_main
 
 
 def _graphs() -> list[SourceGraph]:
@@ -70,23 +72,24 @@ def _insights() -> dict[str, Any]:
     }
 
 
-def test_enrich_writes_source_insights_and_renders_the_inventory_from_it(tmp_path: Path) -> None:
+def test_enrich_writes_agentic_insights_and_renders_the_inventory_from_it(tmp_path: Path) -> None:
     inventory_path = _discover(tmp_path)
     before = json.loads(inventory_path.read_text(encoding="utf-8"))
 
     result = enrich_inventory(tmp_path, insights=_authored(tmp_path))
 
     assert result["ok"] is True
-    source_insights = json.loads((tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
+    assert (tmp_path / "metadata" / "agentic_insights.json").is_file()
+    agentic_insights = json.loads((tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
-    assert inventory[INSIGHTS_KEY] == source_insights
+    assert inventory[INSIGHTS_KEY] == agentic_insights
     assert {key: value for key, value in inventory.items() if key != INSIGHTS_KEY} == before
-    assert source_insights["source_graphs_sha256"] == before["source_graphs_sha256"]
-    assert "authored_against" not in source_insights
+    assert agentic_insights["source_graphs_sha256"] == before["source_graphs_sha256"]
+    assert "authored_against" not in agentic_insights
     assert "authored_against" not in inventory[INSIGHTS_KEY]
-    assert source_insights["inventory_sha256"] == inventory_fingerprint(before)
-    assert result["source_insights_sha256"] == source_insights["source_insights_sha256"]
-    assert source_insights_hash_violations(source_insights) == []
+    assert agentic_insights["inventory_sha256"] == inventory_fingerprint(before)
+    assert result["agentic_insights_sha256"] == agentic_insights["agentic_insights_sha256"]
+    assert agentic_insights_hash_violations(agentic_insights) == []
 
 
 def test_re_enriching_is_byte_identical_and_keeps_the_routing_fingerprint(tmp_path: Path) -> None:
@@ -94,9 +97,9 @@ def test_re_enriching_is_byte_identical_and_keeps_the_routing_fingerprint(tmp_pa
     fingerprint_before = inventory_fingerprint(json.loads(inventory_path.read_text(encoding="utf-8")))
 
     enrich_inventory(tmp_path, insights=_authored(tmp_path))
-    first = (inventory_path.read_bytes(), (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).read_bytes())
+    first = (inventory_path.read_bytes(), (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).read_bytes())
     enrich_inventory(tmp_path, insights=_authored(tmp_path))
-    second = (inventory_path.read_bytes(), (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).read_bytes())
+    second = (inventory_path.read_bytes(), (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).read_bytes())
 
     assert first == second
     assert inventory_fingerprint(json.loads(inventory_path.read_text(encoding="utf-8"))) == fingerprint_before
@@ -112,7 +115,7 @@ def test_enrich_refuses_an_inventory_from_a_different_source_graphs_file(tmp_pat
     assert result["ok"] is False
     assert any("different source_graphs.json" in violation for violation in result["violations"])
     assert inventory_path.read_bytes() == inventory_bytes
-    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
 
 
 def test_enrich_refuses_when_the_saved_source_graphs_file_is_missing(tmp_path: Path) -> None:
@@ -125,7 +128,7 @@ def test_enrich_refuses_when_the_saved_source_graphs_file_is_missing(tmp_path: P
     assert result["ok"] is False
     assert any(f"{SOURCE_GRAPHS_FILENAME} is missing" in violation for violation in result["violations"])
     assert inventory_path.read_bytes() == inventory_bytes
-    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
 
 
 def test_enrich_refuses_when_the_saved_source_graphs_content_was_changed(tmp_path: Path) -> None:
@@ -141,7 +144,7 @@ def test_enrich_refuses_when_the_saved_source_graphs_content_was_changed(tmp_pat
     assert result["ok"] is False
     assert any(f"{SOURCE_GRAPHS_FILENAME} is not usable" in violation for violation in result["violations"])
     assert inventory_path.read_bytes() == inventory_bytes
-    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
 
 
 def test_inventory_without_a_recorded_graph_hash_still_enriches(tmp_path: Path) -> None:
@@ -154,43 +157,53 @@ def test_inventory_without_a_recorded_graph_hash_still_enriches(tmp_path: Path) 
     result = enrich_inventory(tmp_path, insights=_insights())
 
     assert result["ok"] is True
-    source_insights = json.loads((metadata / SOURCE_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
-    assert "source_graphs_sha256" not in source_insights
+    agentic_insights = json.loads((metadata / AGENTIC_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
+    assert "source_graphs_sha256" not in agentic_insights
 
 
 def test_authored_insights_cannot_set_the_library_hashes() -> None:
     inventory = build_source_inventory(_graphs(), source="adf", source_dir="/src")
-    raw = {**_insights(), "source_graphs_sha256": "x", "source_insights_sha256": "y"}
+    raw = {**_insights(), "source_graphs_sha256": "x", "agentic_insights_sha256": "y"}
 
     violations = validate_insights(raw, inventory)
 
     assert any("source_graphs_sha256" in violation and "library" in violation for violation in violations)
-    assert any("source_insights_sha256" in violation and "library" in violation for violation in violations)
+    assert any("agentic_insights_sha256" in violation and "library" in violation for violation in violations)
 
 
-def test_an_edited_source_insights_file_fails_its_hash_check(tmp_path: Path) -> None:
+def test_an_edited_agentic_insights_file_fails_its_hash_check(tmp_path: Path) -> None:
     _discover(tmp_path)
     enrich_inventory(tmp_path, insights=_authored(tmp_path))
-    document = json.loads((tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
+    document = json.loads((tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
     document["overview"] = "Edited after enrich."
 
-    assert source_insights_hash_violations(document) != []
+    assert agentic_insights_hash_violations(document) != []
 
 
 def test_insights_authored_against_an_older_inventory_are_refused(tmp_path: Path) -> None:
-    """A missing or different authored_against means discover ran again after the insights were written."""
+    """A different authored_against means discover ran again after the insights were written."""
     inventory_path = _discover(tmp_path)
     inventory_bytes = inventory_path.read_bytes()
 
-    missing = enrich_inventory(tmp_path, insights=_insights())
     stale = enrich_inventory(tmp_path, insights={**_insights(), "authored_against": "an-older-discover"})
 
-    assert missing["ok"] is False
-    assert any("'authored_against' is required" in violation for violation in missing["violations"])
     assert stale["ok"] is False
     assert any("authored against a different inventory" in violation for violation in stale["violations"])
     assert inventory_path.read_bytes() == inventory_bytes
-    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
+
+
+def test_insights_without_authored_against_are_recorded_with_the_library_stamped_hash(tmp_path: Path) -> None:
+    """authored_against is optional: the library stamps the graphs hash it checked the insights against."""
+    inventory_path = _discover(tmp_path)
+    recorded_hash = json.loads(inventory_path.read_text(encoding="utf-8"))["source_graphs_sha256"]
+
+    result = enrich_inventory(tmp_path, insights=_insights())
+
+    assert result["ok"] is True
+    agentic_insights = json.loads((tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
+    assert agentic_insights["source_graphs_sha256"] == recorded_hash
+    assert "authored_against" not in agentic_insights
 
 
 def test_authored_against_is_refused_when_the_inventory_records_no_graph_hash() -> None:
@@ -204,7 +217,7 @@ def test_authored_against_is_refused_when_the_inventory_records_no_graph_hash() 
 
 
 def test_a_failed_first_inventory_write_leaves_no_insights_behind(tmp_path: Path, monkeypatch: Any) -> None:
-    """With no previous source_insights.json, a failed inventory replace removes the new one."""
+    """With no previous agentic_insights.json, a failed inventory replace removes the new one."""
     inventory_path = _discover(tmp_path)
     metadata = tmp_path / "metadata"
     files_before = sorted(path.name for path in metadata.iterdir())
@@ -220,16 +233,16 @@ def test_a_failed_first_inventory_write_leaves_no_insights_behind(tmp_path: Path
     with pytest.raises(OSError, match="disk full"):
         enrich_inventory(tmp_path, insights=_authored(tmp_path))
 
-    assert not (metadata / SOURCE_INSIGHTS_FILENAME).exists()
+    assert not (metadata / AGENTIC_INSIGHTS_FILENAME).exists()
     assert inventory_path.read_bytes() == inventory_before
     assert sorted(path.name for path in metadata.iterdir()) == files_before
 
 
 def test_a_failed_inventory_write_leaves_the_previous_insights_in_place(tmp_path: Path, monkeypatch: Any) -> None:
-    """source_insights.json and inventory.json are replaced together or not at all."""
+    """agentic_insights.json and inventory.json are replaced together or not at all."""
     inventory_path = _discover(tmp_path)
     enrich_inventory(tmp_path, insights=_authored(tmp_path))
-    insights_path = tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME
+    insights_path = tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME
     insights_before, inventory_before = insights_path.read_bytes(), inventory_path.read_bytes()
     real_replace = os.replace
 
@@ -260,7 +273,7 @@ def test_a_source_graphs_file_that_is_not_an_object_is_a_violation_not_a_crash(t
         for violation in result["violations"]
     )
     assert inventory_path.read_bytes() == inventory_bytes
-    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
 
 
 @pytest.mark.parametrize("graphs", [[[]], [{"tasks": [1]}]])
@@ -280,14 +293,14 @@ def test_unhashed_source_graphs_with_malformed_entries_are_a_violation_not_a_cra
         f"projected from a different {SOURCE_GRAPHS_FILENAME}" in violation for violation in result["violations"]
     )
     assert inventory_path.read_bytes() == inventory_bytes
-    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
 
 
 def test_a_second_enrich_cannot_interleave_with_one_already_writing(tmp_path: Path, monkeypatch: Any) -> None:
     """Pause one enrich between its two replaces and run another: the two files must still agree."""
     inventory_path = _discover(tmp_path)
     enrich_inventory(tmp_path, insights=_authored(tmp_path))
-    insights_path = tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME
+    insights_path = tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME
     paused, resume = threading.Event(), threading.Event()
     real_replace = os.replace
 
@@ -314,9 +327,9 @@ def test_a_second_enrich_cannot_interleave_with_one_already_writing(tmp_path: Pa
     first.join(timeout=10)
 
     assert first_errors == []
-    source_insights = json.loads(insights_path.read_text(encoding="utf-8"))
-    assert json.loads(inventory_path.read_text(encoding="utf-8"))[INSIGHTS_KEY] == source_insights
-    assert source_insights["overview"] == "First writer."
+    agentic_insights = json.loads(insights_path.read_text(encoding="utf-8"))
+    assert json.loads(inventory_path.read_text(encoding="utf-8"))[INSIGHTS_KEY] == agentic_insights
+    assert agentic_insights["overview"] == "First writer."
     assert second["ok"] is False
     assert any("another enrich" in violation for violation in second["violations"])
     assert not (tmp_path / "metadata" / ".enrich.lock").exists()
@@ -335,7 +348,7 @@ def test_a_lock_left_by_a_killed_enrich_blocks_the_next_one_until_removed(tmp_pa
     assert refused["ok"] is False
     assert any(str(lock_path) in violation for violation in refused["violations"])
     assert inventory_path.read_bytes() == inventory_bytes
-    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
     lock_path.unlink()
     assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
 
@@ -375,5 +388,37 @@ def test_the_enrich_after_a_killed_one_clears_its_temp_files(tmp_path: Path) -> 
 
     assert result["ok"] is True
     assert not [path.name for path in metadata.iterdir() if path.name.endswith(".tmp")]
-    source_insights = json.loads((metadata / SOURCE_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
-    assert json.loads(inventory_path.read_text(encoding="utf-8"))[INSIGHTS_KEY] == source_insights
+    agentic_insights = json.loads((metadata / AGENTIC_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
+    assert json.loads(inventory_path.read_text(encoding="utf-8"))[INSIGHTS_KEY] == agentic_insights
+
+
+def test_enrich_rebuilds_the_deterministic_inventory_from_the_saved_source_graphs(tmp_path: Path) -> None:
+    """inventory.json comes from source_graphs.json plus the insights, not from whatever inventory.json held."""
+    inventory_path = _discover(tmp_path)
+    discovered = inventory_path.read_text(encoding="utf-8")
+    edited = json.loads(discovered)
+    edited["summary"]["activity_count"] = 999
+    inventory_path.write_text(json.dumps(edited, indent=2), encoding="utf-8")
+
+    assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
+
+    enriched = json.loads(inventory_path.read_text(encoding="utf-8"))
+    deterministic = {key: value for key, value in enriched.items() if key != INSIGHTS_KEY}
+    assert json.dumps(deterministic, indent=2) == discovered
+
+
+def test_projected_inventory_is_byte_identical_to_adf_discover_on_the_fixtures(tmp_path: Path) -> None:
+    """Rebuilding from source_graphs.json gives exactly the bytes ADF discover wrote."""
+    fixtures = Path(__file__).resolve().parents[1] / "resources" / "json"
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+    metadata = tmp_path / "metadata"
+    discovered = (metadata / "inventory.json").read_text(encoding="utf-8")
+
+    projected = project_inventory(read_source_graphs(metadata / SOURCE_GRAPHS_FILENAME), json.loads(discovered))
+
+    assert json.dumps(projected, indent=2) == discovered
+    inventory = json.loads(discovered)
+    authored = {"authored_against": inventory["source_graphs_sha256"], "overview": "The fixture factory."}
+    assert enrich_inventory(tmp_path, insights=authored)["ok"] is True
+    enriched = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+    assert json.dumps({key: value for key, value in enriched.items() if key != INSIGHTS_KEY}, indent=2) == discovered

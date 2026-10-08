@@ -18,7 +18,7 @@ import pytest
 from flowx.adapter.__main__ import main as adapter_cli_main
 from flowx.discovery_insights import (
     INSIGHTS_KEY,
-    build_source_insights,
+    build_agentic_insights,
     enrich_inventory,
     inventory_fingerprint,
     load_insights,
@@ -473,7 +473,7 @@ def test_system_recommendation_requires_headline_and_patterns() -> None:
 
 def test_merge_adds_single_additive_block_with_fingerprint_and_schema_version() -> None:
     inventory = _inventory()
-    merged = render_inventory(inventory, build_source_insights(inventory, _valid_insights()))
+    merged = render_inventory(inventory, build_agentic_insights(inventory, _valid_insights()))
     # Original keys are untouched and one additive key is appended, last.
     assert list(merged) == ["source", "source_dir", "pipelines", "summary", "insights"]
     block = merged[INSIGHTS_KEY]
@@ -539,7 +539,7 @@ def test_enrich_is_idempotent_and_replaces_prior_block(tmp_path: Path) -> None:
 def test_fingerprint_ignores_any_prior_insights_block() -> None:
     inventory = _inventory()
     base_fingerprint = inventory_fingerprint(inventory)
-    enriched = render_inventory(inventory, build_source_insights(inventory, _valid_insights()))
+    enriched = render_inventory(inventory, build_agentic_insights(inventory, _valid_insights()))
     # Fingerprinting the already-enriched inventory yields the same digest (insights excluded).
     assert inventory_fingerprint(enriched) == base_fingerprint
 

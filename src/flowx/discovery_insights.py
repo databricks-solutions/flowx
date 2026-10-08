@@ -6,8 +6,8 @@ pipelines, per-pipeline ``lineage``, summary). An external agent then *authors* 
 and recommended Databricks patterns, and cross-pipeline relationships (see
 :mod:`flowx.models.insights`). This module *enriches* the inventory: it validates the
 authored JSON against the real inventory and, **only when clean**, records it in
-``metadata/source_insights.json`` and rebuilds ``inventory.json`` from the deterministic
-inventory plus that document -- it never patches the inventory in place.
+``metadata/agentic_insights.json`` and rebuilds ``inventory.json`` from the saved source graphs
+plus that document -- it never patches the inventory in place.
 
 There is **no LLM here** -- the tool only validates and records, mirroring the
 author-then-validate-record contract :mod:`flowx.agentic` uses for gap resolution. That
@@ -21,22 +21,24 @@ keeps the deterministic inventory trustworthy and every insight accountable:
 * an ``inferred`` edge has nothing to resolve against, so it must instead carry a non-empty
   ``evidence`` string and a ``confidence`` level.
 
-Validated insights are written to their own file, ``metadata/source_insights.json``, which
+Validated insights are written to their own file, ``metadata/agentic_insights.json``, which
 records the persisted ``source_graphs.json`` hash it was checked against
-(``source_graphs_sha256``) and carries its own content hash (``source_insights_sha256``).
-``inventory.json`` is then re-rendered as the deterministic inventory discover wrote plus that
-same block under ``insights``, so the inventory is always built from those two pieces rather
-than patched. Only one enrich writes an output directory at a time, and the two files are
+(``source_graphs_sha256``) and carries its own content hash (``agentic_insights_sha256``).
+``inventory.json`` is then rebuilt by the library alone: when the inventory records a
+``source_graphs_sha256``, its deterministic part is projected again from ``source_graphs.json``
+(byte-identical to what discover writes), otherwise discover's deterministic part is reused; that
+same block is added under ``insights``, so the inventory is always built from those two pieces
+rather than patched. Only one enrich writes an output directory at a time, and the two files are
 replaced back to back (see ``_write_both_or_neither``). A process killed between those two
-replaces is the one case that can leave ``source_insights.json`` a write ahead of
+replaces is the one case that can leave ``agentic_insights.json`` a write ahead of
 ``inventory.json``; its lock file stays behind, so the next enrich refuses until the lock is
 removed and enrich is run again. The record is **idempotent**: re-running with the same
 authored insights rewrites byte-identical bytes and never stacks. The library owns
-``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and ``source_insights_sha256``;
+``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and ``agentic_insights_sha256``;
 authored insights carrying any of them are rejected as unknown keys.
-The author instead supplies ``authored_against``, the ``source_graphs_sha256`` copied from the
-``inventory.json`` it read; it is required whenever the inventory records one, verified, and not
-recorded.
+The author may also supply ``authored_against``, the ``source_graphs_sha256`` copied from the
+``inventory.json`` it read. It is optional; when given it is verified, so insights written before
+discover ran again are refused, and it is never recorded.
 """
 
 from __future__ import annotations
@@ -48,7 +50,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from flowx.discovery_inventory import build_source_inventory
 from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, canonical_sha256, source_graphs_from_document
+from flowx.models.discovery import SOURCE_ADF, SourceGraph
 from flowx.models.insights import (
     CONFIDENCE_LEVELS,
     MAX_RECOMMENDED_PATTERNS,
@@ -61,7 +65,7 @@ from flowx.models.insights import (
 INSIGHTS_KEY = "insights"
 
 # The file enrich writes; inventory.json's insights block is always a copy of it.
-SOURCE_INSIGHTS_FILENAME = "source_insights.json"
+AGENTIC_INSIGHTS_FILENAME = "agentic_insights.json"
 
 # Held in metadata/ while one enrich reads, validates and writes, so two enrich calls never interleave.
 ENRICH_LOCK_FILENAME = ".enrich.lock"
@@ -70,11 +74,11 @@ ENRICH_LOCK_FILENAME = ".enrich.lock"
 _SCHEMA_VERSION_KEY = "schema_version"
 _FINGERPRINT_KEY = "inventory_sha256"
 _SOURCE_GRAPHS_HASH_KEY = "source_graphs_sha256"
-_SOURCE_INSIGHTS_HASH_KEY = "source_insights_sha256"
-_LIBRARY_KEYS = (_SCHEMA_VERSION_KEY, _FINGERPRINT_KEY, _SOURCE_GRAPHS_HASH_KEY, _SOURCE_INSIGHTS_HASH_KEY)
+_AGENTIC_INSIGHTS_HASH_KEY = "agentic_insights_sha256"
+_LIBRARY_KEYS = (_SCHEMA_VERSION_KEY, _FINGERPRINT_KEY, _SOURCE_GRAPHS_HASH_KEY, _AGENTIC_INSIGHTS_HASH_KEY)
 
-# The source_graphs_sha256 the author read from inventory.json, checked so stale insights never bind to a
-# newer discover. Verified, then not recorded: the library stamps the hash itself.
+# The source_graphs_sha256 the author read from inventory.json, checked when given so stale insights never
+# bind to a newer discover. Optional and not recorded: the library stamps the hash itself.
 _AUTHORED_AGAINST_KEY = "authored_against"
 _INSIGHTS_TOP_KEYS = {
     "overview",
@@ -188,20 +192,16 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
 def _authored_against_violations(authored_against: Any, inventory: dict[str, Any]) -> list[str]:
     """Check the insights were authored against the inventory enrich is about to record them on.
 
-    When the inventory records the ``source_graphs_sha256`` it was built from, the author must copy
-    that value into ``authored_against``. A missing or different value means discover ran again
-    after the insights were written, so they would otherwise bind to a newer inventory unchecked.
+    ``authored_against`` is optional: without it the library stamps the graphs hash itself. When the
+    author does copy the inventory's ``source_graphs_sha256`` into it, a different value means
+    discover ran again after the insights were written, so they would otherwise bind to a newer
+    inventory unchecked.
     """
+    if authored_against is None:
+        return []
     recorded = inventory.get(_SOURCE_GRAPHS_HASH_KEY)
     if recorded is None:
-        if authored_against is not None:
-            return [f"'{_AUTHORED_AGAINST_KEY}' was given but inventory.json records no {_SOURCE_GRAPHS_HASH_KEY}"]
-        return []
-    if authored_against is None:
-        return [
-            f"'{_AUTHORED_AGAINST_KEY}' is required: set it to the {_SOURCE_GRAPHS_HASH_KEY} of the "
-            "inventory.json the insights were authored from"
-        ]
+        return [f"'{_AUTHORED_AGAINST_KEY}' was given but inventory.json records no {_SOURCE_GRAPHS_HASH_KEY}"]
     if authored_against != recorded:
         return [
             f"the insights were authored against a different inventory ({_AUTHORED_AGAINST_KEY} "
@@ -519,13 +519,13 @@ def inventory_fingerprint(inventory: dict[str, Any]) -> str:
     return canonical_sha256(_base_inventory(inventory))
 
 
-def build_source_insights(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
-    """Build the ``source_insights.json`` document from validated authored insights.
+def build_agentic_insights(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``agentic_insights.json`` document from validated authored insights.
 
     The document is the authored content plus the library-owned ``schema_version``, the
     ``inventory_sha256`` fingerprint of the deterministic inventory, the persisted
     ``source_graphs_sha256`` the inventory records (when it records one), and finally
-    ``source_insights_sha256``, a hash over everything above it. Does not mutate the inputs.
+    ``agentic_insights_sha256``, a hash over everything above it. Does not mutate the inputs.
     """
     base = _base_inventory(inventory)
     document: dict[str, Any] = {_SCHEMA_VERSION_KEY: SCHEMA_VERSION, _FINGERPRINT_KEY: inventory_fingerprint(base)}
@@ -535,54 +535,78 @@ def build_source_insights(inventory: dict[str, Any], raw: dict[str, Any]) -> dic
     for key in ("overview", "system_recommendation", "pipeline_insights", "pipeline_relationships"):
         if key in raw:
             document[key] = raw[key]
-    document[_SOURCE_INSIGHTS_HASH_KEY] = canonical_sha256(document)
+    document[_AGENTIC_INSIGHTS_HASH_KEY] = canonical_sha256(document)
     return document
 
 
-def source_insights_hash_violations(document: dict[str, Any]) -> list[str]:
-    """Check a ``source_insights.json`` document's own hash; an empty list means it is intact."""
-    recorded = document.get(_SOURCE_INSIGHTS_HASH_KEY)
-    content = {key: value for key, value in document.items() if key != _SOURCE_INSIGHTS_HASH_KEY}
+def agentic_insights_hash_violations(document: dict[str, Any]) -> list[str]:
+    """Check an ``agentic_insights.json`` document's own hash; an empty list means it is intact."""
+    recorded = document.get(_AGENTIC_INSIGHTS_HASH_KEY)
+    content = {key: value for key, value in document.items() if key != _AGENTIC_INSIGHTS_HASH_KEY}
     if recorded != canonical_sha256(content):
-        return ["source_insights.json does not match its recorded source_insights_sha256"]
+        return ["agentic_insights.json does not match its recorded agentic_insights_sha256"]
     return []
 
 
-def render_inventory(inventory: dict[str, Any], source_insights: dict[str, Any]) -> dict[str, Any]:
-    """Return the inventory built from its deterministic part plus the source insights document.
+def render_inventory(inventory: dict[str, Any], agentic_insights: dict[str, Any]) -> dict[str, Any]:
+    """Return the inventory built from its deterministic part plus the agentic insights document.
 
     Does not mutate the input and performs no I/O. The deterministic keys keep their original
     order and values, so re-serialising them is byte-identical to discover's write, and the
-    ``insights`` block is exactly the ``source_insights.json`` content, replacing any prior block.
+    ``insights`` block is exactly the ``agentic_insights.json`` content, replacing any prior block.
     """
     base = _base_inventory(inventory)
-    base[INSIGHTS_KEY] = dict(source_insights)
+    base[INSIGHTS_KEY] = dict(agentic_insights)
     return base
 
 
-def _source_graphs_violations(output_dir: Path, inventory: dict[str, Any]) -> list[str]:
-    """Check the inventory still describes the saved ``source_graphs.json`` it records.
+def _load_source_graphs(output_dir: Path, inventory: dict[str, Any]) -> tuple[list[SourceGraph] | None, list[str]]:
+    """Read the saved ``source_graphs.json`` the inventory records, as ``(graphs, violations)``.
 
     An inventory without a recorded hash (an older discover, or a source that does not persist
-    graphs yet) has nothing to check. Otherwise the saved file must be intact and its document
-    hash must be the one the inventory records, so insights are never bound to a stale graph.
+    graphs yet) has nothing to read, so it yields ``(None, [])``. Otherwise the saved file must be
+    intact and its document hash must be the one the inventory records, so insights are never
+    bound to a stale graph; any problem yields ``(None, [violation])``.
     """
     recorded = inventory.get(_SOURCE_GRAPHS_HASH_KEY)
     if recorded is None:
-        return []
+        return None, []
     graphs_path = Path(output_dir) / "metadata" / SOURCE_GRAPHS_FILENAME
     if not graphs_path.is_file():
-        return [f"inventory.json records source_graphs_sha256 but {SOURCE_GRAPHS_FILENAME} is missing; re-run discover"]
+        return None, [
+            f"inventory.json records source_graphs_sha256 but {SOURCE_GRAPHS_FILENAME} is missing; re-run discover"
+        ]
     try:
         document = json.loads(graphs_path.read_text(encoding="utf-8"))
         if not isinstance(document, dict):
             raise ValueError(f"expected a JSON object, got {type(document).__name__}")
         if document.get("document_sha256") != recorded:
-            return [f"inventory.json was projected from a different {SOURCE_GRAPHS_FILENAME}; re-run discover"]
-        source_graphs_from_document(document)
+            return None, [f"inventory.json was projected from a different {SOURCE_GRAPHS_FILENAME}; re-run discover"]
+        return source_graphs_from_document(document), []
     except (OSError, json.JSONDecodeError, ValueError) as error:
-        return [f"{SOURCE_GRAPHS_FILENAME} is not usable: {error}"]
-    return []
+        return None, [f"{SOURCE_GRAPHS_FILENAME} is not usable: {error}"]
+
+
+# Sources whose discover leaves zero-activity pipelines out of the per-pipeline listing (see the ADF loader).
+_SOURCES_OMITTING_EMPTY_PIPELINES = frozenset({SOURCE_ADF})
+
+
+def project_inventory(graphs: list[SourceGraph], inventory: dict[str, Any]) -> dict[str, Any]:
+    """Project the deterministic inventory again from the saved source graphs, as discover did.
+
+    The graphs are the content; ``inventory.json`` only supplies the two settings discover passed
+    alongside them and that ``source_graphs.json`` does not record -- the ``source_dir`` echoed for
+    provenance and the recorded ``source_graphs_sha256`` -- plus the source, which decides whether
+    empty pipelines are listed. The result serialises byte-identically to discover's inventory.
+    """
+    source = str(inventory.get("source", ""))
+    return build_source_inventory(
+        graphs,
+        source=source,
+        source_dir=str(inventory.get("source_dir", "")),
+        include_empty_pipelines=source not in _SOURCES_OMITTING_EMPTY_PIPELINES,
+        source_graphs_sha256=inventory.get(_SOURCE_GRAPHS_HASH_KEY),
+    )
 
 
 @contextmanager
@@ -608,7 +632,7 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[bool]:
 def _write_both_or_neither(
     insights_path: Path, insights_document: dict[str, Any], inventory_path: Path, inventory_document: dict[str, Any]
 ) -> None:
-    """Replace ``source_insights.json`` and ``inventory.json`` back to back, keeping them consistent.
+    """Replace ``agentic_insights.json`` and ``inventory.json`` back to back, keeping them consistent.
 
     Both temp files are written before either target is replaced. If replacing the inventory fails,
     the previous insights file is put back (or the new one removed), so the two never disagree.
@@ -645,8 +669,9 @@ def enrich_inventory(
 
     Reads ``<output_dir>/metadata/inventory.json``, validates the authored insights and checks the
     inventory still matches the saved ``source_graphs.json`` it records. Only when there are no
-    violations does it write ``metadata/source_insights.json`` and re-render ``inventory.json``
-    from its deterministic part plus that document (every existing key byte-unchanged). On any
+    violations does it write ``metadata/agentic_insights.json`` and rebuild ``inventory.json`` from
+    the saved source graphs (or, without a recorded graphs hash, its existing deterministic part)
+    plus that document, every deterministic key byte-identical to discover's write. On any
     violation both files are left untouched. The read, the checks and the write all happen under
     the output directory's enrich lock; when another enrich holds it, that is reported as a
     violation and nothing is written.
@@ -654,7 +679,7 @@ def enrich_inventory(
     Provide the authored insights via exactly one of ``insights`` (an inline dict) or
     ``insights_path`` (a JSON file).
 
-    Returns a result dict ``{"ok", "violations", "inventory_sha256", "source_insights_sha256",
+    Returns a result dict ``{"ok", "violations", "inventory_sha256", "agentic_insights_sha256",
     "pipeline_insights", "relationships"}``. ``ok`` is ``False`` (and the files untouched) when
     there are violations.
 
@@ -689,22 +714,24 @@ def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any) -> dict[str
     if not isinstance(inventory, dict):
         raise ValueError(f"inventory.json must contain a JSON object, got {type(inventory).__name__}")
 
-    violations = validate_insights(raw, inventory) + _source_graphs_violations(output_dir, inventory)
+    graphs, graph_violations = _load_source_graphs(output_dir, inventory)
+    deterministic = inventory if graphs is None else project_inventory(graphs, inventory)
+    violations = validate_insights(raw, deterministic) + graph_violations
     if violations:
         return {"ok": False, "violations": violations, "pipeline_insights": 0, "relationships": 0}
 
-    source_insights = build_source_insights(inventory, raw)
+    agentic_insights = build_agentic_insights(deterministic, raw)
     _write_both_or_neither(
-        inventory_path.with_name(SOURCE_INSIGHTS_FILENAME),
-        source_insights,
+        inventory_path.with_name(AGENTIC_INSIGHTS_FILENAME),
+        agentic_insights,
         inventory_path,
-        render_inventory(inventory, source_insights),
+        render_inventory(deterministic, agentic_insights),
     )
     return {
         "ok": True,
         "violations": [],
-        "inventory_sha256": source_insights[_FINGERPRINT_KEY],
-        "source_insights_sha256": source_insights[_SOURCE_INSIGHTS_HASH_KEY],
+        "inventory_sha256": agentic_insights[_FINGERPRINT_KEY],
+        "agentic_insights_sha256": agentic_insights[_AGENTIC_INSIGHTS_HASH_KEY],
         "pipeline_insights": len(raw.get("pipeline_insights", [])),
         "relationships": len(raw.get("pipeline_relationships", [])),
     }

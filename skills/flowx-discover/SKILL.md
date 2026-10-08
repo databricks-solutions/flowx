@@ -80,7 +80,7 @@ The inventory classifies every task into one of three strategies:
 Once the deterministic inventory is written, the standard flow **chains into enrichment**: you author
 a layer of judgment the parser cannot derive — a factory-wide architecture recommendation,
 per-pipeline intent + recommended Databricks patterns, and cross-pipeline relationships. The library
-records it in `metadata/source_insights.json` and rebuilds `inventory.json` with it under a single
+records it in `metadata/agentic_insights.json` and rebuilds `inventory.json` with it under a single
 additive `insights` key. flowx contains no LLM: you author the JSON, the library validates and
 records it. The routing step (`flowx-route`) reads this block to present the
 agentic conversion option per pipeline group.
