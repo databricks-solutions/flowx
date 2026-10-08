@@ -116,8 +116,11 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     The task's key, dependencies, run condition, timeout, and retries always come from
     the activity, never from the authored fragment, so an agent cannot rewire or re-time
     a task behind flowx's back. A fragment that tries to set any of them is rejected.
-    Everything else in the task, such as its description or compute, is written as the
-    fragment gives it.
+    flowx never overrides or removes any other value the fragment sets. Where the fragment
+    leaves one out, flowx adds only the plumbing the task needs: the ForEach ``item``
+    parameter, the source activity's notifications, or a cluster for a task that names no
+    compute. The task is marked ``_authored`` so the bundle writer leaves its parameters as
+    given; the marker is stripped before the job YAML is written.
 
     Raises:
         ValueError: The authored task fragment sets a flowx-owned field, a file entry is
@@ -140,7 +143,7 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
         field: value for field, value in build_common_task_fields(activity).items() if field in FLOWX_OWNED_TASK_FIELDS
     }
     return PreparedActivity(
-        task={**owned_task_fields, **activity.task},
+        task={**owned_task_fields, **activity.task, "_authored": True},
         notebooks=notebooks,
         pipeline_resources=list(activity.resources),
     )

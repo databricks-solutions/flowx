@@ -491,14 +491,14 @@ def test_agentic_component_pipeline_resource_survives_control_flow(tmp_path, wra
 
 
 def _notebook_tasks_by_path(bundle_dir) -> dict[str, dict]:
-    """Collect every emitted ``notebook_task`` across the bundle's job resources, keyed by notebook path."""
+    """Collect every emitted task with a ``notebook_task`` across the bundle's job resources, keyed by notebook path."""
     found: dict[str, dict] = {}
 
     def visit(value) -> None:
         if isinstance(value, dict):
             notebook_task = value.get("notebook_task")
             if isinstance(notebook_task, dict):
-                found[notebook_task["notebook_path"]] = notebook_task
+                found[notebook_task["notebook_path"]] = value
             for item in value.values():
                 visit(item)
         elif isinstance(value, list):
@@ -534,5 +534,112 @@ def test_agentic_component_notebook_widget_defaults_are_not_overridden(tmp_path,
 
     write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[wrap(report)])), tmp_path)
 
-    notebook_task = _notebook_tasks_by_path(tmp_path)["../src/notebooks/report.py"]
-    assert "lookback_days" not in notebook_task.get("base_parameters", {})
+    task = _notebook_tasks_by_path(tmp_path)["../src/notebooks/report.py"]
+    assert "lookback_days" not in task["notebook_task"].get("base_parameters", {})
+    assert "_authored" not in task
+
+
+@pytest.mark.parametrize(
+    ("fragment", "parameters_field"),
+    [
+        (
+            {
+                "notebook_task": {
+                    "notebook_path": "../src/notebooks/load.py",
+                    "base_parameters": {"item": "{{input.table_name}}"},
+                }
+            },
+            ("notebook_task", "base_parameters"),
+        ),
+        (
+            {"run_job_task": {"job_id": 123, "job_parameters": {"item": "{{input.table_name}}"}}},
+            ("run_job_task", "job_parameters"),
+        ),
+    ],
+    ids=["notebook_task", "run_job_task"],
+)
+def test_agentic_component_inside_for_each_keeps_its_own_item_parameter(tmp_path, fragment, parameters_field):
+    load = AgenticComponentActivity(
+        name="Load",
+        task_key="load",
+        files=[{"path": "notebooks/load.py", "content": "print('load')\n"}],
+        task=fragment,
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[_inside_for_each(load)])), tmp_path)
+
+    job_resource = yaml.safe_load((tmp_path / "resources" / "orders.yml").read_text(encoding="utf-8"))
+    body = job_resource["resources"]["jobs"]["orders"]["tasks"][0]["for_each_task"]["task"]
+    payload, parameters = parameters_field
+    assert body[payload][parameters] == {"item": "{{input.table_name}}"}
+    assert "_authored" not in body
+
+
+def test_agentic_component_notifications_are_added_only_when_the_fragment_sets_none(tmp_path):
+    collapsed = {"destination": "email", "events": ["on_failure"], "args": {"addresses": ["flowx@example.com"]}}
+    authored = AgenticComponentActivity(
+        name="Authored",
+        task_key="authored",
+        notifications=collapsed,
+        resources=RESOURCES,
+        task={**TASK, "email_notifications": {"on_success": ["owner@example.com"]}},
+    )
+    plain = AgenticComponentActivity(name="Plain", task_key="plain", notifications=collapsed, task=TASK)
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[authored, plain])), tmp_path)
+
+    job_resource = yaml.safe_load((tmp_path / "resources" / "orders.yml").read_text(encoding="utf-8"))
+    tasks = {task["task_key"]: task for task in job_resource["resources"]["jobs"]["orders"]["tasks"]}
+    assert tasks["authored"]["email_notifications"] == {"on_success": ["owner@example.com"]}
+    assert tasks["plain"]["email_notifications"] == {"on_failure": ["flowx@example.com"]}
+
+
+def test_agentic_component_with_its_own_compute_never_gets_a_second_binding(tmp_path):
+    serverless = AgenticComponentActivity(
+        name="Serverless",
+        task_key="serverless",
+        task={"notebook_task": {"notebook_path": "/Workspace/Shared/etl/orders"}, "environment_key": "default"},
+    )
+    unbound = AgenticComponentActivity(
+        name="Unbound",
+        task_key="unbound",
+        task={"notebook_task": {"notebook_path": "/Workspace/Shared/etl/customers"}},
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[serverless, unbound])), tmp_path)
+
+    job_resource = yaml.safe_load((tmp_path / "resources" / "orders.yml").read_text(encoding="utf-8"))
+    tasks = {task["task_key"]: task for task in job_resource["resources"]["jobs"]["orders"]["tasks"]}
+    assert tasks["serverless"] == {
+        "task_key": "serverless",
+        "notebook_task": {"notebook_path": "/Workspace/Shared/etl/orders"},
+        "environment_key": "default",
+    }
+    assert tasks["unbound"]["job_cluster_key"] == "default_cluster"
+
+
+def test_agentic_component_base_parameters_that_look_dynamic_are_written_as_given(tmp_path):
+    activity = AgenticComponentActivity(
+        name="Report",
+        task_key="report",
+        files=[{"path": "notebooks/report.py", "content": "print('report')\n"}],
+        task={
+            "notebook_task": {
+                "notebook_path": "../src/notebooks/report.py",
+                "base_parameters": {"cutoff": "datetime.now(timezone.utc) - timedelta(days=7)"},
+            }
+        },
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[activity])), tmp_path)
+
+    job_resource = yaml.safe_load((tmp_path / "resources" / "orders.yml").read_text(encoding="utf-8"))
+    assert job_resource["resources"]["jobs"]["orders"]["tasks"] == [
+        {
+            "task_key": "report",
+            "notebook_task": {
+                "notebook_path": "../src/notebooks/report.py",
+                "base_parameters": {"cutoff": "datetime.now(timezone.utc) - timedelta(days=7)"},
+            },
+        }
+    ]

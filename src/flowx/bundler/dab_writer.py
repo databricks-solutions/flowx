@@ -1256,14 +1256,15 @@ def _collect_required_cluster_keys(tasks: list[dict[str, Any]]) -> set[str]:
     return {task["job_cluster_key"] for task in _iter_tasks_recursively(tasks) if task.get("job_cluster_key")}
 
 
-def _strip_compute_mode_markers(tasks: list[dict[str, Any]]) -> None:
-    """Removes the private ``_compute_mode`` marker from every task before YAML output.
+def _strip_private_task_markers(tasks: list[dict[str, Any]]) -> None:
+    """Removes the private ``_compute_mode`` and ``_authored`` markers from every task before YAML output.
 
     Args:
         tasks: Top-level task dicts (mutated in place).
     """
     for task in _iter_tasks_recursively(tasks):
         task.pop("_compute_mode", None)
+        task.pop("_authored", None)
 
 
 # Patterns that signal a base_parameter value couldn't be evaluated cleanly. When a task references an
@@ -1293,10 +1294,13 @@ def _extract_manual_parameters_from_existing_notebook_tasks(
     deterministic translation are emitted with raw ADF expression values
     that ``dbutils.widgets.get`` returns verbatim, which fails at runtime.
     Walking both the absolute-path and bundle-relative cases drops the
-    broken values and surfaces them as a SETUP.md row instead.
+    broken values and surfaces them as a SETUP.md row instead. Agent-authored
+    tasks (marked ``_authored``) are skipped: their parameters are written as given.
     """
     manual_parameters: list[ManualParameter] = []
     for task in _iter_tasks_recursively(tasks):
+        if task.get("_authored"):
+            continue
         notebook_task = task.get("notebook_task") or {}
         notebook_path = notebook_task.get("notebook_path", "")
         base_params = notebook_task.get("base_parameters")
@@ -1332,7 +1336,7 @@ def _iter_tasks_recursively(tasks: list[dict[str, Any]]) -> Iterator[dict[str, A
             yield from _iter_tasks_recursively([inner])
 
 
-_CLUSTER_BINDING_KEYS = ("existing_cluster_id", "new_cluster", "job_cluster_key")
+_COMPUTE_BINDING_KEYS = ("existing_cluster_id", "new_cluster", "job_cluster_key", "environment_key")
 
 
 def _any_task_uses_classic_cluster(tasks: list[dict[str, Any]]) -> bool:
@@ -1355,6 +1359,8 @@ def _bind_cluster_to_notebook_tasks(tasks: list[dict[str, Any]]) -> None:
     matching job_cluster.  Tasks without a marker fall back to the
     legacy behaviour: existing-workspace notebooks bind to
     ``default_cluster`` and flowx-generated notebooks stay unbound.
+    A task that already names its compute (a cluster or a serverless
+    ``environment_key``) is never given a second binding.
 
     Args:
         tasks: Top-level task dicts (mutated in place).
@@ -1363,7 +1369,7 @@ def _bind_cluster_to_notebook_tasks(tasks: list[dict[str, Any]]) -> None:
         notebook_task = task.get("notebook_task")
         if notebook_task is None:
             continue
-        if any(key in task for key in _CLUSTER_BINDING_KEYS):
+        if any(key in task for key in _COMPUTE_BINDING_KEYS):
             continue
         compute_mode = task.get("_compute_mode")
         if compute_mode == "serverless":
@@ -1721,7 +1727,7 @@ def _build_job_resource(
                 extras=cluster_extras or None,
             )
 
-    _strip_compute_mode_markers(workflow.tasks)
+    _strip_private_task_markers(workflow.tasks)
 
     if workflow.parameters:
         # Emit each job parameter once in the DAB shape ({name, default}); dropping the internal ``type``

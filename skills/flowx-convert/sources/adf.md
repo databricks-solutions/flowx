@@ -75,6 +75,15 @@ Write one JSON file per resolved gap into `<output_dir>/agentic_results/`:
 `activity_name` (required) is matched by name, recursing into containers. `task_key`/`depends_on`
 are inherited from the placeholder when omitted, preserving dependency edges.
 
+When no typed task fits, use `"type": "AgenticComponentActivity"` instead. It carries `files`
+(each a relative `path` below the bundle's `src/` with text `content` or base64 `binary_content`),
+pipeline `resources` (`resource_key` plus a `definition` mapping), and a raw Databricks `task`
+fragment with exactly one `<kind>_task` payload. flowx owns `task_key`, `depends_on`, `run_if`,
+`timeout_seconds`, `max_retries`, `min_retry_interval_millis` and `retry_on_timeout`; setting any of
+them in the fragment is an error. flowx never overrides or removes any other value the fragment sets.
+Where the fragment leaves one out, flowx adds only the plumbing the task needs: the ForEach `item`
+parameter, the source activity's notifications, or a cluster for a task that names no compute.
+
 ## Step 6 — Merge agentic results
 
 ```bash

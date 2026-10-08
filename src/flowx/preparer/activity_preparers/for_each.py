@@ -115,20 +115,20 @@ def _resolve_for_each_inputs_with_bridge(
 
 
 def _inject_input_parameter(inner_task: dict) -> dict:
-    """Adds ``{{input}}`` as a base_parameter on the inner task.
+    """Adds ``{{input}}`` as the ``item`` parameter on the inner task unless it already passes one.
 
     Args:
         inner_task: The prepared inner task dict.
 
     Returns:
-        The task dict with ``item`` parameter injected.
+        The task dict with an ``item`` parameter.
     """
     if "notebook_task" in inner_task:
         params = inner_task["notebook_task"].setdefault("base_parameters", {})
-        params["item"] = "{{input}}"
+        params.setdefault("item", "{{input}}")
     elif "run_job_task" in inner_task:
         params = inner_task["run_job_task"].setdefault("job_parameters", {})
-        params["item"] = "{{input}}"
+        params.setdefault("item", "{{input}}")
     return inner_task
 
 

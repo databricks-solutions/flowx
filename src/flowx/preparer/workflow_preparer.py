@@ -34,6 +34,8 @@ from flowx.models.ir import (
     WebActivity,
 )
 
+_TASK_NOTIFICATION_KEYS = ("email_notifications", "webhook_notifications")
+
 
 @dataclass(slots=True, kw_only=True)
 class PreparedActivity:
@@ -210,7 +212,7 @@ def prepare_activity(
     prepared.task = _stamp_compute_mode(prepared.task, activity.compute_mode)
 
     # Wire any notification spec the adapter stamped onto this task (generic across task types, not just Copy).
-    if activity.notifications:
+    if activity.notifications and not any(key in prepared.task for key in _TASK_NOTIFICATION_KEYS):
         from flowx.preparer.notifications import resolve_task_notifications
 
         notification_keys, notification_setup = resolve_task_notifications(activity.notifications)
