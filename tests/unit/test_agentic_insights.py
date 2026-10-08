@@ -422,3 +422,28 @@ def test_projected_inventory_is_byte_identical_to_adf_discover_on_the_fixtures(t
     assert enrich_inventory(tmp_path, insights=authored)["ok"] is True
     enriched = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
     assert json.dumps({key: value for key, value in enriched.items() if key != INSIGHTS_KEY}, indent=2) == discovered
+
+
+def test_projected_inventory_matches_adf_discover_for_an_empty_pipeline(tmp_path: Path) -> None:
+    """ADF discover counts a zero-activity pipeline but leaves it unlisted, and the rebuild must agree."""
+    pipelines = tmp_path / "export" / "pipelines"
+    pipelines.mkdir(parents=True)
+    wait = {"name": "pause", "type": "Wait", "dependsOn": [], "typeProperties": {"waitTimeInSeconds": 1}}
+    for name, activities in (("empty", []), ("orders", [wait])):
+        document = {"name": name, "properties": {"activities": activities}}
+        (pipelines / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+    output_dir = tmp_path / "out"
+    assert adf_discover_main(["--source-dir", str(tmp_path / "export"), "--output-dir", str(output_dir)]) == 0
+    metadata = output_dir / "metadata"
+    discovered = (metadata / "inventory.json").read_text(encoding="utf-8")
+    inventory = json.loads(discovered)
+    assert inventory["summary"]["pipeline_count"] == 2
+    assert [pipeline["name"] for pipeline in inventory["pipelines"]] == ["orders"]
+
+    projected = project_inventory(read_source_graphs(metadata / SOURCE_GRAPHS_FILENAME), inventory)
+
+    assert json.dumps(projected, indent=2) == discovered
+    authored = {"authored_against": inventory["source_graphs_sha256"], "overview": "One empty pipeline."}
+    assert enrich_inventory(output_dir, insights=authored)["ok"] is True
+    enriched = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+    assert json.dumps({key: value for key, value in enriched.items() if key != INSIGHTS_KEY}, indent=2) == discovered
