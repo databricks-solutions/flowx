@@ -490,10 +490,10 @@ def translate_cluster_config(kwargs: dict[str, ast.expr]) -> ClusterTranslation:
         for key, value in properties.items():
             if isinstance(key, str) and key.startswith("spark:"):
                 spark_key = key.removeprefix("spark:")
-                if spark_key.startswith("spark.dataproc."):
-                    result.dropped_properties.append(key)
-                else:
+                if spark_key and not spark_key.startswith("spark.dataproc."):
                     result.spark_conf[spark_key] = str(value)
+                else:
+                    result.dropped_properties.append(key)
             else:
                 result.dropped_properties.append(str(key))
         result.dropped_properties.sort()

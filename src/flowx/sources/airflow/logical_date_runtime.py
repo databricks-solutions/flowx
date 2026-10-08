@@ -166,7 +166,11 @@ def _localize(wall_clock: datetime, zone: ZoneInfo) -> datetime:
     """
     offset_before = wall_clock.replace(tzinfo=zone, fold=0).utcoffset()
     offset_after = wall_clock.replace(tzinfo=zone, fold=1).utcoffset()
-    if offset_before is not None and offset_after is not None and offset_after > offset_before:
+    if (
+        offset_before is not None
+        and offset_after is not None
+        and offset_after.total_seconds() > offset_before.total_seconds()
+    ):
         wall_clock += offset_after - offset_before
     return wall_clock.replace(tzinfo=zone, fold=1).astimezone(timezone.utc)
 

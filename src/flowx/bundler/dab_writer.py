@@ -454,7 +454,7 @@ def write_bundle_group(
     for workflow in workflows:
         all_cluster_hints.extend(workflow.cluster_hints)
     databricks_yml_path = output_dir / "databricks.yml"
-    inferred_spark_version, inferred_node_type_id = _infer_cluster_defaults_from_hints(all_cluster_hints)
+    inferred_spark_version, inferred_node_type_id = _cluster_hint_consensus(all_cluster_hints)
     databricks_yml_dict = _build_databricks_yml(
         effective_name,
         catalog,
@@ -1325,30 +1325,18 @@ _DEFAULT_SPARK_VERSION = "15.4.x-scala2.12"
 _DEFAULT_NODE_TYPE_ID = "Standard_DS3_v2"
 
 
-def _infer_source_cluster_settings(workflow: PreparedWorkflow) -> tuple[str | None, str | None]:
-    """Finds the runtime and node type the source pipelines configured for their clusters.
+def _cluster_hint_consensus(cluster_hints: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    """Most-common valid ``spark_version`` / ``node_type_id`` across a (possibly multi-workflow) hint list.
 
-    For Airflow bundles these are suggestions in the descriptions of the required ``node_type_id`` and
-    ``spark_version`` variables. For ADF bundles they are the variable defaults, falling back to
-    ``_DEFAULT_SPARK_VERSION`` and ``_DEFAULT_NODE_TYPE_ID`` when no task cluster named a usable value.
+    Returns ``None`` for a field when no hint named a usable value. Callers decide what that means:
+    the ADF default branch of :func:`_build_databricks_yml` falls back to ``_DEFAULT_SPARK_VERSION`` /
+    ``_DEFAULT_NODE_TYPE_ID``, while the Airflow required variables simply omit the source suggestion.
 
     Args:
-        workflow: The prepared workflow being written.
+        cluster_hints: The union of every member workflow's ``cluster_hints``.
 
     Returns:
-        ``(spark_version, node_type_id)``, each ``None`` when no task cluster named a usable value.
-    """
-    return _infer_cluster_defaults_from_hints(workflow.cluster_hints)
-
-
-def _infer_cluster_defaults_from_hints(cluster_hints: list[dict[str, Any]]) -> tuple[str, str]:
-    """Derive ``spark_version`` / ``node_type_id`` defaults from a (possibly multi-workflow) hint list.
-
-    Split out from :func:`_infer_bundle_cluster_defaults` so a bundle holding several pipelines can
-    pass the union of every member's ``cluster_hints`` and get one consensus default pair.
-
-    Returns:
-        ``(spark_version, node_type_id)`` strings.
+        ``(spark_version, node_type_id)``, each ``None`` when no hint named a usable value.
     """
     from collections import Counter
 
@@ -1358,8 +1346,8 @@ def _infer_cluster_defaults_from_hints(cluster_hints: list[dict[str, Any]]) -> t
     ]
     node_types = [hint["node_type_id"] for hint in cluster_hints if _is_valid_node_type_id(hint.get("node_type_id"))]
 
-    spark_version = Counter(spark_versions).most_common(1)[0][0] if spark_versions else _DEFAULT_SPARK_VERSION
-    node_type_id = Counter(node_types).most_common(1)[0][0] if node_types else _DEFAULT_NODE_TYPE_ID
+    spark_version = Counter(spark_versions).most_common(1)[0][0] if spark_versions else None
+    node_type_id = Counter(node_types).most_common(1)[0][0] if node_types else None
     return spark_version, node_type_id
 
 
@@ -1458,7 +1446,7 @@ def _build_databricks_yml(
         catalog: Default target catalog.
         schema: Default target schema.
         spark_version: The Databricks Runtime the source configured, shown as a suggestion in the
-            variable description. Callers derive it from :func:`_infer_source_cluster_settings`.
+            variable description. Callers derive it from :func:`_cluster_hint_consensus`.
         node_type_id: The node type the source configured, shown the same way.
         include_cluster_variables: When True, declares ``spark_version`` and
             ``node_type_id`` for the job clusters.  Set to

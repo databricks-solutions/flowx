@@ -7,8 +7,6 @@ import json
 import yaml
 
 from flowx.bundler.dab_writer import (
-    _DEFAULT_NODE_TYPE_ID,
-    _DEFAULT_SPARK_VERSION,
     _infer_bundle_cluster_extras,
     _load_report,
     write_bundle,
@@ -1261,7 +1259,7 @@ class TestUnparseableClusterHintsFiltered:
     Counter so they are never suggested as the value for a required bundle variable."""
 
     def test_unparseable_spark_version_is_not_suggested(self):
-        from flowx.bundler.dab_writer import _infer_source_cluster_settings
+        from flowx.bundler.dab_writer import _cluster_hint_consensus
 
         wf = _simple_workflow()
         wf.cluster_hints = [
@@ -1270,12 +1268,12 @@ class TestUnparseableClusterHintsFiltered:
                 "node_type_id": "Standard_DS3_v2",
             },
         ]
-        spark_version, node_type_id = _infer_source_cluster_settings(wf)
-        assert spark_version == _DEFAULT_SPARK_VERSION
+        spark_version, node_type_id = _cluster_hint_consensus(wf.cluster_hints)
+        assert spark_version is None
         assert node_type_id == "Standard_DS3_v2"
 
     def test_unparseable_node_type_is_not_suggested(self):
-        from flowx.bundler.dab_writer import _infer_source_cluster_settings
+        from flowx.bundler.dab_writer import _cluster_hint_consensus
 
         wf = _simple_workflow()
         wf.cluster_hints = [
@@ -1284,12 +1282,12 @@ class TestUnparseableClusterHintsFiltered:
                 "node_type_id": "@pipeline().parameters.unresolved",
             },
         ]
-        spark_version, node_type_id = _infer_source_cluster_settings(wf)
+        spark_version, node_type_id = _cluster_hint_consensus(wf.cluster_hints)
         assert spark_version == "15.4.x-scala2.12"
-        assert node_type_id == _DEFAULT_NODE_TYPE_ID
+        assert node_type_id is None
 
     def test_real_spark_version_still_wins(self):
-        from flowx.bundler.dab_writer import _infer_source_cluster_settings
+        from flowx.bundler.dab_writer import _cluster_hint_consensus
 
         wf = _simple_workflow()
         wf.cluster_hints = [
@@ -1297,7 +1295,7 @@ class TestUnparseableClusterHintsFiltered:
             {"spark_version": "15.4.x-photon-scala2.12", "node_type_id": "Standard_D4s_v3"},
             {"spark_version": "@if(equals(item()?.photon,true),X,Y)", "node_type_id": "Standard_D4s_v3"},
         ]
-        spark_version, _ = _infer_source_cluster_settings(wf)
+        spark_version, _ = _cluster_hint_consensus(wf.cluster_hints)
         assert spark_version == "15.4.x-photon-scala2.12"
 
 
