@@ -116,11 +116,24 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     The task's key, dependencies, run condition, timeout, and retries always come from
     the activity, never from the authored fragment, so an agent cannot rewire or re-time
     a task behind flowx's back. A fragment that tries to set any of them is rejected.
-    flowx never overrides or removes any other value the fragment sets. Where the fragment
-    leaves one out, flowx adds only the plumbing the task needs: the ForEach ``item``
-    parameter, the source activity's notifications, or a cluster for a task that names no
-    compute. The task is marked ``_authored`` so the bundle writer leaves its parameters as
-    given; the marker is stripped before the job YAML is written.
+
+    flowx does not override or remove any other value the fragment sets, except in three
+    wiring passes that run on authored tasks exactly as on generated ones:
+
+    - a ``{{tasks.X.values.Y}}`` reference to a task outside the same job is blanked and
+      listed in SETUP.md, because task values do not cross job boundaries;
+    - inside a ForEach that runs as its own job, notebook ``base_parameters`` and
+      ``condition_task`` operands are rewritten for that job: ``{{input.x}}`` becomes
+      ``{{job.parameters.x}}``, ADF expressions become job-parameter references, and
+      non-string values become strings;
+    - a ``run_job_task`` whose ``job_id`` is ``${resources.jobs.X.id}`` for a job outside
+      this bundle is pointed at an ``X_job_id`` bundle variable instead.
+
+    Where the fragment leaves a value out, flowx adds only the plumbing the task needs: the
+    ForEach ``item`` parameter, the source activity's notifications, or a cluster for a task
+    that names no compute. The task is marked ``_authored`` so the bundle writer skips the
+    parameter clean-ups meant for generated tasks; the marker is stripped before the job
+    YAML is written.
 
     Raises:
         ValueError: The authored task fragment sets a flowx-owned field, a file entry is

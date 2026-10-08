@@ -80,9 +80,19 @@ When no typed task fits, use `"type": "AgenticComponentActivity"` instead. It ca
 pipeline `resources` (`resource_key` plus a `definition` mapping), and a raw Databricks `task`
 fragment with exactly one `<kind>_task` payload. flowx owns `task_key`, `depends_on`, `run_if`,
 `timeout_seconds`, `max_retries`, `min_retry_interval_millis` and `retry_on_timeout`; setting any of
-them in the fragment is an error. flowx never overrides or removes any other value the fragment sets.
-Where the fragment leaves one out, flowx adds only the plumbing the task needs: the ForEach `item`
-parameter, the source activity's notifications, or a cluster for a task that names no compute.
+them in the fragment is an error. flowx does not override or remove any other value the fragment
+sets, except in three wiring passes that apply to authored tasks exactly as to generated ones:
+
+- A `{{tasks.X.values.Y}}` reference to a task outside the same job is blanked and listed in
+  SETUP.md, because task values do not cross job boundaries.
+- Inside a ForEach that runs as its own job, notebook `base_parameters` and `condition_task`
+  operands are rewritten for that job: `{{input.x}}` becomes `{{job.parameters.x}}`, ADF
+  expressions become job-parameter references, and non-string values become strings.
+- A `run_job_task` whose `job_id` is `${resources.jobs.X.id}` for a job outside this bundle is
+  pointed at an `X_job_id` bundle variable instead.
+
+Where the fragment leaves a value out, flowx adds only the plumbing the task needs: the ForEach
+`item` parameter, the source activity's notifications, or a cluster for a task that names no compute.
 
 ## Step 6 — Merge agentic results
 
