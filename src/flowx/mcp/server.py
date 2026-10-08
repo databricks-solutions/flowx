@@ -298,7 +298,7 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
-    """Validate agent-authored insights, record them in source_insights.json and rebuild inventory.json.
+    """Validate agent-authored insights, record them in agentic_insights.json and rebuild inventory.json.
 
     Accepts the insights either inline as ``insights`` (a JSON object) or via ``insights_path``
     (a file the server can read); exactly one is required. Inline insights are staged to a temp
@@ -583,12 +583,14 @@ def build_server() -> FastMCP:
           review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "enrich": output_dir(req), one of insights(inline object) | insights_path(req) — validate
-          agent-authored discover insights against inventory.json, record them in source_insights.json,
-          and rebuild inventory.json from the deterministic inventory plus that document (atomic,
-          idempotent). `ok` reflects validation; `result.violations` lists any problems and both files
-          are left untouched on failure. Author the insights by reading inventory.json + the source
-          artifacts first, setting `authored_against` to its source_graphs_sha256 when it records one
-          and leaving it out otherwise (see the flowx-enrich skill's insights.md).
+          agent-authored discover insights against inventory.json, record them in agentic_insights.json,
+          and rebuild inventory.json from source_graphs.json plus that document (one enrich per
+          output_dir at a time, idempotent). `ok` reflects validation; `result.violations` lists any
+          problems (including another enrich holding metadata/.enrich.lock) and both files are left
+          untouched on failure. Author the insights by reading inventory.json + the source
+          artifacts first, setting `authored_against` (optional, checked when given) to its
+          source_graphs_sha256 when it records one and leaving it out otherwise (see the flowx-enrich
+          skill's insights.md).
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

@@ -259,7 +259,7 @@ flowx_output/
   metadata/
     inventory.json            # discover: activity inventory
     source_graphs.json        # discover (ADF): saved source graphs the inventory is built from
-    source_insights.json      # enrich: validated agent-authored insights, rebuilt into inventory.json
+    agentic_insights.json     # enrich: validated agent-authored insights, rebuilt into inventory.json
     profile_report.csv        # discover: per-pipeline complexity report
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
     configuration.json        # modify: collected configuration answers

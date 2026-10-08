@@ -766,3 +766,138 @@ def test_parameterised_file_location_bound_to_literals_resolves_to_its_path() ->
     )
     # An unbound file-name parameter is unknown, so the folder alone is never used as the identity.
     assert resolve_dataset_identity(unbound, definitions) is None
+
+
+def test_overridden_read_carries_no_signature_so_it_cannot_join_on_the_weak_tier() -> None:
+    """With the writer's identity unresolved, a shared dataset binding must not join a wildcard reader by signature."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_param": _adls_dataset(
+                "ds_param",
+                file_system="data",
+                folder_path="@dataset().folderPath",
+                linked_service="ls_secret",
+            )
+        },
+        linked_services={
+            "ls_secret": AdfLinkedService(name="ls_secret", type="AzureBlobFS", properties={"typeProperties": {}})
+        },
+    )
+    binding = {"folderPath": {"value": "@concat('landing/', pipeline().parameters.run)", "type": "Expression"}}
+    ingest = AdfActivity(
+        name="Ingest",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_param", parameters=binding)],
+        type_properties={"sink": {"type": "DelimitedTextSink"}},
+    )
+    publish = AdfActivity(
+        name="Publish",
+        type="Copy",
+        inputs=[AdfDatasetReference(reference_name="ds_param", parameters=binding)],
+        type_properties={"source": {"type": "DelimitedTextSource", "storeSettings": {"wildcardFileName": "*.csv"}}},
+    )
+    _, ingest_writes = activity_data_assets(ingest, definitions)
+    publish_reads, _ = activity_data_assets(publish, definitions)
+
+    assert ingest_writes[0].identity is None
+    assert ingest_writes[0].signature  # the writer still has a path-anchored signature to join on
+    assert publish_reads[0].identity is None
+    assert publish_reads[0].signature == ""
+    edges = data_edges_from_endpoints(
+        [("Ingest", asset) for asset in ingest_writes], [("Publish", asset) for asset in publish_reads]
+    )
+    assert edges == []
+
+
+def _landing_copy(name: str, *, dataset: str, produced: bool) -> AdfActivity:
+    """A Copy that writes (or reads) *dataset* bound to a run-specific folder under ``landing/``."""
+    reference = AdfDatasetReference(
+        reference_name=dataset,
+        parameters={"folderPath": {"value": "@concat('landing/', pipeline().parameters.run)", "type": "Expression"}},
+    )
+    if produced:
+        return AdfActivity(name=name, type="Copy", outputs=[reference])
+    return AdfActivity(name=name, type="Copy", inputs=[reference])
+
+
+def _landing_definitions(**stores: tuple[str, str]) -> AdfDefinitions:
+    """One parameterised-folder dataset per entry, on container ``stores[name][0]`` of account ``stores[name][1]``."""
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name, file_system=container, folder_path="@dataset().folderPath", linked_service=f"ls_{account}"
+            )
+            for name, (container, account) in stores.items()
+        },
+        linked_services={
+            f"ls_{account}": _adls_linked_service(f"ls_{account}", account=account) for _, account in stores.values()
+        },
+    )
+
+
+def test_same_folder_shape_on_different_stores_does_not_join_by_signature() -> None:
+    """A write to sales@acctA and a read of hr@acctB share only a folder skeleton, so no edge joins them."""
+    definitions = _landing_definitions(ds_sales=("sales", "acctA"), ds_hr=("hr", "acctB"))
+    _, sales_writes = activity_data_assets(_landing_copy("WriteSales", dataset="ds_sales", produced=True), definitions)
+    hr_reads, _ = activity_data_assets(_landing_copy("ReadHR", dataset="ds_hr", produced=False), definitions)
+
+    assert sales_writes[0].identity is None
+    assert hr_reads[0].identity is None
+    edges = data_edges_from_endpoints(
+        [("WriteSales", asset) for asset in sales_writes], [("ReadHR", asset) for asset in hr_reads]
+    )
+    assert edges == []
+
+
+def test_same_folder_shape_on_the_same_store_still_joins_by_signature() -> None:
+    """Two datasets on one literal container keep their advisory signature edge, now naming that store."""
+    definitions = _landing_definitions(ds_out=("sales", "acctA"), ds_in=("sales", "acctA"))
+    _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[sales@acctA]/FP[landing|slots=1]/FN[None]")
+    ]
+
+
+def _vaulted_blob_definitions(**containers: str) -> AdfDefinitions:
+    """One parameterised-folder dataset per entry, on container ``containers[name]`` of the Key Vault blob fixture."""
+    vaulted_blob = load_adf_definitions(FIXTURES_DIR).get_linked_service("ls_azure_blob")
+    assert vaulted_blob is not None
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name, file_system=container, folder_path="@dataset().folderPath", linked_service="ls_azure_blob"
+            )
+            for name, container in containers.items()
+        },
+        linked_services={"ls_azure_blob": vaulted_blob},
+    )
+
+
+def test_same_folder_shape_on_different_containers_of_a_hidden_account_does_not_join() -> None:
+    """With the account in Key Vault, the linked service name still tells ``staging`` and ``archive`` apart."""
+    definitions = _vaulted_blob_definitions(ds_staging="staging", ds_archive="archive")
+    _, staging_writes = activity_data_assets(_landing_copy("Stage", dataset="ds_staging", produced=True), definitions)
+    archive_reads, _ = activity_data_assets(_landing_copy("Archive", dataset="ds_archive", produced=False), definitions)
+
+    edges = data_edges_from_endpoints(
+        [("Stage", asset) for asset in staging_writes], [("Archive", asset) for asset in archive_reads]
+    )
+    assert edges == []
+
+
+def test_same_folder_shape_on_one_container_of_a_hidden_account_still_joins() -> None:
+    """Two datasets on the same container of a Key Vault blob linked service join on that container and service."""
+    definitions = _vaulted_blob_definitions(ds_out="staging", ds_in="staging")
+    _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[staging@ls_azure_blob]/FP[landing|slots=1]/FN[None]")
+    ]

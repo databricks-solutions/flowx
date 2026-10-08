@@ -413,6 +413,102 @@ def test_one_sided_if_keeps_empty_false_branch() -> None:
     assert node.branches["false"] == []
 
 
+def test_switch_keeps_named_cases_that_have_no_activities() -> None:
+    """A declared case with ``activities: []`` keeps its label as an empty branch, in declaration order."""
+    activities = [
+        {
+            "name": "Route",
+            "type": "Switch",
+            "typeProperties": {
+                "cases": [
+                    {"value": "gold", "activities": [{"name": "G", "type": "Copy"}]},
+                    {"value": "skip", "activities": []},
+                ],
+                "defaultActivities": [{"name": "D", "type": "Wait"}],
+            },
+        }
+    ]
+    graph = _pipeline(activities)
+
+    container = graph.tasks[0]
+    assert isinstance(container, ContainerNode)
+    assert list(container.branches.keys()) == ["gold", "skip", "default"]
+    assert container.branches["skip"] == []
+    assert container.branches["gold"][0].name == "G"
+
+
+def test_switch_case_without_a_value_keeps_its_declared_position() -> None:
+    """A case with no ``value`` is keyed like the parser keys it ("") and stays where it was declared."""
+    activities = [
+        {
+            "name": "Route",
+            "type": "Switch",
+            "typeProperties": {
+                "cases": [
+                    {"activities": [{"name": "A", "type": "Wait"}]},
+                    {"value": "x", "activities": []},
+                ],
+            },
+        }
+    ]
+    graph = _pipeline(activities)
+
+    container = graph.tasks[0]
+    assert isinstance(container, ContainerNode)
+    assert list(container.branches.keys()) == ["", "x", "default"]
+    assert [child.name for child in container.branches[""]] == ["A"]
+    assert container.branches["x"] == []
+
+
+def test_switch_case_valued_default_does_not_collide_with_the_default_branch() -> None:
+    """A case whose value is literally "default" keeps its activities under ``case:default``."""
+    activities = [
+        {
+            "name": "Route",
+            "type": "Switch",
+            "typeProperties": {
+                "cases": [
+                    {"value": "default", "activities": [{"name": "CopyA", "type": "Copy"}]},
+                    {"value": "full", "activities": [{"name": "CopyB", "type": "Copy"}]},
+                ],
+                "defaultActivities": [{"name": "Wait1", "type": "Wait"}],
+            },
+        }
+    ]
+    graph = _pipeline(activities)
+
+    container = graph.tasks[0]
+    assert isinstance(container, ContainerNode)
+    assert list(container.branches.keys()) == ["case:default", "full", "default"]
+    assert [child.name for child in container.branches["case:default"]] == ["CopyA"]
+    assert [child.name for child in container.branches["default"]] == ["Wait1"]
+
+
+def test_switch_case_valued_default_does_not_collide_with_a_case_valued_case_default() -> None:
+    """A "default" case still keeps its activities when another case is literally valued "case:default"."""
+    activities = [
+        {
+            "name": "Route",
+            "type": "Switch",
+            "typeProperties": {
+                "cases": [
+                    {"value": "default", "activities": [{"name": "CopyA", "type": "Copy"}]},
+                    {"value": "case:default", "activities": [{"name": "CopyC", "type": "Copy"}]},
+                ],
+                "defaultActivities": [{"name": "Wait1", "type": "Wait"}],
+            },
+        }
+    ]
+    graph = _pipeline(activities)
+
+    container = graph.tasks[0]
+    assert isinstance(container, ContainerNode)
+    assert list(container.branches.keys()) == ["case:case:default", "case:default", "default"]
+    assert [child.name for child in container.branches["case:case:default"]] == ["CopyA"]
+    assert [child.name for child in container.branches["case:default"]] == ["CopyC"]
+    assert [child.name for child in container.branches["default"]] == ["Wait1"]
+
+
 def test_empty_switch_stays_a_container_with_default_branch() -> None:
     """A Switch with no cases still maps to a ContainerNode with an empty default."""
     graph = _pipeline([{"name": "Route", "type": "Switch", "typeProperties": {}}])

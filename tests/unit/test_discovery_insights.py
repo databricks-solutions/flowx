@@ -18,7 +18,7 @@ import pytest
 from flowx.adapter.__main__ import main as adapter_cli_main
 from flowx.discovery_insights import (
     INSIGHTS_KEY,
-    build_source_insights,
+    build_agentic_insights,
     enrich_inventory,
     inventory_fingerprint,
     load_insights,
@@ -190,6 +190,19 @@ def test_unknown_pipeline_reference_in_insight() -> None:
     raw["pipeline_insights"][0]["pipeline"] = "ghost"
     violations = validate_insights(raw, _inventory())
     assert any("pipeline 'ghost' not in inventory" in v for v in violations)
+
+
+def test_two_insights_for_the_same_pipeline_are_a_violation() -> None:
+    """Each annotated pipeline gets one judgment; a second entry for it is reported, not silently kept."""
+    raw = _valid_insights()
+    raw["pipeline_insights"].append({"pipeline": raw["pipeline_insights"][0]["pipeline"], "intent": "Contradicts."})
+    duplicate_index = len(raw["pipeline_insights"]) - 1
+    violations = validate_insights(raw, _inventory())
+    assert any(
+        violation.startswith(f"pipeline_insights[{duplicate_index}]: duplicate insight for pipeline")
+        and "pipeline_insights[0]" in violation
+        for violation in violations
+    )
 
 
 def test_unknown_pipeline_reference_in_relationship_endpoint() -> None:
@@ -460,7 +473,7 @@ def test_system_recommendation_requires_headline_and_patterns() -> None:
 
 def test_merge_adds_single_additive_block_with_fingerprint_and_schema_version() -> None:
     inventory = _inventory()
-    merged = render_inventory(inventory, build_source_insights(inventory, _valid_insights()))
+    merged = render_inventory(inventory, build_agentic_insights(inventory, _valid_insights()))
     # Original keys are untouched and one additive key is appended, last.
     assert list(merged) == ["source", "source_dir", "pipelines", "summary", "insights"]
     block = merged[INSIGHTS_KEY]
@@ -526,7 +539,7 @@ def test_enrich_is_idempotent_and_replaces_prior_block(tmp_path: Path) -> None:
 def test_fingerprint_ignores_any_prior_insights_block() -> None:
     inventory = _inventory()
     base_fingerprint = inventory_fingerprint(inventory)
-    enriched = render_inventory(inventory, build_source_insights(inventory, _valid_insights()))
+    enriched = render_inventory(inventory, build_agentic_insights(inventory, _valid_insights()))
     # Fingerprinting the already-enriched inventory yields the same digest (insights excluded).
     assert inventory_fingerprint(enriched) == base_fingerprint
 
