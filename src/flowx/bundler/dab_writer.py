@@ -23,7 +23,7 @@ from flowx.bundler.constants import (
     SINGLE_NODE_JOB_CLUSTER_KEY,
 )
 from flowx.bundler.inner_job_params import normalize_value
-from flowx.bundler.notebook_writer import _content_signature, write_notebooks
+from flowx.bundler.notebook_writer import content_signature, write_notebooks
 from flowx.bundler.prereqs_writer import ManualParameter, build_prereqs, render_setup_md
 from flowx.bundler.setup_generator import generate_setup_tasks
 from flowx.ir_serde import data_asset_from_dict, lineage_from_dict
@@ -113,7 +113,7 @@ def write_bundle(
     _cross_bundle_variables.clear()
     _neutralized_conditions.clear()
 
-    _check_agentic_file_collisions(workflow)
+    _check_agentic_file_collisions(workflow, catalog, schema)
     workflow = copy.deepcopy(workflow)
 
     output_dir = Path(output_dir)
@@ -655,25 +655,31 @@ def _known_bundle_job_keys(workflow: PreparedWorkflow, resource_key: str) -> set
     return keys
 
 
-def _check_agentic_file_collisions(workflow: PreparedWorkflow) -> None:
-    """Refuse two agent-authored files that share a path but differ in content.
+def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, schema: str) -> None:
+    """Refuse an agent-authored file whose path another file below ``src`` uses with different content.
 
-    The notebook writer gives a clashing generated file a ``__N`` suffix, but an authored task
-    still points at the original path, so it would run the other component's code. Authored files
-    are the ones kept out of the bundle root (``write_to_bundle_root=False``).
+    The notebook writer gives a clashing file a ``__N`` suffix, and setup notebooks are written later and
+    replace whatever is there, but every task still points at the original path, so one task would run the
+    other file's code. Authored files are the ones kept out of the bundle root (``write_to_bundle_root=False``).
     """
-    authored: dict[str, object] = {}
+    authored_paths: set[str] = set()
+    signatures_by_path: dict[str, set[object]] = {}
     for prepared in [workflow, *workflow.inner_workflows]:
-        for notebook in prepared.notebooks:
-            if notebook.write_to_bundle_root is not False:
+        setup_notebooks = generate_setup_tasks(
+            secrets=prepared.secrets, setup_tasks=prepared.setup_tasks, catalog=catalog, schema=schema
+        )
+        for notebook in [*prepared.notebooks, *setup_notebooks]:
+            if notebook.write_to_bundle_root is False:
+                authored_paths.add(notebook.relative_path)
+            elif _is_bundle_root_artifact(notebook):
                 continue
-            signature = _content_signature(notebook)
-            previous = authored.setdefault(notebook.relative_path, signature)
-            if previous != signature:
-                raise ValueError(
-                    f"Two agentic components author different content for the same file "
-                    f"{notebook.relative_path!r}; give each component its own file path"
-                )
+            signatures_by_path.setdefault(notebook.relative_path, set()).add(content_signature(notebook))
+    for relative_path in sorted(authored_paths):
+        if len(signatures_by_path[relative_path]) > 1:
+            raise ValueError(
+                f"Agentic component file {relative_path!r} shares its path with another file in the bundle that "
+                "has different content; give each component its own file path"
+            )
 
 
 def _is_bundle_root_artifact(notebook: DabNotebook) -> bool:

@@ -118,6 +118,7 @@ def prepare(activity: IfConditionActivity, *, scope: str = "") -> PreparedActivi
         secrets=list(artifacts.secrets),
         setup_tasks=list(artifacts.setup_tasks),
         inner_workflows=list(artifacts.inner_workflows),
+        pipeline_resources=list(artifacts.pipeline_resources),
     )
 
 

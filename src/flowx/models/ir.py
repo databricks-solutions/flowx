@@ -695,8 +695,9 @@ class AgenticComponentActivity(Activity):
     Attributes:
         files: Files to write below the bundle's ``src`` directory. Each entry
             carries a relative ``path`` and either UTF-8 ``content`` or
-            base64-encoded ``binary_content``. Two components may share a path
-            only when they author identical content.
+            base64-encoded ``binary_content``. A file may share its path with
+            another component's file or a generated notebook only when the
+            content is identical.
         resources: Pipeline resources in the existing ``resource_key`` plus
             raw ``definition`` shape used by the bundle writer.
         task: Raw Databricks task fragment carrying exactly one executable

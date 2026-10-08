@@ -11,7 +11,16 @@ import yaml
 from flowx.bundler.dab_writer import _combine_airflow_workflows, pipeline_dict_to_ir, write_bundle
 from flowx.ir_serde import activity_to_dict, pipeline_to_dict
 from flowx.models.dab import SetupTask
-from flowx.models.ir import AgenticComponentActivity, Dependency, Pipeline
+from flowx.models.ir import (
+    AgenticComponentActivity,
+    Dependency,
+    ForEachActivity,
+    IfConditionActivity,
+    Pipeline,
+    SwitchActivity,
+    SwitchCase,
+    WaitActivity,
+)
 from flowx.preparer.workflow_preparer import prepare_workflow
 from flowx.validate.bundle_invariants import check_bundle_dir
 
@@ -315,7 +324,7 @@ def test_agentic_components_authoring_different_content_at_one_path_fail(tmp_pat
         task={"spark_python_task": {"python_file": "../src/jobs/run.py"}},
     )
 
-    with pytest.raises(ValueError, match="same file 'jobs/run.py'"):
+    with pytest.raises(ValueError, match="'jobs/run.py' shares its path"):
         write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
     assert not (tmp_path / "databricks.yml").exists()
     assert not (tmp_path / "resources").exists()
@@ -340,3 +349,69 @@ def test_agentic_components_sharing_identical_file_content_still_package(tmp_pat
     write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
 
     assert (tmp_path / "src" / "jobs" / "common.py").read_text(encoding="utf-8") == "print('shared')\n"
+
+
+def test_agentic_component_file_at_a_generated_notebook_path_fails(tmp_path):
+    """The writer would rename one of the two files, leaving one task running the other's code."""
+    wait = WaitActivity(name="Pause", task_key="pause", wait_time_seconds=5)
+    custom = AgenticComponentActivity(
+        name="Custom",
+        task_key="custom",
+        files=[{"path": "notebooks/pause.py", "content": "print('custom')\n"}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/pause.py"}},
+    )
+
+    with pytest.raises(ValueError, match="'notebooks/pause.py'"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[wait, custom])), tmp_path)
+    assert not (tmp_path / "src").exists()
+
+
+def test_agentic_component_file_at_a_generated_setup_notebook_path_fails(tmp_path):
+    """Setup notebooks are written after authored files and would silently replace them."""
+    custom = AgenticComponentActivity(
+        name="Custom",
+        task_key="custom",
+        files=[{"path": "setup/create_volumes.py", "content": "print('custom')\n"}],
+        task={"notebook_task": {"notebook_path": "../src/setup/create_volumes.py"}},
+    )
+    workflow = prepare_workflow(Pipeline(name="orders", tasks=[custom]))
+    workflow.setup_tasks.append(SetupTask(type="volume", config={"volume_name": "landing"}))
+
+    with pytest.raises(ValueError, match="'setup/create_volumes.py'"):
+        write_bundle(workflow, tmp_path)
+    assert not (tmp_path / "src").exists()
+
+
+def _inside_if_condition(activity: AgenticComponentActivity) -> IfConditionActivity:
+    return IfConditionActivity(
+        name="Check", task_key="check", op="EQUAL_TO", left="1", right="1", if_true_activities=[activity]
+    )
+
+
+def _inside_switch(activity: AgenticComponentActivity) -> SwitchActivity:
+    return SwitchActivity(
+        name="Route",
+        task_key="route",
+        on_expression="orders",
+        cases=[SwitchCase(value="orders", activities=[activity])],
+    )
+
+
+def _inside_for_each(activity: AgenticComponentActivity) -> ForEachActivity:
+    return ForEachActivity(name="Loop", task_key="loop", items_expression='["a"]', inner_activities=[activity])
+
+
+def _inside_for_each_with_siblings(activity: AgenticComponentActivity) -> ForEachActivity:
+    sibling = WaitActivity(name="Pause", task_key="pause", wait_time_seconds=5)
+    return ForEachActivity(name="Loop", task_key="loop", items_expression='["a"]', inner_activities=[activity, sibling])
+
+
+@pytest.mark.parametrize(
+    "wrap", [_inside_if_condition, _inside_switch, _inside_for_each, _inside_for_each_with_siblings]
+)
+def test_agentic_component_pipeline_resource_survives_control_flow(tmp_path, wrap):
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[wrap(_activity())])), tmp_path)
+
+    pipeline_resource = yaml.safe_load((tmp_path / "resources" / "orders_ingestion.yml").read_text(encoding="utf-8"))
+    assert pipeline_resource == {"resources": {"pipelines": {"orders_ingestion": PIPELINE_DEFINITION}}}
+    assert check_bundle_dir(tmp_path).ok
