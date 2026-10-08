@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -578,11 +577,11 @@ def _source_graphs_violations(output_dir: Path, inventory: dict[str, Any]) -> li
         document = json.loads(graphs_path.read_text(encoding="utf-8"))
         if not isinstance(document, dict):
             raise ValueError(f"expected a JSON object, got {type(document).__name__}")
+        if document.get("document_sha256") != recorded:
+            return [f"inventory.json was projected from a different {SOURCE_GRAPHS_FILENAME}; re-run discover"]
         source_graphs_from_document(document)
     except (OSError, json.JSONDecodeError, ValueError) as error:
         return [f"{SOURCE_GRAPHS_FILENAME} is not usable: {error}"]
-    if document.get("document_sha256") != recorded:
-        return [f"inventory.json was projected from a different {SOURCE_GRAPHS_FILENAME}; re-run discover"]
     return []
 
 
@@ -611,14 +610,14 @@ def _write_both_or_neither(
 ) -> None:
     """Replace ``source_insights.json`` and ``inventory.json`` back to back, keeping them consistent.
 
-    Both temp files (named uniquely per write) are written before either target is replaced. If
-    replacing the inventory fails, the previous insights file is put back (or the new one removed),
-    so the two never disagree. Callers hold :func:`_enrich_lock`, so no other enrich writes between.
+    Both temp files are written before either target is replaced. If replacing the inventory fails,
+    the previous insights file is put back (or the new one removed), so the two never disagree.
+    Callers hold :func:`_enrich_lock`, so no other enrich writes between, and the fixed temp names
+    mean the next write overwrites and removes any left behind by a killed one.
     """
     previous_insights = insights_path.read_bytes() if insights_path.exists() else None
-    write_id = uuid.uuid4().hex
-    insights_temporary = insights_path.with_name(f".{insights_path.name}.{write_id}.tmp")
-    inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.{write_id}.tmp")
+    insights_temporary = insights_path.with_name(f".{insights_path.name}.tmp")
+    inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.tmp")
     try:
         insights_temporary.write_text(json.dumps(insights_document, indent=2), encoding="utf-8")
         inventory_temporary.write_text(json.dumps(inventory_document, indent=2), encoding="utf-8")

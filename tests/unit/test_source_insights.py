@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import flowx
 from flowx.discovery_insights import (
     INSIGHTS_KEY,
     SOURCE_INSIGHTS_FILENAME,
@@ -260,6 +263,26 @@ def test_a_source_graphs_file_that_is_not_an_object_is_a_violation_not_a_crash(t
     assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
 
 
+@pytest.mark.parametrize("graphs", [[[]], [{"tasks": [1]}]])
+def test_unhashed_source_graphs_with_malformed_entries_are_a_violation_not_a_crash(
+    tmp_path: Path, graphs: list[Any]
+) -> None:
+    inventory_path = _discover(tmp_path)
+    (tmp_path / "metadata" / SOURCE_GRAPHS_FILENAME).write_text(
+        json.dumps({"contract_version": "1", "graphs": graphs}), encoding="utf-8"
+    )
+    inventory_bytes = inventory_path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights=_authored(tmp_path))
+
+    assert result["ok"] is False
+    assert any(
+        f"projected from a different {SOURCE_GRAPHS_FILENAME}" in violation for violation in result["violations"]
+    )
+    assert inventory_path.read_bytes() == inventory_bytes
+    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+
+
 def test_a_second_enrich_cannot_interleave_with_one_already_writing(tmp_path: Path, monkeypatch: Any) -> None:
     """Pause one enrich between its two replaces and run another: the two files must still agree."""
     inventory_path = _discover(tmp_path)
@@ -315,3 +338,42 @@ def test_a_lock_left_by_a_killed_enrich_blocks_the_next_one_until_removed(tmp_pa
     assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
     lock_path.unlink()
     assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
+
+
+_KILLED_ENRICH = """
+import json, os, sys
+from pathlib import Path
+from flowx.discovery_insights import enrich_inventory
+
+real_replace = os.replace
+
+def replace_then_die(source, destination):
+    real_replace(source, destination)
+    os._exit(1)
+
+os.replace = replace_then_die
+enrich_inventory(Path(sys.argv[1]), insights=json.loads(sys.argv[2]))
+"""
+
+
+def test_the_enrich_after_a_killed_one_clears_its_temp_files(tmp_path: Path) -> None:
+    """Kill an enrich between its two replaces, clear the lock as instructed, and enrich again."""
+    inventory_path = _discover(tmp_path)
+    metadata = tmp_path / "metadata"
+    authored = _authored(tmp_path)
+    source_root = Path(flowx.__file__).resolve().parents[1]
+    killed = subprocess.run(
+        [sys.executable, "-c", _KILLED_ENRICH, str(tmp_path), json.dumps(authored)],
+        env={**os.environ, "PYTHONPATH": str(source_root)},
+        check=False,
+    )
+    assert killed.returncode == 1
+    assert [path.name for path in metadata.iterdir() if path.name.endswith(".tmp")]
+
+    (metadata / ".enrich.lock").unlink()
+    result = enrich_inventory(tmp_path, insights=authored)
+
+    assert result["ok"] is True
+    assert not [path.name for path in metadata.iterdir() if path.name.endswith(".tmp")]
+    source_insights = json.loads((metadata / SOURCE_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
+    assert json.loads(inventory_path.read_text(encoding="utf-8"))[INSIGHTS_KEY] == source_insights
