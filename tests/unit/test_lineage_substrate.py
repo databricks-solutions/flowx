@@ -339,6 +339,28 @@ def test_build_motif_annotations_groups_members_by_tag():
     assert annotations[0].databricks_replacement == "auto_loader"
 
 
+def test_build_motif_annotations_carries_the_source_type_hint():
+    """The detector's source classification survives into the IR lineage annotation."""
+    pipeline = Pipeline(
+        name="p",
+        tasks=[
+            MotifActivity(
+                name="motif",
+                task_key="motif_bulk_copy",
+                motif_id="metadata_driven_bulk_copy",
+                display_name="Bulk copy",
+                databricks_replacement="lakeflow_connect",
+                matched_activity_names=["Lookup", "ForEach"],
+                source_type_hint="database",
+            ),
+        ],
+    )
+
+    (annotation,) = build_motif_annotations(pipeline)
+
+    assert annotation.source_type_hint == "database"
+
+
 def test_with_lineage_is_pure():
     """with_lineage returns a new pipeline and never mutates the input."""
     pipeline = Pipeline(name="p", tasks=[_notebook("n")])

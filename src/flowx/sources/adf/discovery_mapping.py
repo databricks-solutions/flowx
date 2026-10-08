@@ -32,6 +32,9 @@ an ``IfCondition`` becomes ``{"true": [...], "false": [...]}``, a ``ForEach`` /
 ``Until`` becomes ``{"body": [...]}``, and a ``Switch`` becomes
 ``{"<case value>": [...], "default": [...]}``. Branch insertion order matches the
 order ADF declares the branches so a downstream flatten reproduces source order.
+A case whose value is literally ``"default"`` is keyed ``"case:default"`` (with extra
+``case:`` prefixes if another case already uses that value) so it never collides with
+the Switch's own default branch or another case.
 """
 
 from __future__ import annotations
@@ -341,8 +344,17 @@ def _control_flow_branches(activity: AdfActivity, definitions: AdfDefinitions) -
         return {"body": [_activity_to_node(child, definitions) for child in (activity.activities or [])]}
     if activity.type == "Switch":
         branches: dict[str, list[SourceNode]] = {}
-        for case_value, case_activities in (activity.switch_cases or {}).items():
-            branches[case_value] = [_activity_to_node(child, definitions) for child in case_activities]
+        parsed_cases = activity.switch_cases or {}
+        # The parser drops a case whose activities list is empty, so the declared case labels come
+        # from the raw typeProperties; that keeps every named branch, empty ones included.
+        declared_cases = (activity.type_properties or {}).get("cases")
+        declared_values = [str(case.get("value", "")) for case in declared_cases or []]
+        default_case_label = "case:default"
+        while default_case_label in declared_values:
+            default_case_label = f"case:{default_case_label}"
+        for case_value in declared_values:
+            case_label = default_case_label if case_value == "default" else case_value
+            branches[case_label] = [_activity_to_node(child, definitions) for child in parsed_cases.get(case_value, [])]
         branches["default"] = [
             _activity_to_node(child, definitions) for child in (activity.switch_default_activities or [])
         ]
