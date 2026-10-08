@@ -584,9 +584,10 @@ def build_server() -> FastMCP:
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "enrich": output_dir(req), one of insights(inline object) | insights_path(req) — validate
           agent-authored discover insights against inventory.json, record them in source_insights.json,
-          and rebuild inventory.json from the deterministic inventory plus that document (atomic,
-          idempotent). `ok` reflects validation; `result.violations` lists any problems and both files
-          are left untouched on failure. Author the insights by reading inventory.json + the source
+          and rebuild inventory.json from the deterministic inventory plus that document (one enrich per
+          output_dir at a time, idempotent). `ok` reflects validation; `result.violations` lists any
+          problems (including another enrich holding metadata/.enrich.lock) and both files are left
+          untouched on failure. Author the insights by reading inventory.json + the source
           artifacts first, setting `authored_against` to its source_graphs_sha256 when it records one
           and leaving it out otherwise (see the flowx-enrich skill's insights.md).
         - "inspect": report_path(req) — return the full translation-option schema (every option with

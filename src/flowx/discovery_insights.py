@@ -26,8 +26,11 @@ records the persisted ``source_graphs.json`` hash it was checked against
 (``source_graphs_sha256``) and carries its own content hash (``source_insights_sha256``).
 ``inventory.json`` is then re-rendered as the deterministic inventory discover wrote plus that
 same block under ``insights``, so the inventory is always built from those two pieces rather
-than patched. The two files are replaced together, never one without the other (see
-``_write_both_or_neither``), and the record is **idempotent**: re-running with the same
+than patched. Only one enrich writes an output directory at a time, and the two files are
+replaced back to back (see ``_write_both_or_neither``). A process killed between those two
+replaces is the one case that can leave ``source_insights.json`` a write ahead of
+``inventory.json``; its lock file stays behind, so the next enrich refuses until the lock is
+removed and enrich is run again. The record is **idempotent**: re-running with the same
 authored insights rewrites byte-identical bytes and never stacks. The library owns
 ``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and ``source_insights_sha256``;
 authored insights carrying any of them are rejected as unknown keys.
@@ -40,6 +43,9 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +63,9 @@ INSIGHTS_KEY = "insights"
 
 # The file enrich writes; inventory.json's insights block is always a copy of it.
 SOURCE_INSIGHTS_FILENAME = "source_insights.json"
+
+# Held in metadata/ while one enrich reads, validates and writes, so two enrich calls never interleave.
+ENRICH_LOCK_FILENAME = ".enrich.lock"
 
 # Library-owned keys stamped on record; authored insights must not supply them.
 _SCHEMA_VERSION_KEY = "schema_version"
@@ -204,10 +213,11 @@ def _authored_against_violations(authored_against: Any, inventory: dict[str, Any
 
 
 def _validate_pipeline_insights(insights: Any, names: set[str]) -> list[str]:
-    """Validate the ``pipeline_insights`` list: shape, unknown fields, and the pipeline FK."""
+    """Validate the ``pipeline_insights`` list: shape, unknown fields, the pipeline FK, one entry per pipeline."""
     if not isinstance(insights, list):
         return ["'pipeline_insights' must be a list"]
     violations: list[str] = []
+    first_index_by_name: dict[str, int] = {}
     for index, item in enumerate(insights):
         loc = f"pipeline_insights[{index}]"
         if not isinstance(item, dict):
@@ -220,8 +230,15 @@ def _validate_pipeline_insights(insights: Any, names: set[str]) -> list[str]:
             violations.append(f"{loc}: missing required field 'pipeline'")
         elif not isinstance(name, str):
             violations.append(f"{loc}: 'pipeline' must be a string, got {type(name).__name__}")
-        elif name not in names:
-            violations.append(f"{loc}: pipeline {name!r} not in inventory")
+        elif name in first_index_by_name:
+            violations.append(
+                f"{loc}: duplicate insight for pipeline {name!r} (already given at "
+                f"pipeline_insights[{first_index_by_name[name]}]); give one entry per pipeline"
+            )
+        else:
+            first_index_by_name[name] = index
+            if name not in names:
+                violations.append(f"{loc}: pipeline {name!r} not in inventory")
         violations.extend(_validate_optional_strings(item, _INSIGHT_TEXT_FIELDS, loc))
         notes = item.get("conversion_notes")
         if notes is not None and (not isinstance(notes, list) or not all(isinstance(note, str) for note in notes)):
@@ -466,7 +483,7 @@ def _validate_system_recommendation(value: Any) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Loading, fingerprinting, and the atomic idempotent record.
+# Loading, fingerprinting, and the locked idempotent record.
 # --------------------------------------------------------------------------- #
 
 
@@ -559,6 +576,8 @@ def _source_graphs_violations(output_dir: Path, inventory: dict[str, Any]) -> li
         return [f"inventory.json records source_graphs_sha256 but {SOURCE_GRAPHS_FILENAME} is missing; re-run discover"]
     try:
         document = json.loads(graphs_path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError(f"expected a JSON object, got {type(document).__name__}")
         source_graphs_from_document(document)
     except (OSError, json.JSONDecodeError, ValueError) as error:
         return [f"{SOURCE_GRAPHS_FILENAME} is not usable: {error}"]
@@ -567,29 +586,54 @@ def _source_graphs_violations(output_dir: Path, inventory: dict[str, Any]) -> li
     return []
 
 
+@contextmanager
+def _enrich_lock(metadata_dir: Path) -> Iterator[bool]:
+    """Hold the output directory's enrich lock, yielding ``False`` when another enrich already holds it.
+
+    The lock is a file created with ``O_EXCL`` (portable, unlike ``fcntl``) and removed when the
+    enrich finishes or raises. Only a killed process leaves it behind, which is exactly the case
+    where the two files may disagree, so the next enrich refuses until the lock is removed.
+    """
+    lock_path = metadata_dir / ENRICH_LOCK_FILENAME
+    try:
+        os.close(os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
 def _write_both_or_neither(
     insights_path: Path, insights_document: dict[str, Any], inventory_path: Path, inventory_document: dict[str, Any]
 ) -> None:
-    """Replace ``source_insights.json`` and ``inventory.json`` together, keeping them consistent.
+    """Replace ``source_insights.json`` and ``inventory.json`` back to back, keeping them consistent.
 
-    Both temp files are written before either target is replaced. If replacing the inventory fails,
-    the previous insights file is put back (or the new one removed), so the two never disagree.
+    Both temp files (named uniquely per write) are written before either target is replaced. If
+    replacing the inventory fails, the previous insights file is put back (or the new one removed),
+    so the two never disagree. Callers hold :func:`_enrich_lock`, so no other enrich writes between.
     """
     previous_insights = insights_path.read_bytes() if insights_path.exists() else None
-    insights_temporary = insights_path.with_name(f".{insights_path.name}.tmp")
-    inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.tmp")
-    insights_temporary.write_text(json.dumps(insights_document, indent=2), encoding="utf-8")
-    inventory_temporary.write_text(json.dumps(inventory_document, indent=2), encoding="utf-8")
-    os.replace(insights_temporary, insights_path)
+    write_id = uuid.uuid4().hex
+    insights_temporary = insights_path.with_name(f".{insights_path.name}.{write_id}.tmp")
+    inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.{write_id}.tmp")
     try:
-        os.replace(inventory_temporary, inventory_path)
-    except BaseException:
-        if previous_insights is None:
-            insights_path.unlink(missing_ok=True)
-        else:
-            insights_path.write_bytes(previous_insights)
+        insights_temporary.write_text(json.dumps(insights_document, indent=2), encoding="utf-8")
+        inventory_temporary.write_text(json.dumps(inventory_document, indent=2), encoding="utf-8")
+        os.replace(insights_temporary, insights_path)
+        try:
+            os.replace(inventory_temporary, inventory_path)
+        except BaseException:
+            if previous_insights is None:
+                insights_path.unlink(missing_ok=True)
+            else:
+                insights_path.write_bytes(previous_insights)
+            raise
+    finally:
+        insights_temporary.unlink(missing_ok=True)
         inventory_temporary.unlink(missing_ok=True)
-        raise
 
 
 def enrich_inventory(
@@ -604,7 +648,9 @@ def enrich_inventory(
     inventory still matches the saved ``source_graphs.json`` it records. Only when there are no
     violations does it write ``metadata/source_insights.json`` and re-render ``inventory.json``
     from its deterministic part plus that document (every existing key byte-unchanged). On any
-    violation both files are left untouched.
+    violation both files are left untouched. The read, the checks and the write all happen under
+    the output directory's enrich lock; when another enrich holds it, that is reported as a
+    violation and nothing is written.
 
     Provide the authored insights via exactly one of ``insights`` (an inline dict) or
     ``insights_path`` (a JSON file).
@@ -621,12 +667,30 @@ def enrich_inventory(
     inventory_path = Path(output_dir) / "metadata" / "inventory.json"
     if not inventory_path.exists():
         raise FileNotFoundError(f"No inventory.json under {inventory_path.parent}; run the discover phase first.")
+    raw = load_insights(insights=insights, insights_path=insights_path)
+    with _enrich_lock(inventory_path.parent) as locked:
+        if not locked:
+            lock_path = inventory_path.parent / ENRICH_LOCK_FILENAME
+            return {
+                "ok": False,
+                "violations": [
+                    f"another enrich is writing to {inventory_path.parent} ({lock_path} exists); run enrich again "
+                    "once it finishes. If no enrich is running, a previous one was killed mid-write: delete the "
+                    "lock and run enrich again to rewrite both files"
+                ],
+                "pipeline_insights": 0,
+                "relationships": 0,
+            }
+        return _enrich_locked(Path(output_dir), inventory_path, raw)
+
+
+def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any) -> dict[str, Any]:
+    """The read-validate-write half of :func:`enrich_inventory`, run while holding the enrich lock."""
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     if not isinstance(inventory, dict):
         raise ValueError(f"inventory.json must contain a JSON object, got {type(inventory).__name__}")
 
-    raw = load_insights(insights=insights, insights_path=insights_path)
-    violations = validate_insights(raw, inventory) + _source_graphs_violations(Path(output_dir), inventory)
+    violations = validate_insights(raw, inventory) + _source_graphs_violations(output_dir, inventory)
     if violations:
         return {"ok": False, "violations": violations, "pipeline_insights": 0, "relationships": 0}
 

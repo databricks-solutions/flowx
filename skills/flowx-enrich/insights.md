@@ -69,6 +69,8 @@ graphs they describe. Do not author any of those four keys yourself:
 
 - **Foreign keys.** Every `pipeline_insights[].pipeline` and every relationship
   `from_pipeline` / `to_pipeline` must be a real pipeline name in the inventory.
+- **One insight per pipeline.** A pipeline may appear in `pipeline_insights` at most once; put
+  everything you have to say about it in that one entry.
 - **Field types.** Pipeline names are strings. When present, `pattern_name`, `intent`,
   `databricks_pattern` and `risk_if_ignored` (per pipeline) and `relationship_summary`,
   `databricks_pattern` and `risk_if_ignored` (per relationship) must be strings, and

@@ -100,7 +100,7 @@ narrative.
    Databricks docs before recommending** (never "recommend now, verify later").
 3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
    and the saved source graphs and, only when clean, writes `source_insights.json` and rebuilds the
-   inventory atomically. On any violation both files are left untouched and you get the full list of
+   inventory. On any violation both files are left untouched and you get the full list of
    problems to fix in one pass.
 
 See **`insights.md`** in this skill directory for the exact insights shape, every field, and the
@@ -135,12 +135,18 @@ Run the **`setup`** skill first if you haven't. Both paths run the same validate
 
 ## Idempotency & safety
 
-`enrich` is atomic and idempotent: it records the validated insights in
+`enrich` is idempotent: it records the validated insights in
 `metadata/source_insights.json` (stamping `schema_version`, `inventory_sha256`, `source_graphs_sha256`
 and `source_insights_sha256`), then rebuilds `inventory.json` from the deterministic inventory plus that
 document rather than patching it in place. The `insights` block is replaced wholesale (never stacks),
 and every deterministic inventory key stays byte-identical. Re-running with the same insights rewrites the same bytes; re-running
 with different insights replaces the block. A validation failure writes nothing.
+
+Only one `enrich` writes an output directory at a time: it holds `metadata/.enrich.lock` from reading
+the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
+writes nothing. The two files are replaced one right after the other, so a process killed between those
+two steps can leave `source_insights.json` one write ahead of `inventory.json`. That run's lock stays
+behind, and the next `enrich` refuses until you delete the lock; running `enrich` again then rewrites both.
 
 ## Next step
 

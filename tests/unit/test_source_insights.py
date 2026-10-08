@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -241,3 +242,76 @@ def test_a_failed_inventory_write_leaves_the_previous_insights_in_place(tmp_path
 
     assert insights_path.read_bytes() == insights_before
     assert inventory_path.read_bytes() == inventory_before
+
+
+def test_a_source_graphs_file_that_is_not_an_object_is_a_violation_not_a_crash(tmp_path: Path) -> None:
+    inventory_path = _discover(tmp_path)
+    (tmp_path / "metadata" / SOURCE_GRAPHS_FILENAME).write_text("[]", encoding="utf-8")
+    inventory_bytes = inventory_path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights=_authored(tmp_path))
+
+    assert result["ok"] is False
+    assert any(
+        f"{SOURCE_GRAPHS_FILENAME} is not usable" in violation and "JSON object" in violation
+        for violation in result["violations"]
+    )
+    assert inventory_path.read_bytes() == inventory_bytes
+    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+
+
+def test_a_second_enrich_cannot_interleave_with_one_already_writing(tmp_path: Path, monkeypatch: Any) -> None:
+    """Pause one enrich between its two replaces and run another: the two files must still agree."""
+    inventory_path = _discover(tmp_path)
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    insights_path = tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME
+    paused, resume = threading.Event(), threading.Event()
+    real_replace = os.replace
+
+    def pausing_replace(source: Any, destination: Any) -> None:
+        real_replace(source, destination)
+        if threading.current_thread() is not threading.main_thread() and Path(destination) == insights_path:
+            paused.set()
+            resume.wait(timeout=10)
+
+    monkeypatch.setattr(os, "replace", pausing_replace)
+    first_errors: list[BaseException] = []
+
+    def first_enrich() -> None:
+        try:
+            enrich_inventory(tmp_path, insights={**_authored(tmp_path), "overview": "First writer."})
+        except BaseException as error:
+            first_errors.append(error)
+
+    first = threading.Thread(target=first_enrich)
+    first.start()
+    assert paused.wait(timeout=10)
+    second = enrich_inventory(tmp_path, insights={**_authored(tmp_path), "overview": "Second writer."})
+    resume.set()
+    first.join(timeout=10)
+
+    assert first_errors == []
+    source_insights = json.loads(insights_path.read_text(encoding="utf-8"))
+    assert json.loads(inventory_path.read_text(encoding="utf-8"))[INSIGHTS_KEY] == source_insights
+    assert source_insights["overview"] == "First writer."
+    assert second["ok"] is False
+    assert any("another enrich" in violation for violation in second["violations"])
+    assert not (tmp_path / "metadata" / ".enrich.lock").exists()
+    assert not [path.name for path in (tmp_path / "metadata").iterdir() if path.name.endswith(".tmp")]
+
+
+def test_a_lock_left_by_a_killed_enrich_blocks_the_next_one_until_removed(tmp_path: Path) -> None:
+    """A leftover lock marks a write that may have stopped between the two replaces, so nothing is written."""
+    inventory_path = _discover(tmp_path)
+    lock_path = tmp_path / "metadata" / ".enrich.lock"
+    lock_path.touch()
+    inventory_bytes = inventory_path.read_bytes()
+
+    refused = enrich_inventory(tmp_path, insights=_authored(tmp_path))
+
+    assert refused["ok"] is False
+    assert any(str(lock_path) in violation for violation in refused["violations"])
+    assert inventory_path.read_bytes() == inventory_bytes
+    assert not (tmp_path / "metadata" / SOURCE_INSIGHTS_FILENAME).exists()
+    lock_path.unlink()
+    assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True

@@ -192,6 +192,19 @@ def test_unknown_pipeline_reference_in_insight() -> None:
     assert any("pipeline 'ghost' not in inventory" in v for v in violations)
 
 
+def test_two_insights_for_the_same_pipeline_are_a_violation() -> None:
+    """Each annotated pipeline gets one judgment; a second entry for it is reported, not silently kept."""
+    raw = _valid_insights()
+    raw["pipeline_insights"].append({"pipeline": raw["pipeline_insights"][0]["pipeline"], "intent": "Contradicts."})
+    duplicate_index = len(raw["pipeline_insights"]) - 1
+    violations = validate_insights(raw, _inventory())
+    assert any(
+        violation.startswith(f"pipeline_insights[{duplicate_index}]: duplicate insight for pipeline")
+        and "pipeline_insights[0]" in violation
+        for violation in violations
+    )
+
+
 def test_unknown_pipeline_reference_in_relationship_endpoint() -> None:
     raw = _valid_insights()
     raw["pipeline_relationships"][0]["to_pipeline"] = "ghost"
