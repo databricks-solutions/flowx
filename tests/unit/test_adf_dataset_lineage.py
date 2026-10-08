@@ -808,3 +808,56 @@ def test_overridden_read_carries_no_signature_so_it_cannot_join_on_the_weak_tier
         [("Ingest", asset) for asset in ingest_writes], [("Publish", asset) for asset in publish_reads]
     )
     assert edges == []
+
+
+def _landing_copy(name: str, *, dataset: str, produced: bool) -> AdfActivity:
+    """A Copy that writes (or reads) *dataset* bound to a run-specific folder under ``landing/``."""
+    reference = AdfDatasetReference(
+        reference_name=dataset,
+        parameters={"folderPath": {"value": "@concat('landing/', pipeline().parameters.run)", "type": "Expression"}},
+    )
+    if produced:
+        return AdfActivity(name=name, type="Copy", outputs=[reference])
+    return AdfActivity(name=name, type="Copy", inputs=[reference])
+
+
+def _landing_definitions(**stores: tuple[str, str]) -> AdfDefinitions:
+    """One parameterised-folder dataset per entry, on container ``stores[name][0]`` of account ``stores[name][1]``."""
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name, file_system=container, folder_path="@dataset().folderPath", linked_service=f"ls_{account}"
+            )
+            for name, (container, account) in stores.items()
+        },
+        linked_services={
+            f"ls_{account}": _adls_linked_service(f"ls_{account}", account=account) for _, account in stores.values()
+        },
+    )
+
+
+def test_same_folder_shape_on_different_stores_does_not_join_by_signature() -> None:
+    """A write to sales@acctA and a read of hr@acctB share only a folder skeleton, so no edge joins them."""
+    definitions = _landing_definitions(ds_sales=("sales", "acctA"), ds_hr=("hr", "acctB"))
+    _, sales_writes = activity_data_assets(_landing_copy("WriteSales", dataset="ds_sales", produced=True), definitions)
+    hr_reads, _ = activity_data_assets(_landing_copy("ReadHR", dataset="ds_hr", produced=False), definitions)
+
+    assert sales_writes[0].identity is None
+    assert hr_reads[0].identity is None
+    edges = data_edges_from_endpoints(
+        [("WriteSales", asset) for asset in sales_writes], [("ReadHR", asset) for asset in hr_reads]
+    )
+    assert edges == []
+
+
+def test_same_folder_shape_on_the_same_store_still_joins_by_signature() -> None:
+    """Two datasets on one literal container keep their advisory signature edge, now naming that store."""
+    definitions = _landing_definitions(ds_out=("sales", "acctA"), ds_in=("sales", "acctA"))
+    _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[sales@acctA]/FP[landing|slots=1]/FN[None]")
+    ]

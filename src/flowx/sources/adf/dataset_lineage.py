@@ -167,6 +167,10 @@ def _dataset_ref_to_asset(
     cannot manufacture a signature-tier edge. When *location_overridden* is set the
     dataset's location is not what the activity touches, so neither an identity nor a
     signature is derived from it.
+
+    A path signature is prefixed with the dataset's store when that store is literal,
+    so two datasets on different containers or accounts that merely share a folder
+    shape never join.
     """
     if location_overridden:
         return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))
@@ -176,6 +180,9 @@ def _dataset_ref_to_asset(
         # resolved asset to an unresolved one that merely shares a physical value.
         return DataAsset(signature=identity, identity=identity, asset_type=_asset_type(dataset_ref, definitions))
     path_signature = _path_signature(dataset_ref.parameters)
+    store = _resolve_dataset_store(dataset_ref, definitions, context) if path_signature is not None else None
+    if path_signature is not None and store:
+        path_signature = f"ST[{store}]/{path_signature}"
     return DataAsset(
         signature=path_signature if path_signature is not None else "",
         identity=None,
@@ -460,6 +467,38 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
     if reference_parameters or linked_service_properties.get("parameters"):
         return None
     return linked_service_name
+
+
+def _resolve_dataset_store(
+    dataset_ref: AdfDatasetReference,
+    definitions: AdfDefinitions,
+    context: TranslationContext,
+) -> str | None:
+    """Name the store a dataset lives in, even when its full path or table does not resolve.
+
+    A table dataset's store is the one :func:`_resolve_table_store` names. A file
+    dataset's store is ``<file system>@<account>``, and only when both are literal.
+    ``None`` whenever the store is not provable, so the caller leaves the signature
+    unqualified rather than guess.
+    """
+    properties = _dataset_props(dataset_ref, definitions)
+    if properties is None:
+        return None
+    _, table = _resolve_table_reference(dataset_ref, properties, context)
+    if table:
+        return _resolve_table_store(properties, definitions)
+    type_props = properties.get("typeProperties") or properties
+    location = type_props.get("location")
+    if not isinstance(location, dict):
+        return None
+    raw_file_system = location.get("fileSystem") or location.get("container")
+    if not raw_file_system:
+        return None
+    file_system = _resolve_param_value(raw_file_system, _effective_dataset_params(dataset_ref, properties), context)
+    account = _resolve_storage_account(_backing_linked_service(properties, definitions))
+    if not file_system or not account or not _is_physical(file_system) or not _is_physical(account):
+        return None
+    return f"{file_system}@{account}"
 
 
 def _connection_string_fields(connection_string: str) -> dict[str, str]:
