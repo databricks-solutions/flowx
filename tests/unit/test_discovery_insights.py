@@ -635,8 +635,8 @@ def test_mcp_enrich_requires_exactly_one_source(tmp_path: Path) -> None:
     assert neither["ok"] is False and "exactly one" in neither["error"]
 
 
-def test_mcp_enrich_prepare_returns_the_metadata_an_agent_authors_against(tmp_path: Path) -> None:
-    """On the hosted server the agent can't read output_dir, so prepare hands it metadata/ inline."""
+def test_mcp_enrich_prepare_returns_the_inventory_an_agent_authors_against(tmp_path: Path) -> None:
+    """On the hosted server the agent can't read output_dir, so prepare hands it inventory.json inline."""
     server = pytest.importorskip("flowx.mcp.server")
     inventory_path = _write_inventory(tmp_path, _inventory())
 
