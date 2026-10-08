@@ -65,6 +65,7 @@ All under the shared `<output_dir>/metadata/` folder:
 | File | Description |
 |---|---|
 | `metadata/inventory.json` | Classified activity inventory for the convert phase |
+| `metadata/source_graphs.json` | (ADF) Saved, content-hashed source graphs (activities, lineage, detected motifs); the inventory is built from it and records its hash as `source_graphs_sha256` |
 | `metadata/profile_report.csv` | Per-pipeline complexity report (counts + T-shirt size) |
 | `metadata/<pipeline>.arm.json` | (ADF) Verbatim original source for each pipeline (provenance) |
 
