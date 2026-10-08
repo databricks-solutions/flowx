@@ -114,13 +114,13 @@ Run the **`setup`** skill first if you haven't. Both paths run the same validate
 
 - **MCP tool (Databricks Genie Code, or a local stdio registration):** call the single **`flowx`**
   tool with `command="enrich"`. On the hosted server you cannot read `output_dir`, so first read the
-  inventory with `action="prepare"`. It returns `metadata/` (`inventory.json`, `source_graphs.json`,
-  the `.arm.json` provenance) inline under `bundle.files`, the same way `package` returns a bundle;
-  pass `output_volume_path` or `output_workspace_path` to have large metadata uploaded instead. Then
-  record the insights (the default `action="apply"`) with either inline insights or a file:
+  inventory with `action="prepare"`. It returns `metadata/inventory.json` inline under
+  `bundle.files`, the same way `package` returns a bundle; pass `output_volume_path` or
+  `output_workspace_path` to have a large inventory uploaded instead. Then record the insights (the
+  default `action="apply"`) with either inline insights or a file:
 
   ```
-  flowx(command="enrich", parameters={"output_dir": "<dir>", "action": "prepare"})   # read metadata/
+  flowx(command="enrich", parameters={"output_dir": "<dir>", "action": "prepare"})   # read inventory.json
   flowx(command="enrich", parameters={"output_dir": "<dir>", "insights": { ... }})   # inline object
   flowx(command="enrich", parameters={"output_dir": "<dir>", "insights_path": "<file>"})
   ```

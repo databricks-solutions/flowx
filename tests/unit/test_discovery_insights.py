@@ -647,6 +647,48 @@ def test_mcp_enrich_prepare_returns_the_metadata_an_agent_authors_against(tmp_pa
     assert json.loads(prepared["bundle"]["files"]["inventory.json"]) == json.loads(inventory_path.read_text())
 
 
+def test_mcp_enrich_prepare_returns_inventory_even_when_arm_provenance_fills_the_inline_bound(tmp_path: Path) -> None:
+    """A factory of large PL_* pipelines must not push inventory.json out of the size-bounded response."""
+    server = pytest.importorskip("flowx.mcp.server")
+    inventory_path = _write_inventory(tmp_path, _inventory())
+    for index in range(100):
+        name = f"PL_{index:03}"
+        skeleton = json.dumps({"name": name, "properties": {"description": ""}})
+        arm = json.dumps({"name": name, "properties": {"description": "x" * (20_000 - len(skeleton))}})
+        (inventory_path.parent / f"{name}.arm.json").write_text(arm, encoding="utf-8")
+
+    prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+
+    assert prepared["ok"] is True
+    assert "truncated" not in prepared["bundle"]
+    assert list(prepared["bundle"]["files"]) == ["inventory.json"]
+    assert prepared["bundle"]["files"]["inventory.json"] == inventory_path.read_text(encoding="utf-8")
+
+
+def test_mcp_enrich_prepare_uploads_only_the_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = pytest.importorskip("flowx.mcp.server")
+    runner = pytest.importorskip("flowx.mcp.runner")
+    inventory_path = _write_inventory(tmp_path, _inventory())
+    (inventory_path.parent / "PL_Orders.arm.json").write_text("{}", encoding="utf-8")
+    uploaded: dict[str, str] = {}
+
+    def fake_upload(local_root: Path, volume_path: str) -> dict[str, Any]:
+        uploaded.update(
+            {str(path.relative_to(local_root)): path.read_text(encoding="utf-8") for path in local_root.rglob("*")}
+        )
+        return {"output_volume_path": volume_path, "files": sorted(uploaded), "count": len(uploaded)}
+
+    monkeypatch.setattr(runner, "upload_tree_to_volume", fake_upload)
+
+    prepared = server._cmd_enrich(
+        {"output_dir": str(tmp_path), "action": "prepare", "output_volume_path": "/Volumes/main/default/flowx"}
+    )
+
+    assert prepared["ok"] is True
+    assert prepared["bundle_uploaded"]["files"] == ["inventory.json"]
+    assert uploaded == {"inventory.json": inventory_path.read_text(encoding="utf-8")}
+
+
 def test_mcp_enrich_prepare_and_action_errors(tmp_path: Path) -> None:
     server = pytest.importorskip("flowx.mcp.server")
     missing = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
