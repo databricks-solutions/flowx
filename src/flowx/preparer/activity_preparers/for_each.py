@@ -115,20 +115,20 @@ def _resolve_for_each_inputs_with_bridge(
 
 
 def _inject_input_parameter(inner_task: dict) -> dict:
-    """Adds ``{{input}}`` as a base_parameter on the inner task.
+    """Adds ``{{input}}`` as the ``item`` parameter on the inner task unless it already passes one.
 
     Args:
         inner_task: The prepared inner task dict.
 
     Returns:
-        The task dict with ``item`` parameter injected.
+        The task dict with an ``item`` parameter.
     """
     if "notebook_task" in inner_task:
         params = inner_task["notebook_task"].setdefault("base_parameters", {})
-        params["item"] = "{{input}}"
+        params.setdefault("item", "{{input}}")
     elif "run_job_task" in inner_task:
         params = inner_task["run_job_task"].setdefault("job_parameters", {})
-        params["item"] = "{{input}}"
+        params.setdefault("item", "{{input}}")
     return inner_task
 
 
@@ -151,7 +151,7 @@ def prepare(
 
     Returns:
         A PreparedActivity with the for_each_task, plus any notebooks, secrets,
-        and inner_workflows from the child activities.
+        inner_workflows, pipeline resources and job environments from the child activities.
     """
     task = build_common_task_fields(activity)
     concurrency = activity.concurrency if activity.concurrency is not None else 20
@@ -165,6 +165,8 @@ def prepare(
     all_secrets: list[SecretInstruction] = []
     all_setup_tasks: list[SetupTask] = []
     inner_workflows: list[PreparedWorkflow] = []
+    pipeline_resources: list[dict[str, Any]] = []
+    environments: list[dict[str, Any]] = []
     extra_tasks: list[dict[str, Any]] = []
     if inputs_bridge_task is not None:
         extra_tasks.append(inputs_bridge_task)
@@ -175,6 +177,8 @@ def prepare(
         all_secrets.extend(inner_prepared.secrets)
         all_setup_tasks.extend(inner_prepared.setup_tasks)
         inner_workflows.extend(inner_prepared.inner_workflows)
+        pipeline_resources.extend(inner_prepared.pipeline_resources)
+        environments.extend(inner_prepared.environments)
 
         # CF-001: a single child with extra_tasks (IfCondition/Switch branch bodies) can't inline as
         # for_each_task.task (one task only); escalate to the sub-job path so the whole body survives.
@@ -241,6 +245,8 @@ def prepare(
             all_secrets.extend(child_prepared.secrets)
             all_setup_tasks.extend(child_prepared.setup_tasks)
             inner_workflows.extend(child_prepared.inner_workflows)
+            pipeline_resources.extend(child_prepared.pipeline_resources)
+            environments.extend(child_prepared.environments)
 
         normalize_inner_task_params(inner_tasks)
 
@@ -294,4 +300,6 @@ def prepare(
         secrets=all_secrets,
         setup_tasks=all_setup_tasks,
         inner_workflows=inner_workflows,
+        pipeline_resources=pipeline_resources,
+        environments=environments,
     )

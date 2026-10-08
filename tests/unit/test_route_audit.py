@@ -20,7 +20,7 @@ def _write_plan(output_dir: Path) -> None:
     ConversionPlan(
         inventory_sha256="abc123",
         source_graphs_sha256="graphs123",
-        source_insights_sha256="insights123",
+        agentic_insights_sha256="insights123",
         components=[
             ComponentPlan(component_id="component-1", members=["parent", "child"], decision="agentic"),
             ComponentPlan(component_id="component-2", members=["solo"], decision="deterministic"),
@@ -60,7 +60,7 @@ def test_route_audit_summarises_components_decisions_and_gaps(tmp_path: Path) ->
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
     assert audit["recorded_against_inventory_sha256"] == "abc123"
     assert audit["source_graphs_sha256"] == "graphs123"
-    assert audit["source_insights_sha256"] == "insights123"
+    assert audit["agentic_insights_sha256"] == "insights123"
     # Both routed components and their decisions are recorded.
     decisions = {component["component_id"]: component["decision"] for component in audit["components"]}
     assert decisions == {"component-1": "agentic", "component-2": "deterministic"}

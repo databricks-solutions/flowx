@@ -147,7 +147,7 @@ def _run_resolve_agentic(args: argparse.Namespace) -> int:
 
 
 def _run_enrich(args: argparse.Namespace) -> int:
-    """Implements ``enrich``: validate agent-authored insights and record them in source_insights.json.
+    """Implements ``enrich``: validate agent-authored insights and record them in agentic_insights.json.
 
     Emits the enrich result JSON (``ok`` / ``violations`` / counts) to stdout so the caller can
     surface every violation at once. Returns 0 when the insights were recorded, 1 on validation
@@ -659,7 +659,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     enrich = subparsers.add_parser(
         "enrich",
-        help="Validate agent-authored insights, record them in source_insights.json, rebuild inventory.json.",
+        help="Validate agent-authored insights, record them in agentic_insights.json, rebuild inventory.json.",
     )
     enrich.add_argument(
         "--output-dir",

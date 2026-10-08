@@ -18,7 +18,7 @@ import pytest
 from flowx.adapter.__main__ import main as adapter_cli_main
 from flowx.discovery_insights import (
     INSIGHTS_KEY,
-    build_source_insights,
+    build_agentic_insights,
     enrich_inventory,
     inventory_fingerprint,
     load_insights,
@@ -192,6 +192,19 @@ def test_unknown_pipeline_reference_in_insight() -> None:
     assert any("pipeline 'ghost' not in inventory" in v for v in violations)
 
 
+def test_two_insights_for_the_same_pipeline_are_a_violation() -> None:
+    """Each annotated pipeline gets one judgment; a second entry for it is reported, not silently kept."""
+    raw = _valid_insights()
+    raw["pipeline_insights"].append({"pipeline": raw["pipeline_insights"][0]["pipeline"], "intent": "Contradicts."})
+    duplicate_index = len(raw["pipeline_insights"]) - 1
+    violations = validate_insights(raw, _inventory())
+    assert any(
+        violation.startswith(f"pipeline_insights[{duplicate_index}]: duplicate insight for pipeline")
+        and "pipeline_insights[0]" in violation
+        for violation in violations
+    )
+
+
 def test_unknown_pipeline_reference_in_relationship_endpoint() -> None:
     raw = _valid_insights()
     raw["pipeline_relationships"][0]["to_pipeline"] = "ghost"
@@ -247,6 +260,13 @@ def test_inferred_edge_requires_evidence_and_confidence() -> None:
     violations = validate_insights(raw, _inventory())
     assert any("requires a non-empty 'evidence' string" in v for v in violations)
     assert any("requires 'confidence' in" in v for v in violations)
+
+
+def test_whitespace_only_edge_identity_is_rejected() -> None:
+    raw = _valid_insights()
+    raw["pipeline_relationships"][1]["lineage_edge"]["edge_identity"] = "   "
+    violations = validate_insights(raw, _inventory())
+    assert any("edge_identity must be a non-empty string" in v for v in violations)
 
 
 def test_inferred_edge_aggregates_identity_and_evidence_errors() -> None:
@@ -460,7 +480,7 @@ def test_system_recommendation_requires_headline_and_patterns() -> None:
 
 def test_merge_adds_single_additive_block_with_fingerprint_and_schema_version() -> None:
     inventory = _inventory()
-    merged = render_inventory(inventory, build_source_insights(inventory, _valid_insights()))
+    merged = render_inventory(inventory, build_agentic_insights(inventory, _valid_insights()))
     # Original keys are untouched and one additive key is appended, last.
     assert list(merged) == ["source", "source_dir", "pipelines", "summary", "insights"]
     block = merged[INSIGHTS_KEY]
@@ -526,7 +546,7 @@ def test_enrich_is_idempotent_and_replaces_prior_block(tmp_path: Path) -> None:
 def test_fingerprint_ignores_any_prior_insights_block() -> None:
     inventory = _inventory()
     base_fingerprint = inventory_fingerprint(inventory)
-    enriched = render_inventory(inventory, build_source_insights(inventory, _valid_insights()))
+    enriched = render_inventory(inventory, build_agentic_insights(inventory, _valid_insights()))
     # Fingerprinting the already-enriched inventory yields the same digest (insights excluded).
     assert inventory_fingerprint(enriched) == base_fingerprint
 
@@ -620,6 +640,71 @@ def test_mcp_enrich_requires_exactly_one_source(tmp_path: Path) -> None:
     neither = server._cmd_enrich({"output_dir": str(tmp_path)})
     assert both["ok"] is False and "exactly one" in both["error"]
     assert neither["ok"] is False and "exactly one" in neither["error"]
+
+
+def test_mcp_enrich_prepare_returns_the_inventory_an_agent_authors_against(tmp_path: Path) -> None:
+    """On the hosted server the agent can't read output_dir, so prepare hands it inventory.json inline."""
+    server = pytest.importorskip("flowx.mcp.server")
+    inventory_path = _write_inventory(tmp_path, _inventory())
+
+    prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+
+    assert prepared["ok"] is True
+    assert prepared["output_dir"] == str(tmp_path)
+    assert json.loads(prepared["bundle"]["files"]["inventory.json"]) == json.loads(inventory_path.read_text())
+
+
+def test_mcp_enrich_prepare_returns_inventory_even_when_arm_provenance_fills_the_inline_bound(tmp_path: Path) -> None:
+    """A factory of large PL_* pipelines must not push inventory.json out of the size-bounded response."""
+    server = pytest.importorskip("flowx.mcp.server")
+    inventory_path = _write_inventory(tmp_path, _inventory())
+    for index in range(100):
+        name = f"PL_{index:03}"
+        skeleton = json.dumps({"name": name, "properties": {"description": ""}})
+        arm = json.dumps({"name": name, "properties": {"description": "x" * (20_000 - len(skeleton))}})
+        (inventory_path.parent / f"{name}.arm.json").write_text(arm, encoding="utf-8")
+
+    prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+
+    assert prepared["ok"] is True
+    assert "truncated" not in prepared["bundle"]
+    assert list(prepared["bundle"]["files"]) == ["inventory.json"]
+    assert prepared["bundle"]["files"]["inventory.json"] == inventory_path.read_text(encoding="utf-8")
+
+
+def test_mcp_enrich_prepare_uploads_only_the_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    server = pytest.importorskip("flowx.mcp.server")
+    runner = pytest.importorskip("flowx.mcp.runner")
+    inventory_path = _write_inventory(tmp_path, _inventory())
+    (inventory_path.parent / "PL_Orders.arm.json").write_text("{}", encoding="utf-8")
+    uploaded: dict[str, str] = {}
+
+    def fake_upload(local_root: Path, volume_path: str) -> dict[str, Any]:
+        uploaded.update(
+            {str(path.relative_to(local_root)): path.read_text(encoding="utf-8") for path in local_root.rglob("*")}
+        )
+        return {"output_volume_path": volume_path, "files": sorted(uploaded), "count": len(uploaded)}
+
+    monkeypatch.setattr(runner, "upload_tree_to_volume", fake_upload)
+
+    prepared = server._cmd_enrich(
+        {"output_dir": str(tmp_path), "action": "prepare", "output_volume_path": "/Volumes/main/default/flowx"}
+    )
+
+    assert prepared["ok"] is True
+    assert prepared["bundle_uploaded"]["files"] == ["inventory.json"]
+    assert uploaded == {"inventory.json": inventory_path.read_text(encoding="utf-8")}
+
+
+def test_mcp_enrich_prepare_and_action_errors(tmp_path: Path) -> None:
+    server = pytest.importorskip("flowx.mcp.server")
+    missing = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+    unknown = server._cmd_enrich({"output_dir": str(tmp_path), "action": "read"})
+    _write_inventory(tmp_path, _inventory())
+    with_insights = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare", "insights": {}})
+    assert missing["ok"] is False and "No inventory.json" in missing["error"]
+    assert unknown["ok"] is False and "prepare or apply" in unknown["error"]
+    assert with_insights["ok"] is False and "prepare" in with_insights["error"]
 
 
 # Ensure the deep-copied fixtures never share mutable state between tests.

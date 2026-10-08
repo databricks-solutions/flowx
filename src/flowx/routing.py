@@ -61,7 +61,13 @@ _LEGACY_INVENTORY_SOURCE = "adf"
 
 # Authored top-level keys (everything else the library owns and rejects on input).
 _PLAN_TOP_KEYS = {"components"}
-_LIBRARY_TOP_KEYS = {"schema_version", "inventory_sha256", "source_graphs_sha256", "source_insights_sha256", "findings"}
+_LIBRARY_TOP_KEYS = {
+    "schema_version",
+    "inventory_sha256",
+    "source_graphs_sha256",
+    "agentic_insights_sha256",
+    "findings",
+}
 # Authored per-component keys vs the fields the library recomputes and rejects on input.
 _COMPONENT_AUTHORED_KEYS = {"component_id", "members", "decision", "rationale", "assignments"}
 _COMPONENT_LIBRARY_KEYS = {"recommended", "options"}
@@ -543,7 +549,7 @@ def build_plan(inventory: dict[str, Any], raw: dict[str, Any]) -> ConversionPlan
     authored ``decision`` (and optional ``rationale``) per component, so the recorded facts cannot
     drift from the inventory. It stamps the schema version and the hashes that bind the plan to what
     it was decided on: the inventory fingerprint, the saved source graphs the inventory records, and
-    the saved source insights when enrich ran. Does not mutate the inputs and performs no I/O.
+    the saved agentic insights when enrich ran. Does not mutate the inputs and performs no I/O.
     """
     recommendation = build_recommendation(inventory)
     computed_by_id = _components_by_id(inventory)
@@ -570,7 +576,7 @@ def build_plan(inventory: dict[str, Any], raw: dict[str, Any]) -> ConversionPlan
         schema_version=SCHEMA_VERSION,
         inventory_sha256=inventory_fingerprint(inventory),
         source_graphs_sha256=inventory.get("source_graphs_sha256"),
-        source_insights_sha256=insights.get("source_insights_sha256") if isinstance(insights, dict) else None,
+        agentic_insights_sha256=insights.get("agentic_insights_sha256") if isinstance(insights, dict) else None,
         components=components,
         findings=recommendation["findings"],
     )
@@ -592,9 +598,9 @@ def plan_binding_violations(plan: ConversionPlan, inventory: dict[str, Any]) -> 
     if plan.source_graphs_sha256 != inventory.get("source_graphs_sha256"):
         violations.append(f"{PLAN_FILENAME} was recorded against different source graphs; re-run route")
     insights = inventory.get("insights")
-    current_insights = insights.get("source_insights_sha256") if isinstance(insights, dict) else None
-    if plan.source_insights_sha256 != current_insights:
-        violations.append(f"{PLAN_FILENAME} was recorded against different source insights; re-run route")
+    current_insights = insights.get("agentic_insights_sha256") if isinstance(insights, dict) else None
+    if plan.agentic_insights_sha256 != current_insights:
+        violations.append(f"{PLAN_FILENAME} was recorded against different agentic insights; re-run route")
     return violations
 
 
@@ -638,7 +644,7 @@ def record_plan(
         "violations": [],
         "inventory_sha256": recorded.inventory_sha256,
         "source_graphs_sha256": recorded.source_graphs_sha256,
-        "source_insights_sha256": recorded.source_insights_sha256,
+        "agentic_insights_sha256": recorded.agentic_insights_sha256,
         "components": len(recorded.components),
         "findings": len(recorded.findings),
     }

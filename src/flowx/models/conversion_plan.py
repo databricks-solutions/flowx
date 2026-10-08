@@ -13,8 +13,8 @@ and both conversion options -- is recomputed by the library on record so the rec
 can never drift from the inventory or be faked. The library also owns :attr:`ConversionPlan.schema_version`
 and the hashes that bind the plan to what it was decided on: :attr:`ConversionPlan.inventory_sha256`
 (the deterministic inventory), :attr:`ConversionPlan.source_graphs_sha256` (the saved
-``source_graphs.json``) and :attr:`ConversionPlan.source_insights_sha256` (the saved
-``source_insights.json``, when enrich ran).
+``source_graphs.json``) and :attr:`ConversionPlan.agentic_insights_sha256` (the saved
+``agentic_insights.json``, when enrich ran).
 
 Phase 1 records one decision per component and applies it to the IR after convert. Each component
 also carries :attr:`ComponentPlan.assignments`, reserved for per-node or per-subgraph routing
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 # The plan schema version stamped onto the recorded artifact. Bump on any backwards-incompatible
-# change to the recorded shape. Version 2 adds the source graph and source insights hashes and the
+# change to the recorded shape. Version 2 adds the source graph and agentic insights hashes and the
 # reserved per-node assignments.
 SCHEMA_VERSION = "2"
 
@@ -161,7 +161,7 @@ class ConversionPlan:
             base (see :func:`flowx.discovery_insights.inventory_fingerprint`).
         source_graphs_sha256: Hash of the saved ``source_graphs.json`` the inventory was projected
             from, or ``None`` when the source does not persist one.
-        source_insights_sha256: Hash of the saved ``source_insights.json``, or ``None`` when enrich
+        agentic_insights_sha256: Hash of the saved ``agentic_insights.json``, or ``None`` when enrich
             did not run.
     """
 
@@ -170,7 +170,7 @@ class ConversionPlan:
     schema_version: str = SCHEMA_VERSION
     inventory_sha256: str | None = None
     source_graphs_sha256: str | None = None
-    source_insights_sha256: str | None = None
+    agentic_insights_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to the recorded ``conversion_plan.json`` shape."""
@@ -178,7 +178,7 @@ class ConversionPlan:
             "schema_version": self.schema_version,
             "inventory_sha256": self.inventory_sha256,
             "source_graphs_sha256": self.source_graphs_sha256,
-            "source_insights_sha256": self.source_insights_sha256,
+            "agentic_insights_sha256": self.agentic_insights_sha256,
             "components": [component.to_dict() for component in self.components],
             "findings": list(self.findings),
         }
@@ -203,7 +203,7 @@ class ConversionPlan:
             schema_version=SCHEMA_VERSION,
             inventory_sha256=raw.get("inventory_sha256"),
             source_graphs_sha256=raw.get("source_graphs_sha256"),
-            source_insights_sha256=raw.get("source_insights_sha256"),
+            agentic_insights_sha256=raw.get("agentic_insights_sha256"),
             components=[ComponentPlan.from_dict(item) for item in components],
             findings=[str(finding) for finding in raw.get("findings") or []],
         )

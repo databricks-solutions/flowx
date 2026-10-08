@@ -610,7 +610,7 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any]) -> dict[str, An
 def apply_plan(output_dir: Path, plan: ConversionPlan) -> dict[str, Any]:
     """Apply a recorded, typed plan to the IR after convert: the library's one routing entry point.
 
-    Checks the plan still matches the inventory, source graphs and source insights it was decided
+    Checks the plan still matches the inventory, source graphs and agentic insights it was decided
     on, then rebuilds the translation report from the deterministic baseline (see
     :func:`apply_plan_to_report`). Each routed-agentic component is then filled only by
     ``fill-agentic combine``; ``convert --merge-agentic`` stays for convert's own gaps. Phase 1 decides

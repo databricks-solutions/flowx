@@ -213,7 +213,7 @@ MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [.
 
 - `--members` (comma-separated; MCP accepts a list) must **exactly match** a routed-**agentic**
   component in the recorded `metadata/conversion_plan.json`, whose `inventory_sha256`,
-  `source_graphs_sha256` and `source_insights_sha256` must still match the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
+  `source_graphs_sha256` and `agentic_insights_sha256` must still match the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
   — you can't swap pipelines the plan didn't route agentic. The report must carry a routing record
   that matches that plan (route has applied it).
 - **Same authored pipelines** (the canonical hash covers every field of every authored pipeline):
@@ -307,7 +307,7 @@ Once the routed-agentic groups are filled and the report validates, continue wit
 just-in-time configuration (`inspect`/`modify`) as usual, then `flowx-package`. The recorded
 `metadata/conversion_plan.json` is kept alongside `inventory.json` as the decision of record. It is the
 library's typed `ConversionPlan` (schema 2): one decision per component, bound to the inventory
-fingerprint, the saved `source_graphs.json` and the saved `source_insights.json` it was decided on,
+fingerprint, the saved `source_graphs.json` and the saved `agentic_insights.json` it was decided on,
 with a reserved, empty `assignments` list per component for per-node routing later.
 
 Package verifies the routing plan is still current against the inventory, checks the saved baseline

@@ -75,6 +75,52 @@ Write one JSON file per resolved gap into `<output_dir>/agentic_results/`:
 `activity_name` (required) is matched by name, recursing into containers. `task_key`/`depends_on`
 are inherited from the placeholder when omitted, preserving dependency edges.
 
+When no typed task fits, use `"type": "AgenticComponentActivity"` instead. It carries `files`
+(each a relative `path` below the bundle's `src/` with text `content` or base64 `binary_content`),
+pipeline `resources` (`resource_key` plus a `definition` mapping), optional job `environments`
+(each exactly an `environment_key` plus a `spec` mapping), and a raw Databricks `task` fragment with
+exactly one `<kind>_task` payload. A serverless `spark_python_task` or `python_wheel_task` needs an
+`environment_key`: declare that environment in `environments` and flowx writes it into the job that
+runs the task. A wheel or other authored file the environment installs is listed in
+`spec.dependencies` as `../src/<path>`. Every `environment_key` a task uses must be declared, and
+two components may declare the same environment only with an identical spec (it is then written
+once).
+
+flowx owns `task_key`, `depends_on`, `run_if`, `timeout_seconds`, `max_retries`,
+`min_retry_interval_millis` and `retry_on_timeout`; setting any of them in the fragment is an
+error. On merge, the component's `name`, `task_key`, `depends_on`,
+`timeout_seconds`, `max_retries` and `min_retry_interval_millis` always come from the placeholder;
+any values you set for them on the activity are replaced. flowx does not override or remove any
+other value the fragment sets, except in three wiring passes that apply to authored tasks exactly as
+to generated ones:
+
+- A `{{tasks.X.values.Y}}` reference to a task outside the same job is blanked, because task values
+  do not cross job boundaries. Only notebook `base_parameters`, `run_job_task.job_parameters` and
+  `condition_task` operands are checked. SETUP.md lists the blanked notebook parameters and
+  neutralised conditions, not blanked `job_parameters`; references in other payloads are left as
+  they are.
+- Inside a ForEach that runs as its own job, notebook `base_parameters` and `condition_task`
+  operands are rewritten for that job: `{{input.x}}` becomes `{{job.parameters.x}}`, ADF
+  expressions become job-parameter references, and non-string values become strings.
+- A `run_job_task` whose `job_id` is `${resources.jobs.X.id}` for a job outside this bundle is
+  pointed at an `X_job_id` bundle variable instead.
+
+Where the fragment leaves a value out, flowx adds only the plumbing the task needs:
+
+- The ForEach `item` parameter, only to a `notebook_task` (`base_parameters`) or `run_job_task`
+  (`job_parameters`) that is the ForEach's only child; any other payload of an only child passes
+  `{{input}}` itself. When the ForEach has several children, or its only child is an IfCondition or
+  Switch holding the component, the children run as a `<loop>_inner_tasks` job where `{{input}}`
+  does not resolve: reference `{{job.parameters.item}}` in a notebook `base_parameters`, a
+  `run_job_task.job_parameters` or a `condition_task` operand, which flowx forwards. Other payloads
+  are not scanned, so they cannot receive the item on their own.
+- The source activity's collapsed notifications, when the fragment sets neither
+  `email_notifications` nor `webhook_notifications`.
+- A job-cluster binding, only for a notebook task that names no compute and either has a
+  classic compute mode, ships libraries, or (without a serverless compute mode) points at a
+  workspace path outside the bundle. A bundle `../src/` notebook without libraries runs on
+  serverless, and no other task type is given a cluster, so name the compute you need.
+
 ## Step 6 — Merge agentic results
 
 ```bash

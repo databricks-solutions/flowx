@@ -1,7 +1,7 @@
 """The typed conversion plan (schema 2): the library's load, validate and record path.
 
 The plan is bound to what it was decided on: the deterministic inventory fingerprint, the saved
-source graphs hash the inventory records (H0) and the saved source insights hash (H1). Phase 1
+source graphs hash the inventory records (H0) and the saved agentic insights hash (H1). Phase 1
 decides whole components; per-node assignments are reserved and must stay empty.
 """
 
@@ -40,7 +40,7 @@ def _inventory(insights_hash: str | None = "insights-1") -> dict[str, Any]:
         source_graphs_sha256="graphs-1",
     )
     if insights_hash is not None:
-        inventory["insights"] = {"schema_version": "1", "source_insights_sha256": insights_hash}
+        inventory["insights"] = {"schema_version": "1", "agentic_insights_sha256": insights_hash}
     return inventory
 
 
@@ -66,7 +66,7 @@ def test_plan_round_trips_including_reserved_assignments(tmp_path: Path) -> None
     plan = ConversionPlan(
         inventory_sha256="inv",
         source_graphs_sha256="h0",
-        source_insights_sha256="h1",
+        agentic_insights_sha256="h1",
         components=[
             ComponentPlan(
                 component_id="component-1",
@@ -102,7 +102,7 @@ def test_recorded_plan_is_bound_to_the_source_graphs_and_insights(tmp_path: Path
     assert recorded is not None
     assert recorded.schema_version == SCHEMA_VERSION
     assert recorded.source_graphs_sha256 == "graphs-1"
-    assert recorded.source_insights_sha256 == "insights-1"
+    assert recorded.agentic_insights_sha256 == "insights-1"
     assert result["source_graphs_sha256"] == "graphs-1"
 
 
@@ -116,12 +116,12 @@ def test_per_node_assignments_are_reserved_for_phase_2() -> None:
 
 
 def test_authored_plans_cannot_set_the_bound_hashes() -> None:
-    plan = {**_decide("agentic"), "source_graphs_sha256": "x", "source_insights_sha256": "y"}
+    plan = {**_decide("agentic"), "source_graphs_sha256": "x", "agentic_insights_sha256": "y"}
 
     violations = routing.validate_plan(plan, _inventory())
 
     assert any("source_graphs_sha256" in violation and "library" in violation for violation in violations)
-    assert any("source_insights_sha256" in violation and "library" in violation for violation in violations)
+    assert any("agentic_insights_sha256" in violation and "library" in violation for violation in violations)
 
 
 def test_package_refuses_a_plan_when_the_insights_changed_after_route(
@@ -135,7 +135,7 @@ def test_package_refuses_a_plan_when_the_insights_changed_after_route(
     code = package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"])
 
     assert code == 1
-    assert "different source insights" in capsys.readouterr().err
+    assert "different agentic insights" in capsys.readouterr().err
     assert not (tmp_path / "databricks.yml").exists()
 
 
@@ -147,6 +147,6 @@ def test_apply_plan_refuses_a_stale_plan(tmp_path: Path) -> None:
     report_bytes = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
     (tmp_path / "metadata" / "inventory.json").write_text(json.dumps(_inventory("insights-2")), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="different source insights"):
+    with pytest.raises(ValueError, match="different agentic insights"):
         apply_plan(tmp_path, recorded)
     assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_bytes

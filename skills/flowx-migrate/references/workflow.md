@@ -70,7 +70,7 @@ merges:
 
 - **Enrich (default):** the agent authors an `insights` layer (factory-wide recommendation,
   per-pipeline intent + recommended Databricks patterns, cross-pipeline relationships) and `enrich`
-  records it in `metadata/source_insights.json` (bound to the saved `source_graphs.json`) and
+  records it in `metadata/agentic_insights.json` (bound to the saved `source_graphs.json`) and
   rebuilds `metadata/inventory.json` with it under a single additive `insights` key, leaving every
   deterministic key byte-identical. Skippable for a deterministic-only, headless pass.
 - **Route:** groups pipelines into connected components over control lineage and, per component,

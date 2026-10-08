@@ -176,3 +176,36 @@ def test_bundle_pipeline_reference_to_unknown_resource_is_flagged(tmp_path):
     assert "job.yml" in finding.location
     assert "run_pipeline" in finding.location
     assert "dangling_pipeline_reference" in format_result(result)
+
+
+def test_bundle_environment_reference_must_be_declared_in_the_same_job(tmp_path):
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    (resources / "job.yml").write_text(
+        "resources:\n"
+        "  jobs:\n"
+        "    declared:\n"
+        "      environments:\n"
+        "        - environment_key: serverless\n"
+        "          spec:\n"
+        "            environment_version: '2'\n"
+        "      tasks:\n"
+        "        - task_key: run_declared\n"
+        "          environment_key: serverless\n"
+        "          spark_python_task:\n"
+        "            python_file: ../src/run.py\n"
+        "    undeclared:\n"
+        "      tasks:\n"
+        "        - task_key: run_undeclared\n"
+        "          environment_key: serverless\n"
+        "          spark_python_task:\n"
+        "            python_file: ../src/run.py\n",
+        encoding="utf-8",
+    )
+
+    result = check_bundle_dir(tmp_path)
+    findings = [finding for finding in result.findings if finding.code == "dangling_environment_reference"]
+
+    assert len(findings) == 1
+    assert findings[0].severity == "violation"
+    assert "run_undeclared" in findings[0].location

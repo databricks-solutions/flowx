@@ -1,4 +1,4 @@
-"""Agentic insights (discover phase) -- agent-authored judgment recorded in ``source_insights.json``.
+"""Agentic insights (discover phase) -- agent-authored judgment recorded in ``agentic_insights.json``.
 
 The deterministic discover layer captures what a source workflow *is*; these models
 capture what to *do* about it -- the judgment the deterministic pass can never derive:
@@ -223,14 +223,17 @@ class PipelineRelationship:
 
 @dataclass(slots=True, kw_only=True)
 class Insights:
-    """Agent-authored insights, recorded in ``source_insights.json`` and in ``inventory.json``.
+    """Agent-authored insights, recorded in ``agentic_insights.json`` and in ``inventory.json``.
 
     In the inventory they sit under the additive ``insights`` key.
 
-    The agent authors only these four content fields. The library stamps ``schema_version``, the
-    ``inventory_sha256`` fingerprint, the ``source_graphs_sha256`` it was checked against and its own
-    ``source_insights_sha256`` on record (see :mod:`flowx.discovery_insights`), so the authored
-    insights stay bound to the exact deterministic inventory and source graphs they describe.
+    The agent authors only these four content fields, plus the optional ``authored_against``: the
+    ``source_graphs_sha256`` copied from the ``inventory.json`` it read. When given, enrich verifies
+    it but does not record it. The library stamps
+    ``schema_version``, the ``inventory_sha256`` fingerprint, the ``source_graphs_sha256`` it was
+    checked against and its own ``agentic_insights_sha256`` on record (see
+    :mod:`flowx.discovery_insights`), so the authored insights stay bound to the exact deterministic
+    inventory and source graphs they describe.
 
     Attributes:
         overview: A short factory-wide narrative -- what this collection of pipelines is.

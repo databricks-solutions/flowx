@@ -126,7 +126,8 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
     (fan-out is preserved: each call site is its own edge). Edges whose callee
     equals the caller are dropped (no self-edges), and identical edges are
     collapsed (no duplicates). An unresolved callee is recorded with
-    ``resolved=False`` rather than dropped.
+    ``resolved=False`` rather than dropped. A ``RunJobActivity`` that runs an
+    existing job by ID emits no edge.
 
     Args:
         pipeline: The translated pipeline IR.
@@ -140,7 +141,9 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
             match activity:
                 case ExecutePipelineActivity():
                     yield activity.pipeline_name or "", activity.wait_on_completion, activity.task_key
-                case RunJobActivity():
+                case RunJobActivity() if not activity.existing_job_id:
+                    # A run-now of an existing job by ID targets a job outside this source, and its
+                    # job_name is the caller's own task key, so it is not a cross-workflow edge.
                     yield activity.job_name or "", None, activity.task_key
 
     return control_edges_from_calls(pipeline.name, _calls())
@@ -166,7 +169,8 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
             return "identity", producer.identity, producer.identity
         return None
     if producer.signature and producer.signature == consumer.signature:
-        return "signature", producer.signature, producer.identity or consumer.identity
+        # A signature match proves nothing physical, so it never claims either side's identity.
+        return "signature", producer.signature, None
     return None
 
 
@@ -274,6 +278,7 @@ def build_motif_annotations(pipeline: Pipeline) -> list[MotifAnnotation]:
                 display_name=activity.display_name,
                 databricks_replacement=activity.databricks_replacement,
                 notes=list(activity.confidence_notes),
+                source_type_hint=activity.source_type_hint,
             )
         )
     return annotations

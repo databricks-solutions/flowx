@@ -11,13 +11,18 @@ The `flowx-route` step reads this block to present the agentic conversion option
 
 ## The insights shape
 
-You author only these four fields. The library stamps `schema_version`, the `inventory_sha256`
-fingerprint, the `source_graphs_sha256` it was checked against and its own `source_insights_sha256`
-when it records them, binding your insights to the exact inventory and source graphs they describe.
-Do not author any of those four keys yourself:
+You author these four content fields, plus `authored_against` by default: copy the
+`source_graphs_sha256` value from the `inventory.json` you read. It is optional, but when you give it
+enrich refuses the insights if it no longer matches, because that means discover ran again after you
+wrote them. When the inventory records no `source_graphs_sha256`, leave it out: enrich rejects it
+there. The library stamps `schema_version`, the `inventory_sha256` fingerprint, the
+`source_graphs_sha256` it was checked against and its own `agentic_insights_sha256` when it records
+them, binding your insights to the exact inventory and source graphs they describe. Do not author any
+of those four keys yourself:
 
 ```json
 {
+  "authored_against": "<source_graphs_sha256 copied from the inventory.json you read>",
   "overview": "One short factory-wide narrative — what this collection of pipelines is.",
   "system_recommendation": {
     "headline": "The one decision a migrator must make before any per-pipeline work",
@@ -65,6 +70,8 @@ Do not author any of those four keys yourself:
 
 - **Foreign keys.** Every `pipeline_insights[].pipeline` and every relationship
   `from_pipeline` / `to_pipeline` must be a real pipeline name in the inventory.
+- **One insight per pipeline.** A pipeline may appear in `pipeline_insights` at most once; put
+  everything you have to say about it in that one entry.
 - **Field types.** Pipeline names are strings. When present, `pattern_name`, `intent`,
   `databricks_pattern` and `risk_if_ignored` (per pipeline) and `relationship_summary`,
   `databricks_pattern` and `risk_if_ignored` (per relationship) must be strings, and
@@ -98,8 +105,8 @@ Do not author any of those four keys yourself:
     the evidence.
   - `inferred` — a coupling the deterministic layer never found (data flow inside notebook code, an
     external trigger, a shared table the parser didn't resolve). There is nothing to resolve
-    against, so `edge_identity` is your descriptor of the coupling and you **must** supply a non-empty
-    `evidence` string and a `confidence` of `high` / `medium` / `low`.
+    against, so `edge_identity` is your own non-empty descriptor of the coupling, and you **must** also
+    supply a non-empty `evidence` string and a `confidence` of `high` / `medium` / `low`.
   - There is no deterministic cross-pipeline **data** tier in v1: the deterministic data edges are
     intra-pipeline and task-scoped, so a cross-pipeline data coupling rides the `inferred` tier.
 

@@ -22,7 +22,7 @@ operation; `parameters` is its keyword-argument dict.
 | `convert` | `adapter convert` | ADF activities → Databricks IR |
 | `merge_agentic` | `adapter convert --merge-agentic` | Merge ADF agent-produced results into the report |
 | `resolve_agentic` | `adapter resolve-agentic` | Prepare, stage, and apply reviewed Airflow leaf-gap resolutions |
-| `enrich` | `adapter enrich` | Validate and record agent-authored insights, rebuild the inventory |
+| `enrich` | `adapter enrich` | Return `inventory.json` (`prepare`), then validate and record agent-authored insights (`apply`) |
 | `route` | `adapter route` | Recommend deterministic vs. agentic per component; record the plan and rebuild the report |
 | `fill_agentic` | `adapter fill-agentic combine` | Replace a routed-agentic group with agent-authored pipelines (ADF) |
 | `inspect` | `adapter inspect` | Surface pending translation options |
@@ -113,7 +113,7 @@ at `https://<app-url>/mcp`, and (3) **stateless** — this server sets
 `stateless_http=True` and adds CORS, so it qualifies. If a browser CORS error appears,
 set the app env var `FLOWX_ALLOWED_ORIGINS` to your workspace URL and redeploy.
 MCP access is capped at **20 tools** across all servers; flowx exposes just **one** tool
-(`flowx`, with 12 commands), so it uses a single slot.
+(`flowx`, covering every command in the table above), so it uses a single slot.
 
 > In serverless Genie Code, deploy with the `app/deploy_app.py` notebook (SDK-based). `./app/deploy.sh`
 > must run from a Databricks CLI session (workspace web terminal or a local machine), since

@@ -123,6 +123,16 @@ def test_control_edges_run_job_activity_is_source_neutral():
     assert edges[0].resolved is True
 
 
+def test_run_now_of_an_existing_job_is_not_a_cross_workflow_edge():
+    """A run-now by job ID targets a job outside the source; its job_name is only the caller's task key."""
+    pipeline = Pipeline(
+        name="dag_main",
+        tasks=[RunJobActivity(name="trigger", task_key="trigger", job_name="trigger", existing_job_id="123")],
+    )
+
+    assert build_control_edges(pipeline) == []
+
+
 def test_control_edges_unresolved_callee_is_recorded_not_dropped():
     """An empty callee is kept with resolved=False rather than silently dropped."""
     pipeline = Pipeline(name="parent", tasks=[_execute("call", "")])
@@ -327,6 +337,28 @@ def test_build_motif_annotations_groups_members_by_tag():
     assert annotations[0].member_task_keys == ["motif_auto_loader", "member"]
     assert annotations[0].display_name == "Auto Loader"
     assert annotations[0].databricks_replacement == "auto_loader"
+
+
+def test_build_motif_annotations_carries_the_source_type_hint():
+    """The detector's source classification survives into the IR lineage annotation."""
+    pipeline = Pipeline(
+        name="p",
+        tasks=[
+            MotifActivity(
+                name="motif",
+                task_key="motif_bulk_copy",
+                motif_id="metadata_driven_bulk_copy",
+                display_name="Bulk copy",
+                databricks_replacement="lakeflow_connect",
+                matched_activity_names=["Lookup", "ForEach"],
+                source_type_hint="database",
+            ),
+        ],
+    )
+
+    (annotation,) = build_motif_annotations(pipeline)
+
+    assert annotation.source_type_hint == "database"
 
 
 def test_with_lineage_is_pure():

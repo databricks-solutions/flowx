@@ -19,10 +19,18 @@ Two tiers, exactly as #36 established them:
   resolved asset to an unresolved one on a coincidence. For an unresolved reference
   the signature is the *structural path signature* (#36's "expression" tier: the
   literal path skeleton plus its parameter-slot count) when the path has a literal
-  anchor. It is **never** the bare dataset reference name: two unrelated opaque
+  anchor, prefixed ``ST[<store>]/`` when the dataset's store is known (see
+  :func:`_resolve_dataset_store`), so two datasets on different stores that merely
+  share a folder shape never join. An unknown store is never guessed: the signature
+  stays unqualified, and a qualified and an unqualified signature never join.
+  It is **never** the bare dataset reference name: two unrelated opaque
   references that merely share a name must not join (#36's explicit rule), so when
   neither a physical identity nor a path-anchored signature is available the
   signature is left empty and the asset cannot participate in signature matching.
+  The signature is also left empty when the activity overrides the dataset's
+  location at run time (a source query, stored procedure or ``storeSettings`` path
+  override on a read; a sink stored procedure on a write), because the dataset's
+  path is then not what the activity touches.
 
 Only literal, provable values ever become an ``identity`` -- the resolver returns
 ``None`` rather than guessing, which is what stopped #36's spurious edges.
@@ -32,7 +40,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from flowx.models.adf_ast import AdfActivity, AdfDatasetReference, AdfDefinitions
@@ -41,6 +49,8 @@ from flowx.parser.expression_parser import resolve_expression, resolve_interpola
 
 _ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
 _DATASET_PARAM_RE = re.compile(r"^@dataset\(\)\.([A-Za-z_][A-Za-z0-9_]*)$")
+_ARM_EXPRESSION_RE = re.compile(r"^\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\(.*\]$", re.DOTALL)
+_RUN_TIME_PATH_OVERRIDES = ("wildcardFolderPath", "wildcardFileName", "fileListPath", "prefix")
 
 # Runtime references inside a path expression. Each is a value only knowable at
 # run time; for a *structural* signature we collapse them all to one slot token so
@@ -74,6 +84,13 @@ def activity_data_assets(
     included. A dataset named in both an activity-level slot and ``typeProperties``
     is counted once per side so an activity does not emit two identical assets.
 
+    When the activity overrides the dataset's physical source or target at run time,
+    the dataset's own location is not what the activity touches, so that side gets
+    neither an identity nor a signature and cannot join on either tier. Reads are overridden by
+    a source query or stored procedure, or by ``storeSettings`` that give a wildcard
+    folder or file name, a file list, or a prefix; writes by a sink stored procedure,
+    which decides the table itself.
+
     Args:
         activity: The ADF activity to resolve.
         definitions: All loaded ADF definitions (datasets + linked services),
@@ -86,21 +103,61 @@ def activity_data_assets(
         ``(data_reads, data_writes)`` as lists of :class:`DataAsset`.
     """
     resolution_context = context if context is not None else TranslationContext()
+    reads_overridden = _location_overridden(activity, produced=False)
     reads = [
-        _dataset_ref_to_asset(reference, definitions, resolution_context)
+        _dataset_ref_to_asset(reference, definitions, resolution_context, location_overridden=reads_overridden)
         for reference in _activity_dataset_refs(activity, produced=False)
     ]
+    writes_overridden = _location_overridden(activity, produced=True)
     writes = [
-        _dataset_ref_to_asset(reference, definitions, resolution_context)
+        _dataset_ref_to_asset(reference, definitions, resolution_context, location_overridden=writes_overridden)
         for reference in _activity_dataset_refs(activity, produced=True)
     ]
     return reads, writes
+
+
+def _location_overridden(activity: AdfActivity, *, produced: bool) -> bool:
+    """Say whether the activity replaces its datasets' physical target (produced) or source (not) at run time.
+
+    A Copy sink that names a stored procedure writes wherever the procedure decides.
+    A Copy or Lookup ``source`` that names a query or stored procedure reads what it
+    returns. Connectors name these keys differently (``sqlReaderQuery``,
+    ``oracleReaderQuery``, ``sqlReaderStoredProcedureName``, ...), so they are
+    matched by kind: ``query`` or any key ending in ``Query`` or
+    ``StoredProcedureName``. ``storeSettings`` with a wildcard, file list or prefix
+    replace the read path: Copy and Lookup carry them on ``source``, Delete and
+    GetMetadata directly on ``typeProperties``.
+    """
+    type_properties = activity.type_properties or {}
+    if produced:
+        return _names_any(type_properties.get("sink"), lambda key: key.endswith("StoredProcedureName"))
+    source = type_properties.get("source")
+    store_settings_candidates = (
+        source.get("storeSettings") if isinstance(source, dict) else None,
+        type_properties.get("storeSettings"),
+    )
+    return _names_any(source, _is_source_query_key) or any(
+        _names_any(store_settings, lambda key: key in _RUN_TIME_PATH_OVERRIDES)
+        for store_settings in store_settings_candidates
+    )
+
+
+def _is_source_query_key(key: str) -> bool:
+    """``True`` for a ``source`` key that names a query or stored procedure to read through."""
+    return key == "query" or key.endswith("Query") or key.endswith("StoredProcedureName")
+
+
+def _names_any(settings: object, is_override_key: Callable[[str], bool]) -> bool:
+    """``True`` when *settings* is a dict with a non-empty value under a key *is_override_key* accepts."""
+    return isinstance(settings, dict) and any(value and is_override_key(key) for key, value in settings.items())
 
 
 def _dataset_ref_to_asset(
     dataset_ref: AdfDatasetReference,
     definitions: AdfDefinitions,
     context: TranslationContext,
+    *,
+    location_overridden: bool,
 ) -> DataAsset:
     """Turn one dataset reference into a two-tier :class:`DataAsset`.
 
@@ -111,14 +168,25 @@ def _dataset_ref_to_asset(
     path-anchored signature is available the signature is left empty. An empty
     signature is falsy, so :func:`~flowx.lineage._match_assets` cannot use it as a
     join key -- the asset is still captured as a read / write for reporting, it just
-    cannot manufacture a signature-tier edge.
+    cannot manufacture a signature-tier edge. When *location_overridden* is set the
+    dataset's location is not what the activity touches, so neither an identity nor a
+    signature is derived from it.
+
+    A path signature is prefixed with the dataset's store when that store is known
+    (see :func:`_resolve_dataset_store`), so two datasets on different containers or
+    accounts that merely share a folder shape never join.
     """
+    if location_overridden:
+        return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))
     identity = resolve_dataset_identity(dataset_ref, definitions, context)
     if identity is not None:
         # Mirror the identity into the signature so the weak tier never joins a
         # resolved asset to an unresolved one that merely shares a physical value.
         return DataAsset(signature=identity, identity=identity, asset_type=_asset_type(dataset_ref, definitions))
     path_signature = _path_signature(dataset_ref.parameters)
+    store = _resolve_dataset_store(dataset_ref, definitions, context) if path_signature is not None else None
+    if path_signature is not None and store:
+        path_signature = f"ST[{store}]/{path_signature}"
     return DataAsset(
         signature=path_signature if path_signature is not None else "",
         identity=None,
@@ -227,12 +295,17 @@ def resolve_dataset_identity(
         return None
     schema, table = _resolve_table_reference(dataset_ref, properties, resolution_context)
     if table:
-        qualified_table = f"{schema}.{table}" if schema else table
-        if not _is_physical(qualified_table):
+        if not all(_is_physical(part) for part in (schema, table) if part):
             return None
+        qualified_table = f"{schema}.{table}" if schema else table
         store = _resolve_table_store(properties, definitions)
         return f"{store}/{qualified_table}" if store else None
-    return _resolve_dataset_path(properties, _backing_linked_service(properties, definitions))
+    return _resolve_dataset_path(
+        properties,
+        _backing_linked_service(properties, definitions),
+        _effective_dataset_params(dataset_ref, properties),
+        resolution_context,
+    )
 
 
 def _dataset_props(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> dict[str, Any] | None:
@@ -373,7 +446,7 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
     string, or a linked service that takes parameters, gives ``None``: each binding
     may point at a different store, so no single name identifies it.
     """
-    linked_service_name, reference_parameters = _linked_service_reference(dataset_props)
+    linked_service_name, _ = _linked_service_reference(dataset_props)
     if not linked_service_name:
         return None
     linked_service = definitions.get_linked_service(linked_service_name)
@@ -395,9 +468,81 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
         return None
     if server:
         return "/".join(part.strip() for part in store_parts)
-    if reference_parameters or linked_service_properties.get("parameters"):
+    return _unparameterised_linked_service_name(dataset_props, definitions)
+
+
+def _unparameterised_linked_service_name(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> str | None:
+    """The dataset's linked service name when that linked service takes no parameters, else ``None``.
+
+    A linked service with no parameters points at the same store on every use, so its
+    name can stand in for a server or account it hides in a secret. One that takes
+    parameters, on its reference or in its own definition, may point somewhere else
+    for each binding.
+    """
+    linked_service_name, reference_parameters = _linked_service_reference(dataset_props)
+    if not linked_service_name or reference_parameters:
+        return None
+    linked_service = definitions.get_linked_service(linked_service_name)
+    if linked_service is not None and linked_service.properties.get("parameters"):
         return None
     return linked_service_name
+
+
+def _resolve_dataset_store(
+    dataset_ref: AdfDatasetReference,
+    definitions: AdfDefinitions,
+    context: TranslationContext,
+) -> str | None:
+    """Name the store a dataset lives in, even when its full path or table does not resolve.
+
+    A table dataset's store is the one :func:`_resolve_table_store` names. A file
+    dataset's store is ``<file system>@<account>`` when both are literal. When the
+    file system is literal but the account cannot be read (a Key Vault or masked
+    connection string, for example), the linked service name stands in for the
+    account, as long as the linked service takes no parameters. ``None`` whenever
+    the store is not provable, so the caller leaves the signature unqualified rather
+    than guess.
+    """
+    properties = _dataset_props(dataset_ref, definitions)
+    if properties is None:
+        return None
+    _, table = _resolve_table_reference(dataset_ref, properties, context)
+    if table:
+        return _resolve_table_store(properties, definitions)
+    type_props = properties.get("typeProperties") or properties
+    location = type_props.get("location")
+    if not isinstance(location, dict):
+        return None
+    file_system, account = _resolve_file_store(
+        location,
+        _backing_linked_service(properties, definitions),
+        _effective_dataset_params(dataset_ref, properties),
+        context,
+    )
+    if file_system is None:
+        return None
+    store = account or _unparameterised_linked_service_name(properties, definitions)
+    return f"{file_system}@{store}" if store else None
+
+
+def _resolve_file_store(
+    location: dict[str, Any],
+    linked_service: Any,
+    dataset_params: dict[str, Any],
+    context: TranslationContext,
+) -> tuple[str | None, str | None]:
+    """Resolve a file dataset's ``(file system, storage account)``.
+
+    Each part is ``None`` unless it resolves to a literal. The path identity and the
+    signature's store qualifier both read the store here, so they always agree on
+    what counts as a known file system and account.
+    """
+    file_system = _resolve_param_value(location.get("fileSystem") or location.get("container"), dataset_params, context)
+    account = _resolve_storage_account(linked_service)
+    return (
+        file_system if file_system and _is_physical(file_system) else None,
+        account if account and _is_physical(account) else None,
+    )
 
 
 def _connection_string_fields(connection_string: str) -> dict[str, str]:
@@ -410,27 +555,39 @@ def _connection_string_fields(connection_string: str) -> dict[str, str]:
     return fields
 
 
-def _resolve_dataset_path(dataset_props: dict[str, Any], linked_service: Any) -> str | None:
+def _resolve_dataset_path(
+    dataset_props: dict[str, Any],
+    linked_service: Any,
+    dataset_params: dict[str, Any],
+    context: TranslationContext,
+) -> str | None:
     """Resolve a dataset's storage path from its location + backing linked service.
 
     The path runs down to the literal ``fileName`` when the dataset names one, so
-    two files in the same folder stay distinct. Any parameterised or unresolved
-    part (file system, folder, file name, or storage account) yields ``None``.
+    two files in the same folder stay distinct. Location parts written as
+    ``@dataset().x`` resolve against the reference's effective parameters, as table
+    names do, so a parameterised dataset bound to literals still gets its identity.
+    Any part that stays parameterised or unresolved (file system, folder, file name,
+    or storage account) yields ``None``.
     """
     type_props = dataset_props.get("typeProperties") or dataset_props
     location = type_props.get("location") or {}
     if not isinstance(location, dict):
         return None
 
-    file_system = location.get("fileSystem") or location.get("container") or ""
-    folder_path = location.get("folderPath") or ""
-    file_name = location.get("fileName") or ""
-    location_parts = (file_system, folder_path, file_name)
-    if not all(isinstance(part, str) and _is_physical(part) for part in location_parts) or not file_system:
-        return None
+    def _resolved_part(raw: Any) -> str | None:
+        if raw is None or raw == "":
+            return ""
+        resolved = _resolve_param_value(raw, dataset_params, context)
+        # A part that was written but resolves to nothing (an unbound parameter) is unknown, not absent.
+        if not resolved or not _is_physical(resolved):
+            return None
+        return resolved
 
-    account = _resolve_storage_account(linked_service)
-    if not account or not _is_physical(account):
+    file_system, account = _resolve_file_store(location, linked_service, dataset_params, context)
+    folder_path = _resolved_part(location.get("folderPath"))
+    file_name = _resolved_part(location.get("fileName"))
+    if file_system is None or account is None or folder_path is None or file_name is None:
         return None
 
     relative_path = "/".join(part.strip("/") for part in (folder_path, file_name) if part.strip("/"))
@@ -438,13 +595,20 @@ def _resolve_dataset_path(dataset_props: dict[str, Any], linked_service: Any) ->
 
 
 def _resolve_storage_account(linked_service: Any) -> str | None:
-    """Pull a storage account name out of a linked service, if present."""
+    """Pull a storage account name out of a linked service, if present.
+
+    The whole ``url``, ``sasUri`` or connection string must be physical before the
+    account is cut out of it: cutting first would drop the closing ``]`` of an ARM
+    expression or the tail of an ``@{...}`` and leave a fragment that looks literal.
+    """
     if linked_service is None:
         return None
     type_props = linked_service.properties.get("typeProperties") or linked_service.properties
 
     url = type_props.get("url") or ""
     if isinstance(url, str) and url:
+        if not _is_physical(url):
+            return None
         host = url.replace("https://", "").split("/", 1)[0]
         host_no_port = host.split(":", 1)[0]
         if "." in host_no_port:
@@ -452,19 +616,20 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
 
     sas_uri = type_props.get("sasUri") or ""
     if isinstance(sas_uri, str) and sas_uri:
+        if not _is_physical(sas_uri):
+            return None
         host = sas_uri.split("?", 1)[0].replace("https://", "").split("/", 1)[0]
         if "." in host:
             return host.split(".", 1)[0]
 
     # Plaintext connection string (rare in az exports -- usually masked).
     connection_string = type_props.get("connectionString")
-    if isinstance(connection_string, str):
-        match = _ACCOUNT_NAME_RE.search(connection_string)
-        if match:
-            return match.group(1)
     if isinstance(connection_string, dict):
-        value = connection_string.get("value", "")
-        match = _ACCOUNT_NAME_RE.search(value)
+        connection_string = connection_string.get("value", "")
+    if isinstance(connection_string, str):
+        if not _is_physical(connection_string):
+            return None
+        match = _ACCOUNT_NAME_RE.search(connection_string)
         if match:
             return match.group(1)
 
@@ -478,10 +643,16 @@ def _is_physical(value: str) -> bool:
 
     A value is NOT physical when it still contains an unresolved marker -- a
     DAB-ref placeholder (``{{`` ... ``}}``), a leftover ADF interpolation
-    fragment (``@{``), or a bare ADF expression (starts with ``@``).
+    fragment (``@{``), a bare ADF expression (starts with ``@``), or an ARM
+    template expression the export left unevaluated (``[parameters('x')]``,
+    ``[concat(...)]``). An ARM expression always opens with a function call, so
+    bracket-quoted SQL names such as ``[dbo].[Orders]`` stay physical, and so
+    does ARM's ``[[`` escape for a literal that starts with ``[``.
     """
-    stripped = value.lstrip()
-    return not ("{{" in value or "@{" in value or stripped.startswith("@"))
+    stripped = value.strip()
+    if "{{" in value or "@{" in value or stripped.startswith("@"):
+        return False
+    return not _ARM_EXPRESSION_RE.match(stripped)
 
 
 # --------------------------------------------------------------------------- #
