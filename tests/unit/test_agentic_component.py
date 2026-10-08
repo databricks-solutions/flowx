@@ -52,6 +52,10 @@ PIPELINE_DEFINITION = {
 }
 RESOURCES = [{"resource_key": "orders_ingestion", "definition": PIPELINE_DEFINITION}]
 TASK = {"pipeline_task": {"pipeline_id": "${resources.pipelines.orders_ingestion.id}"}}
+SERVERLESS_ENVIRONMENT = {
+    "environment_key": "serverless",
+    "spec": {"environment_version": "2", "dependencies": ["requests==2.32.3"]},
+}
 
 
 def _activity() -> AgenticComponentActivity:
@@ -661,6 +665,7 @@ def test_agentic_component_with_its_own_compute_never_gets_a_second_binding(tmp_
     serverless = AgenticComponentActivity(
         name="Serverless",
         task_key="serverless",
+        environments=[{**SERVERLESS_ENVIRONMENT, "environment_key": "default"}],
         task={"notebook_task": {"notebook_path": "/Workspace/Shared/etl/orders"}, "environment_key": "default"},
     )
     unbound = AgenticComponentActivity(
@@ -679,6 +684,10 @@ def test_agentic_component_with_its_own_compute_never_gets_a_second_binding(tmp_
         "environment_key": "default",
     }
     assert tasks["unbound"]["job_cluster_key"] == "default_cluster"
+    assert job_resource["resources"]["jobs"]["orders"]["environments"] == [
+        {**SERVERLESS_ENVIRONMENT, "environment_key": "default"}
+    ]
+    assert check_bundle_dir(tmp_path).ok
 
 
 def test_agentic_component_base_parameters_that_look_dynamic_are_written_as_given(tmp_path):
@@ -706,3 +715,141 @@ def test_agentic_component_base_parameters_that_look_dynamic_are_written_as_give
             },
         }
     ]
+
+
+def test_agentic_component_environments_round_trip_through_serialized_ir():
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        environments=[SERVERLESS_ENVIRONMENT],
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "serverless"},
+    )
+
+    serialized = json.loads(json.dumps(activity_to_dict(activity)))
+    restored_pipeline, _ = pipeline_dict_to_ir({"name": "orders", "tasks": [serialized]})
+
+    assert serialized["environments"] == [SERVERLESS_ENVIRONMENT]
+    assert restored_pipeline.tasks[0].environments == [SERVERLESS_ENVIRONMENT]
+    assert activity_to_dict(restored_pipeline.tasks[0]) == serialized
+
+
+def _serverless_component(payload_kind: str, task_key: str = "run") -> AgenticComponentActivity:
+    if payload_kind == "spark_python_task":
+        files = [{"path": "jobs/run.py", "content": "print('run')\n"}]
+        payload = {"spark_python_task": {"python_file": "../src/jobs/run.py"}}
+    else:
+        files = [{"path": "libraries/orders.whl", "binary_content": "UEsDBAoAAAAA"}]
+        payload = {"python_wheel_task": {"package_name": "orders", "entry_point": "main"}}
+    return AgenticComponentActivity(
+        name=task_key.title(),
+        task_key=task_key,
+        files=files,
+        environments=[SERVERLESS_ENVIRONMENT],
+        task={**payload, "environment_key": "serverless"},
+    )
+
+
+@pytest.mark.parametrize("payload_kind", ["spark_python_task", "python_wheel_task"])
+def test_serverless_agentic_component_gets_its_environment_in_the_job(tmp_path, payload_kind):
+    component = _serverless_component(payload_kind)
+    serialized_pipeline = json.loads(json.dumps(pipeline_to_dict(Pipeline(name="orders", tasks=[component]))))
+    restored_pipeline, _ = pipeline_dict_to_ir(serialized_pipeline)
+
+    write_bundle(prepare_workflow(restored_pipeline), tmp_path)
+
+    job = yaml.safe_load((tmp_path / "resources" / "orders.yml").read_text(encoding="utf-8"))["resources"]["jobs"][
+        "orders"
+    ]
+    assert job["environments"] == [SERVERLESS_ENVIRONMENT]
+    assert job["tasks"] == [{"task_key": "run", **component.task}]
+    assert "job_clusters" not in job
+    assert check_bundle_dir(tmp_path).ok
+
+
+def _jobs_by_task_key(bundle_dir) -> dict[str, dict]:
+    """Map every emitted task key (including ForEach bodies) to the job that holds it."""
+    jobs_by_task_key: dict[str, dict] = {}
+    for resource_path in sorted((bundle_dir / "resources").glob("*.yml")):
+        jobs = (yaml.safe_load(resource_path.read_text(encoding="utf-8"))["resources"]).get("jobs") or {}
+        for job in jobs.values():
+            pending = list(job["tasks"])
+            while pending:
+                task = pending.pop()
+                jobs_by_task_key[task["task_key"]] = job
+                body = (task.get("for_each_task") or {}).get("task")
+                if body:
+                    pending.append(body)
+    return jobs_by_task_key
+
+
+@pytest.mark.parametrize(
+    "wrap", [_inside_if_condition, _inside_switch, _inside_for_each, _inside_for_each_with_siblings]
+)
+def test_serverless_agentic_component_environment_lands_in_the_job_that_runs_it(tmp_path, wrap):
+    write_bundle(
+        prepare_workflow(Pipeline(name="orders", tasks=[wrap(_serverless_component("spark_python_task"))])),
+        tmp_path,
+    )
+
+    jobs_by_task_key = _jobs_by_task_key(tmp_path)
+    assert jobs_by_task_key["run"]["environments"] == [SERVERLESS_ENVIRONMENT]
+    assert check_bundle_dir(tmp_path).ok
+
+
+def test_agentic_component_environment_key_that_no_component_declares_fails(tmp_path):
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[{"path": "jobs/run.py", "content": "print('run')\n"}],
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "missing"},
+    )
+
+    with pytest.raises(ValueError, match="environment_key 'missing'"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[activity])), tmp_path)
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_agentic_components_declaring_an_identical_environment_write_it_once(tmp_path):
+    first = _serverless_component("spark_python_task", task_key="first")
+    second = _serverless_component("spark_python_task", task_key="second")
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
+
+    job = yaml.safe_load((tmp_path / "resources" / "orders.yml").read_text(encoding="utf-8"))["resources"]["jobs"][
+        "orders"
+    ]
+    assert job["environments"] == [SERVERLESS_ENVIRONMENT]
+    assert check_bundle_dir(tmp_path).ok
+
+
+def test_agentic_components_declaring_one_environment_key_with_different_specs_fail(tmp_path):
+    first = _serverless_component("spark_python_task", task_key="first")
+    second = _serverless_component("spark_python_task", task_key="second")
+    second.environments = [{"environment_key": "serverless", "spec": {"environment_version": "3"}}]
+
+    with pytest.raises(ValueError, match="declared more than once with different specs"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        "serverless",
+        {"environment_key": "serverless"},
+        {"environment_key": "serverless", "spec": "2"},
+        {"environment_key": "", "spec": {"environment_version": "2"}},
+        {"environment_key": 5, "spec": {"environment_version": "2"}},
+        {**SERVERLESS_ENVIRONMENT, "comment": "extra"},
+    ],
+)
+def test_agentic_component_rejects_malformed_environments(environment):
+    activity = AgenticComponentActivity(
+        name="Bad",
+        task_key="bad",
+        environments=[environment],
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "serverless"},
+    )
+
+    with pytest.raises(ValueError, match="Agentic component 'bad' environment"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))

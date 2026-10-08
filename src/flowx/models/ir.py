@@ -702,6 +702,12 @@ class AgenticComponentActivity(Activity):
             raw ``definition`` shape used by the bundle writer. Components may
             declare the same resource only with an identical definition; it
             is then written once.
+        environments: Job environments in the Jobs API ``environment_key``
+            plus ``spec`` shape, for a serverless task that names one through
+            its ``environment_key``. The bundle writer adds each to every job
+            holding a task that references it. Components may declare the
+            same environment only with an identical spec; it is then written
+            once.
         task: Raw Databricks task fragment carrying exactly one executable
             payload (a ``<kind>_task`` key such as ``pipeline_task`` or
             ``notebook_task``) wired to an authored resource or file.
@@ -710,6 +716,7 @@ class AgenticComponentActivity(Activity):
 
     files: list[dict[str, Any]] = field(default_factory=list)
     resources: list[dict[str, Any]] = field(default_factory=list)
+    environments: list[dict[str, Any]] = field(default_factory=list)
     task: dict[str, Any] = field(default_factory=dict)
     raw_definition: dict[str, Any] | None = None
 

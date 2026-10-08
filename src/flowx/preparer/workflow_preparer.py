@@ -51,6 +51,8 @@ class PreparedActivity:
     task_key_remap: dict[str, str] = field(default_factory=dict)
     # Lakeflow pipeline resources emitted under resources/<resource_key>.yml ({resource_key, definition}).
     pipeline_resources: list[dict[str, Any]] = field(default_factory=list)
+    # Job environments ({environment_key, spec}) written into each job whose tasks reference them.
+    environments: list[dict[str, Any]] = field(default_factory=list)
     parameter_approximations: list[ParameterApproximation] = field(default_factory=list)
 
 
@@ -67,6 +69,7 @@ class PreparedWorkflow:
     parameters: list[dict[str, Any]] = field(default_factory=list)
     cluster_hints: list[dict[str, Any]] = field(default_factory=list)
     pipeline_resources: list[dict[str, Any]] = field(default_factory=list)
+    environments: list[dict[str, Any]] = field(default_factory=list)
     parameter_approximations: list[ParameterApproximation] = field(default_factory=list)
     # C-10 (SCHED-001): serialised schedule / trigger spec the bundler
     # renders as ``schedule:`` / ``trigger:`` on the emitted DAB job.
@@ -306,6 +309,7 @@ class PreparedArtifacts:
     setup_tasks: tuple[SetupTask, ...] = ()
     inner_workflows: tuple[PreparedWorkflow, ...] = ()
     pipeline_resources: tuple[dict[str, Any], ...] = ()
+    environments: tuple[dict[str, Any], ...] = ()
     parameter_approximations: tuple[ParameterApproximation, ...] = ()
 
 
@@ -320,6 +324,7 @@ def merge_prepared_artifacts(
         setup_tasks=artifacts.setup_tasks + tuple(prepared.setup_tasks),
         inner_workflows=artifacts.inner_workflows + tuple(prepared.inner_workflows),
         pipeline_resources=artifacts.pipeline_resources + tuple(prepared.pipeline_resources),
+        environments=artifacts.environments + tuple(prepared.environments),
         parameter_approximations=artifacts.parameter_approximations + tuple(prepared.parameter_approximations),
     )
 
@@ -431,6 +436,7 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         inner_workflows=list(artifacts.inner_workflows),
         cluster_hints=cluster_hints,
         pipeline_resources=list(artifacts.pipeline_resources),
+        environments=list(artifacts.environments),
         parameter_approximations=list(artifacts.parameter_approximations),
         schedule=pipeline.schedule,
         bundle_variables=dict(pipeline.bundle_variables),

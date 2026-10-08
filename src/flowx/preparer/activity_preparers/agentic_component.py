@@ -82,6 +82,24 @@ def _check_resource(task_key: str, resource: object) -> None:
         raise ValueError(f"Agentic component {task_key!r} resource {resource_key!r} definition must be a mapping")
 
 
+def _check_environment(task_key: str, environment: object) -> None:
+    """Reject an environment that is not exactly an ``environment_key`` string and a ``spec`` mapping.
+
+    The entry is written as given into a job's ``environments`` list, whose items take only those two fields.
+    """
+    if (
+        not isinstance(environment, dict)
+        or environment.keys() != {"environment_key", "spec"}
+        or not isinstance(environment["environment_key"], str)
+        or not environment["environment_key"]
+        or not isinstance(environment["spec"], dict)
+    ):
+        raise ValueError(
+            f"Agentic component {task_key!r} environment {environment!r} must be a mapping of a non-empty "
+            "environment_key string and a spec mapping"
+        )
+
+
 def _authored_file(task_key: str, file: object) -> DabNotebook:
     """Turn one authored ``files`` entry into a file the bundle writer keeps below ``src``.
 
@@ -111,7 +129,12 @@ def _authored_file(task_key: str, file: object) -> DabNotebook:
 
 
 def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedActivity:
-    """Pass authored files, resources, and the authored task payload to the bundle writer.
+    """Pass authored files, resources, environments, and the task payload to the bundle writer.
+
+    A serverless task names its compute with ``environment_key``; the component declares
+    that environment in ``environments`` and the bundle writer adds it to the job that holds
+    the task. Every referenced ``environment_key`` must be declared by some component, and
+    two components may declare the same key only with an identical spec.
 
     The task's key, dependencies, run condition, timeout, and retries always come from
     the activity, never from the authored fragment, so an agent cannot rewire or re-time
@@ -140,8 +163,9 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     Raises:
         ValueError: The authored task fragment sets a flowx-owned field, a file entry is
             malformed or its path escapes the bundle's ``src`` directory, a resource is
-            malformed or its key is not a plain identifier, a binary file is not valid
-            base64, or the task does not carry exactly one executable payload mapping.
+            malformed or its key is not a plain identifier, an environment is malformed,
+            a binary file is not valid base64, or the task does not carry exactly one
+            executable payload mapping.
     """
     del scope
     owned_fields = sorted(FLOWX_OWNED_TASK_FIELDS & activity.task.keys())
@@ -153,6 +177,8 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     _check_task_payload(activity.task_key, activity.task)
     for resource in activity.resources:
         _check_resource(activity.task_key, resource)
+    for environment in activity.environments:
+        _check_environment(activity.task_key, environment)
     notebooks = [_authored_file(activity.task_key, file) for file in activity.files]
     owned_task_fields = {
         field: value for field, value in build_common_task_fields(activity).items() if field in FLOWX_OWNED_TASK_FIELDS
@@ -161,4 +187,5 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
         task={**owned_task_fields, **activity.task, "_authored": True},
         notebooks=notebooks,
         pipeline_resources=list(activity.resources),
+        environments=list(activity.environments),
     )

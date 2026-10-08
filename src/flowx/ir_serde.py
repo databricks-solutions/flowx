@@ -300,6 +300,8 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
         case AgenticComponentActivity():
             extra["files"] = activity.files
             extra["resources"] = activity.resources
+            if activity.environments:
+                extra["environments"] = activity.environments
             extra["task"] = activity.task
             if activity.raw_definition is not None:
                 extra["raw_definition"] = activity.raw_definition

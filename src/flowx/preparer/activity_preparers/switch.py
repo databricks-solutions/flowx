@@ -128,6 +128,7 @@ def prepare(activity: SwitchActivity, *, scope: str = "") -> PreparedActivity:
             setup_tasks=list(artifacts.setup_tasks),
             inner_workflows=list(artifacts.inner_workflows),
             pipeline_resources=list(artifacts.pipeline_resources),
+            environments=list(artifacts.environments),
         )
 
     # One condition task per case, chained via outcome="false" deps. Every case is named
@@ -200,6 +201,7 @@ def prepare(activity: SwitchActivity, *, scope: str = "") -> PreparedActivity:
         setup_tasks=list(artifacts.setup_tasks),
         inner_workflows=list(artifacts.inner_workflows),
         pipeline_resources=list(artifacts.pipeline_resources),
+        environments=list(artifacts.environments),
         task_key_remap=remap,
     )
 

@@ -136,6 +136,8 @@ def write_bundle(
 
     pipeline_resources = _collect_pipeline_resources(workflow)
     _check_pipeline_resource_keys(pipeline_resources, known_bundle_jobs)
+    environments = _collect_environments(workflow)
+    _check_environment_keys(environments, workflow)
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
     # sql_task references ${var.warehouse_id}; declare it (no default -> user supplies at deploy).
     if _bundle_uses_sql_task(workflow):
@@ -186,7 +188,9 @@ def write_bundle(
     resources_dir.mkdir(parents=True, exist_ok=True)
     job_yml_path = resources_dir / f"{resource_key}.yml"
     hoisted_global_names = set(hoisted_global_variables)
-    job_resource = _build_job_resource(workflow, resource_key, hoisted_globals=hoisted_global_names)
+    job_resource = _build_job_resource(
+        workflow, resource_key, hoisted_globals=hoisted_global_names, environments=environments
+    )
     job_yml_path.write_text(
         yaml.dump(
             job_resource, default_flow_style=False, sort_keys=False, allow_unicode=True, Dumper=_BundleYamlDumper
@@ -201,7 +205,11 @@ def write_bundle(
         inner_key = normalize_task_key(inner.name)
         inner_yml_path = resources_dir / f"{inner_key}.yml"
         inner_resource = _build_job_resource(
-            inner, inner_key, extra_notebooks_for_augment=workflow.notebooks, hoisted_globals=hoisted_global_names
+            inner,
+            inner_key,
+            extra_notebooks_for_augment=workflow.notebooks,
+            hoisted_globals=hoisted_global_names,
+            environments=environments,
         )
         inner_yml_path.write_text(
             yaml.dump(
@@ -1126,6 +1134,51 @@ def _check_pipeline_resource_keys(pipeline_resources: list[dict[str, Any]], job_
         seen_pipeline_keys.add(pipeline_key)
 
 
+def _collect_environments(workflow: PreparedWorkflow) -> list[dict[str, Any]]:
+    """Returns every job environment carried by *workflow* and its inner jobs.
+
+    Each entry is an ``{environment_key, spec}`` dict. An environment declared
+    more than once with the same key and spec appears once, so it is written
+    once per job that uses it.
+    """
+    environments: list[dict[str, Any]] = []
+    for current in [workflow, *workflow.inner_workflows]:
+        for environment in current.environments:
+            if environment not in environments:
+                environments.append(environment)
+    return environments
+
+
+def _check_environment_keys(environments: list[dict[str, Any]], workflow: PreparedWorkflow) -> None:
+    """Fail when an environment key is declared with two specs or a task names an undeclared one.
+
+    Each job lists the environments its tasks reference, so two specs under one key would leave a
+    task's compute ambiguous, and a task whose ``environment_key`` matches no declared environment is
+    rejected by the Jobs API at deploy time. Identical repeats are already collapsed by
+    :func:`_collect_environments`, so a repeated key here always carries a different spec.
+
+    Raises:
+        ValueError: An environment key repeats with a different spec, or a task references an
+            environment key no environment declares.
+    """
+    declared_keys: set[str] = set()
+    for environment in environments:
+        environment_key = environment["environment_key"]
+        if environment_key in declared_keys:
+            raise ValueError(
+                f"Job environment {environment_key!r} is declared more than once with different specs; "
+                "give each spec its own environment_key"
+            )
+        declared_keys.add(environment_key)
+    for current in [workflow, *workflow.inner_workflows]:
+        for task in _iter_tasks_recursively(current.tasks):
+            if "environment_key" in task and task["environment_key"] not in declared_keys:
+                raise ValueError(
+                    f"Task {task.get('task_key')!r} uses environment_key {task['environment_key']!r}, which no "
+                    "agentic component declares in its environments"
+                )
+
+
 def _collect_pydabs_resource_entries(workflow: PreparedWorkflow) -> list[str]:
     """Returns the ``python.resources`` entries for every dbt-factory PyDABs hook in *workflow*.
 
@@ -1676,6 +1729,7 @@ def _build_job_resource(
     attach_clusters: bool = True,
     extra_notebooks_for_augment: list[DabNotebook] | None = None,
     hoisted_globals: set[str] | None = None,
+    environments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Builds a job resource dict for a single workflow.
 
@@ -1686,6 +1740,9 @@ def _build_job_resource(
             and binds every notebook task to it.  Set to ``False`` for inner
             jobs that are invoked via ``run_job_task`` from another bundle
             job — they inherit compute from the caller.
+        environments: The bundle's job environments; the ones this job's
+            tasks reference by ``environment_key`` are written as its
+            ``environments`` block.
 
     Returns:
         Dict ready for YAML serialization.
@@ -1726,6 +1783,17 @@ def _build_job_resource(
                 needed_keys,
                 extras=cluster_extras or None,
             )
+
+    referenced_environment_keys = {
+        task["environment_key"] for task in _iter_tasks_recursively(workflow.tasks) if "environment_key" in task
+    }
+    job_environments = [
+        environment
+        for environment in environments or []
+        if environment["environment_key"] in referenced_environment_keys
+    ]
+    if job_environments:
+        job_def["environments"] = job_environments
 
     _strip_private_task_markers(workflow.tasks)
 
@@ -2358,6 +2426,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             **base,
             files=list(task_ir.get("files") or []),
             resources=list(task_ir.get("resources") or []),
+            environments=list(task_ir.get("environments") or []),
             task=dict(task_ir.get("task") or {}),
             raw_definition=task_ir.get("raw_definition"),
         )

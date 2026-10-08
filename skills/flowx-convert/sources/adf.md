@@ -77,10 +77,16 @@ are inherited from the placeholder when omitted, preserving dependency edges.
 
 When no typed task fits, use `"type": "AgenticComponentActivity"` instead. It carries `files`
 (each a relative `path` below the bundle's `src/` with text `content` or base64 `binary_content`),
-pipeline `resources` (`resource_key` plus a `definition` mapping), and a raw Databricks `task`
-fragment with exactly one `<kind>_task` payload. flowx owns `task_key`, `depends_on`, `run_if`,
-`timeout_seconds`, `max_retries`, `min_retry_interval_millis` and `retry_on_timeout`; setting any of
-them in the fragment is an error. On merge, the component's `name`, `task_key`, `depends_on`,
+pipeline `resources` (`resource_key` plus a `definition` mapping), optional job `environments`
+(each exactly an `environment_key` plus a `spec` mapping), and a raw Databricks `task` fragment with
+exactly one `<kind>_task` payload. A serverless `spark_python_task` or `python_wheel_task` needs an
+`environment_key`: declare that environment in `environments` and flowx writes it into the job that
+runs the task. Every `environment_key` a task uses must be declared, and two components may declare
+the same environment only with an identical spec (it is then written once).
+
+flowx owns `task_key`, `depends_on`, `run_if`, `timeout_seconds`, `max_retries`,
+`min_retry_interval_millis` and `retry_on_timeout`; setting any of them in the fragment is an
+error. On merge, the component's `name`, `task_key`, `depends_on`,
 `timeout_seconds`, `max_retries` and `min_retry_interval_millis` always come from the placeholder;
 any values you set for them on the activity are replaced. flowx does not override or remove any
 other value the fragment sets, except in three wiring passes that apply to authored tasks exactly as

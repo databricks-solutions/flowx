@@ -273,7 +273,23 @@ def check_bundle_dir(bundle_dir: Path) -> BundleInvariantResult:
         for job_key, job in jobs.items():
             if not isinstance(job, dict):
                 continue
+            job_environment_keys = {
+                environment.get("environment_key")
+                for environment in job.get("environments") or []
+                if isinstance(environment, dict)
+            }
             for task in _iter_tasks(job.get("tasks") or []):
+                if "environment_key" in task and task["environment_key"] not in job_environment_keys:
+                    findings.append(
+                        BundleFinding(
+                            code="dangling_environment_reference",
+                            location=f"{path.name}, job '{job_key}', task '{task.get('task_key', '')}'",
+                            message=(
+                                f"Task environment_key '{task['environment_key']}' is not declared in the job's "
+                                "environments."
+                            ),
+                        )
+                    )
                 pipeline_task = task.get("pipeline_task") or {}
                 pipeline_id = pipeline_task.get("pipeline_id") if isinstance(pipeline_task, dict) else None
                 pipeline_match = (
