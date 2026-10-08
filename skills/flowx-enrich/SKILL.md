@@ -147,10 +147,10 @@ with different insights replaces the block. A validation failure writes nothing.
 Only one `enrich` writes an output directory at a time: it holds `metadata/.enrich.lock` from reading
 the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
 writes nothing. The two files are replaced one right after the other. If replacing `inventory.json`
-fails, the previous `agentic_insights.json` is put back. A process killed between those two steps, or a
-failure while putting the previous file back, can leave `agentic_insights.json` one write ahead of
-`inventory.json`. That run's lock then stays behind, and the next `enrich` refuses until you delete the
-lock; running `enrich` again then rewrites both.
+fails, the previous `agentic_insights.json` is put back. A process killed or interrupted (Ctrl-C)
+between those two steps, or a failure while putting the previous file back, can leave
+`agentic_insights.json` one write ahead of `inventory.json`. That run's lock then stays behind, and the
+next `enrich` refuses until you delete the lock; running `enrich` again then rewrites both.
 
 ## Next step
 

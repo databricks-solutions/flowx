@@ -479,3 +479,56 @@ def test_a_failed_rollback_never_truncates_the_insights_file_and_keeps_the_lock(
     refused = enrich_inventory(tmp_path, insights=_authored(tmp_path))
     assert refused["ok"] is False
     assert any(".enrich.lock" in violation for violation in refused["violations"])
+
+
+@pytest.mark.parametrize("interrupted_file", [AGENTIC_INSIGHTS_FILENAME, "inventory.json"])
+def test_an_interrupt_after_a_replace_succeeds_keeps_the_lock_and_rolls_nothing_back(
+    tmp_path: Path, monkeypatch: Any, interrupted_file: str
+) -> None:
+    """Ctrl-C can land just after a rename finished, so it is treated like a kill rather than undone."""
+    inventory_path = _discover(tmp_path)
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    metadata = tmp_path / "metadata"
+    insights_path = metadata / AGENTIC_INSIGHTS_FILENAME
+    inventory_before = inventory_path.read_bytes()
+    real_replace = os.replace
+
+    def replace_then_interrupt(source: Any, destination: Any) -> None:
+        real_replace(source, destination)
+        if Path(destination) == metadata / interrupted_file:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "replace", replace_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        enrich_inventory(tmp_path, insights={**_authored(tmp_path), "overview": "Interrupted writer."})
+    monkeypatch.undo()
+
+    assert json.loads(insights_path.read_text(encoding="utf-8"))["overview"] == "Interrupted writer."
+    if interrupted_file == "inventory.json":
+        assert json.loads(inventory_path.read_text(encoding="utf-8"))[INSIGHTS_KEY]["overview"] == "Interrupted writer."
+    else:
+        assert inventory_path.read_bytes() == inventory_before
+    assert (metadata / ".enrich.lock").exists()
+    refused = enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    assert refused["ok"] is False
+    assert any(".enrich.lock" in violation for violation in refused["violations"])
+
+
+def test_an_interrupt_before_either_replace_releases_the_lock(tmp_path: Path, monkeypatch: Any) -> None:
+    """Nothing has been replaced yet, so both files still agree and the next enrich may run."""
+    inventory_path = _discover(tmp_path)
+    metadata = tmp_path / "metadata"
+    inventory_before = inventory_path.read_bytes()
+
+    def interrupted_write(self: Path, data: str, **kwargs: Any) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "write_text", interrupted_write)
+    with pytest.raises(KeyboardInterrupt):
+        enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    monkeypatch.undo()
+
+    assert inventory_path.read_bytes() == inventory_before
+    assert not (metadata / AGENTIC_INSIGHTS_FILENAME).exists()
+    assert not (metadata / ".enrich.lock").exists()
+    assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True

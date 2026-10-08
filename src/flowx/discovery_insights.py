@@ -29,8 +29,8 @@ records the persisted ``source_graphs.json`` hash it was checked against
 (byte-identical to what discover writes), otherwise discover's deterministic part is reused; that
 same block is added under ``insights``, so the inventory is always built from those two pieces
 rather than patched. Only one enrich writes an output directory at a time, and the two files are
-replaced back to back (see ``_write_both_or_neither``). A process killed between those two
-replaces, or a rollback that itself fails, can leave ``agentic_insights.json`` a write ahead of
+replaced back to back (see ``_write_both_or_neither``). A process killed or interrupted between
+those two replaces, or a rollback that itself fails, can leave ``agentic_insights.json`` a write ahead of
 ``inventory.json``; the lock file then stays behind, so the next enrich refuses until the lock is
 removed and enrich is run again. The record is **idempotent**: re-running with the same
 authored insights rewrites byte-identical bytes and never stacks. The library owns
@@ -610,7 +610,7 @@ def project_inventory(graphs: list[SourceGraph], inventory: dict[str, Any]) -> d
 
 
 class _UnrecoveredWriteError(OSError):
-    """The inventory write failed and putting the previous insights file back failed too."""
+    """The two files may disagree: putting the previous insights file back failed, or an interrupt hit a replace."""
 
 
 @contextmanager
@@ -619,8 +619,9 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[bool]:
 
     The lock is a file created with ``O_EXCL`` (portable, unlike ``fcntl``) and removed when the
     enrich finishes or raises. It is left behind only when the two files may disagree -- a killed
-    process, or a failed rollback (:class:`_UnrecoveredWriteError`) -- so the next enrich refuses
-    until the lock is removed.
+    process, or an error that is or was raised from :class:`_UnrecoveredWriteError` (a failed
+    rollback, or an interrupt between the two replaces) -- so the next enrich refuses until the lock
+    is removed.
     """
     lock_path = metadata_dir / ENRICH_LOCK_FILENAME
     try:
@@ -631,8 +632,8 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[bool]:
     keep_lock = False
     try:
         yield True
-    except _UnrecoveredWriteError:
-        keep_lock = True
+    except BaseException as error:
+        keep_lock = isinstance(error, _UnrecoveredWriteError) or isinstance(error.__cause__, _UnrecoveredWriteError)
         raise
     finally:
         if not keep_lock:
@@ -644,10 +645,13 @@ def _write_both_or_neither(
 ) -> None:
     """Replace ``agentic_insights.json`` and ``inventory.json`` back to back, keeping them consistent.
 
-    Both temp files are written before either target is replaced. If replacing the inventory fails,
-    the previous insights file is put back by replacing it from a temp file (or the new one is
-    removed), so the live file is never left half-written. If that rollback fails too, the two may
-    disagree, so :class:`_UnrecoveredWriteError` is raised and the caller's lock stays behind.
+    Both temp files are written before either target is replaced. If replacing the inventory raises
+    ``OSError`` (the rename did not happen), the previous insights file is put back by replacing it
+    from a temp file (or the new one is removed), so the live file is never left half-written. If
+    that rollback fails too, the two may disagree, so :class:`_UnrecoveredWriteError` is raised and
+    the caller's lock stays behind. An interrupt (``KeyboardInterrupt``, ``SystemExit``) from the
+    first replace on can arrive just after a rename succeeded, so nothing is rolled back: it is
+    treated like a kill and re-raised from an :class:`_UnrecoveredWriteError`, keeping the lock.
     Callers hold :func:`_enrich_lock`, so no other enrich writes between, and the fixed temp names
     mean the next write overwrites and removes any left behind by a killed one.
     """
@@ -657,22 +661,30 @@ def _write_both_or_neither(
     try:
         insights_temporary.write_text(json.dumps(insights_document, indent=2), encoding="utf-8")
         inventory_temporary.write_text(json.dumps(inventory_document, indent=2), encoding="utf-8")
-        os.replace(insights_temporary, insights_path)
         try:
-            os.replace(inventory_temporary, inventory_path)
-        except BaseException:
+            os.replace(insights_temporary, insights_path)
             try:
-                if previous_insights is None:
-                    insights_path.unlink(missing_ok=True)
-                else:
-                    insights_temporary.write_bytes(previous_insights)
-                    os.replace(insights_temporary, insights_path)
-            except BaseException as rollback_error:
-                raise _UnrecoveredWriteError(
-                    f"inventory.json was not updated and the previous {insights_path.name} could not be put "
-                    f"back ({rollback_error}); the enrich lock is kept, so delete it and run enrich again"
-                ) from rollback_error
+                os.replace(inventory_temporary, inventory_path)
+            except OSError:
+                try:
+                    if previous_insights is None:
+                        insights_path.unlink(missing_ok=True)
+                    else:
+                        insights_temporary.write_bytes(previous_insights)
+                        os.replace(insights_temporary, insights_path)
+                except OSError as rollback_error:
+                    raise _UnrecoveredWriteError(
+                        f"inventory.json was not updated and the previous {insights_path.name} could not be put "
+                        f"back ({rollback_error}); the enrich lock is kept, so delete it and run enrich again"
+                    ) from rollback_error
+                raise
+        except Exception:
             raise
+        except BaseException as interrupt:
+            raise interrupt from _UnrecoveredWriteError(
+                f"enrich was interrupted while replacing {insights_path.name} and inventory.json, so they may "
+                "disagree; the enrich lock is kept, so delete it and run enrich again"
+            )
     finally:
         insights_temporary.unlink(missing_ok=True)
         inventory_temporary.unlink(missing_ok=True)
