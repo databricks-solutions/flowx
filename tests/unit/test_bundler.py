@@ -7,11 +7,16 @@ import json
 import yaml
 
 from flowx.bundler.dab_writer import (
+    _DEFAULT_NODE_TYPE_ID,
+    _DEFAULT_SPARK_VERSION,
+    _infer_bundle_cluster_extras,
     _load_report,
     write_bundle,
     write_bundle_group,
 )
-from flowx.bundler.dab_writer import main as dab_main
+from flowx.bundler.dab_writer import (
+    main as dab_main,
+)
 from flowx.models.dab import DabNotebook, SecretInstruction, SetupTask
 from flowx.models.ir import (
     CopyActivity,
@@ -1162,7 +1167,6 @@ class TestClusterExtrasPropagation:
         from flowx.bundler.dab_writer import (
             _build_default_cluster,
             _build_default_job_clusters,
-            _infer_bundle_cluster_extras,
         )
 
         # Hint set with consistent extras.
@@ -1200,7 +1204,6 @@ class TestClusterExtrasPropagation:
         from flowx.bundler.dab_writer import (
             _build_default_cluster,
             _build_default_job_clusters,
-            _infer_bundle_cluster_extras,
         )
 
         wf = _simple_workflow()
@@ -1268,7 +1271,7 @@ class TestUnparseableClusterHintsFiltered:
             },
         ]
         spark_version, node_type_id = _infer_source_cluster_settings(wf)
-        assert spark_version is None
+        assert spark_version == _DEFAULT_SPARK_VERSION
         assert node_type_id == "Standard_DS3_v2"
 
     def test_unparseable_node_type_is_not_suggested(self):
@@ -1283,7 +1286,7 @@ class TestUnparseableClusterHintsFiltered:
         ]
         spark_version, node_type_id = _infer_source_cluster_settings(wf)
         assert spark_version == "15.4.x-scala2.12"
-        assert node_type_id is None
+        assert node_type_id == _DEFAULT_NODE_TYPE_ID
 
     def test_real_spark_version_still_wins(self):
         from flowx.bundler.dab_writer import _infer_source_cluster_settings

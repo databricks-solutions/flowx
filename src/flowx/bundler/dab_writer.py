@@ -1358,8 +1358,8 @@ def _infer_cluster_defaults_from_hints(cluster_hints: list[dict[str, Any]]) -> t
     ]
     node_types = [hint["node_type_id"] for hint in cluster_hints if _is_valid_node_type_id(hint.get("node_type_id"))]
 
-    spark_version = Counter(spark_versions).most_common(1)[0][0] if spark_versions else None
-    node_type_id = Counter(node_types).most_common(1)[0][0] if node_types else None
+    spark_version = Counter(spark_versions).most_common(1)[0][0] if spark_versions else _DEFAULT_SPARK_VERSION
+    node_type_id = Counter(node_types).most_common(1)[0][0] if node_types else _DEFAULT_NODE_TYPE_ID
     return spark_version, node_type_id
 
 
