@@ -51,6 +51,7 @@ airflow_source_path (a DAG .py file or directory).
 Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("inputs", {"phase": "discover", "source": "adf"})   # learn a phase's inputs
   flowx("discover", {"source": "adf", "adf_source_path": "...", "output_dir": "..."})
+  flowx("enrich", {"output_dir": "...", "action": "prepare"})  # optional: read metadata/ to author insights
   flowx("enrich", {"output_dir": "...", "insights": {...}})   # optional: record agent-authored insights
   flowx("convert", {"source": "adf", "output_dir": "..."})
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
@@ -300,15 +301,31 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
 def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
     """Validate agent-authored insights, record them in agentic_insights.json and rebuild inventory.json.
 
-    Accepts the insights either inline as ``insights`` (a JSON object) or via ``insights_path``
-    (a file the server can read); exactly one is required. Inline insights are staged to a temp
-    file so the same ``enrich`` CLI contract runs on both paths. The returned ``ok`` reflects
-    *validation* success -- ``result.violations`` lists every problem when it is False, and the
-    inventory is left untouched on any failure.
+    ``action`` is ``"apply"`` (the default) or ``"prepare"``. ``prepare`` hands the agent what it
+    authors against -- the ``metadata/`` files (inventory.json, source_graphs.json, the ARM
+    provenance) -- because a hosted agent cannot read the server's ``output_dir``. It reuses
+    :func:`_bundle_output`, so the files come back inline under ``bundle`` (size-bounded), or are
+    uploaded to ``output_volume_path`` / ``output_workspace_path`` like a packaged bundle.
+
+    ``apply`` accepts the insights either inline as ``insights`` (a JSON object) or via
+    ``insights_path`` (a file the server can read); exactly one is required. Inline insights are
+    staged to a temp file so the same ``enrich`` CLI contract runs on both paths. The returned
+    ``ok`` reflects *validation* success -- ``result.violations`` lists every problem when it is
+    False, and the inventory is left untouched on any failure.
     """
     output_dir = p.get("output_dir", "./flowx_output")
+    action = p.get("action", "apply")
+    if action not in {"prepare", "apply"}:
+        return {"ok": False, "error": "enrich action must be prepare or apply."}
     insights = p.get("insights")
     insights_path = p.get("insights_path")
+    if action == "prepare":
+        if insights is not None or insights_path is not None:
+            return {"ok": False, "error": "enrich prepare takes no insights; send them with action apply."}
+        metadata = Path(output_dir) / "metadata"
+        if not (metadata / "inventory.json").is_file():
+            return {"ok": False, "error": f"No inventory.json under {metadata}; run discover first."}
+        return {"ok": True, "output_dir": str(output_dir), **_bundle_output(p, metadata)}
     if (insights is None) == (insights_path is None):
         return {"ok": False, "error": "provide exactly one of 'insights' (inline object) or 'insights_path'."}
 
@@ -582,7 +599,10 @@ def build_server() -> FastMCP:
           airflow_source_path, report_path, gap_id, candidates, replace, accept_gap | accept_gaps, accept_all,
           review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
-        - "enrich": output_dir(req), one of insights(inline object) | insights_path(req) — validate
+        - "enrich": action(prepare | apply, default apply). prepare: output_dir, output_volume_path,
+          output_workspace_path — return metadata/ (inventory.json, source_graphs.json, ARM provenance)
+          the same way package returns a bundle, for the agent to author against when it cannot read
+          output_dir. apply: output_dir(req), one of insights(inline object) | insights_path(req) — validate
           agent-authored discover insights against inventory.json, record them in agentic_insights.json,
           and rebuild inventory.json from source_graphs.json plus that document (one enrich per
           output_dir at a time, idempotent). `ok` reflects validation; `result.violations` lists any

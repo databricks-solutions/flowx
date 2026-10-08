@@ -54,7 +54,8 @@ narrative.
 
 ## How to author (three steps)
 
-1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json`. Note every
+1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json` (on the hosted
+   MCP server, through `enrich` with `action="prepare"`; see below). Note every
    pipeline `name` (these are the only valid foreign keys), and each pipeline's `lineage` block — in
    particular `lineage.control_edges`, each `{source_workflow, target_workflow, via_task_key}`. A
    deterministic **control** relationship you annotate must match one of these exactly. When the
@@ -112,9 +113,14 @@ validation rules the library enforces.
 Run the **`setup`** skill first if you haven't. Both paths run the same validate-and-record contract.
 
 - **MCP tool (Databricks Genie Code, or a local stdio registration):** call the single **`flowx`**
-  tool with `command="enrich"` and either inline insights or a file:
+  tool with `command="enrich"`. On the hosted server you cannot read `output_dir`, so first read the
+  inventory with `action="prepare"`. It returns `metadata/` (`inventory.json`, `source_graphs.json`,
+  the `.arm.json` provenance) inline under `bundle.files`, the same way `package` returns a bundle;
+  pass `output_volume_path` or `output_workspace_path` to have large metadata uploaded instead. Then
+  record the insights (the default `action="apply"`) with either inline insights or a file:
 
   ```
+  flowx(command="enrich", parameters={"output_dir": "<dir>", "action": "prepare"})   # read metadata/
   flowx(command="enrich", parameters={"output_dir": "<dir>", "insights": { ... }})   # inline object
   flowx(command="enrich", parameters={"output_dir": "<dir>", "insights_path": "<file>"})
   ```

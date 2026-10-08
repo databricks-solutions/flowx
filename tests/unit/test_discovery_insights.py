@@ -635,6 +635,29 @@ def test_mcp_enrich_requires_exactly_one_source(tmp_path: Path) -> None:
     assert neither["ok"] is False and "exactly one" in neither["error"]
 
 
+def test_mcp_enrich_prepare_returns_the_metadata_an_agent_authors_against(tmp_path: Path) -> None:
+    """On the hosted server the agent can't read output_dir, so prepare hands it metadata/ inline."""
+    server = pytest.importorskip("flowx.mcp.server")
+    inventory_path = _write_inventory(tmp_path, _inventory())
+
+    prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+
+    assert prepared["ok"] is True
+    assert prepared["output_dir"] == str(tmp_path)
+    assert json.loads(prepared["bundle"]["files"]["inventory.json"]) == json.loads(inventory_path.read_text())
+
+
+def test_mcp_enrich_prepare_and_action_errors(tmp_path: Path) -> None:
+    server = pytest.importorskip("flowx.mcp.server")
+    missing = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+    unknown = server._cmd_enrich({"output_dir": str(tmp_path), "action": "read"})
+    _write_inventory(tmp_path, _inventory())
+    with_insights = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare", "insights": {}})
+    assert missing["ok"] is False and "No inventory.json" in missing["error"]
+    assert unknown["ok"] is False and "prepare or apply" in unknown["error"]
+    assert with_insights["ok"] is False and "prepare" in with_insights["error"]
+
+
 # Ensure the deep-copied fixtures never share mutable state between tests.
 def test_fixture_isolation() -> None:
     a = _valid_insights()
