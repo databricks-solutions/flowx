@@ -12,11 +12,11 @@
     "fixtures/resolution-deferred.json"
   ],
   "flowx_pin": {
-    "commit": "dee6efe51b6264025dd69ee136b81029c15c1dbc",
-    "content_sha256": "87ee069f050eacc34db7c186770805fa3a9c83744120632b4753f673b809f7ae",
+    "commit": "f8bfee0e385ce380841493037a1969d04a922396",
+    "content_sha256": "0f1e5843c6f7e3c8cdbafdfc70fe49df70397cf35eb903ae4a3be93e0fcee570",
     "contract_version": "1",
     "repository": "https://github.com/park-peter/airflow-to-dabs",
-    "tag": "v0.2.3"
+    "tag": "v0.2.7"
   },
   "interface": {
     "contract_versions": [
@@ -60,6 +60,10 @@
     {
       "path": "../../references/hadoop-migration-guide.md",
       "purpose": "Spark-submit, HDFS, Hive, and Hadoop semantic guidance"
+    },
+    {
+      "path": "../../references/dataproc-migration.md",
+      "purpose": "Dataproc payload routing, compute constraints, lifecycle collapse, and sensor semantics"
     }
   ],
   "profile_schema_version": "1",

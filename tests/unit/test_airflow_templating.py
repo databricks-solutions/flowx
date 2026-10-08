@@ -7,25 +7,22 @@ from flowx.sources.airflow.templating import (
     convert_shell_template,
     convert_sql_template,
     convert_template,
-    date_param_default,
     macro_param_default,
 )
 
 
-def test_execution_date_macros_route_through_job_parameters():
-    # Logical-date macros become an overridable job parameter (not an inline start_time ref) so a
-    # native Databricks backfill can override them per replayed window.
-    assert convert_template("{{ ds }}") == (
-        "{{job.parameters.__flowx_airflow_run_date}}",
-        {"__flowx_airflow_run_date"},
-    )
+def test_interval_macros_read_the_date_resolver_task_values():
+    # Interval macros are computed at run time by the generated resolver task, so consumers read its
+    # task values and declare no job parameter of their own.
+    assert convert_template("{{ ds }}") == ("{{tasks.__flowx_airflow_dates.values.ds}}", set())
     assert convert_template("{{ execution_date }}") == (
-        "{{job.parameters.__flowx_airflow_execution_date}}",
-        {"__flowx_airflow_execution_date"},
+        "{{tasks.__flowx_airflow_dates.values.execution_date}}",
+        set(),
     )
-    assert convert_template("{{ logical_date }}") == (
-        "{{job.parameters.__flowx_airflow_logical_date}}",
-        {"__flowx_airflow_logical_date"},
+    assert convert_template("{{ logical_date }}") == ("{{tasks.__flowx_airflow_dates.values.logical_date}}", set())
+    assert convert_template("{{ data_interval_end }}") == (
+        "{{tasks.__flowx_airflow_dates.values.data_interval_end}}",
+        set(),
     )
 
 
@@ -34,22 +31,25 @@ def test_run_id_macro_stays_inline():
     assert convert_template("{{ run_id }}") == ("{{job.run_id}}", set())
 
 
-def test_dashless_macro_left_untouched():
-    # ds_nodash has no dynamic-value form; leave it as an (unresolved) reference rather than emitting
-    # an invalid ref.
-    assert convert_template("{{ ds_nodash }}") == ("{{ ds_nodash }}", set())
+def test_derived_interval_macros_resolve_through_the_resolver():
+    # The resolver renders every interval macro from one logical instant, including the formats with
+    # no dynamic-value equivalent.
+    assert convert_template("{{ ds_nodash }}") == ("{{tasks.__flowx_airflow_dates.values.ds_nodash}}", set())
+    assert convert_template("{{ ts_nodash }}") == ("{{tasks.__flowx_airflow_dates.values.ts_nodash}}", set())
+    assert convert_template("{{ prev_ds }}") == ("{{tasks.__flowx_airflow_dates.values.prev_ds}}", set())
+    assert convert_template("{{ macros.ds_add(ds, 1) }}") == ("{{ macros.ds_add(ds, 1) }}", set())
 
 
-def test_sql_execution_date_binds_a_job_parameter():
+def test_sql_execution_date_binds_the_resolver_value():
     marked, params = convert_sql_template("SELECT * FROM t WHERE d = {{ ds }}")
-    assert marked == "SELECT * FROM t WHERE d = :__flowx_airflow_run_date"
-    assert params == {"__flowx_airflow_run_date": "{{job.parameters.__flowx_airflow_run_date}}"}
+    assert marked == "SELECT * FROM t WHERE d = :__flowx_airflow_date_ds"
+    assert params == {"__flowx_airflow_date_ds": "{{tasks.__flowx_airflow_dates.values.ds}}"}
 
 
 def test_sql_macro_as_entire_string_literal_removes_sql_quotes():
     marked, params = convert_sql_template("SELECT * FROM sales WHERE order_date = '{{ ds }}'")
-    assert marked == "SELECT * FROM sales WHERE order_date = :__flowx_airflow_run_date"
-    assert params == {"__flowx_airflow_run_date": "{{job.parameters.__flowx_airflow_run_date}}"}
+    assert marked == "SELECT * FROM sales WHERE order_date = :__flowx_airflow_date_ds"
+    assert params == {"__flowx_airflow_date_ds": "{{tasks.__flowx_airflow_dates.values.ds}}"}
 
 
 def test_sql_macro_embedded_in_string_literal_remains_unresolved():
@@ -81,8 +81,8 @@ def test_sql_macros_in_typed_and_prefixed_literals_remain_unresolved():
 def test_sql_quote_scanning_ignores_quotes_in_comments():
     sql = "-- owner's date\nSELECT '{{ ds }}'"
     assert convert_sql_template(sql) == (
-        "-- owner's date\nSELECT :__flowx_airflow_run_date",
-        {"__flowx_airflow_run_date": "{{job.parameters.__flowx_airflow_run_date}}"},
+        "-- owner's date\nSELECT :__flowx_airflow_date_ds",
+        {"__flowx_airflow_date_ds": "{{tasks.__flowx_airflow_dates.values.ds}}"},
     )
 
 
@@ -103,20 +103,11 @@ def test_sql_run_id_binds_inline_ref():
     assert params == {"__flowx_airflow_run_id": "{{job.run_id}}"}
 
 
-def test_date_param_default_is_schedule_aware():
-    # Cron/periodic jobs have a scheduled trigger time (correct on normal runs, no start-time drift);
-    # event-triggered or unscheduled jobs approximate with the run start time.
-    assert date_param_default("iso_date", {"kind": "schedule"}) == "{{job.trigger.time.iso_date}}"
-    assert date_param_default("iso_datetime", {"kind": "periodic"}) == "{{job.trigger.time.iso_datetime}}"
-    assert date_param_default("iso_date", {"kind": "file_arrival"}) == "{{job.start_time.iso_date}}"
-    assert date_param_default("iso_date", None) == "{{job.start_time.iso_date}}"
-
-
 def test_shell_template_threads_macros_through_named_vars():
     command, bindings = convert_shell_template("etl.py --date {{ ds }} --run {{ run_id }} --env {{ params.env }}")
-    assert command == ("etl.py --date ${__flowx_airflow_run_date} --run ${__flowx_airflow_run_id} --env ${env}")
+    assert command == ("etl.py --date ${__flowx_airflow_date_ds} --run ${__flowx_airflow_run_id} --env ${env}")
     assert bindings == {
-        "__flowx_airflow_run_date": "{{job.parameters.__flowx_airflow_run_date}}",
+        "__flowx_airflow_date_ds": "{{tasks.__flowx_airflow_dates.values.ds}}",
         "__flowx_airflow_run_id": "{{job.run_id}}",
         "env": "{{job.parameters.env}}",
     }
@@ -124,8 +115,8 @@ def test_shell_template_threads_macros_through_named_vars():
 
 def test_shell_template_braces_adjacent_macros_and_breaks_out_of_single_quotes():
     command, bindings = convert_shell_template("echo '/data/{{ ds }}_load.csv'")
-    assert command == "echo '/data/'\"${__flowx_airflow_run_date}\"'_load.csv'"
-    assert bindings == {"__flowx_airflow_run_date": "{{job.parameters.__flowx_airflow_run_date}}"}
+    assert command == "echo '/data/'\"${__flowx_airflow_date_ds}\"'_load.csv'"
+    assert bindings == {"__flowx_airflow_date_ds": "{{tasks.__flowx_airflow_dates.values.ds}}"}
 
 
 def test_shell_template_leaves_nonexpanding_or_escaped_contexts_unresolved():
@@ -140,8 +131,8 @@ def test_shell_template_leaves_nonexpanding_or_escaped_contexts_unresolved():
 def test_shell_quote_scanning_ignores_quotes_in_comments():
     command = "# owner's note\necho {{ ds }}"
     assert convert_shell_template(command) == (
-        "# owner's note\necho ${__flowx_airflow_run_date}",
-        {"__flowx_airflow_run_date": "{{job.parameters.__flowx_airflow_run_date}}"},
+        "# owner's note\necho ${__flowx_airflow_date_ds}",
+        {"__flowx_airflow_date_ds": "{{tasks.__flowx_airflow_dates.values.ds}}"},
     )
 
 
@@ -150,12 +141,11 @@ def test_template_namespaces_do_not_collapse_equal_source_names():
         "{{ ds }}|{{ params.run_date }}|{{ var.value.run_date }}|{{ dag_run.conf['run_date'] }}"
     )
     assert converted == (
-        "{{job.parameters.__flowx_airflow_run_date}}|{{job.parameters.run_date}}|"
+        "{{tasks.__flowx_airflow_dates.values.ds}}|{{job.parameters.run_date}}|"
         "{{job.parameters.__flowx_airflow_variable_run_date}}|"
         "{{job.parameters.__flowx_airflow_conf_run_date}}"
     )
     assert params == {
-        "__flowx_airflow_run_date",
         "run_date",
         "__flowx_airflow_variable_run_date",
         "__flowx_airflow_conf_run_date",
@@ -178,10 +168,12 @@ def test_shell_template_leaves_unknown_expressions():
     assert bindings == {}
 
 
-def test_macro_param_default_covers_date_and_run_id_and_none():
-    assert macro_param_default("__flowx_airflow_run_date", {"kind": "schedule"}) == ("{{job.trigger.time.iso_date}}")
-    assert macro_param_default("__flowx_airflow_run_id", None) == "{{job.run_id}}"
-    assert macro_param_default("env", None) is None  # a user param, not macro-derived
+def test_macro_param_default_covers_resolver_inputs_run_id_and_none():
+    assert macro_param_default("__flowx_airflow_trigger_time") == "{{job.trigger.time.iso_datetime}}"
+    assert macro_param_default("__flowx_airflow_trigger_type") == "{{job.trigger.type}}"
+    assert macro_param_default("__flowx_airflow_logical_date") == ""
+    assert macro_param_default("__flowx_airflow_run_id") == "{{job.run_id}}"
+    assert macro_param_default("env") is None  # a user param, not macro-derived
 
 
 def test_quartz_never_restricts_both_day_of_month_and_day_of_week():
