@@ -114,10 +114,10 @@ Run the **`setup`** skill first if you haven't. Both paths run the same validate
 
 - **MCP tool (Databricks Genie Code, or a local stdio registration):** call the single **`flowx`**
   tool with `command="enrich"`. On the hosted server you cannot read `output_dir`, so first read the
-  inventory with `action="prepare"`. It returns `metadata/inventory.json` inline under
-  `bundle.files`, the same way `package` returns a bundle; pass `output_volume_path` or
-  `output_workspace_path` to have a large inventory uploaded instead. Then record the insights (the
-  default `action="apply"`) with either inline insights or a file:
+  inventory with `action="prepare"`. It returns `metadata/inventory.json` inline as
+  `bundle.files["inventory.json"]`, the same way `package` returns a bundle; pass `output_volume_path`
+  or `output_workspace_path` to have a large inventory uploaded there as `inventory.json` instead. Then
+  record the insights (the default `action="apply"`) with either inline insights or a file:
 
   ```
   flowx(command="enrich", parameters={"output_dir": "<dir>", "action": "prepare"})   # read inventory.json
@@ -153,8 +153,9 @@ with different insights replaces the block. A validation failure writes nothing.
 Only one `enrich` writes an output directory at a time: it holds `metadata/.enrich.lock` from reading
 the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
 writes nothing. The two files are replaced one right after the other. If replacing `inventory.json`
-fails, the previous `agentic_insights.json` is put back. A process killed or interrupted (Ctrl-C)
-between those two steps, or a failure while putting the previous file back, can leave
+fails, `agentic_insights.json` is put back to the insights the unchanged `inventory.json` holds (or
+removed when it holds none). A process killed or interrupted (Ctrl-C)
+between those two steps, or a failure while putting that file back, can leave
 `agentic_insights.json` one write ahead of `inventory.json`. That run's lock then stays behind, and the
 next `enrich` refuses until you delete the lock; running `enrich` again then rewrites both.
 
