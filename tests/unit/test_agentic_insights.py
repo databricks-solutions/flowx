@@ -532,3 +532,27 @@ def test_an_interrupt_before_either_replace_releases_the_lock(tmp_path: Path, mo
     assert not (metadata / AGENTIC_INSIGHTS_FILENAME).exists()
     assert not (metadata / ".enrich.lock").exists()
     assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
+
+
+def test_a_failed_recovery_write_rolls_back_to_the_insights_the_inventory_holds(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """After a write left agentic_insights.json ahead, a failed re-run must not restore that ahead copy."""
+    inventory_path = _discover(tmp_path)
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    insights_path = tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME
+    ahead = {**json.loads(insights_path.read_text(encoding="utf-8")), "overview": "Written by a killed enrich."}
+    insights_path.write_text(json.dumps(ahead, indent=2), encoding="utf-8")
+    real_replace = os.replace
+
+    def failing_replace(source: Any, destination: Any) -> None:
+        if Path(destination) == inventory_path:
+            raise OSError("disk full")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError, match="disk full"):
+        enrich_inventory(tmp_path, insights={**_authored(tmp_path), "overview": "The recovery run."})
+
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    assert json.loads(insights_path.read_text(encoding="utf-8")) == inventory[INSIGHTS_KEY]

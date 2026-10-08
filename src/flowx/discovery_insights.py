@@ -641,13 +641,20 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[bool]:
 
 
 def _write_both_or_neither(
-    insights_path: Path, insights_document: dict[str, Any], inventory_path: Path, inventory_document: dict[str, Any]
+    insights_path: Path,
+    insights_document: dict[str, Any],
+    inventory_path: Path,
+    inventory_document: dict[str, Any],
+    *,
+    current_insights: dict[str, Any] | None,
 ) -> None:
     """Replace ``agentic_insights.json`` and ``inventory.json`` back to back, keeping them consistent.
 
     Both temp files are written before either target is replaced. If replacing the inventory raises
-    ``OSError`` (the rename did not happen), the previous insights file is put back by replacing it
-    from a temp file (or the new one is removed), so the live file is never left half-written. If
+    ``OSError`` (the rename did not happen), the insights file is put back to *current_insights* --
+    the block the unchanged ``inventory.json`` holds, not whatever the file held, which an earlier
+    killed write may have left ahead -- by replacing it from a temp file (or removed when the
+    inventory holds none), so the live file is never left half-written. If
     that rollback fails too, the two may disagree, so :class:`_UnrecoveredWriteError` is raised and
     the caller's lock stays behind. An interrupt (``KeyboardInterrupt``, ``SystemExit``) from the
     first replace on can arrive just after a rename succeeded, so nothing is rolled back: it is
@@ -655,7 +662,7 @@ def _write_both_or_neither(
     Callers hold :func:`_enrich_lock`, so no other enrich writes between, and the fixed temp names
     mean the next write overwrites and removes any left behind by a killed one.
     """
-    previous_insights = insights_path.read_bytes() if insights_path.exists() else None
+    previous_insights = None if current_insights is None else json.dumps(current_insights, indent=2).encode("utf-8")
     insights_temporary = insights_path.with_name(f".{insights_path.name}.tmp")
     inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.tmp")
     try:
@@ -757,6 +764,7 @@ def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any) -> dict[str
         agentic_insights,
         inventory_path,
         render_inventory(deterministic, agentic_insights),
+        current_insights=inventory.get(INSIGHTS_KEY),
     )
     return {
         "ok": True,
