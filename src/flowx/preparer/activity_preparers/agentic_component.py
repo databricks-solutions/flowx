@@ -165,9 +165,10 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
 
     - the ForEach ``item`` parameter, only to a ``notebook_task`` (``base_parameters``) or
       ``run_job_task`` (``job_parameters``) that is the ForEach's only child; any other
-      payload of an only child passes ``{{input}}`` itself. With siblings, the children run
-      as a ``<loop>_inner_tasks`` job where ``{{input}}`` does not resolve: reference
-      ``{{job.parameters.item}}`` in a notebook ``base_parameters``, a
+      payload of an only child passes ``{{input}}`` itself. When the ForEach has several
+      children, or its only child is an IfCondition or Switch holding the component, the
+      children run as a ``<loop>_inner_tasks`` job where ``{{input}}`` does not resolve:
+      reference ``{{job.parameters.item}}`` in a notebook ``base_parameters``, a
       ``run_job_task.job_parameters`` or a ``condition_task`` operand, which flowx forwards;
       other payloads are not scanned, so they cannot receive the item on their own;
     - the source activity's collapsed notifications, when the fragment sets neither
