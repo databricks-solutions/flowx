@@ -262,6 +262,13 @@ def test_inferred_edge_requires_evidence_and_confidence() -> None:
     assert any("requires 'confidence' in" in v for v in violations)
 
 
+def test_whitespace_only_edge_identity_is_rejected() -> None:
+    raw = _valid_insights()
+    raw["pipeline_relationships"][1]["lineage_edge"]["edge_identity"] = "   "
+    violations = validate_insights(raw, _inventory())
+    assert any("edge_identity must be a non-empty string" in v for v in violations)
+
+
 def test_inferred_edge_aggregates_identity_and_evidence_errors() -> None:
     """A single edge wrong in several ways surfaces ALL its errors, never fail-fast.
 

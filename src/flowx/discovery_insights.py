@@ -325,7 +325,7 @@ def _validate_edge(
             "table/file another reads) belongs on the 'inferred' tier -- set edge_type 'inferred' "
             "with an 'evidence' string and a 'confidence' level, not a 'data' edge."
         )
-    if not isinstance(identity, str) or not identity:
+    if not isinstance(identity, str) or not identity.strip():
         problems.append(f"{loc}.lineage_edge: edge_identity must be a non-empty string")
 
     # Tier-specific checks run independently of the type/identity checks above so every problem
