@@ -19,6 +19,7 @@ import pytest
 from flowx.adapter.__main__ import main as adapter_cli_main
 from flowx.discovery_insights import inventory_fingerprint
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
+from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import (
     SCHEMA_VERSION,
     ComponentPlan,
@@ -79,6 +80,7 @@ def _inventory() -> dict[str, Any]:
             }
         ]
     }
+    inventory["insights"]["agentic_insights_sha256"] = canonical_sha256(inventory["insights"])
     return inventory
 
 
@@ -97,6 +99,8 @@ def _write_inventory(output_dir: Path, inventory: dict[str, Any]) -> Path:
     metadata.mkdir(parents=True, exist_ok=True)
     path = metadata / "inventory.json"
     path.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+    if "insights" in inventory:
+        (metadata / "agentic_insights.json").write_text(json.dumps(inventory["insights"], indent=2), encoding="utf-8")
     return path
 
 
@@ -145,22 +149,42 @@ def test_non_dict_payload_is_a_violation() -> None:
     assert validate_plan([1, 2], _inventory()) == ["conversion plan must be a JSON object, got list"]
 
 
-def test_unknown_top_level_key_including_library_owned_fields() -> None:
+def test_library_owned_top_level_keys_are_ignored_and_unknown_ones_rejected() -> None:
     raw = _authored_plan()
     raw["schema_version"] = "1"
+    raw["findings"] = ["edited"]
     raw["bogus"] = True
     violations = validate_plan(raw, _inventory())
-    assert any("unknown top-level key: 'schema_version' (set by the library, not the author)" in v for v in violations)
-    assert any("unknown top-level key: 'bogus'" in v for v in violations)
+    assert violations == ["unknown top-level key: 'bogus'"]
 
 
-def test_library_owned_component_fields_are_rejected() -> None:
+def test_library_owned_component_fields_are_ignored_and_recomputed(tmp_path: Path) -> None:
+    _write_inventory(tmp_path, _inventory())
     raw = _authored_plan()
-    raw["components"][0]["recommended"] = "deterministic"
+    raw["components"][0]["recommended"] = "agentic"
     raw["components"][0]["options"] = {}
-    violations = validate_plan(raw, _inventory())
-    assert any("unknown field 'recommended' (set by the library, not the author)" in v for v in violations)
-    assert any("unknown field 'options' (set by the library, not the author)" in v for v in violations)
+    raw["components"][0]["typo"] = 1
+    assert validate_plan(raw, _inventory()) == ["components[0]: unknown field 'typo'"]
+    del raw["components"][0]["typo"]
+
+    assert record_plan(tmp_path, plan=raw)["ok"] is True
+
+    recorded = json.loads((tmp_path / "metadata" / PLAN_FILENAME).read_text(encoding="utf-8"))
+    assert recorded["components"][0]["recommended"] == "deterministic"
+    assert recorded["components"][0]["options"]["deterministic"]["capable"] is True
+
+
+def test_a_pending_decision_is_valid_and_recorded_as_pending(tmp_path: Path) -> None:
+    _write_inventory(tmp_path, _inventory())
+    raw = _authored_plan()
+    raw["components"][0]["decision"] = None
+    del raw["components"][1]["decision"]
+
+    result = record_plan(tmp_path, plan=raw)
+
+    assert result["ok"] is True and result["pending"] == ["component-1", "component-2"]
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None and recorded.pending_components() == ["component-1", "component-2"]
 
 
 def test_invalid_decision_value_is_rejected() -> None:
@@ -337,18 +361,20 @@ def _write_empty_report(output_dir: Path) -> None:
     (work / "translation_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
 
-def test_cli_route_without_plan_emits_components(
+def test_cli_route_without_plan_writes_the_recommendation_into_the_plan(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import io
 
     _write_inventory(tmp_path, _inventory())
-    monkeypatch.setattr("sys.stdin", io.StringIO(""))  # not a TTY -> dry-run recommendation
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))  # not a TTY
     code = adapter_cli_main(["route", "--output-dir", str(tmp_path)])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert [c["component_id"] for c in payload["components"]] == ["component-1", "component-2"]
-    assert "default_plan" in payload
+    assert payload["pending"] == ["component-1", "component-2"] and payload["applied"] is False
+    recorded = json.loads((tmp_path / "metadata" / PLAN_FILENAME).read_text(encoding="utf-8"))
+    assert [component["component_id"] for component in recorded["components"]] == ["component-1", "component-2"]
+    assert recorded["components"][0]["options"]["agentic"]["has_simplification"] is True
 
 
 def test_cli_route_with_plan_records_and_reports_the_edit(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

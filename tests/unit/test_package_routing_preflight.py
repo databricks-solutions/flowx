@@ -21,6 +21,7 @@ from flowx.adapter.__main__ import main as adapter_main
 from flowx.bundler.dab_writer import main as package_main
 from flowx.discovery_insights import enrich_inventory
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
+from flowx.discovery_serde import canonical_sha256
 from flowx.ir_serde import pipeline_to_dict
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import NotebookActivity, Pipeline
@@ -125,7 +126,7 @@ def test_package_with_a_deterministic_plan_and_no_record_passes(tmp_path: Path) 
             "members": ["solo"],
             "decision": "deterministic",
             "outcome": "deterministic",
-            "combine_sha256": None,
+            "output_sha256": None,
         }
     ]
     assert audit["baseline_report_sha256"] is None
@@ -156,7 +157,6 @@ def test_route_combine_modify_then_package_keeps_the_routing_record(tmp_path: Pa
         adapter_main(
             [
                 "fill-agentic",
-                "combine",
                 "--output-dir",
                 str(tmp_path),
                 "--members",
@@ -178,7 +178,7 @@ def test_route_combine_modify_then_package_keeps_the_routing_record(tmp_path: Pa
     assert component_audit["members"] == ["solo"]
     assert component_audit["decision"] == "agentic"
     assert component_audit["outcome"] == "agentic-applied"
-    assert "combine_sha256" in component_audit
+    assert "output_sha256" in component_audit
     assert "fingerprint" in component_audit
     assert audit["baseline_report_sha256"] == baseline_sha256
     assert audit["translation_report_sha256"] == hashlib.sha256(stamped_path.read_bytes()).hexdigest()
@@ -199,7 +199,7 @@ def test_route_after_modify_leaves_the_stamped_report_and_package_asks_to_re_run
     stamped_path = tmp_path / WORK_DIRNAME / "translation_report.stamped.json"
 
     assert adapter_main(route) == 0
-    combine = ["fill-agentic", "combine", "--output-dir", str(tmp_path), "--members", "solo"]
+    combine = ["fill-agentic", "--output-dir", str(tmp_path), "--members", "solo"]
     assert adapter_main([*combine, "--pipelines-path", str(authored_path)]) == 0
     assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
     assert enrich_inventory(tmp_path, insights={"overview": "Solo loads one table."})["ok"] is True
@@ -243,33 +243,51 @@ def test_route_agentic_then_deterministic_switches_back_to_deterministic(
     assert _package(tmp_path) == 0
 
 
+def test_package_refuses_an_agentic_component_with_no_agent_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    _record(tmp_path, "agentic")
+    plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
+    apply_plan_to_report(tmp_path, plan)
+    assert routing_record(json.loads(report_path.read_text(encoding="utf-8"))) is not None
+
+    assert _package(tmp_path) == 1
+
+    error = capsys.readouterr().err
+    assert "component 'component-1' (solo) is routed agentic but has no agent output yet" in error
+    assert not (tmp_path / "databricks.yml").exists()
+    assert not (tmp_path / "solo" / "databricks.yml").exists()
+    _fill_solo(tmp_path)
+    assert _package(tmp_path) == 0
+
+
 def test_package_with_a_current_plan_writes_an_audit_with_hashes(tmp_path: Path) -> None:
     report_path = _setup(tmp_path, _inventory("agentic"))
     baseline_sha256 = hashlib.sha256(report_path.read_bytes()).hexdigest()
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
     apply_plan_to_report(tmp_path, plan)
+    _fill_solo(tmp_path)
     record = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
     assert record is not None
 
-    assert _package(tmp_path) in (0, 1)  # 1 only signals bundle-invariant warnings, not the preflight
+    assert _package(tmp_path) == 0
     assert (tmp_path / "databricks.yml").exists()
 
     audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
     assert audit["inventory_sha256"] == audit["recorded_against_inventory_sha256"] == plan["inventory_sha256"]
-    assert (
-        audit["conversion_plan_sha256"]
-        == hashlib.sha256((tmp_path / "metadata" / "conversion_plan.json").read_bytes()).hexdigest()
-    )
+    assert audit["conversion_plan_sha256"] == record["conversion_plan_sha256"] == canonical_sha256(plan)
     assert audit["baseline_report_sha256"] == baseline_sha256
     assert audit["baseline_gaps_sha256"] == record["baseline_gaps_sha256"]
     assert audit["translation_report_sha256"] == hashlib.sha256(report_path.read_bytes()).hexdigest()
+    assert "gaps_introduced" not in audit and "gaps_count" not in audit
     (component,) = audit["components"]
     recorded = record["components"][component["component_id"]]
     assert component["decision"] == "agentic"
-    assert component["outcome"] == recorded["outcome"] == "agentic-not-viable"
+    assert component["outcome"] == recorded["outcome"] == "agentic-applied"
     assert component["fingerprint"] == recorded["fingerprint"]
-    assert component["combine_sha256"] is None
+    assert component["output_sha256"] == recorded["output_sha256"] is not None
 
 
 def test_package_refuses_tampered_baseline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -306,7 +324,7 @@ def test_package_refuses_stale_unstamped_report(tmp_path: Path, capsys: pytest.C
 
 
 def test_package_refuses_edited_combine_store(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Package refuses when agentic_combines.json pipelines were edited after the combine."""
+    """Package refuses when agentic_conversion.json pipelines were edited after the combine."""
     _setup(tmp_path, _inventory("agentic"))
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(
@@ -323,7 +341,6 @@ def test_package_refuses_edited_combine_store(tmp_path: Path, capsys: pytest.Cap
         adapter_main(
             [
                 "fill-agentic",
-                "combine",
                 "--output-dir",
                 str(tmp_path),
                 "--members",
@@ -335,16 +352,19 @@ def test_package_refuses_edited_combine_store(tmp_path: Path, capsys: pytest.Cap
         == 0
     )
 
-    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
     combines = json.loads(combines_path.read_text(encoding="utf-8"))
-    combines["component-1"]["pipelines"][0]["name"] = "tampered_name"
+    combines["components"]["component-1"]["pipelines"][0]["name"] = "tampered_name"
     combines_path.write_text(json.dumps(combines, indent=2), encoding="utf-8")
 
     assert _package(tmp_path) == 1
-    assert "the combine store has been edited (component-1); re-run fill-agentic combine" in capsys.readouterr().err
+    assert (
+        "metadata/agentic_conversion.json has been edited (component-1); re-run fill-agentic for that component"
+        in capsys.readouterr().err
+    )
     assert not (tmp_path / "databricks.yml").exists()
 
-    combine = ["fill-agentic", "combine", "--output-dir", str(tmp_path), "--members", "solo"]
+    combine = ["fill-agentic", "--output-dir", str(tmp_path), "--members", "solo"]
     assert adapter_main([*combine, "--pipelines-path", str(authored_path)]) == 0
     assert _package(tmp_path) == 0
 
@@ -367,7 +387,6 @@ def test_package_refuses_stale_stamped_report(tmp_path: Path, capsys: pytest.Cap
         adapter_main(
             [
                 "fill-agentic",
-                "combine",
                 "--output-dir",
                 str(tmp_path),
                 "--members",
@@ -425,8 +444,17 @@ def _route_solo_agentic_and_modify(output_dir: Path, report_path: Path, *modify_
     )
     route = ["route", "--output-dir", str(output_dir), "--plan-path", str(plan_path)]
     assert adapter_main(route) == 0
+    _fill_solo(output_dir)
     assert adapter_main(["modify", str(report_path), "--output-dir", str(output_dir), *modify_args]) == 0
     return route
+
+
+def _fill_solo(output_dir: Path) -> None:
+    """Fill the routed-agentic 'solo' component with the authored pipeline through the CLI."""
+    authored_path = output_dir / "authored.json"
+    authored_path.write_text(json.dumps([_authored_pipeline()]), encoding="utf-8")
+    fill = ["fill-agentic", "--output-dir", str(output_dir), "--members", "solo", "--pipelines-path"]
+    assert adapter_main([*fill, str(authored_path)]) == 0
 
 
 def test_package_asks_to_re_run_modify_after_a_re_convert_and_re_route(
@@ -460,3 +488,63 @@ def test_package_checks_a_modify_out_copy_by_its_routing_record(tmp_path: Path) 
 
     assert exit_code == 0
     assert (tmp_path / "databricks.yml").exists()
+
+
+def test_package_refuses_a_routed_report_whose_plan_is_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    _route_solo_agentic_and_modify(tmp_path, report_path)
+    (tmp_path / "metadata" / "conversion_plan.json").unlink()
+    capsys.readouterr()
+
+    assert _package(tmp_path) == 1
+
+    assert "carries a routing record) but metadata/conversion_plan.json is missing" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_package_revalidates_a_recorded_plan_that_lost_its_component(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup(tmp_path, _inventory())
+    _record(tmp_path, "deterministic")
+    plan_path = tmp_path / "metadata" / "conversion_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["components"] = []
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+    assert _package(tmp_path) == 1
+
+    assert "conversion_plan.json is not a valid decision" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_package_refuses_a_plan_with_a_pending_decision(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _setup(tmp_path, _inventory())
+    plan = {"components": [{"component_id": "component-1", "members": ["solo"], "decision": None}]}
+    assert routing.record_plan(tmp_path, plan=plan)["ok"] is True
+
+    assert _package(tmp_path) == 1
+
+    assert "components ['component-1'] have no decision yet" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_package_refuses_a_configured_report_of_an_unfilled_agentic_component(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps({"components": [{"component_id": "component-1", "members": ["solo"], "decision": "agentic"}]}),
+        encoding="utf-8",
+    )
+    assert adapter_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)]) == 0
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
+    capsys.readouterr()
+
+    assert _package(tmp_path) == 1
+
+    assert "is routed agentic but has no agent output yet" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()

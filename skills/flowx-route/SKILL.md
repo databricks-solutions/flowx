@@ -2,16 +2,17 @@
 name: flowx-route
 description: >
   Route each connected component of the discovered inventory to a deterministic (1:1 engine) or
-  agentic (LLM-assisted re-architecture) conversion, record the fingerprint-bound conversion plan,
-  and fill the routed-agentic groups with fill-agentic combine. Runs after enrich, before/with
-  convert.
+  agentic (LLM-assisted re-architecture) conversion: route writes its recommendation and the
+  suggested groupings into metadata/conversion_plan.json and a standard review page, the user decides,
+  route applies the plan, and fill-agentic fills each routed-agentic unit. Runs after enrich and
+  convert, before package.
 triggers:
   - "route pipelines"
   - "route conversion"
   - "conversion plan"
   - "deterministic or agentic"
   - "fill agentic"
-  - "combine pipelines"
+  - "group pipelines"
   - "agentic conversion"
   - "recommend conversion route"
 ---
@@ -21,185 +22,175 @@ triggers:
 After discover (and, by default, `flowx-enrich`), routing decides **per connected component** whether
 each part of the factory converts **deterministically** (the typed engine's 1:1 translation) or
 **agentically** (an LLM-authored re-architecture, e.g. collapsing five extractors onto one Lakeflow
-Connect pipeline). It records the decision as a fingerprint-bound `metadata/conversion_plan.json`,
-edits the translation report so routed-agentic groups become placeholder gaps, and then you author
-the fill.
+Connect pipeline). Route writes its recommendation straight into `metadata/conversion_plan.json`, the
+one readable record of the decisions, and draws it as `metadata/routing_review.html`. The user decides,
+you edit the plan, route applies it to the translation report, and you author the fill.
 
-**ADF only (current scope).** The discover → enrich → route → edit → fill agentic-conversion flow is
+**ADF only (current scope).** The discover → enrich → route → fill agentic-conversion flow is
 supported for **ADF today**, and `route` enforces it: for an Airflow inventory it recommends and
-records only `deterministic` decisions and rejects an `agentic` one (the plan is not recorded and the
-report is left untouched). `convert --merge-agentic --source airflow` is disabled too. Airflow
-DAGs are often one connected component, so Airflow agentic conversion follows the Airflow track's own
-per-gap and patch contract rather than this whole-component flow. For **Airflow agentic gaps today,
-use the `flowx-resolve-airflow-gaps` skill** (the strict per-gap resolver), not this routing flow.
+records only `deterministic` decisions, suggests no groupings, and rejects an `agentic` decision (the
+plan is not recorded and the report is left untouched). `convert --merge-agentic --source airflow` is
+disabled too. Airflow DAGs are often one connected component, so Airflow agentic conversion follows the
+Airflow track's own per-gap and patch contract rather than this whole-component flow. For **Airflow
+agentic gaps today, use the `flowx-resolve-airflow-gaps` skill** (the strict per-gap resolver), not
+this routing flow.
 
 **There is no LLM inside flowx.** The library computes the recommendation deterministically and only
 *validates and records* the decision and the authored fill — the same author → validate → merge
 contract `enrich` uses. This is additive and non-breaking: with **no recorded plan**, `convert` and
 `package` behave exactly as before.
 
-**Who decides what.** The library **recommends** a route per component; the **customer decides**
-deterministic-vs-agentic for each component; the **agent** presents the options and the
-recommendation, serializes only the customer's *approved* decision into the plan, and authors the
-agentic fill. The agent never picks the route on the customer's behalf — it records the customer's
-choice and does the mechanical work of the approved fill.
+**Who decides what.** The library **recommends** a route per component and **suggests** groupings;
+the **customer decides** deterministic-vs-agentic for each component and which groupings to accept;
+the **agent** presents the review page, asks the customer what they want the conversion to achieve,
+records only the customer's decisions in the plan, and authors the agentic fill. The agent never picks
+the route on the customer's behalf. Route leaves every decision **pending** until it is made, and
+applies nothing while one is pending.
+
+## The files
+
+| Stage | File | Written by |
+|---|---|---|
+| describe | `metadata/source_graphs.json`, `metadata/agentic_insights.json` (optional), `metadata/inventory.json` | discover, enrich |
+| decide | `metadata/conversion_plan.json` — components, decisions, suggested groupings, conversation | route writes it; you edit it |
+| decide | `metadata/routing_review.html` — the standard review page (generated, never edited) | route, fill-agentic |
+| convert | `.work/translation_report.json`, `.work/gaps.json` — the deterministic report with the agentic decision's edits | convert, then route |
+| convert | `metadata/agentic_conversion.json` — the agent's conversion output (per unit, plus fills of convert's own gaps) | fill-agentic, merge_agentic |
+| convert | `.work/route_baseline/` — convert's report as route first found it (internal, never rewritten) | route |
+| after | the bundle, `metadata/route_audit.json` | package |
 
 ## Where routing sits
 
 ```
-discover → enrich (default) → convert (deterministic baseline) → route (decide + edit) → fill-agentic → package
+discover → enrich (default) → convert (deterministic baseline) → route (recommend → decide → apply) → fill-agentic → package
 ```
 
 Convert builds the deterministic baseline report **before** routing (route can trigger it in-process
 via `--source` / `--source-path`); routing then edits that report. If you run `convert` again after
 routing, run `route` straight after it: a fresh report carries no routing record, so route takes it
-as the new baseline and re-applies the plan and the stored combines (merges of convert's own gaps
-made before that convert must be merged again).
+as the new baseline and re-applies the plan and the agent's stored outputs (fills of convert's own
+gaps merged against the earlier report are dropped and must be merged again; route says how many).
 
 Pipelines are grouped into weak/undirected **connected components** over the inventory's control
 lineage (`lineage.control_edges`), so mutually-referencing pipelines are decided together and a
 caller/callee reference is never split across incompatible routes. Only resolved control edges join
 a component; an unresolved call is reported as a finding. ADF emits these control edges (from
-`ExecutePipeline`) in discovery. Agentic routing is ADF-only today whatever lineage an inventory
-carries (see the scope note above).
+`ExecutePipeline`) in discovery.
 
 Run the **`setup`** skill first if you haven't. Everything below has an MCP-tool path (Genie Code, or
 a local stdio registration — call the single **`flowx`** tool, run no `python3`/`$PY`) and a venv-CLI
 path (local; `PY="$(cat <plugin_dir>/.migration-venv)"` and `export PYTHONPATH="<plugin_dir>/src"`).
 
-## Step 1 — Recommend (the dry run you read first)
+## Step 1 — Route writes the recommendation into the plan
 
-Call `route` with **no decision** to get the recommendation: every component with its `members`, both
+Run `route` with no plan. It writes `metadata/conversion_plan.json` and `metadata/routing_review.html`
+and touches nothing else:
+
+- **MCP tool:** `flowx(command="route", parameters={"output_dir": "<dir>"})` — the plan and the page
+  come back under `bundle` (or are uploaded to `output_volume_path` / `output_workspace_path`), because
+  a hosted agent cannot read the server's `output_dir`.
+- **venv CLI:** `"$PY" -m flowx.adapter route --output-dir <dir>` (`--out <file>` writes the result
+  JSON to a file).
+
+The plan lists every component with its `members`, the library's `recommended` route, both
 first-class conversion `options` (a *deterministic* option carrying the engine-capability assessment
-+ any uncovered gaps, and an *agentic* option carrying the `recommended_patterns` from `enrich`, with
-any `simplification_pattern` flagged), the `findings` (unresolved/dangling control edges kept, never
-severed), and a ready-to-record `default_plan` proposing `decision == recommended` for every
-component.
+and any uncovered activities, and an *agentic* option carrying the `recommended_patterns` from enrich,
+with any `simplification_pattern` flagged and release states disclosed), and `decision: null`
+(pending). It also lists the `suggested_groupings`, an empty `conversation`, and the `findings`
+(unresolved control edges kept, never severed). A decision already in the file for a component with
+the same members is kept, so re-running route after a re-enrich or re-discover keeps your decisions
+and leaves only new or regrouped components pending.
 
-- **MCP tool:** `flowx(command="route", parameters={"output_dir": "<dir>"})`
-- **venv CLI:**
+### Present it with the review page
 
-  ```bash
-  export PYTHONPATH="<plugin_dir>/src"
-  PY="$(cat <plugin_dir>/.migration-venv)"
-  "$PY" -m flowx.adapter route --output-dir <dir>
-  ```
+`metadata/routing_review.html` is the standard way to show the customer what their source does and how
+it will be converted. Every run has the same eight sections in the same order: summary, what the
+source does (the insights), components, suggested groupings, how each unit will be converted, the
+routing conversation, findings, and how to steer. Open it with the customer, or walk through the same
+sections in that order.
 
-  On a non-TTY with no `--plan-path`, this emits the recommendation and exits 0 (it edits nothing).
-  `route` reads `metadata/inventory.json`; run discover first. `--out <file>` writes the JSON to a
-  file instead of stdout.
+Ask open questions grounded in what discover and enrich found — what they want the conversion to
+achieve, the databases behind the extractors, whether they are after a specific pattern such as
+Lakeflow Connect — and record each question and answer in the plan's `conversation`
+(`[{"question": "...", "answer": "..."}]`). Package copies it into `route_audit.json`.
 
-`recommended` is the library's starting suggestion — `deterministic` when the whole component is
-engine-capable, else `agentic`. Present each component's members, its recommendation, and the agentic
-option's patterns (flag any `has_simplification` re-architecture prominently).
+### Suggested groupings
 
-## Step 2 — Decide and record the plan
+A **grouping** is two or more whole components the insights suggest converting together, agentically,
+as **one unit**: one agent output replaces all of their pipelines (for example five independent
+extractors → one Lakeflow Connect pipeline). It never splits a component. Route suggests one from two
+kinds of link in the insights:
 
-Take the per-component decision and record it. The plan is **freely editable** — change a component's
-decision from agentic to deterministic, or vice versa, without restriction. `route` validates the plan,
-writes the fingerprint-bound `metadata/conversion_plan.json`, and then rebuilds `.work/translation_report.json`
-+ `gaps.json` from the immutable deterministic baseline, the plan, and any stored combines:
+- an `inferred` pipeline relationship (with its evidence and confidence) between pipelines of
+  different components;
+- one simplification pattern (same pattern name, `simplification_pattern: true`) recommended for
+  pipelines in more than one component — the independent extractors one managed pattern could replace.
 
-- **deterministic** components: the baseline pipelines stay (deterministic outcome).
-- **agentic components with a stored combine** whose members match: the combine's pipelines replace the
-  members; `gaps.json` still lists the members' routed tasks (agentic-applied outcome).
-- **agentic components without a matching combine**: placeholders and gaps as before (agentic-not-viable).
-- **switching back to deterministic**: restores that component's baseline exactly (deterministic outcome).
-  When the whole plan is deterministic, route writes the baseline report and gaps back byte for byte,
-  with no record — the non-breaking guarantee.
+Components joined by these links, directly or through each other, form one suggestion
+(`grouping-<n>`), so suggestions never overlap. Each lists its `components`, `members` and `basis`
+(the relationships or the shared pattern behind it), and `accepted: false`. Only a suggested grouping
+can be accepted; to group other components, record an inferred relationship through enrich and route
+again.
 
-When it edits the report, route also stamps a **routing record** onto it (the top-level
-`_routing_record` key): the plan's hash, the hashes of the immutable deterministic baseline report and
-gaps it started from, and one entry per `component_id` with its `members`, `decision`, `outcome`,
-`combine_sha256` (set only while that component's stored combine is applied, otherwise `null`),
-`fingerprint`, and `replacements` (tracking changes to a component's fingerprint across re-routes).
-Every re-route rebuilds from the baseline and current plan; identical input gives
-identical output (byte-for-byte, deterministic and idempotent).
+## Step 2 — Decide, then route again to apply
 
-There are three ways to supply the decision:
+Edit only these fields in `metadata/conversion_plan.json` (everything else is library-owned and
+recomputed on every route, so edits to it are ignored; an unknown key is refused):
 
-- **Interactive prompt (TTY).** Run `route` with no `--plan-path` on a real terminal and it asks, per
-  component, `route [d]eterministic / [a]gentic (default=<recommended>)`. An empty answer accepts the
-  recommendation. This is the from-the-seat path.
-- **Authored plan file** — `--plan-path <file>` (or `--plan-path -` to read the plan JSON from stdin).
-- **MCP tool** — pass the plan inline as `plan` (or `plan_path`):
+- each component's `decision` — `"deterministic"` or `"agentic"` (the customer's choice) — and an
+  optional `rationale`;
+- to accept a grouping, its `accepted: true`, and decide each of its components `"agentic"`;
+- `conversation`.
 
-  ```
-  flowx(command="route", parameters={"output_dir": "<dir>", "plan": { ...authored plan... }})
-  ```
+Then run `route` again (no plan). Once **no decision is pending** it validates the plan, records it,
+and applies it. Other ways to supply the decisions:
 
-### The plan shape
-
-The plan carries **only** the decision (and an optional rationale) per component — and the decision is
-the **customer's**, not yours. Your job is to present each component's members, its `recommended`
-route, and both `options`, then serialize the customer's pick; you do not choose the route yourself.
-The library recomputes `members`, `recommended`, and both `options` on record, so recorded facts
-cannot drift from the inventory or be faked. Start from the recommendation's `default_plan` and flip
-the components the customer chose to override:
-
-```json
-{
-  "components": [
-    {"component_id": "component-1", "members": ["IngestSalesforce", "IngestWorkday"], "decision": "agentic",
-     "rationale": "Collapse both extractors onto one Lakeflow Connect pipeline"},
-    {"component_id": "component-2", "members": ["BuildMart"], "decision": "deterministic"}
-  ]
-}
-```
+- **A plan** — `--plan-path <file>` (or `--plan-path -` for stdin), or MCP `plan` inline / `plan_path`:
+  the decisions alone (`{"components": [{component_id, members, decision}], "suggested_groupings":
+  [{grouping_id, accepted}], "conversation": [...]}`), or an edited copy of the recorded plan. This is
+  the hosted path: edit the plan route returned and send it back as `plan`.
+- **Interactive prompt (TTY)** — `route` on a real terminal offers each suggested grouping whose
+  components are pending, then asks `route [d]eterministic / [a]gentic (default=<recommended>)` for
+  each pending component.
 
 Rules the validator enforces (all violations returned at once; nothing written on failure):
 
-- `decision` must be `"deterministic"` or `"agentic"`; `rationale` (optional) must be a non-empty
-  string when present.
-- Every `member` must be a real inventory pipeline, and a component's `members` must **exactly match
-  one computed connected component** — a decision can never split a component or span two.
-- The plan is a **bijection**: every component is decided exactly once (no partial plan, no
-  duplicate/conflicting decisions).
-- `component_id` is **required** on every component — a non-empty string that must match the computed
-  component for those `members`. Start from the recommendation's `default_plan`, which already carries
-  the correct `component_id` for each component.
+- `decision` is `"deterministic"`, `"agentic"`, or `null` while pending; `rationale` (optional) is a
+  non-empty string.
+- Every component is listed exactly once, and its `members` must exactly match one computed
+  connected component; `component_id` must match too.
+- An accepted grouping has no component decided `"deterministic"`; agentic decisions and groupings are
+  ADF-only.
+- `conversation` entries are `{question, answer}` with non-empty strings.
 
-### Triggering convert if the report is missing
+### What applying does
 
-`route` edits `.work/translation_report.json`, which the convert phase produces. If it is missing,
-pass `--source <adf|airflow>` **and** `--source-path <path>` (MCP: `source` plus the source-specific
-path param — `adf_source_path` or `airflow_source_path`; a generic `source_path` is **ignored**, and
-ADF also accepts `adf_definitions` / `adf_volume_path` / `adf_workspace_path`) and `route` triggers
-the convert phase in-process first. Otherwise run `flowx-convert` before routing.
+Route rebuilds `.work/translation_report.json` + `gaps.json` from convert's baseline, the stored fills
+of convert's own gaps, the plan, and the agent's outputs in `metadata/agentic_conversion.json`. Each
+**routing unit** (a component, or an accepted grouping) becomes:
 
-### venv CLI
+- **deterministic**: the baseline pipelines stay (outcome `deterministic`).
+- **agentic with a stored output** whose members match: the output's pipelines replace the members,
+  and their routed gaps are dropped (outcome `agentic-applied`).
+- **agentic without one**: every task becomes a `PlaceholderActivity` with one pipeline-tagged gap,
+  the deterministic translation kept as its `raw_definition` (outcome `agentic-not-viable` — package
+  refuses until it is filled).
 
-```bash
-"$PY" -m flowx.adapter route --output-dir <dir> --plan-path plan.json \
-  [--source adf --source-path <path>]     # only needed to trigger convert when the report is missing
-```
+When nothing is routed agentic (and no gap fill is stored), route writes convert's report and gaps back
+byte for byte, with no record — the non-breaking guarantee. Otherwise it stamps a **routing record**
+onto the report (`_routing_record`): the plan's hash, the baseline report and gaps hashes, and one
+entry per unit with its `members`, `decision`, `outcome`, `output_sha256` (set only while its stored
+output is applied) and `fingerprint` (a grouping also lists its `components`). The plan is freely
+editable: change it and route again as often as needed; the same plan gives the same bytes, and a
+changed unit is re-derived.
 
-Exit 1 (nothing written) on a missing report it cannot produce or a plan that fails validation.
-Re-routing under different decisions is always allowed; it rebuilds from the baseline.
+## Step 3 — Fill each routed-agentic unit with fill-agentic
 
-## Step 3 — Fill the routed-agentic groups
-
-Every routed-agentic pipeline's tasks are now `PlaceholderActivity` nodes with one pipeline-tagged
-`AgenticGap` each. A routed-agentic group is filled **only** by `fill-agentic combine`, which replaces
-the whole group with pipelines you author (no LLM in the library, which validates and records).
-
-### 3a — Keep a pipeline 1:1
-
-To convert a routed-agentic pipeline agentically but keep it as one pipeline, combine its component
-with one authored pipeline of the **same name** (see 3b). The per-pipeline
-`convert --merge-agentic` is for convert's **own** agentic gaps only: it refuses, writing nothing, any
-result that names a routed-agentic pipeline, or whose activity would first land in one, with "this
-pipeline is routed agentic; fill it with fill-agentic combine (to change the approach, change the plan,
-re-run convert and route, then combine again)".
-
-### 3b — Cross-pipeline COMBINE (N pipelines → M)
-
-When the decision is a re-architecture that changes pipeline count — e.g. five extractor pipelines
-collapse onto **one** Lakeflow Connect pipeline — use `fill-agentic combine`. You author the
-replacement pipeline(s) as IR dicts and the whole routed group is swapped for them.
+A routed-agentic unit is filled **only** by `fill-agentic`, which replaces the whole unit with
+pipelines you author (no LLM in the library, which validates and records).
 
 ```bash
-"$PY" -m flowx.adapter fill-agentic combine \
+"$PY" -m flowx.adapter fill-agentic \
   --output-dir <output_dir> \
   --members "IngestSalesforce,IngestWorkday" \
   --pipelines-path authored_pipelines.json \
@@ -209,35 +200,39 @@ replacement pipeline(s) as IR dicts and the whole routed group is swapped for th
 MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [...], "pipelines": [...]})`
 (pass `pipelines` inline as a list, or `pipelines_path`).
 
-`combine` is the only action. Its guarantees:
+To keep a pipeline 1:1, fill its component with one authored pipeline of the **same name**. The
+per-pipeline `convert --merge-agentic` is for convert's **own** agentic gaps only: it refuses, writing
+nothing, any result that names a routed-agentic pipeline, or whose activity would first land in one,
+with "this pipeline is routed agentic; fill its component with fill-agentic (run fill-agentic again
+with new pipelines to change the approach)". After routing, a merge into the live report is also
+stored as a gap fill in `metadata/agentic_conversion.json`, so every rebuild re-applies it on top of
+the unchanged baseline.
 
-- `--members` (comma-separated; MCP accepts a list) must **exactly match** a routed-**agentic**
-  component in the recorded `metadata/conversion_plan.json`, whose `inventory_sha256`,
-  `source_graphs_sha256` and `agentic_insights_sha256` must still match the current inventory. A partial group, a superset, a typo, or a deterministic component is refused
-  — you can't swap pipelines the plan didn't route agentic. The report must carry a routing record
-  that matches that plan (route has applied it).
+Its guarantees:
+
+- `--members` (comma-separated; MCP accepts a list) must **exactly match** a routed-**agentic** unit —
+  a component, or an accepted grouping's full member list — in the recorded plan, whose
+  `inventory_sha256`, `source_graphs_sha256` and `agentic_insights_sha256` must still match the
+  current inventory, with nothing pending. A partial group, a superset, a typo, or a deterministic
+  component is refused. The report must carry a routing record that matches that plan.
 - **Same authored pipelines** (the canonical hash covers every field of every authored pipeline):
-  `already_combined: true` with the message "already applied, unchanged"; nothing is written. This
-  is a no-op even after a re-route, allowing idempotent tooling. If the report no longer reflects the
-  stored combine, or the stored entry was edited by hand, combine stores the pipelines again,
-  rebuilds, validates and writes the result.
-- **Different authored pipelines**: replaces the stored combine for that component only, rebuilds,
-  and writes the result (if structural validation passes). The `route_audit.json` records the replacement,
-  showing the old `fingerprint` in `replacements` and the new `fingerprint`.
-- **Unique names**: an authored pipeline name may reuse a member of this component, but not another
-  name in the same list, a member of another component, or a pipeline another component's combine
-  authored; a clash is refused and nothing is written.
-- `--pipelines-path` is a JSON **list** of pipeline IR dicts (the authored replacements), typically
-  carrying `AgenticComponentActivity` nodes (see below). Empty `pipelines` list is refused.
-- Each authored pipeline **must** carry the source tag `"tags": {"source": "adf"}` (routing/agentic
-  conversion is ADF-only). Combine asserts this up front and **fails closed** (nothing written, with
-  a clear message) on a missing or non-`adf` tag, so a mis-tagged pipeline is caught here rather than
-  surviving to the package preflight.
+  `already_applied: true` with the message "already applied, unchanged"; nothing is written. If the
+  report no longer reflects the stored output, or the stored entry was edited by hand, it stores the
+  pipelines again, rebuilds, validates and writes the result.
+- **Different authored pipelines** replace the stored output for that unit only and add
+  `{"from", "to"}` to the entry's `replaced` history (the first fill is not a replacement). The history
+  lives in `agentic_conversion.json`, so it survives switching the unit to deterministic and back.
+- **Unique names**: an authored pipeline name may reuse a member of this unit, but not another name in
+  the same list, a member of another unit, a pipeline another unit's output authored, or a name that
+  shares a bundle folder with another pipeline once normalised (`Sales Load` and `Sales-Load` would
+  overwrite each other).
+- **Fully converted**: an authored pipeline that still holds a `PlaceholderActivity` (top level or
+  inside a ForEach / If / Switch) is refused.
+- Each authored pipeline **must** carry `"tags": {"source": "adf"}`; a missing or non-`adf` tag fails
+  closed. An empty `pipelines` list is refused.
 - The merged report is **always** validated with the structural bundle invariants (a real
   `prepare → write_bundle` pass) **before it is written** — no bypass — so a duplicate key, dangling
-  dependency, cycle, or dangling pipeline/run_job reference can never land on disk. Validation happens
-  first; if any violation is found, `ok` is `false`, `violations` lists them, and nothing is written
-  (all-or-nothing).
+  dependency, cycle, or dangling pipeline/run_job reference can never land on disk (all-or-nothing).
 
 ### Authoring an `AgenticComponentActivity` (the escape hatch)
 
@@ -269,7 +264,7 @@ the package phase writes verbatim:
 ```
 
 - `tags` — the authored pipeline **must** set `tags.source` to `"adf"` (routing/agentic is ADF-only);
-  combine fails closed otherwise (see the combine guarantees above).
+  fill-agentic fails closed otherwise.
 - `files` — files written below the bundle `src/`; each is `path` + either UTF-8 `content` or
   base64 `binary_content`.
 - `resources` — bundle resources in the `resource_key` + raw `definition` shape the bundle writer
@@ -303,30 +298,38 @@ applies when authoring recommended patterns.)
 
 ## Step 4 — Continue to package
 
-Once the routed-agentic groups are filled and the report validates, continue with `flowx-convert`'s
-just-in-time configuration (`inspect`/`modify`) as usual, then `flowx-package`. The recorded
-`metadata/conversion_plan.json` is kept alongside `inventory.json` as the decision of record. It is the
-library's typed `ConversionPlan` (schema 2): one decision per component, bound to the inventory
-fingerprint, the saved `source_graphs.json` and the saved `agentic_insights.json` it was decided on,
-with a reserved, empty `assignments` list per component for per-node routing later.
+Once every agentic unit is filled, continue with `flowx-convert`'s just-in-time configuration
+(`inspect`/`modify`) as usual, then `flowx-package`. The recorded `metadata/conversion_plan.json` is the
+library's typed `ConversionPlan` (schema 3), bound to the inventory fingerprint, the saved
+`source_graphs.json` and the saved `agentic_insights.json` it was decided on, with a reserved, empty
+`assignments` list per component for per-node routing later.
 
-Package verifies the routing plan is still current against the inventory, checks the saved baseline
-still has the hashes the routing record names ("re-run convert, then route" otherwise) and that no
-stored combine was edited ("re-run fill-agentic combine"), then replays `rebuild` from the baseline,
-the plan, and the stored combines. The live `.work/translation_report.json` must match the rebuild
-exactly, record included; otherwise it refuses with "re-run route". Any other packaged report —
-modify's configured `.work/translation_report.stamped.json`, or a `modify --out` copy — must carry
-the live report's routing record; otherwise it refuses with "the configured report is out of date;
-re-run modify". Route, combine and merge never rewrite
-the configured report, so run `modify` again after any of them.
+Package refuses, writing nothing, when:
 
-`metadata/route_audit.json` records per component the `decision`, `outcome`, `fingerprint`,
-`combine_sha256`, and `replacements` (changes to the fingerprint across re-routes), plus the hashes
-of the plan, the baseline report and gaps, the inventory, and the packaged report. It survives the
-prune of `.work/` and documents what was packaged and how.
+- `agentic_insights.json` and `inventory.json` disagree (or the file fails its own hash), plan or no
+  plan — enrich may have stopped between its two writes; run enrich again with the same insights
+  (locally, delete `metadata/.enrich.lock` first if it is still there; on the hosted server, run
+  discover again, then enrich prepare and apply);
+- the report carries a routing record but `conversion_plan.json` is missing;
+- the plan is stale against the inventory, is not a complete decision, or has a decision pending;
+- a routed-agentic unit has **no agent output yet** — an agentic decision is packaged agentically,
+  never as the deterministic stand-in; fill it, or decide it deterministic and route again;
+- the saved baseline no longer has the hashes the record names ("re-run convert, then route"), or a
+  stored output or gap fill was edited ("re-run fill-agentic", or merge that gap again);
+- the live `.work/translation_report.json` does not match a fresh rebuild ("re-run route"), or any
+  other packaged report — modify's configured `.work/translation_report.stamped.json`, or a
+  `modify --out` copy — does not carry the live report's routing record ("the configured report is
+  out of date; re-run modify"). Route, fill-agentic and merge never rewrite the configured report, so
+  run `modify` again after any of them.
+
+`metadata/route_audit.json` records per unit the `decision`, `outcome`, `fingerprint`, `output_sha256`
+and `replaced` history (a grouping also lists `grouped_components`), the gap fills applied, the routing
+`conversation`, and the hashes of the plan (the same canonical hash the routing record holds), the
+baseline report and gaps, the inventory, and the packaged report. It survives the prune of `.work/`
+and documents what was packaged and how.
 
 ## Reference
 
-- `flowx-enrich` skill — the `insights` layer routing's agentic option consumes.
+- `flowx-enrich` skill — the `insights` layer routing's agentic option and groupings consume.
 - `flowx-convert` — the deterministic engine, `merge_agentic` for convert's own gaps, and just-in-time config.
 - `flowx-package` — turns the (filled) report into the deployable DAB bundle.

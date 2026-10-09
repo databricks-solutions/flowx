@@ -388,51 +388,50 @@ def _default_report_path(output_dir: Path) -> Path:
 def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
     """Check a recorded routing plan still matches what is about to be packaged.
 
-    A plan is bound to the inventory, the saved source graphs and the saved agentic insights it was
-    decided on. If discover or enrich ran again since route, package refuses rather than shipping a
-    report that no longer reflects the user's decision. It also refuses when the report's routing
-    record disagrees with the plan: a different plan hash, different components, members or
-    decisions, or no record although the plan routes a component agentic.
+    Whenever enrich ran, ``agentic_insights.json`` must still agree with the inventory's ``insights``
+    block, plan or no plan. A report that carries a routing record needs its plan: package refuses
+    one whose ``conversion_plan.json`` is missing. A plan is bound to the inventory, the saved source
+    graphs and the saved agentic insights it was decided on, and must still decide every component
+    once with nothing pending; if discover or enrich ran again since route, package refuses rather
+    than shipping a report that no longer reflects the user's decision. It also refuses when the
+    report's routing record disagrees with the plan, and while any agentic unit has no agent output
+    yet: an agentic decision is packaged agentically, never as the deterministic stand-in.
 
-    The live ``.work/translation_report.json`` is the report route, combine and merge keep in step
+    The live ``.work/translation_report.json`` is the report route, the fill and merge keep in step
     with the saved deterministic baseline, so it is always the one replayed (see
     :func:`_live_report_failures`; its remedy is "re-run route"). Any other packaged report -- modify's
     configured copy, or one written with ``modify --out`` -- can't be replayed, because modify changes
     its pipelines, so its routing record must equal the live one; otherwise package refuses with "the
     configured report is out of date; re-run modify".
 
-    Returns one message per problem; an empty list means there is no recorded plan or it still matches.
+    Returns one message per problem; an empty list means there is no routing to check or it still matches.
     """
     from flowx.models.conversion_plan import ConversionPlan
     from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, routing_record
-    from flowx.routing import plan_binding_violations
+    from flowx.routing import insights_file_violations, plan_binding_violations, recorded_plan_violations
 
     metadata_dir = Path(output_dir) / "metadata"
+    inventory_path = metadata_dir / "inventory.json"
+    inventory: Any = None
+    if inventory_path.is_file():
+        try:
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            return [f"metadata/inventory.json is unreadable: {error}"]
+    insights_failures = insights_file_violations(Path(output_dir), inventory if isinstance(inventory, dict) else None)
+    if insights_failures:
+        return insights_failures
+
     try:
         plan = ConversionPlan.load(Path(output_dir))
     except (OSError, ValueError) as error:
         return [f"metadata/conversion_plan.json is unreadable: {error}"]
-    if plan is None:
-        return []
 
-    inventory_path = metadata_dir / "inventory.json"
-    if not inventory_path.is_file():
-        return ["metadata/conversion_plan.json was recorded but metadata/inventory.json is missing"]
-    try:
-        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        return [f"metadata/inventory.json is unreadable: {error}"]
-    if not isinstance(inventory, dict):
-        return ["metadata/inventory.json must contain a JSON object"]
-
-    stale = plan_binding_violations(plan, inventory)
-    if stale:
-        return [f"metadata/{message}" if message.startswith("conversion_plan.json") else message for message in stale]
-
+    report: Any = None
     try:
         report = json.loads(Path(report_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        report = None
     live_path = Path(output_dir) / WORK_DIRNAME / REPORT_FILENAME
     configured = Path(report_path).resolve() != live_path.resolve()
     live_report = report
@@ -441,7 +440,37 @@ def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
             live_report = json.loads(live_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             live_report = {}
-    failures = _live_report_failures(Path(output_dir), plan.to_dict(), live_report)
+
+    if plan is None:
+        if routing_record(report) is not None or routing_record(live_report) is not None:
+            return [
+                f"{REPORT_FILENAME} was routed (it carries a routing record) but metadata/conversion_plan.json "
+                "is missing; restore the plan, or re-run convert to package without routing"
+            ]
+        return []
+
+    if inventory is None:
+        return ["metadata/conversion_plan.json was recorded but metadata/inventory.json is missing"]
+    if not isinstance(inventory, dict):
+        return ["metadata/inventory.json must contain a JSON object"]
+
+    stale = plan_binding_violations(plan, inventory)
+    if stale:
+        return [f"metadata/{message}" if message.startswith("conversion_plan.json") else message for message in stale]
+    invalid = recorded_plan_violations(plan, inventory)
+    if invalid:
+        return [
+            f"metadata/conversion_plan.json is not a valid decision: {violation}; re-run route" for violation in invalid
+        ]
+    pending = plan.pending_components()
+    if pending:
+        return [
+            f"components {pending} have no decision yet; decide them in metadata/conversion_plan.json and re-run route"
+        ]
+
+    if report is None:
+        return []
+    failures = _live_report_failures(Path(output_dir), plan.to_dict(), live_report, inventory)
     if failures:
         return failures
     if configured and routing_record(report) != routing_record(live_report):
@@ -449,22 +478,29 @@ def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
     return []
 
 
-def _live_report_failures(output_dir: Path, plan_document: dict[str, Any], report: Any) -> list[str]:
+def _live_report_failures(
+    output_dir: Path, plan_document: dict[str, Any], report: Any, inventory: dict[str, Any]
+) -> list[str]:
     """Check the live translation report still equals a fresh replay of the rebuild.
 
     The report's routing record must match the plan, the saved deterministic baseline must still have
-    the hashes the record names, and no stored combine may have been edited. The rebuild from the
-    baseline, the plan and the stored combines must then reproduce the report exactly, record included.
-    A report without a record passes only when the plan routes nothing agentic.
+    the hashes the record names and the inventory's pipelines, and no stored agent output or gap fill
+    may have been edited. The rebuild from the baseline, the stored gap fills, the plan and the stored
+    outputs must then reproduce the report exactly, record included. Finally every agentic unit must
+    have its agent output applied. A report without a record passes only when the plan routes nothing
+    agentic.
     """
     from flowx.discovery_serde import canonical_sha256
     from flowx.models.conversion_plan import DECISION_AGENTIC
     from flowx.route_agentic import (
-        COMBINES_FILENAME,
+        AGENTIC_OUTPUT_FILENAME,
+        OUTCOME_AGENTIC_NOT_VIABLE,
         REPORT_FILENAME,
         ROUTING_RECORD_KEY,
+        agentic_pipeline_names,
+        baseline_pipeline_mismatch,
+        load_agentic_output,
         load_baseline,
-        load_combines,
         rebuild,
         routing_record,
         routing_record_mismatches,
@@ -494,28 +530,39 @@ def _live_report_failures(output_dir: Path, plan_document: dict[str, Any], repor
     actual_hashes = (hashlib.sha256(baseline_report_bytes).hexdigest(), hashlib.sha256(baseline_gaps_bytes).hexdigest())
     if recorded_hashes != actual_hashes:
         return ["the deterministic baseline is missing or changed; re-run convert, then route"]
+    mismatch = baseline_pipeline_mismatch(baseline_report, inventory)
+    if mismatch and agentic_pipeline_names(plan_document):
+        return [mismatch]
 
     try:
-        stored, combines = load_combines(output_dir)
+        stored = load_agentic_output(output_dir)
     except (OSError, ValueError) as error:
-        return [f"metadata/{COMBINES_FILENAME} is unreadable: {error}"]
-    edited = sorted(set(stored) - set(combines))
-    if edited:
-        return [f"the combine store has been edited ({', '.join(edited)}); re-run fill-agentic combine"]
+        return [f"metadata/{AGENTIC_OUTPUT_FILENAME} is unreadable: {error}"]
+    if stored.edited:
+        return [
+            f"metadata/{AGENTIC_OUTPUT_FILENAME} has been edited ({', '.join(stored.edited)}); "
+            "re-run fill-agentic for that component, or merge that gap again"
+        ]
 
     rebuilt_report, _, rebuilt_record = rebuild(
         baseline_report,
         baseline_gaps,
         plan_document,
-        combines,
-        record,
+        stored.outputs,
+        stored.gap_fills,
         baseline_report_bytes,
         baseline_gaps_bytes,
     )
     report_without_record = {key: value for key, value in report.items() if key != ROUTING_RECORD_KEY}
     if rebuilt_record != record or report_without_record != rebuilt_report:
         return [f"{REPORT_FILENAME} does not match a fresh rebuild; re-run route"]
-    return []
+
+    return [
+        f"component {unit_id!r} ({', '.join(entry.get('members') or [])}) is routed agentic but has no agent "
+        "output yet; fill it with fill-agentic, or decide it deterministic and re-run route"
+        for unit_id, entry in record["components"].items()
+        if entry.get("outcome") == OUTCOME_AGENTIC_NOT_VIABLE
+    ]
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -527,27 +574,28 @@ def _file_sha256(path: Path) -> str | None:
 
 
 def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Path | None:
-    """Persist a compact routing/gaps audit to ``metadata/route_audit.json`` before the prune.
+    """Persist a compact routing audit to ``metadata/route_audit.json`` before the prune.
 
     Package prunes the transient ``.work/`` folder (translation report + ``gaps.json``) by default,
     which erases the "what did routing change?" trail. When a routing decision was recorded
-    (``metadata/conversion_plan.json`` exists), summarise the routed components -- their decisions,
-    and from the report's routing record their outcomes, fingerprints, applied combine hashes and
-    replacements -- and the gaps routing introduced in agentic-routed pipelines, into an additive
-    ``metadata/`` artifact that survives the prune. It also records hashes of the inventory, the saved
-    source graphs and agentic insights the plan was bound to, the plan, and the packaged report, plus
-    the baseline report and gaps route started from as the routing record names them, so the trail
-    can be checked against those files later.
+    (``metadata/conversion_plan.json`` exists), summarise each routing unit -- its decision, and from
+    the report's routing record its outcome, fingerprint and applied output hash, plus the history of
+    outputs it replaced from ``metadata/agentic_conversion.json`` -- and the gap fills applied, into an
+    additive ``metadata/`` artifact that survives the prune. It also records the routing conversation,
+    the hashes of the inventory, the saved source graphs and agentic insights the plan was bound to,
+    the plan (the same canonical hash the routing record holds), and the packaged report, plus the
+    baseline report and gaps route started from as the routing record names them, so the trail can be
+    checked against those files later.
 
     Returns the written path, or ``None`` when there is no recorded plan (no routing happened) -- so
     the no-route path writes nothing and stays byte-identical.
     """
     from flowx.discovery_insights import inventory_fingerprint
-    from flowx.models.conversion_plan import DECISION_AGENTIC, DECISION_DETERMINISTIC, PLAN_FILENAME, ConversionPlan
-    from flowx.route_agentic import OUTCOME_DETERMINISTIC, routing_record
+    from flowx.discovery_serde import canonical_sha256
+    from flowx.models.conversion_plan import DECISION_AGENTIC, DECISION_DETERMINISTIC, ConversionPlan
+    from flowx.route_agentic import OUTCOME_DETERMINISTIC, load_agentic_output, routing_record, routing_units
 
     metadata_dir = Path(output_dir) / "metadata"
-    plan_path = metadata_dir / PLAN_FILENAME
     try:
         plan = ConversionPlan.load(Path(output_dir))
     except (OSError, ValueError):
@@ -569,63 +617,59 @@ def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Pat
             record = routing_record(json.loads(Path(report_path).read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
             record = None
-    recorded_components = record.get("components") if record is not None else None
-    if not isinstance(recorded_components, dict):
-        recorded_components = {}
+    recorded_units = record.get("components") if record is not None else None
+    if not isinstance(recorded_units, dict):
+        recorded_units = {}
+    try:
+        stored = load_agentic_output(Path(output_dir))
+    except ValueError:
+        stored = None
+    stored_entries = stored.document.get("components", {}) if stored is not None else {}
 
-    components: list[dict[str, Any]] = []
+    plan_document = plan.to_dict()
+    units: list[dict[str, Any]] = []
     agentic_pipelines: set[str] = set()
-    for component in plan.components:
-        recorded = recorded_components.get(component.component_id)
-        component_entry: dict[str, Any] = {
-            "component_id": component.component_id,
-            "members": list(component.members),
-            "decision": component.decision,
-        }
+    for unit_id, unit in routing_units(plan_document).items():
+        recorded = recorded_units.get(unit_id)
+        unit_entry: dict[str, Any] = {"component_id": unit_id, "members": list(unit["members"])}
+        if unit.get("components"):
+            unit_entry["grouped_components"] = list(unit["components"])
+        unit_entry["decision"] = unit["decision"]
         if isinstance(recorded, dict):
-            component_entry["outcome"] = recorded.get("outcome")
-            component_entry["combine_sha256"] = recorded.get("combine_sha256")
-            component_entry["fingerprint"] = recorded.get("fingerprint")
-            if recorded.get("replacements"):
-                component_entry["replacements"] = recorded.get("replacements")
+            unit_entry["outcome"] = recorded.get("outcome")
+            unit_entry["output_sha256"] = recorded.get("output_sha256")
+            unit_entry["fingerprint"] = recorded.get("fingerprint")
         else:
-            component_entry["outcome"] = OUTCOME_DETERMINISTIC if component.decision == DECISION_DETERMINISTIC else None
-            component_entry["combine_sha256"] = None
-        components.append(component_entry)
-        if component.decision == DECISION_AGENTIC:
-            agentic_pipelines.update(component.members)
+            unit_entry["outcome"] = OUTCOME_DETERMINISTIC if unit["decision"] == DECISION_DETERMINISTIC else None
+            unit_entry["output_sha256"] = None
+        stored_entry = stored_entries.get(unit_id)
+        if isinstance(stored_entry, dict) and stored_entry.get("replaced"):
+            unit_entry["replaced"] = stored_entry["replaced"]
+        units.append(unit_entry)
+        if unit["decision"] == DECISION_AGENTIC:
+            agentic_pipelines.update(unit["members"])
 
-    gaps_introduced: list[dict[str, Any]] = []
-    gaps_path = Path(output_dir) / ".work" / "gaps.json"
-    if gaps_path.is_file():
-        try:
-            gaps = json.loads(gaps_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            gaps = []
-        for gap in gaps if isinstance(gaps, list) else []:
-            if isinstance(gap, dict) and gap.get("pipeline") in agentic_pipelines:
-                gaps_introduced.append(
-                    {
-                        "pipeline": gap.get("pipeline"),
-                        "activity_name": gap.get("activity_name"),
-                        "activity_type": gap.get("activity_type"),
-                    }
-                )
+    baseline_report_sha256 = record.get("baseline_report_sha256") if record is not None else None
+    gap_fills = [
+        {"pipeline": fill["pipeline"], "activity_name": fill["activity_name"], "task_sha256": fill["task_sha256"]}
+        for fill in (stored.gap_fills if stored is not None else [])
+        if baseline_report_sha256 is not None and fill["baseline_report_sha256"] == baseline_report_sha256
+    ]
 
     audit = {
-        "schema": "flowx.route_audit/v1",
+        "schema": "flowx.route_audit/v2",
         "recorded_against_inventory_sha256": plan.inventory_sha256,
         "inventory_sha256": inventory_sha256,
         "source_graphs_sha256": plan.source_graphs_sha256,
         "agentic_insights_sha256": plan.agentic_insights_sha256,
-        "conversion_plan_sha256": _file_sha256(plan_path),
-        "baseline_report_sha256": record.get("baseline_report_sha256") if record is not None else None,
+        "conversion_plan_sha256": canonical_sha256(plan_document),
+        "baseline_report_sha256": baseline_report_sha256,
         "baseline_gaps_sha256": record.get("baseline_gaps_sha256") if record is not None else None,
         "translation_report_sha256": _file_sha256(report_path) if report_path is not None else None,
-        "components": components,
+        "components": units,
         "agentic_pipelines": sorted(agentic_pipelines),
-        "gaps_count": len(gaps_introduced),
-        "gaps_introduced": gaps_introduced,
+        "gap_fills": gap_fills,
+        "conversation": [entry.to_dict() for entry in plan.conversation],
     }
     metadata_dir.mkdir(parents=True, exist_ok=True)
     audit_path = metadata_dir / "route_audit.json"

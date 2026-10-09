@@ -131,8 +131,9 @@ Where the fragment leaves a value out, flowx adds only the plumbing the task nee
 
 Placeholders are replaced in place, status → `translated`. Exits non-zero if any result can't be
 matched. Add `--output <path>` to write a copy instead of overwriting. After routing, only an
-in-place merge into `.work/translation_report.json` also updates route's saved deterministic baseline
-(so a re-route keeps it); a merge written to an `--output` copy leaves the baseline untouched.
+in-place merge into `.work/translation_report.json` is also stored as a gap fill in
+`metadata/agentic_conversion.json` (so a re-route keeps it, while route's saved deterministic baseline
+stays as convert wrote it); a merge written to an `--output` copy stores nothing.
 
 ## Step 6.1 — Just-in-time translation configuration
 

@@ -1,10 +1,10 @@
-"""Tests for the routing/gaps audit artifact the package phase persists (FIX 5).
+"""Tests for the routing audit artifact the package phase persists.
 
 Package prunes the transient ``.work/`` folder by default, which erases the routing trail
-(translation report + ``gaps.json``). ``_write_route_audit`` summarises the recorded plan's routed
-components + decisions + the gaps routing introduced into ``metadata/route_audit.json`` so the trail
-survives the prune. It must no-op (write nothing) when no plan was recorded, keeping the no-route
-path byte-identical.
+(translation report + ``gaps.json``). ``_write_route_audit`` summarises the recorded plan's routing
+units, their decisions and outcomes, the agent's output history, the gap fills and the routing
+conversation into ``metadata/route_audit.json`` so the trail survives the prune. It must no-op (write
+nothing) when no plan was recorded, keeping the no-route path byte-identical.
 """
 
 from __future__ import annotations
@@ -13,46 +13,36 @@ import json
 from pathlib import Path
 
 from flowx.bundler.dab_writer import _write_route_audit
-from flowx.models.conversion_plan import ComponentPlan, ConversionPlan
+from flowx.discovery_serde import canonical_sha256
+from flowx.models.conversion_plan import ComponentPlan, ConversationEntry, ConversionPlan, SuggestedGrouping
 
 
-def _write_plan(output_dir: Path) -> None:
-    ConversionPlan(
+def _plan(*, accepted: bool = False) -> ConversionPlan:
+    return ConversionPlan(
         inventory_sha256="abc123",
         source_graphs_sha256="graphs123",
         agentic_insights_sha256="insights123",
         components=[
-            ComponentPlan(component_id="component-1", members=["parent", "child"], decision="agentic"),
-            ComponentPlan(component_id="component-2", members=["solo"], decision="deterministic"),
+            ComponentPlan(component_id="component-1", members=["child", "parent"], decision="agentic"),
+            ComponentPlan(
+                component_id="component-2", members=["solo"], decision="agentic" if accepted else "deterministic"
+            ),
         ],
-    ).write(output_dir)
+        suggested_groupings=[
+            SuggestedGrouping(
+                grouping_id="grouping-1",
+                components=["component-1", "component-2"],
+                members=["child", "parent", "solo"],
+                accepted=accepted,
+            )
+        ],
+        conversation=[ConversationEntry(question="What should the conversion achieve?", answer="Fewer pipelines")],
+    )
 
 
-def _write_gaps(output_dir: Path) -> None:
-    work = output_dir / ".work"
-    work.mkdir(parents=True, exist_ok=True)
-    gaps = [
-        {
-            "activity_name": "Extract",
-            "activity_type": "CopyActivity",
-            "raw_definition": {"name": "Extract", "type": "CopyActivity"},
-            "pipeline": "parent",
-        },
-        {
-            "activity_name": "Load",
-            "activity_type": "NotebookActivity",
-            "raw_definition": {"name": "Load"},
-            "pipeline": "child",
-        },
-        {"activity_name": "Fail", "activity_type": "Fail", "raw_definition": {"name": "Fail"}},
-        {"activity_name": "Hook", "activity_type": "WebHook", "raw_definition": {}, "pipeline": "solo"},
-    ]
-    (work / "gaps.json").write_text(json.dumps(gaps, indent=2), encoding="utf-8")
-
-
-def test_route_audit_summarises_components_decisions_and_gaps(tmp_path: Path) -> None:
-    _write_plan(tmp_path)
-    _write_gaps(tmp_path)
+def test_route_audit_summarises_units_decisions_and_the_conversation(tmp_path: Path) -> None:
+    plan = _plan()
+    plan.write(tmp_path)
 
     audit_path = _write_route_audit(tmp_path)
 
@@ -61,15 +51,46 @@ def test_route_audit_summarises_components_decisions_and_gaps(tmp_path: Path) ->
     assert audit["recorded_against_inventory_sha256"] == "abc123"
     assert audit["source_graphs_sha256"] == "graphs123"
     assert audit["agentic_insights_sha256"] == "insights123"
-    # Both routed components and their decisions are recorded.
+    assert audit["conversion_plan_sha256"] == canonical_sha256(plan.to_dict())
     decisions = {component["component_id"]: component["decision"] for component in audit["components"]}
     assert decisions == {"component-1": "agentic", "component-2": "deterministic"}
-    # Only the agentic component's members are surfaced as agentic pipelines.
     assert audit["agentic_pipelines"] == ["child", "parent"]
-    # Only gaps in agentic-routed pipelines count as introduced by routing, as a compact summary.
-    assert audit["gaps_count"] == 2
-    assert {gap["pipeline"] for gap in audit["gaps_introduced"]} == {"parent", "child"}
-    assert all("raw_definition" not in gap for gap in audit["gaps_introduced"])
+    assert audit["conversation"] == [{"question": "What should the conversion achieve?", "answer": "Fewer pipelines"}]
+    assert "gaps_introduced" not in audit and "gaps_count" not in audit
+
+
+def test_route_audit_lists_an_accepted_grouping_as_one_unit(tmp_path: Path) -> None:
+    _plan(accepted=True).write(tmp_path)
+
+    audit = json.loads(_write_route_audit(tmp_path).read_text(encoding="utf-8"))
+
+    (unit,) = audit["components"]
+    assert unit["component_id"] == "grouping-1"
+    assert unit["members"] == ["child", "parent", "solo"]
+    assert unit["grouped_components"] == ["component-1", "component-2"]
+    assert unit["decision"] == "agentic"
+
+
+def test_route_audit_copies_the_output_replacement_history(tmp_path: Path) -> None:
+    _plan().write(tmp_path)
+    pipelines = [{"name": "orders_lfc", "tasks": []}]
+    store = {
+        "components": {
+            "component-1": {
+                "members": ["child", "parent"],
+                "pipelines": pipelines,
+                "output_sha256": canonical_sha256(pipelines),
+                "replaced": [{"from": "old", "to": canonical_sha256(pipelines)}],
+            }
+        },
+        "gap_fills": [],
+    }
+    (tmp_path / "metadata" / "agentic_conversion.json").write_text(json.dumps(store), encoding="utf-8")
+
+    audit = json.loads(_write_route_audit(tmp_path).read_text(encoding="utf-8"))
+
+    component = next(entry for entry in audit["components"] if entry["component_id"] == "component-1")
+    assert component["replaced"] == [{"from": "old", "to": canonical_sha256(pipelines)}]
 
 
 def test_route_audit_noops_without_a_recorded_plan(tmp_path: Path) -> None:
@@ -80,15 +101,3 @@ def test_route_audit_noops_without_a_recorded_plan(tmp_path: Path) -> None:
 
     assert audit_path is None
     assert not (tmp_path / "metadata" / "route_audit.json").exists()
-
-
-def test_route_audit_handles_missing_gaps_file(tmp_path: Path) -> None:
-    # A recorded plan but no gaps.json (e.g. all-deterministic route) still writes an audit with zero gaps.
-    _write_plan(tmp_path)
-
-    audit_path = _write_route_audit(tmp_path)
-
-    assert audit_path is not None
-    audit = json.loads(audit_path.read_text(encoding="utf-8"))
-    assert audit["gaps_count"] == 0
-    assert audit["gaps_introduced"] == []

@@ -42,11 +42,11 @@ from flowx.route_agentic import (
     WORK_DIRNAME,
     agentic_pipeline_names,
     alter_report,
-    apply_combine_fill,
+    apply_agentic_output,
     apply_plan,
     apply_plan_to_report,
-    combine_group_fill,
     prompt_for_decisions,
+    replace_unit_pipelines,
     routing_record,
     validate_report_structurally,
 )
@@ -469,7 +469,7 @@ def test_merge_still_fills_convert_gaps_in_a_deterministic_pipeline(tmp_path: Pa
     assert _record_outcomes(report_path) == {"component-1": "agentic-not-viable", "component-2": "deterministic"}
 
 
-def test_a_merged_top_level_gap_survives_a_re_route_and_package_accepts_it(
+def test_a_merged_top_level_gap_is_stored_apart_and_survives_a_re_route_with_the_baseline_unchanged(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     report = _report_with_child_gap()
@@ -477,20 +477,64 @@ def test_a_merged_top_level_gap_survives_a_re_route_and_package_accepts_it(
         pipeline["tags"] = {"source": "adf"}
     _route_parent_agentic(tmp_path, report)
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    baseline_path = tmp_path / WORK_DIRNAME / "route_baseline" / REPORT_FILENAME
+    baseline_before = baseline_path.read_bytes()
+    record_before = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
     results_dir = tmp_path / "agentic_results"
     _write_merge_result(results_dir, "child", "Load", "load")
     assert merge_agentic_results(report_path, results_dir) == (1, 0)
 
+    assert baseline_path.read_bytes() == baseline_before
+    assert routing_record(json.loads(report_path.read_text(encoding="utf-8"))) == record_before
+    stored = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
+    assert [(fill["pipeline"], fill["activity_name"]) for fill in stored["gap_fills"]] == [("child", "Load")]
+
     recorded = ConversionPlan.load(tmp_path)
     assert recorded is not None
     assert apply_plan(tmp_path, recorded)["altered"] is False
-    for path in (report_path, tmp_path / WORK_DIRNAME / "route_baseline" / REPORT_FILENAME):
-        child = next(p for p in json.loads(path.read_text(encoding="utf-8"))["pipelines"] if p["name"] == "child")
-        assert child["tasks"][0]["type"] == "NotebookActivity"
+    child = next(p for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+    assert baseline_path.read_bytes() == baseline_before
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
     capsys.readouterr()
     package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"])
     assert "preflight failed" not in capsys.readouterr().err
     assert (tmp_path / "child" / "databricks.yml").exists()
+
+
+def test_a_gap_fill_survives_switching_every_component_back_to_deterministic(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    child = next(p for p in report["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+    assert _record_outcomes(report_path) == {"component-1": "deterministic", "component-2": "deterministic"}
+
+
+def test_a_re_convert_drops_gap_fills_merged_against_the_old_baseline(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+    reconverted = _report_with_child_gap()
+    reconverted["pipelines"][0]["tasks"][0]["task_key"] = "extract_again"
+    _write_work(tmp_path, reconverted, gaps=[])
+
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    assert apply_plan(tmp_path, recorded)["dropped_gap_fills"] == 1
+
+    stored = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
+    assert stored["gap_fills"] == []
+    child = next(p for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "PlaceholderActivity"
 
 
 def test_a_merge_written_to_a_separate_copy_leaves_the_baseline_and_live_report_alone(tmp_path: Path) -> None:
@@ -587,7 +631,7 @@ def test_route_takes_a_fresh_convert_as_the_new_baseline(tmp_path: Path) -> None
 
 def test_reroute_under_the_same_decisions_keeps_fills_and_updates_the_plan_hash(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     first_record = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
     assert first_record is not None
@@ -621,14 +665,14 @@ def test_reroute_under_the_same_decisions_keeps_fills_and_updates_the_plan_hash(
 # --------------------------------------------------------------------------- #
 
 
-def test_combine_group_fill_replaces_group_pipelines_with_authored_ones() -> None:
+def test_replace_unit_pipelines_replaces_group_pipelines_with_authored_ones() -> None:
     report = _report_two_pipelines()
-    merged = combine_group_fill(report, {"parent", "child"}, [_lfc_pipeline()])
+    merged = replace_unit_pipelines(report, {"parent", "child"}, [_lfc_pipeline()])
     names = [pipeline["name"] for pipeline in merged["pipelines"]]
     assert names == ["orders_lfc"]
 
 
-def test_combine_group_fill_keeps_pipelines_outside_the_group() -> None:
+def test_replace_unit_pipelines_keeps_pipelines_outside_the_group() -> None:
     report = {
         "pipelines": [
             {"name": "parent", "tasks": [_copy_task("Extract", "extract")]},
@@ -636,14 +680,14 @@ def test_combine_group_fill_keeps_pipelines_outside_the_group() -> None:
             {"name": "unrelated", "tasks": [_notebook_task("Keep", "keep")]},
         ]
     }
-    merged = combine_group_fill(report, {"parent", "child"}, [_lfc_pipeline()])
+    merged = replace_unit_pipelines(report, {"parent", "child"}, [_lfc_pipeline()])
     names = sorted(pipeline["name"] for pipeline in merged["pipelines"])
     assert names == ["orders_lfc", "unrelated"]
 
 
 def test_combine_fill_of_two_pipelines_into_one_lfc_passes_structural_validation() -> None:
     report = _report_two_pipelines()
-    merged = combine_group_fill(report, {"parent", "child"}, [_lfc_pipeline()])
+    merged = replace_unit_pipelines(report, {"parent", "child"}, [_lfc_pipeline()])
     result = validate_report_structurally(merged)
     assert result.ok, [f"{finding.code}: {finding.message}" for finding in result.findings]
 
@@ -652,28 +696,28 @@ def test_combine_fill_with_a_dangling_pipeline_reference_is_caught() -> None:
     dangling = _lfc_pipeline()
     # Point the pipeline_task at a resource that is never declared in this activity's resources list.
     dangling["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.ghost.id}"}}
-    merged = combine_group_fill(_report_two_pipelines(), {"parent", "child"}, [dangling])
+    merged = replace_unit_pipelines(_report_two_pipelines(), {"parent", "child"}, [dangling])
     result = validate_report_structurally(merged)
     assert not result.ok
     assert any(finding.code == "dangling_pipeline_reference" for finding in result.violations)
 
 
-def test_apply_combine_fill_writes_merged_report_when_valid(tmp_path: Path) -> None:
+def test_apply_agentic_output_writes_merged_report_when_valid(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
     assert result["ok"] is True
     assert result["component_id"] == "component-1"
     report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
     assert [pipeline["name"] for pipeline in report["pipelines"]] == ["orders_lfc"]
 
 
-def test_apply_combine_fill_rejects_and_does_not_write_on_dangling_reference(tmp_path: Path) -> None:
+def test_apply_agentic_output_rejects_and_does_not_write_on_dangling_reference(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
     report_before = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
     dangling = _lfc_pipeline()
     dangling["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.ghost.id}"}}
 
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [dangling])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [dangling])
     assert result["ok"] is False
     assert any("dangling_pipeline_reference" in violation for violation in result["violations"])
     # The report on disk is untouched when validation fails.
@@ -687,7 +731,7 @@ def test_combine_rejects_an_authored_pipeline_missing_the_source_tag(tmp_path: P
     untagged = _lfc_pipeline()
     del untagged["tags"]
 
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [untagged])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [untagged])
 
     assert result["ok"] is False
     assert any("tags.source" in violation and "adf" in violation for violation in result["violations"])
@@ -701,7 +745,7 @@ def test_combine_rejects_an_authored_pipeline_with_wrong_source_tag(tmp_path: Pa
     mistagged = _lfc_pipeline()
     mistagged["tags"] = {"source": "airflow"}
 
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [mistagged])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [mistagged])
 
     assert result["ok"] is False
     assert any("tags.source" in violation for violation in result["violations"])
@@ -711,15 +755,15 @@ def test_combine_is_idempotent_running_twice_yields_no_duplicate(tmp_path: Path)
     """FIX 3: re-running combine with the same members + authored pipeline does not duplicate it."""
     _setup_routed_agentic(tmp_path, decision="agentic")
 
-    first = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    first = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
     assert first["ok"] is True
-    assert first["already_combined"] is False
+    assert first["already_applied"] is False
 
     # The recorded plan still lists {parent, child}, so the plan/membership check passes again; the
     # report, however, now contains only the authored pipeline. A naive re-run would re-append it.
-    second = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    second = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
     assert second["ok"] is True
-    assert second["already_combined"] is True
+    assert second["already_applied"] is True
 
     report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
     names = [pipeline["name"] for pipeline in report["pipelines"]]
@@ -729,16 +773,16 @@ def test_combine_is_idempotent_running_twice_yields_no_duplicate(tmp_path: Path)
 def test_a_different_combine_on_an_applied_component_replaces_and_rebuilds(tmp_path: Path) -> None:
     """A second combine with a different hash replaces the stored entry and rebuilds."""
     _setup_routed_agentic(tmp_path, decision="agentic")
-    first = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc")])
-    assert first["ok"] is True and first["already_combined"] is False
+    first = apply_agentic_output(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc")])
+    assert first["ok"] is True and first["already_applied"] is False
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     first_names = [p["name"] for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"]]
     assert first_names == ["orders_lfc"]
 
-    second = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc_v2")])
+    second = apply_agentic_output(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc_v2")])
 
     assert second["ok"] is True
-    assert second["already_combined"] is False
+    assert second["already_applied"] is False
     second_names = [p["name"] for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"]]
     assert second_names == ["orders_lfc_v2"]
 
@@ -752,12 +796,12 @@ def test_combine_idempotent_when_authored_name_collides_with_a_former_member(tmp
     """
     _setup_routed_agentic(tmp_path, decision="agentic")
 
-    first = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("parent")])
-    assert first["ok"] is True and first["already_combined"] is False
+    first = apply_agentic_output(tmp_path, ["parent", "child"], [_named_lfc_pipeline("parent")])
+    assert first["ok"] is True and first["already_applied"] is False
 
-    second = apply_combine_fill(tmp_path, ["parent", "child"], [_named_lfc_pipeline("parent")])
+    second = apply_agentic_output(tmp_path, ["parent", "child"], [_named_lfc_pipeline("parent")])
     assert second["ok"] is True
-    assert second["already_combined"] is True
+    assert second["already_applied"] is True
 
     report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
     names = [pipeline["name"] for pipeline in report["pipelines"]]
@@ -771,7 +815,7 @@ def test_combine_idempotent_when_authored_name_collides_with_a_former_member(tmp
 
 def test_combine_rejects_a_deterministic_component(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="deterministic")
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
     assert result["ok"] is False
     assert "not agentic" in result["error"]
     # A deterministic component is never swapped out.
@@ -781,21 +825,21 @@ def test_combine_rejects_a_deterministic_component(tmp_path: Path) -> None:
 
 def test_combine_rejects_a_partial_member_set(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    result = apply_combine_fill(tmp_path, ["parent"], [_lfc_pipeline()])
+    result = apply_agentic_output(tmp_path, ["parent"], [_lfc_pipeline()])
     assert result["ok"] is False
     assert "do not exactly match" in result["error"]
 
 
 def test_combine_rejects_a_superset_member_set(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    result = apply_combine_fill(tmp_path, ["parent", "child", "extra"], [_lfc_pipeline()])
+    result = apply_agentic_output(tmp_path, ["parent", "child", "extra"], [_lfc_pipeline()])
     assert result["ok"] is False
     assert "do not exactly match" in result["error"]
 
 
 def test_combine_rejects_a_typoed_member(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    result = apply_combine_fill(tmp_path, ["parent", "chld"], [_lfc_pipeline()])
+    result = apply_agentic_output(tmp_path, ["parent", "chld"], [_lfc_pipeline()])
     assert result["ok"] is False
     assert "do not exactly match" in result["error"]
 
@@ -808,7 +852,7 @@ def test_combine_rejects_a_stale_fingerprint_plan(tmp_path: Path) -> None:
     inventory["pipelines"].append({"name": "late_addition", "activities": [], "motifs": []})
     inventory_path.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
 
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
     assert result["ok"] is False
     assert "stale" in result["error"]
 
@@ -818,7 +862,7 @@ def test_combine_marks_the_component_applied(tmp_path: Path) -> None:
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     assert _record_outcomes(report_path) == {"component-1": "agentic-not-viable"}
 
-    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
 
     assert _record_outcomes(report_path) == {"component-1": "agentic-applied"}
 
@@ -839,7 +883,7 @@ def _write_merge_result(results_dir: Path, pipeline: str, activity_name: str, ta
 
 def test_merge_after_a_combine_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     combined_report = report_path.read_bytes()
     results_dir = tmp_path / "agentic_results"
@@ -865,12 +909,12 @@ def _colliding_authored_pipelines() -> list[dict[str, Any]]:
 def test_combine_rerun_is_idempotent_when_authored_names_reuse_every_member(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
 
-    first = apply_combine_fill(tmp_path, ["parent", "child"], _colliding_authored_pipelines())
-    assert first["ok"] is True and first["already_combined"] is False
-    second = apply_combine_fill(tmp_path, ["parent", "child"], _colliding_authored_pipelines())
+    first = apply_agentic_output(tmp_path, ["parent", "child"], _colliding_authored_pipelines())
+    assert first["ok"] is True and first["already_applied"] is False
+    second = apply_agentic_output(tmp_path, ["parent", "child"], _colliding_authored_pipelines())
 
     assert second["ok"] is True
-    assert second["already_combined"] is True
+    assert second["already_applied"] is True
     report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
     assert [pipeline["name"] for pipeline in report["pipelines"]] == ["parent", "child"]
 
@@ -883,7 +927,7 @@ def test_merge_after_a_combine_reusing_every_member_name_is_refused(
     tmp_path: Path, pipeline: str | None, activity_name: str
 ) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    assert apply_combine_fill(tmp_path, ["parent", "child"], _colliding_authored_pipelines())["ok"] is True
+    assert apply_agentic_output(tmp_path, ["parent", "child"], _colliding_authored_pipelines())["ok"] is True
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     combined_report = report_path.read_bytes()
     results_dir = tmp_path / "agentic_results"
@@ -900,7 +944,7 @@ def test_merge_after_a_combine_reusing_every_member_name_is_refused(
 
 def test_merge_into_an_authored_combine_pipeline_is_refused(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
     results_dir = tmp_path / "agentic_results"
     _write_merge_result(results_dir, "orders_lfc", "Ingest orders", "ingest_orders")
 
@@ -912,7 +956,7 @@ def test_combine_requires_route_to_have_applied_the_plan(tmp_path: Path) -> None
     _setup_routed_agentic(tmp_path, decision="agentic")
     _write_work(tmp_path, _report_two_pipelines())  # convert ran again, so the report has no record
 
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
 
     assert result["ok"] is False
     assert "routing record" in result["error"]
@@ -920,22 +964,22 @@ def test_combine_requires_route_to_have_applied_the_plan(tmp_path: Path) -> None
 
 def test_combine_requires_a_recorded_plan(tmp_path: Path) -> None:
     _write_work(tmp_path, _report_two_pipelines())  # report only; no plan recorded
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
     assert result["ok"] is False
     assert "conversion_plan.json" in result["error"]
 
 
 def test_an_invalid_replacement_combine_is_refused_and_keeps_the_applied_one(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
-    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
     report_before = report_path.read_bytes()
     combines_before = combines_path.read_bytes()
     dangling = _named_lfc_pipeline("orders_lfc_v2")
     dangling["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.ghost.id}"}}
 
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [dangling])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [dangling])
 
     assert result["ok"] is False
     assert any("dangling_pipeline_reference" in violation for violation in result["violations"])
@@ -945,38 +989,38 @@ def test_an_invalid_replacement_combine_is_refused_and_keeps_the_applied_one(tmp
 
 def test_combine_stores_sorted_members_and_hashes_every_pipeline_field(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
     described = _lfc_pipeline()
     described["description"] = "Ingest orders through Lakeflow Connect"
 
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [described])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [described])
 
-    assert result["ok"] is True and result["already_combined"] is False
-    combines = json.loads((tmp_path / "metadata" / "agentic_combines.json").read_text(encoding="utf-8"))
-    assert combines["component-1"]["members"] == ["child", "parent"]
-    assert combines["component-1"]["pipelines"] == [described]
+    assert result["ok"] is True and result["already_applied"] is False
+    combines = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
+    assert combines["components"]["component-1"]["members"] == ["child", "parent"]
+    assert combines["components"]["component-1"]["pipelines"] == [described]
     report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
     assert report["pipelines"] == [described]
 
 
 def test_combine_replaces_a_hand_edited_store_entry(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
-    assert apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
-    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
     combined = combines_path.read_bytes()
     edited = json.loads(combined)
-    edited["component-1"]["pipelines"][0]["tasks"] = []
+    edited["components"]["component-1"]["pipelines"][0]["tasks"] = []
     combines_path.write_text(json.dumps(edited, indent=2), encoding="utf-8")
 
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
 
-    assert result["ok"] is True and result["already_combined"] is False
+    assert result["ok"] is True and result["already_applied"] is False
     assert combines_path.read_bytes() == combined
 
 
 def test_a_combine_routed_back_to_deterministic_records_no_combine_hash(tmp_path: Path) -> None:
     _route_parent_agentic(tmp_path, _report_two_pipelines(), child="agentic")
-    assert apply_combine_fill(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
 
     _route_two_components(tmp_path, parent="deterministic", child="agentic")
 
@@ -985,7 +1029,7 @@ def test_a_combine_routed_back_to_deterministic_records_no_combine_hash(tmp_path
     assert record is not None
     (parent_entry,) = [entry for entry in record["components"].values() if entry["members"] == ["parent"]]
     assert parent_entry["outcome"] == "deterministic"
-    assert parent_entry["combine_sha256"] is None
+    assert parent_entry["output_sha256"] is None
     assert [pipeline["name"] for pipeline in report["pipelines"]] == ["parent", "child"]
 
 
@@ -994,13 +1038,13 @@ def test_combine_refuses_a_name_that_another_components_combine_would_drop(tmp_p
     child_lfc = _named_lfc_pipeline("child_lfc")
     child_lfc["tasks"][0]["resources"][0]["resource_key"] = "child_ingestion"
     child_lfc["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.child_ingestion.id}"}}
-    assert apply_combine_fill(tmp_path, ["child"], [child_lfc])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["child"], [child_lfc])["ok"] is True
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
-    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
     report_before = report_path.read_bytes()
     combines_before = combines_path.read_bytes()
 
-    result = apply_combine_fill(tmp_path, ["parent"], [_named_lfc_pipeline("child")])
+    result = apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("child")])
 
     assert result["ok"] is False
     assert "clash" in result["error"]
@@ -1024,28 +1068,28 @@ def test_combine_refuses_authored_names_that_clash(tmp_path: Path, authored_name
             "pipeline_task": {"pipeline_id": f"${{resources.pipelines.orders_ingestion_{index}.id}}"}
         }
 
-    result = apply_combine_fill(tmp_path, ["parent"], authored)
+    result = apply_agentic_output(tmp_path, ["parent"], authored)
 
     assert result["ok"] is False
     assert "clash" in result["error"]
     assert report_path.read_bytes() == report_before
-    assert not (tmp_path / "metadata" / "agentic_combines.json").exists()
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
 
 
-def test_combine_same_hash_returns_already_combined_true_with_unchanged_message(tmp_path: Path) -> None:
-    """Same authored pipelines hash returns already_combined: True with message 'already applied, unchanged'."""
+def test_combine_same_hash_returns_already_applied_true_with_unchanged_message(tmp_path: Path) -> None:
+    """Same authored pipelines hash returns already_applied: True with message 'already applied, unchanged'."""
     _setup_routed_agentic(tmp_path, decision="agentic")
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
-    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
 
-    first = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
-    assert first["ok"] is True and first["already_combined"] is False
+    first = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert first["ok"] is True and first["already_applied"] is False
     report_before = report_path.read_bytes()
     combines_before = combines_path.read_bytes()
 
-    second = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    second = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
     assert second["ok"] is True
-    assert second["already_combined"] is True
+    assert second["already_applied"] is True
     assert second.get("message") == "already applied, unchanged"
 
     assert report_path.read_bytes() == report_before
@@ -1056,10 +1100,10 @@ def test_combine_empty_pipelines_list_is_refused(tmp_path: Path) -> None:
     """Empty pipelines list is refused and writes nothing."""
     _setup_routed_agentic(tmp_path, decision="agentic")
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
-    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
     report_before = report_path.read_bytes()
 
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [])
 
     assert result["ok"] is False
     assert "cannot be empty" in result["error"]
@@ -1071,7 +1115,7 @@ def test_combine_validation_failure_writes_nothing(tmp_path: Path) -> None:
     """When structural validation fails, neither the store nor the report is written."""
     _setup_routed_agentic(tmp_path, decision="agentic")
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
-    combines_path = tmp_path / "metadata" / "agentic_combines.json"
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
     report_before = report_path.read_bytes()
 
     bad_pipeline = copy.deepcopy(_lfc_pipeline())
@@ -1079,7 +1123,7 @@ def test_combine_validation_failure_writes_nothing(tmp_path: Path) -> None:
     bad_task = bad_pipeline["tasks"][0]
     bad_task["depends_on"] = [{"task_key": "nonexistent"}]
 
-    result = apply_combine_fill(tmp_path, ["parent", "child"], [bad_pipeline])
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [bad_pipeline])
 
     assert result["ok"] is False
     assert "violations" in result
@@ -1092,7 +1136,7 @@ def test_combine_re_apply_after_reroute_rebuilds_unchanged(tmp_path: Path) -> No
     _setup_routed_agentic(tmp_path, decision="agentic")
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
 
-    first = apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    first = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
     assert first["ok"] is True
     report_after_combine = report_path.read_bytes()
 
@@ -1106,7 +1150,7 @@ def test_combine_re_apply_after_reroute_rebuilds_unchanged(tmp_path: Path) -> No
 def test_merge_agentic_refuses_routed_agentic_pipeline(tmp_path: Path) -> None:
     """merge_agentic refuses a result landing in a routed-agentic pipeline."""
     _setup_routed_agentic(tmp_path, decision="agentic")
-    apply_combine_fill(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
 
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     results_dir = tmp_path / "agentic_results"
@@ -1115,3 +1159,136 @@ def test_merge_agentic_refuses_routed_agentic_pipeline(tmp_path: Path) -> None:
     with pytest.raises(ValueError) as exc:
         merge_agentic_results(report_path, results_dir)
     assert "routed agentic" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# The agent's output history, gaps of applied units, and fill-time checks.
+# --------------------------------------------------------------------------- #
+
+
+def _stored_output(output_dir: Path, unit_id: str) -> dict[str, Any]:
+    stored = json.loads((output_dir / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
+    return stored["components"][unit_id]
+
+
+def test_the_first_fill_is_not_a_replacement_and_a_different_output_is(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    first = _stored_output(tmp_path, "component-1")
+    assert first["replaced"] == []
+    described = _lfc_pipeline()
+    described["description"] = "a different pattern"
+
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [described])["ok"] is True
+
+    second = _stored_output(tmp_path, "component-1")
+    assert second["replaced"] == [{"from": first["output_sha256"], "to": second["output_sha256"]}]
+    record = routing_record(json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8")))
+    assert record is not None and "replacements" not in record["components"]["component-1"]
+
+
+def test_the_output_history_survives_switching_to_deterministic_and_back(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    changed = _named_lfc_pipeline("parent_lfc")
+    changed["description"] = "changed"
+    assert apply_agentic_output(tmp_path, ["parent"], [changed])["ok"] is True
+
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+    assert routing_record(json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))) is None
+    _route_two_components(tmp_path, parent="agentic", child="deterministic")
+
+    assert len(_stored_output(tmp_path, "component-2")["replaced"]) == 1
+    assert _record_outcomes(tmp_path / WORK_DIRNAME / REPORT_FILENAME)["component-2"] == "agentic-applied"
+
+
+def test_an_applied_unit_leaves_no_routed_gaps(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
+    assert [gap["pipeline"] for gap in json.loads(gaps_path.read_text(encoding="utf-8"))] == ["parent"]
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+
+    assert json.loads(gaps_path.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize(
+    "authored_names",
+    [["Child"], ["Sales Load", "Sales-Load"]],
+    ids=["with-a-deterministic-pipeline", "within-the-authored-list"],
+)
+def test_fill_refuses_names_that_share_a_bundle_folder(tmp_path: Path, authored_names: list[str]) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    authored = [_named_lfc_pipeline(name) for name in authored_names]
+    for index, pipeline in enumerate(authored):
+        pipeline["tasks"][0]["resources"][0]["resource_key"] = f"ingestion_{index}"
+        pipeline["tasks"][0]["task"] = {
+            "pipeline_task": {"pipeline_id": f"${{resources.pipelines.ingestion_{index}.id}}"}
+        }
+
+    result = apply_agentic_output(tmp_path, ["parent"], authored)
+
+    assert result["ok"] is False
+    assert any("shares the bundle folder" in violation for violation in result["violations"])
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+def test_fill_refuses_an_authored_pipeline_that_still_holds_a_placeholder(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    authored = _named_lfc_pipeline("parent_lfc")
+    authored["tasks"].append(
+        {
+            "name": "Loop",
+            "task_key": "loop",
+            "type": "ForEachActivity",
+            "inner_activities": [{"name": "Todo", "task_key": "todo", "type": "PlaceholderActivity"}],
+        }
+    )
+
+    result = apply_agentic_output(tmp_path, ["parent"], [authored])
+
+    assert result["ok"] is False
+    assert result["violations"] == [
+        "parent_lfc: still has placeholder tasks ['Todo']; convert every task before filling the unit"
+    ]
+
+
+def test_the_merge_refusal_points_at_fill_agentic_not_a_re_convert() -> None:
+    assert "fill-agentic" in ROUTED_AGENTIC_MERGE_REFUSED
+    assert "re-run convert" not in ROUTED_AGENTIC_MERGE_REFUSED and "combine" not in ROUTED_AGENTIC_MERGE_REFUSED
+
+
+def test_route_refuses_a_report_converted_from_a_different_discover(tmp_path: Path) -> None:
+    stale = _report_two_pipelines()
+    stale["pipelines"][1]["name"] = "removed_since"
+    _write_work(tmp_path, stale, gaps=[])
+    metadata = tmp_path / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "inventory.json").write_text(json.dumps(_two_component_inventory(), indent=2), encoding="utf-8")
+    report_before = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
+
+    with pytest.raises(ValueError, match=r"different discover \(missing \['child'\], extra \['removed_since'\]\)"):
+        _route_two_components(tmp_path, parent="agentic", child="deterministic")
+    assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+
+
+def test_package_refuses_an_edited_gap_fill(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    report = _report_with_child_gap()
+    for pipeline in report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, report)
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir) == (1, 0)
+    store_path = tmp_path / "metadata" / "agentic_conversion.json"
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    store["gap_fills"][0]["task"]["notebook_path"] = "/Workspace/Shared/tampered"
+    store_path.write_text(json.dumps(store), encoding="utf-8")
+    capsys.readouterr()
+
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files"]) == 1
+
+    assert "agentic_conversion.json has been edited (gap fill 'Load')" in capsys.readouterr().err

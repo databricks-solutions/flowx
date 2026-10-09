@@ -263,9 +263,10 @@ flowx_output/
     agentic_insights.json     # enrich: validated agent-authored insights, rebuilt into inventory.json
     profile_report.csv        # discover: per-pipeline complexity report
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
-    conversion_plan.json      # route: the recorded per-component conversion decision
-    agentic_combines.json     # fill-agentic combine (ADF): authored pipelines per routed-agentic component, re-applied by every route
-    route_audit.json          # package: routing decisions, outcomes and hashes, written when a plan is recorded
+    conversion_plan.json      # route: the recommendation, suggested groupings and the user's per-component decisions
+    routing_review.html       # route: the standard review page drawn from the plan
+    agentic_conversion.json   # fill-agentic (ADF): the agent's conversion output per routed-agentic unit, re-applied by every route
+    route_audit.json          # package: routing decisions, outcomes, history, conversation and hashes, written when a plan is recorded
     configuration.json        # modify: collected configuration answers
   .work/                      # transient intermediates (translation report, IR, gaps.json); pruned by package
 ```
