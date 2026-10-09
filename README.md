@@ -99,6 +99,7 @@ Or run individual phases:
 /flowx:flowx-discover    # Parse the source (ADF JSON / Airflow DAGs), produce inventory + complexity report
 /flowx:flowx-convert     # Deterministic + agentic translation
 /flowx:flowx-package     # Generate DABs project
+/flowx:flowx-profile     # (ADF, optional) Estimate current ADF spend from a live Azure scan
 ```
 
 (In Genie Code, invoke the same skills with the `@` prefix, e.g. `@flowx-migrate`.)

@@ -63,6 +63,13 @@ intermediates under `.work/` (pruned by `package`).
    multi-pipeline factory is laid out into bundles; a top-level `DEPLOY.md` records the suggested
    callees-first deploy order for every mode.
 
+A separate, standalone **Profile** phase (`python -m flowx.adapter profile --source adf`, ADF only)
+estimates current ADF spend from a live Azure scan and writes `metadata/tco/cost_comparison.{csv,md}`
+(overwritten each run). It needs the optional `profile` extra (`pip install -e '.[profile]'`, or
+`pip install 'azure-identity>=1.17'` in the plugin venv) and Azure credentials
+(`az login` locally; a service principal via env vars on Genie Code / CI). It never reads
+`metadata/inventory.json`.
+
 ### Key Patterns
 - `@dataclass(slots=True, kw_only=True)` for all models
 - Immutable `TranslationContext` threaded through visitors
@@ -92,6 +99,7 @@ intermediates under `.work/` (pruned by `package`).
 | `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/` |
 | `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK |
 | `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table |
+| `sources/adf/profiler/` | Live ADF scan + cost estimation for the `profile` phase (optional `profile` extra; Azure deps imported lazily) |
 
 ## Activity Types
 
