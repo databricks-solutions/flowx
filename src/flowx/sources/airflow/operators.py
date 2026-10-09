@@ -19,6 +19,7 @@ import json as _json
 import re
 import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from flowx.models.ir import (
@@ -128,6 +129,8 @@ class OperatorContext:
         call_source: The verbatim source of this operator call, embedded in a
             PlaceholderActivity so the agentic-gap round can reason from it (the
             Airflow analog of ADF's raw ARM JSON).
+        template_search_paths: Directories Airflow searches for template files, in
+            order: the DAG file's folder, then the DAG's ``template_searchpath``.
     """
 
     task_id: str
@@ -138,6 +141,7 @@ class OperatorContext:
     source: str
     call_source: str = ""
     default_args: dict[str, ast.expr] = field(default_factory=dict)
+    template_search_paths: tuple[Path, ...] = ()
 
 
 # --------------------------------------------------------------------------------------
@@ -721,13 +725,68 @@ def _build_databricks_submit_run(ctx: OperatorContext) -> Activity:
     )
 
 
+# Airflow treats a SQL string ending in one of the operator's ``template_ext`` as a template file name.
+_SQL_TEMPLATE_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "DatabricksSqlOperator": (".sql",),
+    "SQLExecuteQueryOperator": (".sql", ".json"),
+    "PostgresOperator": (".sql", ".json"),
+    "MySqlOperator": (".sql", ".json"),
+    "HiveOperator": (".hql", ".sql"),
+}
+_SQL_FILE_EXTENSIONS = (".sql", ".hql")
+_JINJA_STATEMENT_OR_COMMENT = re.compile(r"\{%|\{#")
+
+
+def _read_sql_template(name: str, search_paths: tuple[Path, ...]) -> tuple[str | None, str]:
+    """Loads a SQL template file the way Airflow's Jinja loader finds it, or explains why it cannot.
+
+    Jinja splits the name on ``/``, ignores empty and ``.`` segments, refuses ``..``, and returns the
+    first match across the search paths.
+    """
+    parts = [part for part in name.split("/") if part and part != "."]
+    if ".." in parts:
+        return None, "climbs out of the template search path"
+    for root in search_paths:
+        candidate = root.joinpath(*parts)
+        if candidate.is_file():
+            try:
+                return candidate.read_text(encoding="utf-8"), str(candidate)
+            except (OSError, UnicodeDecodeError) as error:
+                return None, f"could not be read as UTF-8 text ({error})"
+    searched = ", ".join(str(root) for root in search_paths) or "an empty search path"
+    return None, f"was not found in {searched}"
+
+
 def _sql_builder(note: str, sql_kwarg: str = "sql") -> Callable[[OperatorContext], Activity]:
-    """Factory: build a warehouse-backed SqlActivity (sql_task) from an operator's inline SQL."""
+    """Factory: build a warehouse-backed SqlActivity (sql_task) from an operator's SQL.
+
+    A SQL string that names a template file is replaced by the file's contents, as Airflow renders it.
+    Jinja statements and comments (``{% %}``, ``{# #}``) have no Databricks equivalent and fail closed.
+    """
 
     def build(ctx: OperatorContext) -> Activity:
         sql = literal_str(ctx.kwargs.get(sql_kwarg)) or literal_str(ctx.kwargs.get("hql"))
         if sql is None:
             return _placeholder(ctx, f"{ctx.operator} SQL is not a string literal; extract it manually.")
+        if sql.endswith(_SQL_TEMPLATE_EXTENSIONS.get(ctx.operator, ())):
+            if not sql.endswith(_SQL_FILE_EXTENSIONS):
+                return _placeholder(
+                    ctx, f"{ctx.operator} loads {sql!r} as a template file of a type flowx does not read."
+                )
+            content, detail = _read_sql_template(sql, ctx.template_search_paths)
+            if content is None:
+                return _placeholder(
+                    ctx,
+                    f"{ctx.operator} loads its SQL from template file {sql!r}, which {detail}. Make the file "
+                    "available next to the DAG or in a template_searchpath directory, or inline the SQL.",
+                )
+            sql = content
+        if _JINJA_STATEMENT_OR_COMMENT.search(sql):
+            return _placeholder(
+                ctx,
+                f"{ctx.operator} SQL uses Jinja statements or comments ({{% %}} / {{# #}}), which Databricks "
+                "does not render; expand them into plain SQL.",
+            )
         return SqlActivity(name=ctx.task_id, task_key=ctx.task_key, sql=sql)
 
     return build

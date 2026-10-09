@@ -34,11 +34,22 @@ _RECOGNIZED_DAG_SETTINGS = frozenset(
         "doc_md",
         "dag_display_name",
         "default_args.owner",
+        "template_searchpath",
     }
 )
 
 
 _NON_EXECUTION_DAG_SETTINGS = frozenset({"tags", "description", "doc_md", "dag_display_name", "default_args.owner"})
+
+
+def template_searchpath(visitor: _DagVisitor) -> list[str] | None:
+    """Returns the DAG's ``template_searchpath`` directories, or None when it is unset or not static."""
+    value = ops.literal_value(visitor.dag_kwargs.get("template_searchpath"))
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list | tuple) and all(isinstance(entry, str) for entry in value):
+        return list(value)
+    return None
 
 
 def _job_timeout_seconds(visitor: _DagVisitor) -> int | None:
@@ -77,6 +88,18 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
             "status": "gap",
             "message": f"Airflow DAG setting {name!r} has no deterministic Databricks Jobs mapping.",
             "rationale": "no_deterministic_databricks_jobs_mapping",
+        }
+    if name == "template_searchpath":
+        if template_searchpath(visitor) is not None:
+            return {
+                "status": "mapped",
+                "target": "sql_template_file_resolution",
+                "rationale": "sql_template_files_read_at_discovery",
+            }
+        return {
+            "status": "gap",
+            "message": "Airflow template_searchpath must be a static string or list of strings to locate SQL files.",
+            "rationale": "template_searchpath_not_statically_resolvable",
         }
     if name == "dagrun_timeout":
         if _job_timeout_seconds(visitor) is not None:
