@@ -32,6 +32,7 @@ from flowx.models.ir import (
     WaitActivity,
     WebActivity,
 )
+from flowx.motifs.collapsed_lookup_refs import repair_collapsed_lookup_references
 
 
 @dataclass(slots=True, kw_only=True)
@@ -321,6 +322,11 @@ def merge_prepared_artifacts(
 
 def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
     """Converts a Pipeline IR into a PreparedWorkflow ready for the DAB bundle writer."""
+    # Repair references to a Lookup a motif collapsed, before preparing tasks. Done here (the
+    # single entry both the serialized-report and in-process paths share) so every packaging
+    # route is covered and the two produce identical bundles. Idempotent and a no-op when there
+    # is no such motif.
+    pipeline = repair_collapsed_lookup_references(pipeline)
     all_tasks: list[dict[str, Any]] = []
     artifacts = PreparedArtifacts()
     cluster_hints: list[dict[str, Any]] = []

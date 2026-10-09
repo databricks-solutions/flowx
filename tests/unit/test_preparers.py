@@ -625,6 +625,37 @@ class TestForEachPreparer:
         # ForEach depends on the bridge so the value is materialised first.
         assert any(dep.get("task_key") == "loop_inputs_bridge" for dep in prepared.task.get("depends_on") or [])
 
+    def test_prepare_for_each_bridge_takes_over_upstream_dependencies(self):
+        """The inputs-bridge reads the ForEach's upstream task values, so the upstream deps move onto
+        the bridge and the ForEach depends only on the bridge -- it must not retain the producers."""
+        inner = WaitActivity(**_make_base("Inner", "inner"), wait_time_seconds=1)
+        activity = ForEachActivity(
+            **{**_make_base("Loop", "loop"), "depends_on": [Dependency(task_key="producer")]},
+            items_expression="@split(pipeline().parameters.ejecuciones, ';')",
+            inner_activities=[inner],
+        )
+        prepared = prepare_activity(activity)
+        bridge_task = next(t for t in prepared.extra_tasks if t["task_key"] == "loop_inputs_bridge")
+        assert bridge_task.get("depends_on") == [{"task_key": "producer"}]
+        # The ForEach now depends only on the bridge, not on the original producer.
+        assert prepared.task["depends_on"] == [{"task_key": "loop_inputs_bridge"}]
+
+    def test_prepare_for_each_bridge_takes_over_run_if(self):
+        """A non-success trigger (run_if) must move to the bridge; leaving it on the ForEach plus a
+        succeeding bridge dependency would make e.g. ALL_FAILED unsatisfiable."""
+        inner = WaitActivity(**_make_base("Inner", "inner"), wait_time_seconds=1)
+        activity = ForEachActivity(
+            **{**_make_base("Loop", "loop"), "depends_on": [Dependency(task_key="producer", outcome="Failed")]},
+            items_expression="@split(pipeline().parameters.ejecuciones, ';')",
+            inner_activities=[inner],
+        )
+        prepared = prepare_activity(activity)
+        bridge_task = next(t for t in prepared.extra_tasks if t["task_key"] == "loop_inputs_bridge")
+        # run_if moved to the bridge (which carries the producer dep); the ForEach has none.
+        assert bridge_task.get("run_if") == "AT_LEAST_ONE_FAILED"
+        assert "run_if" not in prepared.task
+        assert prepared.task["depends_on"] == [{"task_key": "loop_inputs_bridge"}]
+
     def test_for_each_with_inner_if_condition_carries_branches(self):
         """Change foreach-inner-extra-tasks (P0): CF-001.
 

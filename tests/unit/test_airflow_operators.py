@@ -536,9 +536,9 @@ def test_trigger_dag_run_becomes_run_job_by_name():
 
 
 def test_trigger_dag_run_job_name_matches_target_job_resource_key():
-    # job_name becomes ${resources.jobs.<job_name>.id}; it must equal normalize_task_key(dag_id)
+    # job_name becomes ${resources.jobs.<job_name>.id}; it must equal to_lowercase_key(dag_id)
     # (how write_bundle keys the target job), or the cross-DAG ref dangles for hyphenated/mixed-case ids.
-    from flowx.utils import normalize_task_key
+    from flowx.utils import to_lowercase_key
 
     p = _load(
         "from airflow import DAG\n"
@@ -547,7 +547,7 @@ def test_trigger_dag_run_job_name_matches_target_job_resource_key():
         "    t = TriggerDagRunOperator(task_id='f', trigger_dag_id='Upstream-DAG')\n"
     )
     task = _by_key(p)["f"]
-    assert task.job_name == normalize_task_key("Upstream-DAG") == "upstream_dag"
+    assert task.job_name == to_lowercase_key("Upstream-DAG") == "upstream_dag"
 
 
 def test_databricks_submit_run_reads_notebook_from_json():

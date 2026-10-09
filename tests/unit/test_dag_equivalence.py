@@ -10,7 +10,7 @@ from flowx.models.motifs import (
     DetectedMotif,
 )
 from flowx.motifs.collapser import collapse_motifs
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 from flowx.validate import check_dag_equivalence, format_result
 
 
@@ -22,8 +22,8 @@ def _adf(name: str, deps: dict[str, list[str]] | None = None, adf_type: str = "C
 
 def _task(name: str, deps: list[tuple[str, str]] | None = None) -> Activity:
     """IR leaf task; *deps* is a list of (upstream_name, outcome)."""
-    edges = [Dependency(task_key=normalize_task_key(u), outcome=o) for u, o in (deps or [])]
-    return Activity(name=name, task_key=normalize_task_key(name), depends_on=edges or None)
+    edges = [Dependency(task_key=to_lowercase_key(u), outcome=o) for u, o in (deps or [])]
+    return Activity(name=name, task_key=to_lowercase_key(name), depends_on=edges or None)
 
 
 def _codes(result) -> set[str]:

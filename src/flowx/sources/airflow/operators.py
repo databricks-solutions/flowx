@@ -31,7 +31,7 @@ from flowx.models.ir import (
     SqlActivity,
 )
 from flowx.sources.airflow import callable_notebook, dataproc, templating
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 # --------------------------------------------------------------------------------------
 # Operator classification (handled specially by the loader, not via a task builder)
@@ -693,12 +693,12 @@ def _build_trigger_dag_run(ctx: OperatorContext) -> Activity:
     target = literal_str(ctx.kwargs.get("trigger_dag_id")) or ctx.task_key
     conf = literal_value(ctx.kwargs.get("conf"))
     # job_name becomes ${resources.jobs.<job_name>.id}; it must match the target DAG's job resource
-    # key, which write_bundle derives with normalize_task_key(dag_id). Using the same sanitizer keeps
+    # key, which write_bundle derives with to_lowercase_key(dag_id). Using the same sanitizer keeps
     # a cross-DAG TriggerDagRunOperator ref resolvable for hyphenated / mixed-case dag_ids.
     return RunJobActivity(
         name=ctx.task_id,
         task_key=ctx.task_key,
-        job_name=normalize_task_key(target),
+        job_name=to_lowercase_key(target),
         job_parameters={k: str(v) for k, v in conf.items()} if isinstance(conf, dict) else None,
     )
 

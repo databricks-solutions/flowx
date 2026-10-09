@@ -803,8 +803,14 @@ def _run_modify(args: argparse.Namespace) -> int:
         print(f"Invalid --lookup-csv: {error}", file=sys.stderr)
         return 2
 
+    from flowx.motifs.collapsed_lookup_refs import repair_collapsed_lookup_references
+
     stamped_pipelines = [
-        _stamp_lookup_values_into_metadata_driven_motifs(apply_configuration(pipeline, configuration), lookup_values)
+        repair_collapsed_lookup_references(
+            _stamp_lookup_values_into_metadata_driven_motifs(
+                apply_configuration(pipeline, configuration), lookup_values
+            )
+        )
         for pipeline in pipelines
     ]
     # Prompt-time provisioning: create/reuse the Databricks notification destination for any non-email

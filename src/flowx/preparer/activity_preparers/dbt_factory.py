@@ -24,7 +24,7 @@ from flowx.preparer.workflow_preparer import (
     PreparedWorkflow,
     build_common_task_fields,
 )
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 if TYPE_CHECKING:
     from flowx.models.ir import DbtFactoryActivity
@@ -327,7 +327,7 @@ def _prepare_static(activity: DbtFactoryActivity, nodes: list[dict[str, Any]]) -
         setup_tasks=[],
     )
 
-    inner_job_key = normalize_task_key(inner_job_name)
+    inner_job_key = to_lowercase_key(inner_job_name)
     parent_task["run_job_task"] = {"job_id": f"${{resources.jobs.{inner_job_key}.id}}"}
 
     return PreparedActivity(task=parent_task, inner_workflows=[inner_workflow])
@@ -420,8 +420,8 @@ def _pydabs_hook_source(activity: DbtFactoryActivity) -> str:
         "            'dependencies': ['dbt-databricks==1.12.2', 'dbt-core==1.11.12'],\n"
         "        },\n"
         "    }\n"
-        f"    resources.add_job({normalize_task_key(activity.task_key + '_dbt')!r}, Job(\n"
-        f"        name={normalize_task_key(activity.task_key + '_dbt')!r}, tasks=tasks, environments=[environment]\n"
+        f"    resources.add_job({to_lowercase_key(activity.task_key + '_dbt')!r}, Job(\n"
+        f"        name={to_lowercase_key(activity.task_key + '_dbt')!r}, tasks=tasks, environments=[environment]\n"
         "    ))\n"
         "    return resources\n"
     )
@@ -435,7 +435,7 @@ def _prepare_pydabs(activity: DbtFactoryActivity) -> PreparedActivity:
     ``python.resources`` entry pointing at the hook.
     """
     parent_task = build_common_task_fields(activity)
-    inner_job_key = normalize_task_key(f"{activity.task_key}_dbt")
+    inner_job_key = to_lowercase_key(f"{activity.task_key}_dbt")
     parent_task["run_job_task"] = {"job_id": f"${{resources.jobs.{inner_job_key}.id}}"}
 
     hook_relative_path = f"resources/{activity.task_key}_dbt_job.py"
