@@ -10,7 +10,7 @@ from flowx.models.dab import DabNotebook
 logger = logging.getLogger(__name__)
 
 
-def _content_signature(notebook: DabNotebook) -> object:
+def content_signature(notebook: DabNotebook) -> object:
     """Return a value suitable for comparing two notebooks for byte-equivalence."""
     if notebook.binary_content is not None:
         return ("binary", notebook.binary_content)
@@ -50,7 +50,7 @@ def write_notebooks(notebooks: list[DabNotebook], output_dir: Path) -> list[Path
 
     for notebook in notebooks:
         target = notebook.relative_path
-        signature = _content_signature(notebook)
+        signature = content_signature(notebook)
         existing = written_signatures.get(target)
         if existing is not None:
             if existing == signature:
@@ -70,6 +70,9 @@ def write_notebooks(notebooks: list[DabNotebook], output_dir: Path) -> list[Path
         destination.parent.mkdir(parents=True, exist_ok=True)
         if notebook.binary_content is not None:
             destination.write_bytes(notebook.binary_content)
+        elif notebook.authored:
+            # Authored text is written byte for byte: no added newline and no platform line endings.
+            destination.write_bytes(notebook.content.encode("utf-8"))
         else:
             content = notebook.content if notebook.content.endswith("\n") else notebook.content + "\n"
             destination.write_text(content, encoding="utf-8")

@@ -23,13 +23,14 @@ from flowx.bundler.constants import (
     SINGLE_NODE_JOB_CLUSTER_KEY,
 )
 from flowx.bundler.inner_job_params import normalize_value
-from flowx.bundler.notebook_writer import write_notebooks
+from flowx.bundler.notebook_writer import content_signature, write_notebooks
 from flowx.bundler.prereqs_writer import ManualParameter, build_prereqs, render_setup_md
 from flowx.bundler.setup_generator import generate_setup_tasks
 from flowx.ir_serde import data_asset_from_dict, lineage_from_dict
 from flowx.models.dab import DabNotebook
 from flowx.models.ir import (
     Activity,
+    AgenticComponentActivity,
     AppendVariableActivity,
     CopyActivity,
     DbtFactoryActivity,
@@ -112,6 +113,7 @@ def write_bundle(
     _cross_bundle_variables.clear()
     _neutralized_conditions.clear()
 
+    _check_agentic_file_collisions(workflow, catalog, schema)
     workflow = copy.deepcopy(workflow)
 
     output_dir = Path(output_dir)
@@ -133,6 +135,9 @@ def write_bundle(
     )
 
     pipeline_resources = _collect_pipeline_resources(workflow)
+    _check_pipeline_resource_keys(pipeline_resources, known_bundle_jobs)
+    environments = _collect_environments(workflow)
+    _check_environment_keys(environments, workflow)
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
     # sql_task references ${var.warehouse_id}; declare it (no default -> user supplies at deploy).
     if _bundle_uses_sql_task(workflow):
@@ -183,7 +188,9 @@ def write_bundle(
     resources_dir.mkdir(parents=True, exist_ok=True)
     job_yml_path = resources_dir / f"{resource_key}.yml"
     hoisted_global_names = set(hoisted_global_variables)
-    job_resource = _build_job_resource(workflow, resource_key, hoisted_globals=hoisted_global_names)
+    job_resource = _build_job_resource(
+        workflow, resource_key, hoisted_globals=hoisted_global_names, environments=environments
+    )
     job_yml_path.write_text(
         yaml.dump(
             job_resource, default_flow_style=False, sort_keys=False, allow_unicode=True, Dumper=_BundleYamlDumper
@@ -198,7 +205,11 @@ def write_bundle(
         inner_key = normalize_task_key(inner.name)
         inner_yml_path = resources_dir / f"{inner_key}.yml"
         inner_resource = _build_job_resource(
-            inner, inner_key, extra_notebooks_for_augment=workflow.notebooks, hoisted_globals=hoisted_global_names
+            inner,
+            inner_key,
+            extra_notebooks_for_augment=workflow.notebooks,
+            hoisted_globals=hoisted_global_names,
+            environments=environments,
         )
         inner_yml_path.write_text(
             yaml.dump(
@@ -234,11 +245,7 @@ def write_bundle(
     src_dir = output_dir / "src"
 
     def _write_generated(notebooks: list[DabNotebook]) -> None:
-        root_artifacts = [
-            notebook
-            for notebook in notebooks
-            if notebook.relative_path.startswith("resources/") or notebook.relative_path == "pyproject.toml"
-        ]
+        root_artifacts = [notebook for notebook in notebooks if _is_bundle_root_artifact(notebook)]
         rest = [notebook for notebook in notebooks if notebook not in root_artifacts]
         if rest:
             created_files.extend(write_notebooks(rest, src_dir))
@@ -656,6 +663,43 @@ def _known_bundle_job_keys(workflow: PreparedWorkflow, resource_key: str) -> set
     return keys
 
 
+def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, schema: str) -> None:
+    """Refuse an agent-authored file whose path another file below ``src`` uses with different content.
+
+    The notebook writer gives a clashing file a ``__N`` suffix, and setup notebooks are written later and
+    replace whatever is there, but every task still points at the original path, so one task would run the
+    other file's code.
+    """
+    authored_paths: set[str] = set()
+    signatures_by_path: dict[str, set[object]] = {}
+    for prepared in [workflow, *workflow.inner_workflows]:
+        setup_notebooks = generate_setup_tasks(
+            secrets=prepared.secrets, setup_tasks=prepared.setup_tasks, catalog=catalog, schema=schema
+        )
+        for notebook in [*prepared.notebooks, *setup_notebooks]:
+            if notebook.authored:
+                authored_paths.add(notebook.relative_path)
+            elif _is_bundle_root_artifact(notebook):
+                continue
+            signatures_by_path.setdefault(notebook.relative_path, set()).add(content_signature(notebook))
+    for relative_path in sorted(authored_paths):
+        if len(signatures_by_path[relative_path]) > 1:
+            raise ValueError(
+                f"Agentic component file {relative_path!r} shares its path with another file in the bundle that "
+                "has different content; give each component its own file path"
+            )
+
+
+def _is_bundle_root_artifact(notebook: DabNotebook) -> bool:
+    """Return whether a generated file belongs at the bundle root instead of below ``src``.
+
+    Authored files always stay below ``src``, even when their path looks like a PyDABs artifact.
+    """
+    if notebook.authored:
+        return False
+    return notebook.relative_path.startswith("resources/") or notebook.relative_path == "pyproject.toml"
+
+
 def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
     """Namespaces generated source files by DAG while preserving workspace paths."""
     cloned = copy.deepcopy(workflow)
@@ -692,7 +736,7 @@ def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
                 notebook.content = notebook.content.replace("src/dbt_project", f"src/{prefix}/dbt_project")
                 notebook.content = notebook.content.replace("src/dbt_profiles", f"src/{prefix}/dbt_profiles")
                 continue
-            if original_path.startswith("resources/") or original_path == "pyproject.toml":
+            if _is_bundle_root_artifact(notebook):
                 continue
             notebook.relative_path = f"{prefix}/{original_path}"
             replacements[f"../src/{original_path}"] = f"../src/{notebook.relative_path}"
@@ -1049,12 +1093,95 @@ def _collect_pipeline_resources(workflow: PreparedWorkflow) -> list[dict[str, An
 
     Returns:
         Flat list of pipeline-resource dicts (each with ``resource_key``
-        and ``definition``), including entries from inner workflows.
+        and ``definition``), including entries from inner workflows. A
+        resource declared more than once with the same key and definition
+        appears once, so it is written once; other fields on the entry are
+        never written and play no part in that comparison.
     """
-    resources = list(workflow.pipeline_resources)
-    for inner in workflow.inner_workflows:
-        resources.extend(inner.pipeline_resources)
+    resources: list[dict[str, Any]] = []
+    for current in [workflow, *workflow.inner_workflows]:
+        for resource in current.pipeline_resources:
+            if not any(
+                existing["resource_key"] == resource["resource_key"]
+                and existing["definition"] == resource["definition"]
+                for existing in resources
+            ):
+                resources.append(resource)
     return resources
+
+
+def _check_pipeline_resource_keys(pipeline_resources: list[dict[str, Any]], job_resource_keys: set[str]) -> None:
+    """Fail when a pipeline resource key clashes with another resource in the bundle.
+
+    Every pipeline resource is written to ``resources/<key>.yml``, as is every static job, so a
+    pipeline key that matches a job key or an earlier pipeline key would silently replace that file
+    and drop the other resource. Bundle resource keys must also be unique across resource types, so
+    a match with a Python-generated dbt-factory job would fail at deploy time instead. Repeats with
+    the same definition are already collapsed by :func:`_collect_pipeline_resources`, so a repeated
+    key here always carries a different definition.
+
+    Raises:
+        ValueError: A pipeline resource key matches a job resource key or repeats an earlier one.
+    """
+    seen_pipeline_keys: set[str] = set()
+    for resource in pipeline_resources:
+        pipeline_key = resource["resource_key"]
+        if pipeline_key in job_resource_keys:
+            raise ValueError(
+                f"Pipeline resource key {pipeline_key!r} matches a job resource key in this bundle; "
+                "bundle resource keys must be unique"
+            )
+        if pipeline_key in seen_pipeline_keys:
+            raise ValueError(
+                f"Pipeline resource key {pipeline_key!r} is used by more than one pipeline resource with "
+                f"different definitions; each would overwrite resources/{pipeline_key}.yml"
+            )
+        seen_pipeline_keys.add(pipeline_key)
+
+
+def _collect_environments(workflow: PreparedWorkflow) -> list[dict[str, Any]]:
+    """Returns every job environment carried by *workflow* and its inner jobs.
+
+    Each entry is an ``{environment_key, spec}`` dict. An environment declared
+    more than once with the same key and spec appears once, so it is written
+    once per job that uses it.
+    """
+    environments: list[dict[str, Any]] = []
+    for current in [workflow, *workflow.inner_workflows]:
+        for environment in current.environments:
+            if environment not in environments:
+                environments.append(environment)
+    return environments
+
+
+def _check_environment_keys(environments: list[dict[str, Any]], workflow: PreparedWorkflow) -> None:
+    """Fail when an environment key is declared with two specs or a task names an undeclared one.
+
+    Each job lists the environments its tasks reference, so two specs under one key would leave a
+    task's compute ambiguous, and a task whose ``environment_key`` matches no declared environment is
+    rejected by the Jobs API at deploy time. Identical repeats are already collapsed by
+    :func:`_collect_environments`, so a repeated key here always carries a different spec.
+
+    Raises:
+        ValueError: An environment key repeats with a different spec, or a task references an
+            environment key no environment declares.
+    """
+    declared_keys: set[str] = set()
+    for environment in environments:
+        environment_key = environment["environment_key"]
+        if environment_key in declared_keys:
+            raise ValueError(
+                f"Job environment {environment_key!r} is declared more than once with different specs; "
+                "give each spec its own environment_key"
+            )
+        declared_keys.add(environment_key)
+    for current in [workflow, *workflow.inner_workflows]:
+        for task in _iter_tasks_recursively(current.tasks):
+            if "environment_key" in task and task["environment_key"] not in declared_keys:
+                raise ValueError(
+                    f"Task {task.get('task_key')!r} uses environment_key {task['environment_key']!r}, which no "
+                    "agentic component declares in its environments"
+                )
 
 
 def _collect_pydabs_resource_entries(workflow: PreparedWorkflow) -> list[str]:
@@ -1187,14 +1314,15 @@ def _collect_required_cluster_keys(tasks: list[dict[str, Any]]) -> set[str]:
     return {task["job_cluster_key"] for task in _iter_tasks_recursively(tasks) if task.get("job_cluster_key")}
 
 
-def _strip_compute_mode_markers(tasks: list[dict[str, Any]]) -> None:
-    """Removes the private ``_compute_mode`` marker from every task before YAML output.
+def _strip_private_task_markers(tasks: list[dict[str, Any]]) -> None:
+    """Removes the private ``_compute_mode`` and ``_authored`` markers from every task before YAML output.
 
     Args:
         tasks: Top-level task dicts (mutated in place).
     """
     for task in _iter_tasks_recursively(tasks):
         task.pop("_compute_mode", None)
+        task.pop("_authored", None)
 
 
 # Patterns that signal a base_parameter value couldn't be evaluated cleanly. When a task references an
@@ -1224,10 +1352,13 @@ def _extract_manual_parameters_from_existing_notebook_tasks(
     deterministic translation are emitted with raw ADF expression values
     that ``dbutils.widgets.get`` returns verbatim, which fails at runtime.
     Walking both the absolute-path and bundle-relative cases drops the
-    broken values and surfaces them as a SETUP.md row instead.
+    broken values and surfaces them as a SETUP.md row instead. Agent-authored
+    tasks (marked ``_authored``) are skipped: their parameters are written as given.
     """
     manual_parameters: list[ManualParameter] = []
     for task in _iter_tasks_recursively(tasks):
+        if task.get("_authored"):
+            continue
         notebook_task = task.get("notebook_task") or {}
         notebook_path = notebook_task.get("notebook_path", "")
         base_params = notebook_task.get("base_parameters")
@@ -1263,7 +1394,7 @@ def _iter_tasks_recursively(tasks: list[dict[str, Any]]) -> Iterator[dict[str, A
             yield from _iter_tasks_recursively([inner])
 
 
-_CLUSTER_BINDING_KEYS = ("existing_cluster_id", "new_cluster", "job_cluster_key")
+_COMPUTE_BINDING_KEYS = ("existing_cluster_id", "new_cluster", "job_cluster_key", "environment_key")
 
 
 def _any_task_uses_classic_cluster(tasks: list[dict[str, Any]]) -> bool:
@@ -1286,6 +1417,8 @@ def _bind_cluster_to_notebook_tasks(tasks: list[dict[str, Any]]) -> None:
     matching job_cluster.  Tasks without a marker fall back to the
     legacy behaviour: existing-workspace notebooks bind to
     ``default_cluster`` and flowx-generated notebooks stay unbound.
+    A task that already names its compute (a cluster or a serverless
+    ``environment_key``) is never given a second binding.
 
     Args:
         tasks: Top-level task dicts (mutated in place).
@@ -1294,7 +1427,7 @@ def _bind_cluster_to_notebook_tasks(tasks: list[dict[str, Any]]) -> None:
         notebook_task = task.get("notebook_task")
         if notebook_task is None:
             continue
-        if any(key in task for key in _CLUSTER_BINDING_KEYS):
+        if any(key in task for key in _COMPUTE_BINDING_KEYS):
             continue
         compute_mode = task.get("_compute_mode")
         if compute_mode == "serverless":
@@ -1563,14 +1696,16 @@ def _augment_base_parameters(
 
     Args:
         tasks: Top-level task dicts (mutated in place).
-        notebooks: Generated notebooks to scan.
+        notebooks: Generated notebooks to scan. Authored files are skipped so
+            their tasks keep exactly the parameters the agent wrote and the
+            notebook's own widget defaults still apply.
         hoisted_globals: Names of factory globals hoisted to bundle variables.
             A widget matching one of these binds to ``${var.NAME}`` so the
             deploy-time bundle variable flows into the notebook; other widgets
             default to an empty string as before.
     """
     hoisted = hoisted_globals or set()
-    notebook_by_relpath = {notebook.relative_path: notebook for notebook in notebooks}
+    notebook_by_relpath = {notebook.relative_path: notebook for notebook in notebooks if not notebook.authored}
 
     def visit(task: dict[str, Any]) -> None:
         notebook_task = task.get("notebook_task")
@@ -1599,6 +1734,7 @@ def _build_job_resource(
     attach_clusters: bool = True,
     extra_notebooks_for_augment: list[DabNotebook] | None = None,
     hoisted_globals: set[str] | None = None,
+    environments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Builds a job resource dict for a single workflow.
 
@@ -1609,6 +1745,9 @@ def _build_job_resource(
             and binds every notebook task to it.  Set to ``False`` for inner
             jobs that are invoked via ``run_job_task`` from another bundle
             job — they inherit compute from the caller.
+        environments: The bundle's job environments; the ones this job's
+            tasks reference by ``environment_key`` are written as its
+            ``environments`` block.
 
     Returns:
         Dict ready for YAML serialization.
@@ -1650,7 +1789,18 @@ def _build_job_resource(
                 extras=cluster_extras or None,
             )
 
-    _strip_compute_mode_markers(workflow.tasks)
+    referenced_environment_keys = {
+        task["environment_key"] for task in _iter_tasks_recursively(workflow.tasks) if "environment_key" in task
+    }
+    job_environments = [
+        environment
+        for environment in environments or []
+        if environment["environment_key"] in referenced_environment_keys
+    ]
+    if job_environments:
+        job_def["environments"] = job_environments
+
+    _strip_private_task_markers(workflow.tasks)
 
     if workflow.parameters:
         # Emit each job parameter once in the DAB shape ({name, default}); dropping the internal ``type``
@@ -2275,6 +2425,15 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             motif_config=task_ir.get("motif_config") or {},
             consolidate_metadata_driven=bool(task_ir.get("consolidate_metadata_driven", False)),
             lookup_values=list(task_ir.get("lookup_values") or []),
+        )
+    if task_type == "AgenticComponentActivity":
+        return AgenticComponentActivity(
+            **base,
+            files=list(task_ir.get("files") or []),
+            resources=list(task_ir.get("resources") or []),
+            environments=list(task_ir.get("environments") or []),
+            task=dict(task_ir.get("task") or {}),
+            raw_definition=task_ir.get("raw_definition"),
         )
     if task_type == "UnsupportedActivity":
         return UnsupportedActivity(
