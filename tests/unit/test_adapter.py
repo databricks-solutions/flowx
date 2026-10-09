@@ -1386,16 +1386,22 @@ def _consolidated_bulk_copy_motif(
     matched: list[str] | None = None,
     lookup_values: list[dict[str, Any]] | None = None,
     lookup_scope: str = "LKP_GetActiveTables",
+    lookup_keys: list[str] | None = None,
     consolidate: bool = True,
 ) -> MotifActivity:
-    """A metadata-driven bulk-copy motif that swallowed a Lookup.
+    """A metadata-driven bulk-copy motif that swallowed one or more Lookups.
 
-    ``matched_activity_names`` carries both the Lookup and the ForEach (as the
-    detector records them), while ``motif_config["lookup_scope"]`` is the Lookup's
-    own task key -- the one a dangling downstream reference embeds.  ``consolidate``
+    ``matched_activity_names`` carries both the Lookup(s) and the ForEach (as the
+    detector records them), while ``motif_config["lookup_keys"]`` are the Lookups'
+    own task keys -- the ones a dangling downstream reference embeds.  When
+    ``lookup_keys`` is omitted only ``lookup_scope`` is set, exercising the legacy
+    fallback for reports written before ``lookup_keys`` existed.  ``consolidate``
     toggles the Lakeflow-Connect consolidation; the non-consolidated path still
     collapses the Lookup and builds ``<key>_control_lookup``.
     """
+    motif_config: dict[str, Any] = {"lookup_scope": lookup_scope}
+    if lookup_keys is not None:
+        motif_config["lookup_keys"] = lookup_keys
     return MotifActivity(
         **_make_base(task_key, task_key),
         motif_id="metadata_driven_bulk_copy",
@@ -1405,7 +1411,7 @@ def _consolidated_bulk_copy_motif(
         source_type_hint="database",
         consolidate_metadata_driven=consolidate,
         lookup_values=lookup_values or [],
-        motif_config={"lookup_scope": lookup_scope},
+        motif_config=motif_config,
     )
 
 
@@ -1627,3 +1633,34 @@ class TestInlineCollapsedLookupReferences:
 
         downstream = next(t for t in workflow.tasks if t.get("task_key") == "FE_TransformEachTable")
         assert downstream["for_each_task"]["inputs"] == "{{tasks.motif_mdbc_control_lookup.values.items}}"
+
+    def test_repairs_reference_in_inputs_bridge_parameters(self):
+        # When items is a function over the lookup output, the ref lives in the ForEach
+        # inputs-bridge parameters, which the preparer prefers over items_expression.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        foreach = ForEachActivity(
+            **_make_base("FE_TransformEachTable"),
+            items_expression="@take(activity('LKP_GetActiveTables').output.value, 10)",
+            inputs_bridge_notebook_code="items = source_rows[:10]",
+            inputs_bridge_required_parameters={"source_rows": "{{tasks.LKP_GetActiveTables.values.result}}"},
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].inputs_bridge_required_parameters["source_rows"] == json.dumps(self._ROWS)
+        # The function-form items_expression is not a whole-string ref, so it is left as-is.
+        assert result.tasks[1].items_expression == "@take(activity('LKP_GetActiveTables').output.value, 10)"
+
+    def test_repairs_references_to_multiple_collapsed_lookups(self):
+        # A motif may collapse more than one Lookup; a downstream reference to any of
+        # them (not just the primary lookup_scope) must be repaired.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS, lookup_keys=["LKP_One", "LKP_Two"])
+        fe_one = ForEachActivity(**_make_base("FE_One"), items_expression="{{tasks.LKP_One.values.result}}")
+        fe_two = ForEachActivity(**_make_base("FE_Two"), items_expression="{{tasks.LKP_Two.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, fe_one, fe_two])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == json.dumps(self._ROWS)
+        assert result.tasks[2].items_expression == json.dumps(self._ROWS)

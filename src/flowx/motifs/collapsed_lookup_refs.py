@@ -53,14 +53,17 @@ def repair_collapsed_lookup_references(pipeline: Pipeline) -> Pipeline:
       by a synthesised ``<task_key>_control_lookup`` task that publishes the rows
       as ``values.items`` at runtime, so the reference is repointed there.
 
-    The collapsed Lookup is identified by ``motif_config["lookup_scope"]`` -- the
-    Lookup's own task key, exactly what the dangling reference embeds, and the one
-    member of ``matched_activity_names`` that is a Lookup (never the collapsed
-    ForEach).  ``lookup_scope`` is set only on metadata-driven bulk-copy motifs, so
+    The collapsed Lookups are identified by ``motif_config["lookup_keys"]`` -- the
+    task keys of every Lookup the motif collapsed (a motif may collapse more than
+    one), exactly what the dangling references embed, and never the collapsed
+    ForEach.  ``lookup_keys`` is set only on metadata-driven bulk-copy motifs, so
     other motifs are skipped; the ``consolidate_metadata_driven`` flag is not
     gated on, so the non-consolidated ``for_each_ingestion`` path is covered too.
     The downstream reference may sit at the top level or nested inside any
-    If/Switch/ForEach, so every container is searched.
+    If/Switch/ForEach, and may be a plain ``items_expression`` or a value in a
+    ForEach's inputs-bridge parameters (which the preparer prefers over
+    ``items_expression`` when the items is a function over the Lookup output), so
+    both are searched in every container.
 
     Args:
         pipeline: Pipeline IR after motif collapse (and, in the ``modify`` flow,
@@ -92,9 +95,16 @@ def repair_collapsed_lookup_references(pipeline: Pipeline) -> Pipeline:
         # Descend through every container that can nest a ForEach/Filter (ForEach,
         # If, Switch) so a collapsed-Lookup reference is repaired wherever it lives.
         if isinstance(activity, ForEachActivity):
+            # A ForEach whose items is a function over the lookup output (e.g.
+            # ``@take(activity('LKP').output.value, 10)``) resolves through an inputs
+            # bridge, which the preparer prefers over ``items_expression``; the collapsed
+            # ref lives in the bridge's parameters, so repair those too.
             return dataclasses.replace(
                 activity,
                 items_expression=_rewrite_items(activity.items_expression),
+                inputs_bridge_required_parameters={
+                    name: _rewrite_items(value) for name, value in activity.inputs_bridge_required_parameters.items()
+                },
                 inner_activities=_rewrite_all(activity.inner_activities),
             )
         if isinstance(activity, FilterActivity):
@@ -122,17 +132,28 @@ def _build_replacements(pipeline: Pipeline) -> dict[str, str]:
     for task in pipeline.tasks:
         if not isinstance(task, MotifActivity):
             continue
-        lookup_key = task.motif_config.get("lookup_scope")
-        if not lookup_key:
+        # Every collapsed Lookup's task key -- a motif may collapse more than one.
+        # Fall back to the single ``lookup_scope`` for reports written before
+        # ``lookup_keys`` existed.
+        lookup_keys = task.motif_config.get("lookup_keys") or _legacy_lookup_keys(task.motif_config)
+        if not lookup_keys:
             continue
         if task.lookup_values:
             # Static: motif becomes a pipeline_task; inline the rows as a literal array.
-            replacement_by_key[lookup_key] = json.dumps(task.lookup_values)
+            replacement = json.dumps(task.lookup_values)
         else:
             # Dynamic: motif expands to a for_each fed by <task_key>_control_lookup,
             # which republishes the rows as ``items`` -- point the iterator there.
-            replacement_by_key[lookup_key] = f"{{{{tasks.{task.task_key}_control_lookup.values.items}}}}"
+            replacement = f"{{{{tasks.{task.task_key}_control_lookup.values.items}}}}"
+        for lookup_key in lookup_keys:
+            replacement_by_key[lookup_key] = replacement
     return replacement_by_key
+
+
+def _legacy_lookup_keys(motif_config: dict) -> list[str]:
+    """Returns ``[lookup_scope]`` for reports written before ``lookup_keys`` was recorded."""
+    scope = motif_config.get("lookup_scope")
+    return [scope] if scope else []
 
 
 def _warn_if_wrapped(items_expression: str, replacement_by_key: dict[str, str]) -> None:

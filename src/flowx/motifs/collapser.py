@@ -137,7 +137,8 @@ def _build_motif_config(
     if databricks_replacement != "for_each_ingestion":
         return {}
 
-    lookup = next((activity for activity in original_activities if isinstance(activity, LookupActivity)), None)
+    lookups = [activity for activity in original_activities if isinstance(activity, LookupActivity)]
+    lookup = lookups[0] if lookups else None
     copy = next((activity for activity in original_activities if isinstance(activity, CopyActivity)), None)
 
     config: dict[str, Any] = {}
@@ -147,6 +148,9 @@ def _build_motif_config(
         if lookup.source_type:
             config["lookup_source_type"] = lookup.source_type
         config["lookup_scope"] = lookup.task_key or motif_task_key
+        # Every collapsed Lookup's task key, so a downstream reference to any of them
+        # (not just the primary ``lookup_scope``) can be repaired after collapse.
+        config["lookup_keys"] = [lk.task_key for lk in lookups if lk.task_key]
     if copy is not None:
         sink_properties = copy.sink_properties or {}
         sink_table = sink_properties.get("table") or sink_properties.get("tableName")
