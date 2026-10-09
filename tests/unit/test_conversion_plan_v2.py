@@ -192,3 +192,57 @@ def test_apply_plan_refuses_a_stale_plan(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="different agentic insights"):
         apply_plan(tmp_path, recorded)
     assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_bytes
+
+
+def _recorded_plan(**component_fields: Any) -> dict[str, Any]:
+    component = {"component_id": "component-1", "members": ["solo"], "decision": "agentic", **component_fields}
+    return {"schema_version": SCHEMA_VERSION, "components": [component]}
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        _recorded_plan(assignments=[1]),
+        _recorded_plan(assignments="load"),
+        _recorded_plan(assignments=[{"pipeline": "solo", "route": "agentic", "task_keys": 5}]),
+        _recorded_plan(options=["deterministic"]),
+        {**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "members": 5}]},
+        {**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "components": "component-1"}]},
+        {**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "basis": 5}]},
+        {**_recorded_plan(), "findings": 5},
+    ],
+    ids=[
+        "assignment-not-an-object",
+        "assignments-not-a-list",
+        "assignment-task-keys-not-a-list",
+        "options-not-an-object",
+        "grouping-members-not-a-list",
+        "grouping-components-not-a-list",
+        "grouping-basis-not-a-list",
+        "findings-not-a-list",
+    ],
+)
+def test_a_malformed_nested_field_is_refused_on_load(tmp_path: Path, document: dict[str, Any]) -> None:
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "conversion_plan.json").write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="malformed"):
+        ConversionPlan.load(tmp_path)
+
+
+def test_package_fails_closed_on_a_malformed_nested_plan_field(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup(tmp_path, _inventory())
+    assert routing.record_plan(tmp_path, plan=_decide("deterministic"))["ok"] is True
+    plan_path = tmp_path / "metadata" / "conversion_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["components"][0]["assignments"] = [1]
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+    code = package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"])
+
+    assert code == 1
+    assert "conversion_plan.json is unreadable" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()

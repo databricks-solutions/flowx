@@ -327,7 +327,11 @@ class ConversionPlan:
 
 
 def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
-    """What keeps a recorded plan document from loading: a missing or malformed list or entry."""
+    """What keeps a recorded plan document from loading: a missing or malformed list, entry or nested field.
+
+    Every nested value the models rehydrate is checked here, so a hand-edited plan is refused with a
+    ``ValueError`` rather than crashing while it is read.
+    """
     problems: list[str] = []
     components = raw.get("components")
     if not isinstance(components, list):
@@ -339,20 +343,51 @@ def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
                 continue
             if not isinstance(component.get("component_id"), str) or not component["component_id"]:
                 problems.append(f"components[{index}] needs a 'component_id'")
-            members = component.get("members")
-            if not isinstance(members, list) or not members or not all(isinstance(item, str) for item in members):
+            if not _is_list_of(component.get("members"), str) or not component["members"]:
                 problems.append(f"components[{index}] needs 'members', a list of pipeline names")
             if component.get("decision") is not None and component.get("decision") not in DECISIONS:
                 problems.append(f"components[{index}] has decision {component.get('decision')!r}")
+            if component.get("options") is not None and not isinstance(component["options"], dict):
+                problems.append(f"components[{index}] 'options' must be an object")
+            problems.extend(_assignment_problems(component.get("assignments", []), f"components[{index}]"))
     groupings = raw.get("suggested_groupings", [])
-    if not isinstance(groupings, list) or not all(
-        isinstance(item, dict) and isinstance(item.get("grouping_id"), str) for item in groupings
-    ):
-        problems.append("'suggested_groupings' must be a list of objects with a 'grouping_id'")
+    if not isinstance(groupings, list):
+        problems.append("'suggested_groupings' must be a list")
+    else:
+        for index, grouping in enumerate(groupings):
+            loc = f"suggested_groupings[{index}]"
+            if not isinstance(grouping, dict) or not isinstance(grouping.get("grouping_id"), str):
+                problems.append(f"{loc} must be an object with a 'grouping_id'")
+                continue
+            for key, kind in (("components", str), ("members", str), ("basis", dict)):
+                if key in grouping and not _is_list_of(grouping[key], kind):
+                    problems.append(f"{loc} '{key}' must be a list")
     conversation = raw.get("conversation", [])
     if not isinstance(conversation, list) or not all(
         isinstance(item, dict) and isinstance(item.get("question"), str) and isinstance(item.get("answer"), str)
         for item in conversation
     ):
         problems.append("'conversation' must be a list of {question, answer} objects")
+    if not isinstance(raw.get("findings", []), list):
+        problems.append("'findings' must be a list")
     return problems
+
+
+def _assignment_problems(assignments: Any, loc: str) -> list[str]:
+    """What is malformed in one component's reserved ``assignments`` list."""
+    if not isinstance(assignments, list):
+        return [f"{loc} 'assignments' must be a list"]
+    problems: list[str] = []
+    for index, assignment in enumerate(assignments):
+        if not isinstance(assignment, dict):
+            problems.append(f"{loc} assignments[{index}] must be an object")
+            continue
+        for key in ("task_keys", "boundary"):
+            if key in assignment and not isinstance(assignment[key], list):
+                problems.append(f"{loc} assignments[{index}] '{key}' must be a list")
+    return problems
+
+
+def _is_list_of(value: Any, kind: type) -> bool:
+    """Whether ``value`` is a list whose every item is a ``kind``."""
+    return isinstance(value, list) and all(isinstance(item, kind) for item in value)
