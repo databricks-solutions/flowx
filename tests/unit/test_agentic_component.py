@@ -919,6 +919,24 @@ def test_agentic_component_python_or_jar_task_without_compute_fails(payload):
 
 
 @pytest.mark.parametrize(
+    "compute", [{"environment_key": "serverless"}, {"existing_cluster_id": "0101-123456-abcdefgh"}]
+)
+def test_agentic_component_spark_submit_task_without_a_new_cluster_fails(compute):
+    """Databricks runs spark-submit only on a new cluster, so serverless or an existing cluster fails at deploy."""
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        environments=[SERVERLESS_ENVIRONMENT],
+        task={"spark_submit_task": {"parameters": ["--class", "com.example.Main", "dbfs:/jars/etl.jar"]}, **compute},
+    )
+
+    with pytest.raises(
+        ValueError, match="'run' spark_submit_task must name its compute with job_cluster_key, new_cluster"
+    ):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+@pytest.mark.parametrize(
     "task",
     [
         {"spark_python_task": {"python_file": "../src/jobs/run.py"}, "job_cluster_key": "etl_cluster"},

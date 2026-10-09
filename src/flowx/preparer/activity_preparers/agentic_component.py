@@ -26,10 +26,14 @@ FLOWX_OWNED_TASK_FIELDS = frozenset(
 )
 
 
-_PAYLOADS_NEEDING_COMPUTE = frozenset(
-    {"spark_python_task", "python_wheel_task", "spark_jar_task", "spark_submit_task", "dbt_task"}
-)
 _COMPUTE_KEYS = ("environment_key", "job_cluster_key", "existing_cluster_id", "new_cluster")
+_PAYLOAD_COMPUTE_KEYS = {
+    "spark_python_task": _COMPUTE_KEYS,
+    "python_wheel_task": _COMPUTE_KEYS,
+    "spark_jar_task": _COMPUTE_KEYS,
+    "dbt_task": _COMPUTE_KEYS,
+    "spark_submit_task": ("job_cluster_key", "new_cluster"),
+}
 _BUNDLE_JOB_CLUSTER_KEYS = (DEFAULT_JOB_CLUSTER_KEY, SINGLE_NODE_JOB_CLUSTER_KEY, MULTI_NODE_JOB_CLUSTER_KEY)
 
 
@@ -57,8 +61,8 @@ def _check_task_payload(task_key: str, task: dict[str, object]) -> None:
 
     Databricks names every task type ``<kind>_task``. A fragment with none packages fine but is
     rejected at deploy time, and one with two leaves which runs undefined, so both fail here.
-    The same goes for a task that needs compute but names none, or names a job cluster the
-    bundle does not define. A ``for_each_task`` body is checked the same way.
+    The same goes for a task that needs compute but names none it can run on, or names a job
+    cluster the bundle does not define. A ``for_each_task`` body is checked the same way.
     """
     payloads = sorted(key for key in task if key.endswith("_task"))
     if len(payloads) != 1:
@@ -71,9 +75,10 @@ def _check_task_payload(task_key: str, task: dict[str, object]) -> None:
     if not isinstance(payload, dict):
         raise ValueError(f"Agentic component {task_key!r} task payload {payloads[0]} must be a mapping")
     # flowx binds a cluster only for notebooks, and these task types cannot run without compute.
-    if payloads[0] in _PAYLOADS_NEEDING_COMPUTE and not any(key in task for key in _COMPUTE_KEYS):
+    compute_keys = _PAYLOAD_COMPUTE_KEYS.get(payloads[0])
+    if compute_keys and not any(key in task for key in compute_keys):
         raise ValueError(
-            f"Agentic component {task_key!r} {payloads[0]} must name its compute with {', '.join(_COMPUTE_KEYS)}"
+            f"Agentic component {task_key!r} {payloads[0]} must name its compute with {', '.join(compute_keys)}"
         )
     if "job_cluster_key" in task and task["job_cluster_key"] not in _BUNDLE_JOB_CLUSTER_KEYS:
         raise ValueError(
@@ -214,8 +219,9 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
             malformed or its key is not a plain identifier, an environment is malformed,
             a binary file is not valid base64, the task does not carry exactly one
             executable payload mapping, a ``spark_python_task``, ``python_wheel_task``,
-            ``spark_jar_task``, ``spark_submit_task`` or ``dbt_task`` names no compute, or a
-            ``job_cluster_key`` is not one of the bundle's job clusters.
+            ``spark_jar_task`` or ``dbt_task`` names no compute, a ``spark_submit_task`` names
+            neither ``new_cluster`` nor a ``job_cluster_key`` (it runs only on a new cluster), or
+            a ``job_cluster_key`` is not one of the bundle's job clusters.
     """
     del scope
     owned_fields = sorted(FLOWX_OWNED_TASK_FIELDS & activity.task.keys())
