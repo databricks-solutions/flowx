@@ -26,7 +26,7 @@ and recorded by the library in its own file, `metadata/agentic_insights.json`, b
 `metadata/inventory.json` from `source_graphs.json` plus that file, so it carries the same block under
 a single additive `insights` key; you never pass it anything for that step.
 
-This is the standard step **between discover and route** in the flowx workflow. `flowx-discover`
+This is the standard step **between discover and convert** in the flowx workflow. `flowx-discover`
 chains into this skill by default; the routing step (`flowx-route`) reads the `insights` block to
 present the agentic conversion option per connected component.
 
@@ -165,8 +165,9 @@ next `enrich` refuses until the lock is cleared:
 
 ## Next step
 
-After the inventory is enriched, continue with **`flowx-route`** to recommend and record a
-per-connected-component conversion route (deterministic vs. agentic), then convert and package.
+After the inventory is enriched, convert it (`flowx-convert` builds the deterministic baseline), then
+continue with **`flowx-route`** to recommend and record a per-connected-component conversion route
+(deterministic vs. agentic), then package.
 
 ## Reference
 

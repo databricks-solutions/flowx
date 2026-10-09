@@ -330,7 +330,8 @@ Package refuses, writing nothing, when:
 `metadata/route_audit.json` records per unit the `decision`, `outcome`, `fingerprint`, `output_sha256`
 and `replaced` history (a grouping also lists `grouped_components`), the gap fills applied, the routing
 `conversation`, and the hashes of the plan (the same canonical hash the routing record holds), the
-baseline report and gaps, the inventory, and the packaged report. It survives the prune of `.work/`
+baseline report and gaps, the inventory, the saved source graphs and agentic insights the plan was
+bound to, and the packaged report. It survives the prune of `.work/`
 and documents what was packaged and how.
 
 ## Reference
