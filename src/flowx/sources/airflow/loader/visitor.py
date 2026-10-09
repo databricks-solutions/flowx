@@ -50,6 +50,9 @@ class _DagVisitor(ast.NodeVisitor):
         self.airflow_generation = _airflow_generation(module)
         self.asset_definitions = _asset_definitions(module, self._aliases)
         self._target_dag_variable = target_dag_variable
+        self._calls_joined_by_wiring = (
+            _calls_joined_by_wiring(module, target_dag_variable, self._aliases) if target_dag_variable else set()
+        )
         # Classic python_callable resolution starts at module scope. Nested functions are only visible
         # from their lexical parent and must never overwrite a same-named module function.
         self._functions: dict[str, ast.FunctionDef] = {
@@ -269,7 +272,8 @@ class _DagVisitor(ast.NodeVisitor):
         if self._target_dag_variable is not None and not (
             isinstance(dag_node, ast.Name) and dag_node.id == self._target_dag_variable
         ):
-            return False
+            if not _omits_dag(dag_node) or id(node) not in self._calls_joined_by_wiring:
+                return False
         call = ast.Call(
             func=ast.Name(id=construct, ctx=ast.Load()),
             args=[],
@@ -672,7 +676,9 @@ class _DagVisitor(ast.NodeVisitor):
                     isinstance(dag_argument, ast.Name) and dag_argument.id == self._target_dag_variable
                 )
             is_assigned_task_factory = self._helper_targets_assigned_dag(node)
-            in_selected_assigned_dag = in_selected_assigned_dag or is_assigned_task_factory
+            in_selected_assigned_dag = (
+                in_selected_assigned_dag or is_assigned_task_factory or id(node) in self._calls_joined_by_wiring
+            )
         if (self._dag_scope_depth or in_selected_assigned_dag) and id(node) not in self._claimed_task_call_ids:
             is_operator = _direct_operator_call(node, self._aliases) is not None
             is_mapped_operator = _mapped_operator_call(node, self._aliases) is not None
@@ -958,3 +964,128 @@ class _DagVisitor(ast.NodeVisitor):
             self._add_edges(this_names, others, call)
         elif func.attr == "set_upstream":
             self._add_edges(others, this_names, call)
+
+
+def _omits_dag(dag_argument: ast.expr | None) -> bool:
+    """True when an operator gets no DAG of its own: ``dag=`` is missing or explicitly ``None``."""
+    return dag_argument is None or (isinstance(dag_argument, ast.Constant) and dag_argument.value is None)
+
+
+def _calls_joined_by_wiring(module: ast.Module, dag_variable: str, aliases: dict[str, str]) -> set[int]:
+    """Finds operator calls without a DAG of their own that dependency wiring attaches to *dag_variable*.
+
+    Airflow puts an operator built without ``dag=`` (and outside a ``with DAG():`` block) into the DAG of
+    whatever task it is wired to, so ``start >> TriggerDagRunOperator(...)`` makes the trigger part of
+    ``start``'s DAG. Coordinator DAGs depend on this heavily. Wiring is followed through ``>>`` / ``<<``
+    (including list fan-out), ``set_upstream`` / ``set_downstream``, and ``chain``, transitively.
+
+    Statements are read in source order and every assignment is its own binding, so after ``t`` is
+    reassigned, wiring that mentions ``t`` attaches the new task, never the earlier one. Returns the ids
+    of the call nodes that end up in the DAG.
+    """
+    bound_keys: set[str] = set()
+    dagless_call_ids: dict[str, int] = {}
+    neighbours: dict[str, set[str]] = {}
+    current_binding: dict[str, str] = {}
+
+    def operator_call(node: ast.expr) -> ast.Call | None:
+        if not isinstance(node, ast.Call):
+            return None
+        mapped = _mapped_operator_call(node, aliases)
+        return _direct_operator_call(node, aliases) or (mapped[0] if mapped is not None else None)
+
+    def classify(node: ast.Call) -> str | None:
+        """Returns the binding key for an operator call, recording whether it belongs to the DAG."""
+        call = operator_call(node)
+        if call is None:
+            return None
+        key = f"call:{id(node)}"
+        dag_argument = next((keyword.value for keyword in call.keywords if keyword.arg == "dag"), None)
+        if _omits_dag(dag_argument):
+            dagless_call_ids[key] = id(node)
+        elif isinstance(dag_argument, ast.Name) and dag_argument.id == dag_variable:
+            bound_keys.add(key)
+        return key
+
+    def keys_for(node: ast.expr) -> list[str]:
+        if isinstance(node, ast.Name):
+            return [current_binding[node.id]] if node.id in current_binding else []
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return [key for item in node.elts for key in keys_for(item)]
+        if isinstance(node, ast.Call):
+            key = classify(node)
+            return [key] if key is not None else []
+        return []
+
+    def connect(upstream_keys: list[str], downstream_keys: list[str]) -> None:
+        for upstream in upstream_keys:
+            for downstream in downstream_keys:
+                neighbours.setdefault(upstream, set()).add(downstream)
+                neighbours.setdefault(downstream, set()).add(upstream)
+
+    def shift_operands(node: ast.expr) -> list[list[str]]:
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.RShift, ast.LShift)):
+            return shift_operands(node.left) + shift_operands(node.right)
+        if isinstance(node, ast.Call) and _construct_name(node.func, aliases) in _EDGE_MODIFIER_CONSTRUCTS:
+            return []
+        return [keys_for(node)]
+
+    def bind(name: str, value: ast.expr) -> None:
+        if isinstance(value, ast.Name) and value.id in current_binding:
+            current_binding[name] = current_binding[value.id]
+            return
+        key = classify(value) if isinstance(value, ast.Call) else None
+        if key is None:
+            current_binding.pop(name, None)
+        else:
+            current_binding[name] = key
+
+    def scan(statements: list[ast.stmt]) -> None:
+        for statement in statements:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if (
+                isinstance(statement, ast.For)
+                and isinstance(statement.target, ast.Name)
+                and isinstance(statement.iter, (ast.List, ast.Tuple))
+            ):
+                # A loop over a literal list of tasks runs its body once per task, like the capture pass.
+                for element in statement.iter.elts:
+                    bind(statement.target.id, element)
+                    scan(statement.body)
+                scan(statement.orelse)
+                continue
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+                if isinstance(statement.targets[0], ast.Name):
+                    bind(statement.targets[0].id, statement.value)
+            elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.BinOp):
+                if isinstance(statement.value.op, (ast.RShift, ast.LShift)):
+                    operands = shift_operands(statement.value)
+                    for left, right in zip(operands, operands[1:]):
+                        connect(left, right)
+            elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                call = statement.value
+                if isinstance(call.func, ast.Attribute) and call.func.attr in ("set_upstream", "set_downstream"):
+                    if call.args:
+                        connect(keys_for(call.func.value), keys_for(call.args[0]))
+                elif _construct_name(call.func, aliases) == "chain":
+                    positions = [keys_for(argument) for argument in call.args]
+                    for left, right in zip(positions, positions[1:]):
+                        connect(left, right)
+            for field_name in ("body", "orelse", "finalbody"):
+                nested = getattr(statement, field_name, None)
+                if isinstance(nested, list):
+                    scan(nested)
+            for handler in getattr(statement, "handlers", None) or []:
+                scan(handler.body)
+
+    scan(module.body)
+    reached: set[str] = set()
+    pending = list(bound_keys)
+    while pending:
+        key = pending.pop()
+        if key in reached:
+            continue
+        reached.add(key)
+        pending.extend(neighbours.get(key, ()))
+    return {call_id for key, call_id in dagless_call_ids.items() if key in reached}
