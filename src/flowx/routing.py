@@ -763,58 +763,113 @@ def load_plan(*, plan: dict[str, Any] | None = None, plan_path: Path | None = No
     return json.loads(Path(plan_path).read_text(encoding="utf-8"))
 
 
-def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> dict[str, Any]:
+def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
     """Build the authored plan route records when no plan is supplied: the recommendation, kept decisions.
 
     This is how route writes its recommendation straight into ``conversion_plan.json`` and then picks
-    up the agent's edits to it. Every current component starts pending (``decision: None``); a
-    component the *previous* recorded plan lists with the same members keeps its ``decision``,
-    ``rationale`` and ``assignments`` as written there, a suggested grouping with the same id (which
-    is derived from its members) keeps its ``accepted`` flag, and the ``conversation`` is kept, so
-    decisions survive a re-enrich or a re-route. Entries that no longer match a component or
-    suggestion are dropped. A re-discover keeps nothing: discover clears ``metadata/`` and
+    up the agent's edits to it. The *previous* recorded plan is carried as written, without the keys
+    the library recomputes, so :func:`validate_plan` refuses a typo or a wrong value in the edited file
+    exactly as it would in a passed plan. A component it does not list is added pending
+    (``decision: None``) and a suggested grouping it does not list is added not accepted, so decisions
+    survive a re-enrich or a re-route. A re-discover keeps nothing: discover clears ``metadata/`` and
     ``.work/``, so this plan and the agent's outputs go with them and every component starts pending
-    again. Values are carried as written; :func:`validate_plan` then checks them.
+    again.
+
+    A recorded grouping that route no longer suggests (enrich changed its members, and with them its
+    id) is dropped. When it was accepted, its components are set back to pending, so route applies
+    nothing for them until they are decided again, and it is reported in the returned list.
 
     Args:
         previous: The parsed ``conversion_plan.json`` (edited or not), or ``None`` when there is none.
         inventory: The current discover ``inventory.json`` document.
+
+    Returns:
+        ``(plan, dropped_groupings)``: the authored plan to validate and record, and one
+        ``{"grouping_id", "components", "members", "replaced_by"}`` entry per accepted grouping that is
+        no longer suggested, where ``replaced_by`` lists the current suggestions sharing its components.
     """
+    if previous is None:
+        previous = {}
+    if not isinstance(previous, dict):
+        return previous, []
     recommendation = build_recommendation(inventory)
-    previous = previous if isinstance(previous, dict) else {}
-    previous_components = previous.get("components") if isinstance(previous.get("components"), list) else []
-    by_members: dict[frozenset[str], dict[str, Any]] = {}
-    for entry in previous_components:
-        members = entry.get("members") if isinstance(entry, dict) else None
-        if isinstance(members, list) and all(isinstance(member, str) for member in members):
-            by_members[frozenset(members)] = entry
+    suggestions = {grouping["grouping_id"]: grouping for grouping in recommendation["suggested_groupings"]}
+    plan = _without_library_keys(previous, _PLAN_LIBRARY_KEYS)
 
-    components: list[dict[str, Any]] = []
-    for component in recommendation["components"]:
-        authored: dict[str, Any] = {
-            "component_id": component["component_id"],
-            "members": component["members"],
-            "decision": None,
+    dropped: list[dict[str, Any]] = []
+    previous_groupings = previous.get("suggested_groupings", [])
+    if isinstance(previous_groupings, list):
+        groupings: list[Any] = []
+        for entry in previous_groupings:
+            grouping_id = entry.get("grouping_id") if isinstance(entry, dict) else None
+            no_longer_suggested = (
+                isinstance(grouping_id, str)
+                and grouping_id not in suggestions
+                and ("members" in entry or "components" in entry)
+            )
+            if not no_longer_suggested:
+                groupings.append(_without_library_keys(entry, _GROUPING_LIBRARY_KEYS))
+            elif entry.get("accepted", False) is not False:
+                dropped.append(_dropped_grouping(entry, recommendation["components"], suggestions))
+        listed = [entry.get("grouping_id") for entry in groupings if isinstance(entry, dict)]
+        groupings.extend(
+            {"grouping_id": grouping_id, "accepted": False} for grouping_id in suggestions if grouping_id not in listed
+        )
+        plan["suggested_groupings"] = groupings
+
+    pending_again = {component_id for grouping in dropped for component_id in grouping["components"]}
+    previous_components = previous.get("components", [])
+    if isinstance(previous_components, list):
+        id_by_members = {
+            frozenset(component["members"]): component["component_id"] for component in recommendation["components"]
         }
-        kept = by_members.get(frozenset(component["members"]))
-        if kept is not None:
-            for key in sorted(_COMPONENT_AUTHORED_KEYS - {"component_id", "members"}):
-                if key in kept:
-                    authored[key] = kept[key]
-        components.append(authored)
+        components: list[Any] = []
+        listed_ids: set[str | None] = set()
+        for entry in previous_components:
+            authored = _without_library_keys(entry, _COMPONENT_LIBRARY_KEYS)
+            members = entry.get("members") if isinstance(entry, dict) else None
+            if isinstance(members, list) and all(isinstance(member, str) for member in members):
+                component_id = id_by_members.get(frozenset(members))
+                listed_ids.add(component_id)
+                if component_id in pending_again:
+                    authored["decision"] = None
+            components.append(authored)
+        components.extend(
+            {"component_id": component["component_id"], "members": component["members"], "decision": None}
+            for component in recommendation["components"]
+            if component["component_id"] not in listed_ids
+        )
+        plan["components"] = components
+    return plan, dropped
 
-    previous_groupings = previous.get("suggested_groupings")
-    accepted_before = {
-        entry.get("grouping_id")
-        for entry in (previous_groupings if isinstance(previous_groupings, list) else [])
-        if isinstance(entry, dict) and entry.get("accepted") is True
-    }
-    groupings = [
-        {"grouping_id": grouping["grouping_id"], "accepted": grouping["grouping_id"] in accepted_before}
-        for grouping in recommendation["suggested_groupings"]
+
+def _without_library_keys(entry: Any, library_keys: set[str]) -> Any:
+    """A plan entry without the keys the library recomputes; anything that is not an object, unchanged."""
+    if not isinstance(entry, dict):
+        return entry
+    return {key: value for key, value in entry.items() if key not in library_keys}
+
+
+def _dropped_grouping(
+    entry: dict[str, Any], components: list[dict[str, Any]], suggestions: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Describe a recorded grouping that is no longer suggested: its components and what replaces it."""
+    members = entry.get("members")
+    members = [member for member in members if isinstance(member, str)] if isinstance(members, list) else []
+    component_ids = [
+        component["component_id"] for component in components if not set(component["members"]).isdisjoint(members)
     ]
-    conversation = previous.get("conversation", [])
-    return {"components": components, "suggested_groupings": groupings, "conversation": conversation}
+    replaced_by = [
+        grouping_id
+        for grouping_id, suggestion in suggestions.items()
+        if not set(suggestion["components"]).isdisjoint(component_ids)
+    ]
+    return {
+        "grouping_id": entry["grouping_id"],
+        "components": component_ids,
+        "members": members,
+        "replaced_by": replaced_by,
+    }
 
 
 def build_plan(inventory: dict[str, Any], raw: dict[str, Any]) -> ConversionPlan:

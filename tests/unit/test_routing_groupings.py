@@ -162,6 +162,15 @@ def _route(output_dir: Path, plan: dict[str, Any]) -> dict[str, Any]:
     return apply_plan(output_dir, recorded)
 
 
+def _decide_in_recorded_plan(output_dir: Path, decisions: dict[str, str]) -> None:
+    """Set decisions in the recorded conversion_plan.json in place, the way an agent edits it."""
+    plan_path = output_dir / "metadata" / "conversion_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    for component in plan["components"]:
+        component["decision"] = decisions.get(component["component_id"], component["decision"])
+    plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+
+
 def _authored(name: str) -> dict[str, Any]:
     return pipeline_to_dict(
         Pipeline(
@@ -323,6 +332,21 @@ def test_a_re_enrich_that_drops_another_suggestion_keeps_a_grouping_accepted_and
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["accepted_groupings"] == [remaining["grouping_id"]]
+    assert payload["dropped_groupings"] == [
+        {
+            "grouping_id": _EXTRACTS,
+            "components": ["component-2", "component-3"],
+            "members": ["extract_a", "extract_b"],
+            "replaced_by": [],
+        }
+    ]
+    assert payload["applied"] is False and payload["pending"] == ["component-2", "component-3"]
+    _decide_in_recorded_plan(tmp_path, {"component-2": "agentic", "component-3": "agentic"})
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["accepted_groupings"] == [remaining["grouping_id"]] and payload["dropped_groupings"] == []
     assert payload["edit"]["outcomes"][remaining["grouping_id"]] == "agentic-applied"
     refill = apply_agentic_output(tmp_path, ["extract_c", "mart"], [_authored("lfc_b")])
     assert refill["ok"] is True and refill["already_applied"] is True
@@ -353,11 +377,87 @@ def test_an_accepted_grouping_is_kept_when_route_runs_again_without_a_plan(tmp_p
     assert routing.record_plan(tmp_path, plan=_plan(inventory, {"component-2", "component-3"}, {_EXTRACTS}))["ok"]
     recorded = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
 
-    carried = routing.carried_forward_plan(recorded, inventory)
+    carried, dropped = routing.carried_forward_plan(recorded, inventory)
 
+    assert dropped == []
     assert {entry["grouping_id"]: entry["accepted"] for entry in carried["suggested_groupings"]} == {
         _EXTRACTS: True,
         _EXTRACT_C_AND_MART: False,
     }
     decisions = {entry["component_id"]: entry["decision"] for entry in carried["components"]}
     assert decisions["component-2"] == decisions["component-3"] == "agentic"
+
+
+def test_an_accepted_grouping_enrich_changed_sends_its_components_back_to_pending(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inventory = _enriched(tmp_path)
+    _write_report(tmp_path)
+    _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, {_EXTRACTS}))
+    assert apply_agentic_output(tmp_path, ["extract_a", "extract_b"], [_authored("lfc_a")])["ok"] is True
+    assert enrich_inventory(tmp_path, insights=_insights(extra_patterns={"extract_c": _LAKEFLOW_CONNECT}))["ok"]
+    re_enriched = json.loads((tmp_path / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+    (replacement,) = routing.suggest_groupings(re_enriched)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    capsys.readouterr()
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied"] is False and payload["accepted_groupings"] == []
+    assert payload["pending"] == ["component-2", "component-3"]
+    assert payload["dropped_groupings"] == [
+        {
+            "grouping_id": _EXTRACTS,
+            "components": ["component-2", "component-3"],
+            "members": ["extract_a", "extract_b"],
+            "replaced_by": [replacement["grouping_id"]],
+        }
+    ]
+    assert payload["message"].startswith(
+        f"accepted grouping {_EXTRACTS} (component-2, component-3) is no longer suggested and is replaced by "
+        f"{replacement['grouping_id']}, so its components are pending again; decide ['component-2', 'component-3']"
+    )
+    assert report_path.read_bytes() == report_before
+    recorded = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
+    assert [component["decision"] for component in recorded["components"]] == [
+        "deterministic",
+        None,
+        None,
+        "deterministic",
+        "deterministic",
+    ]
+    page = (tmp_path / "metadata" / "routing_review.html").read_text(encoding="utf-8")
+    groupings_section = page.split('id="groupings"')[1].split("</section>")[0]
+    assert _EXTRACTS in groupings_section and "no longer suggested" in groupings_section
+
+
+def test_route_refuses_typos_and_wrong_values_in_the_edited_recorded_plan(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inventory = _enriched(tmp_path)
+    _write_report(tmp_path)
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 0
+    plan_path = tmp_path / "metadata" / "conversion_plan.json"
+    edited = json.loads(plan_path.read_text(encoding="utf-8"))
+    agentic = {"component-2", "component-3"}
+    for component in edited["components"]:
+        component["decision"] = "agentic" if component["component_id"] in agentic else "deterministic"
+    edited["components"][1]["decison"] = "agentic"
+    edited["suggested_groupings"][0]["accepted"] = "true"
+    edited["notes"] = "convert the extractors together"
+    plan_path.write_text(json.dumps(edited, indent=2), encoding="utf-8")
+    edited_bytes = plan_path.read_bytes()
+    capsys.readouterr()
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 1
+
+    violations = json.loads(capsys.readouterr().out)["violations"]
+    assert violations == [
+        "unknown top-level key: 'notes'",
+        "components[1]: unknown field 'decison'",
+        "suggested_groupings[0]: 'accepted' must be true or false, got 'true'",
+    ]
+    assert violations == routing.validate_plan(edited, inventory)
+    assert plan_path.read_bytes() == edited_bytes

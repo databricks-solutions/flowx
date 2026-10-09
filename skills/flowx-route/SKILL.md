@@ -136,6 +136,11 @@ suggestions change. Each lists its `components`, `members` and `basis`
 can be accepted; to group other components, record an inferred relationship through enrich and route
 again.
 
+When enrich changes an accepted grouping's own members, route no longer suggests it. Route then lists
+it under `dropped_groupings` in its result (its `components`, `members`, and `replaced_by`, the
+current suggestions that share its components), says so in its message and on the review page, and
+sets its components back to pending, so nothing is applied until you decide them again.
+
 ## Step 2 — Decide, then route again to apply
 
 Edit only these fields in `metadata/conversion_plan.json` (everything else is library-owned and
@@ -146,11 +151,13 @@ recomputed on every route, so edits to it are ignored; an unknown key is refused
 - to accept a grouping, its `accepted: true`, and decide each of its components `"agentic"`;
 - `conversation`.
 
-Then run `route` again (no plan). Once **no decision is pending** it validates the plan, records it,
-and applies it. You can also pass a plan — `--plan-path <file>`, or MCP `plan` inline / `plan_path`:
-the decisions alone (`{"components": [{component_id, members, decision}], "suggested_groupings":
-[{grouping_id, accepted}], "conversation": [...]}`), or an edited copy of the recorded plan. This is
-the hosted path: edit the plan route returned and send it back as `plan`.
+Then run `route` again (no plan). It checks the edited file with the same rules as a passed plan, so a
+misspelt key or a value such as `accepted: "true"` is refused and the file is left as you wrote it.
+Once **no decision is pending** it validates the plan, records it, and applies it. You can also pass a
+plan — `--plan-path <file>`, or MCP `plan` inline / `plan_path`: the decisions alone
+(`{"components": [{component_id, members, decision}], "suggested_groupings": [{grouping_id,
+accepted}], "conversation": [...]}`), or an edited copy of the recorded plan. This is the hosted path:
+edit the plan route returned and send it back as `plan`.
 
 Rules the validator enforces (all violations returned at once; nothing written on failure):
 

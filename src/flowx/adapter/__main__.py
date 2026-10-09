@@ -173,7 +173,9 @@ def _run_route(args: argparse.Namespace) -> int:
     Groups pipelines by connected component and computes the per-component recommendation and the
     suggested groupings (reusing :mod:`flowx.routing`). The decisions come from ``--plan-path FILE``
     when given; otherwise from the recorded ``metadata/conversion_plan.json`` as the agent edited it,
-    with every component it does not decide left pending. Route validates and records the plan
+    with every component it does not decide left pending. An accepted grouping that enrich has since
+    changed is no longer suggested: its components go back to pending and it is reported under
+    ``dropped_groupings``, in the message and on the review page. Route validates and records the plan
     (library fields recomputed) and writes ``metadata/routing_review.html``. While any decision is
     pending it stops there and leaves the report alone. Once every component is decided it rebuilds
     ``.work/translation_report.json`` + ``gaps.json`` from the deterministic baseline: routed-agentic
@@ -204,12 +206,13 @@ def _run_route(args: argparse.Namespace) -> int:
         return 1
 
     plan_path = args.output_dir / "metadata" / PLAN_FILENAME
+    dropped: list[dict[str, Any]] = []
     try:
         if args.plan_path is not None:
             plan = json.loads(args.plan_path.read_text(encoding="utf-8"))
         else:
             previous = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else None
-            plan = routing.carried_forward_plan(previous, inventory)
+            plan, dropped = routing.carried_forward_plan(previous, inventory)
     except (OSError, json.JSONDecodeError) as error:
         print(f"Failed to read the conversion plan: {error}", file=sys.stderr)
         return 1
@@ -226,13 +229,26 @@ def _run_route(args: argparse.Namespace) -> int:
     if not result.get("ok"):
         _emit_json(result, args.out)
         return 1
-    locations = {"plan_path": str(plan_path), "review_path": str(write_routing_review(args.output_dir))}
+    review_path = write_routing_review(args.output_dir, dropped_groupings=dropped)
+    locations = {"plan_path": str(plan_path), "review_path": str(review_path)}
     if result["pending"]:
-        message = (
-            f"decide {result['pending']} in {plan_path} (or pass a plan), then run route again to apply it; "
-            f"the review page is {locations['review_path']}"
+        dropped_notes = [
+            f"accepted grouping {grouping['grouping_id']} ({', '.join(grouping['components'])}) is no longer "
+            "suggested"
+            + (f" and is replaced by {', '.join(grouping['replaced_by'])}" if grouping["replaced_by"] else "")
+            + ", so its components are pending again"
+            for grouping in dropped
+        ]
+        message = "; ".join(
+            [
+                *dropped_notes,
+                f"decide {result['pending']} in {plan_path} (or pass a plan), then run route again to apply it; "
+                f"the review page is {locations['review_path']}",
+            ]
         )
-        _emit_json({**result, **locations, "applied": False, "message": message}, args.out)
+        _emit_json(
+            {**result, **locations, "dropped_groupings": dropped, "applied": False, "message": message}, args.out
+        )
         return 0
 
     report_path = args.output_dir / WORK_DIRNAME / REPORT_FILENAME
@@ -247,8 +263,8 @@ def _run_route(args: argparse.Namespace) -> int:
     except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
         print(f"Failed to edit translation report: {error}", file=sys.stderr)
         return 1
-    write_routing_review(args.output_dir)
-    _emit_json({**result, **locations, "applied": True, "edit": edit}, args.out)
+    write_routing_review(args.output_dir, dropped_groupings=dropped)
+    _emit_json({**result, **locations, "dropped_groupings": dropped, "applied": True, "edit": edit}, args.out)
     return 0
 
 

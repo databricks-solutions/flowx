@@ -1128,6 +1128,8 @@ def test_merge_agentic_refuses_routed_agentic_pipeline(tmp_path: Path) -> None:
     with pytest.raises(ValueError) as exc:
         merge_agentic_results(report_path, results_dir)
     assert "routed agentic" in str(exc.value)
+    assert "fill-agentic" in str(exc.value)
+    assert "re-run convert" not in str(exc.value) and "combine" not in str(exc.value)
 
 
 # --------------------------------------------------------------------------- #
@@ -1223,11 +1225,6 @@ def test_fill_refuses_an_authored_pipeline_that_still_holds_a_placeholder(tmp_pa
     assert result["violations"] == [
         "parent_lfc: still has placeholder tasks ['Todo']; convert every task before filling the unit"
     ]
-
-
-def test_the_merge_refusal_points_at_fill_agentic_not_a_re_convert() -> None:
-    assert "fill-agentic" in ROUTED_AGENTIC_MERGE_REFUSED
-    assert "re-run convert" not in ROUTED_AGENTIC_MERGE_REFUSED and "combine" not in ROUTED_AGENTIC_MERGE_REFUSED
 
 
 def test_route_refuses_a_report_converted_from_a_different_discover(tmp_path: Path) -> None:

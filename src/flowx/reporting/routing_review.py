@@ -1,7 +1,8 @@
 """The routing review page: one standard HTML view of how a factory will be converted.
 
 Route writes ``metadata/routing_review.html`` from the recorded ``conversion_plan.json``, the
-inventory's insights and the report's routing record, so every run presents the same eight sections in
+inventory's insights, the report's routing record and any accepted grouping route dropped on this run
+because it is no longer suggested, so every run presents the same eight sections in
 the same order: a summary, what the source does, the components, the suggested groupings, how each
 unit will be converted, the routing conversation, the findings, and how to steer. The page is filled
 from :data:`routing_review_template.html <_TEMPLATE_PATH>` with the standard library only (no script
@@ -28,7 +29,13 @@ _TEMPLATE_PATH = Path(__file__).with_name("routing_review_template.html")
 REVIEW_FILENAME = "routing_review.html"
 
 
-def render_routing_review(plan: ConversionPlan, inventory: dict[str, Any] | None, record: dict[str, Any] | None) -> str:
+def render_routing_review(
+    plan: ConversionPlan,
+    inventory: dict[str, Any] | None,
+    record: dict[str, Any] | None,
+    *,
+    dropped_groupings: list[dict[str, Any]] | None = None,
+) -> str:
     """Render the routing review page for a recorded plan.
 
     Args:
@@ -37,6 +44,8 @@ def render_routing_review(plan: ConversionPlan, inventory: dict[str, Any] | None
             ``None`` when it cannot be read.
         record: The live report's routing record (each unit's outcome), or ``None`` before route has
             applied anything.
+        dropped_groupings: The accepted groupings route dropped on this run because they are no longer
+            suggested (see :func:`flowx.routing.carried_forward_plan`).
 
     Returns:
         The complete HTML document.
@@ -53,7 +62,7 @@ def render_routing_review(plan: ConversionPlan, inventory: dict[str, Any] | None
         summary=_summary(plan, inventory, units),
         source=_source(insights),
         components=_components(plan, insights),
-        groupings=_groupings(plan),
+        groupings=_groupings(plan, dropped_groupings or []),
         conversion=_conversion(units, outcomes),
         conversation=_conversation(plan),
         findings=_list(plan.findings, empty="No findings."),
@@ -61,11 +70,12 @@ def render_routing_review(plan: ConversionPlan, inventory: dict[str, Any] | None
     )
 
 
-def write_routing_review(output_dir: Path) -> Path | None:
+def write_routing_review(output_dir: Path, *, dropped_groupings: list[dict[str, Any]] | None = None) -> Path | None:
     """Write ``metadata/routing_review.html`` for the recorded plan; ``None`` when there is no plan.
 
     Reads the plan, the inventory and the live report's routing record from ``output_dir``. A report
     or inventory that cannot be read is shown as not yet routed or without insights.
+    ``dropped_groupings`` are the accepted groupings route dropped on this run.
     """
     from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, routing_record
 
@@ -76,7 +86,10 @@ def write_routing_review(output_dir: Path) -> Path | None:
     inventory = _read_json(metadata_dir / "inventory.json")
     record = routing_record(_read_json(Path(output_dir) / WORK_DIRNAME / REPORT_FILENAME))
     path = metadata_dir / REVIEW_FILENAME
-    path.write_text(render_routing_review(plan, inventory if isinstance(inventory, dict) else None, record), "utf-8")
+    page = render_routing_review(
+        plan, inventory if isinstance(inventory, dict) else None, record, dropped_groupings=dropped_groupings
+    )
+    path.write_text(page, "utf-8")
     return path
 
 
@@ -236,8 +249,8 @@ def _describe_basis(basis: dict[str, Any]) -> str:
     )
 
 
-def _groupings(plan: ConversionPlan) -> str:
-    """Section 4: every suggested grouping, its basis, and whether it is accepted."""
+def _groupings(plan: ConversionPlan, dropped_groupings: list[dict[str, Any]]) -> str:
+    """Section 4: every suggested grouping, its basis, and whether it is accepted; then any dropped one."""
     cards = []
     for grouping in plan.suggested_groupings:
         status = _tag("accepted", "agentic") if grouping.accepted else _tag("not accepted", "pending")
@@ -249,6 +262,22 @@ def _groupings(plan: ConversionPlan) -> str:
             ("Why it is suggested", basis),
         ]
         cards.append(f'<div class="card"><h3>{_text(grouping.grouping_id)}</h3>{_rows(rows)}</div>')
+    for dropped in dropped_groupings:
+        rows = [
+            ("Status", _tag("no longer suggested", "refused")),
+            ("Components", _text(", ".join(dropped["components"]))),
+            ("Members", _text(", ".join(dropped["members"]))),
+            ("Replaced by", _text(", ".join(dropped["replaced_by"]) or None)),
+            (
+                "What changed",
+                _text(
+                    "You accepted this grouping, but enrich has changed it since, so route no longer suggests it. "
+                    "Its components are pending again: decide them again, and accept a replacing suggestion to "
+                    "keep converting them together."
+                ),
+            ),
+        ]
+        cards.append(f'<div class="card"><h3>{_text(dropped["grouping_id"])}</h3>{_rows(rows)}</div>')
     return "".join(cards) or '<p class="muted">No groupings are suggested.</p>'
 
 
