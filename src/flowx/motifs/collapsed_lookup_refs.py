@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 # task values keep their own keys, so anchoring to ``result`` avoids rewriting those.
 _WHOLE_LOOKUP_RESULT_REF = re.compile(r"^\{\{tasks\.([^.]+)\.values\.result\}\}$")
 
+# The only ``databricks_replacement`` whose preparer emits ``<task_key>_control_lookup``
+# (see ``preparer/activity_preparers/motif.py``).
+_FOR_EACH_INGESTION = "for_each_ingestion"
+
 
 def repair_collapsed_lookup_references(pipeline: Pipeline) -> Pipeline:
     """Repoints references to a Lookup that a metadata-driven motif collapsed.
@@ -141,11 +145,14 @@ def _build_replacements(pipeline: Pipeline) -> dict[str, str]:
         if not lookup_key:
             continue
         if task.lookup_values:
-            # Static: motif becomes a pipeline_task; inline the rows as a literal array.
+            # Static: the rows are materialised, so inline them as a literal array regardless of how
+            # the motif itself is prepared -- the array is the data the Lookup would have returned.
             replacement_by_key[lookup_key] = json.dumps(task.lookup_values)
-        else:
-            # Dynamic: motif expands to a for_each fed by <task_key>_control_lookup,
-            # which republishes the rows as ``items`` -- point the iterator there.
+        elif task.databricks_replacement == _FOR_EACH_INGESTION:
+            # Dynamic: only the for_each_ingestion path emits <task_key>_control_lookup (publishing the
+            # rows as ``items``), so point the iterator there.  Other paths (e.g. a Lakeflow-Connect
+            # database motif that took the generic scaffold) emit no such task, so leave the reference
+            # untouched rather than point at a task that is never created.
             replacement_by_key[lookup_key] = f"{{{{tasks.{task.task_key}_control_lookup.values.items}}}}"
     return replacement_by_key
 

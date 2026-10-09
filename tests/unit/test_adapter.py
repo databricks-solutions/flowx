@@ -1387,6 +1387,7 @@ def _consolidated_bulk_copy_motif(
     lookup_values: list[dict[str, Any]] | None = None,
     lookup_scope: str = "LKP_GetActiveTables",
     consolidate: bool = True,
+    databricks_replacement: str = "for_each_ingestion",
 ) -> MotifActivity:
     """A metadata-driven bulk-copy motif that swallowed a Lookup.
 
@@ -1394,14 +1395,15 @@ def _consolidated_bulk_copy_motif(
     detector records them), while ``motif_config["lookup_scope"]`` is the task key
     of the one Lookup the motif reproduces -- the one a dangling downstream
     reference embeds.  ``consolidate`` toggles the Lakeflow-Connect consolidation;
-    the non-consolidated path still collapses the Lookup and builds
-    ``<key>_control_lookup``.
+    the non-consolidated ``for_each_ingestion`` path collapses the Lookup and builds
+    ``<key>_control_lookup``, whereas other ``databricks_replacement`` values take the
+    generic scaffold path and emit no such task.
     """
     return MotifActivity(
         **_make_base(task_key, task_key),
         motif_id="metadata_driven_bulk_copy",
         display_name="Metadata-Driven Bulk Copy",
-        databricks_replacement="for_each_ingestion",
+        databricks_replacement=databricks_replacement,
         matched_activity_names=matched or ["LKP_GetActiveTables", "FE_CopyEachTable"],
         source_type_hint="database",
         consolidate_metadata_driven=consolidate,
@@ -1451,6 +1453,20 @@ class TestInlineCollapsedLookupReferences:
         result = repair_collapsed_lookup_references(pipeline)
 
         assert result.tasks[1].items_expression == "{{tasks.motif_mdbc_control_lookup.values.items}}"
+
+    def test_dynamic_ref_not_emitted_when_control_lookup_absent(self):
+        # A Lakeflow-Connect database motif with no rows takes the generic scaffold path and emits no
+        # <task_key>_control_lookup, so the reference must be left untouched rather than pointed at a
+        # task that is never created.
+        motif = _consolidated_bulk_copy_motif(
+            task_key="motif_mdbc", lookup_values=[], databricks_replacement="lakeflow_connect_database"
+        )
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.LKP_GetActiveTables.values.result}}"
 
     def test_non_result_lookup_reference_is_untouched(self):
         # Only `.result` holds the iterable array; a firstRow column task value

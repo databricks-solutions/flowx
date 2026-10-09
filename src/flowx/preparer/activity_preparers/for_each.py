@@ -157,13 +157,16 @@ def prepare(
     concurrency = activity.concurrency if activity.concurrency is not None else 20
     inputs, inputs_bridge_task, inputs_bridge_notebooks = _resolve_for_each_inputs_with_bridge(activity)
     if inputs_bridge_task is not None:
-        existing_deps = list(task.get("depends_on") or [])
-        # The bridge computes the iterator input from the ForEach's upstream task values (e.g. a
-        # collapsed motif's control-lookup), so it must run after those producers -- give it the same
-        # upstream dependencies rather than letting it start unordered and race the producer.
-        if existing_deps:
-            inputs_bridge_task["depends_on"] = existing_deps
-        task["depends_on"] = [*existing_deps, {"task_key": inputs_bridge_task["task_key"]}]
+        # The bridge computes the iterator input from the ForEach's upstream task values, so it must
+        # run under the ForEach's original trigger.  Move the upstream deps and their ``run_if`` onto
+        # the bridge, then make the ForEach depend only on the bridge.  Leaving the deps/``run_if`` on
+        # the ForEach too would add a succeeding dependency (the bridge) that breaks non-success
+        # triggers like ALL_FAILED, and a bridge without ``run_if`` would not start for failed upstreams.
+        if "depends_on" in task:
+            inputs_bridge_task["depends_on"] = task["depends_on"]
+        if "run_if" in task:
+            inputs_bridge_task["run_if"] = task.pop("run_if")
+        task["depends_on"] = [{"task_key": inputs_bridge_task["task_key"]}]
 
     inner_activities = activity.inner_activities
     all_notebooks: list[DabNotebook] = list(inputs_bridge_notebooks)
