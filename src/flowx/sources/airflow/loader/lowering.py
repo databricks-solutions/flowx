@@ -387,11 +387,14 @@ def _load_airflow_module(
         unconsumed = ops.unconsumed_kwargs(operator, kwargs)
         if unconsumed:
             names = ", ".join(sorted(unconsumed))
-            activity = ops.build_placeholder_with_comment(
-                ctx,
+            note = (
                 f"Airflow {operator} argument(s) {names} are not represented by the Databricks task; "
-                "translate them explicitly.",
+                "translate them explicitly."
             )
+            if isinstance(activity, PlaceholderActivity):
+                activity.comment = f"{activity.comment} {note}"
+            else:
+                activity = ops.build_placeholder_with_comment(ctx, note)
             activity.depends_on = depends_on
             semantic_findings.append(
                 _semantic_finding(
