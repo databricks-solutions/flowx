@@ -1384,8 +1384,14 @@ def _consolidated_bulk_copy_motif(
     task_key: str = "motif_metadata_driven_bulk_copy",
     matched: list[str] | None = None,
     lookup_values: list[dict[str, Any]] | None = None,
+    lookup_scope: str = "LKP_GetActiveTables",
 ) -> MotifActivity:
-    """A consolidated metadata-driven bulk-copy motif that swallowed a Lookup."""
+    """A consolidated metadata-driven bulk-copy motif that swallowed a Lookup.
+
+    ``matched_activity_names`` carries both the Lookup and the ForEach (as the
+    detector records them), while ``motif_config["lookup_scope"]`` is the Lookup's
+    own task key -- the one a dangling downstream reference embeds.
+    """
     return MotifActivity(
         **_make_base(task_key, task_key),
         motif_id="metadata_driven_bulk_copy",
@@ -1395,6 +1401,7 @@ def _consolidated_bulk_copy_motif(
         source_type_hint="database",
         consolidate_metadata_driven=True,
         lookup_values=lookup_values or [],
+        motif_config={"lookup_scope": lookup_scope},
     )
 
 
@@ -1428,16 +1435,40 @@ class TestInlineCollapsedLookupReferences:
 
         assert result.tasks[1].items_expression == "{{tasks.SomeOtherTask.values.result}}"
 
-    def test_no_rewrite_when_motif_has_no_materialized_values(self):
-        # Not yet stamped: nothing to inline, so the (still-dangling) ref is left
-        # for the existing dangling-ref safety net rather than blanked here.
-        motif = _consolidated_bulk_copy_motif(lookup_values=[])
+    def test_dynamic_lookup_repoints_to_control_lookup_task(self):
+        # No materialised rows -> the motif expands to a for_each fed by a
+        # synthesised <task_key>_control_lookup task, so the downstream iterator
+        # is repointed at that runtime producer rather than left dangling.
+        motif = _consolidated_bulk_copy_motif(task_key="motif_mdbc", lookup_values=[])
         foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
         pipeline = Pipeline(name="p", tasks=[motif, foreach])
 
         result = _inline_collapsed_lookup_references(pipeline)
 
-        assert result.tasks[1].items_expression == "{{tasks.LKP_GetActiveTables.values.result}}"
+        assert result.tasks[1].items_expression == "{{tasks.motif_mdbc_control_lookup.values.items}}"
+
+    def test_non_result_lookup_reference_is_untouched(self):
+        # Only `.result` holds the iterable array; a firstRow column task value
+        # (e.g. `.tables`) must not be rewritten to the whole row array.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.tables}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = _inline_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.LKP_GetActiveTables.values.tables}}"
+
+    def test_reference_to_collapsed_foreach_member_is_untouched(self):
+        # matched_activity_names also carries the collapsed ForEach, but only the
+        # Lookup (lookup_scope) produces the control rows, so a reference to the
+        # ForEach member is not rewritten with lookup rows.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        foreach = self._downstream_foreach("{{tasks.FE_CopyEachTable.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = _inline_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.FE_CopyEachTable.values.result}}"
 
     def test_stamp_then_inline_end_to_end(self):
         # Mirrors the modify flow: stamp materialised rows onto the motif, then

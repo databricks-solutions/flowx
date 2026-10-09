@@ -904,26 +904,40 @@ def _stamp_lookup_values_into_metadata_driven_motifs(pipeline, lookup_values: li
     return _dataclasses.replace(pipeline, tasks=stamped_tasks)
 
 
-# Matches a task value reference that is the whole string, e.g. "{{tasks.LKP.values.result}}".
-_WHOLE_TASK_VALUE_REF = re.compile(r"^\{\{tasks\.([^.]+)\.values\.[^}]+\}\}$")
+# Matches a whole-string reference to a collapsed Lookup's row array, e.g.
+# "{{tasks.LKP.values.result}}".  Only ``result`` holds the array a ForEach
+# iterates; a Lookup's per-column firstRow task values are scalars, so the
+# pattern is anchored to ``result`` rather than any task value.
+_WHOLE_LOOKUP_RESULT_REF = re.compile(r"^\{\{tasks\.([^.]+)\.values\.result\}\}$")
 
 
 def _inline_collapsed_lookup_references(pipeline):
-    """Resolves references to a Lookup that a consolidated motif replaced.
+    """Repoints references to a Lookup that a consolidated motif replaced.
 
-    When the metadata-driven bulk-copy motif is consolidated it becomes a
-    single ``pipeline_task``, and the Lookup it collapsed no longer exists as a
-    task.  A downstream ForEach may still reference that Lookup's output
-    (``{{tasks.<lookup>.values.result}}``) for its iterator -- ``depends_on`` is
-    rewired to the motif by the collapser, but this value reference is not, and
-    a ``pipeline_task`` publishes no task values, so the reference dangles.  The
-    ForEach may sit at the top level or nested inside any If/Switch/ForEach, so
-    every container is searched.
+    The metadata-driven bulk-copy motif collapses a ``Lookup -> ForEach -> Copy``
+    chain.  The Lookup no longer exists as a task, yet a *separate* downstream
+    ForEach may still iterate its control rows via
+    ``{{tasks.<lookup>.values.result}}``.  The collapser rewires ``depends_on`` to
+    the motif but not this value reference, so it dangles -- and the package
+    phase's dangling-ref safety net does not inspect ``for_each_task.inputs``, so
+    nothing else repairs it.
 
-    Consolidation materialises the control rows onto the motif
-    (``lookup_values``), so the safe resolution is to inline those rows as the
-    downstream iterator input -- the same literal-array shape the
-    non-consolidated path emits for a static control table.
+    The repair mirrors how the motif is prepared (see
+    ``preparer/activity_preparers/motif.py``):
+
+    * **Static** -- control rows materialised onto ``lookup_values``: the motif
+      becomes a ``pipeline_task`` that publishes no task values, so the rows are
+      inlined as a literal JSON array (the same shape a static control table
+      emits).
+    * **Dynamic** -- no materialised rows: the motif expands to a ``for_each`` fed
+      by a synthesised ``<task_key>_control_lookup`` task that publishes the rows
+      as ``values.items`` at runtime, so the reference is repointed there.
+
+    The collapsed Lookup is identified by ``motif_config["lookup_scope"]`` -- the
+    Lookup's own task key, exactly what the dangling reference embeds (and only
+    the Lookup, never the collapsed ForEach that shares ``matched_activity_names``).
+    The downstream ForEach may sit at the top level or nested inside any
+    If/Switch/ForEach, so every container is searched.
 
     Args:
         pipeline: Configuration-stamped pipeline IR (after
@@ -931,8 +945,7 @@ def _inline_collapsed_lookup_references(pipeline):
 
     Returns:
         A new :class:`Pipeline` with dangling references to collapsed Lookups
-        replaced by the materialised rows.  Unchanged when no consolidated
-        motif carries lookup values.
+        repointed.  Unchanged when no consolidated motif resolves a lookup key.
     """
     import dataclasses as _dataclasses
 
@@ -941,18 +954,25 @@ def _inline_collapsed_lookup_references(pipeline):
     from flowx.models.ir import MotifActivity as _MotifActivity
     from flowx.models.ir import SwitchActivity as _SwitchActivity
 
-    # Build the same ref key the ADF translator uses so a raw matched-activity
-    # name matches the key found inside a ``{{tasks.<key>.values.Y}}`` ref.
-    from flowx.utils import to_case_preserving_key
-
-    # collapsed task_key -> inlined JSON array of the motif's materialised rows.
-    inlined_by_key: dict[str, str] = {}
+    # collapsed Lookup task key -> replacement iterator input.
+    replacement_by_key: dict[str, str] = {}
     for task in pipeline.tasks:
-        if isinstance(task, _MotifActivity) and task.consolidate_metadata_driven and task.lookup_values:
-            inlined = json.dumps(task.lookup_values)
-            for name in task.matched_activity_names:
-                inlined_by_key[to_case_preserving_key(name)] = inlined
-    if not inlined_by_key:
+        if not (isinstance(task, _MotifActivity) and task.consolidate_metadata_driven):
+            continue
+        # lookup_scope is the collapsed Lookup's own task key -- the key the
+        # dangling reference embeds.  Absent only for a motif we cannot resolve,
+        # in which case its references are left untouched.
+        lookup_key = task.motif_config.get("lookup_scope")
+        if not lookup_key:
+            continue
+        if task.lookup_values:
+            # Static: motif becomes a pipeline_task; inline the rows as a literal array.
+            replacement_by_key[lookup_key] = json.dumps(task.lookup_values)
+        else:
+            # Dynamic: motif expands to a for_each fed by <task_key>_control_lookup,
+            # which republishes the rows as ``items`` -- point the iterator there.
+            replacement_by_key[lookup_key] = f"{{{{tasks.{task.task_key}_control_lookup.values.items}}}}"
+    if not replacement_by_key:
         return pipeline
 
     def _rewrite_all(activities):
@@ -960,12 +980,12 @@ def _inline_collapsed_lookup_references(pipeline):
 
     def _rewrite(activity):
         # Descend through every container that can nest a ForEach (ForEach, If,
-        # Switch) so a collapsed-Lookup reference is resolved wherever it lives.
+        # Switch) so a collapsed-Lookup reference is repointed wherever it lives.
         if isinstance(activity, _ForEachActivity):
             new_items = activity.items_expression
-            match = _WHOLE_TASK_VALUE_REF.match(activity.items_expression or "")
-            if match and match.group(1) in inlined_by_key:
-                new_items = inlined_by_key[match.group(1)]
+            match = _WHOLE_LOOKUP_RESULT_REF.match(activity.items_expression or "")
+            if match and match.group(1) in replacement_by_key:
+                new_items = replacement_by_key[match.group(1)]
             return _dataclasses.replace(
                 activity, items_expression=new_items, inner_activities=_rewrite_all(activity.inner_activities)
             )
