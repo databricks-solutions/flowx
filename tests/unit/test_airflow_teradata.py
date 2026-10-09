@@ -211,3 +211,79 @@ def test_teradata_operator_inline_sql_is_attached(tmp_path: Path) -> None:
     pipeline = _load(tmp_path, "TeradataOperator(task_id='t', sql='SEL 1;', teradata_conn_id='td')")
 
     assert _teradata(pipeline)["inline_scripts"] == ["SEL 1;"]
+
+
+# --------------------------------------------------------------------------------------
+# Review regressions
+# --------------------------------------------------------------------------------------
+
+
+def test_relative_dag_path_still_attaches_the_sql_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "dags" / "sql").mkdir(parents=True)
+    (tmp_path / "dags" / "sql" / "load.sql").write_text("SEL 1;", encoding="utf-8")
+    (tmp_path / "dags" / "dag.py").write_text(
+        f"{_IMPORTS}with DAG(dag_id='d') as dag:\n    t = TeradataOperator(task_id='t', sql='sql/load.sql')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    pipeline = load_airflow_dag(Path("dags/dag.py"))
+
+    assert _teradata(pipeline)["scripts"][0]["content"] == "SEL 1;"
+
+
+def test_later_guards_keep_the_teradata_record(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='bteq < /opt/x.bteq', trigger_rule='one_done')")
+
+    task = _task(pipeline)
+    assert _teradata(pipeline)["utilities"] == ["bteq"]
+    assert "Databricks has no Teradata client" in task.comment
+    assert "trigger_rule" in task.comment
+
+
+def test_jinja_in_a_script_path_stays_one_word() -> None:
+    assert teradata.script_references("bteq < /opt/x_{{ prev_ds }}.bteq") == ["/opt/x_{{ prev_ds }}.bteq"]
+
+
+def test_unparseable_heredoc_keeps_other_script_references() -> None:
+    command = "bteq < /opt/a.bteq; bteq <<EOF\n-- don't\nSEL 1;\nEOF"
+
+    assert teradata.script_references(command) == ["/opt/a.bteq"]
+    assert teradata.heredoc_scripts(command) == ["-- don't\nSEL 1;"]
+
+
+def test_unparseable_command_falls_back_to_a_segment_search() -> None:
+    assert teradata.script_references("bteq < /opt/a.bteq; echo 'unterminated") == ["/opt/a.bteq"]
+
+
+def test_teradata_operator_hql_string_is_inline_sql(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "TeradataOperator(task_id='t', sql='load.hql')", files={"dags/load.hql": "SEL 1;"})
+
+    details = _teradata(pipeline)
+    assert (details["scripts"], details["inline_scripts"]) == ([], ["load.hql"])
+
+
+def test_teradata_operator_statement_list_is_attached(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "TeradataOperator(task_id='t', sql=['SEL 1;', 'SEL 2;'])")
+
+    assert _teradata(pipeline)["inline_scripts"] == ["SEL 1;", "SEL 2;"]
+
+
+def test_non_utf8_sql_file_keeps_its_digest(tmp_path: Path) -> None:
+    script = tmp_path / "dags" / "latin.sql"
+    script.parent.mkdir(parents=True)
+    script.write_bytes("SEL 'é';".encode("latin-1"))
+
+    pipeline = _load(tmp_path, "TeradataOperator(task_id='t', sql='latin.sql')")
+
+    [record] = _teradata(pipeline)["scripts"]
+    assert record["sha256"] == hashlib.sha256(script.read_bytes()).hexdigest()
+    assert "content_note" in record
+
+
+def test_bteq_operator_sql_naming_a_file_is_sent_as_written(tmp_path: Path) -> None:
+    # BteqOperator declares no template_ext, so Airflow passes the string to bteq unchanged.
+    pipeline = _load(tmp_path, "BteqOperator(task_id='t', sql='daily.sql')", files={"dags/daily.sql": "SEL 1;"})
+
+    details = _teradata(pipeline)
+    assert (details["scripts"], details["inline_scripts"]) == ([], ["daily.sql"])
