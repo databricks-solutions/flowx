@@ -33,7 +33,6 @@ from flowx.models.ir import (
 from flowx.sources.airflow import callable_notebook, dataproc, templating
 from flowx.utils import to_lowercase_key
 
-
 # --------------------------------------------------------------------------------------
 # Operator classification (handled specially by the loader, not via a task builder)
 # --------------------------------------------------------------------------------------
