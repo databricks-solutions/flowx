@@ -94,6 +94,8 @@ _PARAM_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 _JINJA = re.compile(r"\{\{\s*(.*?)\s*\}\}")
+# Jinja statements and comments; ``${#name}`` is bash's length expansion, not a Jinja comment.
+_JINJA_STATEMENT_OR_COMMENT = re.compile(r"\{%.*?%\}|(?<!\$)\{#.*?#\}", re.DOTALL)
 _PARAMETER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -389,7 +391,7 @@ def unresolved_jinja_expressions(value: Any) -> set[str]:
             expression
             for match in _JINJA.findall(value)
             if not (expression := match.strip()).startswith(("job.", "tasks.", "input."))
-        }
+        } | set(_JINJA_STATEMENT_OR_COMMENT.findall(value))
     if isinstance(value, list):
         return set().union(*(unresolved_jinja_expressions(item) for item in value)) if value else set()
     if isinstance(value, dict):

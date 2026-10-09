@@ -31,7 +31,11 @@ from flowx.sources.airflow.loader.graph import (
     _root_trigger_sensor,
     _trigger_from_sensor,
 )
-from flowx.sources.airflow.loader.policy import _job_email_notifications, _job_timeout_seconds, template_searchpath
+from flowx.sources.airflow.loader.policy import (
+    _job_email_notifications,
+    _job_timeout_seconds,
+    template_search_directories,
+)
 from flowx.sources.airflow.loader.reconcile import _iter_placeholders, _semantic_finding
 from flowx.sources.airflow.loader.schedule import (
     _asset_schedule_from_node,
@@ -163,7 +167,7 @@ def _load_airflow_module(
                     "task_key": var_to_task_key[trigger_var],
                     "covered_capture_ids": sorted(covered_tasks),
                 }
-    template_search_paths = (dag_path.parent, *(Path(entry) for entry in template_searchpath(visitor) or ()))
+    template_search_paths = (dag_path.resolve().parent, *template_search_directories(visitor))
     dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions, visitor.default_args)
     dropped |= dataproc_plan.dropped
     upstreams = _rewire_dropped(upstreams, dropped)

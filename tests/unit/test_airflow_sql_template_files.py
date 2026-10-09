@@ -22,6 +22,7 @@ def _load(tmp_path: Path, task: str, *, dag_arguments: str = "", files: dict[str
         "from airflow.providers.databricks.operators.databricks_sql import DatabricksSqlOperator\n"
         "from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator\n"
         "from airflow.providers.apache.hive.operators.hive import HiveOperator\n"
+        "from airflow.operators.bash import BashOperator\n"
         f"with DAG(dag_id='d'{dag_arguments}) as dag:\n"
         f"    t = {task}\n",
         encoding="utf-8",
@@ -136,3 +137,76 @@ def test_dynamic_template_searchpath_is_a_dag_gap(tmp_path: Path) -> None:
 
     codes = {finding["code"] for finding in pipeline.not_translatable}
     assert "unsupported_dag_setting" in codes
+
+
+def test_trailing_newline_is_dropped_like_airflow_jinja(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path, "DatabricksSqlOperator(task_id='t', sql='load.sql')", files={"dags/load.sql": "SELECT 1\n"}
+    )
+
+    assert _task(pipeline).sql == "SELECT 1"
+
+
+def test_gap_from_a_loaded_file_carries_its_sql(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        "DatabricksSqlOperator(task_id='t', sql='load.sql')",
+        files={"dags/load.sql": "{% if params.full %}TRUNCATE t{% endif %}"},
+    )
+
+    template_file = _task(pipeline).raw_definition["template_file"]
+    assert template_file["path"] == "load.sql"
+    assert template_file["resolved_path"] == str(tmp_path / "dags" / "load.sql")
+    assert template_file["content"] == "{% if params.full %}TRUNCATE t{% endif %}"
+
+
+def test_relative_template_searchpath_is_not_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "include" / "sql").mkdir(parents=True)
+    (tmp_path / "include" / "sql" / "load.sql").write_text("SELECT 1", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    pipeline = _load(
+        tmp_path,
+        "DatabricksSqlOperator(task_id='t', sql='load.sql')",
+        dag_arguments=", template_searchpath='include/sql'",
+    )
+
+    assert isinstance(_task(pipeline), PlaceholderActivity)
+    disposition = next(
+        item for item in pipeline.audit["transformations"] if item.get("setting") == "template_searchpath"
+    )
+    assert "include/sql (relative" in disposition["unavailable_entries"]
+
+
+def test_absent_template_searchpath_directory_is_reported(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        "DatabricksSqlOperator(task_id='t', sql='SELECT 1')",
+        dag_arguments=", template_searchpath='/opt/airflow/include/sql'",
+    )
+
+    disposition = next(
+        item for item in pipeline.audit["transformations"] if item.get("setting") == "template_searchpath"
+    )
+    assert disposition["unavailable_entries"] == "/opt/airflow/include/sql (not found where discover runs)"
+    assert pipeline.reconciliation_status == "verified"
+
+
+def test_template_searchpath_none_is_unset(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path, "DatabricksSqlOperator(task_id='t', sql='SELECT 1')", dag_arguments=", template_searchpath=None"
+    )
+
+    assert pipeline.reconciliation_status == "verified"
+
+
+def test_jinja_statement_in_a_shell_command_fails_closed(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='{% if params.full %}rm -rf /tmp/x{% endif %}')")
+
+    assert isinstance(_task(pipeline), PlaceholderActivity)
+
+
+def test_bash_length_expansion_is_not_a_jinja_comment(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='echo ${#ROWS[@]} # done')")
+
+    assert not isinstance(_task(pipeline), PlaceholderActivity)

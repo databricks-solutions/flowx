@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from pathlib import Path
 
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow import templating
@@ -43,13 +44,39 @@ _NON_EXECUTION_DAG_SETTINGS = frozenset({"tags", "description", "doc_md", "dag_d
 
 
 def template_searchpath(visitor: _DagVisitor) -> list[str] | None:
-    """Returns the DAG's ``template_searchpath`` directories, or None when it is unset or not static."""
-    value = ops.literal_value(visitor.dag_kwargs.get("template_searchpath"))
+    """Returns the DAG's ``template_searchpath`` entries, ``[]`` when it is unset, or None when it is not static."""
+    node = visitor.dag_kwargs.get("template_searchpath")
+    if node is None or (isinstance(node, ast.Constant) and node.value is None):
+        return []
+    value = ops.literal_value(node)
     if isinstance(value, str):
         return [value]
     if isinstance(value, list | tuple) and all(isinstance(entry, str) for entry in value):
         return list(value)
     return None
+
+
+def template_search_directories(visitor: _DagVisitor) -> list[Path]:
+    """Returns the ``template_searchpath`` directories flowx can search: absolute ones present at discovery.
+
+    Airflow documents these folders as absolute; a relative entry resolves against the worker's working
+    directory, which DAG source does not show.
+    """
+    return [
+        Path(entry)
+        for entry in template_searchpath(visitor) or []
+        if Path(entry).is_absolute() and Path(entry).is_dir()
+    ]
+
+
+def _unavailable_search_entries(entries: list[str]) -> list[str]:
+    unavailable = []
+    for entry in entries:
+        if not Path(entry).is_absolute():
+            unavailable.append(f"{entry} (relative, so it depends on the Airflow worker's working directory)")
+        elif not Path(entry).is_dir():
+            unavailable.append(f"{entry} (not found where discover runs)")
+    return unavailable
 
 
 def _job_timeout_seconds(visitor: _DagVisitor) -> int | None:
@@ -90,12 +117,19 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
             "rationale": "no_deterministic_databricks_jobs_mapping",
         }
     if name == "template_searchpath":
-        if template_searchpath(visitor) is not None:
-            return {
+        entries = template_searchpath(visitor)
+        if entries == []:
+            return {"status": "ignored", "rationale": "template_searchpath_unset"}
+        if entries is not None:
+            disposition = {
                 "status": "mapped",
-                "target": "sql_template_file_resolution",
-                "rationale": "sql_template_files_read_at_discovery",
+                "target": "template_file_resolution",
+                "rationale": "template_files_read_at_discovery",
             }
+            unavailable = _unavailable_search_entries(entries)
+            if unavailable:
+                disposition["unavailable_entries"] = "; ".join(unavailable)
+            return disposition
         return {
             "status": "gap",
             "message": "Airflow template_searchpath must be a static string or list of strings to locate SQL files.",
