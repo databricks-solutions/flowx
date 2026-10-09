@@ -39,14 +39,16 @@ class TestDownloadNotebook:
 
 
 class TestDownloadDbfsFile:
-    def test_returns_none_when_sdk_not_available(self):
+    def test_returns_none_when_sdk_not_available(self, monkeypatch):
         """download_dbfs_file returns None when databricks-sdk is not installed."""
+        monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
         with patch.dict("sys.modules", {"databricks": None, "databricks.sdk": None}):
             result = download_dbfs_file("dbfs:/scripts/etl.py")
             assert result is None
 
-    def test_returns_none_on_import_error(self):
+    def test_returns_none_on_import_error(self, monkeypatch):
         """download_dbfs_file returns None when the SDK import raises ImportError."""
+        monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
 
         original = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
 
@@ -58,6 +60,60 @@ class TestDownloadDbfsFile:
         with patch("builtins.__import__", side_effect=mock_import):
             result = download_dbfs_file("dbfs:/scripts/etl.py")
             assert result is None
+
+
+class TestDbfsDownloadGating:
+    """No network call is attempted unless downloads are enabled and the path is a DBFS path."""
+
+    def _forbid_workspace_client(self, monkeypatch):
+        def fail():
+            raise AssertionError("download attempted a workspace call")
+
+        monkeypatch.setattr(workspace_downloader, "_get_workspace_client", fail)
+
+    def test_disabled_downloads_make_no_call(self, monkeypatch):
+        self._forbid_workspace_client(monkeypatch)
+        monkeypatch.setattr(workspace_downloader, "_downloads_enabled", False)
+        assert download_dbfs_file("dbfs:/scripts/etl.py") is None
+
+    def test_cloud_uris_make_no_call_even_when_enabled(self, monkeypatch):
+        self._forbid_workspace_client(monkeypatch)
+        monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
+        for uri in (
+            "gs://bucket/jobs/etl.py",
+            "s3://bucket/jobs/etl.py",
+            "s3a://bucket/jobs/etl.py",
+            "abfss://container@account.dfs.core.windows.net/jobs/etl.py",
+            "wasbs://container@account.blob.core.windows.net/jobs/etl.py",
+            "https://example.com/etl.py",
+        ):
+            assert download_dbfs_file(uri) is None
+
+    def test_enabled_dbfs_path_is_fetched(self, monkeypatch):
+        calls = []
+
+        class _Handle:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"print('hi')"
+
+        class _Dbfs:
+            def open(self, path, read):
+                calls.append(path)
+                return _Handle()
+
+        class _Client:
+            dbfs = _Dbfs()
+
+        monkeypatch.setattr(workspace_downloader, "_get_workspace_client", lambda: _Client())
+        monkeypatch.setattr(workspace_downloader, "_downloads_enabled", True)
+        assert download_dbfs_file("dbfs:/scripts/etl.py") == b"print('hi')"
+        assert calls == ["/scripts/etl.py"]
 
 
 class TestDownloadsToggle:

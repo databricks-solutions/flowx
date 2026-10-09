@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow.loader.ast_utils import _construct_name
@@ -90,7 +93,7 @@ def _cron_to_quartz(cron: str) -> str | None:
 
 
 def _extract_timezone(node: ast.expr | None) -> str | None:
-    """Extracts an IANA timezone from a ``pendulum.timezone("…")`` call or a tz string kwarg.
+    """Extracts an IANA timezone from a ``pendulum.timezone("…")`` / ``Timezone("…")`` call or a tz string kwarg.
 
     Handles ``start_date=datetime(..., tzinfo=pendulum.timezone("Europe/Madrid"))``,
     ``timezone="Europe/Madrid"``, and ``pendulum.timezone("…")`` directly. Returns None
@@ -103,7 +106,7 @@ def _extract_timezone(node: ast.expr | None) -> str | None:
     if isinstance(node, ast.Call):
         func = node.func
         name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
-        if name in ("timezone", "timezone_") and node.args:
+        if name in ("timezone", "timezone_", "Timezone") and node.args:
             return ops.literal_str(node.args[0])
         # datetime(..., tzinfo=pendulum.timezone("…")) / tz=...
         for kw in node.keywords:
@@ -144,16 +147,108 @@ def _timedelta_seconds(node: ast.expr | None) -> int:
     return total
 
 
+_DATETIME_FIELDS = ("year", "month", "day", "hour", "minute", "second")
+
+
+def static_start_date(node: ast.expr | None, timezone: str | None) -> datetime | None:
+    """Returns a literal ``start_date`` as a UTC instant, or None when it is not statically known.
+
+    Accepts ``datetime(...)`` and ``pendulum.datetime(...)`` with literal fields; the instant is placed
+    in *timezone* (the DAG timezone already extracted from the same call), defaulting to UTC.
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
+    if name != "datetime":
+        return None
+    fields = {field: 0 for field in _DATETIME_FIELDS[3:]}
+    for field, argument in zip(_DATETIME_FIELDS, node.args, strict=False):
+        if not isinstance(argument, ast.Constant) or not isinstance(argument.value, int):
+            return None
+        fields[field] = argument.value
+    for keyword in node.keywords:
+        if keyword.arg in _DATETIME_FIELDS:
+            if not isinstance(keyword.value, ast.Constant) or not isinstance(keyword.value.value, int):
+                return None
+            fields[keyword.arg] = keyword.value.value
+    if not {"year", "month", "day"} <= fields.keys():
+        return None
+    try:
+        zone = ZoneInfo(timezone or "UTC")
+        return datetime(**fields, tzinfo=zone).astimezone(dt_timezone.utc)
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+
+
+_STABILITY_SPAN_DAYS = 366 * 10
+
+
+def _local_time_is_stable(start_wall_clock: datetime, zone: ZoneInfo) -> bool:
+    """Returns True when the start's local time of day exists exactly once on every following day.
+
+    Airflow adds each day to the previous interval's end on the local clock, so a time skipped by a
+    daylight-saving jump moves the schedule forward permanently; a repeated time is ambiguous. Either
+    way the fire time would stop matching a fixed local-time cron.
+    """
+    for day in range(_STABILITY_SPAN_DAYS):
+        wall_clock = start_wall_clock + timedelta(days=day)
+        first = wall_clock.replace(tzinfo=zone, fold=0)
+        second = wall_clock.replace(tzinfo=zone, fold=1)
+        if first.utcoffset() != second.utcoffset():
+            return False
+    return True
+
+
+def _anchored_delta_schedule(
+    total_seconds: int, start_date: datetime, timezone: str | None
+) -> dict[str, object] | None:
+    """Lowers a timedelta schedule to a Quartz cron whose fire times are Airflow's interval boundaries.
+
+    Airflow repeats a timedelta schedule from ``start_date``. A one-day interval keeps the local time of
+    day across daylight-saving changes, so it fires at ``start_date``'s local time in the DAG timezone;
+    an interval that evenly divides a day or an hour advances by elapsed time, so it is anchored to
+    ``start_date`` in UTC. Any other length has no Quartz form and returns None.
+    """
+    if total_seconds == 86400:
+        zone = ZoneInfo(timezone or "UTC")
+        local = start_date.astimezone(zone)
+        if not _local_time_is_stable(local.replace(tzinfo=None), zone):
+            return None
+        expression = f"{local.second} {local.minute} {local.hour} * * ?"
+        zone_id = timezone or "UTC"
+    elif total_seconds % 3600 == 0 and 86400 % total_seconds == 0:
+        hours = total_seconds // 3600
+        hour_field = "*" if hours == 1 else f"{start_date.hour % hours}/{hours}"
+        expression = f"{start_date.second} {start_date.minute} {hour_field} * * ?"
+        zone_id = "UTC"
+    elif total_seconds % 60 == 0 and 3600 % total_seconds == 0:
+        minutes = total_seconds // 60
+        expression = f"{start_date.second} {start_date.minute % minutes}/{minutes} * * * ?"
+        zone_id = "UTC"
+    else:
+        return None
+    return {
+        "kind": "schedule",
+        "quartz_cron_expression": expression,
+        "timezone_id": zone_id,
+        "pause_status": "UNPAUSED",
+    }
+
+
 def _schedule_from_interval(
     interval: str | None,
     *,
     node: ast.expr | None = None,
     timezone: str | None = None,
+    start_date: datetime | None = None,
 ) -> dict[str, object] | None:
     """Builds a Pipeline.schedule spec from an Airflow schedule.
 
-    A string cron / preset -> ``kind: schedule`` (Quartz) with the DAG timezone;
-    a ``timedelta(...)`` -> ``kind: periodic``. Returns None when neither applies.
+    A string cron / preset -> ``kind: schedule`` (Quartz) with the DAG timezone. A ``timedelta(...)``
+    whose length divides a day or an hour, with a literal *start_date*, -> a Quartz cron anchored to
+    that start so runs fire on Airflow's interval boundaries; other timedeltas -> ``kind: periodic``,
+    whose phase follows deployment time. Returns None when nothing applies.
     """
     if interval:
         if interval == "@continuous":
@@ -166,6 +261,10 @@ def _schedule_from_interval(
                 "timezone_id": timezone or "UTC",
                 "pause_status": "UNPAUSED",
             }
+    if start_date is not None:
+        anchored = _anchored_delta_schedule(_timedelta_seconds(node), start_date, timezone)
+        if anchored is not None:
+            return anchored
     periodic = _timedelta_to_periodic(node)
     if periodic is not None:
         return periodic

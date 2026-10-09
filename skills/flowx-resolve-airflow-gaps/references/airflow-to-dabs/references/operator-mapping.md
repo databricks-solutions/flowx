@@ -327,7 +327,7 @@ spark_etl = SparkSubmitOperator(
 ```yaml
 - task_key: spark_etl
   new_cluster:
-    spark_version: "15.4.x-scala2.12"
+    spark_version: ${var.spark_version}
     node_type_id: ${var.node_type_id}
     num_workers: 2
     spark_conf:
@@ -812,15 +812,24 @@ dbt_run = DbtRunOperator(
 
 ```yaml
 - task_key: dbt_transform
+  environment_key: dbt_env
   dbt_task:
     commands:
       - "dbt deps"
       - "dbt run --select tag:daily"
     project_directory: ../dbt/my_project
     warehouse_id: ${var.warehouse_id}
-  libraries:
-    - pypi:
-        package: "dbt-databricks>=1.0.0,<2.0.0"
+```
+
+Job level:
+
+```yaml
+environments:
+  - environment_key: dbt_env
+    spec:
+      environment_version: "5"
+      dependencies:
+        - "dbt-databricks>=1.0.0,<2.0.0"
 ```
 
 Also treat `BashOperator`/`SSHOperator` commands matching `dbt (deps|seed|snapshot|run|test|build)` as dbt workloads subject to this decision point.
@@ -1047,11 +1056,21 @@ If the function has custom dependencies, package it as a Python wheel with an `e
 
 ```yaml
 - task_key: custom_transform
+  environment_key: custom_transform_env
   python_wheel_task:
     entry_point: run
     package_name: custom_transform
-  libraries:
-    - whl: ../dist/custom_transform-*.whl
+```
+
+Job level:
+
+```yaml
+environments:
+  - environment_key: custom_transform_env
+    spec:
+      environment_version: "5"
+      dependencies:
+        - ../dist/custom_transform-*.whl
 ```
 
 **DABs YAML (notebook approach):**
@@ -1535,7 +1554,7 @@ run_etl = KubernetesPodOperator(
 job_clusters:
   - job_cluster_key: etl_container
     new_cluster:
-      spark_version: "15.4.x-scala2.12"
+      spark_version: ${var.spark_version}
       node_type_id: ${var.node_type_id}
       data_security_mode: SINGLE_USER
       num_workers: 0
@@ -1580,7 +1599,7 @@ run_go_binary = KubernetesPodOperator(
 job_clusters:
   - job_cluster_key: go_processor_container
     new_cluster:
-      spark_version: "15.4.x-scala2.12"
+      spark_version: ${var.spark_version}
       node_type_id: ${var.node_type_id}
       data_security_mode: SINGLE_USER
       num_workers: 0
@@ -1630,6 +1649,34 @@ if result.returncode != 0:
 
 ---
 
+### Dataproc / Managed Spark operators (Google provider)
+
+**DABs equivalent:** payload-directed native Lakeflow task(s), not one task type for the operator family
+
+Recognize the `Dataproc*Operator` classes in `airflow.providers.google.cloud.operators.dataproc` and the rebranding `ManagedSpark*Operator` aliases in `airflow.providers.google.cloud.operators.managed_spark`; neither naming surface is treated as deprecated. `DataprocSubmitJobOperator` and `DataprocCreateBatchOperator` are polymorphic wrappers: inspect the nested one-of payload before routing. Never infer the task type from the operator name alone.
+
+| Dataproc payload | DABs target | Automatic only when |
+|---|---|---|
+| `pyspark_job` / `pyspark_batch` | `spark_python_task` | Main Python file is resolved and auxiliary artifacts/dependencies are representable |
+| `pyspark_notebook_batch` | `notebook_task` | Notebook source is resolved and positional arguments can be translated to verified named widgets/base parameters |
+| `spark_job` / `spark_batch` | `spark_jar_task` | Main class and JAR are resolved |
+| `spark_sql_job` / `spark_sql_batch` | `sql_task` or `notebook_task` | SQL is available; choose `sql_task` only when SQL Warehouse semantics are compatible |
+| `spark_r_job` / `spark_r_batch` | R `notebook_task` on classic compute | R source is available and its packages/runtime requirements are resolved |
+| `hive_job` | `sql_task` or `notebook_task` | HiveQL and metastore references can be translated to Spark SQL and Unity Catalog |
+| `hadoop_job`, `pig_job`, `flink_job`, `presto_job`, `trino_job` | manual rewrite or explicit retained-external notebook | No direct Lakeflow task; never relabel these as Spark |
+
+Do not emit `spark_submit_task`; Databricks deprecates it and disallows it for new use cases. Use `spark_python_task`, `spark_jar_task`, `sql_task`, or an R notebook.
+
+Collapse `DataprocCreateClusterOperator` / start / stop / update / delete tasks into serverless or Jobs compute only when their cluster ID, status, diagnostics, and XCom outputs are not consumed outside the migrated workload. Rewire the full predecessor/successor graph across every removed lifecycle task. A static Dataproc worker count may inform `num_workers`, but Dataproc machine types, image versions, autoscaling policies, secondary/preemptible worker topology, GKE virtual clusters, init actions, and service-account settings do not have safe literal mappings; use explicit user mappings or required bundle variables and record the gap.
+
+Flatten inline and resolvable Dataproc workflow templates into the Lakeflow task graph, preserving step dependencies and parameters. An unresolved stored template ID, a template mutated by another task, or a template output consumed as a control-plane object is not executable evidence; require the template body or retain Dataproc explicitly.
+
+An asynchronous job submission followed by `DataprocJobSensor` collapses only when the sensor's `dataproc_job_id` resolves to that submission. `DataprocCreateBatchOperator` returns a batch dictionary, not a raw ID; pair `DataprocBatchSensor` by matching its `batch_id` to the create operator's `batch_id` argument or to a verified ID extracted from that dictionary. Collapse to one native synchronous Lakeflow task only when no other consumer needs the ID or batch object. `deferrable=True` changes only Airflow scheduler resource use. If Dataproc remains external, preserve idempotent submission, job/batch identity transport, polling interval, terminal-state handling, cancellation, and reattachment in a Google Cloud SDK notebook; do not resubmit the external job on a Lakeflow retry.
+
+Read `dataproc-migration.md` for the complete inventory, field mapping, artifact/auth rules, examples, fail-closed cases, validation, and `MIGRATION_NOTES.md` checklist.
+
+---
+
 ### Cloud & messaging operator families
 
 These provider families have **no single 1:1 DABs task** — route each **by intent** via the
@@ -1640,7 +1687,7 @@ Source-aware classification step, not by class name. The recurring strategies:
   Teradata, Redshift, Snowflake, BigQuery, Synapse, Salesforce Data 360, Databricks). **Athena, Trino,
   Presto are NOT federatable** → JDBC/SDK/connector notebook.
 - **Recurring source→Delta ingestion** (eligible source) → **Lakeflow Connect** (`references/lakeflow-connect.md`).
-- **Remote compute that Databricks replaces** (EMR/Dataproc Spark, external Spark SQL) → migrate the
+- **Remote compute that Databricks replaces** (EMR, external Spark SQL) → migrate the
   workload to a `notebook_task` / `sql_task` / pipeline on Databricks.
 - **Remote orchestration retained** (trigger an external job that stays external) → a `notebook_task`
   driving the cloud SDK (boto3 / google-cloud / azure-sdk), with auth via `dbutils.secrets` or a UC
@@ -1653,7 +1700,7 @@ Source-aware classification step, not by class name. The recurring strategies:
 | Family | Representative operators | Typical route |
 |---|---|---|
 | **AWS** | `AthenaOperator`, `EmrAddStepsOperator`/`Emr*`, `GlueJobOperator`, `BatchOperator`, `LambdaInvokeFunctionOperator`, `RedshiftDataOperator`, `SageMaker*`, `SqsPublishOperator`, `SnsPublishOperator` | Athena→JDBC/SDK (not federatable); Redshift→federation; EMR/Glue/Batch/Lambda/SageMaker→SDK notebook (retain remote) or migrate compute; SQS/SNS→SDK notebook |
-| **GCP** | `BigQueryInsertJobOperator`, `DataprocSubmitJobOperator`, `DataflowTemplatedJobStartOperator`, Cloud Run/Functions, `PubSub*` | BigQuery→federation or Connect; Dataproc→migrate to Databricks compute; Dataflow/Cloud Run/Functions→SDK notebook; Pub/Sub→SDK notebook or streaming |
+| **GCP** | `BigQueryInsertJobOperator`, `DataflowTemplatedJobStartOperator`, Cloud Run/Functions, `PubSub*` | BigQuery→federation or Connect; Dataflow/Cloud Run/Functions→SDK notebook; Pub/Sub→SDK notebook or streaming. Dataproc has the dedicated payload-directed section above. |
 | **Azure** | `AzureDataFactoryRunPipelineOperator`, `AzureSynapseRunSparkBatchOperator`, Batch, Service Bus, MS Graph | ADF/Synapse→SDK notebook (retain) or migrate; Service Bus→SDK notebook |
 | **HTTP / files** | `HttpOperator`, `SFTPOperator`/`FTPOperator` | HTTP→`notebook_task` w/ `requests` (or the External-Orchestration HTTP operator when GA); SFTP/FTP→notebook w/ `paramiko`/`ftplib`, staging to a UC volume |
 | **Other SQL engines** | `TrinoOperator`/`PrestoOperator` (deprecated), `OracleOperator`/`MsSqlOperator`/`JdbcOperator` (use `SQLExecuteQueryOperator`), `SparkSqlOperator` | Oracle/MSSQL→federation; Trino/Presto→JDBC/SDK (not federatable); SparkSql→`sql_task`/notebook |
@@ -1670,6 +1717,16 @@ with a note is the faithful mapping.
 ## Tier 3: Sensor to Trigger Mappings
 
 Airflow sensors that wait for external conditions map to DABs job-level triggers.
+
+---
+
+### DataprocJobSensor / DataprocBatchSensor
+
+**DABs equivalent:** absorbed into the migrated native task, or retained with the external Dataproc orchestration
+
+For `DataprocJobSensor`, collapse only when `dataproc_job_id` resolves to the ID returned by the paired asynchronous `DataprocSubmitJobOperator`. For `DataprocBatchSensor`, match its `batch_id` to the paired `DataprocCreateBatchOperator.batch_id` argument or to a verified ID extracted from the returned batch dictionary; the create-batch operator does not return a raw ID. When no other task consumes the job ID, batch ID, or batch object and the workload migrates to a native Lakeflow task, remove the sensor and submission together and rewire their combined graph to the native task. Do not leave a standalone poller for a Dataproc workload that no longer exists.
+
+If the ID is used for branching, metadata, cancellation, diagnostics, or another DAG; the sensor monitors a job submitted outside the converted graph; or the workload intentionally remains on Dataproc, retain both the external submission contract and polling semantics in an SDK notebook. Preserve the original target states, failure states, polling interval, timeout, soft-fail behavior, and downstream output contract. See `dataproc-migration.md`.
 
 ---
 

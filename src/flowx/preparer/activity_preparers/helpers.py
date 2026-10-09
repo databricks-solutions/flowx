@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
 from flowx.models.dab import DabNotebook, SecretInstruction
 from flowx.models.ir import TranslationContext
 from flowx.parser.expression_parser import resolve_expression, resolve_interpolated_string
@@ -84,3 +85,20 @@ def make_jdbc_secrets(
             value_source=f"JDBC password for {source_type} {role} in activity '{activity_name}'",
         ),
     ]
+
+
+def bind_requested_job_cluster(task: dict[str, Any], activity: Activity) -> None:
+    """Binds *task* to the default job cluster when its source asked for dedicated Jobs compute.
+
+    A source front-end requests this by setting ``_bind_default_cluster`` in the activity's cluster
+    hint. The job has one shared default cluster, whose worker count and Spark configuration are the
+    most common values across the tasks' hints, so a task whose hint differs runs on those values.
+    """
+    if (activity.cluster or {}).get("_bind_default_cluster") and not task.get("existing_cluster_id"):
+        task["job_cluster_key"] = DEFAULT_JOB_CLUSTER_KEY
+
+
+def is_remote_artifact_uri(path: str) -> bool:
+    """Returns True for a cloud-storage URI such as ``gs://`` or ``s3://`` that a job reads in place."""
+    scheme, separator, _ = path.partition("://")
+    return bool(separator) and scheme.lower() not in ("dbfs", "file")

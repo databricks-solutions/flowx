@@ -30,8 +30,9 @@ from flowx.models.ir import (
     SparkPythonActivity,
     SqlActivity,
 )
-from flowx.sources.airflow import callable_notebook, templating
+from flowx.sources.airflow import callable_notebook, dataproc, templating
 from flowx.utils import to_lowercase_key
+
 
 # --------------------------------------------------------------------------------------
 # Operator classification (handled specially by the loader, not via a task builder)
@@ -784,6 +785,33 @@ def _build_email(ctx: OperatorContext) -> Activity:
     )
 
 
+def _build_dataproc(ctx: OperatorContext) -> Activity:
+    """Dataproc and Managed Spark operators -> the Databricks task their payload describes.
+
+    Job submissions and batch creations translate by their nested engine key. Every other Dataproc
+    operator reaching this builder (cluster, template, and batch control actions, and sensors) is an
+    external Google Cloud action that the loader could not absorb into Jobs compute.
+    """
+    canonical = dataproc.canonical_name(ctx.operator)
+    if canonical in dataproc.WORKLOAD_OPERATORS:
+        translation = dataproc.translate_workload(ctx.operator, ctx.task_id, ctx.task_key, ctx.kwargs)
+        if translation.activity is not None:
+            return translation.activity
+        return _placeholder(ctx, translation.reason or f"{ctx.operator} needs manual migration.")
+    if "WorkflowTemplate" in canonical:
+        return _placeholder(
+            ctx,
+            f"{ctx.operator} manages a Dataproc workflow template. Expand each templated job into a Lakeflow "
+            "task by its payload, map prerequisite_step_ids to depends_on, and convert template parameters to "
+            "job parameters; a stored template name without its body is not enough to translate.",
+        )
+    return _placeholder(
+        ctx,
+        f"{ctx.operator} is a Google Cloud control action that flowx could not absorb into Jobs compute. "
+        "Keep it as an external action, or remove it deliberately once nothing depends on it.",
+    )
+
+
 # --------------------------------------------------------------------------------------
 # Fallback
 # --------------------------------------------------------------------------------------
@@ -845,6 +873,75 @@ _OPERATOR_CONSUMED_KWARGS: dict[str, frozenset[str]] = {
     "DateTimeSensor": frozenset({"target_time", "timeout"}),
     "DateTimeSensorAsync": frozenset({"target_time", "timeout"}),
 }
+# Why each consumed Dataproc argument needs no Databricks field. Google placement, identity, and API
+# call settings are superseded by Jobs compute and the job's run identity; scheduler wait settings are
+# superseded by native task completion. Arguments outside these sets stay unconsumed and fail closed.
+_DATAPROC_ARGUMENT_RATIONALES: dict[str, str] = {
+    "project_id": "gcp_placement_superseded_by_jobs_compute",
+    "region": "gcp_placement_superseded_by_jobs_compute",
+    "gcp_conn_id": "gcp_identity_not_mapped",
+    "impersonation_chain": "gcp_identity_not_mapped",
+    "request_id": "gcp_api_call_policy_not_mapped",
+    "retry": "gcp_api_call_policy_not_mapped",
+    "timeout": "gcp_api_call_policy_not_mapped",
+    "metadata": "gcp_api_call_policy_not_mapped",
+    "labels": "gcp_resource_metadata_not_mapped",
+    "asynchronous": "scheduler_wait_superseded_by_native_task",
+    "deferrable": "scheduler_wait_superseded_by_native_task",
+    "polling_interval_seconds": "scheduler_wait_superseded_by_native_task",
+    "cancel_on_kill": "native_run_cancellation",
+    "mode": "scheduler_wait_superseded_by_native_task",
+    "poke_interval": "scheduler_wait_superseded_by_native_task",
+    "wait_timeout": "scheduler_wait_superseded_by_native_task",
+    "cluster_name": "dataproc_cluster_absorbed_into_jobs_compute",
+    "cluster_uuid": "dataproc_cluster_absorbed_into_jobs_compute",
+    "cluster_config": "dataproc_cluster_absorbed_into_jobs_compute",
+    "job": "dataproc_payload_translated",
+    "batch": "dataproc_payload_translated",
+    "batch_id": "dataproc_batch_identity",
+    "dataproc_job_id": "dataproc_job_identity",
+}
+_DATAPROC_API_KWARGS = frozenset(
+    {"project_id", "region", "gcp_conn_id", "impersonation_chain", "request_id", "retry", "timeout", "metadata"}
+)
+_DATAPROC_CONSUMED_KWARGS: dict[str, frozenset[str]] = {
+    dataproc.SUBMIT_JOB: _DATAPROC_API_KWARGS
+    | {"job", "asynchronous", "deferrable", "polling_interval_seconds", "cancel_on_kill"},
+    dataproc.CREATE_BATCH: _DATAPROC_API_KWARGS
+    | {"batch", "batch_id", "asynchronous", "deferrable", "polling_interval_seconds"},
+    dataproc.CREATE_CLUSTER: _DATAPROC_API_KWARGS
+    | {"cluster_name", "cluster_config", "labels", "deferrable", "polling_interval_seconds"},
+    dataproc.DELETE_CLUSTER: _DATAPROC_API_KWARGS
+    | {"cluster_name", "cluster_uuid", "deferrable", "polling_interval_seconds"},
+    dataproc.START_CLUSTER: _DATAPROC_API_KWARGS | {"cluster_name", "cluster_uuid"},
+    dataproc.STOP_CLUSTER: _DATAPROC_API_KWARGS | {"cluster_name", "cluster_uuid"},
+    dataproc.JOB_SENSOR: frozenset(
+        {
+            "project_id",
+            "region",
+            "gcp_conn_id",
+            "impersonation_chain",
+            "dataproc_job_id",
+            "wait_timeout",
+            "poke_interval",
+            "timeout",
+            "mode",
+        }
+    ),
+    dataproc.BATCH_SENSOR: frozenset(
+        {
+            "project_id",
+            "region",
+            "gcp_conn_id",
+            "impersonation_chain",
+            "batch_id",
+            "wait_timeout",
+            "poke_interval",
+            "timeout",
+            "mode",
+        }
+    ),
+}
 _FILE_SENSOR_KWARGS = frozenset(
     {"bucket_key", "bucket_name", "object", "bucket", "filepath", "filepath_", "poke_interval", "timeout"}
 )
@@ -861,10 +958,13 @@ _LOADER_KWARG_RATIONALES: dict[str, str] = {
 
 def argument_classification(operator: str, kwargs: dict[str, ast.expr]) -> list[dict[str, str]]:
     """Classifies every supplied operator argument and records why it is represented."""
+    dataproc_name = dataproc.canonical_name(operator)
     if operator in FILE_SENSORS:
         adapter_consumed: frozenset[str] | None = _FILE_SENSOR_KWARGS
     elif operator in TABLE_SENSORS:
         adapter_consumed = _TABLE_SENSOR_KWARGS
+    elif dataproc_name in _DATAPROC_CONSUMED_KWARGS:
+        adapter_consumed = _DATAPROC_CONSUMED_KWARGS[dataproc_name]
     else:
         adapter_consumed = _OPERATOR_CONSUMED_KWARGS.get(operator)
 
@@ -878,7 +978,12 @@ def argument_classification(operator: str, kwargs: dict[str, ast.expr]) -> list[
             rationale = "placeholder_raw_definition"
         elif name in adapter_consumed:
             status = "consumed"
-            rationale = "operator_adapter"
+            if dataproc_name in dataproc.DATAPROC_SENSORS and name == "timeout":
+                rationale = "scheduler_wait_superseded_by_native_task"
+            elif dataproc_name in _DATAPROC_CONSUMED_KWARGS:
+                rationale = _DATAPROC_ARGUMENT_RATIONALES.get(name, "operator_adapter")
+            else:
+                rationale = "operator_adapter"
         else:
             status = "unconsumed"
             rationale = "no_declared_semantics"
@@ -940,3 +1045,6 @@ OPERATOR_REGISTRY.update(
         "DateTimeSensorAsync": _build_datetime_sensor,
     }
 )
+
+# Dataproc and Managed Spark: both naming surfaces route through one builder that reads the payload.
+OPERATOR_REGISTRY.update({name: _build_dataproc for name in dataproc.ALL_DATAPROC_CONSTRUCTS})
