@@ -291,9 +291,8 @@ def test_a_passed_in_grouping_whose_suggestion_changed_since_is_refused(tmp_path
     mislabelled = routing.validate_plan(relabelled, after)
 
     assert stale == [
-        f"suggested_groupings[0]: {_EXTRACTS!r} is not a grouping route suggests for this inventory; only a "
-        "suggested grouping can be accepted (to group other components, record an inferred relationship through "
-        "enrich)"
+        f"suggested_groupings[0]: {_EXTRACTS!r} is no longer a grouping route suggests; the suggestions changed "
+        "since this plan was written, so run route without a plan to see the current ones"
     ]
     assert mislabelled == [
         f"suggested_groupings[0]: grouping {current['grouping_id']!r} now joins ['component-2', 'component-3', "
@@ -342,7 +341,11 @@ def test_only_a_suggested_grouping_can_be_accepted(tmp_path: Path) -> None:
 
     violations = routing.validate_plan(plan, inventory)
 
-    assert any("'grouping-9' is not a grouping route suggests" in violation for violation in violations)
+    assert violations == [
+        f"suggested_groupings[{len(plan['suggested_groupings']) - 1}]: 'grouping-9' is not a grouping route "
+        "suggests for this inventory; only a suggested grouping can be accepted (to group other components, record "
+        "an inferred relationship through enrich)"
+    ]
 
 
 def test_an_accepted_grouping_is_kept_when_route_runs_again_without_a_plan(tmp_path: Path) -> None:

@@ -160,8 +160,10 @@ Rules the validator enforces (all violations returned at once; nothing written o
   connected component; `component_id` must match too.
 - An accepted grouping has no component decided `"deterministic"`; agentic decisions and groupings are
   ADF-only (an inventory that records no `source` is refused too; re-run discover).
-- A grouping entry that lists `components` or `members` must match the current suggestion with that
-  `grouping_id`; when the suggestions changed since the plan was written, review the grouping again.
+- A grouping entry names a current suggestion by its `grouping_id`, with the same `components` and
+  `members` when it lists them. Ids derive from members, so after enrich changes the suggestions an
+  edited copy of an older plan can name a grouping that no longer exists: route refuses it and says to
+  run route without a plan to see the current ones.
 - `conversation` entries are `{question, answer}` with non-empty strings.
 
 ### What applying does

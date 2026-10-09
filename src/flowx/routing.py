@@ -685,6 +685,12 @@ def _grouping_violations(groupings: Any, inventory: dict[str, Any], decision_by_
             violations.append(f"{loc}: unknown field {key!r}")
         grouping_id = entry.get("grouping_id")
         suggestion = suggestions.get(grouping_id) if isinstance(grouping_id, str) else None
+        if suggestion is None and ("members" in entry or "components" in entry):
+            violations.append(
+                f"{loc}: {grouping_id!r} is no longer a grouping route suggests; the suggestions changed since this "
+                "plan was written, so run route without a plan to see the current ones"
+            )
+            continue
         if suggestion is None:
             violations.append(
                 f"{loc}: {grouping_id!r} is not a grouping route suggests for this inventory; only a suggested "
