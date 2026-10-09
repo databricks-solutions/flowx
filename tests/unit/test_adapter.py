@@ -44,10 +44,13 @@ from flowx.adapter.operations import allowed_values_for, enum_for
 from flowx.models.ir import (
     CopyActivity,
     ForEachActivity,
+    IfConditionActivity,
     MotifActivity,
     NotebookActivity,
     Pipeline,
     SparkPythonActivity,
+    SwitchActivity,
+    SwitchCase,
     WaitActivity,
 )
 from flowx.models.motifs import (
@@ -1461,3 +1464,58 @@ class TestInlineCollapsedLookupReferences:
         result = _inline_collapsed_lookup_references(pipeline)
 
         assert result.tasks[1].inner_activities[0].items_expression == json.dumps(self._ROWS)
+
+    def test_rewrites_reference_inside_if_branch(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        inner = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        gate = IfConditionActivity(
+            **_make_base("IF_Gate"),
+            op="Equals",
+            left="@pipeline().parameters.run",
+            right="yes",
+            if_true_activities=[inner],
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, gate])
+
+        result = _inline_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].if_true_activities[0].items_expression == json.dumps(self._ROWS)
+
+    def test_rewrites_reference_inside_switch_case(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        inner = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        switch = SwitchActivity(
+            **_make_base("SW_Route"),
+            on_expression="@pipeline().parameters.env",
+            cases=[SwitchCase(value="prod", activities=[inner])],
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, switch])
+
+        result = _inline_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].cases[0].activities[0].items_expression == json.dumps(self._ROWS)
+
+    def test_rewrites_reference_in_deeply_nested_interleaved_containers(self):
+        # If (false branch) -> Switch (default) -> ForEach (inner) -> target ForEach,
+        # so the walk must interleave container types and recurse several levels deep.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        target = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        mid = ForEachActivity(
+            **_make_base("FE_Mid"),
+            items_expression="{{job.parameters.x}}",
+            inner_activities=[target],
+        )
+        switch = SwitchActivity(**_make_base("SW"), on_expression="@env", default_activities=[mid])
+        gate = IfConditionActivity(
+            **_make_base("IF"),
+            op="Equals",
+            left="@a",
+            right="b",
+            if_false_activities=[switch],
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, gate])
+
+        result = _inline_collapsed_lookup_references(pipeline)
+
+        deepest = result.tasks[1].if_false_activities[0].default_activities[0].inner_activities[0]
+        assert deepest.items_expression == json.dumps(self._ROWS)

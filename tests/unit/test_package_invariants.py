@@ -135,7 +135,7 @@ def test_shared_bundle_cross_dag_ref_resolves_for_hyphenated_dag_id():
                         "name": "trig",
                         "task_key": "trig",
                         "type": "RunJobActivity",
-                        "job_name": "upstream_dag",  # normalize_task_key("Upstream-DAG")
+                        "job_name": "upstream_dag",  # to_lowercase_key("Upstream-DAG")
                     },
                 ],
             ),
@@ -154,7 +154,7 @@ def test_shared_bundle_cross_dag_ref_resolves_for_hyphenated_dag_id():
         upstream = yaml.safe_load((out / "resources" / "upstream_dag.yml").read_text())
         assert "upstream_dag" in upstream["resources"]["jobs"]
         downstream = (out / "resources" / "downstream.yml").read_text(encoding="utf-8")
-        # The ref must match the emitted job resource key, which is normalize_task_key(dag_id).
+        # The ref must match the emitted job resource key, which is to_lowercase_key(dag_id).
         assert "${resources.jobs.upstream_dag.id}" in downstream
 
 

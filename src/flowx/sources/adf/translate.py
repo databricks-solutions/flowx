@@ -52,6 +52,7 @@ from flowx.sources.adf.translators import (
     wait,
     web_activity,
 )
+from flowx.utils import to_case_preserving_key
 
 logger = logging.getLogger(__name__)
 
@@ -795,7 +796,7 @@ def _build_variable_init_activities(
             return_default = True
         if not return_default:
             continue
-        task_key = f"_init_{_sanitize_task_key(var_name)}"
+        task_key = f"_init_{to_case_preserving_key(var_name)}"
         expr_result = resolve_expression(default, context)
         if expr_result is not None:
             variable_value = expr_result.value
@@ -905,7 +906,7 @@ def _build_base_kwargs(
         Dictionary with keys: ``name``, ``task_key``, ``timeout_seconds``,
         ``max_retries``, ``depends_on``, ``cluster``.
     """
-    task_key = _sanitize_task_key(activity.name)
+    task_key = to_case_preserving_key(activity.name)
 
     timeout_seconds: int | None = None
     if activity.policy and activity.policy.timeout:
@@ -926,7 +927,7 @@ def _build_base_kwargs(
             outcome = _map_dependency_conditions(dependency.dependency_conditions)
             depends_on.append(
                 Dependency(
-                    task_key=_sanitize_task_key(dependency.activity),
+                    task_key=to_case_preserving_key(dependency.activity),
                     outcome=outcome,
                 )
             )
@@ -960,21 +961,6 @@ def _build_base_kwargs(
         "cluster": cluster,
         "existing_cluster_id": existing_cluster_id,
     }
-
-
-def _sanitize_task_key(name: str) -> str:
-    """Converts an ADF activity name to a valid Databricks task key.
-
-    Args:
-        name: ADF activity name.
-
-    Returns:
-        Sanitised task key string.
-    """
-    key = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-    key = re.sub(r"_+", "_", key)
-    key = key.strip("_")
-    return key or "unnamed"
 
 
 def _map_dependency_conditions(conditions: list[str] | None) -> str | None:
@@ -1402,7 +1388,7 @@ def main(argv: list[str] | None = None) -> int:
         total_agentic += report.agentic_count
         total_unsupported += report.unsupported_count
 
-        pipeline_file = work_dir / f"{_sanitize_task_key(pipeline.name)}.json"
+        pipeline_file = work_dir / f"{to_case_preserving_key(pipeline.name)}.json"
         pipeline_dict = ir_serde.pipeline_to_dict(report.pipeline)
         pipeline_file.write_text(json.dumps(pipeline_dict, indent=2, default=str), encoding="utf-8")
         logger.info("Wrote pipeline IR to %s", pipeline_file)
@@ -1410,7 +1396,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Write debug IR if requested
         if args.debug:
-            debug_file = work_dir / f"{_sanitize_task_key(pipeline.name)}.debug.json"
+            debug_file = work_dir / f"{to_case_preserving_key(pipeline.name)}.debug.json"
             debug_dict = ir_serde.pipeline_to_debug_dict(report.pipeline)
             debug_file.write_text(json.dumps(debug_dict, indent=2, default=str), encoding="utf-8")
             logger.info("Wrote debug IR to %s", debug_file)

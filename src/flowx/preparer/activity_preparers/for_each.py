@@ -24,7 +24,7 @@ from flowx.preparer.workflow_preparer import (
     build_common_task_fields,
     prepare_activity,
 )
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 if TYPE_CHECKING:
     from flowx.models.ir import ForEachActivity
@@ -205,7 +205,7 @@ def prepare(
             )
             inner_workflows.append(inner_workflow)
 
-            inner_job_key = normalize_task_key(inner_job_name)
+            inner_job_key = to_lowercase_key(inner_job_name)
             body_task: dict[str, Any] = {
                 "task_key": f"{activity.task_key}_iteration",
                 "run_job_task": {
@@ -265,7 +265,7 @@ def prepare(
         )
         inner_workflows.append(inner_workflow)
 
-        inner_job_key = normalize_task_key(inner_job_name)
+        inner_job_key = to_lowercase_key(inner_job_name)
         body_task = {
             "task_key": f"{activity.task_key}_iteration",
             "run_job_task": {

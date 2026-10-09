@@ -60,7 +60,7 @@ from flowx.preparer.workspace_downloader import (
     prompt_for_auth_if_missing,
     set_profile,
 )
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 
 class _BundleYamlDumper(yaml.SafeDumper):
@@ -209,9 +209,9 @@ def _namespace_pydabs_hooks(
             if setup_task.type != "pydabs_dbt_factory":
                 continue
             module_name = str(setup_task.config["hook_module"]).removeprefix("resources.")
-            namespaced_module = normalize_task_key(f"{prefix}__{module_name}")
+            namespaced_module = to_lowercase_key(f"{prefix}__{module_name}")
             old_job_key = str(setup_task.config["job_key"])
-            new_job_key = normalize_task_key(f"{prefix}__{old_job_key}")
+            new_job_key = to_lowercase_key(f"{prefix}__{old_job_key}")
             hooks[f"resources/{module_name}.py"] = (f"resources/{namespaced_module}.py", old_job_key, new_job_key)
             setup_task.config["hook_module"] = f"resources.{namespaced_module}"
             setup_task.config["job_key"] = new_job_key
@@ -258,10 +258,10 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
     # 1. Inner ForEach job keys: rename inner.name, map old resources.jobs ref -> new.
     seen_new_keys: dict[str, str] = {}
     for inner in workflow.inner_workflows:
-        old_key = normalize_task_key(inner.name)
+        old_key = to_lowercase_key(inner.name)
         inner.name = f"{prefix}__{inner.name}"
-        new_key = normalize_task_key(inner.name)
-        # normalize_task_key collapses the "__" separator to "_", so a pipeline name containing "__"
+        new_key = to_lowercase_key(inner.name)
+        # to_lowercase_key collapses the "__" separator to "_", so a pipeline name containing "__"
         # could make two inner jobs land on the same namespaced key (e.g. prefix "a" + inner "b__c" vs
         # prefix "a__b" + inner "c" both -> "a_b_c"), silently overwriting one resource file. Refuse
         # rather than ship a corrupt bundle — this requires pathological ADF names but is cheap to catch.
@@ -382,10 +382,10 @@ def write_bundle_group(
     # untouched, so the per-pipeline path stays byte-for-byte identical.
     if len(workflows) > 1:
         for workflow in workflows:
-            _namespace_bundle_artifacts(workflow, normalize_task_key(workflow.name))
+            _namespace_bundle_artifacts(workflow, to_lowercase_key(workflow.name))
 
     created_files: list[Path] = []
-    effective_name = bundle_name or normalize_task_key(workflows[0].name)
+    effective_name = bundle_name or to_lowercase_key(workflows[0].name)
 
     # Bind clusters across every workflow (parent + inner) up front to decide whether databricks.yml needs
     # cluster tunables at all. Binding is idempotent, so _build_job_resource re-checking these is harmless.
@@ -406,7 +406,7 @@ def write_bundle_group(
     # resource YAML are written below, or the ref points at a non-existent node and deploy fails.
     known_bundle_jobs: set[str] = set()
     for workflow in workflows:
-        known_bundle_jobs |= _known_bundle_job_keys(workflow, normalize_task_key(workflow.name))
+        known_bundle_jobs |= _known_bundle_job_keys(workflow, to_lowercase_key(workflow.name))
     for workflow in workflows:
         _rewrite_cross_bundle_job_references(workflow, known_bundle_jobs)
 
@@ -482,7 +482,7 @@ def write_bundle_group(
     resources_dir = output_dir / "resources"
     resources_dir.mkdir(parents=True, exist_ok=True)
     for index, workflow in enumerate(workflows):
-        resource_key = normalize_task_key(workflow.name)
+        resource_key = to_lowercase_key(workflow.name)
         # Each job resource (parent + its inner ForEach jobs) gets only this workflow's hoisted globals,
         # not the group-wide union, so a widget is bound to ${var.X} only in the pipelines that declare X.
         wf_hoisted_globals = hoisted_globals_by_workflow[index]
@@ -503,7 +503,7 @@ def write_bundle_group(
         # Write inner workflows as additional resource files. Inner tasks reuse notebooks from the parent's
         # list, so pass those in for the inner job's widget auto-augmentation.
         for inner in workflow.inner_workflows:
-            inner_key = normalize_task_key(inner.name)
+            inner_key = to_lowercase_key(inner.name)
             inner_yml_path = resources_dir / f"{inner_key}.yml"
             inner_resource = _build_job_resource(
                 inner, inner_key, extra_notebooks_for_augment=workflow.notebooks, hoisted_globals=wf_hoisted_globals
@@ -688,7 +688,7 @@ def _load_group_spec(path: Path) -> dict[str, str]:
     - ``{"<pipeline>": "<group>", ...}`` — a flat pipeline-to-group map.
     - ``{"<group>": ["<pipeline>", ...], ...}`` — a group-to-pipelines map (a list value).
 
-    Pipeline names are normalized with :func:`normalize_task_key` so the spec can use either the ADF
+    Pipeline names are normalized with :func:`to_lowercase_key` so the spec can use either the ADF
     display name or the resource key. Returns a ``{pipeline_key: group_name}`` map.
     """
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
@@ -698,9 +698,9 @@ def _load_group_spec(path: Path) -> dict[str, str]:
     for key, value in raw.items():
         if isinstance(value, list):
             for pipeline in value:
-                mapping[normalize_task_key(str(pipeline))] = str(key)
+                mapping[to_lowercase_key(str(pipeline))] = str(key)
         else:
-            mapping[normalize_task_key(str(key))] = str(value)
+            mapping[to_lowercase_key(str(key))] = str(value)
     return mapping
 
 
@@ -735,7 +735,7 @@ def _group_workflows(
     if not workflows:
         return []
 
-    by_key = {normalize_task_key(wf.name): wf for wf in workflows}
+    by_key = {to_lowercase_key(wf.name): wf for wf in workflows}
     # Every downstream keying (grouping, resource filenames, ${resources.jobs.X.id} refs, the pipeline
     # graph) assumes each pipeline has a unique normalized key. Two pipeline names that collapse to the
     # same key (e.g. "Load Sales" and "load-sales") would silently drop one here and from every mode's
@@ -743,7 +743,7 @@ def _group_workflows(
     if len(by_key) != len(workflows):
         from collections import Counter
 
-        counts = Counter(normalize_task_key(wf.name) for wf in workflows)
+        counts = Counter(to_lowercase_key(wf.name) for wf in workflows)
         dupes = sorted(key for key, count in counts.items() if count > 1)
         raise ValueError(
             "Pipeline names collide on normalized key(s): "
@@ -752,7 +752,7 @@ def _group_workflows(
         )
 
     if mode == "single" or len(workflows) == 1:
-        name = normalize_task_key(bundle_name) if bundle_name else normalize_task_key(workflows[0].name)
+        name = to_lowercase_key(bundle_name) if bundle_name else to_lowercase_key(workflows[0].name)
         if mode == "single" and not bundle_name and len(workflows) > 1:
             name = "flowx_bundle"
         return [(name, list(workflows))]
@@ -771,16 +771,16 @@ def _group_workflows(
         if group_by == "spec":
             if not group_spec:
                 raise ValueError("per-group with --group-by spec requires a --group-spec file.")
-            explicit_groups = {normalize_task_key(g) for g in group_spec.values()}
+            explicit_groups = {to_lowercase_key(g) for g in group_spec.values()}
             groups: dict[str, list[PreparedWorkflow]] = {}
             for key, wf in by_key.items():
                 if key in group_spec:
-                    group_name = normalize_task_key(group_spec[key])
+                    group_name = to_lowercase_key(group_spec[key])
                 else:
                     # Pipelines absent from the spec become their own single-pipeline bundle. Guard
                     # against a pipeline's own key colliding with an explicit group name, which would
                     # silently merge it into that group's bundle.
-                    group_name = normalize_task_key(key)
+                    group_name = to_lowercase_key(key)
                     if group_name in explicit_groups:
                         raise ValueError(
                             f"Pipeline '{wf.name}' is absent from the group spec, so it would form its "
@@ -828,7 +828,7 @@ def _render_deploy_md_for_run(
     from flowx.bundler.deploy_writer import render_deploy_md
 
     groups = [
-        (group_name, [normalize_task_key(wf.name) for wf in group_workflows])
+        (group_name, [to_lowercase_key(wf.name) for wf in group_workflows])
         for group_name, group_workflows in written_groups
     ]
     return render_deploy_md(
@@ -997,7 +997,7 @@ def main(argv: list[str] | None = None) -> int:
     bundle_dirs: list[Path] = []
 
     if shared_airflow_bundle:
-        combined_name = args.bundle_name or normalize_task_key(args.output_dir.name)
+        combined_name = args.bundle_name or to_lowercase_key(args.output_dir.name)
         # Render + validate away from the destination first, so a structural failure never leaves a
         # partially-written bundle in the migration directory.
         args.output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -1189,10 +1189,10 @@ def _rewrite_cross_bundle_job_references(workflow: PreparedWorkflow, known_bundl
             target_job = match.group(1)
             if target_job in known_bundle_jobs:
                 continue
-            variable_name = f"{normalize_task_key(target_job)}_job_id"
+            variable_name = f"{to_lowercase_key(target_job)}_job_id"
             suffix = 2
             while variable_name in _cross_bundle_variables and _cross_bundle_variables[variable_name] != target_job:
-                variable_name = f"{normalize_task_key(target_job)}_job_id_{suffix}"
+                variable_name = f"{to_lowercase_key(target_job)}_job_id_{suffix}"
                 suffix += 1
             _cross_bundle_variables[variable_name] = target_job
             run_job["job_id"] = f"${{var.{variable_name}}}"
@@ -1200,7 +1200,7 @@ def _rewrite_cross_bundle_job_references(workflow: PreparedWorkflow, known_bundl
 
 def _known_bundle_job_keys(workflow: PreparedWorkflow, resource_key: str) -> set[str]:
     """Returns static and Python-generated job resource keys owned by this bundle."""
-    keys = {resource_key} | {normalize_task_key(inner.name) for inner in workflow.inner_workflows}
+    keys = {resource_key} | {to_lowercase_key(inner.name) for inner in workflow.inner_workflows}
     for current in [workflow, *workflow.inner_workflows]:
         keys.update(
             str(setup_task.config["job_key"])
@@ -1213,7 +1213,7 @@ def _known_bundle_job_keys(workflow: PreparedWorkflow, resource_key: str) -> set
 def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
     """Namespaces generated source files by DAG while preserving workspace paths."""
     cloned = copy.deepcopy(workflow)
-    prefix = normalize_task_key(cloned.name)
+    prefix = to_lowercase_key(cloned.name)
     replacements: dict[str, str] = {}
 
     nested_workflows = [cloned, *cloned.inner_workflows]
@@ -1230,11 +1230,10 @@ def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
             replacements[f"src/{original_path}"] = f"src/{notebook.relative_path}"
 
     for inner in cloned.inner_workflows:
-        original_key = normalize_task_key(inner.name)
+        original_key = to_lowercase_key(inner.name)
         inner.name = f"{prefix}__{inner.name}"
-        replacements[f"${{resources.jobs.{original_key}.id}}"] = (
-            f"${{resources.jobs.{normalize_task_key(inner.name)}.id}}"
-        )
+        new_key = to_lowercase_key(inner.name)
+        replacements[f"${{resources.jobs.{original_key}.id}}"] = f"${{resources.jobs.{new_key}.id}}"
 
     _replace_strings(cloned.tasks, replacements)
     for inner in cloned.inner_workflows:

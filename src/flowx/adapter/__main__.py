@@ -916,7 +916,9 @@ def _inline_collapsed_lookup_references(pipeline):
     task.  A downstream ForEach may still reference that Lookup's output
     (``{{tasks.<lookup>.values.result}}``) for its iterator -- ``depends_on`` is
     rewired to the motif by the collapser, but this value reference is not, and
-    a ``pipeline_task`` publishes no task values, so the reference dangles.
+    a ``pipeline_task`` publishes no task values, so the reference dangles.  The
+    ForEach may sit at the top level or nested inside any If/Switch/ForEach, so
+    every container is searched.
 
     Consolidation materialises the control rows onto the motif
     (``lookup_values``), so the safe resolution is to inline those rows as the
@@ -935,13 +937,13 @@ def _inline_collapsed_lookup_references(pipeline):
     import dataclasses as _dataclasses
 
     from flowx.models.ir import ForEachActivity as _ForEachActivity
+    from flowx.models.ir import IfConditionActivity as _IfConditionActivity
     from flowx.models.ir import MotifActivity as _MotifActivity
+    from flowx.models.ir import SwitchActivity as _SwitchActivity
 
-    def _sanitize(name: str) -> str:
-        # Mirror the translator's task-key sanitiser (case-preserving) so a raw
-        # matched-activity name matches the sanitised key used inside a ref.
-        key = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-        return re.sub(r"_+", "_", key).strip("_") or "unnamed"
+    # Build the same ref key the ADF translator uses so a raw matched-activity
+    # name matches the key found inside a ``{{tasks.<key>.values.Y}}`` ref.
+    from flowx.utils import to_case_preserving_key
 
     # collapsed task_key -> inlined JSON array of the motif's materialised rows.
     inlined_by_key: dict[str, str] = {}
@@ -949,21 +951,37 @@ def _inline_collapsed_lookup_references(pipeline):
         if isinstance(task, _MotifActivity) and task.consolidate_metadata_driven and task.lookup_values:
             inlined = json.dumps(task.lookup_values)
             for name in task.matched_activity_names:
-                inlined_by_key[_sanitize(name)] = inlined
+                inlined_by_key[to_case_preserving_key(name)] = inlined
     if not inlined_by_key:
         return pipeline
 
+    def _rewrite_all(activities):
+        return [_rewrite(child) for child in activities]
+
     def _rewrite(activity):
-        if not isinstance(activity, _ForEachActivity):
-            return activity
-        new_inner = [_rewrite(child) for child in activity.inner_activities]
-        new_items = activity.items_expression
-        match = _WHOLE_TASK_VALUE_REF.match(activity.items_expression or "")
-        if match and match.group(1) in inlined_by_key:
-            new_items = inlined_by_key[match.group(1)]
-        if new_items == activity.items_expression and new_inner == activity.inner_activities:
-            return activity
-        return _dataclasses.replace(activity, items_expression=new_items, inner_activities=new_inner)
+        # Descend through every container that can nest a ForEach (ForEach, If,
+        # Switch) so a collapsed-Lookup reference is resolved wherever it lives.
+        if isinstance(activity, _ForEachActivity):
+            new_items = activity.items_expression
+            match = _WHOLE_TASK_VALUE_REF.match(activity.items_expression or "")
+            if match and match.group(1) in inlined_by_key:
+                new_items = inlined_by_key[match.group(1)]
+            return _dataclasses.replace(
+                activity, items_expression=new_items, inner_activities=_rewrite_all(activity.inner_activities)
+            )
+        if isinstance(activity, _IfConditionActivity):
+            return _dataclasses.replace(
+                activity,
+                if_true_activities=_rewrite_all(activity.if_true_activities),
+                if_false_activities=_rewrite_all(activity.if_false_activities),
+            )
+        if isinstance(activity, _SwitchActivity):
+            return _dataclasses.replace(
+                activity,
+                cases=[_dataclasses.replace(case, activities=_rewrite_all(case.activities)) for case in activity.cases],
+                default_activities=_rewrite_all(activity.default_activities),
+            )
+        return activity
 
     return _dataclasses.replace(pipeline, tasks=[_rewrite(task) for task in pipeline.tasks])
 
