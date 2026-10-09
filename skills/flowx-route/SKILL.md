@@ -99,9 +99,11 @@ and any uncovered activities, and an *agentic* option carrying the `recommended_
 with any `simplification_pattern` flagged and release states disclosed), and `decision: null`
 (pending). It also lists the `suggested_groupings`, an empty `conversation`, and the `findings`
 (unresolved control edges kept, never severed). A decision already in the file for a component with
-the same members is kept, so re-running route, or running it after a re-enrich, keeps your decisions.
-A re-discover does not: discover clears `metadata/` and `.work/`, which drops `conversion_plan.json`
-and the agent's outputs in `agentic_conversion.json`, so route and fill again afterwards.
+the same members is kept, so re-running route, or running it after a re-enrich, keeps your decisions,
+except the components of an accepted grouping route no longer suggests, which go back to pending and
+are listed under `dropped_groupings` (see Suggested groupings below). A re-discover does not:
+discover clears `metadata/` and `.work/`, which drops `conversion_plan.json` and the agent's outputs
+in `agentic_conversion.json`, so route and fill again afterwards.
 
 ### Present it with the review page
 

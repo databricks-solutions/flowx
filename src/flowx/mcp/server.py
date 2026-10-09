@@ -354,10 +354,12 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
 
     With **no** ``plan`` / ``plan_path``, route writes its recommendation straight into
     ``metadata/conversion_plan.json`` (keeping the decisions already recorded there, every other one
-    pending) plus ``metadata/routing_review.html``, and applies the plan once nothing is pending. With
-    a plan (``plan`` inline or ``plan_path`` -- at most one; the decisions, or an edited copy of the
-    recorded plan) it records those decisions instead. Either way the recorded plan and the review page
-    come back like ``enrich prepare`` returns the inventory: inline under ``bundle``, or uploaded to
+    pending, except the components of an accepted grouping route no longer suggests, which go back to
+    pending and are listed under ``dropped_groupings``) plus ``metadata/routing_review.html``, and
+    applies the plan once nothing is pending. With a plan (``plan`` inline or ``plan_path`` -- at most
+    one; the decisions, or an edited copy of the recorded plan) it records those decisions instead.
+    Either way the recorded plan and the review page come back like ``enrich prepare`` returns the
+    inventory: inline under ``bundle``, or uploaded to
     ``output_volume_path`` / ``output_workspace_path``, because a hosted agent cannot read the server's
     ``output_dir``; edit the plan and call route again with it as ``plan``. The returned ``ok``
     reflects the CLI's success; ``result`` carries its JSON.
@@ -721,8 +723,10 @@ def build_server() -> FastMCP:
           insights link by an inferred relationship or a shared simplification pattern, each with its
           basis and `accepted`) and an optional `conversation` (the questions asked and the user's
           answers). With NO plan it keeps the decisions already recorded and leaves every other
-          component pending (decision null); with a plan (the decisions, or an edited copy of the
-          recorded plan) it records those. It also writes metadata/routing_review.html, the standard
+          component pending (decision null), except the components of an accepted grouping route no
+          longer suggests, which go back to pending and are listed under `dropped_groupings`; with a
+          plan (the decisions, or an edited copy of the recorded plan) it records those. It also
+          writes metadata/routing_review.html, the standard
           review page. The plan and the page come back under `bundle` (or are uploaded). While a
           decision is pending nothing is applied; once every component is decided route rebuilds the
           translation report from the unchanged baseline, the stored gap fills, the plan, and the
