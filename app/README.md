@@ -23,6 +23,8 @@ operation; `parameters` is its keyword-argument dict.
 | `merge_agentic` | `adapter convert --merge-agentic` | Merge ADF agent-produced results into the report |
 | `resolve_agentic` | `adapter resolve-agentic` | Prepare, stage, and apply reviewed Airflow leaf-gap resolutions |
 | `enrich` | `adapter enrich` | Return `inventory.json` (`prepare`), then validate and record agent-authored insights (`apply`) |
+| `route` | `adapter route` | Write the recommendation into `conversion_plan.json` and the review page; apply the plan once decided |
+| `fill_agentic` | `adapter fill-agentic` | Fill a routed-agentic unit with agent-authored pipelines (ADF) |
 | `inspect` | `adapter inspect` | Surface pending translation options |
 | `apply_answers` | `adapter modify` | Apply answers → stamped IR |
 | `materialize_lookup` | `adapter materialize-lookup` | CSV → lookup-values JSON |

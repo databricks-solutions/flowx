@@ -1,9 +1,9 @@
 """Unified CLI entry point that the flowx skills and MCP tools drive via subprocesses.
 
 Exposes stateless subcommands -- the ``discover``/``convert``/``package`` phase runners plus
-``inspect``, ``modify``, ``resolve-agentic``, ``enrich``, ``inputs``, ``materialize-lookup``,
-``workspace-paths``, ``record-results``, and ``install-dashboard`` -- so each agent turn runs as an
-independent process holding no session state across user prompts.
+``inspect``, ``modify``, ``resolve-agentic``, ``enrich``, ``route``, ``fill-agentic``, ``inputs``,
+``materialize-lookup``, ``workspace-paths``, ``record-results``, and ``install-dashboard`` -- so each
+agent turn runs as an independent process holding no session state across user prompts.
 """
 
 from __future__ import annotations
@@ -87,6 +87,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_resolve_agentic(args)
     if args.command == "enrich":
         return _run_enrich(args)
+    if args.command == "route":
+        return _run_route(args)
+    if args.command == "fill-agentic":
+        return _run_fill_agentic(args)
     if args.command == "record-results":
         return _run_record_results(args)
     if args.command == "install-dashboard":
@@ -158,6 +162,144 @@ def _run_enrich(args: argparse.Namespace) -> int:
         return 1
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"Failed to enrich inventory: {error}", file=sys.stderr)
+        return 1
+    _emit_json(result, args.out)
+    return 0 if result.get("ok") else 1
+
+
+def _run_route(args: argparse.Namespace) -> int:
+    """Implements ``route``: record the plan in ``conversion_plan.json``, then apply it once decided.
+
+    Groups pipelines by connected component and computes the per-component recommendation and the
+    suggested groupings (reusing :mod:`flowx.routing`). The decisions come from ``--plan-path FILE``
+    when given; otherwise from the recorded ``metadata/conversion_plan.json`` as the agent edited it,
+    with every component it does not decide left pending. An accepted grouping that enrich has since
+    changed is no longer suggested: its components go back to pending and it is reported under
+    ``dropped_groupings``, in the message and on the review page. Route validates and records the plan
+    (library fields recomputed) and writes ``metadata/routing_review.html``. While any decision is
+    pending it stops there and leaves the report alone. Once every component is decided it rebuilds
+    ``.work/translation_report.json`` + ``gaps.json`` from the deterministic baseline: routed-agentic
+    units become placeholder gaps or their stored agent output, deterministic ones keep the baseline,
+    and nothing routed agentic leaves convert's report byte-identical. Re-routing under any decisions
+    is allowed.
+
+    Returns 1 on insights files that disagree or a plan that fails validation (report + plan left
+    untouched), and when every component is decided but convert has not written the report yet.
+    """
+    from flowx import routing
+    from flowx.models.conversion_plan import PLAN_FILENAME, ConversionPlan
+    from flowx.reporting.routing_review import write_routing_review
+    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan
+
+    inventory_path = args.output_dir / "metadata" / "inventory.json"
+    if not inventory_path.exists():
+        print(f"No inventory.json under {inventory_path.parent}; run the discover phase first.", file=sys.stderr)
+        return 1
+    try:
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"Failed to read {inventory_path}: {error}", file=sys.stderr)
+        return 1
+    disagree = routing.insights_file_violations(args.output_dir, inventory)
+    if disagree:
+        _emit_json({"ok": False, "violations": disagree, "components": 0}, args.out)
+        return 1
+
+    plan_path = args.output_dir / "metadata" / PLAN_FILENAME
+    dropped: list[dict[str, Any]] = []
+    try:
+        if args.plan_path is not None:
+            plan = json.loads(args.plan_path.read_text(encoding="utf-8"))
+        else:
+            previous = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else None
+            plan, dropped = routing.carried_forward_plan(previous, inventory)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"Failed to read the conversion plan: {error}", file=sys.stderr)
+        return 1
+
+    violations = routing.validate_plan(plan, inventory)
+    if violations:
+        _emit_json({"ok": False, "violations": violations, "components": 0}, args.out)
+        return 1
+    try:
+        result = routing.record_plan(args.output_dir, plan=plan)
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Failed to record conversion plan: {error}", file=sys.stderr)
+        return 1
+    if not result.get("ok"):
+        _emit_json(result, args.out)
+        return 1
+    review_path = write_routing_review(args.output_dir, dropped_groupings=dropped)
+    locations = {"plan_path": str(plan_path), "review_path": str(review_path)}
+    if result["pending"]:
+        dropped_notes = [
+            f"accepted grouping {grouping['grouping_id']} ({', '.join(grouping['components'])}) is no longer "
+            "suggested"
+            + (f" and is replaced by {', '.join(grouping['replaced_by'])}" if grouping["replaced_by"] else "")
+            + ", so its components are pending again"
+            for grouping in dropped
+        ]
+        message = "; ".join(
+            [
+                *dropped_notes,
+                f"decide {result['pending']} in {plan_path} (or pass a plan), then run route again to apply it; "
+                f"the review page is {locations['review_path']}",
+            ]
+        )
+        _emit_json(
+            {**result, **locations, "dropped_groupings": dropped, "applied": False, "message": message}, args.out
+        )
+        return 0
+
+    report_path = args.output_dir / WORK_DIRNAME / REPORT_FILENAME
+    if not report_path.exists():
+        print(f"No {REPORT_FILENAME} under {report_path.parent}; run the convert phase first.", file=sys.stderr)
+        return 1
+    try:
+        recorded = ConversionPlan.load(args.output_dir)
+        if recorded is None:
+            raise FileNotFoundError("route recorded no conversion_plan.json")
+        edit = apply_plan(args.output_dir, recorded)
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Failed to edit translation report: {error}", file=sys.stderr)
+        return 1
+    write_routing_review(args.output_dir, dropped_groupings=dropped)
+    _emit_json({**result, **locations, "dropped_groupings": dropped, "applied": True, "edit": edit}, args.out)
+    return 0
+
+
+def _run_fill_agentic(args: argparse.Namespace) -> int:
+    """Implements ``fill-agentic``: fill a routed-agentic unit with the agent's pipelines.
+
+    Replaces a routed-agentic unit's pipelines (``--members`` as a comma-separated list) with the
+    agent-authored pipeline(s) read from ``--pipelines-path`` (a JSON list of pipeline IR dicts, each
+    typically carrying ``AgenticComponentActivity`` nodes), and stores them in
+    ``metadata/agentic_conversion.json``. The membership must exactly match a routed-agentic component
+    or accepted grouping in the recorded, fingerprint-bound ``metadata/conversion_plan.json``, and the
+    merged report is always validated structurally before it is written back -- there is no bypass.
+    It is the only fill for a routed-agentic unit; ``convert --merge-agentic`` fills convert's own gaps.
+    """
+    from flowx.route_agentic import apply_agentic_output
+
+    members = [member.strip() for member in args.members.split(",") if member.strip()]
+    if not members:
+        print("fill-agentic requires a non-empty --members list.", file=sys.stderr)
+        return 2
+    try:
+        authored = json.loads(Path(args.pipelines_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"Failed to read {args.pipelines_path}: {error}", file=sys.stderr)
+        return 1
+    if not isinstance(authored, list):
+        print("--pipelines-path must contain a JSON list of pipeline IR dicts.", file=sys.stderr)
+        return 2
+    try:
+        result = apply_agentic_output(args.output_dir, members, authored)
+    except FileNotFoundError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Failed to apply the agent's output: {error}", file=sys.stderr)
         return 1
     _emit_json(result, args.out)
     return 0 if result.get("ok") else 1
@@ -519,6 +661,72 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional output file for the enrich result JSON; defaults to stdout.",
+    )
+
+    route = subparsers.add_parser(
+        "route",
+        help=(
+            "Write the per-component recommendation into metadata/conversion_plan.json (keeping the "
+            "decisions already there) plus metadata/routing_review.html; once every component is decided, "
+            "apply the plan to the translation report."
+        ),
+    )
+    route.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help=(
+            "Migration output directory (reads metadata/inventory.json + .work/translation_report.json; "
+            "records metadata/conversion_plan.json and edits the report for routed-agentic units)."
+        ),
+    )
+    route.add_argument(
+        "--plan-path",
+        type=Path,
+        default=None,
+        help=(
+            "Path to an authored conversion plan JSON (the decisions, or an edited copy of "
+            "conversion_plan.json) to validate, record, and apply. Omit to use "
+            "metadata/conversion_plan.json as edited."
+        ),
+    )
+    route.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Optional output file for the result JSON; defaults to stdout.",
+    )
+
+    fill_agentic = subparsers.add_parser(
+        "fill-agentic",
+        help=(
+            "Fill a routed-agentic unit: replace its pipelines with agent-authored pipeline(s), stored in "
+            "metadata/agentic_conversion.json and validated structurally before writing. It is the only fill "
+            "for a routed-agentic unit; convert --merge-agentic fills convert's own gaps."
+        ),
+    )
+    fill_agentic.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Migration output directory (reads and rewrites .work/translation_report.json).",
+    )
+    fill_agentic.add_argument(
+        "--members",
+        required=True,
+        help="Comma-separated pipeline names of the routed-agentic component or accepted grouping to replace.",
+    )
+    fill_agentic.add_argument(
+        "--pipelines-path",
+        type=Path,
+        required=True,
+        help="JSON file: a list of agent-authored pipeline IR dicts (typically AgenticComponentActivity nodes).",
+    )
+    fill_agentic.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Optional output file for the result JSON; defaults to stdout.",
     )
 
     record = subparsers.add_parser(
@@ -1017,13 +1225,18 @@ def _emit_json(payload: dict[str, Any], out: Path | None) -> None:
 def _write_modified_report(report_path: Path, pipelines: list[dict[str, Any]], out: Path) -> None:
     """Writes the configuration-stamped IR to *out* using the input report's shape.
 
+    A routing record on the input report is carried over unchanged, inside the ``pipelines``
+    wrapper, so package can still check the stamped report against the recorded plan.
+
     Args:
         report_path: Path the modified report was sourced from.  Used
-            only to detect whether the input was a single pipeline IR
-            or an aggregated translation report.
+            to detect whether the input was a single pipeline IR or an
+            aggregated translation report, and to read its routing record.
         pipelines: Stamped pipeline IR dicts to write.
         out: Destination path for the modified report.
     """
+    from flowx.route_agentic import ROUTING_RECORD_KEY, routing_record
+
     raw = json.loads(report_path.read_text(encoding="utf-8"))
     if isinstance(raw, dict) and "translations" in raw:
         by_name = {pipeline["name"]: pipeline for pipeline in pipelines}
@@ -1034,7 +1247,11 @@ def _write_modified_report(report_path: Path, pipelines: list[dict[str, Any]], o
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(raw, indent=2, default=str) + "\n", encoding="utf-8")
         return
-    payload = pipelines[0] if len(pipelines) == 1 else {"pipelines": pipelines}
+    record = routing_record(raw)
+    if record is not None:
+        payload: Any = {"pipelines": pipelines, ROUTING_RECORD_KEY: record}
+    else:
+        payload = pipelines[0] if len(pipelines) == 1 else {"pipelines": pipelines}
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
 

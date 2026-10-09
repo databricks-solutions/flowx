@@ -60,6 +60,19 @@ ADF JSON Exports
 - Datasets and linked services are parsed for context but not independently translated — they inform the activity translators.
 - Triggers are included in the inventory and translated in phase 2.
 
+## Between Discover and Convert: Enrich (default)
+
+**Skill:** `flowx:flowx-enrich`
+
+After discover writes the deterministic inventory, the standard flow enriches it before convert.
+Enrich is additive and contains **no LLM** — the agent authors, the library validates and merges:
+
+- **Enrich (default):** the agent authors an `insights` layer (factory-wide recommendation,
+  per-pipeline intent + recommended Databricks patterns, cross-pipeline relationships) and `enrich`
+  records it in `metadata/agentic_insights.json` (bound to the saved `source_graphs.json`) and
+  rebuilds `metadata/inventory.json` with it under a single additive `insights` key, leaving every
+  deterministic key byte-identical. Skippable for a deterministic-only, headless pass.
+
 ## Phase 2: Convert
 
 **Skill:** `flowx:flowx-convert`
@@ -87,6 +100,39 @@ ADF JSON Exports
 - The IR is an intermediate format that decouples translation from DABs generation. This allows the package phase to target different output formats in the future.
 - Each source's deterministic translators are standalone Python modules under `src/flowx/sources/<source>/` (e.g. ADF's live in `src/flowx/sources/adf/translators/`). Adding support for a new activity type means adding a new module there.
 - Agentic results are saved separately before merging, so they can be inspected, retried, or manually overridden.
+
+## Between Convert and Package: Route
+
+**Skill:** `flowx:flowx-route`
+
+Route runs after convert, on the deterministic report convert wrote (once every decision is made it
+refuses without one: "run the convert phase first"). Like enrich, it contains **no LLM**. Route
+groups pipelines into connected components over control lineage and writes its per-component
+recommendation, plus the groupings the insights suggest (components linked by an inferred
+relationship or a shared simplification pattern), straight into `metadata/conversion_plan.json`
+with every decision pending, and draws it as the standard review page
+`metadata/routing_review.html`. The customer decides `deterministic` or `agentic` per
+component and which groupings to accept (an accepted grouping is converted as one agentic unit);
+the agent records those decisions, and the routing conversation, in the plan and routes again. Once
+nothing is pending, route rebuilds `.work/translation_report.json` and `gaps.json` from convert's
+unchanged baseline, the stored fills of convert's own gaps, the plan, and the agent's outputs:
+deterministic units stay as-is; agentic units with a stored output get it applied; agentic units
+without one become placeholders. A fully-deterministic plan (or no plan) leaves the report
+byte-identical to the baseline — the non-breaking guarantee. Route stamps a routing record onto the
+report (per unit: members, decision, outcome, output hash, and fingerprint) and every re-route
+rebuilds deterministically and idempotently. A fresh convert (a report without a routing record)
+becomes the new baseline on the next route.
+
+Routed-agentic units are then filled only by `fill-agentic`, which applies authored pipelines (N→M,
+e.g. a Lakeflow Connect collapse, or one same-named pipeline to stay 1:1), typically using
+`AgenticComponentActivity` nodes, and stores them in `metadata/agentic_conversion.json`. Same authored
+pipelines as already applied returns "already applied, unchanged" and writes nothing (idempotent).
+Different pipelines replace the stored output, recorded in its `replaced` history, and rebuild.
+`convert --merge-agentic` fills convert's own gaps and refuses routed-agentic pipelines; after routing,
+an in-place merge into `.work/translation_report.json` is also stored as a gap fill, so the next
+rebuild keeps it and the baseline stays as convert wrote it. Package refuses until every agentic unit
+is filled. Route, fill-agentic and merge never rewrite modify's configured report; package asks to
+re-run `modify` when it is out of date.
 
 ## Phase 3: Package
 

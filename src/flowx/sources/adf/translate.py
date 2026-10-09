@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import re
+import sys
 from collections import defaultdict
 from dataclasses import asdict, replace
 from datetime import datetime
@@ -1368,7 +1369,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.merge_agentic:
         if not args.report or not args.agentic_results:
             parser.error("--merge-agentic requires --report and --agentic-results")
-        merged_count, unmatched_count = ir_serde.merge_agentic_results(args.report, args.agentic_results, args.output)
+        try:
+            merged_count, unmatched_count = ir_serde.merge_agentic_results(
+                args.report, args.agentic_results, args.output
+            )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
         print("\nAgentic Merge Summary")
         print("=====================")
         print(f"Merged:    {merged_count}")
@@ -1432,10 +1439,12 @@ def main(argv: list[str] | None = None) -> int:
     report_file.write_text(json.dumps(report_payload, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote translation_report.json to %s", report_file)
 
+    gaps_file = work_dir / "gaps.json"
     if all_gaps:
-        gaps_file = work_dir / "gaps.json"
         gaps_file.write_text(json.dumps(all_gaps, indent=2, default=str), encoding="utf-8")
         logger.info("Wrote %d gap(s) to %s", len(all_gaps), gaps_file)
+    else:
+        gaps_file.unlink(missing_ok=True)
 
     total = total_deterministic + total_agentic + total_unsupported
     print("\nTranslation Summary")

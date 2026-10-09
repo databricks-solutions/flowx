@@ -55,6 +55,9 @@ Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("enrich", {"output_dir": "...", "action": "prepare"})  # optional: read inventory.json to author insights
   flowx("enrich", {"output_dir": "...", "insights": {...}})   # optional: record agent-authored insights
   flowx("convert", {"source": "adf", "output_dir": "..."})
+  flowx("route", {"output_dir": "..."})                       # optional: write the plan + review page
+  flowx("route", {"output_dir": "...", "plan": {...}})        # record the decisions, apply once decided
+  flowx("fill_agentic", {"output_dir": "...", "members": [...], "pipelines": [...]})  # fill an agentic unit
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
   flowx("package", {"output_dir": "...", "catalog": "main", "schema": "default"})
@@ -346,6 +349,95 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
         return _run(str(inline_path))
 
 
+def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
+    """Record the conversion plan, and apply it once every component is decided.
+
+    With **no** ``plan`` / ``plan_path``, route writes its recommendation straight into
+    ``metadata/conversion_plan.json`` (keeping the decisions already recorded there, every other one
+    pending, except the components of an accepted grouping route no longer suggests, which go back to
+    pending and are listed under ``dropped_groupings``) plus ``metadata/routing_review.html``, and
+    applies the plan once nothing is pending. With a plan (``plan`` inline or ``plan_path`` -- at most
+    one; the decisions, or an edited copy of the recorded plan) it records those decisions instead.
+    Either way the recorded plan and the review page come back like ``enrich prepare`` returns the
+    inventory: inline under ``bundle``, or uploaded to
+    ``output_volume_path`` / ``output_workspace_path``, because a hosted agent cannot read the server's
+    ``output_dir``; edit the plan and call route again with it as ``plan``. The returned ``ok``
+    reflects the CLI's success; ``result`` carries its JSON.
+    """
+    output_dir = p.get("output_dir", "./flowx_output")
+    plan = p.get("plan")
+    plan_path = p.get("plan_path")
+    if plan is not None and plan_path is not None:
+        return {"ok": False, "error": "provide at most one of 'plan' (inline object) or 'plan_path'."}
+
+    def _run(extra: list[str]) -> dict[str, Any]:
+        result = runner.run_adapter(["route", "--output-dir", output_dir, *extra])
+        payload = runner.parse_stdout_json(result)
+        ok = bool(isinstance(payload, dict) and payload.get("ok"))
+        return {"ok": ok, "result": payload, "process": result.as_dict(), **_route_files(p, Path(output_dir))}
+
+    if plan is None and plan_path is None:
+        return _run([])
+    if plan_path is not None:
+        return _run(["--plan-path", str(plan_path)])
+    with tempfile.TemporaryDirectory(prefix="flowx-plan-") as temporary:
+        inline_path = Path(temporary) / "conversion_plan.json"
+        inline_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+        return _run(["--plan-path", str(inline_path)])
+
+
+def _route_files(p: dict[str, Any], output_dir: Path) -> dict[str, Any]:
+    """Deliver the recorded plan and the routing review page, when route wrote them."""
+    metadata = output_dir / "metadata"
+    files = [metadata / name for name in ("conversion_plan.json", "routing_review.html")]
+    if not any(path.is_file() for path in files):
+        return {}
+    with tempfile.TemporaryDirectory(prefix="flowx-route-") as temporary:
+        for path in files:
+            if path.is_file():
+                shutil.copy(path, temporary)
+        return _bundle_output(p, Path(temporary))
+
+
+def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
+    """Fill a routed-agentic unit: replace its pipelines with agent-authored pipeline(s).
+
+    ``members`` (a list of pipeline names, or a comma-separated string) names the routed-agentic
+    component or accepted grouping to replace; the authored pipeline IR dicts come inline as
+    ``pipelines`` (a JSON list) or via ``pipelines_path`` (exactly one, staged to a temp file so the
+    same CLI contract runs on both). They are stored in ``metadata/agentic_conversion.json``. The merged
+    report is validated structurally before it is written back; ``ok`` is False (nothing written) when
+    a structural invariant is violated. It is the only fill for a routed-agentic unit;
+    ``merge_agentic`` fills convert's own gaps only.
+    """
+    output_dir = p.get("output_dir", "./flowx_output")
+    members = p.get("members")
+    if isinstance(members, list):
+        members = ",".join(str(member) for member in members)
+    if not members:
+        return {"ok": False, "error": "provide 'members' (a list of pipeline names or comma-separated string)."}
+
+    pipelines = p.get("pipelines")
+    pipelines_path = p.get("pipelines_path")
+    if (pipelines is None) == (pipelines_path is None):
+        return {"ok": False, "error": "provide exactly one of 'pipelines' (inline list) or 'pipelines_path'."}
+
+    def _run(path: str) -> dict[str, Any]:
+        args: list[Any] = ["fill-agentic", "--output-dir", output_dir, "--members", members]
+        args += ["--pipelines-path", path]
+        result = runner.run_adapter(args)
+        payload = runner.parse_stdout_json(result)
+        ok = bool(isinstance(payload, dict) and payload.get("ok"))
+        return {"ok": ok, "result": payload, "process": result.as_dict()}
+
+    if pipelines_path is not None:
+        return _run(str(pipelines_path))
+    with tempfile.TemporaryDirectory(prefix="flowx-fill-") as temporary:
+        inline_path = Path(temporary) / "authored_pipelines.json"
+        inline_path.write_text(json.dumps(pipelines, indent=2), encoding="utf-8")
+        return _run(str(inline_path))
+
+
 def _cmd_inspect(p: dict[str, Any]) -> dict[str, Any]:
     args: list[Any] = ["inspect", p["report_path"]]
     for answer in p.get("answers") or []:
@@ -549,6 +641,8 @@ _COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "merge_agentic": _cmd_merge_agentic,
     "resolve_agentic": _cmd_resolve_agentic,
     "enrich": _cmd_enrich,
+    "route": _cmd_route,
+    "fill_agentic": _cmd_fill_agentic,
     "inspect": _cmd_inspect,
     "apply_answers": _cmd_apply_answers,
     "materialize_lookup": _cmd_materialize_lookup,
@@ -597,7 +691,12 @@ def build_server() -> FastMCP:
         - "convert": source(req), (one ADF source key | airflow_source_path), output_dir, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list).
         - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
-          merge ADF agent results. Airflow's legacy name-based merge is disabled; use resolve_agentic.
+          merge ADF agent results for convert's own agentic gaps. Refuses (writing nothing) any
+          result landing in a pipeline the routing record routes agentic — fill those with
+          fill_agentic. After routing, a merge written in place into the live
+          .work/translation_report.json is also stored as a gap fill in metadata/agentic_conversion.json,
+          so every rebuild re-applies it on top of the unchanged deterministic baseline; a merge written
+          to output_path stores nothing. Airflow's legacy name-based merge is disabled; use resolve_agentic.
         - "resolve_agentic": source(req: "airflow"), action(req: prepare | stage | apply), output_dir,
           airflow_source_path, report_path, gap_id, candidates, replace, accept_gap | accept_gaps, accept_all,
           review_complete, review_manifest, reset —
@@ -615,6 +714,40 @@ def build_server() -> FastMCP:
           reading inventory.json + the source artifacts first, setting `authored_against` (optional,
           checked when given) to its source_graphs_sha256 when it records one and leaving it out
           otherwise (see the flowx-enrich skill's insights.md).
+        - "route": output_dir(req), at most one of plan(inline object) | plan_path, output_volume_path,
+          output_workspace_path (run convert first) — groups pipelines into connected
+          components over control lineage and writes the recommendation straight into
+          metadata/conversion_plan.json: per component BOTH conversion options (deterministic capability
+          + motif/coverage evidence, and the agentic recommended patterns with any simplification
+          pattern surfaced) and a `decision`, plus the `suggested_groupings` (whole components the
+          insights link by an inferred relationship or a shared simplification pattern, each with its
+          basis and `accepted`) and an optional `conversation` (the questions asked and the user's
+          answers). With NO plan it keeps the decisions already recorded and leaves every other
+          component pending (decision null), except the components of an accepted grouping route no
+          longer suggests, which go back to pending and are listed under `dropped_groupings`; with a
+          plan (the decisions, or an edited copy of the recorded plan) it records those. It also
+          writes metadata/routing_review.html, the standard
+          review page. The plan and the page come back under `bundle` (or are uploaded). While a
+          decision is pending nothing is applied; once every component is decided route rebuilds the
+          translation report from the unchanged baseline, the stored gap fills, the plan, and the
+          agent's outputs in metadata/agentic_conversion.json: deterministic units stay as-is, agentic
+          units with a stored output get it applied, agentic without one become placeholders (with no
+          agentic decision the report stays byte-identical to the baseline). An accepted grouping is one
+          agentic unit. The plan is freely editable and can be re-applied as often as needed. Route
+          stamps a routing record onto the report (per unit: members, decision, outcome, output_sha256,
+          fingerprint); every re-route rebuilds deterministically and idempotently.
+        - "fill_agentic": output_dir(req), members(req: list of pipeline names or comma-separated
+          string), one of pipelines(inline list of pipeline IR dicts) | pipelines_path — fill a
+          routed-agentic unit with agent-authored pipeline(s) (typically AgenticComponentActivity nodes),
+          stored in metadata/agentic_conversion.json. `members` must exactly match a routed-agentic
+          component or accepted grouping in the recorded, fingerprint-bound conversion_plan.json and the
+          report's routing record. Same authored pipelines as already stored returns already_applied:
+          true (idempotent, no writes). Different pipelines replace the stored output (recorded in its
+          `replaced` history) and rebuild. Authored pipelines must hold no placeholder task and no name
+          that shares a bundle folder with another pipeline. The merged report is always validated
+          structurally before writing (all-or-nothing). It is the only fill for a routed-agentic unit
+          (to keep a pipeline 1:1, author one same-named pipeline); package refuses until every agentic
+          unit is filled.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

@@ -178,6 +178,9 @@ Where:
   `<output_dir>/.work/translation_report.stamped.json` (falling back to the un-stamped report).
   Pass `--report <path>` only to override.
 - Other parameters are from step 2
+- Before writing anything, `package` checks the routing state and refuses, for example while the
+  recorded `metadata/conversion_plan.json` is stale, has a decision pending, or has an agentic unit
+  still unfilled; the full list and each remedy are in the `flowx-route` skill (Step 4).
 - After a successful build, `package` **prunes the transient `<output_dir>/.work/`** so the
   final tree contains only the bundle and the kept `metadata/` files. Pass `--keep-intermediates`
   to retain `.work/` for debugging.
@@ -341,5 +344,6 @@ All under the shared `<output_dir>`:
 | `metadata/profile_report.csv` | Per-pipeline complexity report (from profile) |
 | `metadata/<pipeline>.arm.json` | Verbatim original ADF/ARM source (from discover) |
 | `metadata/configuration.json` | Collected configuration answers (from modify) |
+| `metadata/route_audit.json` | What each routing unit was converted to; written only when a routing plan is recorded (see `flowx-route`) |
 
 > **Notification destinations.** When a `activity_and_notify` motif was opted into a Slack/Teams/PagerDuty/Generic-Webhook destination, the destination is created (or reused by display name) via the SDK at **prompt time** (the `modify` phase), and its resolved id is carried in the report; package simply wires that id into the task's `webhook_notifications`. If the report has no pre-resolved id (creation was deferred or failed earlier), package retries the create; failing that — e.g. no workspace auth — a `notification_destination` setup task is emitted in SETUP.md instead and the task ships without notifications. Email destinations use raw `email_notifications` and never create an SDK destination.
