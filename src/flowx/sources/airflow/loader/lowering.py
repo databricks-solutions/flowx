@@ -49,6 +49,19 @@ from flowx.sources.airflow.loader.visitor import _DagVisitor
 _DATABRICKS_JOB_TAG_LIMIT = 25
 
 
+def _replace_with_placeholder(ctx: ops.OperatorContext, current: Activity, comment: str) -> PlaceholderActivity:
+    """Replaces *current* with a placeholder, keeping what a builder's own placeholder recorded.
+
+    A builder placeholder can carry more than the call source, such as a Teradata script inventory or a
+    loaded template file, so a later guard adds its reason instead of dropping that record.
+    """
+    replacement = ops.build_placeholder_with_comment(ctx, comment)
+    if isinstance(current, PlaceholderActivity):
+        replacement.comment = f"{current.comment} {comment}"
+        replacement.raw_definition = {**(current.raw_definition or {}), **(replacement.raw_definition or {})}
+    return replacement
+
+
 def _load_airflow_module(
     dag_path: Path,
     source: str,
@@ -350,13 +363,14 @@ def _load_airflow_module(
         builder = ops.OPERATOR_REGISTRY.get(operator, ops.build_placeholder)
         activity = builder(ctx)
         if var in dataproc_plan.retained_reasons:
-            activity = ops.build_placeholder_with_comment(ctx, dataproc_plan.retained_reasons[var])
+            activity = _replace_with_placeholder(ctx, activity, dataproc_plan.retained_reasons[var])
         elif var in dataproc_plan.clusters and not isinstance(activity, PlaceholderActivity):
             activity.cluster = dict(dataproc_plan.clusters[var])
         activity.depends_on = depends_on
         if trigger_mapping.status == "unsupported":
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 f"Airflow trigger_rule {trigger_mapping.rule!r} is unsupported. {trigger_mapping.message}",
             )
             activity.depends_on = depends_on
@@ -387,11 +401,11 @@ def _load_airflow_module(
         unconsumed = ops.unconsumed_kwargs(operator, kwargs)
         if unconsumed:
             names = ", ".join(sorted(unconsumed))
-            activity = ops.build_placeholder_with_comment(
-                ctx,
+            note = (
                 f"Airflow {operator} argument(s) {names} are not represented by the Databricks task; "
-                "translate them explicitly.",
+                "translate them explicitly."
             )
+            activity = _replace_with_placeholder(ctx, activity, note)
             activity.depends_on = depends_on
             semantic_findings.append(
                 _semantic_finding(
@@ -407,8 +421,9 @@ def _load_airflow_module(
         unrepresented_policy = templating.unrepresented_retry_policy_arguments(visitor.default_args, kwargs)
         if unrepresented_policy:
             names = ", ".join(unrepresented_policy)
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 f"Airflow task policy argument(s) {names} cannot be represented statically; "
                 "resolve the policy before migration.",
             )
@@ -429,8 +444,9 @@ def _load_airflow_module(
         date_values = sorted(logical_dates.logical_date_values(activity))
         date_gap = logical_semantics.unavailable_reason(set(date_values)) if date_values else None
         if date_gap is not None:
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 f"Airflow interval macro(s) {', '.join(date_values)} cannot be reproduced: {date_gap}.",
             )
             activity.depends_on = depends_on
@@ -448,8 +464,9 @@ def _load_airflow_module(
         unresolved_templates = _unresolved_activity_templates(activity)
         if unresolved_templates:
             expressions = ", ".join(sorted(unresolved_templates))
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 f"Airflow template expression(s) {expressions} have no deterministic Databricks mapping; "
                 "translate the value manually.",
             )
@@ -473,8 +490,9 @@ def _load_airflow_module(
             partial_note = (
                 " The mapping also contains .partial() fixed arguments." if var in visitor.partial_mapped else ""
             )
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 "Classic Airflow dynamic mapping cannot be emitted until every mapped argument is "
                 f"bound into the inner task ({', '.join(mapped_names) or 'unknown mapping'}).{partial_note}",
             )
