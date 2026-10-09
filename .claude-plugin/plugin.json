@@ -13,6 +13,7 @@
     "./skills/flowx-extract-metadata",
     "./skills/flowx-resolve-airflow-gaps",
     "./skills/flowx-discover",
+    "./skills/flowx-profile",
     "./skills/flowx-convert",
     "./skills/flowx-package",
     "./skills/flowx-deploy",

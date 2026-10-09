@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         Exit code (0 on success, non-zero on usage or runtime errors).
     """
     raw_args = list(sys.argv[1:]) if argv is None else list(argv)
-    if raw_args and raw_args[0] in ("extract", "discover", "convert", "package"):
+    if raw_args and raw_args[0] in ("extract", "discover", "convert", "package", "profile"):
         # Phase runners are pure pass-through to the underlying phase CLI;
         # bypass argparse so forwarded --flags aren't misparsed at this level.
         return _run_phase(raw_args[0], raw_args[1:])
@@ -576,10 +576,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # Unified phase runners: `adapter <phase> --source <name> -- <flags>` routes extract/discover/
-    # convert to the named source's phase module. --source is required for those phases (no default);
-    # package is source-independent. --source-path (and each source's own alias, e.g.
+    # convert/profile to the named source's phase module. --source is required for those phases (no
+    # default); package is source-independent. --source-path (and each source's own alias, e.g.
     # --adf-source-path) normalise to --source-dir.
-    for _phase in ("extract", "discover", "convert", "package"):
+    for _phase in ("extract", "discover", "convert", "package", "profile"):
         _runner = subparsers.add_parser(
             _phase,
             help=f"Run the {_phase} phase (routes to the --source's phase module; forwards remaining flags).",
@@ -631,18 +631,19 @@ def _run_phase(phase: str, forward: list[str]) -> int:
 
     ``python -m flowx.adapter discover --source airflow --source-path X --output-dir Y`` runs
     ``flowx.sources.airflow.discover.main(["--source-dir", "X", "--output-dir", "Y"])`` in this same
-    interpreter -- no second ``python -m`` spawn.  ``--source`` is required for extract/discover/convert
+    interpreter -- no second ``python -m`` spawn.  ``--source`` is required for extract/discover/convert/profile
     (no default: the user must choose a source); ``package`` is source-independent and always routes
     to the shared bundler.  The generic ``--source-path`` and each source's own alias normalise to
     the phase CLI's ``--source-dir``.
 
     Args:
-        phase: One of ``"extract"`` / ``"discover"`` / ``"convert"`` / ``"package"``.
+        phase: One of ``"extract"`` / ``"discover"`` / ``"convert"`` / ``"package"`` / ``"profile"``.
         forward: Tokens after the phase name (flags for the phase CLI).
 
     Returns:
         The phase's exit code (0 on success), or 2 when ``--source`` is missing, names an
-        unknown source, or (for ``extract``) names a source that can't be extracted live.
+        unknown source, or names a source that can't be extracted live (``extract``) or has no
+        profiler (``profile``).
     """
     import importlib
 
@@ -669,6 +670,12 @@ def _run_phase(phase: str, forward: list[str]) -> int:
                 return 2
             module_path = source.extract_module
             aliases = {}
+        elif phase == "profile":
+            if source.profile_module is None:
+                print(f"profiling is not supported for the {source_name} source", file=sys.stderr)
+                return 2
+            module_path = source.profile_module
+            aliases = {_SOURCE_PATH_FLAG: "--source-dir", source.source_path_flag: "--source-dir"}
         else:
             module_path = source.discover_module if phase == "discover" else source.convert_module
             aliases = {_SOURCE_PATH_FLAG: "--source-dir", source.source_path_flag: "--source-dir"}

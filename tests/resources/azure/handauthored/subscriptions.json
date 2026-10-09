@@ -1,0 +1,4 @@
+{"value": [
+  {"subscriptionId": "SUB", "displayName": "Demo Subscription", "state": "Enabled"},
+  {"subscriptionId": "OTHER", "displayName": "Other Subscription", "state": "Enabled"}
+]}

@@ -71,6 +71,13 @@ path for discover, and `--emit-notebook` writes a notebook the user runs themsel
 optional `azure` extra (`azure-identity`, `requests`). The `flowx-extract-metadata` skill drives it;
 the MCP tool has no `extract` command yet.
 
+A separate, standalone **Profile** phase (`python -m flowx.adapter profile --source adf`, ADF only)
+estimates current ADF spend from a live Azure scan and writes `metadata/tco/cost_comparison.{csv,md}`
+(overwritten each run). It needs the optional `azure` extra (`pip install -e '.[azure]'`, or
+`pip install 'azure-identity>=1.17'` in the plugin venv) and Azure credentials
+(`az login` locally; a service principal via env vars on Genie Code / CI). It never reads
+`metadata/inventory.json`.
+
 ### Key Patterns
 - `@dataclass(slots=True, kw_only=True)` for all models
 - Immutable `TranslationContext` threaded through visitors
@@ -101,6 +108,7 @@ the MCP tool has no `extract` command yet.
 | `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK |
 | `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table |
 | `sources/adf/extract/` | Live ADF extraction (`core.py`, self-contained and inlined into the generated notebook), export/path checks (`layout.py`), notebook rendering (`notebook.py`) |
+| `sources/adf/profiler/` | Live ADF scan + cost estimation for the `profile` phase (optional `azure` extra; Azure deps imported lazily) |
 
 ## Activity Types
 
