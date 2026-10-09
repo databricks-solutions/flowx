@@ -11,6 +11,8 @@ from flowx.models.adf_ast import (
 from flowx.models.ir import (
     Activity,
     Dependency,
+    ForEachActivity,
+    LookupActivity,
     MotifActivity,
     Pipeline,
 )
@@ -134,6 +136,39 @@ class TestDetectorParentChild:
 
 
 class TestCollapser:
+    def test_collapse_repairs_non_consolidated_downstream_lookup_reference(self):
+        from flowx.models.motifs import DetectedMotif
+
+        pipeline = Pipeline(
+            name="test",
+            tasks=[
+                LookupActivity(name="Get List", task_key="Get_List"),
+                ForEachActivity(
+                    name="Copy Each",
+                    task_key="Copy_Each",
+                    depends_on=[Dependency(task_key="Get_List")],
+                    items_expression="{{tasks.Get_List.values.result}}",
+                ),
+                ForEachActivity(
+                    name="Transform Each",
+                    task_key="Transform_Each",
+                    depends_on=[Dependency(task_key="Copy_Each")],
+                    items_expression="{{tasks.Get_List.values.result}}",
+                ),
+            ],
+        )
+        detected = DetectedMotif(
+            definition=MOTIF_METADATA_DRIVEN_BULK_COPY,
+            matched_activities=["Get List", "Copy Each"],
+        )
+
+        result = collapse_motifs(pipeline, [detected])
+
+        motif = next(task for task in result.tasks if isinstance(task, MotifActivity))
+        downstream = next(task for task in result.tasks if task.task_key == "Transform_Each")
+        assert motif.consolidate_metadata_driven is False
+        assert downstream.items_expression == f"{{{{tasks.{motif.task_key}_control_lookup.values.items}}}}"
+
     def test_collapse_replaces_activities_with_motif(self):
         pipeline = Pipeline(
             name="test",

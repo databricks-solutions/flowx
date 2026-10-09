@@ -20,10 +20,7 @@ from flowx.adapter import (
     gather_options,
     validate_answer,
 )
-from flowx.adapter.__main__ import (
-    _inline_collapsed_lookup_references,
-    _stamp_lookup_values_into_metadata_driven_motifs,
-)
+from flowx.adapter.__main__ import _stamp_lookup_values_into_metadata_driven_motifs
 from flowx.adapter.__main__ import main as adapter_cli_main
 from flowx.adapter.constants import (
     COMPUTE_MODE_CLASSIC_MULTI_NODE,
@@ -43,6 +40,7 @@ from flowx.adapter.constants import (
 from flowx.adapter.operations import allowed_values_for, enum_for
 from flowx.models.ir import (
     CopyActivity,
+    FilterActivity,
     ForEachActivity,
     IfConditionActivity,
     MotifActivity,
@@ -57,6 +55,7 @@ from flowx.models.motifs import (
     MOTIF_INCREMENTAL_LOAD_WATERMARK,
     DetectedMotif,
 )
+from flowx.motifs.collapser import inline_collapsed_lookup_references
 
 
 def _make_base(name: str = "task", task_key: str | None = None) -> dict[str, Any]:
@@ -1421,7 +1420,7 @@ class TestInlineCollapsedLookupReferences:
         foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
         pipeline = Pipeline(name="p", tasks=[motif, foreach])
 
-        result = _inline_collapsed_lookup_references(pipeline)
+        result = inline_collapsed_lookup_references(pipeline)
 
         assert result.tasks[1].items_expression == json.dumps(self._ROWS)
 
@@ -1431,7 +1430,7 @@ class TestInlineCollapsedLookupReferences:
         foreach = self._downstream_foreach("{{tasks.SomeOtherTask.values.result}}")
         pipeline = Pipeline(name="p", tasks=[motif, foreach])
 
-        result = _inline_collapsed_lookup_references(pipeline)
+        result = inline_collapsed_lookup_references(pipeline)
 
         assert result.tasks[1].items_expression == "{{tasks.SomeOtherTask.values.result}}"
 
@@ -1443,7 +1442,7 @@ class TestInlineCollapsedLookupReferences:
         foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
         pipeline = Pipeline(name="p", tasks=[motif, foreach])
 
-        result = _inline_collapsed_lookup_references(pipeline)
+        result = inline_collapsed_lookup_references(pipeline)
 
         assert result.tasks[1].items_expression == "{{tasks.motif_mdbc_control_lookup.values.items}}"
 
@@ -1454,7 +1453,7 @@ class TestInlineCollapsedLookupReferences:
         foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.tables}}")
         pipeline = Pipeline(name="p", tasks=[motif, foreach])
 
-        result = _inline_collapsed_lookup_references(pipeline)
+        result = inline_collapsed_lookup_references(pipeline)
 
         assert result.tasks[1].items_expression == "{{tasks.LKP_GetActiveTables.values.tables}}"
 
@@ -1466,7 +1465,7 @@ class TestInlineCollapsedLookupReferences:
         foreach = self._downstream_foreach("{{tasks.FE_CopyEachTable.values.result}}")
         pipeline = Pipeline(name="p", tasks=[motif, foreach])
 
-        result = _inline_collapsed_lookup_references(pipeline)
+        result = inline_collapsed_lookup_references(pipeline)
 
         assert result.tasks[1].items_expression == "{{tasks.FE_CopyEachTable.values.result}}"
 
@@ -1478,7 +1477,17 @@ class TestInlineCollapsedLookupReferences:
         pipeline = Pipeline(name="p", tasks=[motif, foreach])
 
         stamped = _stamp_lookup_values_into_metadata_driven_motifs(pipeline, self._ROWS)
-        result = _inline_collapsed_lookup_references(stamped)
+        result = inline_collapsed_lookup_references(stamped)
+
+        assert result.tasks[1].items_expression == json.dumps(self._ROWS)
+
+    def test_stamp_replaces_previously_repointed_dynamic_reference(self):
+        motif = _consolidated_bulk_copy_motif(task_key="motif_mdbc", lookup_values=[])
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        dynamically_repaired = inline_collapsed_lookup_references(Pipeline(name="p", tasks=[motif, foreach]))
+
+        stamped = _stamp_lookup_values_into_metadata_driven_motifs(dynamically_repaired, self._ROWS)
+        result = inline_collapsed_lookup_references(stamped)
 
         assert result.tasks[1].items_expression == json.dumps(self._ROWS)
 
@@ -1492,9 +1501,22 @@ class TestInlineCollapsedLookupReferences:
         )
         pipeline = Pipeline(name="p", tasks=[motif, outer])
 
-        result = _inline_collapsed_lookup_references(pipeline)
+        result = inline_collapsed_lookup_references(pipeline)
 
         assert result.tasks[1].inner_activities[0].items_expression == json.dumps(self._ROWS)
+
+    def test_rewrites_filter_items_expression(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        filter_activity = FilterActivity(
+            **_make_base("FilterTables"),
+            items_expression="  {{tasks.LKP_GetActiveTables.values.result}} \n",
+            condition_expression="@equals(item().enabled, true)",
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, filter_activity])
+
+        result = inline_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == json.dumps(self._ROWS)
 
     def test_rewrites_reference_inside_if_branch(self):
         motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
@@ -1508,7 +1530,7 @@ class TestInlineCollapsedLookupReferences:
         )
         pipeline = Pipeline(name="p", tasks=[motif, gate])
 
-        result = _inline_collapsed_lookup_references(pipeline)
+        result = inline_collapsed_lookup_references(pipeline)
 
         assert result.tasks[1].if_true_activities[0].items_expression == json.dumps(self._ROWS)
 
@@ -1522,7 +1544,7 @@ class TestInlineCollapsedLookupReferences:
         )
         pipeline = Pipeline(name="p", tasks=[motif, switch])
 
-        result = _inline_collapsed_lookup_references(pipeline)
+        result = inline_collapsed_lookup_references(pipeline)
 
         assert result.tasks[1].cases[0].activities[0].items_expression == json.dumps(self._ROWS)
 
@@ -1546,7 +1568,7 @@ class TestInlineCollapsedLookupReferences:
         )
         pipeline = Pipeline(name="p", tasks=[motif, gate])
 
-        result = _inline_collapsed_lookup_references(pipeline)
+        result = inline_collapsed_lookup_references(pipeline)
 
         deepest = result.tasks[1].if_false_activities[0].default_activities[0].inner_activities[0]
         assert deepest.items_expression == json.dumps(self._ROWS)

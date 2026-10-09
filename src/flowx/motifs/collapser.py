@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
+import re
 from typing import Any
 
-from flowx.models.ir import Activity, CopyActivity, Dependency, LookupActivity, MotifActivity, Pipeline
+from flowx.models.ir import (
+    Activity,
+    CopyActivity,
+    Dependency,
+    FilterActivity,
+    ForEachActivity,
+    IfConditionActivity,
+    LookupActivity,
+    MotifActivity,
+    Pipeline,
+    SwitchActivity,
+)
 from flowx.models.motifs import DetectedMotif
 
 logger = logging.getLogger(__name__)
+
+_WHOLE_LOOKUP_RESULT_REF = re.compile(r"^\s*\{\{tasks\.([^.]+)\.values\.result\}\}\s*$")
+_WHOLE_CONTROL_LOOKUP_ITEMS_REF = re.compile(r"^\s*\{\{tasks\.([^.]+)_control_lookup\.values\.items\}\}\s*$")
 
 
 def collapse_motifs(
@@ -63,7 +80,7 @@ def collapse_motifs(
 
     _rewire_dependencies(new_tasks, motif_task_keys)
 
-    return Pipeline(
+    collapsed_pipeline = Pipeline(
         name=pipeline.name,
         description=pipeline.description,
         parameters=pipeline.parameters,
@@ -78,6 +95,83 @@ def collapse_motifs(
         audit=dict(pipeline.audit),
         translation_configuration=pipeline.translation_configuration,
     )
+    return inline_collapsed_lookup_references(collapsed_pipeline)
+
+
+def inline_collapsed_lookup_references(pipeline: Pipeline) -> Pipeline:
+    """Repoints iterator references to Lookups replaced by ingestion motifs.
+
+    A collapsed ``Lookup -> ForEach -> Copy`` chain removes the Lookup task, but
+    separate downstream ForEach or Filter activities can still reference its row
+    array through ``{{tasks.<lookup>.values.result}}``. Expression translation
+    uses ``result`` for both Lookup ``output.value`` and ``output.firstRow``; this
+    repair is limited to whole iterator expressions so scalar semantics elsewhere
+    remain unchanged.
+
+    Dynamic motifs expose the rows from a synthesized ``<task_key>_control_lookup``
+    task. When lookup rows have been materialized, the rows are inlined as JSON.
+
+    Args:
+        pipeline: Pipeline IR containing collapsed motif activities.
+
+    Returns:
+        A new pipeline with resolvable iterator references, or the original
+        pipeline when no collapsed Lookup can be resolved.
+    """
+    replacement_by_lookup_key: dict[str, str] = {}
+    replacement_by_motif_key: dict[str, str] = {}
+    for task in pipeline.tasks:
+        if not isinstance(task, MotifActivity) or task.databricks_replacement != "for_each_ingestion":
+            continue
+        lookup_key = task.motif_config.get("lookup_scope")
+        if not lookup_key:
+            continue
+        replacement = (
+            json.dumps(task.lookup_values)
+            if task.lookup_values
+            else f"{{{{tasks.{task.task_key}_control_lookup.values.items}}}}"
+        )
+        replacement_by_lookup_key[lookup_key] = replacement
+        replacement_by_motif_key[task.task_key] = replacement
+    if not replacement_by_lookup_key:
+        return pipeline
+
+    def rewrite_all(activities: list[Activity]) -> list[Activity]:
+        return [rewrite(activity) for activity in activities]
+
+    def rewrite_items_expression(activity: ForEachActivity | FilterActivity) -> str:
+        lookup_match = _WHOLE_LOOKUP_RESULT_REF.match(activity.items_expression or "")
+        if lookup_match:
+            return replacement_by_lookup_key.get(lookup_match.group(1), activity.items_expression)
+        control_match = _WHOLE_CONTROL_LOOKUP_ITEMS_REF.match(activity.items_expression or "")
+        if control_match:
+            return replacement_by_motif_key.get(control_match.group(1), activity.items_expression)
+        return activity.items_expression
+
+    def rewrite(activity: Activity) -> Activity:
+        if isinstance(activity, ForEachActivity):
+            return dataclasses.replace(
+                activity,
+                items_expression=rewrite_items_expression(activity),
+                inner_activities=rewrite_all(activity.inner_activities),
+            )
+        if isinstance(activity, FilterActivity):
+            return dataclasses.replace(activity, items_expression=rewrite_items_expression(activity))
+        if isinstance(activity, IfConditionActivity):
+            return dataclasses.replace(
+                activity,
+                if_true_activities=rewrite_all(activity.if_true_activities),
+                if_false_activities=rewrite_all(activity.if_false_activities),
+            )
+        if isinstance(activity, SwitchActivity):
+            return dataclasses.replace(
+                activity,
+                cases=[dataclasses.replace(case, activities=rewrite_all(case.activities)) for case in activity.cases],
+                default_activities=rewrite_all(activity.default_activities),
+            )
+        return activity
+
+    return dataclasses.replace(pipeline, tasks=rewrite_all(pipeline.tasks))
 
 
 def _find_motif_for_activity(

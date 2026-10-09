@@ -446,6 +446,39 @@ class TestWriteBundle:
         task_keys = {task["task_key"] for task in workflows[0].tasks}
         assert task_keys == {"pause", "run_nb"}
 
+    def test_raw_report_packaging_repairs_collapsed_lookup_reference(self, tmp_path):
+        report = {
+            "name": "raw_pipeline",
+            "tasks": [
+                {
+                    "type": "MotifActivity",
+                    "name": "Metadata Bulk Copy",
+                    "task_key": "motif_metadata_bulk_copy",
+                    "motif_id": "metadata_driven_bulk_copy",
+                    "display_name": "Metadata Bulk Copy",
+                    "databricks_replacement": "for_each_ingestion",
+                    "matched_activity_names": ["Get_List", "Copy_Each"],
+                    "motif_config": {"lookup_scope": "Get_List"},
+                },
+                {
+                    "type": "ForEachActivity",
+                    "name": "Transform Each",
+                    "task_key": "Transform_Each",
+                    "items_expression": "{{tasks.Get_List.values.result}}",
+                },
+            ],
+        }
+        report_path = tmp_path / "translation_report.json"
+        report_path.write_text(json.dumps(report))
+
+        workflows, _ = _load_report(report_path)
+        bundle_dir = tmp_path / "bundle"
+        created_files = write_bundle(workflows[0], bundle_dir)
+        packaged_text = "\n".join(path.read_text() for path in created_files if path.suffix in {".yml", ".yaml"})
+
+        assert "{{tasks.Get_List.values.result}}" not in packaged_text
+        assert "{{tasks.motif_metadata_bulk_copy_control_lookup.values.items}}" in packaged_text
+
     def test_load_report_handles_pipelines_format(self, tmp_path):
         """``_load_report`` accepts the ``{"pipelines": [...]}`` aggregated report.
 

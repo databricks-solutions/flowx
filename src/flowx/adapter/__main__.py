@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -41,6 +40,7 @@ from flowx.adapter.operations import (
     validate_answer,
 )
 from flowx.adapter.session import MigrationInputSession
+from flowx.motifs.collapser import inline_collapsed_lookup_references
 from flowx.sources import available_sources, get_source
 
 # bundler.dab_writer + translator.engine (sqlglot) are imported lazily inside inspect/modify only, so
@@ -805,7 +805,7 @@ def _run_modify(args: argparse.Namespace) -> int:
         return 2
 
     stamped_pipelines = [
-        _inline_collapsed_lookup_references(
+        inline_collapsed_lookup_references(
             _stamp_lookup_values_into_metadata_driven_motifs(
                 apply_configuration(pipeline, configuration), lookup_values
             )
@@ -878,7 +878,7 @@ def _parse_csv_source(source: str) -> list[dict[str, str]]:
 
 
 def _stamp_lookup_values_into_metadata_driven_motifs(pipeline, lookup_values: list[dict[str, Any]]):
-    """Stamps lookup values onto every metadata-driven motif marked for consolidation.
+    """Stamps lookup values onto every metadata-driven ingestion motif.
 
     Args:
         pipeline: Configuration-stamped pipeline IR.
@@ -897,113 +897,11 @@ def _stamp_lookup_values_into_metadata_driven_motifs(pipeline, lookup_values: li
 
     stamped_tasks = []
     for task in pipeline.tasks:
-        if isinstance(task, _MotifActivity) and task.consolidate_metadata_driven:
+        if isinstance(task, _MotifActivity) and task.databricks_replacement == "for_each_ingestion":
             stamped_tasks.append(_dataclasses.replace(task, lookup_values=list(lookup_values)))
         else:
             stamped_tasks.append(task)
     return _dataclasses.replace(pipeline, tasks=stamped_tasks)
-
-
-# Matches a whole-string reference to a collapsed Lookup's row array, e.g.
-# "{{tasks.LKP.values.result}}".  Only ``result`` holds the array a ForEach
-# iterates; a Lookup's per-column firstRow task values are scalars, so the
-# pattern is anchored to ``result`` rather than any task value.
-_WHOLE_LOOKUP_RESULT_REF = re.compile(r"^\{\{tasks\.([^.]+)\.values\.result\}\}$")
-
-
-def _inline_collapsed_lookup_references(pipeline):
-    """Repoints references to a Lookup that a consolidated motif replaced.
-
-    The metadata-driven bulk-copy motif collapses a ``Lookup -> ForEach -> Copy``
-    chain.  The Lookup no longer exists as a task, yet a *separate* downstream
-    ForEach may still iterate its control rows via
-    ``{{tasks.<lookup>.values.result}}``.  The collapser rewires ``depends_on`` to
-    the motif but not this value reference, so it dangles -- and the package
-    phase's dangling-ref safety net does not inspect ``for_each_task.inputs``, so
-    nothing else repairs it.
-
-    The repair mirrors how the motif is prepared (see
-    ``preparer/activity_preparers/motif.py``):
-
-    * **Static** -- control rows materialised onto ``lookup_values``: the motif
-      becomes a ``pipeline_task`` that publishes no task values, so the rows are
-      inlined as a literal JSON array (the same shape a static control table
-      emits).
-    * **Dynamic** -- no materialised rows: the motif expands to a ``for_each`` fed
-      by a synthesised ``<task_key>_control_lookup`` task that publishes the rows
-      as ``values.items`` at runtime, so the reference is repointed there.
-
-    The collapsed Lookup is identified by ``motif_config["lookup_scope"]`` -- the
-    Lookup's own task key, exactly what the dangling reference embeds (and only
-    the Lookup, never the collapsed ForEach that shares ``matched_activity_names``).
-    The downstream ForEach may sit at the top level or nested inside any
-    If/Switch/ForEach, so every container is searched.
-
-    Args:
-        pipeline: Configuration-stamped pipeline IR (after
-            :func:`_stamp_lookup_values_into_metadata_driven_motifs`).
-
-    Returns:
-        A new :class:`Pipeline` with dangling references to collapsed Lookups
-        repointed.  Unchanged when no consolidated motif resolves a lookup key.
-    """
-    import dataclasses as _dataclasses
-
-    from flowx.models.ir import ForEachActivity as _ForEachActivity
-    from flowx.models.ir import IfConditionActivity as _IfConditionActivity
-    from flowx.models.ir import MotifActivity as _MotifActivity
-    from flowx.models.ir import SwitchActivity as _SwitchActivity
-
-    # collapsed Lookup task key -> replacement iterator input.
-    replacement_by_key: dict[str, str] = {}
-    for task in pipeline.tasks:
-        if not (isinstance(task, _MotifActivity) and task.consolidate_metadata_driven):
-            continue
-        # lookup_scope is the collapsed Lookup's own task key -- the key the
-        # dangling reference embeds.  Absent only for a motif we cannot resolve,
-        # in which case its references are left untouched.
-        lookup_key = task.motif_config.get("lookup_scope")
-        if not lookup_key:
-            continue
-        if task.lookup_values:
-            # Static: motif becomes a pipeline_task; inline the rows as a literal array.
-            replacement_by_key[lookup_key] = json.dumps(task.lookup_values)
-        else:
-            # Dynamic: motif expands to a for_each fed by <task_key>_control_lookup,
-            # which republishes the rows as ``items`` -- point the iterator there.
-            replacement_by_key[lookup_key] = f"{{{{tasks.{task.task_key}_control_lookup.values.items}}}}"
-    if not replacement_by_key:
-        return pipeline
-
-    def _rewrite_all(activities):
-        return [_rewrite(child) for child in activities]
-
-    def _rewrite(activity):
-        # Descend through every container that can nest a ForEach (ForEach, If,
-        # Switch) so a collapsed-Lookup reference is repointed wherever it lives.
-        if isinstance(activity, _ForEachActivity):
-            new_items = activity.items_expression
-            match = _WHOLE_LOOKUP_RESULT_REF.match(activity.items_expression or "")
-            if match and match.group(1) in replacement_by_key:
-                new_items = replacement_by_key[match.group(1)]
-            return _dataclasses.replace(
-                activity, items_expression=new_items, inner_activities=_rewrite_all(activity.inner_activities)
-            )
-        if isinstance(activity, _IfConditionActivity):
-            return _dataclasses.replace(
-                activity,
-                if_true_activities=_rewrite_all(activity.if_true_activities),
-                if_false_activities=_rewrite_all(activity.if_false_activities),
-            )
-        if isinstance(activity, _SwitchActivity):
-            return _dataclasses.replace(
-                activity,
-                cases=[_dataclasses.replace(case, activities=_rewrite_all(case.activities)) for case in activity.cases],
-                default_activities=_rewrite_all(activity.default_activities),
-            )
-        return activity
-
-    return _dataclasses.replace(pipeline, tasks=[_rewrite(task) for task in pipeline.tasks])
 
 
 def _load_pipelines(report_path: Path) -> list[Any] | None:

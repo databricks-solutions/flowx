@@ -54,6 +54,7 @@ from flowx.models.ir import (
     WaitActivity,
     WebActivity,
 )
+from flowx.motifs.collapser import inline_collapsed_lookup_references
 from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
 from flowx.preparer.workspace_downloader import (
     enable_workspace_downloads,
@@ -2594,7 +2595,7 @@ def _pipeline_dict_to_workflow(pipeline_dict: dict[str, Any]) -> PreparedWorkflo
     pipeline, _parameters = pipeline_dict_to_ir(pipeline_dict)
     # prepare_workflow already carries pipeline.parameters onto the workflow, so re-extending here would
     # duplicate every job parameter (the same dict twice -> a duplicate ``region`` entry in YAML).
-    return prepare_workflow(pipeline)
+    return prepare_workflow(inline_collapsed_lookup_references(pipeline))
 
 
 def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[dict[str, Any]]]:
