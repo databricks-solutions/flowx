@@ -324,6 +324,54 @@ def test_alter_report_keeps_a_non_routed_gap_that_shares_a_task_name_with_a_rout
     assert len(tagged) == 1
 
 
+def _if_with_nested_gap(name: str, task_key: str) -> dict[str, Any]:
+    """An IfCondition whose true branch holds convert's own placeholder for an unsupported activity."""
+    return {
+        "name": name,
+        "task_key": task_key,
+        "type": "IfConditionActivity",
+        "if_true_activities": [{"name": "Nested Gap", "task_key": "nested_gap", "type": "PlaceholderActivity"}],
+    }
+
+
+def test_alter_report_supersedes_an_untagged_gap_nested_inside_a_routed_container() -> None:
+    report = {"pipelines": [{"name": "parent", "tasks": [_if_with_nested_gap("Check", "check")]}]}
+    nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
+
+    _report, gaps = alter_report(report, [nested], {"parent"})
+
+    assert nested not in gaps
+    assert [(gap["pipeline"], gap["activity_name"]) for gap in gaps] == [("parent", "Check")]
+
+
+def test_alter_report_keeps_a_nested_gap_whose_name_a_non_routed_container_also_holds() -> None:
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [_if_with_nested_gap("Check", "check")]},
+            {"name": "other", "tasks": [_if_with_nested_gap("Gate", "gate")]},
+        ]
+    }
+    nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
+
+    _report, gaps = alter_report(report, [nested], {"parent"})
+
+    assert nested in gaps
+
+
+def test_a_filled_unit_with_a_nested_convert_gap_leaves_no_gaps(tmp_path: Path) -> None:
+    report = _report_two_pipelines()
+    report["pipelines"][0]["tasks"] = [_if_with_nested_gap("Check", "check")]
+    _write_work(tmp_path, report, gaps=[{"activity_name": "Nested Gap", "activity_type": "Script"}])
+    metadata = tmp_path / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "inventory.json").write_text(json.dumps(_two_component_inventory(), indent=2), encoding="utf-8")
+    _route_two_components(tmp_path, parent="agentic", child="deterministic")
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+
+    assert json.loads((tmp_path / WORK_DIRNAME / GAPS_FILENAME).read_text(encoding="utf-8")) == []
+
+
 def test_alter_report_keeps_gaps_for_non_routed_pipelines() -> None:
     report = {
         "pipelines": [

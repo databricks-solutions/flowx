@@ -531,11 +531,8 @@ def alter_report(
     # could remove that pipeline's gap, so it is preserved. Computed before mutating routed pipelines.
     nonrouted_task_names: set[str] = set()
     for pipeline in _report_pipelines(report):
-        if pipeline.get("name") in agentic:
-            continue
-        for task in pipeline.get("tasks", []):
-            if isinstance(task, dict):
-                nonrouted_task_names.add(str(task.get("name")))
+        if pipeline.get("name") not in agentic:
+            nonrouted_task_names.update(_task_names(pipeline.get("tasks")))
 
     # Emit exactly one pipeline-tagged gap per routed task, replacing (never appending to) any prior
     # gap for a routed pipeline's tasks. Without this, a task that convert already recorded as an
@@ -552,7 +549,9 @@ def alter_report(
             placeholder, gap = _placeholder_and_gap(task, str(pipeline.get("name")))
             placeholders.append(placeholder)
             fresh_gaps.append(gap)
-            routed_task_names.add(str(task.get("name")))
+        # Convert also records gaps for activities nested in a container, and the container's tagged
+        # gap now supersedes them, so nested names count as routed too.
+        routed_task_names.update(_task_names(pipeline.get("tasks")))
         pipeline["tasks"] = placeholders
 
     kept_gaps: list[dict[str, Any]] = []
@@ -840,6 +839,21 @@ def _authored_source_tag_violations(authored_pipelines: list[dict[str, Any]], so
                 f"{label}: authored pipeline must carry tags.source == {source!r}, got {authored_source!r}"
             )
     return violations
+
+
+def _task_names(tasks: Any) -> set[str]:
+    """The names of every task among ``tasks``, looking inside ForEach / If / Switch containers too."""
+    names: set[str] = set()
+    for task in tasks if isinstance(tasks, list) else []:
+        if not isinstance(task, dict):
+            continue
+        names.add(str(task.get("name")))
+        for key in _NESTED_TASK_KEYS:
+            names.update(_task_names(task.get(key)))
+        for case in task.get("cases") or []:
+            if isinstance(case, dict):
+                names.update(_task_names(case.get("activities")))
+    return names
 
 
 def _placeholder_task_names(tasks: Any) -> list[str]:
