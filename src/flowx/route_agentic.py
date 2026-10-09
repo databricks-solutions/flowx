@@ -42,15 +42,14 @@ import copy
 import hashlib
 import json
 import os
-import sys
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from flowx.discovery_serde import canonical_sha256
-from flowx.models.conversion_plan import DECISION_AGENTIC, DECISION_DETERMINISTIC, ConversionPlan
+from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
 
 # The report + gaps live under the shared output dir's transient .work/ folder, beside the pipeline IR.
 WORK_DIRNAME = ".work"
@@ -363,109 +362,9 @@ def record_gap_fills(output_dir: Path, fills: list[dict[str, Any]], baseline_rep
     save_agentic_output(output_dir, {"components": stored.get("components", {}), "gap_fills": list(by_key.values())})
 
 
-# --------------------------------------------------------------------------- #
-# Interactive decision prompt (one route from the user's seat).
-# --------------------------------------------------------------------------- #
-
-
-def _stderr(line: str) -> None:
-    """Default sink for the interactive prompt's narration -- stderr keeps stdout clean for JSON."""
-    print(line, file=sys.stderr)
-
-
-def prompt_for_decisions(
-    recommendation: dict[str, Any],
-    *,
-    authored: dict[str, Any] | None = None,
-    input_fn: Callable[[str], str] | None = None,
-    output_fn: Callable[[str], None] | None = None,
-) -> dict[str, Any]:
-    """Ask the user for every pending decision: suggested groupings first, then each component.
-
-    ``authored`` is the plan so far (see :func:`flowx.routing.carried_forward_plan`); a component it
-    already decides is not asked again, and without it every component is pending. A grouping whose
-    components are all pending is offered first, with its basis; accepting it decides those components
-    agentic. Each remaining pending component shows its members, the library's recommendation and --
-    when the agentic option carries a re-architecture (e.g. a multi-pipeline -> Lakeflow Connect
-    simplification) -- a prominent flag. An empty answer accepts the recommendation; ``d``/``a`` (or
-    the full words) choose a route. Returns the authored plan, ready for
-    :func:`flowx.routing.record_plan`.
-
-    ``input_fn`` and ``output_fn`` are injectable so the prompt is exercised without a real TTY; both
-    are resolved at call time (defaulting to the builtin ``input`` and a stderr sink) so a test that
-    patches ``builtins.input`` is honoured.
-    """
-    ask = input_fn if input_fn is not None else input
-    say = output_fn if output_fn is not None else _stderr
-    decided = {
-        str(component.get("component_id")): component
-        for component in (authored or {}).get("components", [])
-        if isinstance(component, dict) and component.get("decision") is not None
-    }
-    accepted = {
-        str(grouping.get("grouping_id"))
-        for grouping in (authored or {}).get("suggested_groupings", [])
-        if isinstance(grouping, dict) and grouping.get("accepted") is True
-    }
-    decisions: dict[str, str] = {}
-    for grouping in recommendation.get("suggested_groupings", []):
-        grouping_id = str(grouping.get("grouping_id"))
-        components = [str(component_id) for component_id in grouping.get("components", [])]
-        if grouping_id in accepted or any(component_id in decided for component_id in components):
-            continue
-        say(f"\nSuggested grouping {grouping_id}: {', '.join(components)} ({', '.join(grouping.get('members', []))})")
-        for basis in grouping.get("basis", []):
-            say(f"  because: {_describe_basis(basis)}")
-        answer = ask("  convert these together agentically as one unit? [y/N]: ").strip().lower()
-        if answer in ("y", "yes"):
-            accepted.add(grouping_id)
-            decisions.update({component_id: DECISION_AGENTIC for component_id in components})
-
-    components_out: list[dict[str, Any]] = []
-    for component in recommendation.get("components", []):
-        component_id = str(component.get("component_id"))
-        members = list(component.get("members", []))
-        if component_id in decided:
-            components_out.append(dict(decided[component_id]))
-            continue
-        if component_id not in decisions:
-            decisions[component_id] = _ask_component(component, ask, say)
-        components_out.append({"component_id": component_id, "members": members, "decision": decisions[component_id]})
-    result: dict[str, Any] = {"components": components_out}
-    if recommendation.get("suggested_groupings"):
-        result["suggested_groupings"] = [
-            {"grouping_id": grouping["grouping_id"], "accepted": grouping["grouping_id"] in accepted}
-            for grouping in recommendation["suggested_groupings"]
-        ]
-    if authored and authored.get("conversation"):
-        result["conversation"] = authored["conversation"]
-    return result
-
-
-def _ask_component(component: dict[str, Any], ask: Callable[[str], str], say: Callable[[str], None]) -> str:
-    """Ask for one component's route; an empty or unknown answer takes the recommendation."""
-    recommended = str(component.get("recommended", DECISION_DETERMINISTIC))
-    options = component.get("options") or {}
-    say(f"\nComponent {component.get('component_id')}: {', '.join(component.get('members', [])) or '(none)'}")
-    say(f"  recommended: {recommended}")
-    if (options.get("agentic") or {}).get("has_simplification"):
-        say("  agentic option includes a simplification re-architecture (e.g. Lakeflow Connect)")
-    answer = ask(f"  route [d]eterministic / [a]gentic (default={recommended}): ").strip().lower()
-    if answer in ("a", "agentic"):
-        return DECISION_AGENTIC
-    if answer in ("d", "deterministic"):
-        return DECISION_DETERMINISTIC
-    return recommended
-
-
-def _describe_basis(basis: dict[str, Any]) -> str:
-    """One line on why a grouping is suggested."""
-    if basis.get("kind") == "shared_pattern":
-        return f"{basis.get('pattern')!r} is recommended for {', '.join(basis.get('pipelines') or [])}"
-    return (
-        f"{basis.get('from_pipeline')} -> {basis.get('to_pipeline')} via {basis.get('edge_identity')!r} "
-        f"({basis.get('confidence')} confidence: {basis.get('evidence')})"
-    )
+def applied_gap_fills(gap_fills: list[dict[str, Any]] | None, baseline_report_sha256: str) -> list[dict[str, Any]]:
+    """The stored gap fills a rebuild from this baseline applies, in stored order."""
+    return [fill for fill in gap_fills or [] if fill.get("baseline_report_sha256") == baseline_report_sha256]
 
 
 # --------------------------------------------------------------------------- #
@@ -495,8 +394,10 @@ def rebuild(
       Outcome is ``agentic-not-viable``, which package refuses.
 
     Each unit's record entry holds its members, decision, outcome, ``output_sha256`` (only while its
-    stored output is applied, otherwise ``None``) and ``fingerprint``. A plan with no agentic unit and
-    no applicable gap fill returns the baseline itself and no record (byte-identical to convert).
+    stored output is applied, otherwise ``None``) and ``fingerprint``; the record also holds
+    ``gap_fills_sha256``, the hash of the gap fills applied, so a later merge shows in it. A plan with
+    no agentic unit and no applicable gap fill returns the baseline itself and no record
+    (byte-identical to convert).
 
     Args:
         baseline_report: Parsed baseline report JSON.
@@ -510,9 +411,7 @@ def rebuild(
     from flowx.ir_serde import replace_task_by_name
 
     baseline_report_sha256 = hashlib.sha256(baseline_report_bytes).hexdigest()
-    applicable_fills = [
-        fill for fill in gap_fills or [] if fill.get("baseline_report_sha256") == baseline_report_sha256
-    ]
+    applicable_fills = applied_gap_fills(gap_fills, baseline_report_sha256)
     agentic_names = agentic_pipeline_names(plan)
     if not agentic_names and not applicable_fills:
         return baseline_report, baseline_gaps, {}
@@ -553,6 +452,7 @@ def rebuild(
         "conversion_plan_sha256": canonical_sha256(plan),
         "baseline_report_sha256": baseline_report_sha256,
         "baseline_gaps_sha256": hashlib.sha256(baseline_gaps_bytes).hexdigest(),
+        "gap_fills_sha256": canonical_sha256(applicable_fills),
         "components": units,
     }
     return new_report, new_gaps, record
@@ -688,17 +588,21 @@ def baseline_pipeline_mismatch(baseline_report: dict[str, Any], inventory: dict[
     """Say how a baseline report's pipelines differ from the inventory's, or ``None`` when they match.
 
     The baseline is the convert output a rebuild starts from; when discover ran again after convert
-    its pipelines no longer match, and routing it would ship removed pipelines or miss new ones.
+    its pipelines no longer match, and routing it would ship removed pipelines or miss new ones. A
+    report pipeline with no tasks is not counted as extra: ADF discover leaves pipelines without
+    activities out of the inventory, while convert still writes them.
     """
     inventory_names = {
         str(pipeline.get("name"))
         for pipeline in inventory.get("pipelines", [])
         if isinstance(pipeline, dict) and pipeline.get("name") is not None
     }
-    report_names = {str(pipeline.get("name")) for pipeline in _report_pipelines(baseline_report)}
-    if report_names == inventory_names:
+    report_pipelines = _report_pipelines(baseline_report)
+    report_names = {str(pipeline.get("name")) for pipeline in report_pipelines}
+    with_tasks = {str(pipeline.get("name")) for pipeline in report_pipelines if pipeline.get("tasks")}
+    missing, extra = sorted(inventory_names - report_names), sorted(with_tasks - inventory_names)
+    if not missing and not extra:
         return None
-    missing, extra = sorted(inventory_names - report_names), sorted(report_names - inventory_names)
     return (
         f"the translation report was converted from a different discover (missing {missing}, extra {extra}); "
         "re-run convert, then route"
@@ -750,7 +654,7 @@ def apply_plan_to_report(
     dropped = 0
     if record is None and stored.document.get("gap_fills"):
         baseline_report_sha256 = hashlib.sha256(baseline_report_bytes).hexdigest()
-        kept = [fill for fill in stored.gap_fills if fill["baseline_report_sha256"] == baseline_report_sha256]
+        kept = applied_gap_fills(stored.gap_fills, baseline_report_sha256)
         dropped = len(stored.document["gap_fills"]) - len(kept)
         if dropped:
             save_agentic_output(output_dir, {"components": stored.document["components"], "gap_fills": kept})
@@ -857,6 +761,7 @@ def _resolve_agentic_unit(
     """
     from flowx.routing import (
         agentic_routing_supported,
+        agentic_routing_unsupported_note,
         insights_file_violations,
         inventory_source,
         plan_binding_violations,
@@ -875,7 +780,7 @@ def _resolve_agentic_unit(
 
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     if not agentic_routing_supported(inventory):
-        return None, None, None, f"inventory source {inventory_source(inventory)!r} cannot be routed agentic."
+        return None, None, None, agentic_routing_unsupported_note(inventory)
     stale = plan_binding_violations(recorded, inventory)
     if stale:
         return None, None, None, f"conversion_plan.json is stale: {stale[0]}; re-run `route` before filling."
@@ -1009,7 +914,8 @@ def apply_agentic_output(
     plan, and every authored pipeline must carry the correct source tag, hold no placeholder task, and
     have a name of its own: no repeat within the list, no member of another unit, no pipeline another
     unit's output authored, and no bundle folder shared with another pipeline once normalised. A name
-    may reuse a member of this unit, since the fill replaces it.
+    may reuse a member of this unit, since the fill replaces it, or a pipeline the output of a unit
+    sharing members with this one authored (a grouping and its own components never apply together).
 
     Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_applied", "message"}``.
     ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation, a
@@ -1060,7 +966,7 @@ def apply_agentic_output(
     } | {
         pipeline.get("name")
         for other_id, entry in stored.outputs.items()
-        if other_id != unit_id
+        if other_id != unit_id and members.isdisjoint(entry["members"])
         for pipeline in entry["pipelines"]
         if isinstance(pipeline, dict)
     }

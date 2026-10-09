@@ -369,25 +369,19 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "provide at most one of 'plan' (inline object) or 'plan_path'."}
 
     def _run(extra: list[str]) -> dict[str, Any]:
-        result = runner.run_adapter(["route", "--output-dir", output_dir, *extra, *source_args])
+        result = runner.run_adapter(["route", "--output-dir", output_dir, *extra])
         payload = runner.parse_stdout_json(result)
         ok = bool(isinstance(payload, dict) and payload.get("ok"))
         return {"ok": ok, "result": payload, "process": result.as_dict(), **_route_files(p, Path(output_dir))}
 
-    # Forward source + resolved source-path so the MCP path mirrors the CLI: route can then trigger
-    # convert when the report is missing. `source` is optional here (unlike discover/convert).
-    source_args, cleanup = _route_source_args(p)
-    try:
-        if plan is None and plan_path is None:
-            return _run([])
-        if plan_path is not None:
-            return _run(["--plan-path", str(plan_path)])
-        with tempfile.TemporaryDirectory(prefix="flowx-plan-") as temporary:
-            inline_path = Path(temporary) / "conversion_plan.json"
-            inline_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
-            return _run(["--plan-path", str(inline_path)])
-    finally:
-        cleanup()
+    if plan is None and plan_path is None:
+        return _run([])
+    if plan_path is not None:
+        return _run(["--plan-path", str(plan_path)])
+    with tempfile.TemporaryDirectory(prefix="flowx-plan-") as temporary:
+        inline_path = Path(temporary) / "conversion_plan.json"
+        inline_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+        return _run(["--plan-path", str(inline_path)])
 
 
 def _route_files(p: dict[str, Any], output_dir: Path) -> dict[str, Any]:
@@ -401,23 +395,6 @@ def _route_files(p: dict[str, Any], output_dir: Path) -> dict[str, Any]:
             if path.is_file():
                 shutil.copy(path, temporary)
         return _bundle_output(p, Path(temporary))
-
-
-def _route_source_args(p: dict[str, Any]) -> tuple[list[str], Callable[[], None]]:
-    """Resolve optional ``source`` / source-path into ``route`` CLI flags (empty when no source given).
-
-    Mirrors :func:`_cmd_convert`'s source resolution so a materialized volume/workspace source is read
-    the same way, but ``source`` is optional for ``route`` -- absent it, no source flags are forwarded
-    and route simply skips the convert trigger. Returns ``(args, cleanup)``.
-    """
-    if not p.get("source"):
-        return [], _noop
-    source_name = _source_name(p)
-    source, cleanup = _resolve_source(p)
-    args = ["--source", source_name]
-    if source:
-        args += ["--source-path", str(source)]
-    return args, cleanup
 
 
 def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
@@ -735,9 +712,8 @@ def build_server() -> FastMCP:
           reading inventory.json + the source artifacts first, setting `authored_against` (optional,
           checked when given) to its source_graphs_sha256 when it records one and leaving it out
           otherwise (see the flowx-enrich skill's insights.md).
-        - "route": output_dir(req), at most one of plan(inline object) | plan_path, plus optional
-          source + a source path (forwarded so route can trigger convert if the report is absent, like
-          the CLI), output_volume_path, output_workspace_path — groups pipelines into connected
+        - "route": output_dir(req), at most one of plan(inline object) | plan_path, output_volume_path,
+          output_workspace_path (run convert first) — groups pipelines into connected
           components over control lineage and writes the recommendation straight into
           metadata/conversion_plan.json: per component BOTH conversion options (deterministic capability
           + motif/coverage evidence, and the agentic recommended patterns with any simplification

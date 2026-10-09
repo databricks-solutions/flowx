@@ -297,7 +297,7 @@ def test_agentic_option_discloses_each_non_silent_pattern() -> None:
     assert labels == {"public_preview": "Public Preview (production-ready)", "private_preview": "Private Preview"}
 
 
-def test_build_recommendation_emits_both_options_and_a_default_plan() -> None:
+def test_build_recommendation_emits_both_options_per_component() -> None:
     graphs = [
         SourceGraph(
             name="parent",
@@ -320,11 +320,7 @@ def test_build_recommendation_emits_both_options_and_a_default_plan() -> None:
     assert set(first["options"]) == {"deterministic", "agentic"}
     assert first["recommended"] == "agentic"  # child's ExecuteDataFlow is an uncovered gap
     assert recommendation["components"][1]["recommended"] == "deterministic"  # solo notebook
-    # The default plan proposes decision == recommended for every component, ready to record as-is.
-    assert recommendation["default_plan"]["components"] == [
-        {"component_id": "component-1", "members": ["child", "parent"], "decision": "agentic"},
-        {"component_id": "component-2", "members": ["solo"], "decision": "deterministic"},
-    ]
+    assert set(recommendation) == {"components", "suggested_groupings", "findings"}
 
 
 def test_recommendation_is_pure_and_idempotent() -> None:

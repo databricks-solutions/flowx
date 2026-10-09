@@ -674,7 +674,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     When the report has a routing record and the merge is written in place into the live
     ``<output_dir>/.work/translation_report.json``, every merge is also stored as a gap fill in
     ``metadata/agentic_conversion.json``, so every later rebuild applies it on top of route's saved
-    deterministic baseline, which is never changed. A merge written anywhere else (``output_path``, or
+    deterministic baseline, which is never changed. The report's routing record then carries the
+    hash of the gap fills applied, so package sees that modify's configured copy predates the merge.
+    A merge written anywhere else (``output_path``, or
     into a copy such as modify's configured report) stores nothing. Nothing is written until every
     result has been applied.
 
@@ -691,10 +693,13 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         ValueError: A result would land in a pipeline the routing record routes agentic, or the
             routing baseline is missing or lacks the task a merge replaced.
     """
+    from flowx.discovery_serde import canonical_sha256
     from flowx.route_agentic import (
         REPORT_FILENAME,
         ROUTED_AGENTIC_MERGE_REFUSED,
         WORK_DIRNAME,
+        applied_gap_fills,
+        load_agentic_output,
         load_baseline,
         record_gap_fills,
         routed_agentic_pipelines,
@@ -760,7 +765,10 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         logger.info("Merged agentic result for '%s' from %s", activity_name, result_file.name)
 
     if record is not None and gap_fills:
-        record_gap_fills(output_dir, gap_fills, str(record.get("baseline_report_sha256")))
+        baseline_report_sha256 = str(record.get("baseline_report_sha256"))
+        record_gap_fills(output_dir, gap_fills, baseline_report_sha256)
+        stored_fills = load_agentic_output(output_dir).gap_fills
+        record["gap_fills_sha256"] = canonical_sha256(applied_gap_fills(stored_fills, baseline_report_sha256))
     destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote merged report to %s (%d merged, %d unmatched)", destination, merged, unmatched)
     return merged, unmatched

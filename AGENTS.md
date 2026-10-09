@@ -56,7 +56,7 @@ All three phases write into one shared `<output_dir>` (default `./flowx_output`)
 the DAB bundle at the top level, kept artifacts under `metadata/`, and transient
 intermediates under `.work/` (pruned by `package`).
 
-1. **Discover** -- Parse ADF JSON from UC volumes -> typed AST -> `SourceGraph` -> `metadata/source_graphs.json` (versioned, hashed, motifs inside) -> `metadata/inventory.json` (built from the saved graphs, records their hash) + `metadata/profile_report.csv` + verbatim `metadata/<pipeline>.arm.json`; optional enrich adds `metadata/agentic_insights.json` and rebuilds the inventory with it
+1. **Discover** -- Parse ADF JSON from UC volumes -> typed AST -> `metadata/source_graphs.json` (hashed) -> `metadata/inventory.json` + `metadata/profile_report.csv` + verbatim `metadata/<pipeline>.arm.json`
 2. **Convert** -- Registry dispatch + topological sort -> Pipeline IR (deterministic + agentic gaps); transient report at `.work/translation_report.json`
 3. **Package** -- IR -> DAB YAML + generated notebooks + setup scripts; prunes `.work/`
 
@@ -73,16 +73,10 @@ intermediates under `.work/` (pruned by `package`).
 | `models/adf_ast.py` | Typed AST nodes for ADF definitions |
 | `models/ir.py` | Databricks intermediate representation |
 | `models/dab.py` | DAB output schema types |
-| `models/discovery.py` | Source-neutral discovery graph contract (`SourceGraph`); each source keeps its own parser and projects into it |
-| `discovery_serde.py` | SourceGraph JSON round trip and the persisted `source_graphs.json` envelope (contract version, per-graph and document hashes) |
-| `discovery_inventory.py` | The one source-agnostic emitter that projects source graphs into `inventory.json` |
-| `discovery_insights.py` | `enrich`: validates agent-authored insights, records `agentic_insights.json` and rebuilds `inventory.json` with it |
-| `sources/adf/loader.py` | Parses ADF exports, produces `metadata/source_graphs.json` + `metadata/inventory.json` + `metadata/profile_report.csv` |
-| `sources/adf/discovery_mapping.py` | Maps the ADF AST onto the `SourceGraph` discovery graph contract (1:1, lossless) |
-| `sources/adf/translate.py` | Registry dispatch, topological sort, context threading |
-| `sources/adf/translators/` | One module per deterministic activity type (16 total) |
-| `sources/airflow/` | Airflow source: loader, discover, and convert (mirrors the ADF source layout) |
+| `parser/adf_loader.py` | Parses ADF exports, produces `metadata/inventory.json` + `metadata/profile_report.csv` |
 | `parser/expression_parser.py` | Translates ADF expressions (@activity, @pipeline, @variables) |
+| `translator/engine.py` | Registry dispatch, topological sort, context threading |
+| `translator/activity_translators/` | One module per deterministic activity type (16 total) |
 | `preparer/workflow_preparer.py` | Orchestrates activity preparers |
 | `preparer/code_generator.py` | Notebook code generation for activity types |
 | `preparer/activity_preparers/` | One module per activity type |
@@ -137,11 +131,11 @@ ExecuteDataFlow, SqlServerStoredProcedure, AzureFunction, WebHook, Custom, Execu
 ## Adding a New Deterministic Translator
 
 1. Add IR dataclass to `src/flowx/models/ir.py`
-2. Create translator at `src/flowx/sources/adf/translators/<type>.py`
+2. Create translator at `src/flowx/translator/activity_translators/<type>.py`
 3. Create preparer at `src/flowx/preparer/activity_preparers/<type>.py`
 4. Add notebook generator to `src/flowx/preparer/code_generator.py` if needed
-5. Register in `src/flowx/sources/adf/translate.py` (TRANSLATOR_REGISTRY for leaf, match statement for control-flow)
-6. Move from AGENTIC_TYPES to DETERMINISTIC_TYPES in `src/flowx/sources/adf/loader.py`
+5. Register in engine.py (TRANSLATOR_REGISTRY for leaf, match statement for control-flow)
+6. Move from AGENTIC_TYPES to DETERMINISTIC_TYPES in adf_loader.py
 7. Update activity-mapping.md reference
 8. Add test fixtures and unit tests
 
@@ -163,10 +157,3 @@ only one-line pointers):
   proxy the SDK sees the workspace `Origin` and a proxied `Host: localhost:<port>`, so its Host/Origin
   allowlist misfires (403/421) while adding nothing on top of the proxy's authentication. Browser
   CORS is a separate concern configured via `FLOWX_ALLOWED_ORIGINS`.
-
-## Maintaining this file
-
-Keep this file for knowledge useful to almost every future agent session in this project.
-Do not repeat what the codebase already shows; point to the authoritative file or command instead.
-Prefer rewriting or pruning existing entries over appending new ones.
-When updating this file, preserve this bar for all agents and keep entries concise.

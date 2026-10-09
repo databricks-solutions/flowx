@@ -303,9 +303,8 @@ and route again. Once nothing is pending, route applies the plan: every routed-*
 become placeholder gaps; deterministic units (and a no-agentic-route plan) leave the report untouched —
 non-breaking.
 
-If Step 5 was skipped and the report is missing, `route` can trigger the convert phase in-process
-once (pass `--source` / `--source-path`); it never runs a second plain convert once a report exists.
-Re-running `route` is always allowed: it rebuilds the report from the saved deterministic baseline,
+Run Step 5 first: once every decision is made, `route` refuses without the report ("run the convert
+phase first"). Re-running `route` is always allowed: it rebuilds the report from the saved deterministic baseline,
 the stored gap fills, the current plan and the agent's stored outputs, so switching a component back
 to deterministic restores convert's output for it.
 If the user wants a straight deterministic migration, they decide every component deterministic here

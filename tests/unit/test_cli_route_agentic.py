@@ -2,14 +2,13 @@
 
 ``route`` writes its recommendation straight into ``metadata/conversion_plan.json`` (keeping the
 decisions already recorded there, every other one pending) and ``metadata/routing_review.html``; the
-decisions can also come from ``--plan-path``, ``--plan-path -`` (stdin) or an interactive TTY prompt.
-Once nothing is pending it edits the report for the routed-agentic units. ``fill-agentic`` fills a
+decisions can also come from ``--plan-path``. Once nothing is pending it edits the report for the
+routed-agentic units. ``fill-agentic`` fills a
 routed-agentic unit, validating structurally before writing.
 """
 
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
 from typing import Any
@@ -87,12 +86,11 @@ def _agentic_plan() -> dict[str, Any]:
 
 
 def test_route_without_a_decision_writes_a_pending_plan_and_review_page_and_leaves_the_report(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _setup(tmp_path)
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     report_before = report_path.read_bytes()
-    monkeypatch.setattr("sys.stdin", io.StringIO(""))  # not a TTY
 
     code = adapter_cli_main(["route", "--output-dir", str(tmp_path)])
 
@@ -118,10 +116,9 @@ def _edit_recorded_plan(tmp_path: Path, decisions: dict[str, str]) -> None:
 
 
 def test_editing_the_recorded_plan_and_re_running_route_applies_it(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _setup(tmp_path)
-    monkeypatch.setattr("sys.stdin", io.StringIO(""))
     assert adapter_cli_main(["route", "--output-dir", str(tmp_path)]) == 0
     _edit_recorded_plan(tmp_path, {"component-1": "agentic", "component-2": "deterministic"})
     capsys.readouterr()
@@ -137,11 +134,8 @@ def test_editing_the_recorded_plan_and_re_running_route_applies_it(
     assert by_name["parent"]["tasks"][0]["type"] == "PlaceholderActivity"
 
 
-def test_route_recomputes_library_fields_an_agent_edited(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_route_recomputes_library_fields_an_agent_edited(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _setup(tmp_path)
-    monkeypatch.setattr("sys.stdin", io.StringIO(""))
     assert adapter_cli_main(["route", "--output-dir", str(tmp_path)]) == 0
     plan_path = tmp_path / "metadata" / "conversion_plan.json"
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -160,10 +154,9 @@ def test_route_recomputes_library_fields_an_agent_edited(
 
 
 def test_route_refuses_an_invalid_edited_decision_and_keeps_the_file(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _setup(tmp_path)
-    monkeypatch.setattr("sys.stdin", io.StringIO(""))
     assert adapter_cli_main(["route", "--output-dir", str(tmp_path)]) == 0
     _edit_recorded_plan(tmp_path, {"component-1": "Agentic", "component-2": "deterministic"})
     edited = (tmp_path / "metadata" / "conversion_plan.json").read_bytes()
@@ -198,36 +191,6 @@ def test_route_with_plan_path_records_and_edits_the_report(tmp_path: Path, capsy
     assert sorted(gap["pipeline"] for gap in gaps) == ["child", "parent"]
 
 
-def test_route_reads_a_plan_from_stdin_when_plan_path_is_dash(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _setup(tmp_path)
-    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_agentic_plan())))
-    code = adapter_cli_main(["route", "--output-dir", str(tmp_path), "--plan-path", "-"])
-    assert code == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True and payload["edit"]["agentic_pipelines"] == ["child", "parent"]
-
-
-def test_route_interactive_prompt_records_the_users_decision(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _setup(tmp_path)
-
-    class _Tty(io.StringIO):
-        def isatty(self) -> bool:
-            return True
-
-    monkeypatch.setattr("sys.stdin", _Tty(""))
-    answers = iter(["a", ""])  # component-1 -> agentic; component-2 -> accept recommendation (deterministic)
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
-
-    code = adapter_cli_main(["route", "--output-dir", str(tmp_path)])
-    assert code == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True and payload["edit"]["agentic_pipelines"] == ["child", "parent"]
-
-
 def test_route_validation_failure_returns_1_and_leaves_report_untouched(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -250,7 +213,7 @@ def test_route_with_a_missing_plan_file_fails_cleanly(tmp_path: Path) -> None:
     assert code == 1
 
 
-def test_route_errors_when_report_missing_and_no_source_to_trigger_convert(
+def test_route_refuses_to_apply_without_a_report_and_says_run_convert_first(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     metadata = tmp_path / "metadata"
@@ -258,8 +221,19 @@ def test_route_errors_when_report_missing_and_no_source_to_trigger_convert(
     (metadata / "inventory.json").write_text(json.dumps(_inventory(), indent=2), encoding="utf-8")
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(json.dumps(_agentic_plan()), encoding="utf-8")
+
     code = adapter_cli_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)])
+
     assert code == 1
+    assert "run the convert phase first" in capsys.readouterr().err
+    assert not (tmp_path / WORK_DIRNAME).exists()
+
+
+@pytest.mark.parametrize("flag", ["--source", "--source-path"])
+def test_route_takes_no_source_to_run_convert_itself(tmp_path: Path, flag: str) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        adapter_cli_main(["route", "--output-dir", str(tmp_path), flag, "adf"])
+    assert excinfo.value.code == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -363,46 +337,6 @@ def test_fill_agentic_has_no_no_validate_flag(tmp_path: Path) -> None:
     assert excinfo.value.code == 2
 
 
-def test_route_triggers_convert_when_report_absent(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Inventory present, report absent: with --source/--source-path, route triggers convert. Stub the
-    # phase runner to write the report the trigger would have produced, then assert route records+edits.
-    metadata = tmp_path / "metadata"
-    metadata.mkdir(parents=True)
-    (metadata / "inventory.json").write_text(json.dumps(_inventory(), indent=2), encoding="utf-8")
-
-    triggered: list[list[str]] = []
-
-    def fake_run_phase(phase: str, forward: list[str]) -> int:
-        triggered.append([phase, *forward])
-        work = tmp_path / WORK_DIRNAME
-        work.mkdir(parents=True, exist_ok=True)
-        (work / REPORT_FILENAME).write_text(json.dumps(_report(), indent=2), encoding="utf-8")
-        return 0
-
-    monkeypatch.setattr("flowx.adapter.__main__._run_phase", fake_run_phase)
-    plan_path = tmp_path / "plan.json"
-    plan_path.write_text(json.dumps(_agentic_plan()), encoding="utf-8")
-    code = adapter_cli_main(
-        [
-            "route",
-            "--output-dir",
-            str(tmp_path),
-            "--plan-path",
-            str(plan_path),
-            "--source",
-            "adf",
-            "--source-path",
-            str(tmp_path / "adf_src"),
-        ]
-    )
-    assert code == 0
-    assert triggered and triggered[0][0] == "convert"
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True and payload["edit"]["agentic_pipelines"] == ["child", "parent"]
-
-
 def test_the_old_combine_action_is_gone(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as excinfo:
         adapter_cli_main(
@@ -412,12 +346,11 @@ def test_the_old_combine_action_is_gone(tmp_path: Path) -> None:
 
 
 def test_recorded_decisions_survive_a_re_enrich_and_route_re_applies_them(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from flowx.discovery_insights import enrich_inventory
 
     _setup(tmp_path)
-    monkeypatch.setattr("sys.stdin", io.StringIO(""))
     assert adapter_cli_main(["route", "--output-dir", str(tmp_path)]) == 0
     _edit_recorded_plan(tmp_path, {"component-1": "agentic", "component-2": "deterministic"})
     assert adapter_cli_main(["route", "--output-dir", str(tmp_path)]) == 0

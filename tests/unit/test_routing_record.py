@@ -134,10 +134,17 @@ def test_valid_plan_passes_validation() -> None:
     assert validate_plan(_authored_plan(), _inventory()) == []
 
 
-def test_default_plan_from_recommendation_validates() -> None:
+def test_a_plan_taking_every_recommendation_validates() -> None:
     inventory = _inventory()
-    default_plan = build_recommendation(inventory)["default_plan"]
-    assert validate_plan(default_plan, inventory) == []
+    components = [
+        {
+            "component_id": component["component_id"],
+            "members": component["members"],
+            "decision": component["recommended"],
+        }
+        for component in build_recommendation(inventory)["components"]
+    ]
+    assert validate_plan({"components": components}, inventory) == []
 
 
 # --------------------------------------------------------------------------- #

@@ -19,7 +19,7 @@ All three phases share one `output_dir` (default `./flowx_output`):
 
 | Phase         | Module                  | Reads                  | Writes                                                                                   |
 |---------------|-------------------------|------------------------|------------------------------------------------------------------------------------------|
-| **profile**   | `parser/adf_loader.py`  | ADF JSON exports       | `metadata/source_graphs.json`, `metadata/inventory.json`, `metadata/profile_report.csv`, `metadata/<pipeline>.arm.json` |
+| **profile**   | `parser/adf_loader.py`  | ADF JSON exports       | `metadata/inventory.json`, `metadata/profile_report.csv`, `metadata/<pipeline>.arm.json` |
 | **translate** | `translator/engine.py`  | inventory + ADF source | `.work/translation_report.json` (transient IR)                                           |
 | **prepare**   | `bundler/dab_writer.py` | translation report     | `databricks.yml`, `resources/`, `src/`, `setup/` (and prunes `.work/`)                   |
 

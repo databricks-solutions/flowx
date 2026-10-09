@@ -77,10 +77,9 @@ from flowx.models.conversion_plan import (
 _DETERMINISTIC_STRATEGY = "deterministic"
 
 
-# Sources whose inventories route may send agentic in Phase 1. An inventory with no top-level
-# ``source`` predates the unified emitter and is ADF.
+# Sources whose inventories route may send agentic in Phase 1. An inventory that records no
+# top-level ``source`` is not one of them.
 AGENTIC_ROUTING_SOURCES = frozenset({"adf"})
-_LEGACY_INVENTORY_SOURCE = "adf"
 
 # Each level of the plan holds authored keys and library-owned keys. The library recomputes its own
 # keys on every record, so an edited copy of the recorded plan can be handed straight back; any key
@@ -103,13 +102,15 @@ _CONVERSATION_KEYS = {"question", "answer"}
 _INSIGHTS_RECOVERY = (
     "enrich may have stopped between its two writes, or one of the files was edited. To recover, run enrich "
     f"again with the same insights (locally, first delete metadata/{ENRICH_LOCK_FILENAME} if it is still there; "
-    "on the hosted MCP server, run discover again, then enrich prepare and apply)"
+    "on the hosted MCP server, run discover again, then enrich prepare and apply; running discover again also "
+    "clears conversion_plan.json and agentic_conversion.json, so route and fill again afterwards)"
 )
 
 
-def inventory_source(inventory: dict[str, Any]) -> str:
-    """The source an inventory was discovered from (an inventory without one is ADF)."""
-    return str(inventory.get("source", _LEGACY_INVENTORY_SOURCE))
+def inventory_source(inventory: dict[str, Any]) -> str | None:
+    """The source an inventory was discovered from, or ``None`` when it records none."""
+    source = inventory.get("source")
+    return source if isinstance(source, str) else None
 
 
 def agentic_routing_supported(inventory: dict[str, Any]) -> bool:
@@ -117,8 +118,10 @@ def agentic_routing_supported(inventory: dict[str, Any]) -> bool:
     return inventory_source(inventory) in AGENTIC_ROUTING_SOURCES
 
 
-def _agentic_routing_unsupported_note(inventory: dict[str, Any]) -> str:
-    """The finding / violation text that explains why a non-ADF inventory routes deterministic only."""
+def agentic_routing_unsupported_note(inventory: dict[str, Any]) -> str:
+    """The finding / violation text that explains why this inventory routes deterministic only."""
+    if inventory_source(inventory) is None:
+        return "the inventory records no source, so it cannot be routed agentic; re-run discover"
     return (
         f"agentic routing is ADF-only in Phase 1 (inventory source {inventory.get('source')!r}); "
         "route every component 'deterministic' and resolve its gaps with the flowx-resolve-airflow-gaps skill"
@@ -486,28 +489,23 @@ def build_recommendation(inventory: dict[str, Any]) -> dict[str, Any]:
     """Compute the full routing recommendation over every component in the inventory.
 
     Returns a dict with ``components`` (each carrying ``component_id``, sorted ``members``,
-    ``recommended`` and both ``options``), the ``suggested_groupings`` (see :func:`suggest_groupings`),
-    the ``findings`` from component computation, and a ``default_plan`` that proposes
-    ``decision == recommended`` for every component -- ready to hand straight to :func:`record_plan`
-    when the user accepts the recommendations wholesale, or to edit per component for overrides.
+    ``recommended`` and both ``options``), the ``suggested_groupings`` (see :func:`suggest_groupings`)
+    and the ``findings`` from component computation.
     """
     components, findings = build_components(inventory)
     if not agentic_routing_supported(inventory):
-        findings = [*findings, _agentic_routing_unsupported_note(inventory)]
+        findings = [*findings, agentic_routing_unsupported_note(inventory)]
     component_entries: list[dict[str, Any]] = []
-    default_plan_components: list[dict[str, Any]] = []
     for index, members in enumerate(components, start=1):
         component_id = f"component-{index}"
         recommended, options = recommend_component(members, inventory)
         component_entries.append(
             {"component_id": component_id, "members": members, "recommended": recommended, "options": options}
         )
-        default_plan_components.append({"component_id": component_id, "members": members, "decision": recommended})
     return {
         "components": component_entries,
         "suggested_groupings": suggest_groupings(inventory),
         "findings": findings,
-        "default_plan": {"components": default_plan_components},
     }
 
 
@@ -538,8 +536,9 @@ def validate_plan(raw: Any, inventory: dict[str, Any]) -> list[str]:
     * the plan is a **bijection** over components: every component is listed exactly once (no
       partial plan, no duplicate/conflicting decisions);
     * an ``agentic`` decision is only accepted for an ADF inventory (:func:`agentic_routing_supported`);
-    * ``suggested_groupings`` entries name a grouping route suggests for this inventory, ``accepted``
-      is a boolean, and an accepted grouping has none of its components decided ``deterministic``;
+    * ``suggested_groupings`` entries name a grouping route suggests for this inventory (with the
+      same ``components`` and ``members`` when the entry lists them), ``accepted`` is a boolean, and
+      an accepted grouping has none of its components decided ``deterministic``;
     * ``conversation`` is a list of ``{"question", "answer"}`` objects with non-empty strings.
     """
     if not isinstance(raw, dict):
@@ -570,7 +569,7 @@ def validate_plan(raw: Any, inventory: dict[str, Any]) -> list[str]:
     if not agentic_routing_supported(inventory):
         for index, component in enumerate(components):
             if isinstance(component, dict) and component.get("decision") == DECISION_AGENTIC:
-                violations.append(f"components[{index}]: {_agentic_routing_unsupported_note(inventory)}")
+                violations.append(f"components[{index}]: {agentic_routing_unsupported_note(inventory)}")
 
     for component_id, count in Counter(decided_ids).items():
         if count > 1:
@@ -682,6 +681,13 @@ def _grouping_violations(groupings: Any, inventory: dict[str, Any], decision_by_
         if grouping_id in seen:
             violations.append(f"{loc}: grouping {grouping_id!r} is listed more than once")
         seen.add(str(grouping_id))
+        changed = [key for key in ("components", "members") if key in entry and entry[key] != suggestion[key]]
+        if changed:
+            violations.append(
+                f"{loc}: grouping {grouping_id!r} now joins {suggestion['components']} ({suggestion['members']}), "
+                f"not the {' and '.join(changed)} this plan lists; the suggestions changed since it was written, "
+                "so review the grouping again"
+            )
         accepted = entry.get("accepted", False)
         if not isinstance(accepted, bool):
             violations.append(f"{loc}: 'accepted' must be true or false, got {accepted!r}")
@@ -745,9 +751,11 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> dict[str, 
     up the agent's edits to it. Every current component starts pending (``decision: None``); a
     component the *previous* recorded plan lists with the same members keeps its ``decision``,
     ``rationale`` and ``assignments`` as written there, a suggested grouping with the same id and
-    members keeps its ``accepted`` flag, and the ``conversation`` is kept. Entries whose components no
-    longer exist are dropped, so a re-discover that regroups pipelines leaves those components
-    pending. Values are carried as written; :func:`validate_plan` then checks them.
+    members keeps its ``accepted`` flag, and the ``conversation`` is kept, so decisions survive a
+    re-enrich or a re-route. Entries that no longer match a component or suggestion are dropped. A
+    re-discover keeps nothing: discover clears ``metadata/`` and ``.work/``, so this plan and the
+    agent's outputs go with them and every component starts pending again. Values are carried as
+    written; :func:`validate_plan` then checks them.
 
     Args:
         previous: The parsed ``conversion_plan.json`` (edited or not), or ``None`` when there is none.

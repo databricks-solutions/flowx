@@ -135,11 +135,15 @@ def _write_report(output_dir: Path) -> None:
 
 
 def _plan(inventory: dict[str, Any], agentic: set[str], accepted: set[str]) -> dict[str, Any]:
-    """The default plan with ``agentic`` components routed agentic and ``accepted`` groupings accepted."""
+    """A plan routing ``agentic`` components agentic, the rest deterministic, with ``accepted`` groupings accepted."""
     recommendation = routing.build_recommendation(inventory)
     components = [
-        {**component, "decision": "agentic" if component["component_id"] in agentic else "deterministic"}
-        for component in recommendation["default_plan"]["components"]
+        {
+            "component_id": component["component_id"],
+            "members": component["members"],
+            "decision": "agentic" if component["component_id"] in agentic else "deterministic",
+        }
+        for component in recommendation["components"]
     ]
     groupings = [
         {"grouping_id": grouping["grouping_id"], "accepted": grouping["grouping_id"] in accepted}
@@ -247,6 +251,41 @@ def test_a_grouping_with_a_component_decided_deterministic_is_refused(tmp_path: 
     violations = routing.validate_plan(_plan(inventory, {"component-2"}, {"grouping-1"}), inventory)
 
     assert any("grouping 'grouping-1'" in violation and "'component-3'" in violation for violation in violations)
+
+
+def test_a_grouping_and_its_own_components_may_reuse_each_others_pipeline_names(tmp_path: Path) -> None:
+    inventory = _enriched(tmp_path)
+    _write_report(tmp_path)
+    _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, set()))
+    assert apply_agentic_output(tmp_path, ["extract_a"], [_authored("extract_a")])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["extract_b"], [_authored("extract_b")])["ok"] is True
+    _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, {"grouping-1"}))
+
+    grouped = apply_agentic_output(tmp_path, ["extract_a", "extract_b"], [_authored("extract_a")])
+
+    assert grouped["ok"] is True, grouped
+    _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, set()))
+    changed = _authored("extract_a")
+    changed["description"] = "kept 1:1"
+    one_to_one = apply_agentic_output(tmp_path, ["extract_a"], [changed])
+    assert one_to_one["ok"] is True, one_to_one
+
+
+def test_a_passed_in_grouping_whose_suggestion_changed_since_is_refused(tmp_path: Path) -> None:
+    before = _enriched(tmp_path / "before")
+    stale_copy = _plan(before, {"component-2", "component-3", "component-4", "component-5"}, set())
+    suggestion = routing.suggest_groupings(before)[0]
+    stale_copy["suggested_groupings"] = [{**suggestion, "accepted": True}]
+    assert routing.validate_plan(stale_copy, before) == []
+    after = _enriched(tmp_path / "after", extra_patterns={"extract_c": _LAKEFLOW_CONNECT})
+
+    violations = routing.validate_plan(stale_copy, after)
+
+    assert violations == [
+        "suggested_groupings[0]: grouping 'grouping-1' now joins ['component-2', 'component-3', 'component-4', "
+        "'component-5'] (['extract_a', 'extract_b', 'extract_c', 'mart']), not the components and members this "
+        "plan lists; the suggestions changed since it was written, so review the grouping again"
+    ]
 
 
 def test_only_a_suggested_grouping_can_be_accepted(tmp_path: Path) -> None:

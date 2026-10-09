@@ -11,8 +11,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from flowx import routing
 from flowx.adapter.__main__ import main as adapter_cli_main
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
@@ -93,10 +91,28 @@ def test_airflow_inventory_is_recommended_and_recorded_deterministic_only(tmp_pa
     assert {component["recommended"] for component in recommendation["components"]} == {"deterministic"}
     assert any("ADF-only" in finding for finding in recommendation["findings"])
     _setup(tmp_path, inventory)
-    recorded = routing.record_plan(tmp_path, plan=recommendation["default_plan"])
+    components = [
+        {
+            "component_id": component["component_id"],
+            "members": component["members"],
+            "decision": component["recommended"],
+        }
+        for component in recommendation["components"]
+    ]
+    recorded = routing.record_plan(tmp_path, plan={"components": components})
     assert recorded["ok"] is True
 
 
-@pytest.mark.parametrize("source", ["adf", None])
-def test_adf_and_legacy_unsourced_inventories_still_accept_agentic(source: str | None) -> None:
-    assert routing.validate_plan(_plan("agentic"), _inventory(source)) == []
+def test_an_adf_inventory_accepts_agentic() -> None:
+    assert routing.validate_plan(_plan("agentic"), _inventory("adf")) == []
+
+
+def test_an_inventory_without_a_source_refuses_agentic_and_says_re_run_discover() -> None:
+    inventory = _inventory(None)
+
+    assert routing.validate_plan(_plan("agentic"), inventory) == [
+        "components[0]: the inventory records no source, so it cannot be routed agentic; re-run discover"
+    ]
+    assert {component["recommended"] for component in routing.build_recommendation(inventory)["components"]} == {
+        "deterministic"
+    }

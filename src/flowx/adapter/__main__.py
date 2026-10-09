@@ -172,24 +172,22 @@ def _run_route(args: argparse.Namespace) -> int:
 
     Groups pipelines by connected component and computes the per-component recommendation and the
     suggested groupings (reusing :mod:`flowx.routing`). The decisions come from ``--plan-path FILE``
-    (or ``-`` for stdin) when given; otherwise from the recorded ``metadata/conversion_plan.json`` as
-    the agent edited it, with every component it does not decide left pending, and -- on a TTY -- an
-    interactive prompt for the pending ones. Route validates and records the plan (library fields
-    recomputed) and writes ``metadata/routing_review.html``. While any decision is pending it stops
-    there and leaves the report alone. Once every component is decided it rebuilds
+    when given; otherwise from the recorded ``metadata/conversion_plan.json`` as the agent edited it,
+    with every component it does not decide left pending. Route validates and records the plan
+    (library fields recomputed) and writes ``metadata/routing_review.html``. While any decision is
+    pending it stops there and leaves the report alone. Once every component is decided it rebuilds
     ``.work/translation_report.json`` + ``gaps.json`` from the deterministic baseline: routed-agentic
     units become placeholder gaps or their stored agent output, deterministic ones keep the baseline,
     and nothing routed agentic leaves convert's report byte-identical. Re-routing under any decisions
     is allowed.
 
-    Triggers the convert phase in-process when the report is missing and ``--source`` /
-    ``--source-path`` are supplied. Returns 1 on insights files that disagree, a missing report it
-    cannot produce, or a plan that fails validation (report + plan left untouched in each case).
+    Returns 1 on insights files that disagree or a plan that fails validation (report + plan left
+    untouched), and when every component is decided but convert has not written the report yet.
     """
     from flowx import routing
     from flowx.models.conversion_plan import PLAN_FILENAME, ConversionPlan
     from flowx.reporting.routing_review import write_routing_review
-    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan, prompt_for_decisions
+    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan
 
     inventory_path = args.output_dir / "metadata" / "inventory.json"
     if not inventory_path.exists():
@@ -208,12 +206,10 @@ def _run_route(args: argparse.Namespace) -> int:
     plan_path = args.output_dir / "metadata" / PLAN_FILENAME
     try:
         if args.plan_path is not None:
-            plan = json.loads(sys.stdin.read() if str(args.plan_path) == "-" else args.plan_path.read_text("utf-8"))
+            plan = json.loads(args.plan_path.read_text(encoding="utf-8"))
         else:
             previous = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else None
             plan = routing.carried_forward_plan(previous, inventory)
-            if sys.stdin.isatty():
-                plan = prompt_for_decisions(routing.build_recommendation(inventory), authored=plan)
     except (OSError, json.JSONDecodeError) as error:
         print(f"Failed to read the conversion plan: {error}", file=sys.stderr)
         return 1
@@ -241,16 +237,8 @@ def _run_route(args: argparse.Namespace) -> int:
 
     report_path = args.output_dir / WORK_DIRNAME / REPORT_FILENAME
     if not report_path.exists():
-        triggered = _trigger_convert(args)
-        if triggered != 0:
-            return triggered
-        if not report_path.exists():
-            print(
-                f"No {REPORT_FILENAME} under {report_path.parent}; run the convert phase first "
-                "(or pass --source and --source-path so route can trigger it).",
-                file=sys.stderr,
-            )
-            return 1
+        print(f"No {REPORT_FILENAME} under {report_path.parent}; run the convert phase first.", file=sys.stderr)
+        return 1
     try:
         recorded = ConversionPlan.load(args.output_dir)
         if recorded is None:
@@ -262,22 +250,6 @@ def _run_route(args: argparse.Namespace) -> int:
     write_routing_review(args.output_dir)
     _emit_json({**result, **locations, "applied": True, "edit": edit}, args.out)
     return 0
-
-
-def _trigger_convert(args: argparse.Namespace) -> int:
-    """Run the convert phase in-process when ``--source`` / ``--source-path`` are supplied.
-
-    Returns 0 when convert ran (or there was nothing to trigger because the inputs were absent), or
-    the convert phase's non-zero exit code on failure.
-    """
-    source = getattr(args, "source", None)
-    source_path = getattr(args, "source_path", None)
-    if not source or not source_path:
-        return 0
-    return _run_phase(
-        "convert",
-        ["--source", source, "--source-path", str(source_path), "--output-dir", str(args.output_dir)],
-    )
 
 
 def _run_fill_agentic(args: argparse.Namespace) -> int:
@@ -698,20 +670,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path to an authored conversion plan JSON (the decisions, or an edited copy of "
-            "conversion_plan.json) to validate, record, and apply. Use '-' to read it from stdin. Omit to "
-            "use metadata/conversion_plan.json as edited (with a prompt for pending decisions on a TTY)."
+            "conversion_plan.json) to validate, record, and apply. Omit to use "
+            "metadata/conversion_plan.json as edited."
         ),
-    )
-    route.add_argument(
-        "--source",
-        default=None,
-        help="Migration source (adf | airflow); with --source-path, lets route trigger convert if needed.",
-    )
-    route.add_argument(
-        "--source-path",
-        type=Path,
-        default=None,
-        help="Path to the source; with --source, lets route trigger the convert phase when the report is missing.",
     )
     route.add_argument(
         "--out",

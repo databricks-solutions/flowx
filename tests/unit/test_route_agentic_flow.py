@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 
+from flowx.adapter.__main__ import main as adapter_main
 from flowx.bundler.dab_writer import main as package_main
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.ir_serde import merge_agentic_results
@@ -45,7 +46,6 @@ from flowx.route_agentic import (
     apply_agentic_output,
     apply_plan,
     apply_plan_to_report,
-    prompt_for_decisions,
     replace_unit_pipelines,
     routing_record,
     validate_report_structurally,
@@ -83,27 +83,6 @@ def _plan(*, parent: str = "agentic", child: str = "deterministic") -> dict[str,
             {"component_id": "component-1", "members": ["parent"], "decision": parent},
             {"component_id": "component-2", "members": ["child"], "decision": child},
         ]
-    }
-
-
-def _recommendation() -> dict[str, Any]:
-    return {
-        "components": [
-            {
-                "component_id": "component-1",
-                "members": ["parent"],
-                "recommended": "deterministic",
-                "options": {"deterministic": {"capable": True}, "agentic": {"has_simplification": True}},
-            },
-            {
-                "component_id": "component-2",
-                "members": ["child"],
-                "recommended": "agentic",
-                "options": {"deterministic": {"capable": False}, "agentic": {"has_simplification": False}},
-            },
-        ],
-        "findings": [],
-        "default_plan": {"components": []},
     }
 
 
@@ -197,10 +176,15 @@ def _two_component_inventory() -> dict[str, Any]:
 def _route_two_components(output_dir: Path, *, parent: str, child: str) -> None:
     """Record a plan deciding 'parent' and 'child' (each its own component) as given, and apply it."""
     inventory = json.loads((output_dir / "metadata" / "inventory.json").read_text(encoding="utf-8"))
-    plan = build_recommendation(inventory)["default_plan"]
-    for component in plan["components"]:
-        component["decision"] = parent if component["members"] == ["parent"] else child
-    assert record_plan(output_dir, plan=plan)["ok"] is True
+    components = [
+        {
+            "component_id": component["component_id"],
+            "members": component["members"],
+            "decision": parent if component["members"] == ["parent"] else child,
+        }
+        for component in build_recommendation(inventory)["components"]
+    ]
+    assert record_plan(output_dir, plan={"components": components})["ok"] is True
     recorded = ConversionPlan.load(output_dir)
     assert recorded is not None
     apply_plan(output_dir, recorded)
@@ -243,24 +227,6 @@ def test_agentic_pipeline_names_selects_only_agentic_component_members() -> None
         ]
     }
     assert agentic_pipeline_names(plan) == {"parent", "shared"}
-
-
-def test_prompt_for_decisions_defaults_to_recommendation_and_honours_overrides() -> None:
-    answers = iter(["", "d"])  # component-1: accept (deterministic); component-2: override to deterministic
-    lines: list[str] = []
-    plan = prompt_for_decisions(_recommendation(), input_fn=lambda _prompt: next(answers), output_fn=lines.append)
-    decisions = {c["component_id"]: c["decision"] for c in plan["components"]}
-    assert decisions == {"component-1": "deterministic", "component-2": "deterministic"}
-    # Each component carries its members so the plan validates against the inventory on record.
-    assert plan["components"][0]["members"] == ["parent"]
-    # The user saw the members and the prominent simplification option before answering.
-    assert any("component-1" in line for line in lines)
-    assert any("simplification" in line.lower() for line in lines)
-
-
-def test_prompt_for_decisions_selects_agentic_on_a() -> None:
-    plan = prompt_for_decisions(_recommendation(), input_fn=lambda _prompt: "a", output_fn=lambda _line: None)
-    assert [c["decision"] for c in plan["components"]] == ["agentic", "agentic"]
 
 
 # --------------------------------------------------------------------------- #
@@ -485,7 +451,10 @@ def test_a_merged_top_level_gap_is_stored_apart_and_survives_a_re_route_with_the
     assert merge_agentic_results(report_path, results_dir) == (1, 0)
 
     assert baseline_path.read_bytes() == baseline_before
-    assert routing_record(json.loads(report_path.read_text(encoding="utf-8"))) == record_before
+    record_after = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
+    assert record_before is not None and record_after is not None
+    assert record_after["gap_fills_sha256"] != record_before["gap_fills_sha256"]
+    assert record_after == {**record_before, "gap_fills_sha256": record_after["gap_fills_sha256"]}
     stored = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
     assert [(fill["pipeline"], fill["activity_name"]) for fill in stored["gap_fills"]] == [("child", "Load")]
 
@@ -1273,6 +1242,60 @@ def test_route_refuses_a_report_converted_from_a_different_discover(tmp_path: Pa
     with pytest.raises(ValueError, match=r"different discover \(missing \['child'\], extra \['removed_since'\]\)"):
         _route_two_components(tmp_path, parent="agentic", child="deterministic")
     assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+
+
+def test_a_pipeline_without_activities_is_not_taken_for_a_different_discover(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADF discover leaves a pipeline with no activities out of the inventory; convert still writes it."""
+    pipelines = tmp_path / "export" / "pipelines"
+    pipelines.mkdir(parents=True)
+    wait = {"name": "pause", "type": "Wait", "dependsOn": [], "typeProperties": {"waitTimeInSeconds": 1}}
+    for name, activities in (("empty", []), ("orders", [wait])):
+        document = {"name": name, "properties": {"activities": activities}}
+        (pipelines / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+    output_dir = tmp_path / "out"
+    source = ["--source", "adf", "--source-path", str(tmp_path / "export"), "--output-dir", str(output_dir)]
+    assert adapter_main(["discover", *source]) == 0
+    assert adapter_main(["convert", *source]) == 0
+    plan_path = tmp_path / "plan.json"
+    plan = {"components": [{"component_id": "component-1", "members": ["orders"], "decision": "agentic"}]}
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    capsys.readouterr()
+
+    assert adapter_main(["route", "--output-dir", str(output_dir), "--plan-path", str(plan_path)]) == 0
+
+    assert _record_outcomes(output_dir / WORK_DIRNAME / REPORT_FILENAME) == {"component-1": "agentic-not-viable"}
+    capsys.readouterr()
+    assert package_main(["--output-dir", str(output_dir), "--no-download-workspace-files"]) == 1
+    error = capsys.readouterr().err
+    assert "different discover" not in error
+    assert "component 'component-1' (orders) is routed agentic but has no agent output yet" in error
+
+
+def test_package_asks_to_re_run_modify_after_a_merge_made_since_modify(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = _report_with_child_gap()
+    for pipeline in report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, report)
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+    capsys.readouterr()
+
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 1
+
+    assert "the configured report is out of date; re-run modify" in capsys.readouterr().err
+    assert not (tmp_path / "child" / "databricks.yml").exists()
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 0
+    audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
+    assert [(fill["pipeline"], fill["activity_name"]) for fill in audit["gap_fills"]] == [("child", "Load")]
 
 
 def test_package_refuses_an_edited_gap_fill(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

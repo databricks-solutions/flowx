@@ -8,7 +8,6 @@ plan or no plan; a run without enrich is unaffected.
 
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
 from typing import Any
@@ -118,19 +117,17 @@ def test_an_enriched_or_unenriched_run_with_files_in_step_passes(tmp_path: Path)
 
 
 @pytest.mark.parametrize("case", sorted(_BREAKS))
-def test_route_refuses_and_says_how_to_recover(
-    tmp_path: Path, case: str, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_route_refuses_and_says_how_to_recover(tmp_path: Path, case: str, capsys: pytest.CaptureFixture[str]) -> None:
     _setup(tmp_path)
     breaker, expected = _BREAKS[case]
     breaker(tmp_path)
-    monkeypatch.setattr("sys.stdin", io.StringIO(""))
 
     assert adapter_cli_main(["route", "--output-dir", str(tmp_path)]) == 1
 
     (violation,) = json.loads(capsys.readouterr().out)["violations"]
     assert expected in violation
     assert "run enrich again with the same insights" in violation and ".enrich.lock" in violation
+    assert "running discover again also clears conversion_plan.json and agentic_conversion.json" in violation
     assert not (tmp_path / "metadata" / "conversion_plan.json").exists()
 
 

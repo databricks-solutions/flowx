@@ -65,11 +65,12 @@ applies nothing while one is pending.
 discover → enrich (default) → convert (deterministic baseline) → route (recommend → decide → apply) → fill-agentic → package
 ```
 
-Convert builds the deterministic baseline report **before** routing (route can trigger it in-process
-via `--source` / `--source-path`); routing then edits that report. If you run `convert` again after
-routing, run `route` straight after it: a fresh report carries no routing record, so route takes it
-as the new baseline and re-applies the plan and the agent's stored outputs (fills of convert's own
-gaps merged against the earlier report are dropped and must be merged again; route says how many).
+Run convert **before** route: it builds the deterministic baseline report that routing edits, and
+once every decision is made route refuses without it ("run the convert phase first"). If you run
+`convert` again after routing, run `route` straight after it: a fresh report carries no routing
+record, so route takes it as the new baseline and re-applies the plan and the agent's stored outputs
+(fills of convert's own gaps merged against the earlier report are dropped and must be merged again;
+route says how many).
 
 Pipelines are grouped into weak/undirected **connected components** over the inventory's control
 lineage (`lineage.control_edges`), so mutually-referencing pipelines are decided together and a
@@ -98,8 +99,9 @@ and any uncovered activities, and an *agentic* option carrying the `recommended_
 with any `simplification_pattern` flagged and release states disclosed), and `decision: null`
 (pending). It also lists the `suggested_groupings`, an empty `conversation`, and the `findings`
 (unresolved control edges kept, never severed). A decision already in the file for a component with
-the same members is kept, so re-running route after a re-enrich or re-discover keeps your decisions
-and leaves only new or regrouped components pending.
+the same members is kept, so re-running route, or running it after a re-enrich, keeps your decisions.
+A re-discover does not: discover clears `metadata/` and `.work/`, which drops `conversion_plan.json`
+and the agent's outputs in `agentic_conversion.json`, so route and fill again afterwards.
 
 ### Present it with the review page
 
@@ -143,15 +145,10 @@ recomputed on every route, so edits to it are ignored; an unknown key is refused
 - `conversation`.
 
 Then run `route` again (no plan). Once **no decision is pending** it validates the plan, records it,
-and applies it. Other ways to supply the decisions:
-
-- **A plan** — `--plan-path <file>` (or `--plan-path -` for stdin), or MCP `plan` inline / `plan_path`:
-  the decisions alone (`{"components": [{component_id, members, decision}], "suggested_groupings":
-  [{grouping_id, accepted}], "conversation": [...]}`), or an edited copy of the recorded plan. This is
-  the hosted path: edit the plan route returned and send it back as `plan`.
-- **Interactive prompt (TTY)** — `route` on a real terminal offers each suggested grouping whose
-  components are pending, then asks `route [d]eterministic / [a]gentic (default=<recommended>)` for
-  each pending component.
+and applies it. You can also pass a plan — `--plan-path <file>`, or MCP `plan` inline / `plan_path`:
+the decisions alone (`{"components": [{component_id, members, decision}], "suggested_groupings":
+[{grouping_id, accepted}], "conversation": [...]}`), or an edited copy of the recorded plan. This is
+the hosted path: edit the plan route returned and send it back as `plan`.
 
 Rules the validator enforces (all violations returned at once; nothing written on failure):
 
@@ -160,7 +157,9 @@ Rules the validator enforces (all violations returned at once; nothing written o
 - Every component is listed exactly once, and its `members` must exactly match one computed
   connected component; `component_id` must match too.
 - An accepted grouping has no component decided `"deterministic"`; agentic decisions and groupings are
-  ADF-only.
+  ADF-only (an inventory that records no `source` is refused too; re-run discover).
+- A grouping entry that lists `components` or `members` must match the current suggestion with that
+  `grouping_id`; when the suggestions changed since the plan was written, review the grouping again.
 - `conversation` entries are `{question, answer}` with non-empty strings.
 
 ### What applying does
@@ -178,8 +177,8 @@ of convert's own gaps, the plan, and the agent's outputs in `metadata/agentic_co
 
 When nothing is routed agentic (and no gap fill is stored), route writes convert's report and gaps back
 byte for byte, with no record — the non-breaking guarantee. Otherwise it stamps a **routing record**
-onto the report (`_routing_record`): the plan's hash, the baseline report and gaps hashes, and one
-entry per unit with its `members`, `decision`, `outcome`, `output_sha256` (set only while its stored
+onto the report (`_routing_record`): the plan's hash, the baseline report and gaps hashes, the hash
+of the gap fills applied, and one entry per unit with its `members`, `decision`, `outcome`, `output_sha256` (set only while its stored
 output is applied) and `fingerprint` (a grouping also lists its `components`). The plan is freely
 editable: change it and route again as often as needed; the same plan gives the same bytes, and a
 changed unit is re-derived.
@@ -222,10 +221,11 @@ Its guarantees:
 - **Different authored pipelines** replace the stored output for that unit only and add
   `{"from", "to"}` to the entry's `replaced` history (the first fill is not a replacement). The history
   lives in `agentic_conversion.json`, so it survives switching the unit to deterministic and back.
-- **Unique names**: an authored pipeline name may reuse a member of this unit, but not another name in
-  the same list, a member of another unit, a pipeline another unit's output authored, or a name that
-  shares a bundle folder with another pipeline once normalised (`Sales Load` and `Sales-Load` would
-  overwrite each other).
+- **Unique names**: an authored pipeline name may reuse a member of this unit, or a name the output of
+  a unit sharing members with this one authored (a grouping and its own components never apply
+  together), but not another name in the same list, a member of another unit, a pipeline another
+  unit's output authored, or a name that shares a bundle folder with another pipeline once normalised
+  (`Sales Load` and `Sales-Load` would overwrite each other).
 - **Fully converted**: an authored pipeline that still holds a `PlaceholderActivity` (top level or
   inside a ForEach / If / Switch) is refused.
 - Each authored pipeline **must** carry `"tags": {"source": "adf"}`; a missing or non-`adf` tag fails
@@ -309,7 +309,8 @@ Package refuses, writing nothing, when:
 - `agentic_insights.json` and `inventory.json` disagree (or the file fails its own hash), plan or no
   plan — enrich may have stopped between its two writes; run enrich again with the same insights
   (locally, delete `metadata/.enrich.lock` first if it is still there; on the hosted server, run
-  discover again, then enrich prepare and apply);
+  discover again, then enrich prepare and apply — running discover again also clears
+  `conversion_plan.json` and `agentic_conversion.json`, so route and fill again afterwards);
 - the report carries a routing record but `conversion_plan.json` is missing;
 - the plan is stale against the inventory, is not a complete decision, or has a decision pending;
 - a routed-agentic unit has **no agent output yet** — an agentic decision is packaged agentically,
