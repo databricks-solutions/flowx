@@ -1,0 +1,5 @@
+{"value": [
+  {"activityName": "copy1", "activityType": "Copy", "pipelineName": "copy_pipeline", "status": "Succeeded",
+   "durationInMs": 180000,
+   "output": {"durationInMs": 60000, "usedDataIntegrationUnits": 4, "effectiveIntegrationRuntime": "AutoResolveIntegrationRuntime"}}
+]}

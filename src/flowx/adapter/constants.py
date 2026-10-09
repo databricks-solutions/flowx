@@ -26,6 +26,7 @@ METADATA_DRIVEN_MOTIF_ID: Final[str] = "metadata_driven_bulk_copy"
 PHASE_DISCOVER: Final[str] = "discover"
 PHASE_CONVERT: Final[str] = "convert"
 PHASE_PACKAGE: Final[str] = "package"
+PHASE_PROFILE: Final[str] = "profile"
 
 INPUT_ADF_SOURCE_PATH: Final[str] = "adf_source_path"
 INPUT_ADF_RESOURCE_URL: Final[str] = "adf_resource_url"

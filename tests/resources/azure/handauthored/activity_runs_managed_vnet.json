@@ -1,0 +1,5 @@
+{"value": [
+  {"activityName": "notebook1", "activityType": "DatabricksNotebook", "pipelineName": "pipeline1", "status": "Succeeded",
+   "durationInMs": 118563,
+   "output": {"effectiveIntegrationRuntime": "managedvnetir (West US)", "billingReference": null}}
+]}

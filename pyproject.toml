@@ -34,6 +34,13 @@ mcp = [
     "uvicorn>=0.30",
     "starlette>=0.40",
 ]
+# Install with `pip install -e .[profile]` to run the `flowx profile` phase
+# (live Azure scan + cost estimation). Kept optional so the core phases and the
+# Airflow path never require the Azure stack.
+profile = [
+    "azure-identity>=1.17",
+    "requests>=2.31",
+]
 
 [dependency-groups]
 dev = [
@@ -65,6 +72,11 @@ exclude = ['venv', '.venv', 'tests/*']
 # missing-stub errors in dev environments that don't install it.
 [[tool.mypy.overrides]]
 module = ["mcp.*", "starlette.*", "uvicorn.*"]
+ignore_missing_imports = true
+
+# Optional `profile` extra (only installed for the `flowx profile` phase).
+[[tool.mypy.overrides]]
+module = ["azure.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
