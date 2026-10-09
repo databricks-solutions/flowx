@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from pathlib import PurePosixPath, PureWindowsPath
 
+from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY, MULTI_NODE_JOB_CLUSTER_KEY, SINGLE_NODE_JOB_CLUSTER_KEY
 from flowx.models.dab import DabNotebook
 from flowx.models.ir import AgenticComponentActivity
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
@@ -23,6 +24,17 @@ FLOWX_OWNED_TASK_FIELDS = frozenset(
         "retry_on_timeout",
     }
 )
+
+
+_COMPUTE_KEYS = ("environment_key", "job_cluster_key", "existing_cluster_id", "new_cluster")
+_PAYLOAD_COMPUTE_KEYS = {
+    "spark_python_task": _COMPUTE_KEYS,
+    "python_wheel_task": _COMPUTE_KEYS,
+    "spark_jar_task": _COMPUTE_KEYS,
+    "dbt_task": _COMPUTE_KEYS,
+    "spark_submit_task": ("job_cluster_key", "new_cluster"),
+}
+_BUNDLE_JOB_CLUSTER_KEYS = (DEFAULT_JOB_CLUSTER_KEY, SINGLE_NODE_JOB_CLUSTER_KEY, MULTI_NODE_JOB_CLUSTER_KEY)
 
 
 def _source_relative_path(raw_path: object) -> str:
@@ -49,6 +61,8 @@ def _check_task_payload(task_key: str, task: dict[str, object]) -> None:
 
     Databricks names every task type ``<kind>_task``. A fragment with none packages fine but is
     rejected at deploy time, and one with two leaves which runs undefined, so both fail here.
+    The same goes for a task that needs compute but names none it can run on, or names a job
+    cluster the bundle does not define. A ``for_each_task`` body is checked the same way.
     """
     payloads = sorted(key for key in task if key.endswith("_task"))
     if len(payloads) != 1:
@@ -57,8 +71,22 @@ def _check_task_payload(task_key: str, task: dict[str, object]) -> None:
             f"Agentic component {task_key!r} task must contain exactly one executable payload such as "
             f"pipeline_task or notebook_task (found: {found})"
         )
-    if not isinstance(task[payloads[0]], dict):
+    payload = task[payloads[0]]
+    if not isinstance(payload, dict):
         raise ValueError(f"Agentic component {task_key!r} task payload {payloads[0]} must be a mapping")
+    # flowx binds a cluster only for notebooks, and these task types cannot run without compute.
+    compute_keys = _PAYLOAD_COMPUTE_KEYS.get(payloads[0])
+    if compute_keys and not any(key in task for key in compute_keys):
+        raise ValueError(
+            f"Agentic component {task_key!r} {payloads[0]} must name its compute with {', '.join(compute_keys)}"
+        )
+    if "job_cluster_key" in task and task["job_cluster_key"] not in _BUNDLE_JOB_CLUSTER_KEYS:
+        raise ValueError(
+            f"Agentic component {task_key!r} job_cluster_key {task['job_cluster_key']!r} must be one of the "
+            f"bundle's job clusters: {', '.join(_BUNDLE_JOB_CLUSTER_KEYS)}"
+        )
+    if payloads[0] == "for_each_task" and isinstance(payload.get("task"), dict):
+        _check_task_payload(task_key, payload["task"])
 
 
 def _check_resource(task_key: str, resource: object) -> None:
@@ -103,15 +131,16 @@ def _check_environment(task_key: str, environment: object) -> None:
 def _authored_file(task_key: str, file: object) -> DabNotebook:
     """Turn one authored ``files`` entry into a file the bundle writer keeps below ``src``.
 
-    A file carries text ``content`` or base64 ``binary_content``, never both, and each must
-    already be a string so the file is written exactly as authored.
+    A file carries exactly one of text ``content`` or base64 ``binary_content``, and it must
+    already be a string so the file is written byte for byte as authored.
     """
     if not isinstance(file, dict) or not isinstance(file.get("path"), str):
         raise ValueError(f"Agentic component {task_key!r} file {file!r} must be a mapping with a string path")
     relative_path = _source_relative_path(file["path"])
-    if "content" in file and "binary_content" in file:
+    if ("content" in file) == ("binary_content" in file):
         raise ValueError(
-            f"Agentic component {task_key!r} file {relative_path!r} must set content or binary_content, not both"
+            f"Agentic component {task_key!r} file {relative_path!r} must set content or binary_content, "
+            "exactly one of them"
         )
     if "binary_content" in file:
         encoded = file["binary_content"]
@@ -126,7 +155,7 @@ def _authored_file(task_key: str, file: object) -> DabNotebook:
                 f"Agentic component {task_key!r} file {relative_path!r} binary_content must be valid base64"
             ) from error
         return DabNotebook(relative_path=relative_path, binary_content=decoded, authored=True)
-    content = file.get("content", "")
+    content = file["content"]
     if not isinstance(content, str):
         raise ValueError(f"Agentic component {task_key!r} file {relative_path!r} content must be a string")
     return DabNotebook(relative_path=relative_path, content=content, authored=True)
@@ -138,7 +167,10 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     A serverless task names its compute with ``environment_key``; the component declares
     that environment in ``environments`` and the bundle writer adds it to the job that holds
     the task. Every referenced ``environment_key`` must be declared by some component, and
-    two components may declare the same key only with an identical spec.
+    two components may declare the same key only with an identical spec. A component cannot
+    declare a job cluster, so a ``job_cluster_key`` must name one the bundle writer defines:
+    ``default_cluster``, ``single_node_cluster`` or ``multi_node_cluster``. The bundle writer
+    adds that cluster to the job's ``job_clusters``.
 
     The task's key, dependencies, run condition, timeout, and retries always come from
     the activity, never from the authored fragment, so an agent cannot rewire or re-time
@@ -185,8 +217,11 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
         ValueError: The authored task fragment sets a flowx-owned field, a file entry is
             malformed or its path escapes the bundle's ``src`` directory, a resource is
             malformed or its key is not a plain identifier, an environment is malformed,
-            a binary file is not valid base64, or the task does not carry exactly one
-            executable payload mapping.
+            a binary file is not valid base64, the task does not carry exactly one
+            executable payload mapping, a ``spark_python_task``, ``python_wheel_task``,
+            ``spark_jar_task`` or ``dbt_task`` names no compute, a ``spark_submit_task`` names
+            neither ``new_cluster`` nor a ``job_cluster_key`` (it runs only on a new cluster), or
+            a ``job_cluster_key`` is not one of the bundle's job clusters.
     """
     del scope
     owned_fields = sorted(FLOWX_OWNED_TASK_FIELDS & activity.task.keys())
