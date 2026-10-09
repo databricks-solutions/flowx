@@ -206,7 +206,7 @@ Unlike the ADF path, an Airflow operator's path is decided **per instance** by w
 | TaskFlow API | `@task.branch`, `@task.short_circuit`, `@task_group` (decorator form) | Placeholder + gap | Agentic |
 
 **†** Deterministic when the relevant values are statically resolvable; otherwise the instance routes
-to an agentic gap — e.g. a non-literal command / SQL / endpoint / path, a callable that reads Airflow
+to an agentic gap — e.g. a non-literal command / SQL / endpoint / path, a SQL template file (`.sql` / `.hql`) that is not next to the DAG or in a static `template_searchpath`, a callable that reads Airflow
 task context or XCom, an unsafe inline template context, or a non-literal `.expand()` /
 `.partial().expand()`.
 **Agentic** emits a failing placeholder + `gaps.json` entry (eligible for the leaf-gap
