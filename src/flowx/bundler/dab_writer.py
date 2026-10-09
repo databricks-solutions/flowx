@@ -54,7 +54,6 @@ from flowx.models.ir import (
     WaitActivity,
     WebActivity,
 )
-from flowx.motifs.collapsed_lookup_refs import repair_collapsed_lookup_references
 from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
 from flowx.preparer.workspace_downloader import (
     enable_workspace_downloads,
@@ -2593,13 +2592,10 @@ def _pipeline_dict_to_workflow(pipeline_dict: dict[str, Any]) -> PreparedWorkflo
     per-activity preparer logic.
     """
     pipeline, _parameters = pipeline_dict_to_ir(pipeline_dict)
-    # Repair any ForEach/Filter that still references a Lookup a motif collapsed. This is the single
-    # funnel for every packaging route (raw, stamped, single- and multi-pipeline reports), so a report
-    # packaged without the adapter ``modify`` flow is covered too. Idempotent -- a no-op when modify
-    # already repaired the references.
-    pipeline = repair_collapsed_lookup_references(pipeline)
     # prepare_workflow already carries pipeline.parameters onto the workflow, so re-extending here would
-    # duplicate every job parameter (the same dict twice -> a duplicate ``region`` entry in YAML).
+    # duplicate every job parameter (the same dict twice -> a duplicate ``region`` entry in YAML).  It
+    # also runs the collapsed-Lookup reference repair, so this report path and the in-process path share
+    # one implementation and produce identical bundles.
     return prepare_workflow(pipeline)
 
 

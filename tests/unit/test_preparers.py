@@ -625,6 +625,19 @@ class TestForEachPreparer:
         # ForEach depends on the bridge so the value is materialised first.
         assert any(dep.get("task_key") == "loop_inputs_bridge" for dep in prepared.task.get("depends_on") or [])
 
+    def test_prepare_for_each_bridge_inherits_upstream_dependencies(self):
+        """The inputs-bridge reads the ForEach's upstream task values, so it must carry the
+        ForEach's upstream dependencies rather than start unordered and race its producer."""
+        inner = WaitActivity(**_make_base("Inner", "inner"), wait_time_seconds=1)
+        activity = ForEachActivity(
+            **{**_make_base("Loop", "loop"), "depends_on": [Dependency(task_key="producer")]},
+            items_expression="@split(pipeline().parameters.ejecuciones, ';')",
+            inner_activities=[inner],
+        )
+        prepared = prepare_activity(activity)
+        bridge_task = next(t for t in prepared.extra_tasks if t["task_key"] == "loop_inputs_bridge")
+        assert bridge_task.get("depends_on") == [{"task_key": "producer"}]
+
     def test_for_each_with_inner_if_condition_carries_branches(self):
         """Change foreach-inner-extra-tasks (P0): CF-001.
 

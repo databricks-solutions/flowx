@@ -158,6 +158,11 @@ def prepare(
     inputs, inputs_bridge_task, inputs_bridge_notebooks = _resolve_for_each_inputs_with_bridge(activity)
     if inputs_bridge_task is not None:
         existing_deps = list(task.get("depends_on") or [])
+        # The bridge computes the iterator input from the ForEach's upstream task values (e.g. a
+        # collapsed motif's control-lookup), so it must run after those producers -- give it the same
+        # upstream dependencies rather than letting it start unordered and race the producer.
+        if existing_deps:
+            inputs_bridge_task["depends_on"] = existing_deps
         task["depends_on"] = [*existing_deps, {"task_key": inputs_bridge_task["task_key"]}]
 
     inner_activities = activity.inner_activities

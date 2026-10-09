@@ -53,17 +53,18 @@ def repair_collapsed_lookup_references(pipeline: Pipeline) -> Pipeline:
       by a synthesised ``<task_key>_control_lookup`` task that publishes the rows
       as ``values.items`` at runtime, so the reference is repointed there.
 
-    The collapsed Lookups are identified by ``motif_config["lookup_keys"]`` -- the
-    task keys of every Lookup the motif collapsed (a motif may collapse more than
-    one), exactly what the dangling references embed, and never the collapsed
-    ForEach.  ``lookup_keys`` is set only on metadata-driven bulk-copy motifs, so
-    other motifs are skipped; the ``consolidate_metadata_driven`` flag is not
-    gated on, so the non-consolidated ``for_each_ingestion`` path is covered too.
-    The downstream reference may sit at the top level or nested inside any
-    If/Switch/ForEach, and may be a plain ``items_expression`` or a value in a
-    ForEach's inputs-bridge parameters (which the preparer prefers over
-    ``items_expression`` when the items is a function over the Lookup output), so
-    both are searched in every container.
+    The collapsed Lookup is identified by ``motif_config["lookup_scope"]`` -- the
+    one Lookup the motif reproduces (its query drives the control table), which is
+    exactly what the dangling reference embeds, and never the collapsed ForEach.  A
+    motif may collapse other Lookups too, but their data is not reproduced, so
+    references to them are left untouched rather than redirected to the wrong rows.
+    ``lookup_scope`` is set only on metadata-driven bulk-copy motifs, so other
+    motifs are skipped; the ``consolidate_metadata_driven`` flag is not gated on, so
+    the non-consolidated ``for_each_ingestion`` path is covered too.  The downstream
+    reference may sit at the top level or nested inside any If/Switch/ForEach, and
+    may be a plain ``items_expression`` or a value in a ForEach's inputs-bridge
+    parameters (which the preparer prefers over ``items_expression`` when the items
+    is a function over the Lookup output), so both are searched in every container.
 
     Args:
         pipeline: Pipeline IR after motif collapse (and, in the ``modify`` flow,
@@ -132,28 +133,21 @@ def _build_replacements(pipeline: Pipeline) -> dict[str, str]:
     for task in pipeline.tasks:
         if not isinstance(task, MotifActivity):
             continue
-        # Every collapsed Lookup's task key -- a motif may collapse more than one.
-        # Fall back to the single ``lookup_scope`` for reports written before
-        # ``lookup_keys`` existed.
-        lookup_keys = task.motif_config.get("lookup_keys") or _legacy_lookup_keys(task.motif_config)
-        if not lookup_keys:
+        # ``lookup_scope`` is the one Lookup the motif reproduces (its query drives the
+        # control table).  A motif can collapse other Lookups too, but their data is not
+        # reproduced, so only references to this one can be repaired -- redirecting a
+        # reference to a different collapsed Lookup here would silently serve wrong rows.
+        lookup_key = task.motif_config.get("lookup_scope")
+        if not lookup_key:
             continue
         if task.lookup_values:
             # Static: motif becomes a pipeline_task; inline the rows as a literal array.
-            replacement = json.dumps(task.lookup_values)
+            replacement_by_key[lookup_key] = json.dumps(task.lookup_values)
         else:
             # Dynamic: motif expands to a for_each fed by <task_key>_control_lookup,
             # which republishes the rows as ``items`` -- point the iterator there.
-            replacement = f"{{{{tasks.{task.task_key}_control_lookup.values.items}}}}"
-        for lookup_key in lookup_keys:
-            replacement_by_key[lookup_key] = replacement
+            replacement_by_key[lookup_key] = f"{{{{tasks.{task.task_key}_control_lookup.values.items}}}}"
     return replacement_by_key
-
-
-def _legacy_lookup_keys(motif_config: dict) -> list[str]:
-    """Returns ``[lookup_scope]`` for reports written before ``lookup_keys`` was recorded."""
-    scope = motif_config.get("lookup_scope")
-    return [scope] if scope else []
 
 
 def _warn_if_wrapped(items_expression: str, replacement_by_key: dict[str, str]) -> None:
