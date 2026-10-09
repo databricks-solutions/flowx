@@ -80,9 +80,12 @@ When no typed task fits, use `"type": "AgenticComponentActivity"` instead. It ca
 `binary_content`, written byte for byte),
 pipeline `resources` (`resource_key` plus a `definition` mapping), optional job `environments`
 (each exactly an `environment_key` plus a `spec` mapping), and a raw Databricks `task` fragment with
-exactly one `<kind>_task` payload. A `spark_python_task`, `python_wheel_task` or `spark_jar_task`
-must name its compute (`environment_key`, `job_cluster_key`, `existing_cluster_id` or
-`new_cluster`), or package refuses it. A serverless one uses an `environment_key`: declare that environment in `environments` and flowx writes it into the job that
+exactly one `<kind>_task` payload. A `spark_python_task`, `python_wheel_task`, `spark_jar_task`,
+`spark_submit_task` or `dbt_task` must name its compute (`environment_key`, `job_cluster_key`,
+`existing_cluster_id` or `new_cluster`), or package refuses it. A component cannot declare a job
+cluster, so a `job_cluster_key` must be one flowx defines (`default_cluster`, `single_node_cluster`
+or `multi_node_cluster`); flowx adds that cluster to the job. A serverless task uses an
+`environment_key`: declare that environment in `environments` and flowx writes it into the job that
 runs the task. A wheel or other authored file the environment installs is listed in
 `spec.dependencies` as `../src/<path>`. Every `environment_key` a task uses must be declared, and
 two components may declare the same environment only with an identical spec (it is then written
