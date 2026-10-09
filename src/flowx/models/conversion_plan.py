@@ -166,7 +166,7 @@ class SuggestedGrouping:
     the grouping's id: one agent output replaces all of its pipelines. It never splits a component.
 
     Attributes:
-        grouping_id: Stable id assigned by the library (``"grouping-<n>"``).
+        grouping_id: Stable id assigned by the library from the members (``"grouping-<hash>"``).
         components: The ids of the components it joins (two or more, library-computed).
         members: Every pipeline of those components, sorted (library-computed).
         basis: Why it is suggested (library-computed): each entry is an inferred relationship from the

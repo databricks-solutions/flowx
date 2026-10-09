@@ -125,7 +125,7 @@ def _summary(plan: ConversionPlan, inventory: dict[str, Any] | None, units: dict
     accepted = [grouping.grouping_id for grouping in plan.suggested_groupings if grouping.accepted]
     return _rows(
         [
-            ("Source", _text((inventory or {}).get("source", "adf"))),
+            ("Source", _text((inventory or {}).get("source"))),
             ("Pipelines", _text(len(pipelines) if isinstance(pipelines, list) else None)),
             ("Components", _text(len(plan.components))),
             ("Suggested groupings", _text(f"{len(plan.suggested_groupings)} ({len(accepted)} accepted)")),

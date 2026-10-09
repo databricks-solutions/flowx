@@ -7,7 +7,6 @@ the same bytes), and says per unit what package will do.
 
 from __future__ import annotations
 
-import io
 import json
 import re
 from pathlib import Path
@@ -109,13 +108,18 @@ def test_a_grouping_shows_its_basis_and_whether_it_is_accepted() -> None:
     assert "grouping-1 (component-1, component-2)" in conversion
 
 
+@pytest.mark.parametrize(("inventory", "shown"), [({"source": "adf"}, "adf"), ({}, "&mdash;")])
+def test_the_summary_shows_the_recorded_source_or_a_dash(inventory: dict[str, Any], shown: str) -> None:
+    summary = render_routing_review(_plan(), inventory, None).split('id="summary"')[1].split("</section>")[0]
+
+    assert re.findall(r"<th>Source</th><td>(.*?)</td>", summary) == [shown]
+
+
 def test_without_insights_the_page_says_enrich_has_not_run() -> None:
     assert "Enrich has not run" in render_routing_review(_plan(), None, None)
 
 
-def test_route_writes_the_review_page_beside_the_plan(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_route_writes_the_review_page_beside_the_plan(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     node = SourceNode(
         source_id="load",
         task_key="load",
@@ -130,7 +134,6 @@ def test_route_writes_the_review_page_beside_the_plan(
     )
     (tmp_path / "metadata").mkdir()
     (tmp_path / "metadata" / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
-    monkeypatch.setattr("sys.stdin", io.StringIO(""))
 
     assert adapter_cli_main(["route", "--output-dir", str(tmp_path)]) == 0
 

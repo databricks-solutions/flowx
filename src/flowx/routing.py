@@ -57,6 +57,7 @@ from flowx.discovery_insights import (
     agentic_insights_hash_violations,
     inventory_fingerprint,
 )
+from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import (
     BASIS_INFERRED_RELATIONSHIP,
     BASIS_SHARED_PATTERN,
@@ -409,8 +410,10 @@ def suggest_groupings(inventory: dict[str, Any]) -> list[dict[str, Any]]:
     relationship or shared pattern behind it. Nothing is suggested without insights, or for an
     inventory whose source cannot be routed agentic (:data:`AGENTIC_ROUTING_SOURCES`).
 
-    Returns ``[{"grouping_id", "components", "members", "basis", "accepted": False}]`` with ids
-    ``grouping-<n>`` in component order, deterministic for a given inventory.
+    Returns ``[{"grouping_id", "components", "members", "basis", "accepted": False}]`` in component
+    order, deterministic for a given inventory. Each id is derived from the grouping's members (see
+    :func:`grouping_id_for`), so a grouping keeps its id -- and with it its acceptance and the agent's
+    stored output -- when a re-enrich adds or drops other suggestions.
     """
     insights = inventory.get(INSIGHTS_KEY)
     if not isinstance(insights, dict) or not agentic_routing_supported(inventory):
@@ -475,7 +478,7 @@ def suggest_groupings(inventory: dict[str, Any]) -> list[dict[str, Any]]:
         members = sorted(member for component_id in component_ids for member in components_by_id[component_id])
         groupings.append(
             {
-                "grouping_id": f"grouping-{len(groupings) + 1}",
+                "grouping_id": grouping_id_for(members),
                 "components": component_ids,
                 "members": members,
                 "basis": [basis for linked, basis in links if linked <= set(component_ids) and len(linked) > 1],
@@ -483,6 +486,11 @@ def suggest_groupings(inventory: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return groupings
+
+
+def grouping_id_for(members: list[str]) -> str:
+    """The id of the grouping that joins ``members``: ``grouping-`` plus a short hash of the sorted members."""
+    return f"grouping-{canonical_sha256(sorted(members))[:12]}"
 
 
 def build_recommendation(inventory: dict[str, Any]) -> dict[str, Any]:
@@ -516,7 +524,12 @@ def build_recommendation(inventory: dict[str, Any]) -> dict[str, Any]:
 
 
 def _components_by_id(inventory: dict[str, Any]) -> dict[str, list[str]]:
-    """Computed components keyed by their library id (``component-<n>``)."""
+    """Computed components keyed by their library id (``component-<n>``, numbered in member order).
+
+    Components come from the inventory's pipelines and control lineage, which only discover changes,
+    and discover clears the plan and the agent's outputs, so a component keeps its id for as long as
+    either exists.
+    """
     components, _ = build_components(inventory)
     return {f"component-{index}": members for index, members in enumerate(components, start=1)}
 
@@ -750,12 +763,12 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> dict[str, 
     This is how route writes its recommendation straight into ``conversion_plan.json`` and then picks
     up the agent's edits to it. Every current component starts pending (``decision: None``); a
     component the *previous* recorded plan lists with the same members keeps its ``decision``,
-    ``rationale`` and ``assignments`` as written there, a suggested grouping with the same id and
-    members keeps its ``accepted`` flag, and the ``conversation`` is kept, so decisions survive a
-    re-enrich or a re-route. Entries that no longer match a component or suggestion are dropped. A
-    re-discover keeps nothing: discover clears ``metadata/`` and ``.work/``, so this plan and the
-    agent's outputs go with them and every component starts pending again. Values are carried as
-    written; :func:`validate_plan` then checks them.
+    ``rationale`` and ``assignments`` as written there, a suggested grouping with the same id (which
+    is derived from its members) keeps its ``accepted`` flag, and the ``conversation`` is kept, so
+    decisions survive a re-enrich or a re-route. Entries that no longer match a component or
+    suggestion are dropped. A re-discover keeps nothing: discover clears ``metadata/`` and
+    ``.work/``, so this plan and the agent's outputs go with them and every component starts pending
+    again. Values are carried as written; :func:`validate_plan` then checks them.
 
     Args:
         previous: The parsed ``conversion_plan.json`` (edited or not), or ``None`` when there is none.
@@ -785,15 +798,13 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> dict[str, 
         components.append(authored)
 
     previous_groupings = previous.get("suggested_groupings")
-    accepted_before: set[tuple[Any, tuple[str, ...]]] = set()
-    for entry in previous_groupings if isinstance(previous_groupings, list) else []:
-        if isinstance(entry, dict) and entry.get("accepted") is True and isinstance(entry.get("members"), list):
-            accepted_before.add((entry.get("grouping_id"), tuple(sorted(str(member) for member in entry["members"]))))
+    accepted_before = {
+        entry.get("grouping_id")
+        for entry in (previous_groupings if isinstance(previous_groupings, list) else [])
+        if isinstance(entry, dict) and entry.get("accepted") is True
+    }
     groupings = [
-        {
-            "grouping_id": grouping["grouping_id"],
-            "accepted": (grouping["grouping_id"], tuple(grouping["members"])) in accepted_before,
-        }
+        {"grouping_id": grouping["grouping_id"], "accepted": grouping["grouping_id"] in accepted_before}
         for grouping in recommendation["suggested_groupings"]
     ]
     conversation = previous.get("conversation", [])

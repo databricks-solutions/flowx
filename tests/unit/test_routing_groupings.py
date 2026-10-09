@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from flowx import routing
+from flowx.adapter.__main__ import main as adapter_main
 from flowx.bundler.dab_writer import main as package_main
 from flowx.discovery_insights import enrich_inventory
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
@@ -27,6 +28,8 @@ from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_agentic_out
 
 _PIPELINES = ("child", "extract_a", "extract_b", "extract_c", "mart", "orchestrator")
 _LAKEFLOW_CONNECT = "Lakeflow Connect SQL Server connector"
+_EXTRACTS = routing.grouping_id_for(["extract_a", "extract_b"])
+_EXTRACT_C_AND_MART = routing.grouping_id_for(["extract_c", "mart"])
 
 
 def _node(task_key: str, native_type: str = "DatabricksNotebook") -> SourceNode:
@@ -175,8 +178,8 @@ def test_groupings_come_from_a_shared_simplification_pattern_and_an_inferred_rel
     groupings = routing.suggest_groupings(inventory)
 
     assert [(grouping["grouping_id"], grouping["components"]) for grouping in groupings] == [
-        ("grouping-1", ["component-2", "component-3"]),
-        ("grouping-2", ["component-4", "component-5"]),
+        (_EXTRACTS, ["component-2", "component-3"]),
+        (_EXTRACT_C_AND_MART, ["component-4", "component-5"]),
     ]
     assert groupings[0]["members"] == ["extract_a", "extract_b"]
     assert groupings[0]["basis"] == [
@@ -213,21 +216,21 @@ def test_an_accepted_grouping_routes_fills_and_packages_as_one_unit(
     inventory = _enriched(tmp_path)
     _write_report(tmp_path)
 
-    outcome = _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, {"grouping-1"}))
+    outcome = _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, {_EXTRACTS}))
 
-    assert outcome["outcomes"]["grouping-1"] == "agentic-not-viable"
+    assert outcome["outcomes"][_EXTRACTS] == "agentic-not-viable"
     assert "component-2" not in outcome["outcomes"] and "component-3" not in outcome["outcomes"]
     result = apply_agentic_output(tmp_path, ["extract_a", "extract_b"], [_authored("sql_server_ingest")])
-    assert result["ok"] is True and result["component_id"] == "grouping-1"
+    assert result["ok"] is True and result["component_id"] == _EXTRACTS
     report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
     names = sorted(pipeline["name"] for pipeline in report["pipelines"])
     assert names == ["child", "extract_c", "mart", "orchestrator", "sql_server_ingest"]
     record = routing_record(report)
-    assert record is not None and record["components"]["grouping-1"]["outcome"] == "agentic-applied"
+    assert record is not None and record["components"][_EXTRACTS]["outcome"] == "agentic-applied"
 
     assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 0
     audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
-    grouped = next(unit for unit in audit["components"] if unit["component_id"] == "grouping-1")
+    grouped = next(unit for unit in audit["components"] if unit["component_id"] == _EXTRACTS)
     assert grouped["grouped_components"] == ["component-2", "component-3"]
     assert grouped["outcome"] == "agentic-applied"
 
@@ -235,22 +238,22 @@ def test_an_accepted_grouping_routes_fills_and_packages_as_one_unit(
 def test_un_accepting_a_grouping_routes_its_components_separately_again(tmp_path: Path) -> None:
     inventory = _enriched(tmp_path)
     _write_report(tmp_path)
-    _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, {"grouping-1"}))
+    _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, {_EXTRACTS}))
     assert apply_agentic_output(tmp_path, ["extract_a", "extract_b"], [_authored("sql_server_ingest")])["ok"] is True
 
     outcome = _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, set()))
 
     assert outcome["outcomes"]["component-2"] == outcome["outcomes"]["component-3"] == "agentic-not-viable"
-    assert "grouping-1" not in outcome["outcomes"]
+    assert _EXTRACTS not in outcome["outcomes"]
     assert apply_agentic_output(tmp_path, ["extract_a", "extract_b"], [_authored("x")])["ok"] is False
 
 
 def test_a_grouping_with_a_component_decided_deterministic_is_refused(tmp_path: Path) -> None:
     inventory = _enriched(tmp_path)
 
-    violations = routing.validate_plan(_plan(inventory, {"component-2"}, {"grouping-1"}), inventory)
+    violations = routing.validate_plan(_plan(inventory, {"component-2"}, {_EXTRACTS}), inventory)
 
-    assert any("grouping 'grouping-1'" in violation and "'component-3'" in violation for violation in violations)
+    assert any(f"grouping {_EXTRACTS!r}" in violation and "'component-3'" in violation for violation in violations)
 
 
 def test_a_grouping_and_its_own_components_may_reuse_each_others_pipeline_names(tmp_path: Path) -> None:
@@ -259,7 +262,7 @@ def test_a_grouping_and_its_own_components_may_reuse_each_others_pipeline_names(
     _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, set()))
     assert apply_agentic_output(tmp_path, ["extract_a"], [_authored("extract_a")])["ok"] is True
     assert apply_agentic_output(tmp_path, ["extract_b"], [_authored("extract_b")])["ok"] is True
-    _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, {"grouping-1"}))
+    _route(tmp_path, _plan(inventory, {"component-2", "component-3"}, {_EXTRACTS}))
 
     grouped = apply_agentic_output(tmp_path, ["extract_a", "extract_b"], [_authored("extract_a")])
 
@@ -278,14 +281,58 @@ def test_a_passed_in_grouping_whose_suggestion_changed_since_is_refused(tmp_path
     stale_copy["suggested_groupings"] = [{**suggestion, "accepted": True}]
     assert routing.validate_plan(stale_copy, before) == []
     after = _enriched(tmp_path / "after", extra_patterns={"extract_c": _LAKEFLOW_CONNECT})
+    (current,) = routing.suggest_groupings(after)
+    relabelled = {
+        **stale_copy,
+        "suggested_groupings": [{**suggestion, "grouping_id": current["grouping_id"], "accepted": True}],
+    }
 
-    violations = routing.validate_plan(stale_copy, after)
+    stale = routing.validate_plan(stale_copy, after)
+    mislabelled = routing.validate_plan(relabelled, after)
 
-    assert violations == [
-        "suggested_groupings[0]: grouping 'grouping-1' now joins ['component-2', 'component-3', 'component-4', "
-        "'component-5'] (['extract_a', 'extract_b', 'extract_c', 'mart']), not the components and members this "
-        "plan lists; the suggestions changed since it was written, so review the grouping again"
+    assert stale == [
+        f"suggested_groupings[0]: {_EXTRACTS!r} is not a grouping route suggests for this inventory; only a "
+        "suggested grouping can be accepted (to group other components, record an inferred relationship through "
+        "enrich)"
     ]
+    assert mislabelled == [
+        f"suggested_groupings[0]: grouping {current['grouping_id']!r} now joins ['component-2', 'component-3', "
+        "'component-4', 'component-5'] (['extract_a', 'extract_b', 'extract_c', 'mart']), not the components and "
+        "members this plan lists; the suggestions changed since it was written, so review the grouping again"
+    ]
+
+
+def test_a_re_enrich_that_drops_another_suggestion_keeps_a_grouping_accepted_and_filled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inventory = _enriched(tmp_path)
+    _write_report(tmp_path)
+    agentic = {"component-2", "component-3", "component-4", "component-5"}
+    _route(
+        tmp_path,
+        _plan(inventory, agentic, {grouping["grouping_id"] for grouping in routing.suggest_groupings(inventory)}),
+    )
+    assert apply_agentic_output(tmp_path, ["extract_a", "extract_b"], [_authored("lfc_a")])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["extract_c", "mart"], [_authored("lfc_b")])["ok"] is True
+    assert enrich_inventory(tmp_path, insights=_insights(extra_patterns={"extract_b": "Auto Loader"}))["ok"] is True
+    re_enriched = json.loads((tmp_path / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+    (remaining,) = routing.suggest_groupings(re_enriched)
+    assert remaining["members"] == ["extract_c", "mart"]
+    capsys.readouterr()
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["accepted_groupings"] == [remaining["grouping_id"]]
+    assert payload["edit"]["outcomes"][remaining["grouping_id"]] == "agentic-applied"
+    refill = apply_agentic_output(tmp_path, ["extract_c", "mart"], [_authored("lfc_b")])
+    assert refill["ok"] is True and refill["already_applied"] is True
+    store = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
+    assert sorted(entry["members"] for entry in store["components"].values()) == [
+        ["extract_a", "extract_b"],
+        ["extract_c", "mart"],
+    ]
+    assert all(entry["replaced"] == [] for entry in store["components"].values())
 
 
 def test_only_a_suggested_grouping_can_be_accepted(tmp_path: Path) -> None:
@@ -300,14 +347,14 @@ def test_only_a_suggested_grouping_can_be_accepted(tmp_path: Path) -> None:
 
 def test_an_accepted_grouping_is_kept_when_route_runs_again_without_a_plan(tmp_path: Path) -> None:
     inventory = _enriched(tmp_path)
-    assert routing.record_plan(tmp_path, plan=_plan(inventory, {"component-2", "component-3"}, {"grouping-1"}))["ok"]
+    assert routing.record_plan(tmp_path, plan=_plan(inventory, {"component-2", "component-3"}, {_EXTRACTS}))["ok"]
     recorded = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
 
     carried = routing.carried_forward_plan(recorded, inventory)
 
     assert {entry["grouping_id"]: entry["accepted"] for entry in carried["suggested_groupings"]} == {
-        "grouping-1": True,
-        "grouping-2": False,
+        _EXTRACTS: True,
+        _EXTRACT_C_AND_MART: False,
     }
     decisions = {entry["component_id"]: entry["decision"] for entry in carried["components"]}
     assert decisions["component-2"] == decisions["component-3"] == "agentic"

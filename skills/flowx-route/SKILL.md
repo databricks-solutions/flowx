@@ -129,7 +129,9 @@ kinds of link in the insights:
   pipelines in more than one component — the independent extractors one managed pattern could replace.
 
 Components joined by these links, directly or through each other, form one suggestion
-(`grouping-<n>`), so suggestions never overlap. Each lists its `components`, `members` and `basis`
+(`grouping-<hash of its members>`), so suggestions never overlap; the same members keep the same id,
+so an accepted grouping stays accepted, and keeps its agent output, when enrich runs again and other
+suggestions change. Each lists its `components`, `members` and `basis`
 (the relationships or the shared pattern behind it), and `accepted: false`. Only a suggested grouping
 can be accepted; to group other components, record an inferred relationship through enrich and route
 again.
