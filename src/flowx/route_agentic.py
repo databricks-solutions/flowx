@@ -43,7 +43,7 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -86,6 +86,8 @@ _PLACEHOLDER_COMMENT = (
 
 # Where a task can hold nested tasks in the report IR (IfCondition / ForEach / Switch containers).
 _NESTED_TASK_KEYS = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
+# Where an ADF activity's typeProperties hold nested activities (ForEach / Until / If / Switch).
+_ADF_NESTED_ACTIVITY_KEYS = ("activities", "ifTrueActivities", "ifFalseActivities", "defaultActivities")
 
 
 # --------------------------------------------------------------------------- #
@@ -841,35 +843,52 @@ def _authored_source_tag_violations(authored_pipelines: list[dict[str, Any]], so
     return violations
 
 
-def _task_names(tasks: Any) -> set[str]:
-    """The names of every task among ``tasks``, looking inside ForEach / If / Switch containers too."""
-    names: set[str] = set()
+def _walk_tasks(tasks: Any) -> Iterator[dict[str, Any]]:
+    """Every task among ``tasks``, followed by the tasks nested in its ForEach / If / Switch containers."""
     for task in tasks if isinstance(tasks, list) else []:
         if not isinstance(task, dict):
             continue
-        names.add(str(task.get("name")))
+        yield task
         for key in _NESTED_TASK_KEYS:
-            names.update(_task_names(task.get(key)))
+            yield from _walk_tasks(task.get(key))
         for case in task.get("cases") or []:
             if isinstance(case, dict):
-                names.update(_task_names(case.get("activities")))
+                yield from _walk_tasks(case.get("activities"))
+
+
+def _adf_activity_names(activities: Any) -> Iterator[str]:
+    """The names of the ADF activities among ``activities`` and of every activity nested inside them."""
+    for activity in activities if isinstance(activities, list) else []:
+        if not isinstance(activity, dict):
+            continue
+        yield str(activity.get("name"))
+        type_properties = activity.get("typeProperties")
+        if not isinstance(type_properties, dict):
+            continue
+        for key in _ADF_NESTED_ACTIVITY_KEYS:
+            yield from _adf_activity_names(type_properties.get(key))
+        for case in type_properties.get("cases") or []:
+            if isinstance(case, dict):
+                yield from _adf_activity_names(case.get("activities"))
+
+
+def _task_names(tasks: Any) -> set[str]:
+    """The names of every task among ``tasks``, looking inside containers too.
+
+    Convert keeps an agentic container such as an ``Until`` as one placeholder, but still records a gap
+    for each activity inside it, so the names nested in a placeholder's ADF definition count as well.
+    """
+    names: set[str] = set()
+    for task in _walk_tasks(tasks):
+        names.add(str(task.get("name")))
+        if task.get("type") == "PlaceholderActivity":
+            names.update(_adf_activity_names([task.get("raw_definition")]))
     return names
 
 
 def _placeholder_task_names(tasks: Any) -> list[str]:
     """The names of every ``PlaceholderActivity`` among ``tasks``, looking inside containers too."""
-    names: list[str] = []
-    for task in tasks if isinstance(tasks, list) else []:
-        if not isinstance(task, dict):
-            continue
-        if task.get("type") == "PlaceholderActivity":
-            names.append(str(task.get("name")))
-        for key in _NESTED_TASK_KEYS:
-            names.extend(_placeholder_task_names(task.get(key)))
-        for case in task.get("cases") or []:
-            if isinstance(case, dict):
-                names.extend(_placeholder_task_names(case.get("activities")))
-    return names
+    return [str(task.get("name")) for task in _walk_tasks(tasks) if task.get("type") == "PlaceholderActivity"]
 
 
 def _authored_placeholder_violations(authored_pipelines: list[dict[str, Any]]) -> list[str]:

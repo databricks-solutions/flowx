@@ -334,8 +334,29 @@ def _if_with_nested_gap(name: str, task_key: str) -> dict[str, Any]:
     }
 
 
-def test_alter_report_supersedes_an_untagged_gap_nested_inside_a_routed_container() -> None:
-    report = {"pipelines": [{"name": "parent", "tasks": [_if_with_nested_gap("Check", "check")]}]}
+def _until_with_nested_gap(name: str, task_key: str) -> dict[str, Any]:
+    """Convert's placeholder for an Until, whose loop body holds an unsupported activity only in its ADF JSON."""
+    nested = {"name": "Nested Gap", "type": "Script", "typeProperties": {}}
+    raw_definition = {
+        "name": name,
+        "type": "Until",
+        "typeProperties": {
+            "expression": {"value": "@equals(1, 1)", "type": "Expression"},
+            "activities": [{"name": "Gate", "type": "IfCondition", "typeProperties": {"ifTrueActivities": [nested]}}],
+        },
+    }
+    return {
+        "name": name,
+        "task_key": task_key,
+        "type": "PlaceholderActivity",
+        "original_type": "Until",
+        "raw_definition": raw_definition,
+    }
+
+
+@pytest.mark.parametrize("container", [_if_with_nested_gap, _until_with_nested_gap])
+def test_alter_report_supersedes_an_untagged_gap_nested_inside_a_routed_container(container: Any) -> None:
+    report = {"pipelines": [{"name": "parent", "tasks": [container("Check", "check")]}]}
     nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
 
     _report, gaps = alter_report(report, [nested], {"parent"})
@@ -344,11 +365,12 @@ def test_alter_report_supersedes_an_untagged_gap_nested_inside_a_routed_containe
     assert [(gap["pipeline"], gap["activity_name"]) for gap in gaps] == [("parent", "Check")]
 
 
-def test_alter_report_keeps_a_nested_gap_whose_name_a_non_routed_container_also_holds() -> None:
+@pytest.mark.parametrize("other_container", [_if_with_nested_gap, _until_with_nested_gap])
+def test_alter_report_keeps_a_nested_gap_whose_name_a_non_routed_container_also_holds(other_container: Any) -> None:
     report = {
         "pipelines": [
             {"name": "parent", "tasks": [_if_with_nested_gap("Check", "check")]},
-            {"name": "other", "tasks": [_if_with_nested_gap("Gate", "gate")]},
+            {"name": "other", "tasks": [other_container("Wait", "wait")]},
         ]
     }
     nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
@@ -358,9 +380,10 @@ def test_alter_report_keeps_a_nested_gap_whose_name_a_non_routed_container_also_
     assert nested in gaps
 
 
-def test_a_filled_unit_with_a_nested_convert_gap_leaves_no_gaps(tmp_path: Path) -> None:
+@pytest.mark.parametrize("container", [_if_with_nested_gap, _until_with_nested_gap])
+def test_a_filled_unit_with_a_nested_convert_gap_leaves_no_gaps(tmp_path: Path, container: Any) -> None:
     report = _report_two_pipelines()
-    report["pipelines"][0]["tasks"] = [_if_with_nested_gap("Check", "check")]
+    report["pipelines"][0]["tasks"] = [container("Check", "check")]
     _write_work(tmp_path, report, gaps=[{"activity_name": "Nested Gap", "activity_type": "Script"}])
     metadata = tmp_path / "metadata"
     metadata.mkdir(parents=True, exist_ok=True)
@@ -644,6 +667,36 @@ def test_route_takes_a_fresh_convert_as_the_new_baseline(tmp_path: Path) -> None
     report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
     child = next(p for p in report["pipelines"] if p["name"] == "child")
     assert child["tasks"][0]["notebook_path"] == "/Workspace/Shared/reconverted"
+
+
+def test_a_re_convert_without_gaps_clears_the_gaps_an_agentic_route_wrote(tmp_path: Path) -> None:
+    pipelines = tmp_path / "export" / "pipelines"
+    pipelines.mkdir(parents=True)
+    wait = {"name": "pause", "type": "Wait", "dependsOn": [], "typeProperties": {"waitTimeInSeconds": 1}}
+    document = {"name": "orders", "properties": {"activities": [wait]}}
+    (pipelines / "orders.json").write_text(json.dumps(document), encoding="utf-8")
+    output_dir = tmp_path / "out"
+    source = ["--source", "adf", "--source-path", str(tmp_path / "export"), "--output-dir", str(output_dir)]
+    report_path = output_dir / WORK_DIRNAME / REPORT_FILENAME
+    gaps_path = output_dir / WORK_DIRNAME / GAPS_FILENAME
+    plan_path = tmp_path / "plan.json"
+
+    def route(decision: str) -> None:
+        plan = {"components": [{"component_id": "component-1", "members": ["orders"], "decision": decision}]}
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        assert adapter_main(["route", "--output-dir", str(output_dir), "--plan-path", str(plan_path)]) == 0
+
+    assert adapter_main(["discover", *source]) == 0
+    assert adapter_main(["convert", *source]) == 0
+    route("agentic")
+    assert [gap["pipeline"] for gap in json.loads(gaps_path.read_text(encoding="utf-8"))] == ["orders"]
+    assert adapter_main(["convert", *source]) == 0
+    reconverted_report = report_path.read_bytes()
+
+    route("deterministic")
+
+    assert not gaps_path.exists()
+    assert report_path.read_bytes() == reconverted_report
 
 
 def test_reroute_under_the_same_decisions_keeps_fills_and_updates_the_plan_hash(tmp_path: Path) -> None:
