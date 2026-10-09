@@ -70,6 +70,9 @@ def write_notebooks(notebooks: list[DabNotebook], output_dir: Path) -> list[Path
         destination.parent.mkdir(parents=True, exist_ok=True)
         if notebook.binary_content is not None:
             destination.write_bytes(notebook.binary_content)
+        elif notebook.authored:
+            # Authored text is written byte for byte: no added newline and no platform line endings.
+            destination.write_bytes(notebook.content.encode("utf-8"))
         else:
             content = notebook.content if notebook.content.endswith("\n") else notebook.content + "\n"
             destination.write_text(content, encoding="utf-8")

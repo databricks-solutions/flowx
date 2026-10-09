@@ -25,6 +25,10 @@ FLOWX_OWNED_TASK_FIELDS = frozenset(
 )
 
 
+_PAYLOADS_NEEDING_COMPUTE = frozenset({"spark_python_task", "python_wheel_task", "spark_jar_task"})
+_COMPUTE_KEYS = ("environment_key", "job_cluster_key", "existing_cluster_id", "new_cluster")
+
+
 def _source_relative_path(raw_path: object) -> str:
     """Return a safe path relative to the bundle's ``src`` directory."""
     relative_path = PurePosixPath(str(raw_path))
@@ -59,6 +63,11 @@ def _check_task_payload(task_key: str, task: dict[str, object]) -> None:
         )
     if not isinstance(task[payloads[0]], dict):
         raise ValueError(f"Agentic component {task_key!r} task payload {payloads[0]} must be a mapping")
+    # flowx binds a cluster only for notebooks, and these task types cannot run without compute.
+    if payloads[0] in _PAYLOADS_NEEDING_COMPUTE and not any(key in task for key in _COMPUTE_KEYS):
+        raise ValueError(
+            f"Agentic component {task_key!r} {payloads[0]} must name its compute with {', '.join(_COMPUTE_KEYS)}"
+        )
 
 
 def _check_resource(task_key: str, resource: object) -> None:
@@ -103,15 +112,16 @@ def _check_environment(task_key: str, environment: object) -> None:
 def _authored_file(task_key: str, file: object) -> DabNotebook:
     """Turn one authored ``files`` entry into a file the bundle writer keeps below ``src``.
 
-    A file carries text ``content`` or base64 ``binary_content``, never both, and each must
-    already be a string so the file is written exactly as authored.
+    A file carries exactly one of text ``content`` or base64 ``binary_content``, and it must
+    already be a string so the file is written byte for byte as authored.
     """
     if not isinstance(file, dict) or not isinstance(file.get("path"), str):
         raise ValueError(f"Agentic component {task_key!r} file {file!r} must be a mapping with a string path")
     relative_path = _source_relative_path(file["path"])
-    if "content" in file and "binary_content" in file:
+    if ("content" in file) == ("binary_content" in file):
         raise ValueError(
-            f"Agentic component {task_key!r} file {relative_path!r} must set content or binary_content, not both"
+            f"Agentic component {task_key!r} file {relative_path!r} must set content or binary_content, "
+            "exactly one of them"
         )
     if "binary_content" in file:
         encoded = file["binary_content"]
@@ -126,7 +136,7 @@ def _authored_file(task_key: str, file: object) -> DabNotebook:
                 f"Agentic component {task_key!r} file {relative_path!r} binary_content must be valid base64"
             ) from error
         return DabNotebook(relative_path=relative_path, binary_content=decoded, authored=True)
-    content = file.get("content", "")
+    content = file["content"]
     if not isinstance(content, str):
         raise ValueError(f"Agentic component {task_key!r} file {relative_path!r} content must be a string")
     return DabNotebook(relative_path=relative_path, content=content, authored=True)
@@ -185,8 +195,9 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
         ValueError: The authored task fragment sets a flowx-owned field, a file entry is
             malformed or its path escapes the bundle's ``src`` directory, a resource is
             malformed or its key is not a plain identifier, an environment is malformed,
-            a binary file is not valid base64, or the task does not carry exactly one
-            executable payload mapping.
+            a binary file is not valid base64, the task does not carry exactly one
+            executable payload mapping, or a ``spark_python_task``, ``python_wheel_task`` or
+            ``spark_jar_task`` names no compute.
     """
     del scope
     owned_fields = sorted(FLOWX_OWNED_TASK_FIELDS & activity.task.keys())

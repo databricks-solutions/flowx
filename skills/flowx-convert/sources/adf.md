@@ -76,11 +76,13 @@ Write one JSON file per resolved gap into `<output_dir>/agentic_results/`:
 are inherited from the placeholder when omitted, preserving dependency edges.
 
 When no typed task fits, use `"type": "AgenticComponentActivity"` instead. It carries `files`
-(each a relative `path` below the bundle's `src/` with text `content` or base64 `binary_content`),
+(each a relative `path` below the bundle's `src/` with exactly one of text `content` or base64
+`binary_content`, written byte for byte),
 pipeline `resources` (`resource_key` plus a `definition` mapping), optional job `environments`
 (each exactly an `environment_key` plus a `spec` mapping), and a raw Databricks `task` fragment with
-exactly one `<kind>_task` payload. A serverless `spark_python_task` or `python_wheel_task` needs an
-`environment_key`: declare that environment in `environments` and flowx writes it into the job that
+exactly one `<kind>_task` payload. A `spark_python_task`, `python_wheel_task` or `spark_jar_task`
+must name its compute (`environment_key`, `job_cluster_key`, `existing_cluster_id` or
+`new_cluster`), or package refuses it. A serverless one uses an `environment_key`: declare that environment in `environments` and flowx writes it into the job that
 runs the task. A wheel or other authored file the environment installs is listed in
 `spec.dependencies` as `../src/<path>`. Every `environment_key` a task uses must be declared, and
 two components may declare the same environment only with an identical spec (it is then written

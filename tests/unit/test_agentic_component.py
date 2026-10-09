@@ -265,7 +265,7 @@ def test_merged_agentic_component_takes_identity_dependencies_and_policy_from_th
         "depends_on": [{"task_key": "extract", "outcome": "Succeeded"}],
         "max_retries": 9,
         "files": [{"path": "jobs/load.py", "content": "print('load')\n"}],
-        "task": {"spark_python_task": {"python_file": "../src/jobs/load.py"}},
+        "task": {"spark_python_task": {"python_file": "../src/jobs/load.py"}, "existing_cluster_id": "0101-abc"},
     }
     (results / "transform.json").write_text(
         json.dumps({"activity_name": "Transform", "task": transform}), encoding="utf-8"
@@ -287,7 +287,11 @@ def test_merged_agentic_component_takes_identity_dependencies_and_policy_from_th
         "min_retry_interval_millis": 60000,
         "pipeline_task": TASK["pipeline_task"],
     }
-    assert tasks["load"] == {"task_key": "load", "spark_python_task": {"python_file": "../src/jobs/load.py"}}
+    assert tasks["load"] == {
+        "task_key": "load",
+        "spark_python_task": {"python_file": "../src/jobs/load.py"},
+        "existing_cluster_id": "0101-abc",
+    }
     assert [task.name for task in merged_pipeline.tasks] == ["Extract", "Transform", "Load"]
 
 
@@ -485,13 +489,13 @@ def test_agentic_components_authoring_different_content_at_one_path_fail(tmp_pat
         name="First",
         task_key="first",
         files=[{"path": "jobs/run.py", "content": "print('first')\n"}],
-        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}},
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "existing_cluster_id": "0101-abc"},
     )
     second = AgenticComponentActivity(
         name="Second",
         task_key="second",
         files=[{"path": "jobs/run.py", "content": "print('second')\n"}],
-        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}},
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "existing_cluster_id": "0101-abc"},
     )
 
     with pytest.raises(ValueError, match="'jobs/run.py' shares its path"):
@@ -507,13 +511,13 @@ def test_agentic_components_sharing_identical_file_content_still_package(tmp_pat
         name="First",
         task_key="first",
         files=shared,
-        task={"spark_python_task": {"python_file": "../src/jobs/common.py"}},
+        task={"spark_python_task": {"python_file": "../src/jobs/common.py"}, "existing_cluster_id": "0101-abc"},
     )
     second = AgenticComponentActivity(
         name="Second",
         task_key="second",
         files=shared,
-        task={"spark_python_task": {"python_file": "../src/jobs/common.py"}},
+        task={"spark_python_task": {"python_file": "../src/jobs/common.py"}, "existing_cluster_id": "0101-abc"},
     )
 
     write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
@@ -888,3 +892,45 @@ def test_agentic_component_rejects_malformed_environments(environment):
 
     with pytest.raises(ValueError, match="Agentic component 'bad' environment"):
         prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"spark_python_task": {"python_file": "../src/jobs/run.py"}},
+        {"python_wheel_task": {"package_name": "orders", "entry_point": "main"}},
+        {"spark_jar_task": {"main_class_name": "com.example.Main"}},
+    ],
+)
+def test_agentic_component_python_or_jar_task_without_compute_fails(payload):
+    """flowx binds a cluster only for notebooks, so these would package with no compute and fail at deploy."""
+    activity = AgenticComponentActivity(name="Run", task_key="run", task=payload)
+
+    with pytest.raises(ValueError, match="'run' .* must name its compute"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+def test_agentic_component_file_without_content_or_binary_content_fails():
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[{"path": "notebooks/run.py"}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/run.py"}},
+    )
+
+    with pytest.raises(ValueError, match="'run' file 'notebooks/run.py' must set content or binary_content"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+@pytest.mark.parametrize("content", ["print('no trailing newline')", ""])
+def test_agentic_component_text_file_is_written_byte_for_byte(tmp_path, content):
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[{"path": "notebooks/run.py", "content": content}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/run.py"}},
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[activity])), tmp_path)
+
+    assert (tmp_path / "src" / "notebooks" / "run.py").read_bytes() == content.encode("utf-8")
