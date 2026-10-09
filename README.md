@@ -170,7 +170,7 @@ agent using LLM-assisted reasoning from the activity's ARM JSON.
 
 ## Supported Airflow Operators
 
-The Airflow source parses DAG `.py` modules **statically** (via `ast`, no Airflow install or DAG execution) and maps the constructs below to the shared IR — 38 operator/sensor types in the parser registry, plus the dbt CLI, Cosmos, and TaskFlow constructs.
+The Airflow source parses DAG `.py` modules **statically** (via `ast`, no Airflow install or DAG execution) and maps the constructs below to the shared IR — 74 operator/sensor types in the parser registry, plus the dbt CLI, Cosmos, and TaskFlow constructs.
 
 Unlike the ADF path, an Airflow operator's path is decided **per instance** by whether its inputs are statically resolvable. A recognized operator lowers to a real Databricks task (**deterministic**), or — when a value can't be resolved from source alone — to a failing placeholder + `gaps.json` entry (**agentic**). A few constructs are always agentic because their behavior is inherently runtime.
 
@@ -179,6 +179,7 @@ Unlike the ADF path, an Airflow operator's path is decided **per instance** by w
 | Compute / scripts | `PythonOperator` | Notebook task (callable + transitive deps) | Deterministic † |
 | Compute / scripts | `PythonVirtualenvOperator`, `ExternalPythonOperator` | Notebook task + `%pip install` | Deterministic |
 | Compute / scripts | `BashOperator`, `SSHOperator` | `%sh` notebook (`spark-submit` lifted when option arity is known) | Deterministic † |
+| Teradata | `BteqOperator`, `TeradataOperator`, and Bash/SSH commands that run `bteq`, TPT (`tbuild`, `tdload`), or the load/export utilities | Placeholder + gap carrying the script | Agentic |
 | Compute / scripts | `SparkSubmitOperator` | Spark JAR / Python task | Deterministic |
 | Databricks provider | `DatabricksSubmitRunOperator` (+ `…DeferrableOperator`) | Notebook / run task | Deterministic |
 | Databricks provider | `DatabricksRunNowOperator` (+ `…DeferrableOperator`) | `run_job_task` | Deterministic |
