@@ -273,8 +273,8 @@ class ConversionPlan:
 
         Raises:
             ValueError: The document is not an object, was recorded under another schema version, or
-                its components, groupings or conversation are missing or malformed (re-run ``route``
-                to record it again).
+                its components, groupings, conversation or findings are missing or malformed (re-run
+                ``route`` to record it again).
         """
         if not isinstance(raw, dict):
             raise ValueError(f"{PLAN_FILENAME} must contain a JSON object, got {type(raw).__name__}")
