@@ -684,14 +684,17 @@ def _teradata_placeholder(
     ctx: OperatorContext, utilities: list[str], scripts: list[dict[str, Any]], inline_scripts: list[str]
 ) -> Activity:
     message, details = teradata.gap_details(utilities, scripts, inline_scripts)
-    raw_definition = {"operator": ctx.operator, "source": ctx.call_source} if ctx.call_source else {}
-    return PlaceholderActivity(
-        name=ctx.task_id,
-        task_key=ctx.task_key,
-        original_type=ctx.operator,
-        comment=message,
-        raw_definition={**raw_definition, "teradata": details},
-    )
+    return _placeholder(ctx, message, {"teradata": details})
+
+
+def _literal_statements(node: ast.expr | None) -> list[str]:
+    """Returns an operator's SQL as a list of statements: one string, or a literal list of strings."""
+    value = literal_value(node)
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list | tuple) and all(isinstance(statement, str) for statement in value):
+        return list(value)
+    return []
 
 
 def _build_bteq(ctx: OperatorContext) -> Activity:
@@ -703,14 +706,15 @@ def _build_bteq(ctx: OperatorContext) -> Activity:
 
 
 def _build_teradata_sql(ctx: OperatorContext) -> Activity:
-    """A TeradataOperator runs Teradata SQL, inline or from a ``.sql`` template file."""
-    sql = literal_str(ctx.kwargs.get("sql"))
-    if sql is not None and sql.endswith(_SQL_FILE_EXTENSIONS):
-        content, detail = _read_template_file(sql, ctx.template_search_paths)
-        record = {"path": sql, "unresolved": detail} if content is None else teradata.script_record(detail, ())
-        record["path"] = sql
+    """A TeradataOperator runs Teradata SQL: inline statements, or a ``.sql`` template file (its template_ext)."""
+    statements = _literal_statements(ctx.kwargs.get("sql"))
+    if len(statements) == 1 and statements[0].endswith(".sql"):
+        name = statements[0]
+        path, detail = _find_template_file(name, ctx.template_search_paths)
+        record = {"path": name, "unresolved": detail} if path is None else teradata.script_record(str(path), ())
+        record["path"] = name
         return _teradata_placeholder(ctx, [], [record], [])
-    return _teradata_placeholder(ctx, [], [], [sql] if sql is not None else [])
+    return _teradata_placeholder(ctx, [], [], statements)
 
 
 def _build_spark_submit(ctx: OperatorContext) -> Activity:
@@ -805,8 +809,8 @@ _SQL_FILE_EXTENSIONS = (".sql", ".hql")
 _JINJA_STATEMENT_OR_COMMENT = re.compile(r"\{%|\{#")
 
 
-def _read_template_file(name: str, search_paths: tuple[Path, ...]) -> tuple[str | None, str]:
-    """Loads a template file the way Airflow's Jinja loader finds it, or explains why it cannot.
+def _find_template_file(name: str, search_paths: tuple[Path, ...]) -> tuple[Path | None, str]:
+    """Finds a template file the way Airflow's Jinja loader does, or explains why it cannot.
 
     Jinja splits the name on ``/``, ignores empty and ``.`` segments, refuses ``..``, and returns the
     first match across the search paths.
@@ -817,14 +821,22 @@ def _read_template_file(name: str, search_paths: tuple[Path, ...]) -> tuple[str 
     for root in search_paths:
         candidate = root.joinpath(*parts)
         if candidate.is_file():
-            try:
-                content = candidate.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as error:
-                return None, f"could not be read as UTF-8 text ({error})"
-            # Airflow's Jinja environment drops a single trailing newline (keep_trailing_newline=False).
-            return content.removesuffix("\n"), str(candidate)
+            return candidate, str(candidate)
     searched = ", ".join(str(root) for root in search_paths) or "an empty search path"
     return None, f"was not found in {searched}"
+
+
+def _read_template_file(name: str, search_paths: tuple[Path, ...]) -> tuple[str | None, str]:
+    """Loads a template file's text as Airflow renders it, returning the resolved path or why it failed."""
+    path, detail = _find_template_file(name, search_paths)
+    if path is None:
+        return None, detail
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        return None, f"could not be read as UTF-8 text ({error})"
+    # Airflow's Jinja environment drops a single trailing newline (keep_trailing_newline=False).
+    return content.removesuffix("\n"), detail
 
 
 def _sql_builder(note: str, sql_kwarg: str = "sql") -> Callable[[OperatorContext], Activity]:
@@ -972,7 +984,7 @@ def build_placeholder(ctx: OperatorContext) -> Activity:
     )
 
 
-def build_placeholder_with_comment(ctx: OperatorContext, comment: str) -> Activity:
+def build_placeholder_with_comment(ctx: OperatorContext, comment: str) -> PlaceholderActivity:
     """Builds a placeholder carrying a caller-supplied migration explanation."""
     return _placeholder(ctx, comment)
 

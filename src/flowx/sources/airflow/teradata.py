@@ -26,17 +26,48 @@ _HEREDOC = re.compile(
 )
 
 
-def _tokens(command: str) -> list[str] | None:
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+_JINJA_EXPRESSION = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.DOTALL)
+_SCRIPT_ARGUMENT = re.compile(r"(?:<|-f)\s*([^\s;|&<>]+)")
+
+
+def _mask_jinja(command: str) -> tuple[str, dict[str, str]]:
+    """Replaces Jinja expressions with space-free markers so a path like ``x_{{ ds }}.bteq`` stays one word."""
+    expressions: dict[str, str] = {}
+
+    def mask(match: re.Match[str]) -> str:
+        marker = f"\x00{len(expressions)}\x00"
+        expressions[marker] = match.group(0)
+        return marker
+
+    return _JINJA_EXPRESSION.sub(mask, command), expressions
+
+
+def _unmask(word: str, expressions: dict[str, str]) -> str:
+    for marker, expression in expressions.items():
+        word = word.replace(marker, expression)
+    return word
+
+
+def _shell_words(command: str) -> tuple[list[str] | None, dict[str, str]]:
+    """Splits a command into shell words, with here-document bodies removed and Jinja kept whole.
+
+    Returns None for the words when the remaining command still does not parse.
+    """
+    masked, expressions = _mask_jinja(_HEREDOC.sub(" ;\n", command))
+    lexer = shlex.shlex(masked, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
-        return list(lexer)
+        return [_unmask(word, expressions) for word in lexer], expressions
     except ValueError:
-        return None
+        return None, expressions
 
 
-def _utility_name(token: str) -> str | None:
-    name = token.rsplit("/", 1)[-1]
+def _command_name(word: str) -> str:
+    return word.rsplit("/", 1)[-1]
+
+
+def _utility_name(word: str) -> str | None:
+    name = _command_name(word)
     return name if name in UTILITIES else None
 
 
@@ -46,12 +77,12 @@ def find_utilities(command: str) -> list[str]:
     A word whose basename is a utility counts wherever it appears, which can over-report (for example
     ``echo bteq``) but never misses a call. An unparseable command falls back to a word search.
     """
-    tokens = _tokens(command)
-    if tokens is None:
-        tokens = re.findall(r"[\w./-]+", command)
+    words, _ = _shell_words(command)
+    if words is None:
+        words = re.findall(r"[\w./-]+", _HEREDOC.sub(" ;\n", command))
     found: list[str] = []
-    for token in tokens:
-        name = _utility_name(token)
+    for word in words:
+        name = _utility_name(word)
         if name is not None and name not in found:
             found.append(name)
     return found
@@ -60,32 +91,39 @@ def find_utilities(command: str) -> list[str]:
 def script_references(command: str) -> list[str]:
     """Returns the script files a shell command feeds to its Teradata utilities.
 
-    Recognizes ``utility < file``, ``utility -f file``, and ``cat file | utility``.
+    Recognizes ``utility < file``, ``utility -f file``, and ``cat file | utility``. A command that does not
+    parse falls back to finding ``< file`` and ``-f file`` in each segment that names a utility.
     """
-    tokens = _tokens(command)
-    if tokens is None:
-        return []
+    words, expressions = _shell_words(command)
     references: list[str] = []
 
     def add(path: str) -> None:
         if path not in references:
             references.append(path)
 
-    for index, token in enumerate(tokens):
-        if _utility_name(token) is None:
+    if words is None:
+        masked, expressions = _mask_jinja(_HEREDOC.sub(" ;\n", command))
+        for segment in re.split(r"[;&|\n]", masked):
+            if any(_utility_name(word) for word in segment.split()):
+                for match in _SCRIPT_ARGUMENT.finditer(segment):
+                    add(_unmask(match.group(1), expressions))
+        return references
+
+    for index, word in enumerate(words):
+        if _utility_name(word) is None:
             continue
         position = index + 1
-        while position < len(tokens) and tokens[position] not in _SEPARATORS:
-            if tokens[position] in ("<", "-f") and position + 1 < len(tokens):
-                add(tokens[position + 1])
+        while position < len(words) and words[position] not in _SEPARATORS:
+            if words[position] in ("<", "-f") and position + 1 < len(words):
+                add(words[position + 1])
                 position += 1
             position += 1
-        if index >= 2 and tokens[index - 1] == "|":
+        if index >= 2 and words[index - 1] == "|":
             start = index - 2
-            while start >= 0 and tokens[start] not in _SEPARATORS:
+            while start >= 0 and words[start] not in _SEPARATORS:
                 start -= 1
-            segment = tokens[start + 1 : index - 1]
-            if segment and segment[0].rsplit("/", 1)[-1] == "cat":
+            segment = words[start + 1 : index - 1]
+            if segment and _command_name(segment[0]) == "cat":
                 for path in segment[1:]:
                     if not path.startswith("-"):
                         add(path)
