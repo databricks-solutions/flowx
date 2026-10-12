@@ -1,0 +1,1 @@
+{"name":"avro-blob","properties":{"type":"Avro","linkedServiceName":{"referenceName":"blob","type":"LinkedServiceReference"},"typeProperties":{"location":{"type":"AzureBlobStorageLocation","container":"raw","folderPath":"avro"}}}}

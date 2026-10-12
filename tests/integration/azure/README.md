@@ -1,0 +1,112 @@
+# Azure live integration suite
+
+This suite deploys an ephemeral Azure Data Factory and supporting resources, exports the factory 
+through the Azure REST API, and runs flowx against that live export. The same JSON under `adf/` is 
+used by Terraform and by the offline coverage test. The workflow validates translation and Databricks 
+bundle structure; it never deploys a bundle.
+
+## GitHub environment and secrets
+
+Create a protected GitHub environment named `flowx-live-integration` and require approval. Same-repo
+pull requests use `refs/pull/*/merge`, so do not add a deployment-branch restriction if PR runs should 
+proceed; organizations that require trusted-branch-only environments should use the `workflow_dispatch` 
+or post-merge `main` run instead. Add these environment secrets:
+
+- `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` for OIDC. Do not create a client secret.
+- Either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` for headless Claude Code. When neither is present, 
+  deterministic conversion and bundle checks still run and the workflow reports that agentic resolution was 
+  skipped.
+- Optionally, `DATABRICKS_HOST` and `DATABRICKS_TOKEN` to run `databricks bundle validate`. They are not needed
+  for the local structural validation.
+
+The workflow never prints secret values. Fork pull requests cannot reach the protected environment 
+because both the `not-a-fork` job and the live job dependency reject them.
+
+## One-time Azure and GitHub setup
+
+`setup.sh` creates the Entra application and OIDC credential, registers providers, installs and assigns
+the least-privilege custom role, protects the GitHub environment, and sets its secrets. It requires Bash,
+`az`, `gh`, and `jq`, plus active Azure and GitHub CLI logins. The operator needs permission to create 
+Entra applications, administer the repository environment, register providers, and create/assign roles 
+(normally User Access Administrator or Owner for that last setup operation). The CI identity itself receives
+only the custom deployer role, never Owner.
+
+Configuration comes from flags or these environment variables: `GITHUB_REPO`, `AZURE_SUBSCRIPTION_ID`, 
+`APP_NAME`, `ENV_NAME`, `ROLE_NAME`, and the required comma-separated `REVIEWERS`. Defaults are derived 
+from the current CLI context or use `flowx-live-integration`. Claude and optional Databricks secret values 
+may be exported as `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `DATABRICKS_HOST`, and `DATABRICKS_TOKEN`; 
+otherwise the secrets step offers hidden interactive prompts.
+
+```bash
+export REVIEWERS='github-user-one,github-user-two'
+tests/integration/azure/setup.sh setup --dry-run
+tests/integration/azure/setup.sh setup
+tests/integration/azure/setup.sh verify
+```
+
+Use `identity`, `providers`, `role`, `environment`, or `secrets` to rerun one step, and `--yes` for 
+non-interactive automation. Running `setup.sh` without a subcommand defaults to `setup`. The OIDC credential 
+uses the protected-environment subject `repo:<owner>/<repo>:environment:flowx-live-integration`; no client secret
+is created. Terraform provider auto-registration remains disabled.
+
+Use the `cleanup` subcommand to inspect tagged cleanup candidates. Deletion requires both an exact resource-group
+name and explicit confirmation; it never performs wildcard deletion:
+
+```bash
+tests/integration/azure/setup.sh cleanup
+tests/integration/azure/setup.sh cleanup --delete exact-resource-group-name
+```
+
+## Run locally
+
+Offline verification requires Python 3.12 and `uv` but no Azure credentials:
+
+```bash
+bash scripts/bootstrap.sh
+python_bin="$(cat .migration-venv)"
+rm -rf /tmp/flowx-azure-output
+PYTHONPATH=src "$python_bin" -m flowx.adapter discover --source adf \
+  --source-path tests/integration/azure/adf --output-dir /tmp/flowx-azure-output
+PYTHONPATH=src "$python_bin" -m flowx.adapter convert --source adf \
+  --source-path tests/integration/azure/adf --output-dir /tmp/flowx-azure-output
+PYTHONPATH=src uv run pytest tests/integration/test_azure_fixture_coverage.py -m integration -v
+```
+
+To validate or deploy the Azure harness locally, authenticate using an OIDC-capable shell or another temporary
+Azure CLI credential and set `TF_VAR_subscription_id`, `TF_VAR_tenant_id`, `TF_VAR_client_id`, and a lowercase
+run-unique `TF_VAR_name_prefix`. Run Terraform from `terraform/`. Always run `terraform destroy` afterward.
+
+Troubleshooting: if the first apply cannot read storage data-plane properties, set 
+`features { storage { data_plane_available = false } }` or grant the deployer the required storage data-plane
+read actions.
+
+## Coverage matrix
+
+| Area                     | Coverage                                                                                                                                                                                                  | Strategy or purpose                                          |
+|--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------|
+| Deterministic activities | Copy, DatabricksNotebook, DatabricksSparkJar, DatabricksSparkPython, ForEach, IfCondition, SetVariable, Switch, Lookup, WebActivity, Delete, ExecutePipeline, DatabricksJob, Wait, Filter, AppendVariable | All 16 registered deterministic types; 36 activity instances |
+| Agentic activities       | ExecuteDataFlow, Until, SqlServerStoredProcedure, AzureFunction, WebHook, Custom, ExecuteSSISPackage, AzureMLExecutePipeline, GetMetadata, Validation, Fail, Script                                       | All 12 registered agentic types; 15 activity instances       |
+| Complex orchestration    | Exhaustive activity pipeline, nested `ExecutePipeline`, nested control flow, and mixed deterministic/agentic dependencies                                                                                 | Exercises recursive inventory and cross-pipeline references  |
+| Motifs                   | REST API pagination, incremental watermark load, metadata-driven bulk copy, activity-and-notify                                                                                                           | Dedicated pipeline for each production detector              |
+| Formats                  | CSV, Parquet, JSON, Avro, ORC, Delta                                                                                                                                                                      | File and table dataset parsing                               |
+| Stores                   | ADLS Gen2, Blob Storage, Azure SQL, MySQL, PostgreSQL, Databricks Delta                                                                                                                                   | Key Vault references or parameters only                      |
+| Triggers                 | Schedule, TumblingWindow, BlobEvents                                                                                                                                                                      | All three supported trigger kinds                            |
+
+The checked-in corpus currently classifies 51 activity instances: 36 deterministic, 15 agentic, and 0 unsupported.
+
+Note: a real TumblingWindow export uses singular `properties.pipeline`. The current flowx loader reads only
+`properties.pipelines`, so it loads the trigger but does not yet attach its pipeline reference. The fixture 
+intentionally preserves the valid ADF shape; this is a known loader gap.
+
+## Teardown and security
+
+Every base Azure resource is tagged `purpose=flowx-integration-test`, `ephemeral=true`, `managedBy=terraform`,
+and with its run prefix. The workflow runs `terraform destroy` under `if: always()` and then deletes the exact
+Terraform-output resource group as a safety net. It never performs a broad or wildcard deletion.
+
+Fixtures contain no PII, credentials, tenant or subscription IDs, private endpoints, or usable connection 
+strings. Values that would identify an environment use angle-bracket placeholders, dummy `example.invalid`
+URLs, managed identity, parameters, or Key Vault references. Linked-service definitions reference a Key 
+Vault secret named `integration-placeholder`; it intentionally does not exist because pipelines are never 
+executed. The Key Vault contains no secret values. The workflow strips ARM `id` and `etag` fields before 
+any export reaches flowx or Claude. Resources are isolated in a collision-resistant, run-scoped resource group.

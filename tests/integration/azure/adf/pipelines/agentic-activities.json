@@ -1,0 +1,19 @@
+{
+  "name": "agentic-activities",
+  "properties": {
+    "activities": [
+      {"name": "data-flow", "type": "ExecuteDataFlow", "typeProperties": {"dataflow": {"referenceName": "placeholder-data-flow", "type": "DataFlowReference"}, "compute": {"coreCount": 8, "computeType": "General"}}},
+      {"name": "until", "type": "Until", "typeProperties": {"expression": {"value": "@equals(1,1)", "type": "Expression"}, "timeout": "0.00:01:00", "activities": [{"name": "until-wait", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}]}},
+      {"name": "stored-procedure", "type": "SqlServerStoredProcedure", "linkedServiceName": {"referenceName": "azure-sql", "type": "LinkedServiceReference"}, "typeProperties": {"storedProcedureName": "dbo.flowx_integration"}},
+      {"name": "azure-function", "type": "AzureFunction", "linkedServiceName": {"referenceName": "azure-function-parameterized", "type": "LinkedServiceReference"}, "typeProperties": {"functionName": "flowx", "method": "GET"}},
+      {"name": "webhook", "type": "WebHook", "typeProperties": {"url": "https://example.invalid/webhook", "method": "POST", "timeout": "00:01:00"}},
+      {"name": "custom", "type": "Custom", "linkedServiceName": {"referenceName": "batch-parameterized", "type": "LinkedServiceReference"}, "typeProperties": {"command": "echo flowx", "resourceLinkedService": {"referenceName": "blob", "type": "LinkedServiceReference"}, "folderPath": "integration"}},
+      {"name": "ssis", "type": "ExecuteSSISPackage", "typeProperties": {"packageLocation": {"packagePath": "flowx/package.dtsx", "type": "SSISDB"}}},
+      {"name": "azure-ml", "type": "AzureMLExecutePipeline", "typeProperties": {"mlPipelineId": "<AZURE_ML_PIPELINE_ID>", "version": "1"}},
+      {"name": "get-metadata", "type": "GetMetadata", "typeProperties": {"dataset": {"referenceName": "csv-adls", "type": "DatasetReference"}, "fieldList": ["exists"]}},
+      {"name": "validation", "type": "Validation", "typeProperties": {"dataset": {"referenceName": "csv-adls", "type": "DatasetReference"}, "timeout": "0.00:01:00", "sleep": 1, "minimumSize": 0}},
+      {"name": "script", "type": "Script", "linkedServiceName": {"referenceName": "azure-sql", "type": "LinkedServiceReference"}, "typeProperties": {"scripts": [{"type": "Query", "text": "SELECT 1"}]}},
+      {"name": "fail", "type": "Fail", "typeProperties": {"message": "intentional integration fixture", "errorCode": "FLOWX_TEST"}}
+    ]
+  }
+}

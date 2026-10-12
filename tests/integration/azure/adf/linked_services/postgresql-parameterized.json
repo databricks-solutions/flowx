@@ -1,0 +1,1 @@
+{"name":"postgresql-parameterized","properties":{"type":"AzurePostgreSql","parameters":{"connectionString":{"type":"String","defaultValue":"<POSTGRESQL_CONNECTION_STRING>"}},"typeProperties":{"connectionString":{"value":"@linkedService().connectionString","type":"Expression"}}}}

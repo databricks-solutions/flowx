@@ -1,0 +1,1 @@
+{"name":"tumbling-window","properties":{"type":"TumblingWindowTrigger","typeProperties":{"frequency":"Hour","interval":1,"startTime":"2026-01-01T00:00:00Z","maxConcurrency":1},"pipeline":{"pipelineReference":{"referenceName":"motif-incremental-watermark","type":"PipelineReference"},"parameters":{}}}}

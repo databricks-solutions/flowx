@@ -1,0 +1,258 @@
+name: integration
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - tests/integration/azure/**
+      - "!tests/integration/azure/setup.sh"
+      - "!tests/integration/azure/README.md"
+      - tests/integration/test_azure_fixture_coverage.py
+      - src/flowx/sources/adf/**
+      - .github/workflows/integration.yml
+  pull_request:
+    paths:
+      - tests/integration/azure/**
+      - "!tests/integration/azure/setup.sh"
+      - "!tests/integration/azure/README.md"
+      - tests/integration/test_azure_fixture_coverage.py
+      - src/flowx/sources/adf/**
+      - .github/workflows/integration.yml
+
+concurrency:
+  group: live-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  not-a-fork:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+      !github.event.pull_request.head.repo.fork &&
+      github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - run: echo "Trusted repository event; live integration may proceed."
+
+  preflight:
+    needs: not-a-fork
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+        with:
+          version: "0.11.2"
+          checksum: "7ac2ca0449c8d68dae9b99e635cd3bc9b22a4cb1de64b7c43716398447d42981"
+          python-version: "3.12"
+      - run: PYTHONPATH=src uv run pytest tests/integration/test_azure_fixture_coverage.py -m integration -v
+
+  integration:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: flowx-live-integration
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TF_IN_AUTOMATION: "true"
+      FLOWX_OUTPUT: flowx_output
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+        with:
+          version: "0.11.2"
+          checksum: "7ac2ca0449c8d68dae9b99e635cd3bc9b22a4cb1de64b7c43716398447d42981"
+          python-version: "3.12"
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Derive collision-resistant run prefix
+        shell: bash
+        run: |
+          run_hash="$(printf '%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" | sha256sum | cut -c1-10)"
+          echo "TF_VAR_name_prefix=fx${run_hash}" >> "${GITHUB_ENV}"
+
+      - name: Sign in to Azure with OIDC
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create ephemeral Azure resources
+        working-directory: tests/integration/azure/terraform
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform init -input=false
+          terraform fmt -check
+          terraform validate
+          terraform apply -auto-approve -input=false
+
+      - name: Bootstrap flowx
+        run: bash scripts/bootstrap.sh
+
+      - name: Export deployed ADF definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          export_dir="${RUNNER_TEMP}/adf-export"
+          factory_name="$(terraform -chdir=tests/integration/azure/terraform output -raw factory_name)"
+          resource_group="$(terraform -chdir=tests/integration/azure/terraform output -raw resource_group_name)"
+          mkdir -p "${export_dir}"/{pipelines,datasets,linked_services,triggers}
+          for mapping in "pipelines:pipelines" "datasets:datasets" "linkedservices:linked_services" "triggers:triggers"; do
+            resource_type="${mapping%%:*}"
+            directory="${mapping##*:}"
+            subscription_id="$(az account show --query id --output tsv)"
+            base_url="https://management.azure.com/subscriptions/${subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.DataFactory/factories/${factory_name}/${resource_type}"
+            az rest --method get --url "${base_url}?api-version=2018-06-01" --output json |
+              jq -c '.value[]' |
+              while IFS= read -r resource; do
+                name="$(jq -r '.name' <<<"${resource}" | awk -F/ '{print $NF}')"
+                jq '{name, properties}' <<<"${resource}" > "${export_dir}/${directory}/${name}.json"
+              done
+          done
+          echo "ADF_EXPORT_DIR=${export_dir}" >> "${GITHUB_ENV}"
+
+      - name: Discover and convert exported definitions
+        run: |
+          python_bin="$(cat .migration-venv)"
+          PYTHONPATH=src "${python_bin}" -m flowx.adapter discover --source adf --source-path "${ADF_EXPORT_DIR}" --output-dir "${FLOWX_OUTPUT}"
+          PYTHONPATH=src "${python_bin}" -m flowx.adapter convert --source adf --source-path "${ADF_EXPORT_DIR}" --output-dir "${FLOWX_OUTPUT}"
+
+      - name: Resolve agentic gaps with Claude Code
+        id: agentic
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p agentic_results
+          echo "resolved=false" >> "${GITHUB_OUTPUT}"
+          skip_agentic() {
+            echo "::warning::$1"
+            echo "- ⚠️ Agentic resolution skipped: $1" >> "${GITHUB_STEP_SUMMARY}"
+          }
+          if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+            skip_agentic "no Claude authentication secret is configured"
+            exit 0
+          fi
+          if ! npm install --global @anthropic-ai/claude-code@2.1.296; then
+            skip_agentic "Claude Code CLI installation failed"
+            exit 0
+          fi
+          if ! claude -p --plugin-dir . --permission-mode acceptEdits --allowedTools "Read,Write(agentic_results/**),Glob,Grep" \
+            "Use this repository's flowx conversion skills. Read ${FLOWX_OUTPUT}/.work/translation_report.json and the exported ADF source at ${ADF_EXPORT_DIR}. Resolve every agentic ADF gap and write one valid merge-result JSON per gap under agentic_results/. Do not deploy or access unrelated resources."; then
+            skip_agentic "Claude Code did not complete successfully"
+            exit 0
+          fi
+          if compgen -G 'agentic_results/*.json' >/dev/null; then
+            echo "resolved=true" >> "${GITHUB_OUTPUT}"
+            echo "- ✅ Claude produced agentic merge results." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            skip_agentic "Claude produced no merge results"
+          fi
+
+      - name: Report unexpected agentic-step failure
+        if: always() && steps.agentic.outcome == 'failure'
+        run: |
+          echo "::warning::Agentic resolution failed or timed out; deterministic validation will continue."
+          echo "- ⚠️ Agentic resolution failed or timed out; deterministic validation continued." >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Verify Claude changed only agentic results
+        shell: bash
+        run: |
+          unexpected="$(git status --porcelain --untracked-files=all | grep -vE '^\?\? agentic_results/' || true)"
+          if [[ -n "${unexpected}" ]]; then
+            echo "::error::Claude changed files outside agentic_results/."
+            printf '%s\n' "${unexpected}"
+            exit 1
+          fi
+
+      - name: Merge agentic results when available
+        if: steps.agentic.outputs.resolved == 'true'
+        run: |
+          # Strict by design: an unmatched result means the agent output does not belong to this translation report.
+          python_bin="$(cat .migration-venv)"
+          PYTHONPATH=src "${python_bin}" -m flowx.adapter convert --source adf --merge-agentic \
+            --report "${FLOWX_OUTPUT}/.work/translation_report.json" \
+            --agentic-results agentic_results
+
+      - name: Package and verify translation quality
+        run: |
+          python_bin="$(cat .migration-venv)"
+          PYTHONPATH=src "${python_bin}" -m flowx.adapter package --output-dir "${FLOWX_OUTPUT}" \
+            --catalog main --schema default --no-download-workspace-files
+          PYTHONPATH=src "${python_bin}" tests/integration/azure/assert_quality.py \
+            tests/integration/azure/adf "${ADF_EXPORT_DIR}" \
+            "${FLOWX_OUTPUT}/metadata/inventory.json" "${FLOWX_OUTPUT}"
+
+      - name: Check optional Databricks credentials
+        id: databricks-auth
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          if [[ -n "${DATABRICKS_HOST:-}" && -n "${DATABRICKS_TOKEN:-}" ]]; then
+            echo "configured=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "configured=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Install Databricks CLI
+        if: steps.databricks-auth.outputs.configured == 'true'
+        uses: databricks/setup-cli@00763fa457b36b8608132f9e8a4b21f16caa247b # v0.299.0
+
+      - name: Validate bundles with Databricks CLI
+        if: steps.databricks-auth.outputs.configured == 'true'
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          for bundle in "${FLOWX_OUTPUT}"/*/databricks.yml; do
+            (cd "$(dirname "${bundle}")" && databricks bundle validate -t dev)
+          done
+
+      - name: Destroy ephemeral Azure resources
+        if: always()
+        working-directory: tests/integration/azure/terraform
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        shell: bash
+        run: |
+          set +e
+          fallback_hash="$(printf '%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" | sha256sum | cut -c1-10)"
+          fallback_prefix="fx${fallback_hash}"
+          export TF_VAR_name_prefix="${TF_VAR_name_prefix:-$fallback_prefix}"
+          resource_group="$(terraform output -raw resource_group_name 2>/dev/null)"
+          resource_group="${resource_group:-${TF_VAR_name_prefix:0:12}-flowx-rg}"
+          terraform destroy -auto-approve -input=false
+          destroy_status=$?
+          if [[ -n "${resource_group}" ]] && az group exists --name "${resource_group}" | grep -q true; then
+            az group delete --name "${resource_group}" --yes --no-wait
+          fi
+          exit "${destroy_status}"
