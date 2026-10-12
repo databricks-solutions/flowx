@@ -24,16 +24,20 @@
 # MAGIC - **source_code_path** — workspace dir the app deploys from. Must be readable by the app's
 # MAGIC   service principal, so it defaults under `/Workspace/Shared` — **not** a private
 # MAGIC   `/Workspace/Users/<you>` home, which the app SP cannot read.
+# MAGIC - **with_profile** — `yes` adds the Azure deps the `profile` command needs (live ADF cost
+# MAGIC   scan); `no` (default) leaves them out.
 
 # COMMAND ----------
 
 dbutils.widgets.text("repo_root", "/Workspace/Shared/flowx", "flowx repo root (contains app/ and src/flowx)")
 dbutils.widgets.text("app_name", "mcp-flowx", "App name")
 dbutils.widgets.text("source_code_path", "", "Workspace source path (blank = /Workspace/Shared/<app_name>)")
+dbutils.widgets.dropdown("with_profile", "no", ["no", "yes"], "Add ADF cost profiling (Azure deps)?")
 
 repo_root = dbutils.widgets.get("repo_root").strip()
 app_name = dbutils.widgets.get("app_name").strip()
 source_code_path = dbutils.widgets.get("source_code_path").strip() or f"/Workspace/Shared/{app_name}"
+with_profile = dbutils.widgets.get("with_profile") == "yes"
 app_description = "flowx MCP server — ADF to Databricks Lakeflow migration tools"
 
 # COMMAND ----------
@@ -54,6 +58,7 @@ workspace_client = WorkspaceClient()
 print(f"repo_root        : {repo_root}")
 print(f"app_name         : {app_name}")
 print(f"source_code_path : {source_code_path}")
+print(f"with_profile     : {with_profile}")
 
 # COMMAND ----------
 
@@ -66,7 +71,7 @@ print(f"source_code_path : {source_code_path}")
 
 # COMMAND ----------
 
-flowx_module_count = deploy_helpers.stage_app_bundle(workspace_client, repo_root, source_code_path)
+flowx_module_count = deploy_helpers.stage_app_bundle(workspace_client, repo_root, source_code_path, with_profile)
 print(f"Staged app files + {flowx_module_count} flowx module files to {source_code_path}")
 
 # COMMAND ----------

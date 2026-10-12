@@ -28,6 +28,7 @@ operation; `parameters` is its keyword-argument dict.
 | `workspace_paths` | `adapter workspace-paths` | Detect workspace paths / hosts |
 | `package` | `adapter package` | Emit the deployable DAB bundle |
 | `migrate` | discover→convert→package | Full non-interactive migration |
+| `profile` | `adapter profile` | Estimate current ADF spend (live Azure scan; needs the `profile` extra) |
 | `record_results` | `adapter record-results` | Write coverage to a UC table |
 | `install_dashboard` | `adapter install-dashboard` | Publish the coverage dashboard |
 
@@ -65,6 +66,13 @@ app entrypoint plus a vendored copy of the pure-Python `flowx` package) to `/Wor
 and create/deploy the app (default name **`mcp-flowx`**). Because it uploads through the SDK Workspace
 API, it runs directly in a serverless Genie Code session — no CLI needed. The deployment logic lives in
 `app/deploy_helpers.py` (imported by the notebook, so it is also unit-testable).
+
+**Optional: ADF cost profiling.** The `profile` command needs Azure deps (`azure-identity`,
+`requests`) that the app leaves out by default. To include them, set the notebook's `with_profile`
+widget to `yes`, or run `WITH_PROFILE=1 ./app/deploy.sh`; both append the `profile` extra from
+`pyproject.toml` to the app's requirements. Without them, `profile` returns exit code 2 with an
+install hint. The app also needs Azure service principal credentials (`AZURE_CLIENT_ID`,
+`AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`) as app env vars, e.g. from a secret.
 
 **CLI alternative — `deploy.sh`:**
 
@@ -110,7 +118,7 @@ at `https://<app-url>/mcp`, and (3) **stateless** — this server sets
 `stateless_http=True` and adds CORS, so it qualifies. If a browser CORS error appears,
 set the app env var `FLOWX_ALLOWED_ORIGINS` to your workspace URL and redeploy.
 MCP access is capped at **20 tools** across all servers; flowx exposes just **one** tool
-(`flowx`, with 12 commands), so it uses a single slot.
+(`flowx`, with 14 commands), so it uses a single slot.
 
 > In serverless Genie Code, deploy with the `app/deploy_app.py` notebook (SDK-based). `./app/deploy.sh`
 > must run from a Databricks CLI session (workspace web terminal or a local machine), since

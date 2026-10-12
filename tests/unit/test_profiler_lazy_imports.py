@@ -11,6 +11,8 @@ import sys
 import flowx.sources
 import flowx.adapter.__main__
 import flowx.sources.adf.profiler
+import flowx.mcp
+import flowx.mcp.runner
 forbidden = {"azure", "aiohttp", "pandas", "tqdm"}
 leaked = sorted({name.split(".")[0] for name in sys.modules} & forbidden)
 print(",".join(leaked))

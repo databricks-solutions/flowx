@@ -10,14 +10,17 @@ Mirrors what ``deploy.sh`` does, minus the CLI: assemble a self-contained source
 at a workspace path, then create/deploy the app from it.
 """
 
+import io
 import os
+import tomllib
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import App, AppDeployment, AppDeploymentMode
 from databricks.sdk.service.workspace import ImportFormat
 
-# Top-level files the app needs alongside the vendored flowx package.
-APP_BUNDLE_FILES = ("app.py", "app.yaml", "requirements.txt")
+# Top-level files the app needs alongside the vendored flowx package (plus requirements.txt,
+# which app_requirements builds).
+APP_BUNDLE_FILES = ("app.py", "app.yaml")
 
 
 def validate_repo_root(repo_root: str) -> None:
@@ -66,12 +69,27 @@ def upload_directory(
     return uploaded_file_count
 
 
+def app_requirements(repo_root: str, with_profile: bool) -> bytes:
+    """The app's requirements.txt, plus the pyproject ``profile`` extra when ``with_profile`` is set."""
+    with open(os.path.join(repo_root, "app", "requirements.txt"), "rb") as file_handle:
+        contents = file_handle.read()
+    if with_profile:
+        with open(os.path.join(repo_root, "pyproject.toml"), "rb") as file_handle:
+            profile_extra = tomllib.load(file_handle)["project"]["optional-dependencies"]["profile"]
+        contents += "".join(f"{requirement}\n" for requirement in profile_extra).encode()
+    return contents
+
+
 def stage_app_bundle(
-    workspace_client: WorkspaceClient, repo_root: str, source_code_path: str
+    workspace_client: WorkspaceClient,
+    repo_root: str,
+    source_code_path: str,
+    with_profile: bool = False,
 ) -> int:
     """Assemble the self-contained app bundle at ``source_code_path`` in the workspace.
 
-    Uploads the top-level app files and a fresh copy of the ``flowx`` package (the prior
+    Uploads the top-level app files, the requirements (with the ``profile`` command's Azure
+    deps when ``with_profile`` is set), and a fresh copy of the ``flowx`` package (the prior
     copy is deleted first so removed modules do not linger). Returns the flowx module count.
     """
     app_directory = os.path.join(repo_root, "app")
@@ -83,6 +101,12 @@ def stage_app_bundle(
             os.path.join(app_directory, file_name),
             f"{source_code_path}/{file_name}",
         )
+    workspace_client.workspace.upload(
+        f"{source_code_path}/requirements.txt",
+        io.BytesIO(app_requirements(repo_root, with_profile)),
+        format=ImportFormat.RAW,
+        overwrite=True,
+    )
 
     package_source_directory = os.path.join(repo_root, "src", "flowx")
     package_workspace_directory = f"{source_code_path}/flowx"

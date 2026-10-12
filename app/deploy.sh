@@ -15,6 +15,8 @@
 #                       service principal, so it defaults to /Workspace/Shared — NOT a user's
 #                       private /Workspace/Users/<me> home, which the app SP cannot read.
 #   DATABRICKS_PROFILE  CLI profile to use (default: env/DEFAULT auth)
+#   WITH_PROFILE        Set to 1 to add the `profile` command's Azure deps (the `profile`
+#                       extra in pyproject.toml) to the app. Default: not added.
 set -euo pipefail
 
 APP_NAME="${APP_NAME:-mcp-flowx}"
@@ -58,6 +60,11 @@ dbx() { (cd "$STAGE_DIR" && databricks "${PROFILE_FLAG[@]}" "$@"); }
 
 echo "==> Staging self-contained app bundle in $STAGE_DIR (outside the repo so sync includes every file)"
 cp "$APP_DIR/app.py" "$APP_DIR/app.yaml" "$APP_DIR/requirements.txt" "$STAGE_DIR/"
+if [ "${WITH_PROFILE:-0}" = "1" ]; then
+  echo "==> Adding the profile command's Azure deps (WITH_PROFILE=1)"
+  python3 -c 'import sys, tomllib; print("\n".join(tomllib.load(open(sys.argv[1], "rb"))["project"]["optional-dependencies"]["profile"]))' \
+    "$REPO_ROOT/pyproject.toml" >> "$STAGE_DIR/requirements.txt"
+fi
 cp -R "$REPO_ROOT/src/flowx" "$STAGE_DIR/flowx"
 find "$STAGE_DIR/flowx" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 

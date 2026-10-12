@@ -22,7 +22,22 @@
 # The resolved interpreter path is also written to <plugin_root>/.migration-venv
 # so the skills can discover it without re-deriving the location.
 #
+# Options:
+#   --with-profile  Also install flowx from this checkout with its `profile` extra
+#                   (the Azure deps `flowx profile` needs). Off by default.
+#
 set -euo pipefail
+
+WITH_PROFILE=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-profile) WITH_PROFILE=1 ;;
+    *)
+      echo "Usage: bootstrap.sh [--with-profile]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 # Resolve the plugin root
 SOURCE="${BASH_SOURCE[0]}"
@@ -158,6 +173,13 @@ echo "Upgrading pip ..."
 
 echo "Installing dependencies from requirements.txt ..."
 "$VENV_PYTHON" -m pip install -r "$REQUIREMENTS"
+
+# Install from the local checkout (editable) so the installed flowx always matches
+# this source tree, rather than a separately published release.
+if [ "$WITH_PROFILE" = "1" ]; then
+  echo "Installing flowx from $PLUGIN_ROOT with the profile extra ..."
+  "$VENV_PYTHON" -m pip install -e "${PLUGIN_ROOT}[profile]"
+fi
 
 # ---------------------------------------------------------------------------
 # Databricks runtime: pre-configure workspace auth from the notebook context

@@ -28,7 +28,8 @@ and does not require `discover` to have run first. Only the `adf` source has a p
 ## Step 1 — Install the optional `profile` dependencies
 
 The Azure SDK stack is an optional extra so the other phases never need it. Run the **`setup`**
-skill first if there is no venv yet, then add the extra to it:
+skill first if there is no venv yet (answering **yes** to its profiling question installs the extra
+for you), or add the extra to an existing venv:
 
 ```bash
 PY="$(cat <plugin_dir>/.migration-venv)"
@@ -91,8 +92,10 @@ Scope flags:
   is ignored and the whole subscription is scanned (behavior carried over from the original
   profiler).
 
-The phase is not exposed as an MCP `flowx` command yet. In Genie Code, run it from a serverless
-notebook as above.
+Over MCP (Genie Code), call `flowx(command="profile", parameters={"source": "adf", "output_dir":
+"...", "days": 90, ...})` with the same scope keys (`subscription_id`, `resource_group`,
+`factory_name`). The app needs the profile deps (deploy it with `with_profile=yes`; see the `setup`
+skill) and the service principal env vars above; the result carries the report as `report_md`.
 
 ## Output
 
@@ -112,6 +115,9 @@ How to read it:
   are left out so the comparison is like-for-like.
 - **Pipeline rows** are estimates only. Azure bills per factory unless per-pipeline billing is
   enabled in Factory Settings.
+
+ADF Datasets are intentionally not scanned: they are definitions only and have no runtime meter, so
+they add no cost.
 
 Nothing outside `metadata/tco/` is touched. `discover`'s `metadata/profile_report.csv` is a
 different report (pipeline complexity) and is left alone.
