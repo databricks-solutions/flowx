@@ -93,10 +93,31 @@ run_write() {
   if $DRY_RUN; then printf 'DRY-RUN:'; printf ' %q' "$@"; printf '\n'; else "$@"; fi
 }
 
+json_value() {
+  local message=$1 filter=$2
+  shift 2
+  jq -r "$@" "$filter" 2>/dev/null || die "$message"
+}
+
 lookup_identity() {
-  app_id=$(az ad app list --display-name "$APP_NAME" --query "[?displayName=='$APP_NAME'] | [0].appId" -o tsv)
-  sp_id=''
-  [[ -z "$app_id" ]] || sp_id=$(az ad sp list --filter "appId eq '$app_id'" --query '[0].id' -o tsv)
+  local attempt attempts
+  [[ -n "${app_id:-}" && -n "${sp_id:-}" ]] && return
+  if [[ -z "${app_id:-}" ]]; then
+    app_id=$(az ad app list --display-name "$APP_NAME" --query "[?displayName=='$APP_NAME'] | [0].appId" -o tsv) ||
+      die "cannot query Entra applications"
+  fi
+  [[ -n "$app_id" ]] || { sp_id=''; return; }
+  sp_id=${sp_id:-}
+  [[ -n "$sp_id" ]] && return
+  if $DRY_RUN; then attempts=1; else attempts=4; fi
+  attempt=1
+  while ((attempt <= attempts)); do
+    sp_id=$(az ad sp list --filter "appId eq '$app_id'" --query '[0].id' -o tsv) ||
+      die "cannot query the Entra service principal"
+    [[ -n "$sp_id" ]] && return
+    ((attempt == attempts)) || sleep 1
+    attempt=$((attempt + 1))
+  done
 }
 
 step_identity() {
@@ -122,10 +143,14 @@ step_identity() {
   if [[ "$app_id" == '<client-id>' ]]; then credential='null'; else
     credential=$(az ad app federated-credential list --id "$app_id" --query "[?subject=='$subject'] | [0]" -o json)
   fi
-  credential_id=$(jq -r '.id // empty' <<< "$credential")
-  credential_matches=$(jq -r '.issuer == "https://token.actions.githubusercontent.com" and (.audiences == ["api://AzureADTokenExchange"])' <<< "${credential:-null}")
+  credential_id=$(json_value "invalid federated-credential response from Azure" \
+    'if type == "object" then .id // empty else empty end' <<< "$credential")
+  credential_matches=$(json_value "invalid federated-credential response from Azure" \
+    'type == "object" and .issuer == "https://token.actions.githubusercontent.com" and ((.audiences // []) == ["api://AzureADTokenExchange"])' \
+    <<< "${credential:-null}")
   if [[ -z "$credential_id" || "$credential_matches" != true ]]; then
-    credential_name=$(jq -r '.name // empty' <<< "$credential")
+    credential_name=$(json_value "invalid federated-credential response from Azure" \
+      'if type == "object" then .name // empty else empty end' <<< "$credential")
     credential_name=${credential_name:-${ENV_NAME}-github}
     new_temp_file; credential_file=$NEW_TEMP_FILE
     jq -n --arg name "$credential_name" --arg subject "$subject" \
@@ -193,7 +218,9 @@ step_environment() {
   for reviewer in ${reviewer_names[@]+"${reviewer_names[@]}"}; do
     reviewer=${reviewer//[[:space:]]/}; [[ -n "$reviewer" ]] || continue
     reviewer_id=$(gh api "users/$reviewer" --jq .id) || die "GitHub reviewer not found: $reviewer"
-    reviewer_json=$(jq --argjson id "$reviewer_id" '. + [{type:"User",id:$id}]' <<< "$reviewer_json")
+    # shellcheck disable=SC2016
+    reviewer_json=$(json_value "could not build GitHub reviewer configuration" \
+      '. + [{type:"User",id:$id}]' --argjson id "$reviewer_id" <<< "$reviewer_json")
   done
   new_temp_file; environment_file=$NEW_TEMP_FILE
   jq -n --argjson reviewers "$reviewer_json" \
@@ -245,16 +272,24 @@ verify_setup() {
   scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}"
   role_json=$(az role definition list --name "$ROLE_NAME" --scope "$scope" -o json)
   required_actions='["Microsoft.Resources/subscriptions/read","Microsoft.Resources/subscriptions/resourceGroups/*","Microsoft.DataFactory/factories/*","Microsoft.Storage/storageAccounts/*","Microsoft.KeyVault/vaults/*"]'
-  role_matches=$(jq --arg scope "$scope" --argjson actions "$required_actions" \
-    'length == 1 and (.[0].actions | sort) == ($actions | sort) and (.[0].assignableScopes | index($scope)) != null' <<< "$role_json")
+  # shellcheck disable=SC2016
+  role_matches=$(json_value "invalid role-definition response from Azure" \
+    'if type == "array" then
+       (length == 1) and
+       (((.[0].permissions // []) | map(.actions // []) | add // [] | sort) == ($expected | sort)) and
+       (((.[0].assignableScopes // []) | index($scope)) != null)
+     else false end' --arg scope "$scope" --argjson expected "$required_actions" <<< "$role_json")
   [[ "$role_matches" == true ]] || { echo "MISSING/MISMATCH: custom role definition $ROLE_NAME" >&2; failures=$((failures + 1)); }
-  role_id=$(jq -r '.[0].id // empty' <<< "$role_json")
+  role_id=$(json_value "invalid role-definition response from Azure" \
+    'if type == "array" then .[0].id // empty else empty end' <<< "$role_json")
   if [[ -n "$role_id" ]]; then
     assignment=$(az role assignment list --assignee-object-id "$sp_id" --scope "$scope" --role "$role_id" --query '[0].id' -o tsv)
   else assignment=''; fi
   [[ -n "$assignment" ]] || { echo "MISSING/MISMATCH: role assignment $ROLE_NAME" >&2; failures=$((failures + 1)); }
   environment=$(gh api "repos/${GITHUB_REPO}/environments/${ENV_NAME}") || { echo "MISSING: GitHub environment $ENV_NAME" >&2; failures=$((failures + 1)); environment='{}'; }
-  reviewer_count=$(jq '[.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | length' <<< "$environment")
+  reviewer_count=$(json_value "invalid environment response from GitHub" \
+    'if type == "object" then [.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | length else 0 end' \
+    <<< "$environment")
   ((reviewer_count > 0)) || { echo 'MISSING/MISMATCH: environment has no required reviewers' >&2; failures=$((failures + 1)); }
   secret_names=$(gh secret list --repo "$GITHUB_REPO" --env "$ENV_NAME" --json name --jq '.[].name')
   for secret_name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do

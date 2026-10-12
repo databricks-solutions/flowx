@@ -64,13 +64,13 @@ case "$*" in
     "issuer":"https://token.actions.githubusercontent.com",
     "audiences":["api://AzureADTokenExchange"]}' ;;
   *"provider show"*) if [[ "${STUB_FRESH:-}" == 1 ]]; then echo "NotRegistered"; else echo "Registered"; fi ;;
-  *"role definition list"*"-o json"*) echo '[{"id":"role-id","actions":[
-    "Microsoft.Resources/subscriptions/read",
-    "Microsoft.Resources/subscriptions/resourceGroups/*",
-    "Microsoft.DataFactory/factories/*",
-    "Microsoft.Storage/storageAccounts/*",
-    "Microsoft.KeyVault/vaults/*"
-  ],"assignableScopes":["/subscriptions/00000000-0000-0000-0000-000000000001"]}]' ;;
+  *"role definition list"*"-o json"*)
+    if [[ "${STUB_ROLE_MISMATCH:-}" == 1 ]]; then actions='["Microsoft.Resources/subscriptions/read"]';
+    else actions='["Microsoft.Resources/subscriptions/read","Microsoft.Resources/subscriptions/resourceGroups/*",
+      "Microsoft.DataFactory/factories/*","Microsoft.Storage/storageAccounts/*","Microsoft.KeyVault/vaults/*"]'; fi
+    printf '[{"assignableScopes":["/subscriptions/00000000-0000-0000-0000-000000000001"],
+      "permissions":[{"actions":%s,"notActions":[],"dataActions":[],"notDataActions":[]}],
+      "roleName":"flowx-live-integration-deployer","id":"role-id"}]\n' "$actions" ;;
   *"role definition list"*) [[ "${STUB_FRESH:-}" == 1 ]] || echo "role-id" ;;
   *"role assignment list"*)
     [[ "${STUB_NO_SP:-}" != 1 ]] || { echo 'placeholder assignment lookup' >> "$MUTATION_LOG"; exit 88; }
@@ -91,7 +91,7 @@ case "$*" in
   *"repo view"*) echo "databricks-solutions/flowx" ;;
   *"api users/"*) echo "12345" ;;
   *"api repos/"*"/environments/"*) echo '{"protection_rules":[
-    {"type":"required_reviewers","reviewers":[{"type":"User","id":12345}]}
+    {"type":"required_reviewers","reviewers":[{"type":"User","reviewer":{"login":"flowx-reviewer","id":12345}}]}
   ]}' ;;
   *"secret list"*) printf 'AZURE_CLIENT_ID\nAZURE_TENANT_ID\nAZURE_SUBSCRIPTION_ID\n' ;;
   *"secret set"*)
@@ -158,6 +158,18 @@ def test_role_dry_run_skips_assignment_lookup_for_missing_sp(stub_path: tuple[Pa
     assert result.returncode == 0, result.stdout + result.stderr
     assert "service-principal-object-id" in result.stdout
     assert not mutation_log.exists()
+
+
+def test_verify_reports_mismatched_role_actions_clearly(stub_path: tuple[Path, Path]) -> None:
+    """A real nested role response with wrong actions fails without a raw jq error."""
+    binary_dir, mutation_log = stub_path
+    environment = clean_environment(binary_dir, mutation_log)
+    environment["STUB_ROLE_MISMATCH"] = "1"
+    result = run_script(["verify"], environment)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "MISSING/MISMATCH: custom role definition" in output
+    assert "jq: error" not in output
 
 
 def test_github_secret_value_uses_stdin_only(stub_path: tuple[Path, Path], tmp_path: Path) -> None:
