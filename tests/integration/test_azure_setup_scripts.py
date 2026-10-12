@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,6 +19,7 @@ SENSITIVE_ENV = {
     "ANTHROPIC_API_KEY",
     "DATABRICKS_HOST",
     "DATABRICKS_TOKEN",
+    "RESOURCE_OWNER_EMAIL",
 }
 
 
@@ -33,6 +35,7 @@ def clean_environment(binary_dir: Path, mutation_log: Path) -> dict[str, str]:
             "GITHUB_REPO": "databricks-solutions/flowx",
             "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000001",
             "REVIEWERS": "flowx-reviewer",
+            "RESOURCE_OWNER_EMAIL": "owner@example.invalid",
         }
     )
     return environment
@@ -93,7 +96,9 @@ case "$*" in
   *"api repos/"*"/environments/"*) echo '{"protection_rules":[
     {"type":"required_reviewers","reviewers":[{"type":"User","reviewer":{"login":"flowx-reviewer","id":12345}}]}
   ]}' ;;
-  *"secret list"*) printf 'AZURE_CLIENT_ID\nAZURE_TENANT_ID\nAZURE_SUBSCRIPTION_ID\n' ;;
+  *"secret list"*)
+    printf 'AZURE_CLIENT_ID\nAZURE_TENANT_ID\nAZURE_SUBSCRIPTION_ID\n'
+    [[ "${STUB_MISSING_OWNER:-}" == 1 ]] || printf 'RESOURCE_OWNER_EMAIL\n' ;;
   *"secret set"*)
     if [[ "${ALLOW_SECRET_WRITE:-}" == 1 ]]; then
       printf '%s\n' "$*" >> "$GH_ARGV_LOG"
@@ -172,6 +177,18 @@ def test_verify_reports_mismatched_role_actions_clearly(stub_path: tuple[Path, P
     assert "jq: error" not in output
 
 
+def test_verify_requires_owner_secret_name(stub_path: tuple[Path, Path]) -> None:
+    """Verification reports the missing required owner secret by name only."""
+    binary_dir, mutation_log = stub_path
+    environment = clean_environment(binary_dir, mutation_log)
+    environment["STUB_MISSING_OWNER"] = "1"
+    result = run_script(["verify"], environment)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "MISSING: environment secret RESOURCE_OWNER_EMAIL" in output
+    assert "owner@example.invalid" not in output
+
+
 def test_github_secret_value_uses_stdin_only(stub_path: tuple[Path, Path], tmp_path: Path) -> None:
     """The real secrets path omits --body and keeps secret values out of argv and output."""
     binary_dir, mutation_log = stub_path
@@ -193,6 +210,21 @@ def test_github_secret_value_uses_stdin_only(stub_path: tuple[Path, Path], tmp_p
     assert SECRET not in argv_log.read_text()
     assert "--body" not in argv_log.read_text()
     assert SECRET not in output
+    assert "owner@example.invalid" in stdin_log.read_text()
+    assert "owner@example.invalid" not in argv_log.read_text()
+    assert "owner@example.invalid" not in output
+
+
+def test_secrets_rejects_malformed_owner_email(stub_path: tuple[Path, Path]) -> None:
+    """The required owner value is validated before any secret write."""
+    binary_dir, mutation_log = stub_path
+    environment = clean_environment(binary_dir, mutation_log)
+    environment["RESOURCE_OWNER_EMAIL"] = "not-an-email"
+    result = run_script(["secrets", "--yes"], environment)
+    assert result.returncode != 0
+    assert "must be a non-empty email-like value" in result.stderr
+    assert "not-an-email" not in result.stdout + result.stderr
+    assert not mutation_log.exists()
 
 
 def test_cleanup_without_delete_only_lists(stub_path: tuple[Path, Path]) -> None:
@@ -207,3 +239,18 @@ def test_cleanup_without_delete_only_lists(stub_path: tuple[Path, Path]) -> None
 def test_bash_syntax() -> None:
     """The consolidated setup script parses under the system Bash 3.2."""
     subprocess.run([str(BASH), "-n", str(SCRIPT)], check=True)
+
+
+def test_every_taggable_terraform_resource_uses_owner_tags() -> None:
+    """The shared owner tag is attached to every taggable base resource."""
+    terraform = (SCRIPT.parent / "terraform" / "main.tf").read_text()
+    assert "owner     = var.owner_email" in terraform
+    for resource_type in (
+        "azurerm_resource_group",
+        "azurerm_storage_account",
+        "azurerm_key_vault",
+        "azurerm_data_factory",
+    ):
+        block = rf'^resource "{resource_type}" "test" \{{(?P<body>.*?)^\}}'
+        match = re.search(block, terraform, re.DOTALL | re.MULTILINE)
+        assert match and re.search(r"tags\s*=\s*local\.tags", match.group("body")), resource_type

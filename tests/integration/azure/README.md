@@ -13,6 +13,7 @@ proceed; organizations that require trusted-branch-only environments should use 
 or post-merge `main` run instead. Add these environment secrets:
 
 - `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` for OIDC. Do not create a client secret.
+- `RESOURCE_OWNER_EMAIL` for the required `owner` tag on live Azure resources.
 - Either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` for headless Claude Code. When neither is present, 
   deterministic conversion and bundle checks still run and the workflow reports that agentic resolution was 
   skipped.
@@ -32,7 +33,8 @@ Entra applications, administer the repository environment, register providers, a
 only the custom deployer role, never Owner.
 
 Configuration comes from flags or these environment variables: `GITHUB_REPO`, `AZURE_SUBSCRIPTION_ID`, 
-`APP_NAME`, `ENV_NAME`, `ROLE_NAME`, and the required comma-separated `REVIEWERS`. Defaults are derived 
+`APP_NAME`, `ENV_NAME`, `ROLE_NAME`, and the required comma-separated `REVIEWERS`. `RESOURCE_OWNER_EMAIL`
+is also required when setting environment secrets. Defaults are derived
 from the current CLI context or use `flowx-live-integration`. Claude and optional Databricks secret values 
 may be exported as `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `DATABRICKS_HOST`, and `DATABRICKS_TOKEN`; 
 otherwise the secrets step offers hidden interactive prompts.
@@ -100,8 +102,10 @@ intentionally preserves the valid ADF shape; this is a known loader gap.
 
 ## Teardown and security
 
-Every base Azure resource is tagged `purpose=flowx-integration-test`, `ephemeral=true`, `managedBy=terraform`,
-and with its run prefix. The workflow runs `terraform destroy` under `if: always()` and then deletes the exact
+Every taggable base Azure resource is tagged `purpose=flowx-integration-test`, `ephemeral=true`,
+`managedBy=terraform`, with its run prefix, and with `owner` set from the protected
+`DATABRICKS_OWNER_EMAIL` environment secret. The workflow runs `terraform destroy` under `if: always()` and
+then deletes the exact
 Terraform-output resource group as a safety net. It never performs a broad or wildcard deletion.
 
 Fixtures contain no PII, credentials, tenant or subscription IDs, private endpoints, or usable connection 

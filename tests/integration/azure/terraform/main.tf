@@ -6,6 +6,7 @@ locals {
     ephemeral = "true"
     managedBy = "terraform"
     run       = local.run_prefix
+    owner     = var.owner_email
   }
 
   pipeline_files       = fileset("${local.fixture_root}/pipelines", "*.json")

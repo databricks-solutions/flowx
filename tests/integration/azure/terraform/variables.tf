@@ -16,6 +16,17 @@ variable "client_id" {
   sensitive   = true
 }
 
+variable "owner_email" {
+  description = "Owner email applied to every taggable integration resource."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$", trimspace(var.owner_email)))
+    error_message = "owner_email must be a non-empty email-like value."
+  }
+}
+
 variable "location" {
   description = "Azure region for the integration resources."
   type        = string

@@ -28,7 +28,8 @@ Options:
 
 Environment variables:
   GITHUB_REPO, AZURE_SUBSCRIPTION_ID, APP_NAME, ENV_NAME, ROLE_NAME, REVIEWERS
-  CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, DATABRICKS_HOST, DATABRICKS_TOKEN
+  RESOURCE_OWNER_EMAIL, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY
+  DATABRICKS_HOST, DATABRICKS_TOKEN
 EOF
 }
 
@@ -243,10 +244,17 @@ prompt_optional() {
 step_secrets() {
   lookup_identity
   if [[ -z "$app_id" ]]; then if $DRY_RUN; then app_id='<client-id>'; else die "Entra app not found; run identity"; fi; fi
+  if [[ -z "${DATABRICKS_OWNER_EMAIL:-}" ]]; then
+    [[ -t 0 ]] || die "RESOURCE_OWNER_EMAIL is required"
+    read -r -s -p "Cloud resource owner email: " RESOURCE_OWNER_EMAIL; printf '\n'
+  fi
+  [[ "$RESOURCE_OWNER_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] ||
+    die "RESOURCE_OWNER_EMAIL must be a non-empty email-like value"
   tenant_id=$(az account show --subscription "$AZURE_SUBSCRIPTION_ID" --query tenantId -o tsv)
   set_secret AZURE_CLIENT_ID "$app_id"
   set_secret AZURE_TENANT_ID "$tenant_id"
   set_secret AZURE_SUBSCRIPTION_ID "$AZURE_SUBSCRIPTION_ID"
+  set_secret DATABRICKS_OWNER_EMAIL "$RESOURCE_OWNER_EMAIL"
   prompt_optional CLAUDE_CODE_OAUTH_TOKEN 'Claude Code OAuth token'
   prompt_optional ANTHROPIC_API_KEY 'Anthropic API key'
   prompt_optional DATABRICKS_HOST 'Databricks host'
@@ -292,7 +300,7 @@ verify_setup() {
     <<< "$environment")
   ((reviewer_count > 0)) || { echo 'MISSING/MISMATCH: environment has no required reviewers' >&2; failures=$((failures + 1)); }
   secret_names=$(gh secret list --repo "$GITHUB_REPO" --env "$ENV_NAME" --json name --jq '.[].name')
-  for secret_name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+  for secret_name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID RESOURCE_OWNER_EMAIL; do
     grep -Fxq "$secret_name" <<< "$secret_names" || { echo "MISSING: environment secret $secret_name" >&2; failures=$((failures + 1)); }
   done
   ((failures == 0)) || die "$failures verification check(s) failed"

@@ -98,6 +98,7 @@ jobs:
           TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
           TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_owner_email: ${{ secrets.RESOURCE_OWNER_EMAIL }}
         run: |
           terraform init -input=false
           terraform fmt -check
@@ -242,6 +243,7 @@ jobs:
           TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
           TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_owner_email: ${{ secrets.RESOURCE_OWNER_EMAIL }}
         shell: bash
         run: |
           set +e
