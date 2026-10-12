@@ -553,7 +553,17 @@ def test_example_packages_onto_the_bound_job_cluster(tmp_path: Path) -> None:
     report = pipeline_to_dict(load_airflow_dag(FIXTURE))
     (work_dir / "translation_report.json").write_text(json.dumps(report), encoding="utf-8")
 
-    assert package_main(["--output-dir", str(output_dir), "--no-download-workspace-files"]) == 0
+    assert (
+        package_main(
+            [
+                "--output-dir",
+                str(output_dir),
+                "--no-download-workspace-files",
+                "--allow-unresolved-gaps",
+            ]
+        )
+        == 0
+    )
 
     bundle_text = "\n".join(path.read_text(encoding="utf-8") for path in output_dir.rglob("*.yml"))
     assert "spark_submit_task" not in bundle_text
@@ -576,7 +586,17 @@ def _package(tmp_path: Path, pipeline: Pipeline) -> Path:
     work_dir = output_dir / ".work"
     work_dir.mkdir(parents=True)
     (work_dir / "translation_report.json").write_text(json.dumps(pipeline_to_dict(pipeline)), encoding="utf-8")
-    assert package_main(["--output-dir", str(output_dir), "--no-download-workspace-files"]) == 0
+    assert (
+        package_main(
+            [
+                "--output-dir",
+                str(output_dir),
+                "--no-download-workspace-files",
+                "--allow-unresolved-gaps",
+            ]
+        )
+        == 0
+    )
     return output_dir
 
 

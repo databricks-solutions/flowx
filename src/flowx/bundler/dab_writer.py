@@ -945,6 +945,11 @@ def main(argv: list[str] | None = None) -> int:
             "group names ({pipeline: group} or {group: [pipelines]})."
         ),
     )
+    parser.add_argument(
+        "--allow-unresolved-gaps",
+        action="store_true",
+        help="Explicitly package an unreviewed Airflow report whose linked failing placeholders remain unresolved.",
+    )
     args = parser.parse_args(argv)
 
     if args.report is None:
@@ -953,7 +958,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: Report file not found: {args.report}", file=sys.stderr)
         return 1
 
-    report_failures = _report_reconciliation_failures(args.report)
+    report_failures = _report_reconciliation_failures(
+        args.report,
+        allow_unresolved_gaps=args.allow_unresolved_gaps,
+    )
     if report_failures:
         print("Error: translation report preflight failed; no bundle files were written.", file=sys.stderr)
         for failure in report_failures:
@@ -2449,7 +2457,7 @@ def _load_report(report_path: Path) -> tuple[list[PreparedWorkflow], list[str]]:
     return workflows, skipped
 
 
-def _report_reconciliation_failures(report_path: Path) -> list[str]:
+def _report_reconciliation_failures(report_path: Path, *, allow_unresolved_gaps: bool = False) -> list[str]:
     """Returns report-shape, source-contract, and reconciliation failures.
 
     Packaging is a security boundary for source reconciliation. A malformed report or an
@@ -2500,7 +2508,7 @@ def _report_reconciliation_failures(report_path: Path) -> list[str]:
         and pipeline["tags"].get("source") == "airflow"
         for pipeline in pipelines
     )
-    if airflow_agentic_report or any(
+    reviewed_airflow_report = airflow_agentic_report or any(
         isinstance(pipeline, dict)
         and (
             pipeline.get("reconciliation_status") == "verified_with_reviewed_resolutions"
@@ -2510,7 +2518,8 @@ def _report_reconciliation_failures(report_path: Path) -> list[str]:
             )
         )
         for pipeline in pipelines
-    ):
+    )
+    if reviewed_airflow_report:
         from flowx.agentic import validate_persisted_agentic_report
 
         output_dir = report_path.parent.parent if report_path.parent.name == ".work" else report_path.parent
@@ -2564,7 +2573,18 @@ def _report_reconciliation_failures(report_path: Path) -> list[str]:
         if status not in airflow_statuses:
             failures.append(f"{label}: unknown reconciliation_status {status!r} for Airflow")
             continue
-        if migration_status == "excluded" or status != "failed":
+        if migration_status == "excluded":
+            continue
+        gap_findings = [
+            finding
+            for finding in pipeline.get("not_translatable") or []
+            if isinstance(finding, dict) and finding.get("severity") == "gap"
+        ]
+        if gap_findings and not reviewed_airflow_report and not allow_unresolved_gaps:
+            failures.append(
+                f"{label}: unresolved Airflow gaps require reviewed agentic evidence or --allow-unresolved-gaps"
+            )
+        if status != "failed":
             continue
 
         findings = [

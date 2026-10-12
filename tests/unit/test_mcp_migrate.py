@@ -7,6 +7,7 @@ guard that one-shot contract. Skipped where the optional ``mcp`` dependency is a
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import pytest
 
 pytest.importorskip("mcp")
 
+import flowx.agentic as agentic_contract  # noqa: E402
 from flowx.mcp import runner, server  # noqa: E402
 
 
@@ -205,6 +207,7 @@ def _gap(operator: str) -> dict:
         "pipeline_name": "example",
         "operator": operator,
         "finding_fingerprints": ["gap-1"],
+        "required_capability": "graph_patch" if is_structural else None,
         "allowed_replacement_kinds": [] if is_structural else ["notebook", "sql", "spark_python"],
     }
 
@@ -212,7 +215,7 @@ def _gap(operator: str) -> dict:
 def test_airflow_gap_state_never_advertises_contract_restricted_gap_as_leaf_eligible() -> None:
     gap = {**_gap("CustomOperator"), "allowed_replacement_kinds": []}
 
-    state = server._airflow_gap_state(_airflow_report(operator="CustomOperator"), [gap])
+    state = agentic_contract.classify_airflow_gaps(_airflow_report(operator="CustomOperator"), [gap])
 
     assert state["eligible_gaps"] == []
     assert state["structural_gaps"][0]["required_capability"] == "non_leaf_patch"
@@ -221,7 +224,7 @@ def test_airflow_gap_state_never_advertises_contract_restricted_gap_as_leaf_elig
 def test_airflow_gap_state_trusts_hash_bound_leaf_eligibility_over_operator_heuristics() -> None:
     gap = {**_gap("BranchPythonOperator"), "allowed_replacement_kinds": ["notebook"]}
 
-    state = server._airflow_gap_state(_airflow_report(operator="BranchPythonOperator"), [gap])
+    state = agentic_contract.classify_airflow_gaps(_airflow_report(operator="BranchPythonOperator"), [gap])
 
     assert state["eligible_gaps"] == [gap]
     assert state["structural_gaps"] == []
@@ -231,7 +234,7 @@ def test_airflow_gap_state_fails_closed_when_leaf_eligibility_is_missing() -> No
     gap = _gap("CustomOperator")
     del gap["allowed_replacement_kinds"]
 
-    state = server._airflow_gap_state(_airflow_report(operator="CustomOperator"), [gap])
+    state = agentic_contract.classify_airflow_gaps(_airflow_report(operator="CustomOperator"), [gap])
 
     assert state["eligible_gaps"] == []
     assert state["structural_gaps"][0]["required_capability"] == "non_leaf_patch"
@@ -280,6 +283,7 @@ def test_airflow_migrate_pauses_for_leaf_agentic_gaps_even_when_noninteractive(m
     assert [gap["gap_id"] for gap in result["eligible_gaps"]] == ["gap-1"]
     assert result["structural_gaps"] == []
     assert result["unsupported_gaps"] == []
+    assert "airflow_volume_path" in result["next_action"]
     assert [argv[0] for argv in calls] == ["discover", "convert", "resolve-agentic"]
 
 
@@ -331,7 +335,7 @@ def test_airflow_migrate_reports_graph_structural_gaps_as_unsupported(monkeypatc
     assert result["status"] == "needs_agentic_resolution"
     assert result["eligible_gaps"] == []
     assert result["structural_gaps"][0]["gap_id"] == "gap-1"
-    assert result["structural_gaps"][0]["required_capability"] == "non_leaf_patch"
+    assert result["structural_gaps"][0]["required_capability"] == "graph_patch"
     assert not any(argv[0] == "package" for argv in calls)
 
 
@@ -354,6 +358,7 @@ def test_airflow_migrate_reports_unbound_source_semantics_as_unsupported(monkeyp
     assert result["unsupported_gaps"][0]["gap_id"] == "gap-setting"
     assert result["unsupported_gaps"][0]["required_capability"] == "source_semantics"
     assert "package" in result["next_action"]
+    assert "allow_unresolved_gaps=true" in result["next_action"]
     assert result["report_path"] in result["next_action"]
     assert not any(argv[0] == "resolve-agentic" for argv in calls)
     assert not any(argv[0] == "package" for argv in calls)
@@ -406,6 +411,35 @@ def test_airflow_migrate_without_gaps_packages_normally(monkeypatch, tmp_path: P
     assert [argv[0] for argv in calls] == ["discover", "convert", "package"]
 
 
+def test_package_reports_explicitly_acknowledged_unresolved_airflow_gaps(monkeypatch, tmp_path: Path):
+    output = tmp_path / "out"
+    report = output / ".work" / "translation_report.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps(_airflow_report(operator="KubernetesPodOperator")), encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def package_and_prune(args):
+        calls.append([str(value) for value in args])
+        report.unlink()
+        return _FakeResult()
+
+    monkeypatch.setattr(runner, "run_adapter", package_and_prune)
+    monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
+    monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
+
+    result = server._cmd_package(
+        {
+            "output_dir": str(output),
+            "report_path": str(report),
+            "allow_unresolved_gaps": True,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "packaged_with_unresolved_gaps"
+    assert "--allow-unresolved-gaps" in calls[0]
+
+
 def test_airflow_migrate_resumes_from_reviewed_agentic_report(monkeypatch, tmp_path: Path):
     output = tmp_path / "out"
     report = output / ".work" / "translation_report.agentic.json"
@@ -415,18 +449,12 @@ def test_airflow_migrate_resumes_from_reviewed_agentic_report(monkeypatch, tmp_p
 
     def fake_run_adapter(args):
         calls.append([str(value) for value in args])
+        report.unlink()
         return _FakeResult()
 
     monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
     monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
     monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
-    validated: list[tuple[dict, Path]] = []
-    monkeypatch.setattr(
-        server,
-        "validate_persisted_agentic_report",
-        lambda payload, *, evidence_dir: validated.append((payload, evidence_dir)) or [],
-    )
-
     result = server._cmd_migrate(
         {
             "source": "airflow",
@@ -436,7 +464,6 @@ def test_airflow_migrate_resumes_from_reviewed_agentic_report(monkeypatch, tmp_p
     )
 
     assert result["status"] == "completed_with_reviewed_gaps"
-    assert validated == [(_airflow_report(operator="KubernetesPodOperator"), output / "metadata" / "agentic")]
     assert len(calls) == 1 and calls[0][0] == "package"
     assert calls[0][calls[0].index("--report") + 1] == str(report)
 
@@ -452,8 +479,6 @@ def test_airflow_migrate_resume_is_completed_only_when_reviewed_report_has_no_ga
     monkeypatch.setattr(runner, "run_adapter", lambda _args: _FakeResult())
     monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
     monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
-    monkeypatch.setattr(server, "validate_persisted_agentic_report", lambda _payload, *, evidence_dir: [])
-
     result = server._cmd_migrate(
         {
             "source": "airflow",
@@ -501,13 +526,19 @@ def test_airflow_migrate_resume_rejects_custom_agentic_report_path(monkeypatch, 
     assert calls == []
 
 
-def test_airflow_migrate_resume_replays_agentic_evidence_before_package(monkeypatch, tmp_path: Path):
+def test_airflow_migrate_resume_delegates_agentic_evidence_validation_to_package(monkeypatch, tmp_path: Path):
     output = tmp_path / "out"
     report = output / ".work" / "translation_report.agentic.json"
     report.parent.mkdir(parents=True)
     report.write_text(json.dumps(_airflow_report(operator="KubernetesPodOperator")), encoding="utf-8")
     calls: list[list[str]] = []
-    monkeypatch.setattr(runner, "run_adapter", lambda args: calls.append([str(value) for value in args]))
+
+    def fail_package(args):
+        calls.append([str(value) for value in args])
+        return _FakeResult(ok=False, stderr="agentic resolution evidence is invalid")
+
+    monkeypatch.setattr(runner, "run_adapter", fail_package)
+    monkeypatch.setattr(runner, "list_tree", lambda _out: [])
 
     result = server._cmd_migrate(
         {
@@ -519,9 +550,94 @@ def test_airflow_migrate_resume_replays_agentic_evidence_before_package(monkeypa
 
     assert result["ok"] is False
     assert result["status"] == "failed"
-    assert result["failed_phase"] == "validate_agentic"
-    assert "evidence" in result["error"]
-    assert calls == []
+    assert result["failed_phase"] == "package"
+    assert len(calls) == 1 and calls[0][0] == "package"
+
+
+def test_hosted_inline_airflow_prepare_and_apply_rematerialize_the_same_source(tmp_path: Path):
+    definitions = {
+        "dag.py": (
+            "from airflow import DAG\n"
+            "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator\n"
+            "with DAG(dag_id='hosted_apply') as dag:\n"
+            "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12')\n"
+        )
+    }
+    output = tmp_path / "out"
+    convert_result = server._cmd_convert(
+        {
+            "source": "airflow",
+            "airflow_definitions": definitions,
+            "output_dir": str(output),
+        }
+    )
+    assert convert_result["ok"] is True
+    report = output / ".work" / "translation_report.json"
+    prepare_result = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "prepare",
+            "airflow_definitions": definitions,
+            "report_path": str(report),
+            "output_dir": str(output),
+        }
+    )
+    assert prepare_result["ok"] is True
+    gap = prepare_result["gaps"][0]
+    generated_source = "# Databricks notebook source\nprint('resolved')\n"
+    candidate = {
+        "contract_version": "1",
+        "gap_id": gap["gap_id"],
+        "status": "resolved",
+        "baseline_report_sha256": gap["baseline_report_sha256"],
+        "source_sha256": gap["source_sha256"],
+        "task_sha256": gap["task_sha256"],
+        "graph_sha256": gap["graph_sha256"],
+        "provider_sha256": gap["provider_sha256"],
+        "request_sha256": gap["request_sha256"],
+        "provider": agentic_contract._provider_identity(),
+        "model": {"name": "test-model"},
+        "argument_disposition": [
+            {
+                "name": argument["name"],
+                "disposition": "preserved_by_flowx" if argument["preserved_by_flowx"] else "consumed",
+                "rationale": "Preserved by Flowx." if argument["preserved_by_flowx"] else "Used by the notebook.",
+            }
+            for argument in gap["arguments"]
+        ],
+        "prerequisites": [],
+        "warnings": [],
+        "semantic_deltas": [],
+        "replacement": {"kind": "notebook", "file": "task.py"},
+        "generated_files": [
+            {
+                "path": "task.py",
+                "language": "python",
+                "content": generated_source,
+                "sha256": hashlib.sha256(generated_source.encode("utf-8")).hexdigest(),
+            }
+        ],
+    }
+    stage_result = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "stage",
+            "candidates": [candidate],
+            "output_dir": str(output),
+        }
+    )
+    assert stage_result["ok"] is True
+    apply_result = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "apply",
+            "airflow_definitions": definitions,
+            "accept_gap": gap["gap_id"],
+            "output_dir": str(output),
+        }
+    )
+    assert apply_result["ok"] is True
+    assert (output / ".work" / "translation_report.agentic.json").is_file()
 
 
 def test_airflow_migrate_end_to_end_prepares_gap_without_writing_bundle(tmp_path: Path):

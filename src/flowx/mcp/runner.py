@@ -23,9 +23,11 @@ from typing import Any
 # Phases can take a while on large factories; allow generous default headroom.
 DEFAULT_TIMEOUT = int(os.environ.get("FLOWX_MCP_TIMEOUT", "1800"))
 
-# Cap on inline `adf_definitions` payloads (they pass through the agent context); above this, stage
-# to a UC Volume and pass a path reference instead. Configurable via FLOWX_MAX_INLINE_BYTES.
+# Inline definitions pass through the agent context; larger or more numerous sources belong in a
+# UC Volume or Workspace directory. Every limit is configurable through its matching environment variable.
 MAX_INLINE_BYTES = int(os.environ.get("FLOWX_MAX_INLINE_BYTES", str(5_000_000)))
+MAX_INLINE_FILES = int(os.environ.get("FLOWX_MAX_INLINE_FILES", "1000"))
+MAX_INLINE_PATH_BYTES = int(os.environ.get("FLOWX_MAX_INLINE_PATH_BYTES", "1024"))
 
 
 @dataclass
@@ -232,6 +234,11 @@ def materialize_airflow_definitions(definitions: dict[str, str]) -> str:
     """
     if not definitions:
         raise ValueError("airflow_definitions is empty")
+    if len(definitions) > MAX_INLINE_FILES:
+        raise ValueError(
+            f"airflow_definitions contains {len(definitions)} files (limit {MAX_INLINE_FILES}); stage the DAG files "
+            "to a UC Volume and pass 'airflow_volume_path' instead."
+        )
 
     validated: list[tuple[PurePosixPath, str]] = []
     validated_paths: set[PurePosixPath] = set()
@@ -239,6 +246,14 @@ def materialize_airflow_definitions(definitions: dict[str, str]) -> str:
     for relative_path, content in definitions.items():
         if not isinstance(relative_path, str) or not relative_path or "\\" in relative_path:
             raise ValueError(f"unsafe path in airflow_definitions: {relative_path!r}")
+        try:
+            path_bytes = len(relative_path.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise ValueError(f"airflow_definitions path must be valid UTF-8: {relative_path!r}") from error
+        if path_bytes > MAX_INLINE_PATH_BYTES:
+            raise ValueError(
+                f"airflow_definitions path is {path_bytes} bytes (limit {MAX_INLINE_PATH_BYTES}): {relative_path!r}"
+            )
         validated_path = PurePosixPath(relative_path)
         if validated_path.is_absolute() or ".." in validated_path.parts or validated_path.name in {"", "."}:
             raise ValueError(f"unsafe path in airflow_definitions: {relative_path!r}")
@@ -246,6 +261,19 @@ def materialize_airflow_definitions(definitions: dict[str, str]) -> str:
             raise ValueError(f"airflow_definitions path must end in .py: {relative_path!r}")
         if validated_path in validated_paths:
             raise ValueError(f"duplicate path in airflow_definitions: {relative_path!r}")
+        conflict = next(
+            (
+                existing
+                for existing in validated_paths
+                if existing in validated_path.parents or validated_path in existing.parents
+            ),
+            None,
+        )
+        if conflict is not None:
+            raise ValueError(
+                "parent/child path conflict in airflow_definitions: "
+                f"{conflict.as_posix()!r} and {validated_path.as_posix()!r}"
+            )
         if not isinstance(content, str):
             raise ValueError(f"airflow_definitions content must be a string: {relative_path!r}")
         total_bytes += len(content.encode("utf-8"))

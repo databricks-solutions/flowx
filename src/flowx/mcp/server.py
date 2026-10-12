@@ -17,7 +17,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from flowx.agentic import airflow_finding_required_capability, validate_persisted_agentic_report
+from flowx.agentic import airflow_gap_findings, classify_airflow_gaps
 from flowx.mcp import runner
 
 
@@ -61,10 +61,11 @@ To estimate current ADF spend (live Azure scan; needs the server's `azure` extra
 credentials in its environment):
   flowx("profile", {"source": "adf", "output_dir": "...", "days": 30})
 For a reviewed Airflow leaf gap, call `resolve_agentic` with action `prepare`, then `stage` with
-provider-authored candidates, then `apply` with an explicit `accept_gap` allowlist. Airflow `migrate`
-pauses before package with `status="needs_agentic_resolution"`; after apply, call it again with
-`resume_agentic=true` to package the reviewed report. Structural gaps remain explicit and require
-manual migration, deterministic support, or a future GraphPatch contract.
+provider-authored candidates, then `apply` with an explicit `accept_gap` allowlist. Hosted apply
+must receive the same Airflow source input used for prepare because each hosted source copy is
+temporary. Airflow `migrate` pauses before package with `status="needs_agentic_resolution"`; after
+apply, call it again with `resume_agentic=true` to package the reviewed report. Structural gaps remain
+explicit and require manual migration, deterministic support, or a future GraphPatch contract.
 Or run it all at once:
   flowx("migrate", {"source": "airflow", "airflow_source_path": "...", "output_dir": "...",
                     "catalog": "...", "schema": "..."})
@@ -180,88 +181,6 @@ def _has_source_reference(parameters: dict[str, Any], source: str) -> bool:
     )
 
 
-def _gap_capability(gap: dict[str, Any], finding_codes: dict[str, str]) -> str | None:
-    """Returns the contract capability a prepared gap needs beyond leaf replacement, if any."""
-    allowed_replacement_kinds = gap.get("allowed_replacement_kinds")
-    if isinstance(allowed_replacement_kinds, list) and allowed_replacement_kinds:
-        return None
-    codes = {finding_codes.get(str(fingerprint), "") for fingerprint in gap.get("finding_fingerprints") or []}
-    return airflow_finding_required_capability(codes) or "non_leaf_patch"
-
-
-def _airflow_gap_state(report: Any, prepared_gaps: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Classifies reconciled Airflow findings against the v1 leaf-resolution contract."""
-    pipelines = report.get("pipelines") if isinstance(report, dict) else None
-    if not isinstance(pipelines, list):
-        pipelines = [report] if isinstance(report, dict) else []
-    findings: list[tuple[str, dict[str, Any]]] = []
-    finding_codes: dict[str, str] = {}
-    for pipeline in pipelines:
-        if not isinstance(pipeline, dict):
-            continue
-        pipeline_name = str(pipeline.get("name", ""))
-        for finding in pipeline.get("not_translatable") or []:
-            if not isinstance(finding, dict) or finding.get("severity") != "gap":
-                continue
-            findings.append((pipeline_name, finding))
-            fingerprint = finding.get("fingerprint")
-            if isinstance(fingerprint, str):
-                finding_codes[fingerprint] = str(finding.get("code", ""))
-
-    eligible: list[dict[str, Any]] = []
-    structural: list[dict[str, Any]] = []
-    bound_fingerprints: set[str] = set()
-    for gap in prepared_gaps:
-        fingerprints = {str(value) for value in gap.get("finding_fingerprints") or []}
-        bound_fingerprints.update(fingerprints)
-        capability = _gap_capability(gap, finding_codes)
-        if capability is None:
-            eligible.append(gap)
-            continue
-        structural.append(
-            {
-                **gap,
-                "resolution_support": "unsupported_by_leaf_contract",
-                "required_capability": capability,
-            }
-        )
-
-    unsupported: list[dict[str, Any]] = []
-    for pipeline_name, finding in findings:
-        fingerprint = finding.get("fingerprint")
-        if isinstance(fingerprint, str) and fingerprint in bound_fingerprints:
-            continue
-        code = str(finding.get("code", ""))
-        capability = airflow_finding_required_capability({code}) or "source_semantics"
-        unsupported.append(
-            {
-                "gap_id": fingerprint,
-                "pipeline_name": pipeline_name,
-                "code": code,
-                "message": str(finding.get("message", "")),
-                "source_span": {key: finding.get(key, 0) for key in ("line", "column", "end_line", "end_column")},
-                "details": finding.get("details") or {},
-                "resolution_support": "unsupported_by_leaf_contract",
-                "required_capability": capability,
-            }
-        )
-    return {"eligible_gaps": eligible, "structural_gaps": structural, "unsupported_gaps": unsupported}
-
-
-def _airflow_gap_findings(report: Any) -> list[dict[str, Any]]:
-    """Returns every unresolved reconciled gap finding in an Airflow report."""
-    pipelines = report.get("pipelines") if isinstance(report, dict) else None
-    if not isinstance(pipelines, list):
-        pipelines = [report] if isinstance(report, dict) else []
-    return [
-        finding
-        for pipeline in pipelines
-        if isinstance(pipeline, dict)
-        for finding in pipeline.get("not_translatable") or []
-        if isinstance(finding, dict) and finding.get("severity") == "gap"
-    ]
-
-
 def _pending_options(inspect_result: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract the per-pipeline configuration options still awaiting an answer.
 
@@ -361,6 +280,7 @@ def _cmd_merge_agentic(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
+    """Run one Airflow gap-review action, rematerializing hosted source for prepare or apply."""
     source_name = _source_name(p)
     if source_name != "airflow":
         return {"ok": False, "error": "resolve_agentic is not enabled for ADF; ADF uses the legacy merge path."}
@@ -424,7 +344,7 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
             extra["gaps"] = gaps
             report = runner.read_json(Path(p["report_path"])) if p.get("report_path") else None
             if isinstance(gaps, list):
-                extra.update(_airflow_gap_state(report, [gap for gap in gaps if isinstance(gap, dict)]))
+                extra.update(classify_airflow_gaps(report, [gap for gap in gaps if isinstance(gap, dict)]))
         return {"ok": result.ok, "process": result.as_dict(), **extra}
     finally:
         cleanup()
@@ -488,11 +408,28 @@ def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
         args += ["--no-download-workspace-files"]
     if p.get("keep_intermediates"):
         args += ["--keep-intermediates"]
-    result = runner.run_adapter(args)
+    if p.get("allow_unresolved_gaps"):
+        args += ["--allow-unresolved-gaps"]
     out = Path(output_dir)
+    default_report = out / ".work" / "translation_report.stamped.json"
+    if not default_report.exists():
+        default_report = out / ".work" / "translation_report.json"
+    report_path = Path(p["report_path"]) if p.get("report_path") else default_report
+    report = runner.read_json(report_path)
+    result = runner.run_adapter(args)
+    unresolved_gaps = airflow_gap_findings(report) if result.ok else []
+    status = (
+        "failed"
+        if not result.ok
+        else "completed_with_reviewed_gaps"
+        if report_path.name == "translation_report.agentic.json" and unresolved_gaps
+        else "packaged_with_unresolved_gaps"
+        if p.get("allow_unresolved_gaps") and unresolved_gaps
+        else "completed"
+    )
     setup_md = runner.read_text(out / "SETUP.md") or runner.read_text(out / "setup" / "SETUP.md")
     extra = _bundle_output(p, out) if result.ok else {}
-    return _phase_result(result, out, bundle_files=runner.list_tree(out), setup_md=setup_md, **extra)
+    return _phase_result(result, out, status=status, bundle_files=runner.list_tree(out), setup_md=setup_md, **extra)
 
 
 def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
@@ -510,7 +447,8 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
     Airflow reports with reconciled gaps pause independently with
     ``status="needs_agentic_resolution"``. The result separates leaf envelopes supported by the v1
     contract from graph-structural and source-semantic gaps. After a reviewed ``resolve_agentic``
-    apply, call migrate with ``resume_agentic=True`` to package the validated agentic report.
+    apply, resupply the same hosted source input used for prepare, then call migrate with
+    ``resume_agentic=True`` to package the validated agentic report.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     source_name = _source_name(p)
@@ -554,27 +492,6 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                 "status": "failed",
                 "error": f"Reviewed Airflow report not found: {reviewed_report}",
             }
-        reviewed_payload = runner.read_json(reviewed_report)
-        if not isinstance(reviewed_payload, dict):
-            return {
-                "ok": False,
-                "status": "failed",
-                "failed_phase": "validate_agentic",
-                "error": "Reviewed Airflow report must be a JSON object.",
-            }
-        validation_failures = validate_persisted_agentic_report(
-            reviewed_payload,
-            evidence_dir=out / "metadata" / "agentic",
-        )
-        if validation_failures:
-            return {
-                "ok": False,
-                "status": "failed",
-                "failed_phase": "validate_agentic",
-                "error": "Reviewed Airflow report failed agentic evidence validation.",
-                "validation_failures": validation_failures,
-            }
-        has_validated_gaps = bool(_airflow_gap_findings(reviewed_payload))
         package_args: list[Any] = [
             "package",
             "--output-dir",
@@ -586,7 +503,9 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
             "--report",
             reviewed_report,
         ]
+        reviewed_payload = runner.read_json(reviewed_report)
         package_res = runner.run_adapter(package_args)
+        has_validated_gaps = package_res.ok and bool(airflow_gap_findings(reviewed_payload))
         extra = _bundle_output(p, out) if package_res.ok else {}
         steps["package"] = _phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra)
         return {
@@ -680,24 +599,11 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
 
         if source_name == "airflow":
             report = runner.read_json(Path(report_path))
-            gap_findings = _airflow_gap_findings(report)
+            gap_findings = airflow_gap_findings(report)
             if gap_findings:
                 operator_gaps = [finding for finding in gap_findings if finding.get("code") == "operator_placeholder"]
                 prepared_gaps: list[dict[str, Any]] = []
                 if operator_gaps:
-                    if not source:
-                        source, cleanup = _resolve_source(p)
-                    if not source:
-                        return {
-                            "ok": False,
-                            "status": "failed",
-                            "failed_phase": "prepare_agentic",
-                            "error": (
-                                "Airflow leaf gaps require the source during agentic preparation. "
-                                f"Provide one of: {_source_parameter_names('airflow')}."
-                            ),
-                            "steps": steps,
-                        }
                     prepare_args: list[Any] = [
                         "resolve-agentic",
                         "prepare",
@@ -727,20 +633,21 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                     payload = runner.read_json(out / ".work" / "agentic" / "gaps.json")
                     if isinstance(payload, list):
                         prepared_gaps = [gap for gap in payload if isinstance(gap, dict)]
-                state = _airflow_gap_state(report, prepared_gaps)
+                state = classify_airflow_gaps(report, prepared_gaps)
                 if state["eligible_gaps"]:
                     next_action = (
-                        "Stage and review eligible leaf candidates with resolve_agentic, then apply them and call "
-                        "migrate again with resume_agentic=true. Structural and source-semantic gaps remain linked "
-                        "failing placeholders unless they are migrated manually or gain deterministic or GraphPatch "
-                        "support."
+                        "Stage and review eligible leaf candidates with resolve_agentic, then apply them while "
+                        "resupplying the same airflow_volume_path, airflow_workspace_path, airflow_definitions, or "
+                        "airflow_source_path used for prepare. Call migrate again with resume_agentic=true. Structural "
+                        "and source-semantic gaps remain linked failing placeholders unless they are migrated manually "
+                        "or gain deterministic or GraphPatch support."
                     )
                 else:
                     next_action = (
                         "No gap is eligible for the v1 leaf-resolution contract, so migrate cannot create a reviewed "
                         "agentic report to resume. To intentionally retain the linked failing placeholders, call "
                         f"package separately with report_path={report_path!r} and "
-                        f"output_dir={output_dir!r}. Otherwise, "
+                        f"output_dir={output_dir!r}, allow_unresolved_gaps=true. Otherwise, "
                         "migrate the unsupported semantics manually or add deterministic or GraphPatch support."
                     )
                 return {
@@ -875,8 +782,8 @@ def build_server() -> FastMCP:
         - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
           merge ADF agent results. Airflow's legacy name-based merge is disabled; use resolve_agentic.
         - "resolve_agentic": source(req: "airflow"), action(req: prepare | stage | apply), output_dir,
-          one Airflow source key, report_path, gap_id, candidates, replace, accept_gap | accept_gaps,
-          accept_all, review_complete, review_manifest, reset —
+          one Airflow source key (required for prepare and hosted apply), report_path, gap_id,
+          candidates, replace, accept_gap | accept_gaps, accept_all, review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
@@ -885,7 +792,7 @@ def build_server() -> FastMCP:
         - "workspace_paths": source(req), report_path(req), one source-specific input key | source_dir.
         - "package": output_dir, output_volume_path, output_workspace_path, report_path,
           catalog(default "main"), schema(default "default"), bundle_name, profile,
-          download_workspace_files(bool), keep_intermediates(bool).
+          download_workspace_files(bool), keep_intermediates(bool), allow_unresolved_gaps(bool).
         - "migrate": source(req), one source-specific input key (req unless resuming), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list),
@@ -914,7 +821,8 @@ def build_server() -> FastMCP:
         - ``<source>_workspace_path``: a ``/Workspace`` directory read via the SDK Workspace API. The
           bytes also bypass the agent; the app service principal needs read access on the path.
         - ``<source>_definitions``: a small inline mapping. ADF accepts relative export paths → JSON;
-          Airflow accepts relative ``.py`` paths → Python source. Inline payloads are capped (~5 MB).
+          Airflow accepts relative ``.py`` paths → Python source. Inline payloads are capped (~5 MB);
+          Airflow also limits file count and UTF-8 path length.
         - ``<source>_source_path`` / ``source_dir``: a path the server itself can read (local hosting or
           a mounted volume).
 
@@ -948,16 +856,17 @@ def build_server() -> FastMCP:
           ``status="needs_agentic_resolution"`` with ``eligible_gaps`` (v1 leaf envelopes),
           ``structural_gaps`` (future GraphPatch or task-policy work), and ``unsupported_gaps``
           (source-level semantics outside leaf replacement).
-        - Run ``resolve_agentic`` stage/apply with reviewed candidates. Then call ``migrate`` with
-          ``source="airflow"``, the same ``output_dir``, and ``resume_agentic=true``. The reviewed
-          report is passed explicitly to package, where persisted evidence and reconciliation are
-          validated before bundle files are written. A successful package that retains reviewed
-          placeholders returns ``status="completed_with_reviewed_gaps"`` rather than claiming the
-          migration is semantically complete.
+        - Run ``resolve_agentic`` stage/apply with reviewed candidates. A hosted apply must resupply
+          the same Airflow source input used for prepare. Then call ``migrate`` with ``source="airflow"``,
+          the same ``output_dir``, and ``resume_agentic=true``. The reviewed report is passed explicitly
+          to package, where persisted evidence and reconciliation are validated before bundle files are
+          written. A successful package that retains reviewed placeholders returns
+          ``status="completed_with_reviewed_gaps"`` rather than claiming the migration is semantically complete.
         - When no gap is eligible for leaf resolution, no agentic report exists to resume. To retain
           those linked failing placeholders intentionally, call ``package`` separately with the
-          deterministic ``report_path`` returned by ``migrate``; otherwise migrate them manually or
-          add deterministic or GraphPatch support.
+          deterministic ``report_path`` returned by ``migrate`` and ``allow_unresolved_gaps=true``.
+          A successful acknowledged package returns ``status="packaged_with_unresolved_gaps"``;
+          otherwise migrate the gaps manually or add deterministic or GraphPatch support.
 
         Returns a dict ``{"ok": bool, ...}`` with per-command summaries (inventory / translation /
         bundle_files / questions / result) and a "process" block (stdout/stderr/returncode). An unknown

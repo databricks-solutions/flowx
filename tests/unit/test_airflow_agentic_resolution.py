@@ -180,7 +180,11 @@ def test_prepare_writes_versioned_fingerprint_bound_gap_without_changing_report(
     assert gap["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert gap["dag_capture_identity"] == "dag:dag.py:agentic"
     assert gap["finding_fingerprints"] == [gap["gap_id"]]
+    assert gap["required_capability"] is None
     assert all(len(gap[field]) == 64 for field in ("task_sha256", "graph_sha256", "provider_sha256", "request_sha256"))
+    request_payload = dict(gap)
+    request_sha256 = request_payload.pop("request_sha256")
+    assert request_sha256 == agentic_contract._sha256_bytes(agentic_contract._json_bytes(request_payload))
     assert {argument["name"] for argument in gap["arguments"]} == {"task_id", "image", "retries"}
     assert {argument["owner"] for argument in gap["arguments"]} == {"flowx", "provider"}
     image = next(argument for argument in gap["arguments"] if argument["name"] == "image")
@@ -499,6 +503,7 @@ def test_structural_gap_rejects_leaf_replacement_but_accepts_deferred_candidate(
     gap = _prepare_source(source, output)[0]
 
     assert gap["allowed_replacement_kinds"] == []
+    assert gap["required_capability"] == "graph_patch"
     assert _stage(output, _candidate(gap)) == 1
     assert "not allowed for this gap" in capsys.readouterr().err
 

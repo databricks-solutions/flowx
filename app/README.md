@@ -197,22 +197,11 @@ generated bundle directory.
 
 ## Inputs and outputs on a hosted app
 
-A Databricks App can't read the user's workspace / UC Volume files (only the container's
-ephemeral disk is local; `/Volumes/...` is **not** auto-mounted). The MCP surface handles this
-by passing data **inline** through the tool, since the calling agent *can* read those files:
+A Databricks App can't read the user's workspace / UC Volume files directly (only the container's ephemeral disk is local; `/Volumes/...` is **not** auto-mounted). The MCP surface accepts small definitions inline or downloads larger sources by reference.
 
-- **Input — small jobs:** pass the ADF JSON via `adf_definitions` — a mapping of relative path → JSON
-  content mirroring the ADF Git-export layout (`pipeline/…`, `dataset/…`, `linkedService/…`,
-  `trigger/…`); a single ARM-template object is also accepted. The server materializes it to a temp
-  dir. Capped at ~5 MB (`FLOWX_MAX_INLINE_BYTES`) since it flows through the agent's context.
-- **Input — large factories (recommended):** point the server at the source by reference, so the
-  bytes bypass the agent and it scales to thousands of pipelines:
-  - `adf_volume_path` — a UC Volume directory, downloaded via the SDK **Files API**.
-  - `adf_workspace_path` — a `/Workspace` directory (e.g. an ADF Git folder), listed and downloaded
-    via the SDK **Workspace API** (workspace files use the Workspace API, *not* the Files API).
-
-  Grant the app's service principal read on whichever path you use. (`adf_source_path` / `source_dir`
-  remain for paths the server itself can read — local hosting or a mounted volume.)
+- **Input — small jobs:** pass ADF JSON through `adf_definitions` (relative export path → JSON content) or Airflow DAGs through `airflow_definitions` (relative `.py` path → Python source). The server materializes either mapping in a temporary directory. Inline content is capped by `FLOWX_MAX_INLINE_BYTES` (about 5 MB by default); Airflow mappings are also capped by `FLOWX_MAX_INLINE_FILES` (1,000 by default) and `FLOWX_MAX_INLINE_PATH_BYTES` (1,024 UTF-8 bytes per relative path by default).
+- **Input — large sources (recommended):** use `adf_volume_path` / `airflow_volume_path` for a UC Volume directory downloaded through the SDK Files API, or `adf_workspace_path` / `airflow_workspace_path` for a `/Workspace` directory downloaded through the SDK Workspace API. The bytes bypass the agent and scale to large estates. Grant the app service principal read access to the selected path. Local hosting may instead use `adf_source_path`, `airflow_source_path`, or `source_dir` when the server can read the path itself.
+- **Airflow agentic review:** hosted `resolve_agentic apply` must receive the same Airflow source input used for `prepare`. The materialized source is intentionally removed after every call, and apply verifies the resupplied source against the prepared snapshot.
 - **Output — large bundles (recommended):** `package`/`migrate` write the DAB to the target via the
   SDK so the contents bypass the agent. Pass `output_volume_path` (uploaded to a UC Volume via the SDK
   Files API) **or** `output_workspace_path` (uploaded to a `/Workspace` directory via the SDK Workspace
@@ -220,6 +209,8 @@ by passing data **inline** through the tool, since the calling agent *can* read 
   `bundle_uploaded` (location + file list). Grant the service principal write on the target.
 - **Output — small bundles:** without an output path, `package`/`migrate` return the DAB inline as
   `bundle = {"files": {relpath: text, …}, "truncated": [...]}` (capped ~2 MB) for the caller to persist.
+
+Unreviewed Airflow reports with unresolved linked placeholders are rejected by `package` unless the caller explicitly passes `allow_unresolved_gaps=true`; a successful acknowledged package returns `packaged_with_unresolved_gaps`. Fingerprint-reviewed reports continue through persisted-evidence validation and report `completed_with_reviewed_gaps` when reviewed placeholders remain.
 
 ## Known constraints / follow-ups
 
