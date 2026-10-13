@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -13,6 +14,7 @@ import pytest
 import yaml
 
 WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "integration.yml"
+AGENTIC_STRUCTURE_CHECK = Path(__file__).parent / "azure" / "check_agentic_structure.py"
 
 
 def test_claude_prompt_uses_stdin_and_scoped_edit_permissions() -> None:
@@ -174,7 +176,7 @@ def test_live_workflow_runs_expected_output_cases_and_not_legacy_quality_script(
     assert "ADF_CASES_OUTCOME: ${{ steps.adf-cases.outcome }}" in workflow
     case_step = workflow.split("- name: Compare live ADF cases with expected outputs", 1)[1].split("- name:", 1)[0]
     assert "continue-on-error: true" in case_step
-    assert "PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v" in workflow
+    assert "PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v --tb=short" in workflow
     assert "ADF_CASE_SOURCE_DIR=${export_dir}" in workflow
     assert "assert_quality.py" not in workflow
     assert workflow.index("Validate bundles with Databricks CLI") < workflow.index("Enforce live integration results")
@@ -186,12 +188,107 @@ def test_merged_agentic_outputs_receive_structural_case_validation() -> None:
     assert "expected-agentic-structure.json" in workflow
     assert "id: agentic-structure" in workflow
     assert "STRUCTURE_OUTCOME: ${{ steps.agentic-structure.outcome }}" in workflow
-    assert 'assert task["type"] in valid_types' in workflow
-    assert 'if task["type"] == "NotebookActivity":' in workflow
-    assert "ast.parse(source)" in workflow
+    assert "depends_on: (.depends_on // [])" in workflow
+    assert "tests/integration/azure/check_agentic_structure.py" in workflow
     assert 'cases_root.glob("*/case.json")' in workflow
     assert "check_bundle_dir(bundle_dir)" in workflow
     assert 'bundle_by_pipeline[job["name"]] = bundle_dir' in workflow
+
+
+@pytest.mark.parametrize("depends_on", [None, []], ids=["missing", "empty"])
+def test_agentic_structure_accepts_empty_dependency_representations(tmp_path: Path, depends_on) -> None:
+    """Null, missing, and empty dependency lists represent the same graph edges."""
+    expected = [{"pipeline": "pipeline", "activity_name": "activity", "task_key": "activity", "depends_on": None}]
+    task = {"name": "activity", "task_key": "activity", "type": "WaitActivity"}
+    if depends_on is not None:
+        task["depends_on"] = depends_on
+    report = {"name": "pipeline", "tasks": [task]}
+    expected_path = tmp_path / "expected.json"
+    report_path = tmp_path / "report.json"
+    expected_path.write_text(json.dumps(expected), encoding="utf-8")
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(AGENTIC_STRUCTURE_CHECK), str(expected_path), str(report_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_agentic_structure_treats_dependency_edges_as_order_independent(tmp_path: Path) -> None:
+    """IR DAG edges are a set even though their serialized representation is a list."""
+    dependencies = [{"task_key": "first"}, {"task_key": "second", "outcome": "failed"}]
+    expected = [
+        {"pipeline": "pipeline", "activity_name": "activity", "task_key": "activity", "depends_on": dependencies}
+    ]
+    report = {
+        "name": "pipeline",
+        "tasks": [
+            {"name": "activity", "task_key": "activity", "type": "WaitActivity", "depends_on": dependencies[::-1]}
+        ],
+    }
+    expected_path = tmp_path / "expected.json"
+    report_path = tmp_path / "report.json"
+    expected_path.write_text(json.dumps(expected), encoding="utf-8")
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(AGENTIC_STRUCTURE_CHECK), str(expected_path), str(report_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_agentic_structure_reports_all_failures_without_source(tmp_path: Path) -> None:
+    """Every bad replacement is reported together without printing generated code."""
+    names = ["dependency", "key", "type", "empty-source", "invalid-source", "missing"]
+    expected = [
+        {
+            "pipeline": "pipeline",
+            "activity_name": name,
+            "task_key": name,
+            "depends_on": [{"task_key": "upstream"}] if name == "dependency" else [],
+        }
+        for name in names
+    ]
+    report = {
+        "name": "pipeline",
+        "tasks": [
+            {"name": "dependency", "task_key": "dependency", "type": "WaitActivity", "depends_on": []},
+            {"name": "key", "task_key": "changed", "type": "WaitActivity"},
+            {"name": "type", "task_key": "type", "type": "UnknownActivity"},
+            {"name": "empty-source", "task_key": "empty-source", "type": "NotebookActivity", "generated_source": ""},
+            {
+                "name": "invalid-source",
+                "task_key": "invalid-source",
+                "type": "NotebookActivity",
+                "generated_source": "SECRET_INVALID_SOURCE(",
+            },
+        ],
+    }
+    expected_path = tmp_path / "expected.json"
+    report_path = tmp_path / "report.json"
+    expected_path.write_text(json.dumps(expected), encoding="utf-8")
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(AGENTIC_STRUCTURE_CHECK), str(expected_path), str(report_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    for fragment in (
+        "pipeline/dependency: depends_on:",
+        "pipeline/key: task_key:",
+        "pipeline/type: type:",
+        "pipeline/empty-source: generated_source:",
+        "pipeline/invalid-source: generated_source:",
+        "pipeline/missing: task: expected present, actual missing",
+    ):
+        assert fragment in result.stderr
+    assert "SECRET_INVALID_SOURCE" not in result.stderr
 
 
 def test_bundle_validation_supplies_required_variables_and_collects_failures() -> None:

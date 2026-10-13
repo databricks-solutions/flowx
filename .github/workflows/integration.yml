@@ -190,7 +190,7 @@ jobs:
         id: adf-cases
         continue-on-error: true
         run: |
-          PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v
+          PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v --tb=short
 
       - name: Discover and convert exported definitions
         run: |
@@ -243,7 +243,7 @@ jobs:
             def pipelines: if has("pipelines") then .pipelines else [.] end;
             [pipelines[] as $pipeline |
              $pipeline.tasks | .. | objects | select(.type? == "PlaceholderActivity") |
-             {pipeline: $pipeline.name, activity_name: .name, task_key, depends_on}]
+             {pipeline: $pipeline.name, activity_name: .name, task_key, depends_on: (.depends_on // [])}]
           ' "${FLOWX_OUTPUT}/.work/translation_report.json" > "${RUNNER_TEMP}/expected-agentic-structure.json"
           cat > "${RUNNER_TEMP}/snapshot-worktree.sh" <<'SNAPSHOT_HELPER'
           snapshot_worktree() {
@@ -347,45 +347,9 @@ jobs:
         continue-on-error: true
         if: steps.agentic.outputs.resolved == 'true' && steps.agentic-merge.outcome == 'success'
         run: |
-          PYTHONPATH=src "$(cat .migration-venv)" - <<'PY'
-          import ast
-          import json
-          import os
-          from pathlib import Path
-
-          report = json.loads(Path(os.environ["FLOWX_OUTPUT"], ".work/translation_report.json").read_text())
-          expected = json.loads(Path(os.environ["RUNNER_TEMP"], "expected-agentic-structure.json").read_text())
-          pipelines = report.get("pipelines", [report])
-
-          valid_types = {
-              "AppendVariableActivity", "CopyActivity", "DbtFactoryActivity", "DeleteActivity",
-              "ExecutePipelineActivity", "FilterActivity", "ForEachActivity", "IfConditionActivity",
-              "LookupActivity", "MotifActivity", "NotebookActivity", "RunJobActivity",
-              "SetVariableActivity", "SparkJarActivity", "SparkPythonActivity", "SqlActivity",
-              "SwitchActivity", "WaitActivity", "WebActivity",
-          }
-
-          def tasks(value):
-              if isinstance(value, dict):
-                  if isinstance(value.get("name"), str) and isinstance(value.get("type"), str):
-                      yield value
-                  for child in value.values():
-                      yield from tasks(child)
-              elif isinstance(value, list):
-                  for child in value:
-                      yield from tasks(child)
-
-          by_pipeline = {pipeline["name"]: {task["name"]: task for task in tasks(pipeline["tasks"])} for pipeline in pipelines}
-          for item in expected:
-              task = by_pipeline[item["pipeline"]][item["activity_name"]]
-              assert task["type"] in valid_types, item
-              assert task["task_key"] == item["task_key"], item
-              assert task.get("depends_on", []) == item.get("depends_on", []), item
-              if task["type"] == "NotebookActivity":
-                  source = task.get("generated_source")
-                  assert isinstance(source, str) and source.strip(), item
-                  ast.parse(source)
-          PY
+          "$(cat .migration-venv)" tests/integration/azure/check_agentic_structure.py \
+            "${RUNNER_TEMP}/expected-agentic-structure.json" \
+            "${FLOWX_OUTPUT}/.work/translation_report.json"
 
       - name: Package merged translation
         run: |
