@@ -19,6 +19,7 @@ FIXTURES = ROOT / "tests/integration/azure/adf"
 CASES = FIXTURES / "cases"
 PHASES = ("discover", "convert", "package")
 SHARED_DIRS = ("datasets", "linked_services", "dataflows")
+LIVE_DEFINITION_DIRS = (*SHARED_DIRS, "pipelines", "triggers")
 LIVE_ENV = {
     "<STORAGE_ACCOUNT_ID>": "ADF_CASE_STORAGE_ACCOUNT_ID",
     "<KEY_VAULT_URI>": "ADF_CASE_KEY_VAULT_URI",
@@ -59,7 +60,11 @@ def _replace_values(value: Any, substitutions: dict[str, str]) -> Any:
 
 
 def _allow_added_key(path: str, value: Any) -> bool:
-    """Allow only empty ADF defaults that have no translation semantics."""
+    """Allow only ADF GET fields that have no translation semantics."""
+    # ADF stamps this read-only server timestamp on pipeline GET responses;
+    # flowx does not consume it. Require a non-empty ISO-8601-like string.
+    if path == "$.properties.lastPublishTime":
+        return isinstance(value, str) and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T\S+Z", value))
     if path == "$.properties.annotations":
         return value == []
     if path in {"$.properties.parameters", "$.properties.variables"}:
@@ -69,8 +74,8 @@ def _allow_added_key(path: str, value: Any) -> bool:
     return False
 
 
-def _validate_definition(expected: Any, actual: Any, path: str = "$") -> None:
-    """Require exact fixture content plus the documented no-op ADF defaults."""
+def _definition_errors(expected: Any, actual: Any, path: str = "$") -> list[str]:
+    """Return differing paths after accounting for documented ADF GET fields."""
     errors: list[str] = []
 
     def compare(want: Any, got: Any, current: str) -> None:
@@ -98,7 +103,38 @@ def _validate_definition(expected: Any, actual: Any, path: str = "$") -> None:
             errors.append(current)
 
     compare(expected, actual, path)
+    return sorted(errors)
+
+
+def _validate_definition(expected: Any, actual: Any, path: str = "$") -> None:
+    """Require exact fixture content plus the documented no-op ADF defaults."""
+    errors = _definition_errors(expected, actual, path)
     assert not errors, "live definition differs at key paths:\n" + "\n".join(sorted(errors))
+
+
+def _assert_live_export(source_root: Path) -> None:
+    """Report all live definition mismatches together, without printing values."""
+    mismatches: dict[str, list[str]] = {}
+    substitutions = _substitutions()
+    for directory in LIVE_DEFINITION_DIRS:
+        for fixture_path in sorted((FIXTURES / directory).glob("*.json")):
+            relative = fixture_path.relative_to(FIXTURES)
+            source_path = source_root / relative
+            if not source_path.exists():
+                mismatches[str(relative)] = ["$ (missing file)"]
+                continue
+            errors = _definition_errors(
+                _read_json(fixture_path),
+                _replace_values(_read_json(source_path), substitutions),
+            )
+            if errors:
+                mismatches[str(relative)] = errors
+    if mismatches:
+        lines = ["live export differs from fixtures:"]
+        for filename, paths in mismatches.items():
+            lines.append(filename)
+            lines.extend(f"  {path}" for path in paths)
+        pytest.fail("\n".join(lines))
 
 
 def _strip_allowed_defaults(value: Any, path: str = "$") -> Any:
@@ -110,6 +146,7 @@ def _strip_allowed_defaults(value: Any, path: str = "$") -> Any:
             if not (
                 (key in {"annotations", "dependsOn", "userProperties"} and item == [])
                 or (key in {"parameters", "variables"} and item == {})
+                or _allow_added_key(f"{path}.{key}", item)
             )
         }
     if isinstance(value, list):
@@ -291,6 +328,11 @@ def test_adf_case(case_dir: Path, phase: str, tmp_path: Path, pytestconfig: pyte
         _assert_tree(expected / "bundles", output)
 
 
+def test_live_export_matches_fixtures() -> None:
+    """Show every unexpected GET field across the complete live export at once."""
+    _assert_live_export(Path(os.getenv("ADF_CASE_SOURCE_DIR", str(FIXTURES))))
+
+
 def test_every_fixture_pipeline_is_in_a_case() -> None:
     """New fixture pipelines must be assigned to at least one expected-output case."""
     fixtures = {path.stem for path in (FIXTURES / "pipelines").glob("*.json")}
@@ -321,6 +363,37 @@ def test_live_definition_allowlist_rejects_translation_changes() -> None:
         _validate_definition(fixture, changed)
 
 
+def test_last_publish_time_allowlist_is_narrow() -> None:
+    """Only a plausible read-only ADF pipeline timestamp is ignored."""
+    fixture = {"properties": {}}
+    _validate_definition(fixture, {"properties": {"lastPublishTime": "2026-10-13T12:34:56Z"}})
+    with pytest.raises(AssertionError, match=r"\$\.properties\.lastPublishTime"):
+        _validate_definition(fixture, {"properties": {"lastPublishTime": 123}})
+    with pytest.raises(AssertionError, match=r"\$\.properties\.unexpected"):
+        _validate_definition(fixture, {"properties": {"unexpected": "2026-10-13T12:34:56Z"}})
+
+
+def test_whole_export_reports_all_files_and_paths(tmp_path: Path) -> None:
+    """Aggregate validation does not stop at the first definition mismatch."""
+    live = tmp_path / "live"
+    for directory in LIVE_DEFINITION_DIRS:
+        shutil.copytree(FIXTURES / directory, live / directory)
+    first = live / "pipelines/agentic-activities.json"
+    first_value = _read_json(first)
+    first_value["properties"]["unexpectedOne"] = True
+    _write_json(first, first_value)
+    second = live / "datasets/csv-adls.json"
+    second_value = _read_json(second)
+    second_value["properties"]["unexpectedTwo"] = True
+    _write_json(second, second_value)
+
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _assert_live_export(live)
+    message = str(failure.value)
+    assert "pipelines/agentic-activities.json\n  $.properties.unexpectedOne" in message
+    assert "datasets/csv-adls.json\n  $.properties.unexpectedTwo" in message
+
+
 def test_expected_artifacts_are_not_subject_to_line_ending_conversion() -> None:
     """Generated CSV CRLF bytes must survive checkout unchanged."""
     sample = CASES / "full-factory/expected/bundles/metadata/profile_report.csv"
@@ -344,6 +417,10 @@ def test_live_read_only_trigger_and_integration_runtime_fields(tmp_path: Path) -
     runtime = _read_json(runtime_path)
     runtime["properties"]["state"] = "Started"
     _write_json(runtime_path, runtime)
+    for pipeline_path in (live / "pipelines").glob("*.json"):
+        pipeline = _read_json(pipeline_path)
+        pipeline["properties"]["lastPublishTime"] = "2026-10-13T12:34:56Z"
+        _write_json(pipeline_path, pipeline)
 
     case_dir = CASES / "full-factory"
     case = _read_json(case_dir / "case.json")

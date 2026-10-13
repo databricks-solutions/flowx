@@ -116,10 +116,12 @@ git diff -- tests/integration/azure/adf/cases
 
 Always review the generated diff. Expected files come only from checked-in fixtures; update mode rejects a
 live source directory. Live comparison reverses Terraform substitutions without printing their values and
-runs flowx on the raw live definitions. It accepts only four empty defaults added by ADF: top-level
+runs flowx on the raw live definitions. It accepts only these empty defaults added by ADF: top-level
 `annotations`, top-level `parameters` and `variables`, and activity `dependsOn` or `userProperties` arrays.
 These values carry no behavior when empty; every other added or changed key fails with key paths only.
-The same defaults are removed when comparing raw JSON preserved in metadata, gaps, and placeholder notebooks.
+Pipeline `lastPublishTime` is also ignored only when it is an ISO-8601-like string: ADF sets this read-only
+timestamp on GET responses and flowx does not read it. The same ignored fields are removed when comparing raw
+JSON preserved in metadata, gaps, and placeholder notebooks.
 
 Known issue: the Blob Events trigger currently produces `file_arrival.url: <STORAGE_ACCOUNT_ID>`, an ARM
 resource ID rather than a storage URL. The expected output deliberately records today's behavior pending a

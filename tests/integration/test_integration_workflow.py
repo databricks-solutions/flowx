@@ -148,11 +148,12 @@ def test_configured_agentic_failures_are_enforced() -> None:
     assert 'fail_agentic "Claude Code did not complete successfully"' in workflow
     assert "id: agentic-merge" in workflow
     assert "continue-on-error: true" in workflow
-    assert "Enforce configured agentic resolution" in workflow
-    assert "if: always() && steps.agentic.outputs.configured == 'true'" in workflow
+    assert "Enforce live integration results" in workflow
+    assert "if: always()" in workflow
+    assert 'if [[ "${AGENTIC_CONFIGURED}" != true ]]' in workflow
     assert (
         workflow.index("Validate bundles with Databricks CLI")
-        < workflow.index("Enforce configured agentic resolution")
+        < workflow.index("Enforce live integration results")
         < workflow.index("Destroy ephemeral Azure resources")
     )
 
@@ -169,9 +170,14 @@ def test_live_workflow_runs_expected_output_cases_and_not_legacy_quality_script(
     """One deployment feeds the same case suite used by offline CI."""
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert "Compare live ADF cases with expected outputs" in workflow
+    assert "id: adf-cases" in workflow
+    assert "ADF_CASES_OUTCOME: ${{ steps.adf-cases.outcome }}" in workflow
+    case_step = workflow.split("- name: Compare live ADF cases with expected outputs", 1)[1].split("- name:", 1)[0]
+    assert "continue-on-error: true" in case_step
     assert "PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v" in workflow
     assert "ADF_CASE_SOURCE_DIR=${export_dir}" in workflow
     assert "assert_quality.py" not in workflow
+    assert workflow.index("Validate bundles with Databricks CLI") < workflow.index("Enforce live integration results")
 
 
 def test_merged_agentic_outputs_receive_structural_case_validation() -> None:

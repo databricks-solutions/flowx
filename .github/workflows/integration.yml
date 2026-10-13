@@ -187,6 +187,8 @@ jobs:
           } >> "${GITHUB_ENV}"
 
       - name: Compare live ADF cases with expected outputs
+        id: adf-cases
+        continue-on-error: true
         run: |
           PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v
 
@@ -490,14 +492,23 @@ jobs:
             exit 1
           fi
 
-      - name: Enforce configured agentic resolution
-        if: always() && steps.agentic.outputs.configured == 'true'
+      - name: Enforce live integration results
+        if: always()
         env:
+          ADF_CASES_OUTCOME: ${{ steps.adf-cases.outcome }}
+          AGENTIC_CONFIGURED: ${{ steps.agentic.outputs.configured }}
           AGENTIC_OUTCOME: ${{ steps.agentic.outcome }}
           AGENTIC_RESOLVED: ${{ steps.agentic.outputs.resolved }}
           MERGE_OUTCOME: ${{ steps.agentic-merge.outcome }}
           STRUCTURE_OUTCOME: ${{ steps.agentic-structure.outcome }}
         run: |
+          if [[ "${ADF_CASES_OUTCOME}" != success ]]; then
+            echo "::error::Live ADF expected-output case validation failed."
+            exit 1
+          fi
+          if [[ "${AGENTIC_CONFIGURED}" != true ]]; then
+            exit 0
+          fi
           if [[ "${AGENTIC_OUTCOME}" != success ]]; then
             echo "::error::Claude authentication was configured, but agentic resolution failed or timed out."
             exit 1
