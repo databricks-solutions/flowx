@@ -9,6 +9,7 @@ on:
       - "!tests/integration/azure/setup.sh"
       - "!tests/integration/azure/README.md"
       - tests/integration/test_azure_fixture_coverage.py
+      - tests/integration/test_adf_cases.py
       - src/flowx/sources/adf/**
       - .github/workflows/integration.yml
   pull_request:
@@ -17,6 +18,7 @@ on:
       - "!tests/integration/azure/setup.sh"
       - "!tests/integration/azure/README.md"
       - tests/integration/test_azure_fixture_coverage.py
+      - tests/integration/test_adf_cases.py
       - src/flowx/sources/adf/**
       - .github/workflows/integration.yml
 
@@ -51,6 +53,7 @@ jobs:
       - run: >-
           PYTHONPATH=src uv run pytest
           tests/integration/test_azure_fixture_coverage.py
+          tests/integration/test_adf_cases.py
           tests/integration/test_integration_workflow.py -v
 
   integration:
@@ -161,8 +164,8 @@ jobs:
           export_dir="${RUNNER_TEMP}/adf-export"
           factory_name="$(terraform -chdir=tests/integration/azure/terraform output -raw factory_name)"
           resource_group="$(terraform -chdir=tests/integration/azure/terraform output -raw resource_group_name)"
-          mkdir -p "${export_dir}"/{pipelines,datasets,linked_services,dataflows,triggers}
-          for mapping in "pipelines:pipelines" "datasets:datasets" "linkedservices:linked_services" "dataflows:dataflows" "triggers:triggers"; do
+          mkdir -p "${export_dir}"/{pipelines,datasets,linked_services,dataflows,integration_runtimes,triggers}
+          for mapping in "pipelines:pipelines" "datasets:datasets" "linkedservices:linked_services" "dataflows:dataflows" "integrationruntimes:integration_runtimes" "triggers:triggers"; do
             resource_type="${mapping%%:*}"
             directory="${mapping##*:}"
             subscription_id="$(az account show --query id --output tsv)"
@@ -174,7 +177,18 @@ jobs:
                 jq '{name, properties}' <<<"${resource}" > "${export_dir}/${directory}/${name}.json"
               done
           done
-          echo "ADF_EXPORT_DIR=${export_dir}" >> "${GITHUB_ENV}"
+          {
+            echo "ADF_EXPORT_DIR=${export_dir}"
+            echo "ADF_CASE_SOURCE_DIR=${export_dir}"
+            printf 'ADF_CASE_STORAGE_ACCOUNT_ID=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw storage_account_id)"
+            printf 'ADF_CASE_KEY_VAULT_URI=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw key_vault_uri)"
+            printf 'ADF_CASE_ADLS_DFS_ENDPOINT=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw adls_dfs_endpoint)"
+            printf 'ADF_CASE_LOCATION=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw location)"
+          } >> "${GITHUB_ENV}"
+
+      - name: Compare live ADF cases with expected outputs
+        run: |
+          PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v
 
       - name: Discover and convert exported definitions
         run: |
@@ -223,6 +237,12 @@ jobs:
              $pipeline.tasks | .. | objects | select(.type? == "PlaceholderActivity") |
              {pipeline: $pipeline.name, activity_name: .name}] | sort_by(.pipeline, .activity_name)
           ' "${FLOWX_OUTPUT}/.work/translation_report.json" > "${expected_tasks_file}"
+          jq '
+            def pipelines: if has("pipelines") then .pipelines else [.] end;
+            [pipelines[] as $pipeline |
+             $pipeline.tasks | .. | objects | select(.type? == "PlaceholderActivity") |
+             {pipeline: $pipeline.name, activity_name: .name, task_key, depends_on}]
+          ' "${FLOWX_OUTPUT}/.work/translation_report.json" > "${RUNNER_TEMP}/expected-agentic-structure.json"
           cat > "${RUNNER_TEMP}/snapshot-worktree.sh" <<'SNAPSHOT_HELPER'
           snapshot_worktree() {
             find . -path './.git' -prune -o -path './agentic_results' -prune -o \
@@ -320,14 +340,87 @@ jobs:
             --report "${FLOWX_OUTPUT}/.work/translation_report.json" \
             --agentic-results agentic_results
 
-      - name: Package and verify translation quality
+      - name: Validate merged agentic structure
+        id: agentic-structure
+        continue-on-error: true
+        if: steps.agentic.outputs.resolved == 'true' && steps.agentic-merge.outcome == 'success'
+        run: |
+          PYTHONPATH=src "$(cat .migration-venv)" - <<'PY'
+          import ast
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(Path(os.environ["FLOWX_OUTPUT"], ".work/translation_report.json").read_text())
+          expected = json.loads(Path(os.environ["RUNNER_TEMP"], "expected-agentic-structure.json").read_text())
+          pipelines = report.get("pipelines", [report])
+
+          valid_types = {
+              "AppendVariableActivity", "CopyActivity", "DbtFactoryActivity", "DeleteActivity",
+              "ExecutePipelineActivity", "FilterActivity", "ForEachActivity", "IfConditionActivity",
+              "LookupActivity", "MotifActivity", "NotebookActivity", "RunJobActivity",
+              "SetVariableActivity", "SparkJarActivity", "SparkPythonActivity", "SqlActivity",
+              "SwitchActivity", "WaitActivity", "WebActivity",
+          }
+
+          def tasks(value):
+              if isinstance(value, dict):
+                  if isinstance(value.get("name"), str) and isinstance(value.get("type"), str):
+                      yield value
+                  for child in value.values():
+                      yield from tasks(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      yield from tasks(child)
+
+          by_pipeline = {pipeline["name"]: {task["name"]: task for task in tasks(pipeline["tasks"])} for pipeline in pipelines}
+          for item in expected:
+              task = by_pipeline[item["pipeline"]][item["activity_name"]]
+              assert task["type"] in valid_types, item
+              assert task["task_key"] == item["task_key"], item
+              assert task.get("depends_on", []) == item.get("depends_on", []), item
+              if task["type"] == "NotebookActivity":
+                  source = task.get("generated_source")
+                  assert isinstance(source, str) and source.strip(), item
+                  ast.parse(source)
+          PY
+
+      - name: Package merged translation
         run: |
           python_bin="$(cat .migration-venv)"
           PYTHONPATH=src "${python_bin}" -m flowx.adapter package --output-dir "${FLOWX_OUTPUT}" \
             --catalog main --schema default --no-download-workspace-files
-          PYTHONPATH=src "${python_bin}" tests/integration/azure/assert_quality.py \
-            tests/integration/azure/adf "${ADF_EXPORT_DIR}" \
-            "${FLOWX_OUTPUT}/metadata/inventory.json" "${FLOWX_OUTPUT}"
+          PYTHONPATH=src "${python_bin}" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import yaml
+          from flowx.validate.bundle_invariants import check_bundle_dir, format_result
+
+          root = Path(os.environ["FLOWX_OUTPUT"])
+          bundle_dirs = sorted(path.parent for path in root.glob("*/databricks.yml"))
+          if (root / "databricks.yml").exists():
+              bundle_dirs.append(root)
+          assert bundle_dirs, "package produced no bundles"
+          bundle_by_pipeline = {}
+          for bundle_dir in bundle_dirs:
+              for resource_file in bundle_dir.glob("resources/*.yml"):
+                  resources = yaml.safe_load(resource_file.read_text()) or {}
+                  for job in ((resources.get("resources") or {}).get("jobs") or {}).values():
+                      bundle_by_pipeline[job["name"]] = bundle_dir
+          cases_root = Path("tests/integration/azure/adf/cases")
+          for case_file in sorted(cases_root.glob("*/case.json")):
+              case = json.loads(case_file.read_text())
+              for pipeline in case["pipelines"]:
+                  bundle_dir = bundle_by_pipeline[pipeline]
+                  result = check_bundle_dir(bundle_dir)
+                  assert result.ok, f"{case_file.parent.name}: {format_result(result)}"
+          summary = json.loads((root / "metadata/inventory.json").read_text())["summary"]
+          github_summary = os.getenv("GITHUB_STEP_SUMMARY")
+          if github_summary:
+              with open(github_summary, "a", encoding="utf-8") as handle:
+                  handle.write(f"- ADF cases: {summary['pipeline_count']} pipelines, {summary['activity_count']} activities.\n")
+          PY
 
       - name: Check optional Databricks credentials
         id: databricks-auth
@@ -403,13 +496,14 @@ jobs:
           AGENTIC_OUTCOME: ${{ steps.agentic.outcome }}
           AGENTIC_RESOLVED: ${{ steps.agentic.outputs.resolved }}
           MERGE_OUTCOME: ${{ steps.agentic-merge.outcome }}
+          STRUCTURE_OUTCOME: ${{ steps.agentic-structure.outcome }}
         run: |
           if [[ "${AGENTIC_OUTCOME}" != success ]]; then
             echo "::error::Claude authentication was configured, but agentic resolution failed or timed out."
             exit 1
           fi
-          if [[ "${AGENTIC_RESOLVED}" != true || "${MERGE_OUTCOME}" != success ]]; then
-            echo "::error::Claude authentication was configured, but merge-result validation or merging failed."
+          if [[ "${AGENTIC_RESOLVED}" != true || "${MERGE_OUTCOME}" != success || "${STRUCTURE_OUTCOME}" != success ]]; then
+            echo "::error::Claude authentication was configured, but result validation, merging, or structural validation failed."
             exit 1
           fi
 

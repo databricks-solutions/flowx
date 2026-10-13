@@ -1,0 +1,230 @@
+{
+  "audit": {},
+  "migration_status": "included",
+  "name": "all-activity-types",
+  "not_translatable": [],
+  "parameters": [
+    {
+      "default": [
+        "one"
+      ],
+      "name": "items",
+      "type": "Array"
+    }
+  ],
+  "reconciliation_status": null,
+  "schedule": {
+    "events": [
+      "Microsoft.Storage.BlobCreated"
+    ],
+    "kind": "file_arrival",
+    "pause_status": "PAUSED",
+    "url": "<STORAGE_ACCOUNT_ID>"
+  },
+  "tags": {
+    "pipeline": "all-activity-types",
+    "source": "adf"
+  },
+  "tasks": [
+    {
+      "name": "_init_status",
+      "task_key": "_init_status",
+      "type": "SetVariableActivity",
+      "value_kind": "literal",
+      "variable_name": "status",
+      "variable_value": "new"
+    },
+    {
+      "append_value": "ok",
+      "name": "append-variable",
+      "task_key": "append-variable",
+      "type": "AppendVariableActivity",
+      "value_kind": "literal",
+      "variable_name": "results"
+    },
+    {
+      "name": "copy",
+      "sink_dataset_type": "Parquet",
+      "sink_format": "parquet",
+      "sink_properties": {
+        "linked_service_name": "adls-gen2",
+        "resolved_path": "/Volumes/${var.catalog}/${var.schema}/curated/parquet",
+        "volume_external_location": "abfss://curated@${var.storage_account}.dfs.core.windows.net/",
+        "volume_location_type": "AzureBlobFSLocation",
+        "volume_name": "curated",
+        "volume_relative_path": "parquet"
+      },
+      "sink_resolved_path": "/Volumes/${var.catalog}/${var.schema}/curated/parquet",
+      "sink_type": "ParquetSink",
+      "source_properties": {
+        "connection": {
+          "type": "AzureBlobFS"
+        },
+        "linked_service_name": "adls-gen2"
+      },
+      "source_type": "DelimitedTextSource",
+      "task_key": "copy",
+      "type": "CopyActivity"
+    },
+    {
+      "existing_job_id": "1",
+      "job_name": "1",
+      "name": "databricks-job",
+      "task_key": "databricks-job",
+      "type": "RunJobActivity"
+    },
+    {
+      "dataset_name": "",
+      "name": "delete",
+      "recursive": true,
+      "task_key": "delete",
+      "type": "DeleteActivity"
+    },
+    {
+      "name": "execute-child",
+      "pipeline_name": "child-pipeline",
+      "task_key": "execute-child",
+      "type": "ExecutePipelineActivity",
+      "wait_on_completion": true
+    },
+    {
+      "condition_code": "(not (len(item.get('input')) == 0))",
+      "condition_expression": "@not(empty(item()))",
+      "items_expression": "{{job.parameters.items}}",
+      "name": "filter",
+      "task_key": "filter",
+      "type": "FilterActivity"
+    },
+    {
+      "concurrency": 20,
+      "inner_activities": [
+        {
+          "name": "foreach-wait",
+          "task_key": "foreach-wait",
+          "type": "WaitActivity",
+          "wait_time_seconds": 1
+        }
+      ],
+      "items_expression": "{{job.parameters.items}}",
+      "name": "foreach",
+      "task_key": "foreach",
+      "type": "ForEachActivity"
+    },
+    {
+      "if_false_activities": [
+        {
+          "name": "false-wait",
+          "task_key": "false-wait",
+          "type": "WaitActivity",
+          "wait_time_seconds": 1
+        }
+      ],
+      "if_true_activities": [
+        {
+          "name": "true-wait",
+          "task_key": "true-wait",
+          "type": "WaitActivity",
+          "wait_time_seconds": 1
+        }
+      ],
+      "left": "1",
+      "name": "if-condition",
+      "op": "EQUAL_TO",
+      "right": "1",
+      "task_key": "if-condition",
+      "type": "IfConditionActivity"
+    },
+    {
+      "first_row_only": true,
+      "name": "lookup",
+      "source_properties": {
+        "sqlReaderQuery": "SELECT 1 AS value"
+      },
+      "source_query": "SELECT 1 AS value",
+      "source_type": "AzureSqlSource",
+      "task_key": "lookup",
+      "type": "LookupActivity"
+    },
+    {
+      "cluster": {
+        "_adf_authentication": "MSI",
+        "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>"
+      },
+      "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+      "name": "notebook",
+      "notebook_path": "/Shared/flowx/integration",
+      "task_key": "notebook",
+      "type": "NotebookActivity"
+    },
+    {
+      "name": "set-variable",
+      "task_key": "set-variable",
+      "type": "SetVariableActivity",
+      "value_kind": "literal",
+      "variable_name": "status",
+      "variable_value": "running"
+    },
+    {
+      "cluster": {
+        "_adf_authentication": "MSI",
+        "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>"
+      },
+      "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+      "main_class_name": "com.example.Integration",
+      "name": "spark-jar",
+      "task_key": "spark-jar",
+      "type": "SparkJarActivity"
+    },
+    {
+      "cluster": {
+        "_adf_authentication": "MSI",
+        "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>"
+      },
+      "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+      "name": "spark-python",
+      "python_file": "dbfs:/flowx/integration.py",
+      "task_key": "spark-python",
+      "type": "SparkPythonActivity"
+    },
+    {
+      "cases": [
+        {
+          "activities": [
+            {
+              "name": "case-wait",
+              "task_key": "case-wait",
+              "type": "WaitActivity",
+              "wait_time_seconds": 1
+            }
+          ],
+          "value": "running"
+        }
+      ],
+      "default_activities": [
+        {
+          "name": "default-wait",
+          "task_key": "default-wait",
+          "type": "WaitActivity",
+          "wait_time_seconds": 1
+        }
+      ],
+      "name": "switch",
+      "on_expression": "{{tasks.set-variable.values.status}}",
+      "task_key": "switch",
+      "type": "SwitchActivity"
+    },
+    {
+      "name": "wait",
+      "task_key": "wait",
+      "type": "WaitActivity",
+      "wait_time_seconds": 1
+    },
+    {
+      "method": "GET",
+      "name": "web",
+      "task_key": "web",
+      "type": "WebActivity",
+      "url": "https://example.invalid/flowx"
+    }
+  ]
+}

@@ -1,9 +1,9 @@
 # Azure live integration suite
 
-This suite deploys an ephemeral Azure Data Factory and supporting resources, exports the factory 
-through the Azure REST API, and runs flowx against that live export. The same JSON under `adf/` is 
-used by Terraform and by the offline coverage test. The workflow validates translation and Databricks 
-bundle structure; it never deploys a bundle.
+This suite deploys an ephemeral Azure Data Factory and supporting resources, exports the factory
+through the Azure REST API, and runs flowx against that live export. Expected-output cases under
+`adf/cases/` exercise discover, convert, and package offline and against the live export. The workflow
+validates translation and Databricks bundle structure; it never deploys a bundle.
 
 ## GitHub environment and secrets
 
@@ -97,14 +97,33 @@ Offline verification requires Python 3.12 and `uv` but no Azure credentials:
 
 ```bash
 bash scripts/bootstrap.sh
-python_bin="$(cat .migration-venv)"
-rm -rf /tmp/flowx-azure-output
-PYTHONPATH=src "$python_bin" -m flowx.adapter discover --source adf \
-  --source-path tests/integration/azure/adf --output-dir /tmp/flowx-azure-output
-PYTHONPATH=src "$python_bin" -m flowx.adapter convert --source adf \
-  --source-path tests/integration/azure/adf --output-dir /tmp/flowx-azure-output
-PYTHONPATH=src uv run pytest tests/integration/test_azure_fixture_coverage.py -m integration -v
+PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v
 ```
+
+### Expected-output cases
+
+Each `adf/cases/<case>/case.json` names one or more fixture pipelines. The test constructs a temporary
+ADF source containing those pipelines, every shared dataset/linked service/dataflow/integration runtime,
+and only triggers that reference a selected pipeline. `expected/` records normalized inventory, per-pipeline
+IR, gaps, and the complete packaged bundle tree.
+
+To add a case, create its `case.json`, then regenerate expected artifacts offline:
+
+```bash
+PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py --update-expected -v
+git diff -- tests/integration/azure/adf/cases
+```
+
+Always review the generated diff. Expected files come only from checked-in fixtures; update mode rejects a
+live source directory. Live comparison reverses Terraform substitutions without printing their values and
+runs flowx on the raw live definitions. It accepts only four empty defaults added by ADF: top-level
+`annotations`, top-level `parameters` and `variables`, and activity `dependsOn` or `userProperties` arrays.
+These values carry no behavior when empty; every other added or changed key fails with key paths only.
+The same defaults are removed when comparing raw JSON preserved in metadata, gaps, and placeholder notebooks.
+
+Known issue: the Blob Events trigger currently produces `file_arrival.url: <STORAGE_ACCOUNT_ID>`, an ARM
+resource ID rather than a storage URL. The expected output deliberately records today's behavior pending a
+separate flowx fix.
 
 To validate or deploy the Azure harness locally, authenticate using an OIDC-capable shell or another temporary
 Azure CLI credential and set `TF_VAR_subscription_id`, `TF_VAR_tenant_id`, `TF_VAR_client_id`, and a lowercase

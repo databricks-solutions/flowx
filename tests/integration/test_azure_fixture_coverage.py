@@ -96,6 +96,10 @@ def test_dedicated_motif_pipelines_are_detected(definitions) -> None:
 
 def test_adf_export_shapes_match_real_contracts() -> None:
     """Guard ADF shapes that the permissive loader alone cannot validate."""
+    triggers = [json.loads(path.read_text(encoding="utf-8")) for path in (FIXTURE_ROOT / "triggers").glob("*.json")]
+    assert triggers
+    assert all(trigger["properties"]["runtimeState"] == "Stopped" for trigger in triggers)
+
     tumbling = json.loads((FIXTURE_ROOT / "triggers" / "tumbling-window.json").read_text(encoding="utf-8"))
     assert "pipeline" in tumbling["properties"]
     assert "pipelines" not in tumbling["properties"]
@@ -116,6 +120,13 @@ def test_adf_export_shapes_match_real_contracts() -> None:
     assert len(lookups) == 4
     assert all("dataset" in lookup["typeProperties"] for lookup in lookups)
     assert all("dataset" not in lookup for lookup in lookups)
+
+
+def test_terraform_omits_read_only_trigger_runtime_state() -> None:
+    """Terraform deploys stopped trigger definitions without PUTting the read-only state."""
+    terraform = (FIXTURE_ROOT / "../terraform/main.tf").resolve().read_text(encoding="utf-8")
+    trigger_resource = terraform.split('resource "azapi_resource" "triggers" {', 1)[1]
+    assert 'if key != "runtimeState"' in trigger_resource
 
 
 def test_linked_service_parameters_use_adf_string_interpolation() -> None:

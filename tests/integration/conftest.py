@@ -2,6 +2,16 @@
 import pytest
 
 
+def pytest_addoption(parser):
+    """Register expected-artifact regeneration for ADF case tests."""
+    parser.addoption(
+        "--update-expected",
+        action="store_true",
+        default=False,
+        help="regenerate ADF case expected artifacts from checked-in fixtures",
+    )
+
+
 @pytest.fixture
 def pipeline_by_name(adf_definitions):
     """Return a lookup helper that finds a pipeline by name."""

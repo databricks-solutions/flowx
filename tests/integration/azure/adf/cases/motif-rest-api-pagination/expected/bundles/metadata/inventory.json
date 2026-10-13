@@ -1,0 +1,43 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "name": "initial-request",
+          "strategy": "deterministic",
+          "type": "WebActivity"
+        },
+        {
+          "depends_on": [
+            "initial-request"
+          ],
+          "name": "paginate",
+          "strategy": "agentic",
+          "type": "Until"
+        },
+        {
+          "name": "page-request",
+          "strategy": "deterministic",
+          "type": "WebActivity"
+        },
+        {
+          "depends_on": [
+            "page-request"
+          ],
+          "name": "set-continuation",
+          "strategy": "deterministic",
+          "type": "SetVariable"
+        }
+      ],
+      "name": "motif-rest-api-pagination"
+    }
+  ],
+  "summary": {
+    "activity_count": 4,
+    "agentic_count": 1,
+    "coverage_pct": 100.0,
+    "deterministic_count": 3,
+    "pipeline_count": 1,
+    "unsupported_count": 0
+  }
+}

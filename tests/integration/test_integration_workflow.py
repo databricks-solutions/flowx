@@ -160,8 +160,32 @@ def test_configured_agentic_failures_are_enforced() -> None:
 def test_live_export_includes_dataflows() -> None:
     """Claude receives referenced mapping-data-flow definitions from ADF."""
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert '"${export_dir}"/{pipelines,datasets,linked_services,dataflows,triggers}' in workflow
+    assert '"${export_dir}"/{pipelines,datasets,linked_services,dataflows,integration_runtimes,triggers}' in workflow
     assert '"dataflows:dataflows"' in workflow
+    assert '"integrationruntimes:integration_runtimes"' in workflow
+
+
+def test_live_workflow_runs_expected_output_cases_and_not_legacy_quality_script() -> None:
+    """One deployment feeds the same case suite used by offline CI."""
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "Compare live ADF cases with expected outputs" in workflow
+    assert "PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v" in workflow
+    assert "ADF_CASE_SOURCE_DIR=${export_dir}" in workflow
+    assert "assert_quality.py" not in workflow
+
+
+def test_merged_agentic_outputs_receive_structural_case_validation() -> None:
+    """Merged placeholders and every case bundle are structurally checked."""
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "expected-agentic-structure.json" in workflow
+    assert "id: agentic-structure" in workflow
+    assert "STRUCTURE_OUTCOME: ${{ steps.agentic-structure.outcome }}" in workflow
+    assert 'assert task["type"] in valid_types' in workflow
+    assert 'if task["type"] == "NotebookActivity":' in workflow
+    assert "ast.parse(source)" in workflow
+    assert 'cases_root.glob("*/case.json")' in workflow
+    assert "check_bundle_dir(bundle_dir)" in workflow
+    assert 'bundle_by_pipeline[job["name"]] = bundle_dir' in workflow
 
 
 def test_bundle_validation_supplies_required_variables_and_collects_failures() -> None:

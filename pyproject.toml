@@ -92,7 +92,11 @@ markers = [
 cache-dir = ".venv/ruff-cache"
 target-version = "py312"
 line-length = 120
-exclude = ["templates/*", "tests/resources/airflow/review_repros/*"]
+exclude = [
+    "templates/*",
+    "tests/resources/airflow/review_repros/*",
+    "tests/integration/azure/adf/cases/*/expected/bundles/**",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

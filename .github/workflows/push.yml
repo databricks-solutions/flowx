@@ -36,6 +36,7 @@ jobs:
         run: >-
           PYTHONPATH=src uv run pytest
           tests/integration/test_azure_setup_scripts.py
+          tests/integration/test_adf_cases.py
           tests/integration/test_integration_workflow.py -v
       - name: Verify requirements.txt is in sync with the lockfile
         run: |

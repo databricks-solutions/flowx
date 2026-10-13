@@ -219,7 +219,9 @@ resource "azapi_resource" "triggers" {
   type      = "Microsoft.DataFactory/factories/triggers@2018-06-01"
   name      = each.value.name
   parent_id = azurerm_data_factory.test.id
-  body      = { properties = each.value.properties }
+  body = {
+    properties = { for key, value in each.value.properties : key => value if key != "runtimeState" }
+  }
 
   schema_validation_enabled = false
   depends_on                = [azapi_resource.base_pipelines, azapi_resource.dependent_pipelines]

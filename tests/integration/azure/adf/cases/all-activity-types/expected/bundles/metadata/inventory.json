@@ -1,0 +1,122 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "name": "copy",
+          "strategy": "deterministic",
+          "type": "Copy"
+        },
+        {
+          "name": "notebook",
+          "strategy": "deterministic",
+          "type": "DatabricksNotebook"
+        },
+        {
+          "name": "spark-jar",
+          "strategy": "deterministic",
+          "type": "DatabricksSparkJar"
+        },
+        {
+          "name": "spark-python",
+          "strategy": "deterministic",
+          "type": "DatabricksSparkPython"
+        },
+        {
+          "name": "databricks-job",
+          "strategy": "deterministic",
+          "type": "DatabricksJob"
+        },
+        {
+          "name": "lookup",
+          "strategy": "deterministic",
+          "type": "Lookup"
+        },
+        {
+          "name": "web",
+          "strategy": "deterministic",
+          "type": "WebActivity"
+        },
+        {
+          "name": "delete",
+          "strategy": "deterministic",
+          "type": "Delete"
+        },
+        {
+          "name": "execute-child",
+          "strategy": "deterministic",
+          "type": "ExecutePipeline"
+        },
+        {
+          "name": "wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "set-variable",
+          "strategy": "deterministic",
+          "type": "SetVariable"
+        },
+        {
+          "name": "append-variable",
+          "strategy": "deterministic",
+          "type": "AppendVariable"
+        },
+        {
+          "name": "filter",
+          "strategy": "deterministic",
+          "type": "Filter"
+        },
+        {
+          "name": "foreach",
+          "strategy": "deterministic",
+          "type": "ForEach"
+        },
+        {
+          "name": "foreach-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "if-condition",
+          "strategy": "deterministic",
+          "type": "IfCondition"
+        },
+        {
+          "name": "true-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "false-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "switch",
+          "strategy": "deterministic",
+          "type": "Switch"
+        },
+        {
+          "name": "case-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "default-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        }
+      ],
+      "name": "all-activity-types"
+    }
+  ],
+  "summary": {
+    "activity_count": 21,
+    "agentic_count": 0,
+    "coverage_pct": 100.0,
+    "deterministic_count": 21,
+    "pipeline_count": 1,
+    "unsupported_count": 0
+  }
+}
