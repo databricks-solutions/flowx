@@ -32,6 +32,25 @@ Entra applications, administer the repository environment, register providers, a
 (normally User Access Administrator or Owner for that last setup operation). The CI identity itself receives
 only the custom deployer role, never Owner.
 
+The setup registers `Microsoft.Resources`, `Microsoft.DataFactory`, `Microsoft.Storage`,
+`Microsoft.KeyVault`, and `Microsoft.EventGrid`. Its custom role contains exactly these actions:
+
+- `Microsoft.Resources/subscriptions/read`
+- `Microsoft.Resources/subscriptions/resourceGroups/*`
+- `Microsoft.DataFactory/factories/*`
+- `Microsoft.Storage/storageAccounts/*`
+- `Microsoft.KeyVault/vaults/*`
+- `Microsoft.EventGrid/eventSubscriptions/read`
+- `Microsoft.EventGrid/eventSubscriptions/write`
+- `Microsoft.EventGrid/eventSubscriptions/delete`
+
+The Event Grid permission covers the linked subscription created and removed with the stopped Blob Events
+trigger; it grants no other Event Grid resource operations.
+
+Existing installations must rerun `./setup.sh providers` and `./setup.sh role` (or the full `./setup.sh setup`)
+to register Event Grid and update the existing custom role. Role-definition changes can take a few minutes to
+propagate, so wait a few minutes after `./setup.sh role` before rerunning the workflow.
+
 Configuration comes from flags or these environment variables: `GITHUB_REPO`, `AZURE_SUBSCRIPTION_ID`, 
 `APP_NAME`, `ENV_NAME`, `ROLE_NAME`, and the required comma-separated `REVIEWERS`. `RESOURCE_OWNER_EMAIL`
 is also required when setting environment secrets. Defaults are derived

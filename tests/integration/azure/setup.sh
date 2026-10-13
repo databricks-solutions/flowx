@@ -44,6 +44,8 @@ APP_NAME=${APP_NAME:-flowx-live-integration}
 ENV_NAME=${ENV_NAME:-flowx-live-integration}
 ROLE_NAME=${ROLE_NAME:-flowx-live-integration-deployer}
 REVIEWERS=${REVIEWERS:-}
+REQUIRED_PROVIDERS='Microsoft.Resources Microsoft.DataFactory Microsoft.Storage Microsoft.KeyVault Microsoft.EventGrid'
+REQUIRED_ROLE_ACTIONS='["Microsoft.Resources/subscriptions/read","Microsoft.Resources/subscriptions/resourceGroups/*","Microsoft.DataFactory/factories/*","Microsoft.Storage/storageAccounts/*","Microsoft.KeyVault/vaults/*","Microsoft.EventGrid/eventSubscriptions/read","Microsoft.EventGrid/eventSubscriptions/write","Microsoft.EventGrid/eventSubscriptions/delete"]'
 while (($#)); do
   case "$1" in
     --github-repo) [[ $# -ge 2 ]] || die "$1 requires a value"; GITHUB_REPO=$2; shift 2 ;;
@@ -170,7 +172,7 @@ step_identity() {
 
 step_providers() {
   local provider state
-  for provider in Microsoft.Resources Microsoft.DataFactory Microsoft.Storage Microsoft.KeyVault; do
+  for provider in $REQUIRED_PROVIDERS; do
     state=$(az provider show --subscription "$AZURE_SUBSCRIPTION_ID" --namespace "$provider" \
       --query registrationState -o tsv 2>/dev/null || true)
     if [[ "$state" == Registered ]]; then log "$provider is registered"; else
@@ -191,8 +193,8 @@ step_role() {
   fi
   scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}"
   new_temp_file; role_file=$NEW_TEMP_FILE
-  jq -n --arg name "$ROLE_NAME" --arg scope "$scope" \
-    '{Name:$name,IsCustom:true,Description:"Deploy flowx live integration fixtures",Actions:["Microsoft.Resources/subscriptions/read","Microsoft.Resources/subscriptions/resourceGroups/*","Microsoft.DataFactory/factories/*","Microsoft.Storage/storageAccounts/*","Microsoft.KeyVault/vaults/*"],NotActions:[],AssignableScopes:[$scope]}' > "$role_file"
+  jq -n --arg name "$ROLE_NAME" --arg scope "$scope" --argjson actions "$REQUIRED_ROLE_ACTIONS" \
+    '{Name:$name,IsCustom:true,Description:"Deploy flowx live integration fixtures",Actions:$actions,NotActions:[],AssignableScopes:[$scope]}' > "$role_file"
   role_id=$(az role definition list --name "$ROLE_NAME" --scope "$scope" --query '[0].id' -o tsv)
   if [[ -z "$role_id" ]]; then
     if $DRY_RUN; then role_id='<role-definition-id>'; run_write az role definition create --role-definition "$role_file"; else
@@ -272,13 +274,13 @@ verify_setup() {
   credential=$(az ad app federated-credential list --id "$app_id" \
     --query "[?subject=='$subject' && issuer=='https://token.actions.githubusercontent.com' && audiences[0]=='api://AzureADTokenExchange'].id | [0]" -o tsv)
   [[ -n "$credential" ]] || { echo "MISSING/MISMATCH: GitHub OIDC federated credential" >&2; failures=$((failures + 1)); }
-  for provider in Microsoft.Resources Microsoft.DataFactory Microsoft.Storage Microsoft.KeyVault; do
+  for provider in $REQUIRED_PROVIDERS; do
     state=$(az provider show --subscription "$AZURE_SUBSCRIPTION_ID" --namespace "$provider" --query registrationState -o tsv 2>/dev/null || true)
     [[ "$state" == Registered ]] || { echo "MISSING/MISMATCH: provider $provider is not registered" >&2; failures=$((failures + 1)); }
   done
   scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}"
   role_json=$(az role definition list --name "$ROLE_NAME" --scope "$scope" -o json)
-  required_actions='["Microsoft.Resources/subscriptions/read","Microsoft.Resources/subscriptions/resourceGroups/*","Microsoft.DataFactory/factories/*","Microsoft.Storage/storageAccounts/*","Microsoft.KeyVault/vaults/*"]'
+  required_actions=$REQUIRED_ROLE_ACTIONS
   # shellcheck disable=SC2016
   role_matches=$(json_value "invalid role-definition response from Azure" \
     'if type == "array" then

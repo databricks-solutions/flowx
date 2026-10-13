@@ -70,7 +70,9 @@ case "$*" in
   *"role definition list"*"-o json"*)
     if [[ "${STUB_ROLE_MISMATCH:-}" == 1 ]]; then actions='["Microsoft.Resources/subscriptions/read"]';
     else actions='["Microsoft.Resources/subscriptions/read","Microsoft.Resources/subscriptions/resourceGroups/*",
-      "Microsoft.DataFactory/factories/*","Microsoft.Storage/storageAccounts/*","Microsoft.KeyVault/vaults/*"]'; fi
+      "Microsoft.DataFactory/factories/*","Microsoft.Storage/storageAccounts/*","Microsoft.KeyVault/vaults/*",
+      "Microsoft.EventGrid/eventSubscriptions/read","Microsoft.EventGrid/eventSubscriptions/write",
+      "Microsoft.EventGrid/eventSubscriptions/delete"]'; fi
     printf '[{"assignableScopes":["/subscriptions/00000000-0000-0000-0000-000000000001"],
       "permissions":[{"actions":%s,"notActions":[],"dataActions":[],"notDataActions":[]}],
       "roleName":"flowx-live-integration-deployer","id":"role-id"}]\n' "$actions" ;;
@@ -78,6 +80,14 @@ case "$*" in
   *"role assignment list"*)
     [[ "${STUB_NO_SP:-}" != 1 ]] || { echo 'placeholder assignment lookup' >> "$MUTATION_LOG"; exit 88; }
     echo "assignment-id" ;;
+  *"role definition update"*)
+    if [[ "${ALLOW_ROLE_UPDATE:-}" == 1 ]]; then
+      previous=''
+      for argument in "$@"; do
+        if [[ "$previous" == --role-definition ]]; then cat "$argument" > "$ROLE_JSON_LOG"; fi
+        previous=$argument
+      done
+    else echo "$*" >> "$MUTATION_LOG"; exit 91; fi ;;
   *"group list"*) echo "flowx-orphan-exact" ;;
   *" create"*|*" update"*|*" register"*|*" delete"*|*" account set"*)
     echo "$*" >> "$MUTATION_LOG"; exit 91 ;;
@@ -151,6 +161,7 @@ def test_fresh_tenant_setup_dry_run_skips_dependent_lookups(stub_path: tuple[Pat
     assert result.returncode == 0, result.stdout + result.stderr
     assert "client-id" in result.stdout
     assert "role-definition-id" in result.stdout
+    assert "Microsoft.EventGrid" in result.stdout
     assert not mutation_log.exists()
 
 
@@ -175,6 +186,22 @@ def test_verify_reports_mismatched_role_actions_clearly(stub_path: tuple[Path, P
     assert result.returncode != 0
     assert "MISSING/MISMATCH: custom role definition" in output
     assert "jq: error" not in output
+
+
+def test_role_updates_an_existing_definition_with_event_grid(stub_path: tuple[Path, Path], tmp_path: Path) -> None:
+    """An existing pre-Event-Grid role is idempotently updated in place."""
+    binary_dir, mutation_log = stub_path
+    role_json_log = tmp_path / "role.json"
+    environment = clean_environment(binary_dir, mutation_log)
+    environment.update({"ALLOW_ROLE_UPDATE": "1", "ROLE_JSON_LOG": str(role_json_log), "STUB_ROLE_MISMATCH": "1"})
+    result = run_script(["role", "--yes"], environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    role_json = role_json_log.read_text()
+    assert '"Microsoft.EventGrid/eventSubscriptions/read"' in role_json
+    assert '"Microsoft.EventGrid/eventSubscriptions/write"' in role_json
+    assert '"Microsoft.EventGrid/eventSubscriptions/delete"' in role_json
+    assert '"Microsoft.EventGrid/eventSubscriptions/*"' not in role_json
+    assert not mutation_log.exists()
 
 
 def test_verify_requires_owner_secret_name(stub_path: tuple[Path, Path]) -> None:
