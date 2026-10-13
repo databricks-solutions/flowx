@@ -227,6 +227,17 @@ def test_secrets_rejects_malformed_owner_email(stub_path: tuple[Path, Path]) -> 
     assert not mutation_log.exists()
 
 
+def test_setup_requires_owner_email_before_any_lookup_or_write(stub_path: tuple[Path, Path]) -> None:
+    """Non-interactive full setup validates the owner before step one."""
+    binary_dir, mutation_log = stub_path
+    environment = clean_environment(binary_dir, mutation_log)
+    environment.pop("RESOURCE_OWNER_EMAIL")
+    result = run_script(["setup", "--dry-run", "--yes"], environment)
+    assert result.returncode != 0
+    assert "RESOURCE_OWNER_EMAIL is required before setup can begin" in result.stderr
+    assert not mutation_log.exists()
+
+
 def test_cleanup_without_delete_only_lists(stub_path: tuple[Path, Path]) -> None:
     """Cleanup without --delete cannot dispatch a resource-group deletion."""
     binary_dir, mutation_log = stub_path
@@ -244,13 +255,22 @@ def test_bash_syntax() -> None:
 def test_every_taggable_terraform_resource_uses_owner_tags() -> None:
     """The shared owner tag is attached to every taggable base resource."""
     terraform = (SCRIPT.parent / "terraform" / "main.tf").read_text()
-    assert "owner     = var.owner_email" in terraform
-    for resource_type in (
-        "azurerm_resource_group",
-        "azurerm_storage_account",
-        "azurerm_key_vault",
-        "azurerm_data_factory",
-    ):
-        block = rf'^resource "{resource_type}" "test" \{{(?P<body>.*?)^\}}'
-        match = re.search(block, terraform, re.DOTALL | re.MULTILINE)
-        assert match and re.search(r"tags\s*=\s*local\.tags", match.group("body")), resource_type
+    assert "owner     = trimspace(var.owner_email)" in terraform
+    resources = list(re.finditer(r'^resource "(?P<type>azurerm_[^"]+)" "(?P<name>[^"]+)" \{', terraform, re.MULTILINE))
+    assert resources
+    for index, resource in enumerate(resources):
+        end = resources[index + 1].start() if index + 1 < len(resources) else len(terraform)
+        body = terraform[resource.end() : end]
+        identity = f"{resource.group('type')}.{resource.group('name')}"
+        assert re.search(r"^\s*tags\s*=\s*local\.tags$", body, re.MULTILINE), identity
+
+    azapi_resources = list(re.finditer(r'^resource "azapi_resource" "(?P<name>[^"]+)" \{', terraform, re.MULTILINE))
+    assert azapi_resources
+    for index, resource in enumerate(azapi_resources):
+        end = azapi_resources[index + 1].start() if index + 1 < len(azapi_resources) else len(terraform)
+        body = terraform[resource.end() : end]
+        resource_type = re.search(r'^\s*type\s*=\s*"(?P<type>[^"]+)"$', body, re.MULTILINE)
+        assert resource_type, resource.group("name")
+        assert resource_type.group("type").startswith(
+            ("Microsoft.DataFactory/factories/", "Microsoft.Storage/storageAccounts/")
+        ), f"top-level azapi resource must be assessed for owner tags: {resource.group('name')}"

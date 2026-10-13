@@ -64,6 +64,26 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Configure Terraform paths outside the checkout
+        shell: bash
+        run: |
+          {
+            printf 'TF_DATA_DIR=%s\n' "${RUNNER_TEMP}/flowx-terraform-data"
+            printf 'TF_STATE_DIR=%s\n' "${RUNNER_TEMP}/flowx-tfstate"
+            printf 'TF_STATE_PATH=%s\n' "${RUNNER_TEMP}/flowx-tfstate/terraform.tfstate"
+          } >> "${GITHUB_ENV}"
+          mkdir -p "${RUNNER_TEMP}/flowx-terraform-data" "${RUNNER_TEMP}/flowx-tfstate"
+
+      - name: Check required owner configuration
+        env:
+          RESOURCE_OWNER_EMAIL: ${{ secrets.RESOURCE_OWNER_EMAIL }}
+        shell: bash
+        run: |
+          if [[ -z "${RESOURCE_OWNER_EMAIL:-}" ]]; then
+            echo "::error::RESOURCE_OWNER_EMAIL is required in the flowx-live-integration environment."
+            exit 1
+          fi
+
       - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
         with:
           version: "0.11.2"
@@ -100,7 +120,7 @@ jobs:
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_owner_email: ${{ secrets.RESOURCE_OWNER_EMAIL }}
         run: |
-          terraform init -input=false
+          terraform init -input=false -backend-config="path=${TF_STATE_PATH}"
           terraform fmt -check
           terraform validate
           terraform apply -auto-approve -input=false
@@ -160,7 +180,10 @@ jobs:
             skip_agentic "Claude Code CLI installation failed"
             exit 0
           fi
-          if ! claude -p --plugin-dir . --permission-mode acceptEdits --allowedTools "Read,Write(agentic_results/**),Glob,Grep" \
+          chmod 000 "${TF_STATE_DIR}" "${TF_DATA_DIR}"
+          if ! claude -p --plugin-dir . --permission-mode acceptEdits \
+            --allowedTools "Read,Write(agentic_results/**),Glob,Grep" \
+            --disallowedTools "Read(tests/integration/azure/terraform/**),Read(/${TF_STATE_DIR}/**),Read(/${TF_DATA_DIR}/**)" \
             "Use this repository's flowx conversion skills. Read ${FLOWX_OUTPUT}/.work/translation_report.json and the exported ADF source at ${ADF_EXPORT_DIR}. Resolve every agentic ADF gap and write one valid merge-result JSON per gap under agentic_results/. Do not deploy or access unrelated resources."; then
             skip_agentic "Claude Code did not complete successfully"
             exit 0
@@ -247,6 +270,7 @@ jobs:
         shell: bash
         run: |
           set +e
+          chmod 700 "${TF_STATE_DIR}" "${TF_DATA_DIR}" 2>/dev/null || true
           fallback_hash="$(printf '%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" | sha256sum | cut -c1-10)"
           fallback_prefix="fx${fallback_hash}"
           export TF_VAR_name_prefix="${TF_VAR_name_prefix:-$fallback_prefix}"

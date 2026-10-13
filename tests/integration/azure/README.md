@@ -104,7 +104,7 @@ intentionally preserves the valid ADF shape; this is a known loader gap.
 
 Every taggable base Azure resource is tagged `purpose=flowx-integration-test`, `ephemeral=true`,
 `managedBy=terraform`, with its run prefix, and with `owner` set from the protected
-`DATABRICKS_OWNER_EMAIL` environment secret. The workflow runs `terraform destroy` under `if: always()` and
+`RESOURCE_OWNER_EMAIL` environment secret. The workflow runs `terraform destroy` under `if: always()` and
 then deletes the exact
 Terraform-output resource group as a safety net. It never performs a broad or wildcard deletion.
 

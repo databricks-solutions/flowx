@@ -1,1 +1,1 @@
-{"name":"mysql-parameterized","properties":{"type":"AzureMySql","parameters":{"connectionString":{"type":"String","defaultValue":"<MYSQL_CONNECTION_STRING>"}},"typeProperties":{"connectionString":{"value":"@linkedService().connectionString","type":"Expression"}}}}
+{"name":"mysql-parameterized","properties":{"type":"AzureMySql","parameters":{"connectionString":{"type":"String","defaultValue":"<MYSQL_CONNECTION_STRING>"}},"typeProperties":{"connectionString":"@{linkedService().connectionString}"}}}

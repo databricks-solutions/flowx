@@ -244,17 +244,16 @@ prompt_optional() {
 step_secrets() {
   lookup_identity
   if [[ -z "$app_id" ]]; then if $DRY_RUN; then app_id='<client-id>'; else die "Entra app not found; run identity"; fi; fi
-  if [[ -z "${DATABRICKS_OWNER_EMAIL:-}" ]]; then
+  if [[ -z "${RESOURCE_OWNER_EMAIL:-}" ]]; then
     [[ -t 0 ]] || die "RESOURCE_OWNER_EMAIL is required"
     read -r -s -p "Cloud resource owner email: " RESOURCE_OWNER_EMAIL; printf '\n'
   fi
-  [[ "$RESOURCE_OWNER_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] ||
-    die "RESOURCE_OWNER_EMAIL must be a non-empty email-like value"
+  validate_owner_email
   tenant_id=$(az account show --subscription "$AZURE_SUBSCRIPTION_ID" --query tenantId -o tsv)
   set_secret AZURE_CLIENT_ID "$app_id"
   set_secret AZURE_TENANT_ID "$tenant_id"
   set_secret AZURE_SUBSCRIPTION_ID "$AZURE_SUBSCRIPTION_ID"
-  set_secret DATABRICKS_OWNER_EMAIL "$RESOURCE_OWNER_EMAIL"
+  set_secret RESOURCE_OWNER_EMAIL "$RESOURCE_OWNER_EMAIL"
   prompt_optional CLAUDE_CODE_OAUTH_TOKEN 'Claude Code OAuth token'
   prompt_optional ANTHROPIC_API_KEY 'Anthropic API key'
   prompt_optional DATABRICKS_HOST 'Databricks host'
@@ -320,8 +319,18 @@ cleanup_orphans() {
   run_write az group delete --subscription "$AZURE_SUBSCRIPTION_ID" --name "$DELETE_GROUP" --yes
 }
 
+validate_owner_email() {
+  [[ "${RESOURCE_OWNER_EMAIL:-}" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] ||
+    die "RESOURCE_OWNER_EMAIL must be a non-empty email-like value"
+}
+
 [[ "$COMMAND" == setup || "$COMMAND" == environment ]] && [[ -z "$REVIEWERS" ]] &&
   die "REVIEWERS (or --reviewers) is required before setup can begin"
+if [[ "$COMMAND" == setup ]]; then
+  if [[ -n "${RESOURCE_OWNER_EMAIL:-}" ]]; then validate_owner_email
+  elif [[ ! -t 0 ]]; then die "RESOURCE_OWNER_EMAIL is required before setup can begin"
+  fi
+fi
 check_prereqs
 case "$COMMAND" in
   verify) verify_setup ;;

@@ -118,6 +118,95 @@ def test_adf_export_shapes_match_real_contracts() -> None:
     assert all("dataset" not in lookup for lookup in lookups)
 
 
+def test_linked_service_parameters_use_adf_string_interpolation() -> None:
+    """ADF linked-service properties reject generic Expression objects."""
+    for path in (FIXTURE_ROOT / "linked_services").glob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        pending = [payload["properties"].get("typeProperties", {})]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                assert value.get("type") != "Expression", path.name
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+
+
+def test_every_adf_reference_target_exists() -> None:
+    """Every named ADF dependency is deployed from this fixture corpus."""
+    directories = {
+        "LinkedServiceReference": "linked_services",
+        "DatasetReference": "datasets",
+        "PipelineReference": "pipelines",
+        "DataFlowReference": "dataflows",
+        "IntegrationRuntimeReference": "integration_runtimes",
+    }
+    targets = {}
+    for reference_type, directory in directories.items():
+        targets[reference_type] = {
+            json.loads(path.read_text(encoding="utf-8"))["name"] for path in (FIXTURE_ROOT / directory).glob("*.json")
+        }
+
+    for path in FIXTURE_ROOT.glob("**/*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        pending = [payload]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                reference_type = value.get("type")
+                if reference_type in targets:
+                    assert value.get("referenceName") in targets[reference_type], (path.name, value)
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+
+
+def test_terraform_orders_adf_reference_tiers() -> None:
+    """No fixture references an object in its own or a later Terraform tier."""
+    fixtures: dict[str, tuple[int, dict]] = {}
+
+    def reference_objects(value):
+        if isinstance(value, dict):
+            if value.get("type", "").endswith("Reference") and "referenceName" in value:
+                yield value
+            for child in value.values():
+                yield from reference_objects(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from reference_objects(child)
+
+    def references(value):
+        return (reference["referenceName"] for reference in reference_objects(value))
+
+    for directory in ("linked_services", "datasets", "dataflows", "integration_runtimes", "pipelines", "triggers"):
+        for path in (FIXTURE_ROOT / directory).glob("*.json"):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if directory == "linked_services":
+                linked_service_references = list(references(payload["properties"]))
+                if payload["properties"]["type"] == "AzureKeyVault":
+                    tier = 0
+                elif linked_service_references and "key-vault" not in linked_service_references:
+                    tier = 2
+                else:
+                    tier = 1
+            elif directory == "datasets":
+                tier = 3
+            elif directory in {"dataflows", "integration_runtimes"}:
+                tier = 4
+            elif directory == "pipelines":
+                has_pipeline_reference = any(
+                    reference["type"] == "PipelineReference" for reference in reference_objects(payload["properties"])
+                )
+                tier = 6 if has_pipeline_reference else 5
+            else:
+                tier = 7
+            fixtures[payload["name"]] = (tier, payload)
+
+    for name, (tier, payload) in fixtures.items():
+        for target in references(payload):
+            assert fixtures[target][0] < tier, f"{name} (tier {tier}) references {target} (tier {fixtures[target][0]})"
+
+
 def test_sanitized_arm_export_round_trip_preserves_inventory(definitions, tmp_path: Path) -> None:
     """The workflow's ``{name, properties}`` export retains the full inventory."""
     for source_dir in FIXTURE_ROOT.iterdir():
