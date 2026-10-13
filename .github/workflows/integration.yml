@@ -161,8 +161,8 @@ jobs:
           export_dir="${RUNNER_TEMP}/adf-export"
           factory_name="$(terraform -chdir=tests/integration/azure/terraform output -raw factory_name)"
           resource_group="$(terraform -chdir=tests/integration/azure/terraform output -raw resource_group_name)"
-          mkdir -p "${export_dir}"/{pipelines,datasets,linked_services,triggers}
-          for mapping in "pipelines:pipelines" "datasets:datasets" "linkedservices:linked_services" "triggers:triggers"; do
+          mkdir -p "${export_dir}"/{pipelines,datasets,linked_services,dataflows,triggers}
+          for mapping in "pipelines:pipelines" "datasets:datasets" "linkedservices:linked_services" "dataflows:dataflows" "triggers:triggers"; do
             resource_type="${mapping%%:*}"
             directory="${mapping##*:}"
             subscription_id="$(az account show --query id --output tsv)"
@@ -212,6 +212,10 @@ jobs:
           if ! npm install --global @anthropic-ai/claude-code@2.1.296; then
             fail_agentic "Claude Code CLI installation failed"
           fi
+          plugin_dir="${RUNNER_TEMP}/flowx-plugin"
+          mkdir -p "${plugin_dir}"
+          cp -R .claude-plugin skills "${plugin_dir}/"
+          chmod -R a-w "${plugin_dir}"
           expected_tasks_file="${RUNNER_TEMP}/expected-agentic-tasks.json"
           jq '
             def pipelines: if has("pipelines") then .pipelines else [.] end;
@@ -233,10 +237,10 @@ jobs:
           snapshot_worktree > "${worktree_snapshot}"
           chmod 000 "${TF_STATE_DIR}" "${TF_DATA_DIR}"
           if ! claude -p \
-            --plugin-dir . \
+            --plugin-dir "${RUNNER_TEMP}/flowx-plugin" \
             --permission-mode dontAsk \
             --permission-prompts none \
-            --tools="Read,Edit,Write,Glob,Grep" \
+            --tools="Read,Edit,Write,Glob,Grep,Skill" \
             --allowedTools="Read,Edit(agentic_results/**),Glob,Grep" \
             --disallowedTools="Read(tests/integration/azure/terraform/**),Read(/${TF_STATE_DIR}/**),Read(/${TF_DATA_DIR}/**)" <<CLAUDE_PROMPT
           Use the flowx:flowx-convert skill, specifically the ADF agentic-gap instructions in
@@ -347,9 +351,51 @@ jobs:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
+          set -uo pipefail
+          python_bin="$(cat .migration-venv)"
+          failed_bundles=()
           for bundle in "${FLOWX_OUTPUT}"/*/databricks.yml; do
-            (cd "$(dirname "${bundle}")" && databricks bundle validate -t dev)
+            bundle_name="$(basename "$(dirname "${bundle}")")"
+            required_variables=()
+            if ! required_output="$("${python_bin}" - "${bundle}" 2>/dev/null <<'PY'
+          import sys
+
+          import yaml
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              config = yaml.safe_load(handle) or {}
+          target_variables = (((config.get("targets") or {}).get("dev") or {}).get("variables") or {})
+          for name, declaration in sorted((config.get("variables") or {}).items()):
+              if name not in target_variables and (not isinstance(declaration, dict) or "default" not in declaration):
+                  print(name)
+          PY
+            )"; then
+              printf '::error::Could not parse required variables for bundle %s.\n' "${bundle_name}"
+              failed_bundles+=("${bundle_name}")
+              continue
+            fi
+            if [[ -n "${required_output}" ]]; then
+              mapfile -t required_variables <<< "${required_output}"
+            fi
+            validate_args=(bundle validate -t dev)
+            if (( ${#required_variables[@]} )); then
+              printf 'Validating %s with placeholders for required variables:' "${bundle_name}"
+              printf ' %s' "${required_variables[@]}"
+              printf '\n'
+            fi
+            for variable in "${required_variables[@]}"; do
+              placeholder="flowx-validation-placeholder"
+              [[ "${variable}" == *_job_id ]] && placeholder=0
+              validate_args+=(--var "${variable}=${placeholder}")
+            done
+            if ! (cd "$(dirname "${bundle}")" && databricks "${validate_args[@]}"); then
+              failed_bundles+=("${bundle_name}")
+            fi
           done
+          if (( ${#failed_bundles[@]} )); then
+            printf '::error::Bundle validation failed for: %s\n' "${failed_bundles[*]}"
+            exit 1
+          fi
 
       - name: Enforce configured agentic resolution
         if: always() && steps.agentic.outputs.configured == 'true'
@@ -382,6 +428,7 @@ jobs:
         shell: bash
         run: |
           set +e
+          chmod -R u+w "${RUNNER_TEMP}/flowx-plugin" 2>/dev/null || true
           chmod 700 "${TF_STATE_DIR}" "${TF_DATA_DIR}" 2>/dev/null || true
           fallback_hash="$(printf '%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" | sha256sum | cut -c1-10)"
           fallback_prefix="fx${fallback_hash}"

@@ -20,7 +20,8 @@ or post-merge `main` run instead. Add these environment secrets:
   placeholder task in the translation report and the strict flowx merge must succeed; a Claude failure, timeout, invalid result, or
   unmatched result makes the job fail after deterministic validation completes.
 - Optionally, `DATABRICKS_HOST` and `DATABRICKS_TOKEN` to run `databricks bundle validate`. They are not needed
-  for the local structural validation.
+  for the local structural validation. Validate-only runs supply placeholders for required variables; in
+  particular, cross-bundle job IDs are set to `0` because sibling jobs are not deployed by this suite.
 
 The workflow never prints secret values. Fork pull requests cannot reach the protected environment 
 because both the `not-a-fork` job and the live job dependency reject them.
@@ -32,6 +33,8 @@ results carry source inline rather than creating separate executable files. The 
 schema, detects changes outside `agentic_results/` (including ignored files), and then invokes flowx's strict
 `--merge-agentic` command. Missing Claude credentials explicitly skip this step; configured credentials make
 any Claude, validation, or merge failure fail the job after the remaining deterministic checks run.
+The workflow loads a read-only plugin copy from the runner's temporary directory because Claude Code denies
+all writes beneath a plugin directory, which would otherwise include `agentic_results/` in the checkout.
 
 ## One-time Azure and GitHub setup
 

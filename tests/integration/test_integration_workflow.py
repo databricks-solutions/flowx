@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "integration.yml"
 
@@ -20,7 +23,7 @@ def test_claude_prompt_uses_stdin_and_scoped_edit_permissions() -> None:
     flags = invocation.group("flags")
     assert "--permission-mode dontAsk" in flags
     assert "acceptEdits" not in workflow
-    assert '--tools="Read,Edit,Write,Glob,Grep"' in flags
+    assert '--tools="Read,Edit,Write,Glob,Grep,Skill"' in flags
     assert '--allowedTools="Read,Edit(agentic_results/**),Glob,Grep"' in flags
     assert '--disallowedTools="Read(' in flags
     assert "Write(agentic_results/**)" not in workflow
@@ -28,6 +31,18 @@ def test_claude_prompt_uses_stdin_and_scoped_edit_permissions() -> None:
     assert "--disallowedTools " not in flags
     assert "CLAUDE_PROMPT\n          then" in workflow
     assert "Bash" not in flags
+
+
+def test_claude_plugin_is_copied_outside_the_checkout() -> None:
+    """dontAsk can edit results only when the plugin is outside the working tree."""
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "--plugin-dir ." not in workflow
+    assert '--plugin-dir "${RUNNER_TEMP}/flowx-plugin"' in workflow
+    assert 'cp -R .claude-plugin skills "${plugin_dir}/"' in workflow
+    assert 'chmod -R a-w "${plugin_dir}"' in workflow
+    assert workflow.index('cp -R .claude-plugin skills "${plugin_dir}/"') < workflow.index(
+        'snapshot_worktree > "${worktree_snapshot}"'
+    )
 
 
 def test_agentic_prompt_and_coverage_share_expected_task_source() -> None:
@@ -140,3 +155,94 @@ def test_configured_agentic_failures_are_enforced() -> None:
         < workflow.index("Enforce configured agentic resolution")
         < workflow.index("Destroy ephemeral Azure resources")
     )
+
+
+def test_live_export_includes_dataflows() -> None:
+    """Claude receives referenced mapping-data-flow definitions from ADF."""
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert '"${export_dir}"/{pipelines,datasets,linked_services,dataflows,triggers}' in workflow
+    assert '"dataflows:dataflows"' in workflow
+
+
+def test_bundle_validation_supplies_required_variables_and_collects_failures() -> None:
+    """Validate-only runs substitute required inputs and report every bad bundle."""
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert 'python_bin="$(cat .migration-venv)"' in workflow
+    assert "realpath" not in workflow
+    assert 'if ! required_output="$(' in workflow
+    assert "Could not parse required variables for bundle %s" in workflow
+    assert "name not in target_variables" in workflow
+    assert 'validate_args+=(--var "${variable}=${placeholder}")' in workflow
+    assert '[[ "${variable}" == *_job_id ]] && placeholder=0' in workflow
+    assert 'failed_bundles+=("${bundle_name}")' in workflow
+    assert "Bundle validation failed for: %s" in workflow
+
+
+def test_required_bundle_variable_parser_uses_real_yaml_shapes(tmp_path: Path) -> None:
+    """The embedded parser handles defaults, target values, and absent variables."""
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(
+        r'"\$\{python_bin\}" - "\$\{bundle\}" 2>/dev/null <<\'PY\'\n(?P<body>.*?)\n\s*PY',
+        workflow,
+        re.DOTALL,
+    )
+    assert match, "required-variable parser must remain extractable"
+    parser = re.sub(r"^ {10}", "", match.group("body"), flags=re.MULTILINE)
+
+    fixtures = {
+        "mixed.yml": (
+            "variables:\n"
+            "  with_default:\n"
+            "    default: present\n"
+            "  child_pipeline_job_id:\n"
+            "    description: required\n"
+            "  supplied_by_target:\n"
+            "    description: target override\n"
+            "targets:\n"
+            "  dev:\n"
+            "    variables:\n"
+            "      supplied_by_target: configured\n",
+            ["child_pipeline_job_id"],
+        ),
+        "missing.yml": ("bundle:\n  name: no-variables\n", []),
+        "null.yml": ("variables: null\n", []),
+    }
+    for filename, (content, expected) in fixtures.items():
+        bundle = tmp_path / filename
+        bundle.write_text(content, encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, "-", str(bundle)],
+            input=parser,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert result.stdout.splitlines() == expected
+
+
+def test_bundle_parser_failure_fails_validation_step(tmp_path: Path) -> None:
+    """A broken venv parser is reported and cannot silently omit --var flags."""
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    step = next(
+        step
+        for step in workflow["jobs"]["integration"]["steps"]
+        if step.get("name") == "Validate bundles with Databricks CLI"
+    )
+    broken_python = tmp_path / "broken-python"
+    broken_python.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
+    broken_python.chmod(0o700)
+    (tmp_path / ".migration-venv").write_text(f"{broken_python}\n", encoding="utf-8")
+    bundle_dir = tmp_path / "output" / "broken-bundle"
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "databricks.yml").write_text("variables: null\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", step["run"]],
+        cwd=tmp_path,
+        env={**os.environ, "FLOWX_OUTPUT": str(tmp_path / "output")},
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "Could not parse required variables for bundle broken-bundle." in result.stdout
