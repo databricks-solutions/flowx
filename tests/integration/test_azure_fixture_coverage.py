@@ -132,6 +132,22 @@ def test_linked_service_parameters_use_adf_string_interpolation() -> None:
                 pending.extend(value)
 
 
+def test_linked_service_connection_strings_are_parseable() -> None:
+    """ADF must parse connection strings before encrypting their payloads."""
+    for path in (FIXTURE_ROOT / "linked_services").glob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        connection_string = payload["properties"].get("typeProperties", {}).get("connectionString")
+        if connection_string is None:
+            continue
+        if isinstance(connection_string, dict):
+            assert connection_string.get("type") == "AzureKeyVaultSecret", path.name
+            continue
+        assert not connection_string.startswith("@"), path.name
+        assert not (connection_string.startswith("<") and connection_string.endswith(">")), path.name
+        pairs = [pair for pair in connection_string.split(";") if pair]
+        assert pairs and all("=" in pair and pair.split("=", 1)[0] for pair in pairs), path.name
+
+
 def test_every_adf_reference_target_exists() -> None:
     """Every named ADF dependency is deployed from this fixture corpus."""
     directories = {
