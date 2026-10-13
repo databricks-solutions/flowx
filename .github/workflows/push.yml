@@ -32,8 +32,11 @@ jobs:
         run: sed -i -E 's#https://[a-zA-Z0-9._-]+/simple#https://pypi.org/simple#g' uv.lock
       - run: uv sync --frozen
       - run: make test
-      - name: Test Azure setup scripts offline
-        run: PYTHONPATH=src uv run pytest tests/integration/test_azure_setup_scripts.py -v
+      - name: Test Azure setup and workflow offline
+        run: >-
+          PYTHONPATH=src uv run pytest
+          tests/integration/test_azure_setup_scripts.py
+          tests/integration/test_integration_workflow.py -v
       - name: Verify requirements.txt is in sync with the lockfile
         run: |
           make requirements

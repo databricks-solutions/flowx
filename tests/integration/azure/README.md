@@ -16,12 +16,22 @@ or post-merge `main` run instead. Add these environment secrets:
 - `RESOURCE_OWNER_EMAIL` for the required `owner` tag on live Azure resources.
 - Either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` for headless Claude Code. When neither is present, 
   deterministic conversion and bundle checks still run and the workflow reports that agentic resolution was 
-  skipped.
+  skipped. When either secret is configured, Claude must produce schema-valid merge-result JSON for every
+  placeholder task in the translation report and the strict flowx merge must succeed; a Claude failure, timeout, invalid result, or
+  unmatched result makes the job fail after deterministic validation completes.
 - Optionally, `DATABRICKS_HOST` and `DATABRICKS_TOKEN` to run `databricks bundle validate`. They are not needed
   for the local structural validation.
 
 The workflow never prints secret values. Fork pull requests cannot reach the protected environment 
 because both the `not-a-fork` job and the live job dependency reject them.
+
+The agentic step loads the `flowx:flowx-convert` ADF guide, reads the translation report and sanitized ADF
+export, and writes one result per `PlaceholderActivity` under `agentic_results/`. Claude runs in `dontAsk`
+mode with read/search tools and file edits permitted only in that directory, and has no Bash access. Notebook
+results carry source inline rather than creating separate executable files. The workflow validates each result's merge
+schema, detects changes outside `agentic_results/` (including ignored files), and then invokes flowx's strict
+`--merge-agentic` command. Missing Claude credentials explicitly skip this step; configured credentials make
+any Claude, validation, or merge failure fail the job after the remaining deterministic checks run.
 
 ## One-time Azure and GitHub setup
 
