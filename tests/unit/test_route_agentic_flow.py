@@ -1308,6 +1308,22 @@ def test_fill_refuses_names_that_share_a_bundle_folder(tmp_path: Path, authored_
     assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
 
 
+@pytest.mark.parametrize("name", [["parent_lfc"], {"name": "parent_lfc"}, ""], ids=["list", "object", "empty"])
+def test_fill_refuses_a_pipeline_name_that_is_not_a_non_empty_string(tmp_path: Path, name: object) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    authored = _named_lfc_pipeline("parent_lfc")
+    authored["name"] = name
+
+    result = apply_agentic_output(tmp_path, ["parent"], [authored])
+
+    assert result["ok"] is False
+    assert any("give every pipeline a name" in violation for violation in result["violations"])
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
 def test_fill_refuses_an_authored_pipeline_that_still_holds_a_placeholder(tmp_path: Path) -> None:
     _route_parent_agentic(tmp_path, _report_two_pipelines())
     authored = _named_lfc_pipeline("parent_lfc")
