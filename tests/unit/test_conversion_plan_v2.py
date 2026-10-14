@@ -16,6 +16,7 @@ import pytest
 
 from flowx import routing
 from flowx.bundler.dab_writer import main as package_main
+from flowx.discovery_insights import inventory_fingerprint
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.discovery_serde import canonical_sha256
 from flowx.ir_serde import pipeline_to_dict
@@ -25,9 +26,9 @@ from flowx.models.ir import NotebookActivity, Pipeline
 from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan
 
 
-def _insights(label: str) -> dict[str, Any]:
-    """A self-hashed agentic insights document; a different ``label`` gives a different hash."""
-    content = {"schema_version": "1", "overview": label}
+def _insights(label: str, inventory: dict[str, Any]) -> dict[str, Any]:
+    """A self-hashed agentic insights document for ``inventory``; a different ``label`` gives a different hash."""
+    content = {"schema_version": "1", "inventory_sha256": inventory_fingerprint(inventory), "overview": label}
     return {**content, "agentic_insights_sha256": canonical_sha256(content)}
 
 
@@ -48,7 +49,7 @@ def _inventory(insights_label: str | None = "insights-1") -> dict[str, Any]:
         source_graphs_sha256="graphs-1",
     )
     if insights_label is not None:
-        inventory["insights"] = _insights(insights_label)
+        inventory["insights"] = _insights(insights_label, inventory)
     return inventory
 
 
@@ -117,7 +118,7 @@ def test_recorded_plan_is_bound_to_the_source_graphs_and_insights(tmp_path: Path
     assert recorded is not None
     assert recorded.schema_version == SCHEMA_VERSION
     assert recorded.source_graphs_sha256 == "graphs-1"
-    assert recorded.agentic_insights_sha256 == _insights("insights-1")["agentic_insights_sha256"]
+    assert recorded.agentic_insights_sha256 == _inventory()["insights"]["agentic_insights_sha256"]
     assert result["source_graphs_sha256"] == "graphs-1"
 
 
@@ -140,7 +141,7 @@ def test_an_edited_copy_of_the_recorded_plan_cannot_change_the_bound_hashes(tmp_
     recorded = ConversionPlan.load(tmp_path)
     assert recorded is not None
     assert recorded.source_graphs_sha256 == "graphs-1"
-    assert recorded.agentic_insights_sha256 == _insights("insights-1")["agentic_insights_sha256"]
+    assert recorded.agentic_insights_sha256 == _inventory()["insights"]["agentic_insights_sha256"]
 
 
 def test_an_unknown_key_in_an_authored_plan_is_still_refused() -> None:

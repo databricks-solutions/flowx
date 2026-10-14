@@ -67,6 +67,7 @@ def _inventory() -> dict[str, Any]:
     solo = SourceGraph(name="solo", source="unit", tasks=[_node("load", "Notebook")])
     inventory = build_source_inventory([parent, child, solo], source="adf", source_dir="/tmp/src")
     inventory["insights"] = {
+        "inventory_sha256": inventory_fingerprint(inventory),
         "pipeline_insights": [
             {
                 "pipeline": "child",
@@ -78,7 +79,7 @@ def _inventory() -> dict[str, Any]:
                     }
                 ],
             }
-        ]
+        ],
     }
     inventory["insights"]["agentic_insights_sha256"] = canonical_sha256(inventory["insights"])
     return inventory

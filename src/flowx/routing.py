@@ -971,7 +971,9 @@ def insights_file_violations(output_dir: Path, inventory: dict[str, Any] | None)
     Enrich writes ``metadata/agentic_insights.json`` and then ``inventory.json``; a run stopped between
     the two, or a hand edit, leaves them out of step. This refuses when the inventory carries insights
     but the file is missing, the file exists but the inventory's block differs from it (or there is no
-    inventory to compare with), or the file no longer matches its own ``agentic_insights_sha256``.
+    inventory to compare with), the file no longer matches its own ``agentic_insights_sha256``, or its
+    recorded ``inventory_sha256`` no longer matches the deterministic inventory (a hand edit to
+    ``inventory.json`` that left the copied block as it was).
     Returns one message saying how to recover; an empty list when they agree or enrich never ran.
     """
     path = Path(output_dir) / "metadata" / AGENTIC_INSIGHTS_FILENAME
@@ -995,6 +997,12 @@ def insights_file_violations(output_dir: Path, inventory: dict[str, Any] | None)
             problem = f"metadata/{AGENTIC_INSIGHTS_FILENAME} is present but metadata/inventory.json is missing"
         elif problem is None and inventory_insights != document:
             problem = f"metadata/{AGENTIC_INSIGHTS_FILENAME} and metadata/inventory.json disagree"
+        elif problem is None and isinstance(document, dict) and isinstance(inventory, dict):
+            if document.get("inventory_sha256") != inventory_fingerprint(inventory):
+                problem = (
+                    f"metadata/{AGENTIC_INSIGHTS_FILENAME} was written for a different inventory.json "
+                    "(its inventory_sha256 no longer matches the inventory)"
+                )
     if problem is None:
         return []
     return [f"{problem}; {_INSIGHTS_RECOVERY}"]
