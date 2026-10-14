@@ -159,19 +159,20 @@ otherwise P = ⌈N / L⌉.
 | C2 pipelines | P ≤ saved pipelines per workspace. Warn when P > concurrent updates | `pipelines_saved_per_workspace`, `pipelines_concurrent_updates_per_workspace` | M1 strained or out |
 | C3 tables | N plus the tables the metastore already holds fits per metastore, and tables per schema and schemas per catalog fit | `uc_tables_per_metastore`, `uc_tables_per_schema`, `uc_schemas_per_catalog` | M1 out, or a quota and a multi-catalog plan |
 | C4 history | Current state is enough, or every table has a change feed that carries every change, on a source tier that supports it | Source docs | M1 is limited to SCD1 without CDC and M2 gives state per run only, so SCD2 required without CDC tips to A1 |
-| C5 mode | Gateway: P always-on classic gateways are acceptable. Integrated CDC: the workspace has it enabled | `sqlserver_gateway_one_gateway_per_pipeline`, `sqlserver_gateway_compute`, `sqlserver_integrated_cdc_workspace_enablement` | Pick the other mode, or M1 out |
+| C5 mode | Gateway: P always-on classic gateways are acceptable. Integrated CDC: the workspace has it enabled | `sqlserver_gateway_one_gateway_per_pipeline`, `sqlserver_gateway_compute`, `sqlserver_integrated_cdc_workspace_enablement` | Pick the other mode and re-check; if neither mode passes, M1 out, so D1 or A1 |
 | C6 run time | ⌈P / min(concurrent updates, chosen concurrency)⌉ × the minimum update run fits the allowed run time. A pipeline task inside For each runs one iteration at a time | `pipelines_concurrent_updates_per_workspace`, `sqlserver_integrated_cdc_minimum_extraction`, `pipelines_pipeline_task_in_for_each` | M1 out |
 | C7 cost floor | P × updates per day × the minimum update run × the cluster rate fits the budget or today's spend. Compare M2, which pays mostly for sources that changed | `sqlserver_integrated_cdc_minimum_extraction` | M1 not preferred |
-| C8 retention | Change-feed retention is longer than the longest gap between successful runs, with margin | Source docs | Any pattern: a reseed risk, and history is lost on a full refresh |
+| C8 retention | Change-feed retention is longer than the longest gap between successful runs, with margin | Source docs | Disclose on whichever pattern is suggested: a reseed risk, and history is lost on a full refresh |
 | C9 network | Classic compute has a network path to the source; serverless has NCC private endpoints within the region's limit | `serverless_private_endpoints_per_region` | Choose the compute |
 | C10 connections | The source servers fit the connections per metastore | `uc_connections_per_metastore` | M1 needs a quota, or M2 |
 | C11 shaping | No expression, join or row filter has to happen at landing | None | M1 isn't 1:1; M2 or D1 |
-| C12 release | The chosen mode's release state, checked live as `flowx-enrich` requires, is disclosed and the customer accepts it | `sqlserver_integrated_cdc_release_state` (unconfirmed) | M1 in the other mode only |
+| C12 release | The chosen mode's release state, checked live as `flowx-enrich` requires, is disclosed and the customer accepts it | `sqlserver_integrated_cdc_release_state` (unconfirmed) | M1 in the other mode only, re-checked; if that mode fails too, D1 or A1 |
 | C13 jobs (M2, D1) | Tasks and parent tasks running at once, and saved jobs, fit; For each inputs fit through task values, so batch sources per task | `jobs_tasks_running_per_workspace`, `jobs_parent_tasks_running_per_workspace`, `jobs_saved_per_workspace`, `jobs_for_each_inputs_via_task_values` | Batch, or A1 |
 
 **Suggestion order:**
 
-1. **M1** when C1 to C12 all pass. It's the managed option.
+1. **M1** when C1 to C7 and C9 to C12 pass. It's the managed option. A C8 failure doesn't rule it out; it's a
+   reseed and lost-history risk you disclose on whichever pattern is suggested.
 2. **M2** when M1 fails on C1, C2, C3, C6, C7, C10 or C11, and C13 passes.
 3. **D1** when the customer wants like-for-like, or no database ingestion is in scope.
 4. **A1** when no pattern passes, or the requirements conflict.
