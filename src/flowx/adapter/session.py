@@ -395,7 +395,8 @@ _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
             "Optional. JSON/YAML file mapping pipelines to group names (``{pipeline: group}`` or "
             "``{group: [pipelines]}``). When set, package is run with ``--packaging-mode per-group "
             "--group-by spec --group-spec <path>``. Leave blank to infer groups from the Run "
-            "Pipeline call graph."
+            "Pipeline call graph. It must be a path the server itself can read, so on the hosted "
+            "server use ``--group-by inferred`` or a server-local path."
         ),
         default="",
         required=False,

@@ -579,8 +579,9 @@ def build_server() -> FastMCP:
           download_workspace_files(bool), keep_intermediates(bool), packaging_mode, group_by, group_spec.
           ``packaging_mode`` ("per-pipeline" default | "single" | "per-group") lays a multi-pipeline
           migration out into bundles; for "per-group", ``group_by`` is "inferred" (default, by the Run
-          Pipeline call graph) or "spec", which needs ``group_spec``: a JSON/YAML file the server can
-          read mapping pipelines to groups. An unrecognized value is refused with ``ok: false``.
+          Pipeline call graph) or "spec", which needs ``group_spec``: a JSON/YAML file mapping pipelines
+          to groups. It must be a path the server itself can read, so on the hosted server use
+          ``group_by`` "inferred" or a server-local path. An unrecognized value is refused with ``ok: false``.
         - "migrate": source(req), one ADF source key | airflow_source_path (req), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list), packaging_mode, group_by, group_spec
