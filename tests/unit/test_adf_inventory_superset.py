@@ -234,3 +234,37 @@ def test_discover_twice_on_the_same_export_gives_identical_inventory_bytes(tmp_p
 
     assert first == second
     assert "generated_at" not in json.loads(first)
+
+
+def test_pipeline_filter_still_resolves_a_child_that_is_in_the_export(tmp_path: Path) -> None:
+    """Under ``--pipeline``, an ExecutePipeline edge to a child that was exported but not selected stays resolved."""
+    pipelines_dir = tmp_path / "export" / "pipelines"
+    pipelines_dir.mkdir(parents=True)
+    run_child = {
+        "name": "RunChild",
+        "type": "ExecutePipeline",
+        "typeProperties": {"pipeline": {"referenceName": "child"}},
+    }
+    run_missing = {
+        "name": "RunMissing",
+        "type": "ExecutePipeline",
+        "typeProperties": {"pipeline": {"referenceName": "missing"}},
+    }
+    (pipelines_dir / "parent.json").write_text(
+        json.dumps({"name": "parent", "properties": {"activities": [run_child, run_missing]}}), encoding="utf-8"
+    )
+    (pipelines_dir / "child.json").write_text(
+        json.dumps({"name": "child", "properties": {"activities": []}}), encoding="utf-8"
+    )
+
+    output_dir = tmp_path / "out"
+    exit_code = main(
+        ["--source-dir", str(tmp_path / "export"), "--output-dir", str(output_dir), "--pipeline", "parent"]
+    )
+    assert exit_code == 0
+
+    graphs = read_source_graphs(output_dir / "metadata" / "source_graphs.json")
+    assert [graph.name for graph in graphs] == ["parent"]
+    assert graphs[0].lineage is not None
+    resolved_by_target = {edge.target_workflow: edge.resolved for edge in graphs[0].lineage.control_edges}
+    assert resolved_by_target == {"child": True, "missing": False}

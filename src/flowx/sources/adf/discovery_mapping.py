@@ -39,6 +39,7 @@ the Switch's own default branch or another case.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 
 from flowx.discovery_inventory import STRATEGY_PROPERTY
@@ -102,7 +103,9 @@ _CONCEPT_BY_TYPE: dict[str, str] = {
 }
 
 
-def adf_definitions_to_source_graphs(definitions: AdfDefinitions) -> list[SourceGraph]:
+def adf_definitions_to_source_graphs(
+    definitions: AdfDefinitions, *, known_workflows: Collection[str] | None = None
+) -> list[SourceGraph]:
     """Map every pipeline in *definitions* to a shared :class:`SourceGraph`.
 
     Pipeline order is preserved so downstream consumers see the same ordering the
@@ -116,13 +119,17 @@ def adf_definitions_to_source_graphs(definitions: AdfDefinitions) -> list[Source
     only when its child pipeline is one of the pipelines in this export.
 
     ``definitions`` is threaded down to the activity mapper so a node's data assets
-    resolve against the factory's datasets and linked services.
+    resolve against the factory's datasets and linked services. ``known_workflows``
+    names every pipeline in the export; pass it when *definitions* holds only some
+    of them (such as under ``--pipeline``), so a child that was exported but not
+    selected still counts as resolved. It defaults to the pipelines in *definitions*.
     """
     graphs = [adf_pipeline_to_source_graph(pipeline, definitions) for pipeline in definitions.pipelines]
     _attach_schedules(graphs, definitions.triggers)
-    exported_pipeline_names = {graph.name for graph in graphs}
+    if known_workflows is None:
+        known_workflows = {graph.name for graph in graphs}
     for graph in graphs:
-        graph.lineage = build_graph_lineage(graph, known_workflows=exported_pipeline_names)
+        graph.lineage = build_graph_lineage(graph, known_workflows=known_workflows)
     return graphs
 
 
