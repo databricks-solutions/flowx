@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tasks, files, pipeline resources and job environments, which package writes into the bundle while
   flowx keeps the task name, dependencies and run policy
 
+### Changed
+- Re-running discover over an output folder that already holds a run now moves that run's outputs
+  into `metadata/archive/<UTC time>/`, with an `archive.json` of what moved, instead of deleting them
+
 ## [0.1.0]
 
 ### Added

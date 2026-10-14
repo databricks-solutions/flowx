@@ -214,7 +214,8 @@ next `enrich` refuses until the lock is cleared:
 
 - **Locally**, delete `metadata/.enrich.lock` and run `enrich` again; it rewrites both files.
 - **On the hosted MCP server** you cannot delete files in `output_dir`, so run `discover` again (it
-  clears `metadata/`, the lock with it), then `enrich` with `action="prepare"` and apply the insights again.
+  moves the earlier `metadata/`, the lock with it, into `metadata/archive/<UTC time>/`), then `enrich`
+  with `action="prepare"` and apply the insights again.
 
 ## Next step
 

@@ -70,7 +70,7 @@ AGENTIC_INSIGHTS_FILENAME = "agentic_insights.json"
 # Held in metadata/ while one enrich reads, validates and writes, so two enrich calls never interleave.
 ENRICH_LOCK_FILENAME = ".enrich.lock"
 
-# A hosted agent cannot delete files in output_dir, but discover clears metadata/ and the lock with it.
+# A hosted agent cannot delete files in output_dir, but discover moves metadata/, the lock with it, into the archive.
 _LOCK_RECOVERY = (
     f"locally, delete metadata/{ENRICH_LOCK_FILENAME} and run enrich again; on the hosted MCP server, run "
     "discover again (it clears metadata/ and the lock), then enrich prepare and apply again"

@@ -771,9 +771,9 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
     the library recomputes, so :func:`validate_plan` refuses a typo or a wrong value in the edited file
     exactly as it would in a passed plan. A component it does not list is added pending
     (``decision: None``) and a suggested grouping it does not list is added not accepted, so decisions
-    survive a re-enrich or a re-route. A re-discover keeps nothing: discover clears ``metadata/`` and
-    ``.work/``, so this plan and the agent's outputs go with them and every component starts pending
-    again.
+    survive a re-enrich or a re-route. A re-discover keeps nothing in use: discover moves ``metadata/`` and
+    ``.work/`` into ``metadata/archive/<UTC time>/``, so this plan and the agent's outputs no longer
+    apply and every component starts pending again.
 
     A recorded grouping that route no longer suggests (enrich changed its members, and with them its
     id) is dropped. When it was accepted, its components are set back to pending, so route applies
