@@ -1324,6 +1324,33 @@ def test_fill_refuses_a_pipeline_name_that_is_not_a_non_empty_string(tmp_path: P
     assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
 
 
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda pipeline: pipeline.pop("tasks"),
+        lambda pipeline: pipeline.update(tasks=[]),
+        lambda pipeline: pipeline.update(tasks="load"),
+        lambda pipeline: pipeline.update(tasks={"name": "load"}),
+        lambda pipeline: pipeline.update(tasks=None),
+        lambda pipeline: pipeline.update(migration_status="excluded"),
+    ],
+    ids=["no-tasks", "empty-tasks", "tasks-a-string", "tasks-an-object", "tasks-null", "excluded"],
+)
+def test_fill_refuses_an_authored_pipeline_package_would_not_build(tmp_path: Path, edit: Any) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    authored = _named_lfc_pipeline("parent_lfc")
+    edit(authored)
+
+    result = apply_agentic_output(tmp_path, ["parent"], [authored])
+
+    assert result["ok"] is False
+    assert any("parent_lfc" in violation for violation in result["violations"])
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
 def test_fill_refuses_an_authored_pipeline_that_still_holds_a_placeholder(tmp_path: Path) -> None:
     _route_parent_agentic(tmp_path, _report_two_pipelines())
     authored = _named_lfc_pipeline("parent_lfc")

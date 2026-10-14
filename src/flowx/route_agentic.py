@@ -975,7 +975,7 @@ def _authored_placeholder_violations(authored_pipelines: list[dict[str, Any]]) -
     """Reports each authored pipeline that still holds a placeholder task, which would ship as a stub."""
     violations: list[str] = []
     for index, pipeline in enumerate(authored_pipelines):
-        if not isinstance(pipeline, dict):
+        if not isinstance(pipeline, dict) or not isinstance(pipeline.get("tasks"), list):
             continue
         placeholders = _placeholder_task_names(pipeline.get("tasks"))
         if placeholders:
@@ -997,6 +997,24 @@ def _authored_name_violations(authored_pipelines: list[dict[str, Any]]) -> list[
             violations.append(
                 f"pipeline[{index}]: authored pipeline name {name!r} is not a non-empty string; "
                 "give every pipeline a name"
+            )
+    return violations
+
+
+def _authored_buildable_violations(authored_pipelines: list[dict[str, Any]]) -> list[str]:
+    """Reports each authored pipeline package wouldn't build: no tasks list to run, or marked excluded."""
+    violations: list[str] = []
+    for index, pipeline in enumerate(authored_pipelines):
+        if not isinstance(pipeline, dict):
+            continue
+        label = pipeline.get("name") if isinstance(pipeline.get("name"), str) else f"pipeline[{index}]"
+        tasks = pipeline.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            violations.append(f"{label}: authored pipeline needs a non-empty 'tasks' list; give it the tasks to run")
+        if pipeline.get("migration_status") == "excluded":
+            violations.append(
+                f"{label}: authored pipeline is marked migration_status 'excluded', which package skips; "
+                "leave it out of the fill or drop the status"
             )
     return violations
 
@@ -1068,6 +1086,7 @@ def apply_agentic_output(
     assert unit_id is not None and plan is not None and source is not None
 
     authoring_violations = _authored_name_violations(authored_pipelines)
+    authoring_violations += _authored_buildable_violations(authored_pipelines)
     authoring_violations += _authored_source_tag_violations(authored_pipelines, source)
     authoring_violations += _authored_placeholder_violations(authored_pipelines)
     if authoring_violations:
