@@ -1,16 +1,17 @@
-"""The routing review page: one standard HTML view of how a factory will be converted.
+"""The routing review page: one short, standard view of how a factory will be converted.
 
-Route writes ``metadata/routing_review.html`` from the recorded ``conversion_plan.json``, the
-inventory's insights, the report's routing record and any accepted grouping route dropped on this run
-because it is no longer suggested, so every run presents the same eight sections in
-the same order: a summary, what the source does, the components, the suggested groupings, how each
-unit will be converted, the routing conversation, the findings, and how to steer. The page is filled
-from :data:`routing_review_template.html <_TEMPLATE_PATH>` with the standard library only (no script
-or external asset, so it opens offline and in the workspace file viewer), carries no timestamp, and
-every value from the plan or insights is HTML-escaped. The same inputs always give the same bytes.
+Route writes ``metadata/routing_review.html`` for the person deciding each group deterministic or
+agentic. It is filled from the plan, the inventory's insights, the report's routing record and any
+accepted grouping route dropped on this run, and every run shows the same eight sections in the same
+order: at a glance, what the source does, the recommended conversion, suggested groupings, what
+happens next, what you told us, notes, and how to change a decision. Detail a decision maker does not
+need (activity counts, detected patterns, hashes) is folded into a closing "Technical details" block.
 
-The page is generated and never read back: the user steers by editing ``conversion_plan.json`` (or
-passing a plan) and running route again.
+The page uses Databricks colours and is filled from :data:`routing_review_template.html <_TEMPLATE_PATH>`
+with the standard library only (no script or external asset, so it opens offline and in the workspace
+file viewer). It carries no timestamp, and every value from the plan or insights is HTML-escaped, so
+the same inputs always give the same bytes. The page is generated and never read back: the user steers
+by editing ``conversion_plan.json`` (or passing a plan) and running route again.
 """
 
 from __future__ import annotations
@@ -59,14 +60,16 @@ def render_routing_review(
     outcomes = outcomes if isinstance(outcomes, dict) else {}
     template = Template(_TEMPLATE_PATH.read_text(encoding="utf-8"))
     return template.substitute(
-        summary=_summary(plan, inventory, units),
+        source_line=_source_line(inventory),
+        summary=_summary(plan, inventory),
         source=_source(insights),
-        components=_components(plan, insights),
+        components=_components(plan),
         groupings=_groupings(plan, dropped_groupings or []),
         conversion=_conversion(units, outcomes),
         conversation=_conversation(plan),
-        findings=_list(plan.findings, empty="No findings."),
+        findings=_findings(plan.findings),
         steer=_steer(),
+        details=_details(plan),
     )
 
 
@@ -106,226 +109,377 @@ def _text(value: Any) -> str:
     return "&mdash;" if value is None else escape(str(value))
 
 
-def _tag(label: str, css_class: str) -> str:
-    """A small coloured label."""
-    return f'<span class="tag {css_class}">{escape(label)}</span>'
+def _pill(label: str, kind: str) -> str:
+    """A small coloured status label; ``kind`` is one of det, agt, pend, wait or muted."""
+    return f'<span class="pill pill-{kind}">{escape(label)}</span>'
 
 
-def _decision_tag(decision: str | None) -> str:
+def _decision_pill(decision: str | None) -> str:
     """The label for a decision, pending included."""
-    if decision is None:
-        return _tag("pending", "pending")
-    return _tag(decision, "agentic" if decision == DECISION_AGENTIC else "deterministic")
+    if decision == DECISION_DETERMINISTIC:
+        return _pill("Deterministic", "det")
+    if decision == DECISION_AGENTIC:
+        return _pill("Agentic", "agt")
+    return _pill("Decision pending", "pend")
 
 
-def _rows(rows: list[tuple[str, str]]) -> str:
-    """A two-column table of already-escaped cells."""
-    body = "".join(f"<tr><th>{escape(label)}</th><td>{cell}</td></tr>" for label, cell in rows)
-    return f"<table>{body}</table>"
+def _plural(count: int, singular: str, plural: str | None = None) -> str:
+    """``count`` and the noun, in the right number."""
+    return f"{count} {singular if count == 1 else plural or singular + 's'}"
 
 
-def _list(items: list[Any], *, empty: str) -> str:
-    """An escaped bullet list, or a muted note when there is nothing to list."""
-    if not items:
-        return f'<p class="muted">{escape(empty)}</p>'
-    return "<ul>" + "".join(f"<li>{_text(item)}</li>" for item in items) + "</ul>"
+def _pipelines(members: list[str], limit: int = 3) -> str:
+    """The first few pipeline names, then how many more there are."""
+    shown = ", ".join(escape(member) for member in members[:limit])
+    more = len(members) - limit
+    return f'{shown} <span class="muted">+{more} more</span>' if more > 0 else shown
 
 
-def _summary(plan: ConversionPlan, inventory: dict[str, Any] | None, units: dict[str, dict[str, Any]]) -> str:
-    """Section 1: counts and the hashes the plan is bound to."""
+def _deterministic_option(component: Any) -> dict[str, Any]:
+    """The recorded deterministic option of a component, or an empty one."""
+    options = component.options if isinstance(component.options, dict) else {}
+    option = options.get("deterministic")
+    return option if isinstance(option, dict) else {}
+
+
+def _activity_counts(option: dict[str, Any]) -> dict[str, int]:
+    """The per-strategy activity counts of a deterministic option, ignoring anything malformed."""
+    counts = option.get("activity_counts")
+    if not isinstance(counts, dict):
+        return {}
+    return {str(bucket): value for bucket, value in counts.items() if isinstance(value, int)}
+
+
+def _agentic_option(component: Any) -> dict[str, Any]:
+    """The recorded agentic option of a component, or an empty one."""
+    options = component.options if isinstance(component.options, dict) else {}
+    option = options.get("agentic")
+    return option if isinstance(option, dict) else {}
+
+
+def _why(component: Any) -> str:
+    """One plain sentence on why the library recommends what it does for this component."""
+    deterministic = _deterministic_option(component)
+    total = sum(_activity_counts(deterministic).values())
+    uncovered = [entry for entry in deterministic.get("uncovered") or [] if isinstance(entry, dict)]
+    if deterministic.get("capable"):
+        if total == 1:
+            return "Its one activity converts automatically."
+        return escape(f"All {total} activities convert automatically.")
+    kinds = sorted({str(entry.get("type")) for entry in uncovered if entry.get("type")})
+    reason = f"{_plural(len(uncovered), 'activity', 'activities')} can't convert 1:1"
+    return escape(f"{reason} ({', '.join(kinds)})." if kinds else f"{reason}.")
+
+
+def _suggested_pattern(component: Any) -> str:
+    """The first pattern the insights recommend for this component, with its release label."""
+    agentic = _agentic_option(component)
+    patterns = [entry for entry in agentic.get("recommended_patterns") or [] if isinstance(entry, dict)]
+    if not patterns:
+        return '<span class="muted">None suggested</span>'
+    first = patterns[0]
+    labels = {
+        str(entry.get("pattern")): str(entry.get("label"))
+        for entry in agentic.get("release_disclosures") or []
+        if isinstance(entry, dict)
+    }
+    label = labels.get(str(first.get("pattern")))
+    simplification = " " + _pill("Simplifies", "agt") if first.get("simplification_pattern") else ""
+    release = f' <span class="muted small">{escape(label)}</span>' if label else ""
+    return f"{_text(first.get('pattern'))}{simplification}{release}"
+
+
+def _summary(plan: ConversionPlan, inventory: dict[str, Any] | None) -> str:
+    """At a glance: one headline sentence and the counts a decision maker needs."""
     pipelines = (inventory or {}).get("pipelines")
-    decisions = [component.decision for component in plan.components]
-    accepted = [grouping.grouping_id for grouping in plan.suggested_groupings if grouping.accepted]
-    return _rows(
-        [
-            ("Source", _text((inventory or {}).get("source"))),
-            ("Pipelines", _text(len(pipelines) if isinstance(pipelines, list) else None)),
-            ("Components", _text(len(plan.components))),
-            ("Suggested groupings", _text(f"{len(plan.suggested_groupings)} ({len(accepted)} accepted)")),
-            ("Routing units", _text(len(units))),
-            (
-                "Decisions",
-                _text(
-                    f"{decisions.count(DECISION_DETERMINISTIC)} deterministic, {decisions.count(DECISION_AGENTIC)} "
-                    f"agentic, {decisions.count(None)} pending"
-                ),
-            ),
-            ("Inventory", f"<code>{_text(plan.inventory_sha256)}</code>"),
-            ("Source graphs", f"<code>{_text(plan.source_graphs_sha256)}</code>"),
-            ("Agentic insights", f"<code>{_text(plan.agentic_insights_sha256)}</code>"),
-        ]
+    pipeline_count = len(pipelines) if isinstance(pipelines, list) else sum(len(c.members) for c in plan.components)
+    components = len(plan.components)
+    automatic = sum(1 for component in plan.components if component.recommended == DECISION_DETERMINISTIC)
+    redesign = sum(1 for component in plan.components if component.recommended == DECISION_AGENTIC)
+    pending = len(plan.pending_components())
+    accepted = sum(1 for grouping in plan.suggested_groupings if grouping.accepted)
+    headline = (
+        f"{_plural(pipeline_count, 'pipeline')} in {_plural(components, 'group')}. "
+        f"{automatic} can convert automatically; {redesign} "
+        f"{'is' if redesign == 1 else 'are'} recommended for agentic redesign."
     )
-
-
-def _patterns(patterns: Any) -> str:
-    """A list of recommended patterns with their fit and simplification flag."""
-    items = []
-    for pattern in patterns if isinstance(patterns, list) else []:
-        if not isinstance(pattern, dict):
-            continue
-        flag = " " + _tag("simplification", "agentic") if pattern.get("simplification_pattern") else ""
-        where = f' <span class="muted">({_text(pattern["pipeline"])})</span>' if pattern.get("pipeline") else ""
-        items.append(
-            f"<li><strong>{_text(pattern.get('pattern'))}</strong>{flag}{where}: {_text(pattern.get('fit'))}</li>"
-        )
-    return "<ul>" + "".join(items) + "</ul>" if items else '<span class="muted">none</span>'
+    status = (
+        f"{pending} of {components} groups still need a decision. Nothing is converted until every group has one."
+        if pending
+        else "Every group has a decision."
+    )
+    tiles = [
+        (pipeline_count, "Pipelines", False),
+        (components, "Groups", False),
+        (automatic, "Convert automatically", False),
+        (redesign, "Recommended for agentic redesign", False),
+        (len(plan.suggested_groupings), f"Suggested groupings ({accepted} accepted)", False),
+        (pending, "Decisions pending", pending > 0),
+    ]
+    tile_html = "".join(
+        f'<div class="tile{" alert" if alert else ""}"><b>{value}</b><span>{escape(label)}</span></div>'
+        for value, label, alert in tiles
+    )
+    return f'<p class="lead">{escape(headline)} {escape(status)}</p><div class="tiles">{tile_html}</div>'
 
 
 def _source(insights: dict[str, Any] | None) -> str:
-    """Section 2: the insights overview and the factory-wide recommendation."""
+    """What the source does: the insights overview and the factory-wide recommendation, briefly."""
     if insights is None:
-        return '<p class="muted">Enrich has not run, so there are no insights about what the source does.</p>'
+        return '<p class="muted">Enrich has not run yet, so there is no summary of what the pipelines do.</p>'
+    parts = [f'<p class="lead">{_text(insights.get("overview") or "No overview was recorded.")}</p>']
     system = insights.get("system_recommendation")
-    system = system if isinstance(system, dict) else {}
-    cascade = system.get("cascade")
-    return _rows(
-        [
-            ("Overview", _text(insights.get("overview"))),
-            ("Headline", _text(system.get("headline"))),
-            ("Recommended architecture", _patterns(system.get("recommended_patterns"))),
-            ("What it collapses", _list(cascade if isinstance(cascade, list) else [], empty="Nothing stated.")),
-            ("Deciding question", _text(system.get("decision_driver"))),
-        ]
+    if isinstance(system, dict) and system:
+        lines = []
+        if system.get("headline"):
+            lines.append(f"<p><strong>{_text(system['headline'])}</strong></p>")
+        patterns = [entry for entry in system.get("recommended_patterns") or [] if isinstance(entry, dict)]
+        if patterns:
+            fit = f": {_text(patterns[0].get('fit'))}" if patterns[0].get("fit") else ""
+            lines.append(f"<p>Recommended approach: {_text(patterns[0].get('pattern'))}{fit}</p>")
+        cascade = [str(item) for item in system.get("cascade") or [] if item]
+        if cascade:
+            lines.append(f"<p>What it replaces: {escape('; '.join(cascade))}</p>")
+        if system.get("decision_driver"):
+            lines.append(f'<p class="muted">Key question: {_text(system["decision_driver"])}</p>')
+        if lines:
+            parts.append(f'<div class="callout">{"".join(lines)}</div>')
+    return f'<div class="stack">{"".join(parts)}</div>'
+
+
+def _components(plan: ConversionPlan) -> str:
+    """Recommended conversion: the groups to look at closely, then the ones that convert automatically."""
+    redesign = [
+        component
+        for component in plan.components
+        if component.recommended == DECISION_AGENTIC or component.decision == DECISION_AGENTIC
+    ]
+    automatic = [component for component in plan.components if component not in redesign]
+    grouped_with = {
+        component_id: [other for other in grouping.components if other != component_id]
+        for grouping in plan.suggested_groupings
+        if grouping.accepted
+        for component_id in grouping.components
+    }
+    parts: list[str] = []
+    if redesign:
+        rows = "".join(
+            f"<tr><td><strong>{_text(component.component_id)}</strong><br>{_pipelines(component.members)}</td>"
+            f"<td>{_why(component)}{_grouped_note(grouped_with.get(component.component_id))}</td>"
+            f"<td>{_suggested_pattern(component)}</td>"
+            f'<td class="nowrap">{_decision_pill(component.decision)}</td></tr>'
+            for component in redesign
+        )
+        parts.append(
+            f"<h3>Agentic redesign ({len(redesign)})</h3>"
+            '<p class="muted small">The agent builds these as new Databricks pipelines rather than translating 1:1.</p>'
+            '<div class="scroll"><table><thead><tr><th>Group</th><th>Why</th><th>Suggested pattern</th>'
+            f"<th>Decision</th></tr></thead><tbody>{rows}</tbody></table></div>"
+        )
+    else:
+        parts.append('<p class="lead">No group needs agentic redesign: every group converts automatically.</p>')
+    if automatic:
+        pending = sum(1 for component in automatic if component.decision is None)
+        rows = "".join(
+            f"<tr><td><strong>{_text(component.component_id)}</strong></td><td>{_pipelines(component.members, 4)}</td>"
+            f'<td>{_why(component)}</td><td class="nowrap">{_decision_pill(component.decision)}</td></tr>'
+            for component in automatic
+        )
+        parts.append(
+            f"<details><summary>Convert automatically ({len(automatic)}"
+            f"{f', {pending} pending' if pending else ''})</summary>"
+            '<div class="stack"><p class="muted small">flowx\'s deterministic engine translates these 1:1.</p>'
+            '<div class="scroll"><table><thead><tr><th>Group</th><th>Pipelines</th><th>Why</th><th>Decision</th></tr>'
+            f"</thead><tbody>{rows}</tbody></table></div></div></details>"
+        )
+    return f'<div class="stack">{"".join(parts)}</div>'
+
+
+def _grouped_note(others: list[str] | None) -> str:
+    """A short line saying a component converts together with others, under an accepted grouping."""
+    if not others:
+        return ""
+    return f'<br><span class="muted small">Converts as one unit with {escape(", ".join(others))}.</span>'
+
+
+def _basis_sentence(basis: dict[str, Any], members: list[str]) -> str:
+    """One plain sentence on why a grouping is suggested."""
+    if basis.get("kind") == "shared_pattern":
+        pipelines = [str(pipeline) for pipeline in basis.get("pipelines") or []]
+        pattern = _text(basis.get("pattern"))
+        if sorted(pipelines) == sorted(members):
+            who = "Both are" if len(pipelines) == 2 else "All of them are"
+            return f"{who} candidates for {pattern}."
+        return f"{escape(', '.join(pipelines))} are candidates for {pattern}."
+    confidence = f" ({escape(str(basis['confidence']))} confidence)" if basis.get("confidence") else ""
+    return (
+        f"{_text(basis.get('to_pipeline'))} depends on {_text(basis.get('from_pipeline'))} through "
+        f"{_text(basis.get('edge_identity'))}{confidence}."
     )
 
 
-def _components(plan: ConversionPlan, insights: dict[str, Any] | None) -> str:
-    """Section 3: one card per component, always with the same fields."""
-    intents: dict[str, Any] = {}
-    for entry in (insights or {}).get("pipeline_insights") or []:
-        if isinstance(entry, dict) and entry.get("pipeline") is not None:
-            intents[str(entry["pipeline"])] = entry.get("intent")
+def _groupings(plan: ConversionPlan, dropped_groupings: list[dict[str, Any]]) -> str:
+    """Suggested groupings: pipelines the insights say to convert together, and any no longer suggested."""
     cards = []
-    for component in plan.components:
-        options = component.options or {}
-        deterministic = options.get("deterministic") or {}
-        agentic = options.get("agentic") or {}
-        members = (
-            "<ul>"
-            + "".join(
-                f"<li><code>{_text(member)}</code>: {_text(intents.get(member))}</li>" for member in component.members
-            )
-            + "</ul>"
+    for grouping in plan.suggested_groupings:
+        status = _pill("Accepted", "agt") if grouping.accepted else _pill("Not accepted", "muted")
+        reasons = "".join(f"<li>{_basis_sentence(entry, grouping.members)}</li>" for entry in grouping.basis)
+        cards.append(
+            f'<div class="card"><div class="card-head"><h3>Convert '
+            f"{_plural(len(grouping.members), 'pipeline')} together</h3>{status}</div>"
+            f"<p>{_pipelines(grouping.members, 6)}</p><ul>{reasons}</ul>"
+            f'<p class="muted small">{_text(grouping.grouping_id)} &middot; joins '
+            f"{_text(', '.join(grouping.components))}</p></div>"
         )
+    for dropped in dropped_groupings:
+        replaced_by = ", ".join(dropped.get("replaced_by") or [])
+        replacement = f" It is replaced by {escape(replaced_by)}." if replaced_by else ""
+        cards.append(
+            f'<div class="card"><div class="card-head"><h3>{_text(dropped["grouping_id"])}</h3>'
+            f"{_pill('No longer suggested', 'wait')}</div>"
+            f"<p>{_pipelines(list(dropped.get('members') or []), 6)}</p>"
+            "<p>You accepted this grouping, but the insights have changed since, so it is no longer suggested and "
+            f"its groups are pending again.{replacement}</p></div>"
+        )
+    if not cards:
+        return '<p class="muted">No groupings are suggested.</p>'
+    intro = (
+        '<p class="muted small">A grouping converts several groups as one agentic unit, so one new pipeline can '
+        "replace them all. Accepting one is optional.</p>"
+    )
+    return f'<div class="stack">{intro}<div class="cards">{"".join(cards)}</div></div>'
+
+
+def _conversion(units: dict[str, dict[str, Any]], outcomes: dict[str, Any]) -> str:
+    """What happens next: where conversion stands per unit, and whether the bundle can be packaged."""
+    from flowx.route_agentic import OUTCOME_AGENTIC_APPLIED
+
+    pending, automatic, waiting, ready = [], [], [], []
+    for unit_id, unit in units.items():
+        recorded = outcomes.get(unit_id)
+        outcome = recorded.get("outcome") if isinstance(recorded, dict) else None
+        if unit["decision"] is None:
+            pending.append(unit_id)
+        elif unit["decision"] == DECISION_DETERMINISTIC:
+            automatic.append(unit_id)
+        elif outcome == OUTCOME_AGENTIC_APPLIED:
+            ready.append(unit_id)
+        else:
+            waiting.append(unit_id)
+    states = [
+        (pending, "Decision pending", "pend"),
+        (automatic, "Converts automatically", "det"),
+        (waiting, "Waiting for the agent's build", "wait"),
+        (ready, "Agent build ready", "agt"),
+    ]
+    status = "".join(
+        f"<div>{_pill(str(len(ids)), kind)}<span>{escape(label)}</span></div>" for ids, label, kind in states
+    )
+    if pending:
+        verdict = "The plan is not applied yet. Decide the pending groups, then run route again."
+    elif waiting:
+        verdict = "Packaging is blocked until the agent builds every agentic unit."
+    else:
+        verdict = "Everything is decided and built. The bundle can be packaged."
+    steps = [
+        f"<li><strong>{_text(unit_id)}</strong>: the agent builds "
+        f"{_pipelines(units[unit_id]['members'])} with fill-agentic.</li>"
+        for unit_id in waiting
+    ]
+    step_list = f"<ul>{''.join(steps)}</ul>" if steps else ""
+    return (
+        f'<div class="stack"><div class="status">{status}</div><p class="lead">{escape(verdict)}</p>{step_list}</div>'
+    )
+
+
+def _conversation(plan: ConversionPlan) -> str:
+    """What you told us: the questions asked while routing and the answers."""
+    if not plan.conversation:
+        return '<p class="muted">No routing conversation is recorded yet.</p>'
+    items = "".join(
+        f"<div><dt>{_text(entry.question)}</dt><dd>{_text(entry.answer)}</dd></div>" for entry in plan.conversation
+    )
+    return f"<dl>{items}</dl>"
+
+
+def _findings(findings: list[str]) -> str:
+    """Notes: a plain summary of what route could not resolve, with route's own wording folded away.
+
+    Route reports a call to a pipeline that isn't in the export as an "unresolved control edge"; those
+    are counted in one sentence, since the caller is simply routed on its own.
+    """
+    if not findings:
+        return '<p class="muted">Nothing to note.</p>'
+    unresolved = [finding for finding in findings if finding.startswith("unresolved control edge")]
+    other = [finding for finding in findings if finding not in unresolved]
+    lines = [f"<li>{_text(finding)}</li>" for finding in other]
+    if unresolved:
+        lines.insert(
+            0,
+            f"<li>{_plural(len(unresolved), 'pipeline call points', 'pipeline calls point')} to a pipeline that "
+            "isn't in this export. The calling pipelines are converted on their own; check whether the missing "
+            "pipelines should be exported too.</li>",
+        )
+    raw = "".join(f"<li>{_text(finding)}</li>" for finding in findings)
+    return (
+        f'<div class="stack"><ul>{"".join(lines)}</ul><details><summary>Route\'s wording</summary>'
+        f'<div class="stack"><ul class="small">{raw}</ul></div></details></div>'
+    )
+
+
+def _steer() -> str:
+    """How to change a decision: the edits and the command, in short."""
+    commands = (
+        "python -m flowx.adapter route --output-dir &lt;dir&gt;\n"
+        'flowx(command="route", parameters={"output_dir": "&lt;dir&gt;"})'
+    )
+    steps = [
+        'Set each group\'s <code>decision</code> to <code>"deterministic"</code> or <code>"agentic"</code> in '
+        "<code>metadata/conversion_plan.json</code>.",
+        "To convert a suggested grouping as one unit, set its <code>accepted</code> to <code>true</code> and decide "
+        'its groups <code>"agentic"</code>.',
+        "Run route again. It applies the plan once nothing is pending, and you can change it and re-run as often as "
+        "you like.",
+    ]
+    return f'<div class="stack"><ol>{"".join(f"<li>{step}</li>" for step in steps)}</ol><pre>{commands}</pre></div>'
+
+
+def _details(plan: ConversionPlan) -> str:
+    """Technical details, folded away: per-group evidence and the hashes the plan is bound to."""
+    rows = []
+    for component in plan.components:
+        deterministic = _deterministic_option(component)
+        counts = _activity_counts(deterministic)
         uncovered = [
             f"{entry.get('pipeline')} / {entry.get('activity')} ({entry.get('type')})"
             for entry in deterministic.get("uncovered") or []
             if isinstance(entry, dict)
         ]
-        counts = deterministic.get("activity_counts") or {}
-        disclosures = [
-            entry.get("message") for entry in agentic.get("release_disclosures") or [] if isinstance(entry, dict)
-        ]
-        rows = [
-            ("Members and intent", members),
-            ("Recommended", _decision_tag(component.recommended)),
-            ("Decision", _decision_tag(component.decision)),
-            ("Deterministic: fully capable", _text("yes" if deterministic.get("capable") else "no")),
-            (
-                "Deterministic: activities",
-                _text(", ".join(f"{count} {bucket}" for bucket, count in counts.items()) or None),
-            ),
-            ("Deterministic: motifs", _list(list(deterministic.get("motifs") or []), empty="none")),
-            ("Deterministic: not covered", _list(uncovered, empty="none")),
-            ("Agentic: recommended patterns", _patterns(agentic.get("recommended_patterns"))),
-            ("Agentic: release disclosures", _list(disclosures, empty="none")),
-            ("Rationale", _text(component.rationale)),
-        ]
-        cards.append(f'<div class="card"><h3>{_text(component.component_id)}</h3>{_rows(rows)}</div>')
-    return "".join(cards) or '<p class="muted">No components.</p>'
-
-
-def _describe_basis(basis: dict[str, Any]) -> str:
-    """One escaped line on why a grouping is suggested."""
-    if basis.get("kind") == "shared_pattern":
-        pipelines = ", ".join(str(pipeline) for pipeline in basis.get("pipelines") or [])
-        pattern = _text(basis.get("pattern"))
-        return f"Shared simplification pattern <strong>{pattern}</strong>, recommended for {_text(pipelines)}"
-    summary = f" &mdash; {_text(basis['relationship_summary'])}" if basis.get("relationship_summary") else ""
-    return (
-        f"Inferred relationship <code>{_text(basis.get('from_pipeline'))}</code> &rarr; "
-        f"<code>{_text(basis.get('to_pipeline'))}</code> via {_text(basis.get('edge_identity'))} "
-        f"({_text(basis.get('confidence'))} confidence; evidence: {_text(basis.get('evidence'))}){summary}"
+        rows.append(
+            f"<tr><td>{_text(component.component_id)}</td><td>{_text(', '.join(component.members))}</td>"
+            f"<td>{_text(', '.join(f'{count} {bucket}' for bucket, count in counts.items()) or None)}</td>"
+            f"<td>{_text(', '.join(str(motif) for motif in deterministic.get('motifs') or []) or None)}</td>"
+            f"<td>{_text('; '.join(uncovered) or None)}</td><td>{_text(component.rationale)}</td></tr>"
+        )
+    hashes = (
+        f'<p class="small">Inventory <code>{_text(plan.inventory_sha256)}</code><br>Source graphs '
+        f"<code>{_text(plan.source_graphs_sha256)}</code><br>Agentic insights "
+        f"<code>{_text(plan.agentic_insights_sha256)}</code></p>"
     )
+    table = (
+        '<div class="scroll"><table class="small"><thead><tr><th>Group</th><th>Pipelines</th><th>Activities</th>'
+        "<th>Detected patterns</th><th>Not convertible 1:1</th><th>Rationale</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+    return f'<details><summary>Technical details</summary><div class="stack">{table}{hashes}</div></details>'
 
 
-def _groupings(plan: ConversionPlan, dropped_groupings: list[dict[str, Any]]) -> str:
-    """Section 4: every suggested grouping, its basis, and whether it is accepted; then any dropped one."""
-    cards = []
-    for grouping in plan.suggested_groupings:
-        status = _tag("accepted", "agentic") if grouping.accepted else _tag("not accepted", "pending")
-        basis = "<ul>" + "".join(f"<li>{_describe_basis(entry)}</li>" for entry in grouping.basis) + "</ul>"
-        rows = [
-            ("Status", status),
-            ("Components", _text(", ".join(grouping.components))),
-            ("Members", _text(", ".join(grouping.members))),
-            ("Why it is suggested", basis),
-        ]
-        cards.append(f'<div class="card"><h3>{_text(grouping.grouping_id)}</h3>{_rows(rows)}</div>')
-    for dropped in dropped_groupings:
-        rows = [
-            ("Status", _tag("no longer suggested", "refused")),
-            ("Components", _text(", ".join(dropped["components"]))),
-            ("Members", _text(", ".join(dropped["members"]))),
-            ("Replaced by", _text(", ".join(dropped["replaced_by"]) or None)),
-            (
-                "What changed",
-                _text(
-                    "You accepted this grouping, but enrich has changed it since, so route no longer suggests it. "
-                    "Its components are pending again: decide them again, and accept a replacing suggestion to "
-                    "keep converting them together."
-                ),
-            ),
-        ]
-        cards.append(f'<div class="card"><h3>{_text(dropped["grouping_id"])}</h3>{_rows(rows)}</div>')
-    return "".join(cards) or '<p class="muted">No groupings are suggested.</p>'
-
-
-def _conversion(units: dict[str, dict[str, Any]], outcomes: dict[str, Any]) -> str:
-    """Section 5: what package will do with each routing unit."""
-    from flowx.route_agentic import OUTCOME_AGENTIC_APPLIED
-
-    rows = []
-    for unit_id, unit in units.items():
-        recorded = outcomes.get(unit_id)
-        outcome: dict[str, Any] = recorded if isinstance(recorded, dict) else {}
-        if unit["decision"] is None:
-            what = _tag("pending", "pending") + " Decision pending; route applies nothing until it is decided."
-        elif unit["decision"] == DECISION_DETERMINISTIC:
-            what = _tag("deterministic", "deterministic") + " Converted 1:1 by the deterministic engine."
-        elif outcome.get("outcome") == OUTCOME_AGENTIC_APPLIED:
-            what = _tag("agentic", "agentic") + (
-                f" The agent's output <code>{_text(str(outcome.get('output_sha256'))[:12])}</code> replaces these "
-                "pipelines; package ships it."
-            )
-        else:
-            what = _tag("waiting", "refused") + (
-                " Waiting for the agent's output (fill-agentic); package refuses until it is filled."
-            )
-        label = f"{unit_id} ({', '.join(unit.get('components') or [])})" if unit.get("components") else unit_id
-        rows.append((label, f'{what}<br><span class="muted">{_text(", ".join(unit["members"]))}</span>'))
-    return _rows(rows) if rows else '<p class="muted">Nothing to convert.</p>'
-
-
-def _conversation(plan: ConversionPlan) -> str:
-    """Section 6: the questions asked while routing and the user's answers."""
-    if not plan.conversation:
-        return '<p class="muted">No routing conversation is recorded.</p>'
-    return _rows([(entry.question, _text(entry.answer)) for entry in plan.conversation])
-
-
-def _steer() -> str:
-    """Section 8: the exact edits and commands that change the conversion."""
-    steps = [
-        'Set each component\'s <code>decision</code> to <code>"deterministic"</code> or <code>"agentic"</code> '
-        "in <code>metadata/conversion_plan.json</code> (or pass the edited plan as <code>plan</code>).",
-        "To convert a suggested grouping as one unit, set its <code>accepted</code> to <code>true</code> and "
-        'decide each of its components <code>"agentic"</code>.',
-        "Optionally record the questions you asked and the answers under <code>conversation</code>.",
-        "Run route again: <code>python -m flowx.adapter route --output-dir &lt;dir&gt;</code>, or "
-        '<code>flowx(command="route", parameters={"output_dir": ...})</code>. Route applies the plan once '
-        "nothing is pending; the plan can be changed and re-applied as often as needed.",
-        "Fill each agentic unit with <code>fill-agentic --members &lt;members&gt; --pipelines-path &lt;file&gt;</code> "
-        "(MCP: <code>fill_agentic</code>); run it again with new pipelines to change the approach.",
-    ]
-    return "<ol>" + "".join(f"<li>{step}</li>" for step in steps) + "</ol>"
+def _source_line(inventory: dict[str, Any] | None) -> str:
+    """The line under the page title naming the source the plan covers."""
+    source = (inventory or {}).get("source")
+    label = {"adf": "Azure Data Factory", "airflow": "Apache Airflow"}.get(str(source), source)
+    named = f"Source: {escape(str(label))}. " if label else ""
+    return (
+        f"<p>{named}How your pipelines will be converted, and the decisions still to make. Generated by route from "
+        "<code>metadata/conversion_plan.json</code>; edit that file, not this page.</p>"
+    )

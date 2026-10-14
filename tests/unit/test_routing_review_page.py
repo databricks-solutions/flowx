@@ -1,8 +1,8 @@
-"""The routing review page: one standard HTML view, the same eight sections in the same order every run.
+"""The routing review page: one short, standard view for a decision maker, the same eight sections every run.
 
 Route writes ``metadata/routing_review.html`` from the recorded plan, the inventory's insights and the
-report's routing record. It escapes every authored value, carries no timestamp (the same inputs give
-the same bytes), and says per unit what package will do.
+report's routing record. It leads with what needs deciding, folds technical detail away, escapes every
+authored value, and carries no timestamp (the same inputs give the same bytes).
 """
 
 from __future__ import annotations
@@ -16,20 +16,19 @@ import pytest
 
 from flowx.adapter.__main__ import main as adapter_cli_main
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
-from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import ComponentPlan, ConversationEntry, ConversionPlan, SuggestedGrouping
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.reporting.routing_review import render_routing_review
 
 _SECTIONS = [
-    "1. Summary",
-    "2. What the source does",
-    "3. Components",
-    "4. Suggested groupings",
-    "5. How it will be converted",
-    "6. Routing conversation",
-    "7. Findings",
-    "8. How to steer",
+    "At a glance",
+    "What the source does",
+    "Recommended conversion",
+    "Suggested groupings",
+    "What happens next",
+    "What you told us",
+    "Notes",
+    "How to change a decision",
 ]
 
 
@@ -77,21 +76,39 @@ def test_the_same_inputs_render_the_same_bytes() -> None:
     assert render_routing_review(_plan(), None, None) == render_routing_review(_plan(), None, None)
 
 
-def test_each_unit_says_what_package_will_do() -> None:
-    output_sha256 = canonical_sha256(["authored"])
-    record = {
-        "components": {"component-2": {"outcome": "agentic-applied", "output_sha256": output_sha256}},
-    }
-    conversion = render_routing_review(_plan(), None, record).split('id="conversion"')[1].split("</section>")[0]
-
-    assert "Decision pending" in conversion
-    assert f"<code>{output_sha256[:12]}</code>" in conversion
-    assert "Converted 1:1 by the deterministic engine" in conversion
-    waiting = render_routing_review(_plan(), None, None).split('id="conversion"')[1].split("</section>")[0]
-    assert "package refuses until it is filled" in waiting
+def _section(page: str, section_id: str) -> str:
+    return page.split(f'id="{section_id}"')[1].split("</section>")[0]
 
 
-def test_a_grouping_shows_its_basis_and_whether_it_is_accepted() -> None:
+def test_the_summary_leads_with_the_counts_and_what_still_needs_deciding() -> None:
+    summary = _section(render_routing_review(_plan(), {"pipelines": [{}, {}, {}]}, None), "summary")
+
+    assert "3 pipelines in 3 groups. 1 can convert automatically; 1 is recommended for agentic redesign." in summary
+    assert "1 of 3 groups still need a decision. Nothing is converted until every group has one." in summary
+    assert '<div class="tile alert"><b>1</b><span>Decisions pending</span></div>' in summary
+
+
+def test_what_happens_next_counts_each_state_and_says_what_blocks_packaging() -> None:
+    record = {"components": {"component-2": {"outcome": "agentic-applied", "output_sha256": "abc"}}}
+    decided = _plan(
+        components=[
+            ComponentPlan(component_id="component-1", members=["extract"], decision="agentic"),
+            ComponentPlan(component_id="component-2", members=["mart"], decision="agentic"),
+            ComponentPlan(component_id="component-3", members=["solo"], decision="deterministic"),
+        ]
+    )
+
+    pending = _section(render_routing_review(_plan(), None, record), "conversion")
+    waiting = _section(render_routing_review(decided, None, record), "conversion")
+
+    assert "The plan is not applied yet. Decide the pending groups, then run route again." in pending
+    assert "Packaging is blocked until the agent builds every agentic unit." in waiting
+    assert "<strong>component-1</strong>: the agent builds extract with fill-agentic." in waiting
+    assert '<span class="pill pill-agt">1</span><span>Agent build ready</span>' in waiting
+    assert '<span class="pill pill-det">1</span><span>Converts automatically</span>' in waiting
+
+
+def test_a_grouping_says_why_and_whether_it_is_accepted() -> None:
     grouping = SuggestedGrouping(
         grouping_id="grouping-1",
         components=["component-1", "component-2"],
@@ -102,17 +119,37 @@ def test_a_grouping_shows_its_basis_and_whether_it_is_accepted() -> None:
 
     page = render_routing_review(_plan(suggested_groupings=[grouping]), None, None)
 
-    groupings = page.split('id="groupings"')[1].split("</section>")[0]
-    assert "grouping-1" in groupings and "Lakeflow Connect" in groupings and ">accepted<" in groupings
-    conversion = page.split('id="conversion"')[1].split("</section>")[0]
-    assert "grouping-1 (component-1, component-2)" in conversion
+    groupings = _section(page, "groupings")
+    assert "Convert 2 pipelines together" in groupings and "Accepted" in groupings
+    assert "Both are candidates for Lakeflow Connect." in groupings
+    assert "Converts as one unit with component-2." in _section(page, "components")
 
 
-@pytest.mark.parametrize(("inventory", "shown"), [({"source": "adf"}, "adf"), ({}, "&mdash;")])
-def test_the_summary_shows_the_recorded_source_or_a_dash(inventory: dict[str, Any], shown: str) -> None:
-    summary = render_routing_review(_plan(), inventory, None).split('id="summary"')[1].split("</section>")[0]
+@pytest.mark.parametrize(("inventory", "shown"), [({"source": "adf"}, "Source: Azure Data Factory."), ({}, None)])
+def test_the_header_names_the_recorded_source_and_never_assumes_adf(inventory: dict[str, Any], shown: str) -> None:
+    header = render_routing_review(_plan(), inventory, None).split("<main>")[0]
 
-    assert re.findall(r"<th>Source</th><td>(.*?)</td>", summary) == [shown]
+    if shown is None:
+        assert "Source:" not in header and "Azure Data Factory" not in header
+    else:
+        assert shown in header
+
+
+def test_notes_count_unresolved_calls_in_plain_words_and_keep_routes_wording() -> None:
+    finding = "unresolved control edge 'a' -> 'b' (via 'Call B') kept as a finding, not severed; 'a' is routed alone"
+
+    notes = _section(render_routing_review(_plan(findings=[finding, "another note"]), None, None), "findings")
+
+    assert "1 pipeline call points to a pipeline that isn't in this export." in notes
+    assert "another note" in notes
+    assert "Route's wording" in notes and "unresolved control edge" in notes
+
+
+def test_technical_details_are_folded_away_with_the_binding_hashes() -> None:
+    page = render_routing_review(_plan(), None, None)
+
+    footer = page.split("<footer>")[1]
+    assert "<summary>Technical details</summary>" in footer and "<code>inv</code>" in footer
 
 
 def test_without_insights_the_page_says_enrich_has_not_run() -> None:

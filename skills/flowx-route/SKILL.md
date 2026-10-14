@@ -109,10 +109,10 @@ in `agentic_conversion.json`, so route and fill again afterwards.
 ### Present it with the review page
 
 `metadata/routing_review.html` is the standard way to show the customer what their source does and how
-it will be converted. Every run has the same eight sections in the same order: summary, what the
-source does (the insights), components, suggested groupings, how each unit will be converted, the
-routing conversation, findings, and how to steer. Open it with the customer, or walk through the same
-sections in that order.
+it will be converted. Every run has the same eight sections in the same order: at a glance, what the
+source does (the insights), the recommended conversion, suggested groupings, what happens next, what
+you told us (the routing conversation), notes (the findings), and how to change a decision. Open it
+with the customer, or walk through the same sections in that order.
 
 Ask what they want the conversion to achieve, and qualify the target pattern for each ingestion
 component (next section). Record each question and answer in the plan's `conversation`
