@@ -200,7 +200,7 @@ def _summary(plan: ConversionPlan, inventory: dict[str, Any] | None) -> str:
     accepted = sum(1 for grouping in plan.suggested_groupings if grouping.accepted)
     headline = (
         f"{_plural(pipeline_count, 'pipeline')} in {_plural(components, 'group')}. "
-        f"{automatic} can convert automatically; {redesign} "
+        f"{automatic} recommended for deterministic conversion; {redesign} "
         f"{'is' if redesign == 1 else 'are'} recommended for agentic redesign."
     )
     status = (
@@ -211,7 +211,7 @@ def _summary(plan: ConversionPlan, inventory: dict[str, Any] | None) -> str:
     tiles = [
         (pipeline_count, "Pipelines", False),
         (components, "Groups", False),
-        (automatic, "Convert automatically", False),
+        (automatic, "Recommended deterministic", False),
         (redesign, "Recommended for agentic redesign", False),
         (len(plan.suggested_groupings), f"Suggested groupings ({accepted} accepted)", False),
         (pending, "Decisions pending", pending > 0),
@@ -248,7 +248,7 @@ def _source(insights: dict[str, Any] | None) -> str:
 
 
 def _components(plan: ConversionPlan) -> str:
-    """Recommended conversion: the groups to look at closely, then the ones that convert automatically."""
+    """Recommended conversion: the groups to look at closely, then the ones recommended for deterministic conversion."""
     redesign = [
         component
         for component in plan.components
@@ -277,7 +277,10 @@ def _components(plan: ConversionPlan) -> str:
             f"<th>Decision</th></tr></thead><tbody>{rows}</tbody></table></div>"
         )
     else:
-        parts.append('<p class="lead">No group needs agentic redesign: every group converts automatically.</p>')
+        parts.append(
+            '<p class="lead">No group needs agentic redesign: every group is recommended for deterministic '
+            "conversion.</p>"
+        )
     if automatic:
         pending = sum(1 for component in automatic if component.decision is None)
         rows = "".join(
@@ -286,9 +289,10 @@ def _components(plan: ConversionPlan) -> str:
             for component in automatic
         )
         parts.append(
-            f"<details><summary>Convert automatically ({len(automatic)}"
+            f"<details><summary>Recommended deterministic ({len(automatic)}"
             f"{f', {pending} pending' if pending else ''})</summary>"
-            '<div class="stack"><p class="muted small">flowx\'s deterministic engine translates these 1:1.</p>'
+            '<div class="stack"><p class="muted small">flowx\'s deterministic engine translates these 1:1; any '
+            "activity listed under Why is left as a gap to fill.</p>"
             '<div class="scroll"><table><thead><tr><th>Group</th><th>Pipelines</th><th>Why</th><th>Decision</th></tr>'
             f"</thead><tbody>{rows}</tbody></table></div></div></details>"
         )

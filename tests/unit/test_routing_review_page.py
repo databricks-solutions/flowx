@@ -83,9 +83,31 @@ def _section(page: str, section_id: str) -> str:
 def test_the_summary_leads_with_the_counts_and_what_still_needs_deciding() -> None:
     summary = _section(render_routing_review(_plan(), {"pipelines": [{}, {}, {}]}, None), "summary")
 
-    assert "3 pipelines in 3 groups. 1 can convert automatically; 1 is recommended for agentic redesign." in summary
+    assert (
+        "3 pipelines in 3 groups. 1 recommended for deterministic conversion; 1 is recommended for agentic redesign."
+        in summary
+    )
     assert "1 of 3 groups still need a decision. Nothing is converted until every group has one." in summary
     assert '<div class="tile alert"><b>1</b><span>Decisions pending</span></div>' in summary
+    assert '<div class="tile"><b>1</b><span>Recommended deterministic</span></div>' in summary
+
+
+def test_a_deterministic_recommendation_with_gaps_is_not_called_automatic() -> None:
+    """A non-ADF component is recommended deterministic even with gaps; the page says those stay gaps to fill."""
+    with_gaps = ComponentPlan(
+        component_id="component-1",
+        members=["dag"],
+        recommended="deterministic",
+        options={"deterministic": {"capable": False, "uncovered": [{"type": "Until"}, {"type": "Until"}]}},
+    )
+    page = render_routing_review(_plan(components=[with_gaps]), None, None)
+
+    summary, components = _section(page, "summary"), _section(page, "components")
+    assert "1 recommended for deterministic conversion" in summary
+    assert "automatic" not in summary + components
+    assert "<summary>Recommended deterministic (1, 1 pending)</summary>" in components
+    assert "translates these 1:1; any activity listed under Why is left as a gap to fill." in components
+    assert "2 activities can&#x27;t convert 1:1 (Until)." in components
 
 
 def test_what_happens_next_counts_each_state_and_says_what_blocks_packaging() -> None:
