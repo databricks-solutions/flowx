@@ -6,7 +6,10 @@ on:
     branches: [main]
     paths:
       - tests/integration/azure/**
-      - "!tests/integration/azure/setup.sh"
+      - .github/scripts/**
+      - "!.github/scripts/setup-integration.sh"
+      - "!.github/scripts/check-formatting.sh"
+      - "!.github/scripts/verify-requirements.sh"
       - "!tests/integration/azure/README.md"
       - tests/integration/test_azure_fixture_coverage.py
       - tests/integration/test_adf_cases.py
@@ -15,7 +18,10 @@ on:
   pull_request:
     paths:
       - tests/integration/azure/**
-      - "!tests/integration/azure/setup.sh"
+      - .github/scripts/**
+      - "!.github/scripts/setup-integration.sh"
+      - "!.github/scripts/check-formatting.sh"
+      - "!.github/scripts/verify-requirements.sh"
       - "!tests/integration/azure/README.md"
       - tests/integration/test_azure_fixture_coverage.py
       - tests/integration/test_adf_cases.py
@@ -45,6 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
       - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
         with:
           version: "0.11.2"
@@ -70,25 +77,19 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Copy trusted CI scripts outside the checkout
+        shell: bash
+        run: '"${GITHUB_WORKSPACE}/.github/scripts/bootstrap-ci-scripts.sh"'
+
       - name: Configure Terraform paths outside the checkout
         shell: bash
-        run: |
-          {
-            printf 'TF_DATA_DIR=%s\n' "${RUNNER_TEMP}/flowx-terraform-data"
-            printf 'TF_STATE_DIR=%s\n' "${RUNNER_TEMP}/flowx-tfstate"
-            printf 'TF_STATE_PATH=%s\n' "${RUNNER_TEMP}/flowx-tfstate/terraform.tfstate"
-          } >> "${GITHUB_ENV}"
-          mkdir -p "${RUNNER_TEMP}/flowx-terraform-data" "${RUNNER_TEMP}/flowx-tfstate"
+        run: '"${CI_SCRIPTS}/configure-terraform-paths.sh"'
 
       - name: Check required owner configuration
         env:
           RESOURCE_OWNER_EMAIL: ${{ secrets.RESOURCE_OWNER_EMAIL }}
         shell: bash
-        run: |
-          if [[ -z "${RESOURCE_OWNER_EMAIL:-}" ]]; then
-            echo "::error::RESOURCE_OWNER_EMAIL is required in the flowx-live-integration environment."
-            exit 1
-          fi
+        run: '"${CI_SCRIPTS}/check-owner-configuration.sh"'
 
       - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
         with:
@@ -103,9 +104,7 @@ jobs:
 
       - name: Derive collision-resistant run prefix
         shell: bash
-        run: |
-          run_hash="$(printf '%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" | sha256sum | cut -c1-10)"
-          echo "TF_VAR_name_prefix=fx${run_hash}" >> "${GITHUB_ENV}"
+        run: '"${CI_SCRIPTS}/configure-run-prefix.sh"'
 
       - name: Sign in to Azure with OIDC
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
@@ -117,25 +116,7 @@ jobs:
       - name: Mask Azure principal object ID
         continue-on-error: true
         shell: bash
-        run: |
-          set -euo pipefail
-          if ! access_token="$(az account get-access-token --query accessToken --output tsv 2>/dev/null)"; then
-            exit 0
-          fi
-          IFS=. read -r _ payload _ <<< "${access_token}"
-          if [[ -z "${payload:-}" ]]; then
-            unset access_token
-            exit 0
-          fi
-          while (( ${#payload} % 4 )); do payload="${payload}="; done
-          if ! object_id="$(printf '%s' "${payload}" | tr -- '_-' '/+' | base64 --decode 2>/dev/null | jq -r '.oid // empty')"; then
-            unset access_token payload
-            exit 0
-          fi
-          unset access_token payload
-          if [[ -n "${object_id}" ]]; then
-            echo "::add-mask::${object_id}"
-          fi
+        run: '"${CI_SCRIPTS}/mask-azure-principal.sh"'
 
       - name: Create ephemeral Azure resources
         working-directory: tests/integration/azure/terraform
@@ -148,55 +129,22 @@ jobs:
           TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_owner_email: ${{ secrets.RESOURCE_OWNER_EMAIL }}
-        run: |
-          terraform init -input=false -backend-config="path=${TF_STATE_PATH}"
-          terraform fmt -check
-          terraform validate
-          terraform apply -auto-approve -input=false
+        run: '"${CI_SCRIPTS}/apply-terraform.sh"'
 
       - name: Bootstrap flowx
         run: bash scripts/bootstrap.sh
 
       - name: Export deployed ADF definitions
         shell: bash
-        run: |
-          set -euo pipefail
-          export_dir="${RUNNER_TEMP}/adf-export"
-          factory_name="$(terraform -chdir=tests/integration/azure/terraform output -raw factory_name)"
-          resource_group="$(terraform -chdir=tests/integration/azure/terraform output -raw resource_group_name)"
-          mkdir -p "${export_dir}"/{pipelines,datasets,linked_services,dataflows,integration_runtimes,triggers}
-          for mapping in "pipelines:pipelines" "datasets:datasets" "linkedservices:linked_services" "dataflows:dataflows" "integrationruntimes:integration_runtimes" "triggers:triggers"; do
-            resource_type="${mapping%%:*}"
-            directory="${mapping##*:}"
-            subscription_id="$(az account show --query id --output tsv)"
-            base_url="https://management.azure.com/subscriptions/${subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.DataFactory/factories/${factory_name}/${resource_type}"
-            az rest --method get --url "${base_url}?api-version=2018-06-01" --output json |
-              jq -c '.value[]' |
-              while IFS= read -r resource; do
-                name="$(jq -r '.name' <<<"${resource}" | awk -F/ '{print $NF}')"
-                jq '{name, properties}' <<<"${resource}" > "${export_dir}/${directory}/${name}.json"
-              done
-          done
-          {
-            echo "ADF_EXPORT_DIR=${export_dir}"
-            echo "ADF_CASE_SOURCE_DIR=${export_dir}"
-            printf 'ADF_CASE_STORAGE_ACCOUNT_ID=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw storage_account_id)"
-            printf 'ADF_CASE_KEY_VAULT_URI=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw key_vault_uri)"
-            printf 'ADF_CASE_ADLS_DFS_ENDPOINT=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw adls_dfs_endpoint)"
-            printf 'ADF_CASE_LOCATION=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw location)"
-          } >> "${GITHUB_ENV}"
+        run: '"${CI_SCRIPTS}/export-adf.sh"'
 
       - name: Compare live ADF cases with expected outputs
         id: adf-cases
         continue-on-error: true
-        run: |
-          PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v --tb=short
+        run: PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v --tb=short
 
       - name: Discover and convert exported definitions
-        run: |
-          python_bin="$(cat .migration-venv)"
-          PYTHONPATH=src "${python_bin}" -m flowx.adapter discover --source adf --source-path "${ADF_EXPORT_DIR}" --output-dir "${FLOWX_OUTPUT}"
-          PYTHONPATH=src "${python_bin}" -m flowx.adapter convert --source adf --source-path "${ADF_EXPORT_DIR}" --output-dir "${FLOWX_OUTPUT}"
+        run: '"${CI_SCRIPTS}/run-flowx-convert.sh"'
 
       - name: Resolve agentic gaps with Claude Code
         id: agentic
@@ -206,199 +154,38 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p agentic_results
-          echo "configured=false" >> "${GITHUB_OUTPUT}"
-          echo "resolved=false" >> "${GITHUB_OUTPUT}"
-          skip_agentic() {
-            echo "::warning::$1"
-            echo "- ⚠️ Agentic resolution skipped: $1" >> "${GITHUB_STEP_SUMMARY}"
-          }
-          fail_agentic() {
-            echo "::error::$1"
-            echo "- ❌ Agentic resolution failed: $1" >> "${GITHUB_STEP_SUMMARY}"
-            exit 1
-          }
-          if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
-            skip_agentic "no Claude authentication secret is configured"
-            exit 0
-          fi
-          echo "configured=true" >> "${GITHUB_OUTPUT}"
-          if ! npm install --global @anthropic-ai/claude-code@2.1.296; then
-            fail_agentic "Claude Code CLI installation failed"
-          fi
-          plugin_dir="${RUNNER_TEMP}/flowx-plugin"
-          mkdir -p "${plugin_dir}"
-          cp -R .claude-plugin skills "${plugin_dir}/"
-          chmod -R a-w "${plugin_dir}"
-          expected_tasks_file="${RUNNER_TEMP}/expected-agentic-tasks.json"
-          jq '
-            def pipelines: if has("pipelines") then .pipelines else [.] end;
-            [pipelines[] as $pipeline |
-             $pipeline.tasks | .. | objects | select(.type? == "PlaceholderActivity") |
-             {pipeline: $pipeline.name, activity_name: .name}] | sort_by(.pipeline, .activity_name)
-          ' "${FLOWX_OUTPUT}/.work/translation_report.json" > "${expected_tasks_file}"
-          jq '
-            def pipelines: if has("pipelines") then .pipelines else [.] end;
-            [pipelines[] as $pipeline |
-             $pipeline.tasks | .. | objects | select(.type? == "PlaceholderActivity") |
-             {pipeline: $pipeline.name, activity_name: .name, task_key, depends_on: (.depends_on // [])}]
-          ' "${FLOWX_OUTPUT}/.work/translation_report.json" > "${RUNNER_TEMP}/expected-agentic-structure.json"
-          cat > "${RUNNER_TEMP}/snapshot-worktree.sh" <<'SNAPSHOT_HELPER'
-          snapshot_worktree() {
-            find . -path './.git' -prune -o -path './agentic_results' -prune -o \
-              -type f -print0 | sort -z | xargs -0 -r sha256sum
-            find . -path './.git' -prune -o -path './agentic_results' -prune -o \
-              -printf '%y %m %p -> %l\n' | sort
-          }
-          SNAPSHOT_HELPER
-          # shellcheck source=/dev/null
-          source "${RUNNER_TEMP}/snapshot-worktree.sh"
-          worktree_snapshot="${RUNNER_TEMP}/pre-claude-worktree.sha256"
-          snapshot_worktree > "${worktree_snapshot}"
-          chmod 000 "${TF_STATE_DIR}" "${TF_DATA_DIR}"
-          if ! claude -p \
-            --plugin-dir "${RUNNER_TEMP}/flowx-plugin" \
-            --permission-mode dontAsk \
-            --permission-prompts none \
-            --tools="Read,Edit,Write,Glob,Grep,Skill" \
-            --allowedTools="Read,Edit(agentic_results/**),Glob,Grep" \
-            --disallowedTools="Read(tests/integration/azure/terraform/**),Read(/${TF_STATE_DIR}/**),Read(/${TF_DATA_DIR}/**)" <<CLAUDE_PROMPT
-          Use the flowx:flowx-convert skill, specifically the ADF agentic-gap instructions in
-          skills/flowx-convert/sources/adf.md steps 4 and 5. Read
-          ${FLOWX_OUTPUT}/.work/translation_report.json, ${FLOWX_OUTPUT}/.work/gaps.json, and the
-          exported ADF definitions under ${ADF_EXPORT_DIR}. Produce one merge result for each
-          PlaceholderActivity in translation_report.json. This is the exact expected task list:
-          $(cat "${expected_tasks_file}")
-          Use gaps.json only to find the corresponding raw ADF activity definitions.
-
-          Write exactly one JSON file per resolved gap under agentic_results/. Each file must be a
-          single JSON object with this merge-result schema:
-          {"activity_name":"<exact placeholder activity name>","pipeline":"<exact pipeline name>",
-           "task":{"type":"<valid flowx IR task type>","name":"<activity name>",...}}
-          Preserve the exact activity and pipeline names from the report. The task must be a complete,
-          valid replacement for that placeholder; task_key and depends_on may be omitted so merge keeps
-          the placeholder values. For a NotebookActivity, include its complete source in the non-empty
-          generated_source field; do not create a separate notebook file.
-          Do not write outside agentic_results/, deploy anything, or access
-          unrelated resources. Do not run shell commands; the workflow validates and merges the files.
-          CLAUDE_PROMPT
-          then
-            fail_agentic "Claude Code did not complete successfully"
-          fi
-          if find agentic_results -type l -print -quit | grep -q .; then
-            fail_agentic "Claude produced a symlink under agentic_results/"
-          fi
-          result_files=(agentic_results/*.json)
-          [[ -e "${result_files[0]}" ]] || fail_agentic "Claude produced no merge-result JSON files"
-          for result_file in "${result_files[@]}"; do
-            jq -e '
-              type == "object" and
-              (.activity_name | (type == "string" and length > 0)) and
-              (.pipeline | (type == "string" and length > 0)) and
-              (.task | type == "object") and
-              (.task.type | (type == "string" and length > 0)) and
-              (.task.name | (type == "string" and length > 0)) and
-              (if .task.type == "NotebookActivity" then
-                 (.task.generated_source | (type == "string" and length > 0))
-               else true end)
-            ' "${result_file}" >/dev/null || fail_agentic "invalid merge-result schema: ${result_file}"
-          done
-          expected_results="$(jq -c '[.[] | [.pipeline, .activity_name]] | sort' "${expected_tasks_file}")"
-          actual_results="$(jq -cs '[.[] | [.pipeline, .activity_name]] | sort' "${result_files[@]}")"
-          [[ "${actual_results}" == "${expected_results}" ]] ||
-            fail_agentic "merge-result files do not cover every pending agentic placeholder exactly once"
-          echo "resolved=true" >> "${GITHUB_OUTPUT}"
-          echo "- ✅ Claude produced schema-valid agentic merge results." >> "${GITHUB_STEP_SUMMARY}"
+        run: '"${CI_SCRIPTS}/resolve-agentic-gaps.sh"'
 
       - name: Report unexpected agentic-step failure
         if: always() && steps.agentic.outcome == 'failure'
-        run: |
-          echo "::warning::Agentic resolution failed or timed out; deterministic validation will continue before the final gate fails."
-          echo "- ⚠️ Agentic resolution failed or timed out; deterministic validation continued before final failure." >> "${GITHUB_STEP_SUMMARY}"
+        run: '"${CI_SCRIPTS}/report-agentic-failure.sh"'
 
       - name: Verify Claude changed only agentic results
         if: always() && steps.agentic.outputs.configured == 'true'
         shell: bash
-        run: |
-          # shellcheck source=/dev/null
-          source "${RUNNER_TEMP}/snapshot-worktree.sh"
-          post_snapshot="${RUNNER_TEMP}/post-claude-worktree.sha256"
-          snapshot_worktree > "${post_snapshot}"
-          if ! diff -u "${RUNNER_TEMP}/pre-claude-worktree.sha256" "${post_snapshot}"; then
-            echo "::error::Claude changed files outside agentic_results/, including ignored files."
-            exit 1
-          fi
+        run: '"${CI_SCRIPTS}/verify-claude-worktree.sh"'
 
       - name: Merge agentic results when available
         id: agentic-merge
         continue-on-error: true
         if: steps.agentic.outputs.resolved == 'true'
-        run: |
-          # Strict by design: an unmatched result means the agent output does not belong to this translation report.
-          python_bin="$(cat .migration-venv)"
-          PYTHONPATH=src "${python_bin}" -m flowx.adapter convert --source adf --merge-agentic \
-            --report "${FLOWX_OUTPUT}/.work/translation_report.json" \
-            --agentic-results agentic_results
+        run: '"${CI_SCRIPTS}/merge-agentic-results.sh"'
 
       - name: Validate merged agentic structure
         id: agentic-structure
         continue-on-error: true
         if: steps.agentic.outputs.resolved == 'true' && steps.agentic-merge.outcome == 'success'
-        run: |
-          "$(cat .migration-venv)" tests/integration/azure/check_agentic_structure.py \
-            "${RUNNER_TEMP}/expected-agentic-structure.json" \
-            "${FLOWX_OUTPUT}/.work/translation_report.json"
+        run: '"${CI_SCRIPTS}/validate-agentic-structure.sh"'
 
       - name: Package merged translation
-        run: |
-          python_bin="$(cat .migration-venv)"
-          PYTHONPATH=src "${python_bin}" -m flowx.adapter package --output-dir "${FLOWX_OUTPUT}" \
-            --catalog main --schema default --no-download-workspace-files
-          PYTHONPATH=src "${python_bin}" - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import yaml
-          from flowx.validate.bundle_invariants import check_bundle_dir, format_result
-
-          root = Path(os.environ["FLOWX_OUTPUT"])
-          bundle_dirs = sorted(path.parent for path in root.glob("*/databricks.yml"))
-          if (root / "databricks.yml").exists():
-              bundle_dirs.append(root)
-          assert bundle_dirs, "package produced no bundles"
-          bundle_by_pipeline = {}
-          for bundle_dir in bundle_dirs:
-              for resource_file in bundle_dir.glob("resources/*.yml"):
-                  resources = yaml.safe_load(resource_file.read_text()) or {}
-                  for job in ((resources.get("resources") or {}).get("jobs") or {}).values():
-                      bundle_by_pipeline[job["name"]] = bundle_dir
-          cases_root = Path("tests/integration/azure/adf/cases")
-          for case_file in sorted(cases_root.glob("*/case.json")):
-              case = json.loads(case_file.read_text())
-              for pipeline in case["pipelines"]:
-                  bundle_dir = bundle_by_pipeline[pipeline]
-                  result = check_bundle_dir(bundle_dir)
-                  assert result.ok, f"{case_file.parent.name}: {format_result(result)}"
-          summary = json.loads((root / "metadata/inventory.json").read_text())["summary"]
-          github_summary = os.getenv("GITHUB_STEP_SUMMARY")
-          if github_summary:
-              with open(github_summary, "a", encoding="utf-8") as handle:
-                  handle.write(f"- ADF cases: {summary['pipeline_count']} pipelines, {summary['activity_count']} activities.\n")
-          PY
+        run: '"${CI_SCRIPTS}/package-integration-results.sh"'
 
       - name: Check optional Databricks credentials
         id: databricks-auth
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: |
-          if [[ -n "${DATABRICKS_HOST:-}" && -n "${DATABRICKS_TOKEN:-}" ]]; then
-            echo "configured=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "configured=false" >> "${GITHUB_OUTPUT}"
-          fi
+        run: '"${CI_SCRIPTS}/check-databricks-credentials.sh"'
 
       - name: Install Databricks CLI
         if: steps.databricks-auth.outputs.configured == 'true'
@@ -409,52 +196,7 @@ jobs:
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: |
-          set -uo pipefail
-          python_bin="$(cat .migration-venv)"
-          failed_bundles=()
-          for bundle in "${FLOWX_OUTPUT}"/*/databricks.yml; do
-            bundle_name="$(basename "$(dirname "${bundle}")")"
-            required_variables=()
-            if ! required_output="$("${python_bin}" - "${bundle}" 2>/dev/null <<'PY'
-          import sys
-
-          import yaml
-
-          with open(sys.argv[1], encoding="utf-8") as handle:
-              config = yaml.safe_load(handle) or {}
-          target_variables = (((config.get("targets") or {}).get("dev") or {}).get("variables") or {})
-          for name, declaration in sorted((config.get("variables") or {}).items()):
-              if name not in target_variables and (not isinstance(declaration, dict) or "default" not in declaration):
-                  print(name)
-          PY
-            )"; then
-              printf '::error::Could not parse required variables for bundle %s.\n' "${bundle_name}"
-              failed_bundles+=("${bundle_name}")
-              continue
-            fi
-            if [[ -n "${required_output}" ]]; then
-              mapfile -t required_variables <<< "${required_output}"
-            fi
-            validate_args=(bundle validate -t dev)
-            if (( ${#required_variables[@]} )); then
-              printf 'Validating %s with placeholders for required variables:' "${bundle_name}"
-              printf ' %s' "${required_variables[@]}"
-              printf '\n'
-            fi
-            for variable in "${required_variables[@]}"; do
-              placeholder="flowx-validation-placeholder"
-              [[ "${variable}" == *_job_id ]] && placeholder=0
-              validate_args+=(--var "${variable}=${placeholder}")
-            done
-            if ! (cd "$(dirname "${bundle}")" && databricks "${validate_args[@]}"); then
-              failed_bundles+=("${bundle_name}")
-            fi
-          done
-          if (( ${#failed_bundles[@]} )); then
-            printf '::error::Bundle validation failed for: %s\n' "${failed_bundles[*]}"
-            exit 1
-          fi
+        run: '"${CI_SCRIPTS}/validate-bundles.sh"'
 
       - name: Enforce live integration results
         if: always()
@@ -465,22 +207,7 @@ jobs:
           AGENTIC_RESOLVED: ${{ steps.agentic.outputs.resolved }}
           MERGE_OUTCOME: ${{ steps.agentic-merge.outcome }}
           STRUCTURE_OUTCOME: ${{ steps.agentic-structure.outcome }}
-        run: |
-          if [[ "${ADF_CASES_OUTCOME}" != success ]]; then
-            echo "::error::Live ADF expected-output case validation failed."
-            exit 1
-          fi
-          if [[ "${AGENTIC_CONFIGURED}" != true ]]; then
-            exit 0
-          fi
-          if [[ "${AGENTIC_OUTCOME}" != success ]]; then
-            echo "::error::Claude authentication was configured, but agentic resolution failed or timed out."
-            exit 1
-          fi
-          if [[ "${AGENTIC_RESOLVED}" != true || "${MERGE_OUTCOME}" != success || "${STRUCTURE_OUTCOME}" != success ]]; then
-            echo "::error::Claude authentication was configured, but result validation, merging, or structural validation failed."
-            exit 1
-          fi
+        run: '"${CI_SCRIPTS}/enforce-integration-results.sh"'
 
       - name: Destroy ephemeral Azure resources
         if: always()
@@ -495,18 +222,4 @@ jobs:
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_owner_email: ${{ secrets.RESOURCE_OWNER_EMAIL }}
         shell: bash
-        run: |
-          set +e
-          chmod -R u+w "${RUNNER_TEMP}/flowx-plugin" 2>/dev/null || true
-          chmod 700 "${TF_STATE_DIR}" "${TF_DATA_DIR}" 2>/dev/null || true
-          fallback_hash="$(printf '%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" | sha256sum | cut -c1-10)"
-          fallback_prefix="fx${fallback_hash}"
-          export TF_VAR_name_prefix="${TF_VAR_name_prefix:-$fallback_prefix}"
-          resource_group="$(terraform output -raw resource_group_name 2>/dev/null)"
-          resource_group="${resource_group:-${TF_VAR_name_prefix:0:12}-flowx-rg}"
-          terraform destroy -auto-approve -input=false
-          destroy_status=$?
-          if [[ -n "${resource_group}" ]] && az group exists --name "${resource_group}" | grep -q true; then
-            az group delete --name "${resource_group}" --yes --no-wait
-          fi
-          exit "${destroy_status}"
+        run: '"${CI_SCRIPTS}/teardown-integration.sh"'

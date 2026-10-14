@@ -39,10 +39,7 @@ jobs:
           tests/integration/test_adf_cases.py
           tests/integration/test_integration_workflow.py -v
       - name: Verify requirements.txt is in sync with the lockfile
-        run: |
-          make requirements
-          git diff --exit-code -- requirements.txt \
-            || { echo "requirements.txt is stale. Run 'make requirements' (or 'make precommit') and commit it."; exit 1; }
+        run: .github/scripts/verify-requirements.sh
 
   fmt:
     needs: not-a-fork
@@ -59,9 +56,4 @@ jobs:
       - run: uv sync --frozen
       - run: make fmt
       - name: Check for formatting changes
-        run: |
-          if [ -n "$(git diff)" ]; then
-            echo "Code formatting issues detected. Run 'make fmt' locally."
-            git diff
-            exit 1
-          fi
+        run: .github/scripts/check-formatting.sh

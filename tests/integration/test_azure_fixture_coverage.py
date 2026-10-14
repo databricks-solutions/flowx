@@ -35,12 +35,6 @@ EXPECTED_MOTIFS = {
 }
 
 
-@pytest.fixture(scope="module")
-def definitions():
-    """Load the checked-in definitions through the production ADF loader."""
-    return load_adf_definitions(FIXTURE_ROOT)
-
-
 def test_every_registered_activity_type_is_classified(definitions) -> None:
     """Every supported ADF activity is present and follows its registry strategy."""
     inventory = build_inventory(definitions)

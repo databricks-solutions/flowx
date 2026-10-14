@@ -28,16 +28,172 @@ LIVE_ENV = {
 }
 
 
-def _case_dirs() -> list[Path]:
-    return sorted(path.parent for path in CASES.glob("*/case.json"))
-
-
-CASE_PHASES = [(case_dir, phase) for case_dir in _case_dirs() for phase in PHASES]
+CASE_PHASES = [
+    (case_dir, phase) for case_dir in sorted(path.parent for path in CASES.glob("*/case.json")) for phase in PHASES
+]
 CASE_IDS = [f"{case_dir.name}-{phase}" for case_dir, phase in CASE_PHASES]
+
+
+@pytest.mark.parametrize(("case_dir", "phase"), CASE_PHASES, ids=CASE_IDS)
+def test_adf_case(case_dir: Path, phase: str, tmp_path: Path, pytestconfig: pytest.Config) -> None:
+    """Run one expected-output phase for one selected pipeline case."""
+    update = pytestconfig.getoption("--update-expected")
+    source_root = Path(os.getenv("ADF_CASE_SOURCE_DIR", str(FIXTURES)))
+    if update and source_root.resolve() != FIXTURES.resolve():
+        pytest.fail("--update-expected only accepts the checked-in fixture source")
+    case = _read_json(case_dir / "case.json")
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    _build_case_source(case, source_root, source)
+    _run("discover", source, output)
+    inventory = _normalize_inventory(output / "metadata/inventory.json")
+    expected = case_dir / "expected"
+
+    if phase == "discover":
+        if update:
+            _write_json(expected / "inventory.json", inventory)
+        else:
+            assert inventory == _read_json(expected / "inventory.json")
+        return
+
+    _run("convert", source, output)
+    ir, gaps = _capture_convert(output)
+    if phase == "convert":
+        if update:
+            shutil.rmtree(expected / "ir", ignore_errors=True)
+            for pipeline, value in ir.items():
+                _write_json(expected / "ir" / f"{pipeline}.json", value)
+            _write_json(expected / "gaps.json", gaps)
+        else:
+            assert ir == {path.stem: _read_json(path) for path in sorted((expected / "ir").glob("*.json"))}
+            assert gaps == _read_json(expected / "gaps.json")
+        return
+
+    _run("package", source, output)
+    if update:
+        _copy_tree(output, expected / "bundles")
+    else:
+        _assert_tree(expected / "bundles", output)
+
+
+def test_live_export_matches_fixtures() -> None:
+    """Show every unexpected GET field across the complete live export at once."""
+    _assert_live_export(Path(os.getenv("ADF_CASE_SOURCE_DIR", str(FIXTURES))))
+
+
+def test_every_fixture_pipeline_is_in_a_case() -> None:
+    """New fixture pipelines must be assigned to at least one expected-output case."""
+    fixtures = {path.stem for path in (FIXTURES / "pipelines").glob("*.json")}
+    covered = {pipeline for case_dir in _case_dirs() for pipeline in _read_json(case_dir / "case.json")["pipelines"]}
+    assert covered == fixtures, f"uncovered={sorted(fixtures - covered)} unknown={sorted(covered - fixtures)}"
+
+
+def test_blob_event_expected_url_documents_known_arm_id_bug() -> None:
+    """Keep the current ARM-ID URL visible until the separate flowx bug is fixed."""
+    expected = CASES / "full-factory/expected/bundles"
+    matches = [path for path in expected.rglob("*.yml") if "file_arrival" in path.read_text(encoding="utf-8")]
+    assert matches
+    assert any("url: <STORAGE_ACCOUNT_ID>" in path.read_text(encoding="utf-8") for path in matches)
+
+
+def test_live_definition_allowlist_rejects_translation_changes() -> None:
+    """ADF defaults may be added, but translation-affecting activity policy may not."""
+    fixture = {"properties": {"activities": [{"name": "wait", "type": "Wait"}]}}
+    allowed = {"properties": {"annotations": [], "activities": [{"name": "wait", "type": "Wait", "dependsOn": []}]}}
+    _validate_definition(fixture, allowed)
+
+    changed = {
+        "properties": {
+            "activities": [{"name": "wait", "type": "Wait", "policy": {"retry": 3}}],
+        }
+    }
+    with pytest.raises(AssertionError, match=r"\$\.properties\.activities\[0\]\.policy"):
+        _validate_definition(fixture, changed)
+
+
+def test_last_publish_time_allowlist_is_narrow() -> None:
+    """Only a plausible read-only ADF pipeline timestamp is ignored."""
+    fixture = {"properties": {}}
+    _validate_definition(fixture, {"properties": {"lastPublishTime": "2026-10-13T12:34:56Z"}})
+    with pytest.raises(AssertionError, match=r"\$\.properties\.lastPublishTime"):
+        _validate_definition(fixture, {"properties": {"lastPublishTime": 123}})
+    with pytest.raises(AssertionError, match=r"\$\.properties\.unexpected"):
+        _validate_definition(fixture, {"properties": {"unexpected": "2026-10-13T12:34:56Z"}})
+
+
+def test_whole_export_reports_all_files_and_paths(tmp_path: Path) -> None:
+    """Aggregate validation does not stop at the first definition mismatch."""
+    live = tmp_path / "live"
+    for directory in LIVE_DEFINITION_DIRS:
+        shutil.copytree(FIXTURES / directory, live / directory)
+    first = live / "pipelines/agentic-activities.json"
+    first_value = _read_json(first)
+    first_value["properties"]["unexpectedOne"] = True
+    _write_json(first, first_value)
+    second = live / "datasets/csv-adls.json"
+    second_value = _read_json(second)
+    second_value["properties"]["unexpectedTwo"] = True
+    _write_json(second, second_value)
+
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _assert_live_export(live)
+    message = str(failure.value)
+    assert "pipelines/agentic-activities.json\n  $.properties.unexpectedOne" in message
+    assert "datasets/csv-adls.json\n  $.properties.unexpectedTwo" in message
+
+
+def test_expected_artifacts_are_not_subject_to_line_ending_conversion() -> None:
+    """Generated CSV CRLF bytes must survive checkout unchanged."""
+    sample = CASES / "full-factory/expected/bundles/metadata/profile_report.csv"
+    result = subprocess.run(
+        ["git", "check-attr", "text", "--", str(sample.relative_to(ROOT))],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    assert result.stdout.rstrip().endswith(": text: unset")
+
+
+def test_live_read_only_trigger_and_integration_runtime_fields(tmp_path: Path) -> None:
+    """Live read-only fields are retained for triggers and ignored with unloaded IRs."""
+    live = tmp_path / "live"
+    for directory in (*SHARED_DIRS, "integration_runtimes", "pipelines", "triggers"):
+        shutil.copytree(FIXTURES / directory, live / directory)
+
+    runtime_path = live / "integration_runtimes/azure-ssis-placeholder.json"
+    runtime = _read_json(runtime_path)
+    runtime["properties"]["state"] = "Started"
+    _write_json(runtime_path, runtime)
+    for pipeline_path in (live / "pipelines").glob("*.json"):
+        pipeline = _read_json(pipeline_path)
+        pipeline["properties"]["lastPublishTime"] = "2026-10-13T12:34:56Z"
+        _write_json(pipeline_path, pipeline)
+
+    case_dir = CASES / "full-factory"
+    case = _read_json(case_dir / "case.json")
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    _build_case_source(case, live, source)
+    assert not (source / "integration_runtimes").exists()
+    assert all(_read_json(path)["properties"]["runtimeState"] == "Stopped" for path in source.glob("triggers/*.json"))
+
+    _run("discover", source, output)
+    assert _normalize_inventory(output / "metadata/inventory.json") == _read_json(case_dir / "expected/inventory.json")
+    _run("convert", source, output)
+    ir, gaps = _capture_convert(output)
+    assert ir == {path.stem: _read_json(path) for path in sorted((case_dir / "expected/ir").glob("*.json"))}
+    assert gaps == _read_json(case_dir / "expected/gaps.json")
+    _run("package", source, output)
+    _assert_tree(case_dir / "expected/bundles", output)
 
 
 def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _case_dirs() -> list[Path]:
+    return sorted(path.parent for path in CASES.glob("*/case.json"))
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -284,157 +440,3 @@ def _capture_convert(output: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     gaps_path = output / ".work/gaps.json"
     gaps = _strip_allowed_defaults(_read_json(gaps_path)) if gaps_path.exists() else []
     return ir, gaps
-
-
-@pytest.mark.parametrize(("case_dir", "phase"), CASE_PHASES, ids=CASE_IDS)
-def test_adf_case(case_dir: Path, phase: str, tmp_path: Path, pytestconfig: pytest.Config) -> None:
-    """Run one expected-output phase for one selected pipeline case."""
-    update = pytestconfig.getoption("--update-expected")
-    source_root = Path(os.getenv("ADF_CASE_SOURCE_DIR", str(FIXTURES)))
-    if update and source_root.resolve() != FIXTURES.resolve():
-        pytest.fail("--update-expected only accepts the checked-in fixture source")
-    case = _read_json(case_dir / "case.json")
-    source = tmp_path / "source"
-    output = tmp_path / "output"
-    _build_case_source(case, source_root, source)
-    _run("discover", source, output)
-    inventory = _normalize_inventory(output / "metadata/inventory.json")
-    expected = case_dir / "expected"
-
-    if phase == "discover":
-        if update:
-            _write_json(expected / "inventory.json", inventory)
-        else:
-            assert inventory == _read_json(expected / "inventory.json")
-        return
-
-    _run("convert", source, output)
-    ir, gaps = _capture_convert(output)
-    if phase == "convert":
-        if update:
-            shutil.rmtree(expected / "ir", ignore_errors=True)
-            for pipeline, value in ir.items():
-                _write_json(expected / "ir" / f"{pipeline}.json", value)
-            _write_json(expected / "gaps.json", gaps)
-        else:
-            assert ir == {path.stem: _read_json(path) for path in sorted((expected / "ir").glob("*.json"))}
-            assert gaps == _read_json(expected / "gaps.json")
-        return
-
-    _run("package", source, output)
-    if update:
-        _copy_tree(output, expected / "bundles")
-    else:
-        _assert_tree(expected / "bundles", output)
-
-
-def test_live_export_matches_fixtures() -> None:
-    """Show every unexpected GET field across the complete live export at once."""
-    _assert_live_export(Path(os.getenv("ADF_CASE_SOURCE_DIR", str(FIXTURES))))
-
-
-def test_every_fixture_pipeline_is_in_a_case() -> None:
-    """New fixture pipelines must be assigned to at least one expected-output case."""
-    fixtures = {path.stem for path in (FIXTURES / "pipelines").glob("*.json")}
-    covered = {pipeline for case_dir in _case_dirs() for pipeline in _read_json(case_dir / "case.json")["pipelines"]}
-    assert covered == fixtures, f"uncovered={sorted(fixtures - covered)} unknown={sorted(covered - fixtures)}"
-
-
-def test_blob_event_expected_url_documents_known_arm_id_bug() -> None:
-    """Keep the current ARM-ID URL visible until the separate flowx bug is fixed."""
-    expected = CASES / "full-factory/expected/bundles"
-    matches = [path for path in expected.rglob("*.yml") if "file_arrival" in path.read_text(encoding="utf-8")]
-    assert matches
-    assert any("url: <STORAGE_ACCOUNT_ID>" in path.read_text(encoding="utf-8") for path in matches)
-
-
-def test_live_definition_allowlist_rejects_translation_changes() -> None:
-    """ADF defaults may be added, but translation-affecting activity policy may not."""
-    fixture = {"properties": {"activities": [{"name": "wait", "type": "Wait"}]}}
-    allowed = {"properties": {"annotations": [], "activities": [{"name": "wait", "type": "Wait", "dependsOn": []}]}}
-    _validate_definition(fixture, allowed)
-
-    changed = {
-        "properties": {
-            "activities": [{"name": "wait", "type": "Wait", "policy": {"retry": 3}}],
-        }
-    }
-    with pytest.raises(AssertionError, match=r"\$\.properties\.activities\[0\]\.policy"):
-        _validate_definition(fixture, changed)
-
-
-def test_last_publish_time_allowlist_is_narrow() -> None:
-    """Only a plausible read-only ADF pipeline timestamp is ignored."""
-    fixture = {"properties": {}}
-    _validate_definition(fixture, {"properties": {"lastPublishTime": "2026-10-13T12:34:56Z"}})
-    with pytest.raises(AssertionError, match=r"\$\.properties\.lastPublishTime"):
-        _validate_definition(fixture, {"properties": {"lastPublishTime": 123}})
-    with pytest.raises(AssertionError, match=r"\$\.properties\.unexpected"):
-        _validate_definition(fixture, {"properties": {"unexpected": "2026-10-13T12:34:56Z"}})
-
-
-def test_whole_export_reports_all_files_and_paths(tmp_path: Path) -> None:
-    """Aggregate validation does not stop at the first definition mismatch."""
-    live = tmp_path / "live"
-    for directory in LIVE_DEFINITION_DIRS:
-        shutil.copytree(FIXTURES / directory, live / directory)
-    first = live / "pipelines/agentic-activities.json"
-    first_value = _read_json(first)
-    first_value["properties"]["unexpectedOne"] = True
-    _write_json(first, first_value)
-    second = live / "datasets/csv-adls.json"
-    second_value = _read_json(second)
-    second_value["properties"]["unexpectedTwo"] = True
-    _write_json(second, second_value)
-
-    with pytest.raises(pytest.fail.Exception) as failure:
-        _assert_live_export(live)
-    message = str(failure.value)
-    assert "pipelines/agentic-activities.json\n  $.properties.unexpectedOne" in message
-    assert "datasets/csv-adls.json\n  $.properties.unexpectedTwo" in message
-
-
-def test_expected_artifacts_are_not_subject_to_line_ending_conversion() -> None:
-    """Generated CSV CRLF bytes must survive checkout unchanged."""
-    sample = CASES / "full-factory/expected/bundles/metadata/profile_report.csv"
-    result = subprocess.run(
-        ["git", "check-attr", "text", "--", str(sample.relative_to(ROOT))],
-        cwd=ROOT,
-        capture_output=True,
-        check=True,
-        text=True,
-    )
-    assert result.stdout.rstrip().endswith(": text: unset")
-
-
-def test_live_read_only_trigger_and_integration_runtime_fields(tmp_path: Path) -> None:
-    """Live read-only fields are retained for triggers and ignored with unloaded IRs."""
-    live = tmp_path / "live"
-    for directory in (*SHARED_DIRS, "integration_runtimes", "pipelines", "triggers"):
-        shutil.copytree(FIXTURES / directory, live / directory)
-
-    runtime_path = live / "integration_runtimes/azure-ssis-placeholder.json"
-    runtime = _read_json(runtime_path)
-    runtime["properties"]["state"] = "Started"
-    _write_json(runtime_path, runtime)
-    for pipeline_path in (live / "pipelines").glob("*.json"):
-        pipeline = _read_json(pipeline_path)
-        pipeline["properties"]["lastPublishTime"] = "2026-10-13T12:34:56Z"
-        _write_json(pipeline_path, pipeline)
-
-    case_dir = CASES / "full-factory"
-    case = _read_json(case_dir / "case.json")
-    source = tmp_path / "source"
-    output = tmp_path / "output"
-    _build_case_source(case, live, source)
-    assert not (source / "integration_runtimes").exists()
-    assert all(_read_json(path)["properties"]["runtimeState"] == "Stopped" for path in source.glob("triggers/*.json"))
-
-    _run("discover", source, output)
-    assert _normalize_inventory(output / "metadata/inventory.json") == _read_json(case_dir / "expected/inventory.json")
-    _run("convert", source, output)
-    ir, gaps = _capture_convert(output)
-    assert ir == {path.stem: _read_json(path) for path in sorted((case_dir / "expected/ir").glob("*.json"))}
-    assert gaps == _read_json(case_dir / "expected/gaps.json")
-    _run("package", source, output)
-    _assert_tree(case_dir / "expected/bundles", output)

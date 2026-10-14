@@ -6,7 +6,7 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-Usage: setup.sh [subcommand] [options]
+Usage: setup-integration.sh [subcommand] [options]
 
 Subcommands:
   setup        run all setup steps (default)

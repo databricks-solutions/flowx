@@ -38,7 +38,7 @@ all writes beneath a plugin directory, which would otherwise include `agentic_re
 
 ## One-time Azure and GitHub setup
 
-`setup.sh` creates the Entra application and OIDC credential, registers providers, installs and assigns
+`make setup-integration` creates the Entra application and OIDC credential, registers providers, installs and assigns
 the least-privilege custom role, protects the GitHub environment, and sets its secrets. It requires Bash,
 `az`, `gh`, and `jq`, plus active Azure and GitHub CLI logins. The operator needs permission to create 
 Entra applications, administer the repository environment, register providers, and create/assign roles 
@@ -60,9 +60,10 @@ The setup registers `Microsoft.Resources`, `Microsoft.DataFactory`, `Microsoft.S
 The Event Grid permission covers the linked subscription created and removed with the stopped Blob Events
 trigger; it grants no other Event Grid resource operations.
 
-Existing installations must rerun `./setup.sh providers` and `./setup.sh role` (or the full `./setup.sh setup`)
+Existing installations must rerun `make setup-integration ARGS="providers"` and `make setup-integration ARGS="role"`
+(or the full `make setup-integration ARGS="setup"`)
 to register Event Grid and update the existing custom role. Role-definition changes can take a few minutes to
-propagate, so wait a few minutes after `./setup.sh role` before rerunning the workflow.
+propagate, so wait a few minutes after `make setup-integration ARGS="role"` before rerunning the workflow.
 
 Configuration comes from flags or these environment variables: `GITHUB_REPO`, `AZURE_SUBSCRIPTION_ID`, 
 `APP_NAME`, `ENV_NAME`, `ROLE_NAME`, and the required comma-separated `REVIEWERS`. `RESOURCE_OWNER_EMAIL`
@@ -73,13 +74,13 @@ otherwise the secrets step offers hidden interactive prompts.
 
 ```bash
 export REVIEWERS='github-user-one,github-user-two'
-tests/integration/azure/setup.sh setup --dry-run
-tests/integration/azure/setup.sh setup
-tests/integration/azure/setup.sh verify
+make setup-integration ARGS="setup --dry-run"
+make setup-integration ARGS="setup"
+make setup-integration ARGS="verify"
 ```
 
 Use `identity`, `providers`, `role`, `environment`, or `secrets` to rerun one step, and `--yes` for 
-non-interactive automation. Running `setup.sh` without a subcommand defaults to `setup`. The OIDC credential 
+non-interactive automation. Running `make setup-integration` without `ARGS` defaults to `setup`. The OIDC credential
 uses the protected-environment subject `repo:<owner>/<repo>:environment:flowx-live-integration`; no client secret
 is created. Terraform provider auto-registration remains disabled.
 
@@ -87,8 +88,8 @@ Use the `cleanup` subcommand to inspect tagged cleanup candidates. Deletion requ
 name and explicit confirmation; it never performs wildcard deletion:
 
 ```bash
-tests/integration/azure/setup.sh cleanup
-tests/integration/azure/setup.sh cleanup --delete exact-resource-group-name
+make setup-integration ARGS="cleanup"
+make setup-integration ARGS="cleanup --delete exact-resource-group-name"
 ```
 
 ## Run locally
