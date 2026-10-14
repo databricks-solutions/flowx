@@ -460,6 +460,39 @@ def test_arm_expression_folder_path_is_not_a_signature_anchor() -> None:
     assert edges == []
 
 
+def test_different_arm_expression_file_names_under_one_folder_never_join() -> None:
+    """An unevaluated ARM file name stays in the signature, so two different ones under one folder never join."""
+    dataset = _adls_dataset(
+        "ds_landing",
+        file_system="raw",
+        folder_path="@dataset().folderPath",
+        linked_service="ls_lake",
+        file_name="@dataset().fileName",
+    )
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_landing": dataset},
+        linked_services={"ls_lake": _adls_linked_service("ls_lake", account="acct")},
+    )
+
+    def _reference(file_name: str) -> AdfDatasetReference:
+        return AdfDatasetReference(
+            reference_name="ds_landing", parameters={"folderPath": "landing", "fileName": file_name}
+        )
+
+    _, writes = activity_data_assets(
+        AdfActivity(name="Write", type="Copy", outputs=[_reference("[parameters('a')]")]), definitions
+    )
+    reads, _ = activity_data_assets(
+        AdfActivity(name="Read", type="Copy", inputs=[_reference("[parameters('b')]")]), definitions
+    )
+
+    assert writes[0].identity is None and reads[0].identity is None
+    assert writes[0].signature != reads[0].signature
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert edges == []
+
+
 def test_distinct_parameter_bindings_of_same_dataset_are_all_retained() -> None:
     """Same dataset ref, different params -> distinct physical assets, both kept (not collapsed)."""
     dataset = AdfDataset(

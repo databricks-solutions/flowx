@@ -680,22 +680,23 @@ def _path_signature(parameters: dict[str, Any] | None) -> str | None:
     """
     if not parameters:
         return None
-    folder_signature = _normalize_path_expression(parameters.get("folderPath"))
+    folder_signature = _normalize_path_expression(parameters.get("folderPath"), require_physical=True)
     if folder_signature is None:
         return None
     file_signature = _normalize_path_expression(parameters.get("fileName"))
     return f"FP[{folder_signature}]/FN[{file_signature}]"
 
 
-def _normalize_path_expression(expression: Any) -> str | None:
+def _normalize_path_expression(expression: Any, *, require_physical: bool = False) -> str | None:
     """Reduce a (possibly parameterised) ADF path expression to a structural signature.
 
     Keeps the literal path segments and collapses every runtime reference to a
     single ``<P>`` slot, so the result captures the path *shape* (literal skeleton
     plus slot count) without guessing the runtime value. Returns ``None`` when
     there is no literal segment to anchor on (a signature of only slots is too weak
-    a join key -- never guess), including a value that is not physical, such as an
-    unevaluated ARM ``[parameters('folder')]``.
+    a join key -- never guess). With *require_physical*, a value that is not
+    physical, such as an unevaluated ARM ``[parameters('folder')]``, gives ``None``
+    too; without it that value is kept verbatim, so two different ones never match.
     """
     if isinstance(expression, dict):
         expression = expression.get("value", "")
@@ -705,7 +706,7 @@ def _normalize_path_expression(expression: Any) -> str | None:
     if "@" not in text:
         # A bare literal value (no ADF expression): the whole string is the literal
         # path / filename, with no runtime slots.
-        if not _is_physical(text):
+        if require_physical and not _is_physical(text):
             return None
         literal = re.sub(r"/+", "/", text).strip("/")
         return f"{literal}|slots=0" if literal else None

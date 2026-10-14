@@ -1130,6 +1130,8 @@ def main(argv: list[str] | None = None) -> int:
     if not definitions.pipelines:
         _warn_no_pipelines_found(args.source_dir)
 
+    exported_pipeline_names = {pipeline.name for pipeline in definitions.pipelines}
+
     # Filter to a single pipeline when --pipeline is specified
     if args.pipeline:
         matched = [pipeline for pipeline in definitions.pipelines if pipeline.name == args.pipeline]
@@ -1164,7 +1166,7 @@ def main(argv: list[str] | None = None) -> int:
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
     inventory_path = metadata_dir / "inventory.json"
-    source_graphs = adf_definitions_to_source_graphs(definitions)
+    source_graphs = adf_definitions_to_source_graphs(definitions, known_workflows=exported_pipeline_names)
     # Detect motifs once and share the result: the graphs carry them (so they are saved and
     # hashed with each graph), the inventory surfaces them, the profile report counts them.
     motifs_by_pipeline = detect_motifs_by_pipeline(definitions)
