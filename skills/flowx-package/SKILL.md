@@ -189,6 +189,10 @@ Where:
 - After a successful build, `package` **prunes the transient `<output_dir>/.work/`** so the
   final tree contains only the bundle and the kept `metadata/` files. Pass `--keep-intermediates`
   to retain `.work/` for debugging.
+- **To change the conversion after a package**, run convert (same source and options), route,
+  fill-agentic for a unit whose output changes, modify if it was used, then package. The decisions,
+  conversation, stored fills and modify's answers are kept in `metadata/`; hand edits to generated
+  bundle files and `resources/*.yml` are not. See "After package" in the `flowx-route` skill.
 
 **Workspace artifact downloading (default: enabled).** When the report references workspace-resident notebooks (`/Shared/...`), DBFS Spark JARs (`dbfs:/...`), or Spark Python files, the preparer downloads them via the Databricks CLI auth so the resulting bundle is self-contained and deployable across environments. Downloaded notebooks are downloaded under `src/notebooks/` and bound to the default `job_cluster` (since they may rely on classic-compute features). The original `notebook_path` in the resource YAML is rewritten to the bundle-relative path `../src/notebooks/<file>.py`.
 

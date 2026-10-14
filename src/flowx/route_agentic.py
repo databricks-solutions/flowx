@@ -143,6 +143,23 @@ def routing_units(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return units
 
 
+def missing_report_message(output_dir: Path) -> str:
+    """Say why convert's report is missing and what to run, for route and fill-agentic.
+
+    Package prunes ``.work/`` once it has built the bundle, so after a package the report is gone even
+    though convert ran. A ``databricks.yml`` at the top or one folder down shows a package has run.
+    """
+    root = Path(output_dir)
+    work = root / WORK_DIRNAME
+    if (root / "databricks.yml").is_file() or any(root.glob("*/databricks.yml")):
+        return (
+            f"No {REPORT_FILENAME} under {work}: package pruned .work/ when it built the bundle. Re-run convert "
+            "with the same source, then route, which re-applies the plan and the stored fills; then run "
+            "fill-agentic, modify and package as needed."
+        )
+    return f"No {REPORT_FILENAME} under {work}; run the convert phase first."
+
+
 # --------------------------------------------------------------------------- #
 # The routing record stamped onto the report.
 # --------------------------------------------------------------------------- #
@@ -698,7 +715,7 @@ def apply_plan_to_report(
     report_path = work / REPORT_FILENAME
     gaps_path = work / GAPS_FILENAME
     if not report_path.exists():
-        raise FileNotFoundError(f"No {REPORT_FILENAME} under {work}; run the convert phase first.")
+        raise FileNotFoundError(missing_report_message(Path(output_dir)))
 
     report = json.loads(report_path.read_bytes())
     record = routing_record(report)
@@ -1043,7 +1060,7 @@ def apply_agentic_output(
     work = Path(output_dir) / WORK_DIRNAME
     report_path = work / REPORT_FILENAME
     if not report_path.exists():
-        raise FileNotFoundError(f"No {REPORT_FILENAME} under {work}; run the convert phase first.")
+        raise FileNotFoundError(missing_report_message(Path(output_dir)))
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     record = routing_record(report)

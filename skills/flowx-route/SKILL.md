@@ -66,7 +66,8 @@ discover → enrich (default) → convert (deterministic baseline) → route (re
 ```
 
 Run convert **before** route: it builds the deterministic baseline report that routing edits, and
-once every decision is made route refuses without it ("run the convert phase first"). If you run
+once every decision is made route refuses without it ("run the convert phase first"; after a package,
+see "After package" below). If you run
 `convert` again after routing, run `route` straight after it: a fresh report carries no routing
 record, so route takes it as the new baseline and re-applies the plan and the agent's stored outputs
 (fills of convert's own gaps merged against the earlier report are dropped and must be merged again;
@@ -113,40 +114,72 @@ source does (the insights), components, suggested groupings, how each unit will 
 routing conversation, findings, and how to steer. Open it with the customer, or walk through the same
 sections in that order.
 
-Ask open questions grounded in what discover and enrich found — what they want the conversion to
-achieve, the databases behind the extractors, whether they are after a specific pattern such as
-Lakeflow Connect — and record each question and answer in the plan's `conversation`
+Ask what they want the conversion to achieve, and qualify the target pattern for each ingestion
+component (next section). Record each question and answer in the plan's `conversation`
 (`[{"question": "...", "answer": "..."}]`). Package copies it into `route_audit.json`.
 
-### SQL Server sources: ask before suggesting an ingestion pattern
+### Qualify the target pattern before you suggest one
 
-When the factory reads from SQL Server, ask these before you suggest a Lakeflow Connect ingestion
-pattern, and record each question and answer in the plan's `conversation`. Enrich flags such pipelines
-in their `conversion_notes`. In `inventory.json`, an activity's `raw` JSON shows it: a source type of
-`SqlServerSource`, `AzureSqlSource` or `SqlMISource` (`typeProperties.source.type` on Copy and Lookup
-activities). The linked service types `SqlServer`, `AzureSqlDatabase` and `AzureSqlMI` are a second
-signal, only when the source export itself is at hand.
+A component that ingests from a database can land in one of four patterns. The library doesn't run
+these checks; you do, from the facts and the limits, and you record them as free text in the plan's
+`conversation`.
 
-1. **Gateway or integrated CDC, and is integrated CDC enabled on their workspace?**
-   - **Gateway-based:** an ingestion gateway runs continuously on classic compute and stages changes,
-     and a separate ingestion pipeline (serverless) applies them. The pipeline references the gateway
-     by `ingestion_gateway_id`.
-   - **Integrated CDC:** one pipeline extracts and applies on each update. It references a Unity Catalog
-     connection by `connection_name` with `connector_type: CDC`. The Databricks account team has to
-     enable it on the workspace, and it is created through the API, the CLI or a bundle, not the UI.
+| Pattern | What it is | Facts it needs | Decision |
+|---|---|---|---|
+| **D1** deterministic 1:1 | The engine's port (For each + JDBC notebooks), same behaviour | None | `deterministic` |
+| **M1** Lakeflow Connect managed | Gateway or integrated CDC ingestion pipelines generated from the worklist, sharded by database or schema | Scale, repeat, fan-in, change, bar, policy, shaping | `agentic` |
+| **M2** metadata-driven worklist | A job over the worklist that skips unchanged sources, reads the change feed over JDBC, MERGEs (fan-in allowed) and reseeds when retention lapses | Scale, change, fan-in, bar | `agentic` |
+| **A1** agentic re-architecture | Bespoke, for example several workspaces or metastores, an accelerator or partner tool, or mixed patterns | Whatever conflicts remain | `agentic` |
 
-   If they don't know whether integrated CDC is enabled, say what each option needs and let them choose.
-   Don't assume it is enabled.
-2. **Classic or serverless compute?** The gateway runs on classic compute only. Integrated CDC runs on
-   classic compute by default, and on serverless once serverless network connectivity to the database
-   is set up.
-3. **Roughly how many tables?** This decides how many ingestion pipelines the fill authors: each
-   pipeline has a table limit, so check the current limit in the connector docs and split larger sets
-   across pipelines.
+The facts are the ones `flowx-enrich` asks about. **Follow-up questions:** carry each question and
+answer from the insights' `conversion_notes` into `conversation`, then ask at most three more, only on
+facts still open for the patterns still in play. These are usually platform-side: whether a feature is
+enabled on the workspace, which compute is allowed, how many tables the metastore already holds. Never
+re-ask a fact already answered, a "don't know" included. End each answer with the fact on one line,
+`fact: value (source: code | data | user | assumed)`.
 
-Before suggesting either pattern, check its current release state and availability against the public
-Databricks docs, as `flowx-enrich` requires, and tell the customer plainly what you found. Don't rely
-on a remembered state. The fill (Step 3) builds the ingestion from these recorded answers.
+**Limits** come from `platform-limits.json` in this skill directory. Each row has its value, whether the
+docs say it is fixed, its source page and the date it was read; the `unconfirmed` list holds claims
+the public docs don't state. Limits change, so before you recommend a pattern open each row it rests
+on and check the value still holds. If it has changed, use the live value, and record it with its page
+and the date in `conversation`. The file covers the SQL Server connector today; for another
+connector, read its limits page the same way.
+
+Let **N** be the total tables and **L** the tables per pipeline for the chosen mode
+(`sqlserver_gateway_tables_per_pipeline`, `sqlserver_integrated_cdc_tables_per_pipeline`). One pipeline
+can't hold two tables with the same name (`sqlserver_same_name_tables_per_pipeline`), so when names
+repeat across databases the pipeline count is **P** = Σ over databases of ⌈tables in the database / L⌉;
+otherwise P = ⌈N / L⌉.
+
+| Check | Passes when | Limits rows | When it fails |
+|---|---|---|---|
+| C1 fan-in | Fan-in isn't required, or only a few sources feed each logical table (a UNION view over a handful is fine) | `lakeflow_connect_fan_in` (unconfirmed) | M1 out |
+| C2 pipelines | P ≤ saved pipelines per workspace. Warn when P > concurrent updates | `pipelines_saved_per_workspace`, `pipelines_concurrent_updates_per_workspace` | M1 strained or out |
+| C3 tables | N plus the tables the metastore already holds fits per metastore, and tables per schema and schemas per catalog fit | `uc_tables_per_metastore`, `uc_tables_per_schema`, `uc_schemas_per_catalog` | M1 out, or a quota and a multi-catalog plan |
+| C4 history | Current state is enough, or every table has a change feed that carries every change, on a source tier that supports it | Source docs | M1 gives current state only; M2 gives state per run |
+| C5 mode | Gateway: P always-on classic gateways are acceptable. Integrated CDC: the workspace has it enabled | `sqlserver_gateway_one_gateway_per_pipeline`, `sqlserver_gateway_compute`, `sqlserver_integrated_cdc_workspace_enablement` | Pick the other mode, or M1 out |
+| C6 run time | ⌈P / min(concurrent updates, chosen concurrency)⌉ × the minimum update run fits the allowed run time. A pipeline task inside For each runs one iteration at a time | `pipelines_concurrent_updates_per_workspace`, `sqlserver_integrated_cdc_minimum_extraction`, `pipelines_pipeline_task_in_for_each` | M1 out |
+| C7 cost floor | P × updates per day × the minimum update run × the cluster rate fits the budget or today's spend. Compare M2, which pays mostly for sources that changed | `sqlserver_integrated_cdc_minimum_extraction` | M1 not preferred |
+| C8 retention | Change-feed retention is longer than the longest gap between successful runs, with margin | Source docs | Any pattern: a reseed risk, and history is lost on a full refresh |
+| C9 network | Classic compute has a network path to the source; serverless has NCC private endpoints within the region's limit | `serverless_private_endpoints_per_region` | Choose the compute |
+| C10 connections | The source servers fit the connections per metastore | `uc_connections_per_metastore` | M1 needs a quota, or M2 |
+| C11 shaping | No expression, join or row filter has to happen at landing | None | M1 isn't 1:1; M2 or D1 |
+| C12 release | The chosen mode's release state, checked live as `flowx-enrich` requires, is disclosed and the customer accepts it | `sqlserver_integrated_cdc_release_state` (unconfirmed) | M1 in the other mode only |
+| C13 jobs (M2, D1) | Tasks and parent tasks running at once, and saved jobs, fit; For each inputs fit through task values, so batch sources per task | `jobs_tasks_running_per_workspace`, `jobs_parent_tasks_running_per_workspace`, `jobs_saved_per_workspace`, `jobs_for_each_inputs_via_task_values` | Batch, or A1 |
+
+**Suggestion order:**
+
+1. **M1** when C1 to C12 all pass. It's the managed option.
+2. **M2** when M1 fails on C1, C2, C3, C6 or C7, and C13 passes.
+3. **D1** when the customer wants like-for-like, or no database ingestion is in scope.
+4. **A1** when no pattern passes, or the requirements conflict.
+
+Beside each pattern you rule out, show the failing check and its source: the limits row's
+`source_url` and `read_on`, or the fact and where it came from. A pattern whose facts are still unknown
+shows as *not qualified: needs <fact>*; present the remaining candidates with their assumptions marked
+rather than asking again. The customer still decides, and the fill (Step 3) builds the pattern they
+chose. On a source where route records deterministic decisions only, D1 is the decision and the facts
+inform the per-gap fills.
 
 ### Suggested groupings
 
@@ -245,9 +278,10 @@ pipelines you author (no LLM in the library, which validates and records).
 MCP: `flowx(command="fill_agentic", parameters={"output_dir": ..., "members": [...], "pipelines": [...]})`
 (pass `pipelines` inline as a list, or `pipelines_path`).
 
-For SQL Server sources, author the ingestion from the answers recorded in the plan's `conversation`
-(gateway or integrated CDC, the compute, and the table count), and don't pick a pattern the customer
-didn't choose.
+Author the pattern the customer chose (see "Qualify the target pattern"), from the facts recorded in
+the plan's `conversation`, and don't pick one they didn't choose. An M1 fill authors one ingestion
+pipeline per shard, each within L tables and with no table name twice; an M2 fill authors the job, a
+seed for its control table, and its notebooks.
 
 To keep a pipeline 1:1, fill its component with one authored pipeline of the **same name**. The
 per-pipeline `convert --merge-agentic` is for convert's **own** agentic gaps only: it refuses, writing
@@ -379,6 +413,31 @@ and `replaced` history (a grouping also lists `grouped_components`), the gap fil
 baseline report and gaps, the inventory, the saved source graphs and agentic insights the plan was
 bound to, and the packaged report. It survives the prune of `.work/`
 and documents what was packaged and how.
+
+## After package: change the conversion
+
+Package prunes `.work/` once it has built the bundle, so route and fill-agentic refuse straight
+after a package and say that package pruned `.work/`. Everything they rebuild from is kept in
+`metadata/`: the decisions, accepted groupings and conversation in `conversion_plan.json`, every
+stored fill and its `replaced` history in `agentic_conversion.json`, and modify's answers in
+`configuration.json`. To change a decision, an answer or an agent output after a package, run:
+
+1. **convert**, with the same source and options. It writes `.work/` again.
+2. **route**, after editing the plan if a decision or an answer is what changes. Route takes the fresh
+   report as its new baseline and re-applies the plan and the stored outputs. Fills of convert's own
+   gaps come back when convert wrote the same report as before; otherwise route says how many it
+   dropped, and you merge them again.
+3. **fill-agentic**, only for a unit whose output changes. Revise the fill when a changed answer
+   changes the pattern or its shape; nothing flags that for you. New pipelines replace the stored ones
+   and add an entry to the unit's `replaced` history.
+4. **modify**, if it was used, with the same answers (`metadata/configuration.json` lists them).
+5. **package**.
+
+Package overwrites the bundle files it generates and clears `resources/*.yml` before writing, so hand
+edits to them are lost. To keep a change to an agentic unit's resource, put it in the authored
+pipeline's resource `definition` and run fill-agentic. With `--keep-intermediates` (MCP
+`keep_intermediates`) package leaves `.work/` in place, so you can start at route or fill-agentic. A
+re-discover clears `metadata/` and `.work/`, the plan and the fills with them.
 
 ## Reference
 

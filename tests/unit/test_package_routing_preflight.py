@@ -457,6 +457,26 @@ def _fill_solo(output_dir: Path) -> None:
     assert adapter_main([*fill, str(authored_path)]) == 0
 
 
+def test_route_and_fill_agentic_after_a_package_say_package_pruned_work_and_what_to_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    route = _route_solo_agentic_and_modify(tmp_path, report_path)
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files"]) == 0
+    assert not (tmp_path / WORK_DIRNAME).exists()
+    capsys.readouterr()
+
+    assert adapter_main(route) == 1
+    route_error = capsys.readouterr().err
+    fill = ["fill-agentic", "--output-dir", str(tmp_path), "--members", "solo", "--pipelines-path"]
+    assert adapter_main([*fill, str(tmp_path / "authored.json")]) == 1
+    fill_error = capsys.readouterr().err
+
+    for error in (route_error, fill_error):
+        assert "package pruned .work/ when it built the bundle" in error
+        assert "Re-run convert with the same source, then route" in error
+
+
 def test_package_asks_to_re_run_modify_after_a_re_convert_and_re_route(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
