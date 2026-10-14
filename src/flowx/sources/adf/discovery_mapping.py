@@ -112,15 +112,17 @@ def adf_definitions_to_source_graphs(definitions: AdfDefinitions) -> list[Source
     :attr:`SourceGraph.lineage` block is derived (control + data edges) once its
     nodes' reads / writes and invocation markers are populated -- data edges are
     joined within a single graph, matching the per-workflow scope of the shared
-    :class:`~flowx.models.ir.Lineage` model.
+    :class:`~flowx.models.ir.Lineage` model. An ``ExecutePipeline`` edge is resolved
+    only when its child pipeline is one of the pipelines in this export.
 
     ``definitions`` is threaded down to the activity mapper so a node's data assets
     resolve against the factory's datasets and linked services.
     """
     graphs = [adf_pipeline_to_source_graph(pipeline, definitions) for pipeline in definitions.pipelines]
     _attach_schedules(graphs, definitions.triggers)
+    exported_pipeline_names = {graph.name for graph in graphs}
     for graph in graphs:
-        graph.lineage = build_graph_lineage(graph)
+        graph.lineage = build_graph_lineage(graph, known_workflows=exported_pipeline_names)
     return graphs
 
 

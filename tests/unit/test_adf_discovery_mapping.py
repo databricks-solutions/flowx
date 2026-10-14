@@ -193,6 +193,30 @@ def test_definitions_map_preserves_pipeline_order(adf_definitions) -> None:
     assert all(g.source == SOURCE_ADF for g in graphs)
 
 
+def test_execute_pipeline_edge_is_resolved_only_when_the_child_is_in_the_export() -> None:
+    """A child pipeline missing from the export gives an unresolved edge; one that is present gives a resolved edge."""
+
+    def _execute(name: str, child: str) -> dict:
+        return {"name": name, "type": "ExecutePipeline", "typeProperties": {"pipeline": {"referenceName": child}}}
+
+    definitions = AdfDefinitions(
+        pipelines=[
+            _parse_pipeline_json(
+                {
+                    "name": "parent",
+                    "properties": {"activities": [_execute("RunChild", "child"), _execute("RunMissing", "missing")]},
+                }
+            ),
+            _parse_pipeline_json({"name": "child", "properties": {"activities": []}}),
+        ]
+    )
+    parent = adf_definitions_to_source_graphs(definitions)[0]
+
+    assert parent.lineage is not None
+    resolved_by_target = {edge.target_workflow: edge.resolved for edge in parent.lineage.control_edges}
+    assert resolved_by_target == {"child": True, "missing": False}
+
+
 # ---------------------------------------------------------------------------
 # Triggers / schedules (BLOCKING 1)
 # ---------------------------------------------------------------------------

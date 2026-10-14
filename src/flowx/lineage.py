@@ -123,7 +123,7 @@ def control_edges_from_calls(
     return edges
 
 
-def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
+def build_control_edges(pipeline: Pipeline, *, known_workflows: Collection[str] | None = None) -> list[ControlEdge]:
     """Derive cross-workflow invocation edges for a pipeline.
 
     Emits one :class:`ControlEdge` per invoking activity -- an
@@ -137,6 +137,8 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
 
     Args:
         pipeline: The translated pipeline IR.
+        known_workflows: Names of the workflows present in this export; see
+            :func:`control_edges_from_calls`.
 
     Returns:
         Deduplicated list of control edges, in first-seen order.
@@ -152,7 +154,7 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
                     # job_name is the caller's own task key, so it is not a cross-workflow edge.
                     yield activity.job_name or "", None, activity.task_key
 
-    return control_edges_from_calls(pipeline.name, _calls())
+    return control_edges_from_calls(pipeline.name, _calls(), known_workflows=known_workflows)
 
 
 def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, str | None] | None:
@@ -293,17 +295,19 @@ def build_motif_annotations(pipeline: Pipeline) -> list[MotifAnnotation]:
     return annotations
 
 
-def build_lineage(pipeline: Pipeline) -> Lineage:
+def build_lineage(pipeline: Pipeline, *, known_workflows: Collection[str] | None = None) -> Lineage:
     """Compose the full source-neutral lineage block for a pipeline.
 
     Args:
         pipeline: The translated pipeline IR.
+        known_workflows: Names of the workflows present in this export; see
+            :func:`control_edges_from_calls`.
 
     Returns:
         A :class:`Lineage` with control edges, data edges, and motif annotations.
     """
     return Lineage(
-        control_edges=build_control_edges(pipeline),
+        control_edges=build_control_edges(pipeline, known_workflows=known_workflows),
         data_edges=build_data_edges(pipeline),
         motifs=build_motif_annotations(pipeline),
     )

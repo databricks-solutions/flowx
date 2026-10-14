@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from flowx.lineage import data_edges_from_endpoints
 from flowx.models.adf_ast import (
     AdfActivity,
@@ -437,6 +439,25 @@ def test_unresolved_reference_without_path_anchor_has_empty_signature() -> None:
     assert reads[0].identity is None
     # Never the bare dataset name: an empty signature cannot produce a signature-tier join.
     assert reads[0].signature == ""
+
+
+def test_arm_expression_folder_path_is_not_a_signature_anchor() -> None:
+    """An unevaluated ARM expression bound as the folder is not a literal anchor, so it never joins two datasets."""
+    dataset = AdfDataset(
+        name="ds_landing",
+        type="DelimitedText",
+        properties={
+            "typeProperties": {"location": {"fileSystem": "@dataset().fs", "folderPath": "@dataset().folderPath"}}
+        },
+    )
+    definitions = _definitions(ds_landing=dataset)
+    reference = AdfDatasetReference(reference_name="ds_landing", parameters={"folderPath": "[parameters('landing')]"})
+    _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference]), definitions)
+    reads, _ = activity_data_assets(AdfActivity(name="Read", type="Copy", inputs=[reference]), definitions)
+
+    assert writes[0].signature == reads[0].signature == ""
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert edges == []
 
 
 def test_distinct_parameter_bindings_of_same_dataset_are_all_retained() -> None:
@@ -901,3 +922,51 @@ def test_same_folder_shape_on_one_container_of_a_hidden_account_still_joins() ->
     assert [(edge.match_kind, edge.match_key) for edge in edges] == [
         ("signature", "ST[staging@ls_azure_blob]/FP[landing|slots=1]/FN[None]")
     ]
+
+
+def test_arm_expression_linked_service_name_never_qualifies_an_identity() -> None:
+    """A linked service named by an unevaluated ARM expression is not a plain name, so it gives no table identity."""
+    definitions = _definitions(
+        ds_orders=_table_dataset("ds_orders", schema="dbo", table="Orders", linked_service="[parameters('ls')]")
+    )
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orders"), definitions) is None
+
+
+def _bucket_definitions(location_type: str, **buckets: str) -> AdfDefinitions:
+    """One parameterised-folder dataset per entry, in bucket ``buckets[name]`` of a single S3 or GCS linked service."""
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: AdfDataset(
+                name=name,
+                type="DelimitedText",
+                properties={
+                    "typeProperties": {
+                        "location": {"type": location_type, "bucketName": bucket, "folderPath": "@dataset().folderPath"}
+                    },
+                    "linkedServiceName": {"referenceName": "ls_bucket_store"},
+                },
+            )
+            for name, bucket in buckets.items()
+        },
+        linked_services={
+            "ls_bucket_store": AdfLinkedService(
+                name="ls_bucket_store", type="AmazonS3", properties={"typeProperties": {"accessKeyId": "AKIAEXAMPLE"}}
+            )
+        },
+    )
+
+
+@pytest.mark.parametrize("location_type", ["AmazonS3Location", "GoogleCloudStorageLocation"])
+def test_same_folder_shape_in_different_buckets_does_not_join_by_signature(location_type: str) -> None:
+    """S3 and GCS name the bucket in ``bucketName``, so two buckets with one folder layout get distinct signatures."""
+    definitions = _bucket_definitions(location_type, ds_sales="sales-bucket", ds_hr="hr-bucket")
+    _, sales_writes = activity_data_assets(_landing_copy("WriteSales", dataset="ds_sales", produced=True), definitions)
+    hr_reads, _ = activity_data_assets(_landing_copy("ReadHR", dataset="ds_hr", produced=False), definitions)
+
+    assert sales_writes[0].signature == "ST[sales-bucket@ls_bucket_store]/FP[landing|slots=1]/FN[None]"
+    assert hr_reads[0].signature == "ST[hr-bucket@ls_bucket_store]/FP[landing|slots=1]/FN[None]"
+    edges = data_edges_from_endpoints(
+        [("WriteSales", asset) for asset in sales_writes], [("ReadHR", asset) for asset in hr_reads]
+    )
+    assert edges == []
