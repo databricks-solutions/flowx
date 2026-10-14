@@ -460,6 +460,27 @@ def test_arm_expression_folder_path_is_not_a_signature_anchor() -> None:
     assert edges == []
 
 
+def test_arm_expression_folder_path_with_a_quoted_at_sign_is_not_a_signature_anchor() -> None:
+    """An ARM folder expression is rejected even when a quoted literal inside it holds ``@``."""
+    dataset = AdfDataset(
+        name="ds_landing",
+        type="DelimitedText",
+        properties={
+            "typeProperties": {"location": {"fileSystem": "@dataset().fs", "folderPath": "@dataset().folderPath"}}
+        },
+    )
+    definitions = _definitions(ds_landing=dataset)
+    reference = AdfDatasetReference(
+        reference_name="ds_landing", parameters={"folderPath": "[concat(parameters('root'), '@archive')]"}
+    )
+    _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference]), definitions)
+    reads, _ = activity_data_assets(AdfActivity(name="Read", type="Copy", inputs=[reference]), definitions)
+
+    assert writes[0].signature == reads[0].signature == ""
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert edges == []
+
+
 def test_different_arm_expression_file_names_under_one_folder_never_join() -> None:
     """An unevaluated ARM file name stays in the signature, so two different ones under one folder never join."""
     dataset = _adls_dataset(

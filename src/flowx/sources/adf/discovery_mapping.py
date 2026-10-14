@@ -39,7 +39,7 @@ the Switch's own default branch or another case.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from typing import Any
 
 from flowx.discovery_inventory import STRATEGY_PROPERTY
@@ -123,14 +123,26 @@ def adf_definitions_to_source_graphs(
     names every pipeline in the export; pass it when *definitions* holds only some
     of them (such as under ``--pipeline``), so a child that was exported but not
     selected still counts as resolved. It defaults to the pipelines in *definitions*.
+    A child is matched case-insensitively, as ADF matches pipeline names.
     """
     graphs = [adf_pipeline_to_source_graph(pipeline, definitions) for pipeline in definitions.pipelines]
     _attach_schedules(graphs, definitions.triggers)
-    if known_workflows is None:
-        known_workflows = {graph.name for graph in graphs}
+    exported_pipeline_names = _AdfPipelineNames(
+        known_workflows if known_workflows is not None else (graph.name for graph in graphs)
+    )
     for graph in graphs:
-        graph.lineage = build_graph_lineage(graph, known_workflows=known_workflows)
+        graph.lineage = build_graph_lineage(graph, known_workflows=exported_pipeline_names)
     return graphs
+
+
+class _AdfPipelineNames(frozenset[str]):
+    """Pipeline names that answer ``in`` case-insensitively, as ADF compares pipeline names."""
+
+    def __new__(cls, names: Iterable[str]) -> _AdfPipelineNames:
+        return super().__new__(cls, (name.lower() for name in names))
+
+    def __contains__(self, name: object) -> bool:
+        return isinstance(name, str) and super().__contains__(name.lower())
 
 
 def _attach_schedules(graphs: list[SourceGraph], triggers: list[AdfTrigger]) -> None:
