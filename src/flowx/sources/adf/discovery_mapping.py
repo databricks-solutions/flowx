@@ -39,11 +39,16 @@ the Switch's own default branch or another case.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable
+from collections.abc import Collection
 from typing import Any
 
 from flowx.discovery_inventory import STRATEGY_PROPERTY
-from flowx.discovery_lineage import INVOKES_WAIT_PROPERTY, INVOKES_WORKFLOW_PROPERTY, build_graph_lineage
+from flowx.discovery_lineage import (
+    INVOKES_WAIT_PROPERTY,
+    INVOKES_WORKFLOW_PROPERTY,
+    build_graph_lineage,
+    walk_nodes,
+)
 from flowx.models.adf_ast import AdfActivity, AdfDefinitions, AdfParameter, AdfPipeline, AdfTrigger, AdfVariable
 from flowx.models.discovery import (
     CONCEPT_BRANCH,
@@ -123,26 +128,27 @@ def adf_definitions_to_source_graphs(
     names every pipeline in the export; pass it when *definitions* holds only some
     of them (such as under ``--pipeline``), so a child that was exported but not
     selected still counts as resolved. It defaults to the pipelines in *definitions*.
-    A child is matched case-insensitively, as ADF matches pipeline names.
+    A child is matched case-insensitively, as ADF matches pipeline names, and a
+    matched child is recorded under its exported spelling; an unmatched one keeps
+    the spelling written at the call site.
     """
     graphs = [adf_pipeline_to_source_graph(pipeline, definitions) for pipeline in definitions.pipelines]
     _attach_schedules(graphs, definitions.triggers)
-    exported_pipeline_names = _AdfPipelineNames(
-        known_workflows if known_workflows is not None else (graph.name for graph in graphs)
-    )
+    exported_names = known_workflows if known_workflows is not None else [graph.name for graph in graphs]
+    exported_spelling = {name.lower(): name for name in exported_names}
+    exported_pipeline_names = set(exported_spelling.values())
     for graph in graphs:
+        _use_exported_child_spelling(graph, exported_spelling)
         graph.lineage = build_graph_lineage(graph, known_workflows=exported_pipeline_names)
     return graphs
 
 
-class _AdfPipelineNames(frozenset[str]):
-    """Pipeline names that answer ``in`` case-insensitively, as ADF compares pipeline names."""
-
-    def __new__(cls, names: Iterable[str]) -> _AdfPipelineNames:
-        return super().__new__(cls, (name.lower() for name in names))
-
-    def __contains__(self, name: object) -> bool:
-        return isinstance(name, str) and super().__contains__(name.lower())
+def _use_exported_child_spelling(graph: SourceGraph, exported_spelling: dict[str, str]) -> None:
+    """Rewrite each ``ExecutePipeline`` child name to the exported pipeline it names, ignoring case."""
+    for node in walk_nodes(graph.tasks):
+        callee = node.properties.get(INVOKES_WORKFLOW_PROPERTY)
+        if isinstance(callee, str) and callee.lower() in exported_spelling:
+            node.properties[INVOKES_WORKFLOW_PROPERTY] = exported_spelling[callee.lower()]
 
 
 def _attach_schedules(graphs: list[SourceGraph], triggers: list[AdfTrigger]) -> None:

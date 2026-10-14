@@ -217,23 +217,46 @@ def test_execute_pipeline_edge_is_resolved_only_when_the_child_is_in_the_export(
     assert resolved_by_target == {"child": True, "missing": False}
 
 
+def _execute_pipeline(name: str, child: str) -> dict:
+    return {"name": name, "type": "ExecutePipeline", "typeProperties": {"pipeline": {"referenceName": child}}}
+
+
 def test_execute_pipeline_child_is_matched_case_insensitively_like_adf() -> None:
-    """ADF names are case-insensitive, so a reference to ``Child`` resolves to the exported ``child`` as written."""
-    run_child = {
-        "name": "RunChild",
-        "type": "ExecutePipeline",
-        "typeProperties": {"pipeline": {"referenceName": "Child"}},
-    }
+    """A reference to ``Child`` resolves to the exported ``child`` under that spelling; a missing one keeps its own."""
+    activities = [
+        _execute_pipeline("RunChild", "Child"),
+        _execute_pipeline("RunChildAgain", "CHILD"),
+        _execute_pipeline("RunMissing", "Missing"),
+    ]
     definitions = AdfDefinitions(
         pipelines=[
-            _parse_pipeline_json({"name": "parent", "properties": {"activities": [run_child]}}),
+            _parse_pipeline_json({"name": "parent", "properties": {"activities": activities}}),
             _parse_pipeline_json({"name": "child", "properties": {"activities": []}}),
         ]
     )
     parent = adf_definitions_to_source_graphs(definitions)[0]
 
     assert parent.lineage is not None
-    assert [(edge.target_workflow, edge.resolved) for edge in parent.lineage.control_edges] == [("Child", True)]
+    assert [(edge.target_workflow, edge.via_task_key, edge.resolved) for edge in parent.lineage.control_edges] == [
+        ("child", "RunChild", True),
+        ("child", "RunChildAgain", True),
+        ("Missing", "RunMissing", False),
+    ]
+
+
+def test_execute_pipeline_calling_itself_in_another_case_is_not_an_edge() -> None:
+    """ADF names are case-insensitive, so ``Parent`` running ``parent`` is a self-call and gives no edge."""
+    definitions = AdfDefinitions(
+        pipelines=[
+            _parse_pipeline_json(
+                {"name": "Parent", "properties": {"activities": [_execute_pipeline("RunSelf", "parent")]}}
+            ),
+        ]
+    )
+    parent = adf_definitions_to_source_graphs(definitions)[0]
+
+    assert parent.lineage is not None
+    assert parent.lineage.control_edges == []
 
 
 # ---------------------------------------------------------------------------
