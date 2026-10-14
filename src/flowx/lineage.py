@@ -25,7 +25,7 @@ the in-place dependency rewrite in ``motifs/collapser.py``.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 
 from flowx.models.ir import (
     Activity,
@@ -76,6 +76,8 @@ def walk_activities(activities: list[Activity]) -> Iterator[Activity]:
 def control_edges_from_calls(
     source_workflow: str,
     calls: Iterable[tuple[str, bool | None, str]],
+    *,
+    known_workflows: Collection[str] | None = None,
 ) -> list[ControlEdge]:
     """Assemble deduplicated control edges from raw invocation primitives.
 
@@ -89,11 +91,15 @@ def control_edges_from_calls(
         calls: One ``(target_workflow, wait_for_completion, via_task_key)`` triple
             per call site, in the order they should be considered. ``target_workflow``
             may be empty when the callee could not be resolved from a partial export.
+        known_workflows: Names of the workflows present in this export. When given,
+            an edge is resolved only when its target is one of them, so a callee
+            missing from the export stays unresolved. When ``None``, any non-empty
+            target counts as resolved.
 
     Returns:
         Deduplicated control edges in first-seen order. A call whose target equals
-        ``source_workflow`` is dropped (no self-edge); an empty target is kept with
-        ``resolved=False`` rather than dropped.
+        ``source_workflow`` is dropped (no self-edge); an empty or unknown target is
+        kept with ``resolved=False`` rather than dropped.
     """
     edges: list[ControlEdge] = []
     seen: set[tuple[str, str, str]] = set()
@@ -111,13 +117,13 @@ def control_edges_from_calls(
                 target_workflow=target_name,
                 via_task_key=via_task_key,
                 wait_for_completion=wait,
-                resolved=bool(target_name),
+                resolved=bool(target_name) and (known_workflows is None or target_name in known_workflows),
             )
         )
     return edges
 
 
-def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
+def build_control_edges(pipeline: Pipeline, *, known_workflows: Collection[str] | None = None) -> list[ControlEdge]:
     """Derive cross-workflow invocation edges for a pipeline.
 
     Emits one :class:`ControlEdge` per invoking activity -- an
@@ -131,6 +137,8 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
 
     Args:
         pipeline: The translated pipeline IR.
+        known_workflows: Names of the workflows present in this export; see
+            :func:`control_edges_from_calls`.
 
     Returns:
         Deduplicated list of control edges, in first-seen order.
@@ -146,7 +154,7 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
                     # job_name is the caller's own task key, so it is not a cross-workflow edge.
                     yield activity.job_name or "", None, activity.task_key
 
-    return control_edges_from_calls(pipeline.name, _calls())
+    return control_edges_from_calls(pipeline.name, _calls(), known_workflows=known_workflows)
 
 
 def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, str | None] | None:
@@ -284,17 +292,19 @@ def build_motif_annotations(pipeline: Pipeline) -> list[MotifAnnotation]:
     return annotations
 
 
-def build_lineage(pipeline: Pipeline) -> Lineage:
+def build_lineage(pipeline: Pipeline, *, known_workflows: Collection[str] | None = None) -> Lineage:
     """Compose the full source-neutral lineage block for a pipeline.
 
     Args:
         pipeline: The translated pipeline IR.
+        known_workflows: Names of the workflows present in this export; see
+            :func:`control_edges_from_calls`.
 
     Returns:
         A :class:`Lineage` with control edges, data edges, and motif annotations.
     """
     return Lineage(
-        control_edges=build_control_edges(pipeline),
+        control_edges=build_control_edges(pipeline, known_workflows=known_workflows),
         data_edges=build_data_edges(pipeline),
         motifs=build_motif_annotations(pipeline),
     )

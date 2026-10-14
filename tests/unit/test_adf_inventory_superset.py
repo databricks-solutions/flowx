@@ -225,3 +225,12 @@ def test_detected_motifs_are_saved_inside_the_hashed_graphs(tmp_path: Path) -> N
         saved = sorted((motif.motif_id, tuple(motif.member_task_keys)) for motif in lineage.motifs)
         listed = sorted((motif["motif_id"], tuple(motif["member_task_keys"])) for motif in pipeline["motifs"])
         assert set(listed) <= set(saved)
+
+
+def test_discover_twice_on_the_same_export_gives_identical_inventory_bytes(tmp_path: Path) -> None:
+    """The same export always gives the same ``inventory.json`` bytes, so it carries no ``generated_at``."""
+    first = (_run_discover(tmp_path / "first") / "inventory.json").read_bytes()
+    second = (_run_discover(tmp_path / "second") / "inventory.json").read_bytes()
+
+    assert first == second
+    assert "generated_at" not in json.loads(first)

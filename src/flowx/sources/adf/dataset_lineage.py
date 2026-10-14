@@ -477,13 +477,16 @@ def _unparameterised_linked_service_name(dataset_props: dict[str, Any], definiti
     A linked service with no parameters points at the same store on every use, so its
     name can stand in for a server or account it hides in a secret. One that takes
     parameters, on its reference or in its own definition, may point somewhere else
-    for each binding.
+    for each binding. A name that is not plain, such as an unevaluated
+    ``[parameters('ls')]``, gives ``None`` too.
     """
     linked_service_name, reference_parameters = _linked_service_reference(dataset_props)
     if not linked_service_name or reference_parameters:
         return None
     linked_service = definitions.get_linked_service(linked_service_name)
     if linked_service is not None and linked_service.properties.get("parameters"):
+        return None
+    if not _is_physical(linked_service_name):
         return None
     return linked_service_name
 
@@ -533,11 +536,14 @@ def _resolve_file_store(
 ) -> tuple[str | None, str | None]:
     """Resolve a file dataset's ``(file system, storage account)``.
 
-    Each part is ``None`` unless it resolves to a literal. The path identity and the
-    signature's store qualifier both read the store here, so they always agree on
-    what counts as a known file system and account.
+    The file system is the ADLS ``fileSystem``, the Blob ``container``, or the S3 /
+    GCS ``bucketName``. Each part is ``None`` unless it resolves to a literal. The
+    path identity and the signature's store qualifier both read the store here, so
+    they always agree on what counts as a known file system and account.
     """
-    file_system = _resolve_param_value(location.get("fileSystem") or location.get("container"), dataset_params, context)
+    file_system = _resolve_param_value(
+        location.get("fileSystem") or location.get("container") or location.get("bucketName"), dataset_params, context
+    )
     account = _resolve_storage_account(linked_service)
     return (
         file_system if file_system and _is_physical(file_system) else None,
@@ -688,7 +694,8 @@ def _normalize_path_expression(expression: Any) -> str | None:
     single ``<P>`` slot, so the result captures the path *shape* (literal skeleton
     plus slot count) without guessing the runtime value. Returns ``None`` when
     there is no literal segment to anchor on (a signature of only slots is too weak
-    a join key -- never guess).
+    a join key -- never guess), including a value that is not physical, such as an
+    unevaluated ARM ``[parameters('folder')]``.
     """
     if isinstance(expression, dict):
         expression = expression.get("value", "")
@@ -698,6 +705,8 @@ def _normalize_path_expression(expression: Any) -> str | None:
     if "@" not in text:
         # A bare literal value (no ADF expression): the whole string is the literal
         # path / filename, with no runtime slots.
+        if not _is_physical(text):
+            return None
         literal = re.sub(r"/+", "/", text).strip("/")
         return f"{literal}|slots=0" if literal else None
     marked = _PARAM_REF_RE.sub("<P>", text)

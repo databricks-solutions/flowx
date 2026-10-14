@@ -144,6 +144,16 @@ def test_control_edges_unresolved_callee_is_recorded_not_dropped():
     assert edges[0].resolved is False
 
 
+def test_control_edges_callee_missing_from_known_workflows_is_unresolved():
+    """Given the workflows in the export, only a callee that is one of them counts as resolved."""
+    pipeline = Pipeline(name="parent", tasks=[_execute("call_child", "child"), _execute("call_missing", "missing")])
+
+    edges = build_control_edges(pipeline, known_workflows={"parent", "child"})
+
+    assert {edge.target_workflow: edge.resolved for edge in edges} == {"child": True, "missing": False}
+    assert [edge.resolved for edge in build_lineage(pipeline, known_workflows={"child"}).control_edges] == [True, False]
+
+
 def test_control_edges_no_self_edge():
     """A pipeline invoking itself produces no edge."""
     pipeline = Pipeline(name="loop", tasks=[_execute("call", "loop")])

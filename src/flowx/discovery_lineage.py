@@ -20,7 +20,7 @@ Airflow graph derives lineage through this one code path once its nodes carry
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 
 from flowx.lineage import control_edges_from_calls, data_edges_from_endpoints
 from flowx.models.discovery import ContainerNode, SourceGraph, SourceNode
@@ -58,7 +58,9 @@ def walk_nodes(nodes: list[SourceNode]) -> Iterator[SourceNode]:
                 yield from walk_nodes(children)
 
 
-def build_graph_control_edges(graph: SourceGraph) -> list[ControlEdge]:
+def build_graph_control_edges(
+    graph: SourceGraph, *, known_workflows: Collection[str] | None = None
+) -> list[ControlEdge]:
     """Derive cross-workflow invocation edges for a discovery graph.
 
     One edge per node that carries the :data:`INVOKES_WORKFLOW_PROPERTY` marker,
@@ -68,6 +70,8 @@ def build_graph_control_edges(graph: SourceGraph) -> list[ControlEdge]:
 
     Args:
         graph: The source graph to derive control edges for.
+        known_workflows: Names of the workflows present in this export; see
+            :func:`~flowx.lineage.control_edges_from_calls`.
 
     Returns:
         Deduplicated control edges, in first-seen order.
@@ -81,7 +85,7 @@ def build_graph_control_edges(graph: SourceGraph) -> list[ControlEdge]:
             wait = node.properties.get(INVOKES_WAIT_PROPERTY)
             yield str(target), wait, node.task_key
 
-    return control_edges_from_calls(graph.name, _calls())
+    return control_edges_from_calls(graph.name, _calls(), known_workflows=known_workflows)
 
 
 def build_graph_data_edges(graph: SourceGraph) -> list[DataEdge]:
@@ -104,7 +108,7 @@ def build_graph_data_edges(graph: SourceGraph) -> list[DataEdge]:
     return data_edges_from_endpoints(producers, consumers)
 
 
-def build_graph_lineage(graph: SourceGraph) -> Lineage:
+def build_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] | None = None) -> Lineage:
     """Compose the source-neutral lineage block for a discovery graph.
 
     Edges are derived here from the graph alone. Motifs come from a source's own
@@ -114,12 +118,15 @@ def build_graph_lineage(graph: SourceGraph) -> Lineage:
 
     Args:
         graph: The source graph to derive lineage for.
+        known_workflows: Names of the workflows present in this export; an
+            invocation edge is resolved only when its target is one of them. See
+            :func:`~flowx.lineage.control_edges_from_calls`.
 
     Returns:
         A :class:`Lineage` with control edges and data edges (motifs empty).
     """
     return Lineage(
-        control_edges=build_graph_control_edges(graph),
+        control_edges=build_graph_control_edges(graph, known_workflows=known_workflows),
         data_edges=build_graph_data_edges(graph),
     )
 
