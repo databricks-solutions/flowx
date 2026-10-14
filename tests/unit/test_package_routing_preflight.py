@@ -457,6 +457,68 @@ def _fill_solo(output_dir: Path) -> None:
     assert adapter_main([*fill, str(authored_path)]) == 0
 
 
+_MANAGED_ROOTS = ("metadata", WORK_DIRNAME, "resources", "src", "setup", "databricks.yml", "SETUP.md", "WARNINGS.md")
+
+
+def _managed_files(output_dir: Path) -> dict[str, bytes]:
+    """Every file discover's reset would take out of the output folder, by relative path."""
+    files: dict[str, bytes] = {}
+    for root in _MANAGED_ROOTS:
+        path = output_dir / root
+        for file in [path] if path.is_file() else sorted(path.rglob("*")) if path.is_dir() else []:
+            if file.is_file():
+                files[file.relative_to(output_dir).as_posix()] = file.read_bytes()
+    return files
+
+
+def test_discover_over_a_routed_filled_folder_archives_every_file_it_replaces(
+    tmp_path: Path, fixtures_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    _route_solo_agentic_and_modify(tmp_path, report_path)
+    assert _package(tmp_path) == 0
+    before = _managed_files(tmp_path)
+    for kept in ("metadata/conversion_plan.json", "metadata/routing_review.html", "metadata/agentic_conversion.json"):
+        assert kept in before
+    assert any(path.startswith(f"{WORK_DIRNAME}/route_baseline/") for path in before)
+
+    with caplog.at_level("INFO"):
+        assert (
+            adapter_main(
+                ["discover", "--source", "adf", "--source-path", str(fixtures_dir), "--output-dir", str(tmp_path)]
+            )
+            == 0
+        )
+
+    records = sorted((tmp_path / "metadata" / "archive").glob("*/archive.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text(encoding="utf-8"))
+    assert {entry["from"] for entry in record["moved"]} == set(before)
+    for entry in record["moved"]:
+        archived = (tmp_path / entry["to"]).read_bytes()
+        assert archived == before[entry["from"]]
+        assert entry["sha256"] == hashlib.sha256(archived).hexdigest()
+    assert not (tmp_path / "metadata" / "conversion_plan.json").exists()
+    assert (tmp_path / "metadata" / "inventory.json").is_file()
+    assert (tmp_path / "authored.json").is_file()
+    assert f"Moved {len(before)} file(s) from the earlier run" in caplog.text
+
+
+def test_discover_into_a_fresh_folder_archives_nothing(
+    tmp_path: Path, fixtures_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("INFO"):
+        assert (
+            adapter_main(
+                ["discover", "--source", "adf", "--source-path", str(fixtures_dir), "--output-dir", str(tmp_path)]
+            )
+            == 0
+        )
+
+    assert not (tmp_path / "metadata" / "archive").exists()
+    assert "from the earlier run" not in caplog.text
+
+
 def test_route_and_fill_agentic_after_a_package_say_package_pruned_work_and_what_to_run(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -7,6 +7,8 @@ guard that one-shot contract. Skipped where the optional ``mcp`` dependency is a
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 from pathlib import Path
 
@@ -14,6 +16,7 @@ import pytest
 
 pytest.importorskip("mcp")
 
+from flowx.adapter.__main__ import main as adapter_main  # noqa: E402
 from flowx.mcp import runner, server  # noqa: E402
 
 
@@ -123,3 +126,37 @@ def test_interactive_false_skips_prompt_and_packages(stub_adapter, tmp_path: Pat
     )
     assert result["status"] == "completed"
     assert stub_adapter == ["discover", "convert", "package"]  # no inspect, no pause
+
+
+def test_migrate_over_an_earlier_run_reports_the_files_discover_archived(
+    monkeypatch: pytest.MonkeyPatch, fixtures_dir: Path, tmp_path: Path
+) -> None:
+    """Hosted migrate re-runs discover for real, which archives the earlier outputs; the result lists them."""
+
+    def run_discover_for_real(args: list[object], **_: object) -> runner.AdapterResult:
+        command = [str(arg) for arg in args]
+        if command[0] != "discover":
+            return runner.AdapterResult(command=command, returncode=0, stdout="", stderr="")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            returncode = adapter_main(command)
+        return runner.AdapterResult(command=command, returncode=returncode, stdout=stdout.getvalue(), stderr="")
+
+    monkeypatch.setattr(runner, "run_adapter", run_discover_for_real)
+    out = tmp_path / "out"
+    parameters = {"source": "adf", "adf_source_path": str(fixtures_dir), "output_dir": str(out), "interactive": False}
+
+    first = server._cmd_migrate(parameters)
+    assert first["status"] == "completed"
+    assert "archived" not in first["steps"]["discover"]
+    (out / "metadata" / "conversion_plan.json").write_text('{"components": []}', encoding="utf-8")
+    inventory_before = (out / "metadata" / "inventory.json").read_bytes()
+
+    second = server._cmd_migrate(parameters)
+
+    archived = second["steps"]["discover"]["archived"]
+    assert archived["record"].startswith("metadata/archive/") and (out / archived["record"]).is_file()
+    moved = {entry["from"]: entry["to"] for entry in archived["moved"]}
+    assert (out / moved["metadata/conversion_plan.json"]).read_text(encoding="utf-8") == '{"components": []}'
+    assert (out / moved["metadata/inventory.json"]).read_bytes() == inventory_before
+    assert not (out / "metadata" / "conversion_plan.json").exists()

@@ -18,6 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from flowx.mcp import runner
+from flowx.sources.adf.loader import ARCHIVE_DIRNAME, ARCHIVE_RECORD_FILENAME
 
 
 def _allowed_origins() -> list[str]:
@@ -73,6 +74,9 @@ discover → convert → package in one call and never enriches or routes:
 
 All phases share one output_dir. Provide source paths and output_dir as locations the server can
 read/write (a local path, or a Unity Catalog Volume path when the host has volume access).
+Re-running discover or migrate over an output_dir starts afresh: it first moves the earlier plan,
+review page, insights, fills and bundle into metadata/archive/<UTC time>/ and lists them under
+`archived` in the discover result.
 """
 
 
@@ -81,6 +85,20 @@ def _phase_result(result: runner.AdapterResult, output_dir: Path, **extra: Any) 
     payload: dict[str, Any] = {"ok": result.ok, "process": result.as_dict(), "output_dir": str(output_dir)}
     payload.update({k: v for k, v in extra.items() if v is not None})
     return payload
+
+
+def _archive_records(output_dir: Path) -> set[Path]:
+    """The archive records discover has written under ``metadata/archive/`` so far."""
+    return set((output_dir / "metadata" / ARCHIVE_DIRNAME).glob(f"*/{ARCHIVE_RECORD_FILENAME}"))
+
+
+def _new_archive(output_dir: Path, records_before: set[Path]) -> dict[str, Any] | None:
+    """What a discover just moved aside: its archive record plus the record's path, or ``None``."""
+    new_records = sorted(_archive_records(output_dir) - records_before)
+    record = runner.read_json(new_records[-1]) if new_records else None
+    if not isinstance(record, dict):
+        return None
+    return {"record": new_records[-1].relative_to(output_dir).as_posix(), **record}
 
 
 def _source_name(p: dict[str, Any]) -> str:
@@ -201,9 +219,12 @@ def _cmd_discover(p: dict[str, Any]) -> dict[str, Any]:
             args += ["--pipeline", p["pipeline"]]
         for dag_id in _excluded_dags(p):
             args += ["--exclude-dag", dag_id]
-        result = runner.run_adapter(args)
         out = Path(output_dir)
-        return _phase_result(result, out, inventory=runner.summarize_inventory(out))
+        records_before = _archive_records(out)
+        result = runner.run_adapter(args)
+        return _phase_result(
+            result, out, inventory=runner.summarize_inventory(out), archived=_new_archive(out, records_before)
+        )
     finally:
         cleanup()
 
@@ -552,8 +573,14 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                 discover_args += ["--pipeline", pipeline]
             for dag_id in excluded_dags:
                 discover_args += ["--exclude-dag", dag_id]
+            records_before = _archive_records(out)
             discover_res = runner.run_adapter(discover_args)
-            steps["discover"] = _phase_result(discover_res, out, inventory=runner.summarize_inventory(out))
+            steps["discover"] = _phase_result(
+                discover_res,
+                out,
+                inventory=runner.summarize_inventory(out),
+                archived=_new_archive(out, records_before),
+            )
             if not discover_res.ok:
                 return {"ok": False, "status": "failed", "failed_phase": "discover", "steps": steps}
 

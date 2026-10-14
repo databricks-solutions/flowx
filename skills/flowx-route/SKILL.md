@@ -103,8 +103,9 @@ with any `simplification_pattern` flagged and release states disclosed), and `de
 the same members is kept, so re-running route, or running it after a re-enrich, keeps your decisions,
 except the components of an accepted grouping route no longer suggests, which go back to pending and
 are listed under `dropped_groupings` (see Suggested groupings below). A re-discover does not:
-discover clears `metadata/` and `.work/`, which drops `conversion_plan.json` and the agent's outputs
-in `agentic_conversion.json`, so route and fill again afterwards.
+discover moves the earlier `metadata/`, `.work/` and bundle into `metadata/archive/<UTC time>/`, with
+an `archive.json` record of what moved, so `conversion_plan.json` and the agent's outputs in
+`agentic_conversion.json` are kept for audit but no longer used; route and fill again afterwards.
 
 ### Present it with the review page
 
@@ -440,7 +441,9 @@ Package overwrites the bundle files it generates and clears `resources/*.yml` be
 edits to them are lost. To keep a change to an agentic unit's resource, put it in the authored
 pipeline's resource `definition` and run fill-agentic. With `--keep-intermediates` (MCP
 `keep_intermediates`) package leaves `.work/` in place, so you can start at route or fill-agentic. A
-re-discover clears `metadata/` and `.work/`, the plan and the fills with them.
+re-package after the pipeline count or names change can leave the earlier bundle folders (one per
+pipeline) in the output folder; remove them. A re-discover moves `metadata/` and `.work/`, the plan
+and the fills with them, into `metadata/archive/<UTC time>/`.
 
 ## Reference
 
