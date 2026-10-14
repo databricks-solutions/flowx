@@ -694,20 +694,22 @@ def _normalize_path_expression(expression: Any, *, require_physical: bool = Fals
     single ``<P>`` slot, so the result captures the path *shape* (literal skeleton
     plus slot count) without guessing the runtime value. Returns ``None`` when
     there is no literal segment to anchor on (a signature of only slots is too weak
-    a join key -- never guess). With *require_physical*, a value that is not
-    physical, such as an unevaluated ARM ``[parameters('folder')]``, gives ``None``
-    too; without it that value is kept verbatim, so two different ones never match.
+    a join key -- never guess). With *require_physical*, an unevaluated ARM
+    expression such as ``[parameters('folder')]`` or a ``{{`` placeholder gives
+    ``None`` too, even when a quoted literal inside it holds ``@``; an ADF ``@``
+    expression is still reduced to its shape. Without it that value is kept
+    verbatim, so two different ones never match.
     """
     if isinstance(expression, dict):
         expression = expression.get("value", "")
     if not isinstance(expression, str) or not expression.strip():
         return None
     text = expression.strip()
+    if require_physical and ("{{" in text or _ARM_EXPRESSION_RE.match(text)):
+        return None
     if "@" not in text:
         # A bare literal value (no ADF expression): the whole string is the literal
         # path / filename, with no runtime slots.
-        if require_physical and not _is_physical(text):
-            return None
         literal = re.sub(r"/+", "/", text).strip("/")
         return f"{literal}|slots=0" if literal else None
     marked = _PARAM_REF_RE.sub("<P>", text)

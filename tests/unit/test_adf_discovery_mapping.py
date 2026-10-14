@@ -217,6 +217,25 @@ def test_execute_pipeline_edge_is_resolved_only_when_the_child_is_in_the_export(
     assert resolved_by_target == {"child": True, "missing": False}
 
 
+def test_execute_pipeline_child_is_matched_case_insensitively_like_adf() -> None:
+    """ADF names are case-insensitive, so a reference to ``Child`` resolves to the exported ``child`` as written."""
+    run_child = {
+        "name": "RunChild",
+        "type": "ExecutePipeline",
+        "typeProperties": {"pipeline": {"referenceName": "Child"}},
+    }
+    definitions = AdfDefinitions(
+        pipelines=[
+            _parse_pipeline_json({"name": "parent", "properties": {"activities": [run_child]}}),
+            _parse_pipeline_json({"name": "child", "properties": {"activities": []}}),
+        ]
+    )
+    parent = adf_definitions_to_source_graphs(definitions)[0]
+
+    assert parent.lineage is not None
+    assert [(edge.target_workflow, edge.resolved) for edge in parent.lineage.control_edges] == [("Child", True)]
+
+
 # ---------------------------------------------------------------------------
 # Triggers / schedules (BLOCKING 1)
 # ---------------------------------------------------------------------------
