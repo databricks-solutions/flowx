@@ -461,3 +461,23 @@ def test_route_refuses_typos_and_wrong_values_in_the_edited_recorded_plan(
     ]
     assert violations == routing.validate_plan(edited, inventory)
     assert plan_path.read_bytes() == edited_bytes
+
+
+@pytest.mark.parametrize("accepted", ["true", 1, None], ids=["string", "number", "null"])
+def test_package_refuses_a_recorded_plan_whose_grouping_accepted_is_not_a_boolean(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], accepted: object
+) -> None:
+    inventory = _enriched(tmp_path)
+    _write_report(tmp_path)
+    _route(tmp_path, _plan(inventory, agentic=set(), accepted=set()))
+    plan_path = tmp_path / "metadata" / "conversion_plan.json"
+    edited = json.loads(plan_path.read_text(encoding="utf-8"))
+    edited["suggested_groupings"][0]["accepted"] = accepted
+    plan_path.write_text(json.dumps(edited, indent=2), encoding="utf-8")
+    capsys.readouterr()
+
+    code = package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"])
+
+    assert code == 1
+    assert "'accepted' must be true or false" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()

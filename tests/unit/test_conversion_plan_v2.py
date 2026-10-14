@@ -231,6 +231,17 @@ def test_a_malformed_nested_field_is_refused_on_load(tmp_path: Path, document: d
         ConversionPlan.load(tmp_path)
 
 
+@pytest.mark.parametrize("accepted", ["true", 1, None], ids=["string", "number", "null"])
+def test_a_grouping_accepted_that_is_not_a_boolean_is_refused_on_load(tmp_path: Path, accepted: object) -> None:
+    document = {**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "accepted": accepted}]}
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "conversion_plan.json").write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"suggested_groupings\[0\] 'accepted' must be true or false"):
+        ConversionPlan.load(tmp_path)
+
+
 def test_package_fails_closed_on_a_malformed_nested_plan_field(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

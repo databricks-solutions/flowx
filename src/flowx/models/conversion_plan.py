@@ -362,6 +362,8 @@ def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
             for key, kind in (("components", str), ("members", str), ("basis", dict)):
                 if key in grouping and not _is_list_of(grouping[key], kind):
                     problems.append(f"{loc} '{key}' must be a list")
+            if "accepted" in grouping and not isinstance(grouping["accepted"], bool):
+                problems.append(f"{loc} 'accepted' must be true or false, got {grouping['accepted']!r}")
     conversation = raw.get("conversation", [])
     if not isinstance(conversation, list) or not all(
         isinstance(item, dict) and isinstance(item.get("question"), str) and isinstance(item.get("answer"), str)
