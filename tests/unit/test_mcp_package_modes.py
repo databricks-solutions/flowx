@@ -109,6 +109,35 @@ def test_mcp_package_honours_an_explicit_group_spec(no_bundle_upload, tmp_path: 
     assert (mcp_dir / "team_b" / "databricks.yml").exists()
 
 
+@pytest.mark.parametrize("parameters", [{"packaging_mode": "per-group"}, {}])
+def test_mcp_package_uses_a_group_spec_sent_without_group_by(no_bundle_upload, tmp_path: Path, parameters):
+    spec_path = tmp_path / "groups.json"
+    spec_path.write_text(json.dumps({"team_a": ["caller", "solo"], "team_b": ["callee"]}))
+    mcp_dir, cli_dir = tmp_path / "mcp", tmp_path / "cli"
+    _write_converted_state(mcp_dir)
+    _write_converted_state(cli_dir)
+
+    result = server._cmd_package(
+        {"output_dir": str(mcp_dir), "download_workspace_files": False, "group_spec": str(spec_path), **parameters}
+    )
+    exit_code = package_main(
+        [
+            "--output-dir",
+            str(cli_dir),
+            "--no-download-workspace-files",
+            *_cli_flags({"packaging_mode": "per-group", "group_by": "spec", "group_spec": str(spec_path)}),
+        ]
+    )
+
+    assert exit_code == 0
+    assert result["ok"], result["process"]
+    assert _tree(mcp_dir) == _tree(cli_dir)
+    assert {name for name in _tree(mcp_dir) if name.endswith("databricks.yml")} == {
+        "team_a/databricks.yml",
+        "team_b/databricks.yml",
+    }
+
+
 @pytest.mark.parametrize(
     "parameters",
     [{"packaging_mode": "bogus"}, {"packaging_mode": "per-group", "group_by": "bogus"}],
@@ -146,6 +175,10 @@ class _FakeResult:
         ({"packaging_mode": "single"}, ["--packaging-mode", "single"]),
         (
             {"packaging_mode": "per-group", "group_by": "spec", "group_spec": "/tmp/groups.json"},
+            ["--packaging-mode", "per-group", "--group-by", "spec", "--group-spec", "/tmp/groups.json"],
+        ),
+        (
+            {"group_spec": "/tmp/groups.json"},
             ["--packaging-mode", "per-group", "--group-by", "spec", "--group-spec", "/tmp/groups.json"],
         ),
     ],

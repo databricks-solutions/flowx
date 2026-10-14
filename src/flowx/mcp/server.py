@@ -169,16 +169,21 @@ def _excluded_dags(parameters: dict[str, Any]) -> list[str]:
 def _packaging_args(parameters: dict[str, Any]) -> list[Any]:
     """Forwards the bundle-layout parameters to ``package`` as its CLI flags.
 
-    Unset keys are left off so the CLI's own defaults apply (``per-pipeline``, ``inferred``), and a
-    bad value reaches the CLI unchanged so it is refused there exactly as on the command line.
+    A ``group_spec`` on its own means "package by this spec", so it fills in ``per-group`` and
+    ``spec`` for whichever of the other two is unset. Otherwise unset keys are left off so the CLI's
+    own defaults apply (``per-pipeline``, ``inferred``), and a bad value reaches the CLI unchanged so
+    it is refused there exactly as on the command line.
     """
+    group_spec = parameters.get("group_spec")
+    packaging_mode = parameters.get("packaging_mode") or ("per-group" if group_spec else None)
+    group_by = parameters.get("group_by") or ("spec" if group_spec else None)
     args: list[Any] = []
-    if parameters.get("packaging_mode"):
-        args += ["--packaging-mode", parameters["packaging_mode"]]
-    if parameters.get("group_by"):
-        args += ["--group-by", parameters["group_by"]]
-    if parameters.get("group_spec"):
-        args += ["--group-spec", parameters["group_spec"]]
+    if packaging_mode:
+        args += ["--packaging-mode", packaging_mode]
+    if group_by:
+        args += ["--group-by", group_by]
+    if group_spec:
+        args += ["--group-spec", group_spec]
     return args
 
 
@@ -580,8 +585,9 @@ def build_server() -> FastMCP:
           ``packaging_mode`` ("per-pipeline" default | "single" | "per-group") lays a multi-pipeline
           migration out into bundles; for "per-group", ``group_by`` is "inferred" (default, by the Run
           Pipeline call graph) or "spec", which needs ``group_spec``: a JSON/YAML file mapping pipelines
-          to groups. It must be a path the server itself can read, so on the hosted server use
-          ``group_by`` "inferred" or a server-local path. An unrecognized value is refused with ``ok: false``.
+          to groups (sending it alone implies "per-group" and "spec"). It must be a path the server
+          itself can read, so on the hosted server use ``group_by`` "inferred" or a server-local path.
+          An unrecognized value is refused with ``ok: false``.
         - "migrate": source(req), one ADF source key | airflow_source_path (req), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list), packaging_mode, group_by, group_spec
