@@ -372,6 +372,16 @@
         "https://learn.microsoft.com/en-us/azure/databricks/ingestion/lakeflow-connect/sql-server-integrated-pipeline"
       ],
       "read_on": "2026-10-14"
+    },
+    {
+      "id": "pipelines_gateway_counts_as_concurrent_update",
+      "claim": "A running SQL Server ingestion gateway holds one of the workspace's concurrent pipeline updates for as long as it runs.",
+      "why": "Neither the SQL Server limits page nor the resource limits page says whether a gateway counts against the concurrent-update limit. Treat it as counting when sizing gateway mode, and confirm with the account team.",
+      "checked_urls": [
+        "https://learn.microsoft.com/en-us/azure/databricks/ingestion/lakeflow-connect/sql-server-limits",
+        "https://learn.microsoft.com/en-us/azure/databricks/resources/limits"
+      ],
+      "read_on": "2026-10-14"
     }
   ]
 }
