@@ -1057,15 +1057,17 @@ def apply_agentic_output(
     Validates the unit's membership against the recorded plan, stores the authored pipelines in
     ``metadata/agentic_conversion.json``, and rebuilds (applying them deterministically). The
     membership must exactly match a routed-agentic unit (a component, or an accepted grouping) in the
-    plan, and every authored pipeline must carry the correct source tag, hold no placeholder task, and
-    have a name of its own: no repeat within the list, no member of another unit, no pipeline another
+    plan, and every authored pipeline must carry the correct source tag, hold a non-empty ``tasks`` list
+    of task objects with no placeholder task, not be marked ``migration_status`` ``excluded``, and have a
+    non-empty string name of its own: no repeat within the list, no member of another unit, no pipeline another
     unit's output authored, and no bundle folder shared with another pipeline once normalised. A name
     may reuse a member of this unit, since the fill replaces it, or a pipeline the output of a unit
     sharing members with this one authored (a grouping and its own components never apply together).
 
     Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_applied", "message"}``.
     ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation, a
-    placeholder left in, a name clash, structural validation failure, or any other error. Empty
+    placeholder left in, a missing tasks list, an excluded pipeline, a bad or clashing name, structural
+    validation failure, or any other error. Empty
     ``authored_pipelines`` is refused.
 
     The stored entry carries the canonical hash of the complete authored pipelines. When that hash

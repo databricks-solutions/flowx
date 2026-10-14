@@ -135,7 +135,10 @@ def test_route_refuses_and_says_how_to_recover(tmp_path: Path, case: str, capsys
     (violation,) = json.loads(capsys.readouterr().out)["violations"]
     assert expected in violation
     assert "run enrich again with the same insights" in violation and ".enrich.lock" in violation
-    assert "running discover again moves conversion_plan.json and agentic_conversion.json into metadata/archive/" in violation
+    assert (
+        "running discover again moves conversion_plan.json and agentic_conversion.json into metadata/archive/"
+        in violation
+    )
     assert not (tmp_path / "metadata" / "conversion_plan.json").exists()
 
 

@@ -314,6 +314,8 @@ Its guarantees:
   together), but not another name in the same list, a member of another unit, a pipeline another
   unit's output authored, or a name that shares a bundle folder with another pipeline once normalised
   (`Sales Load` and `Sales-Load` would overwrite each other).
+- **Buildable**: each authored pipeline needs a non-empty string `name` and a non-empty `tasks` list
+  of task objects, and must not be marked `migration_status: "excluded"` (package skips those).
 - **Fully converted**: an authored pipeline that still holds a `PlaceholderActivity` (top level or
   inside a ForEach / If / Switch) is refused.
 - Each authored pipeline **must** carry `"tags": {"source": "adf"}`; a missing or non-`adf` tag fails
@@ -394,11 +396,12 @@ library's typed `ConversionPlan` (schema 3), bound to the inventory fingerprint,
 
 Package refuses, writing nothing, when:
 
-- `agentic_insights.json` and `inventory.json` disagree (or the file fails its own hash), plan or no
-  plan — enrich may have stopped between its two writes; run enrich again with the same insights
-  (locally, delete `metadata/.enrich.lock` first if it is still there; on the hosted server, run
-  discover again, then enrich prepare and apply — running discover again also clears
-  `conversion_plan.json` and `agentic_conversion.json`, so route and fill again afterwards);
+- `agentic_insights.json` and `inventory.json` disagree (or the file fails its own hash, or its
+  `inventory_sha256` no longer matches the inventory), plan or no plan — enrich may have stopped
+  between its two writes, or a file was edited; run enrich again with the same insights (locally,
+  delete `metadata/.enrich.lock` first if it is still there; on the hosted server, run discover again,
+  then enrich prepare and apply — running discover again moves `conversion_plan.json` and
+  `agentic_conversion.json` into `metadata/archive/`, so route and fill again afterwards);
 - the report carries a routing record but `conversion_plan.json` is missing;
 - the plan is stale against the inventory, is not a complete decision, or has a decision pending;
 - a routed-agentic unit has **no agent output yet** — an agentic decision is packaged agentically,
