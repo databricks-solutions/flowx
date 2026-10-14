@@ -56,8 +56,10 @@ flowx migrate pipelines in `/Volumes/main/default/adf_export`. Save output in `.
 Your agent will use flowx's `migrate` skill to run an end-to-end migration consisting of several phases:
 
 1. `discover` parses JSON files, builds an inventory, assigns a translation strategy for each resource, and creates a complexity report.
-2. `convert` converts each activity to an intermediate representation. The agent will ask for confirmation before running any LLM-based translation.
-3. `package` creates a [Declarative Automation Bundle](https://docs.databricks.com/aws/en/dev-tools/bundles/resources) with job configuration, code, and setup scripts (e.g. to create Databricks Secret Scopes or Unity Catalog connections).
+2. `enrich` (default) has the agent author insights over the inventory and records them.
+3. `convert` converts each activity to an intermediate representation. The agent will ask for confirmation before running any LLM-based translation.
+4. `route` (ADF) recommends deterministic or agentic conversion per group of connected pipelines, shows the plan on a review page, and records your decisions; the agent then fills the groups you route agentic.
+5. `package` creates a [Declarative Automation Bundle](https://docs.databricks.com/aws/en/dev-tools/bundles/resources) with job configuration, code, and setup scripts (e.g. to create Databricks Secret Scopes or Unity Catalog connections).
 
 <Callout type="info" title="Running migration step-by-step">
 To run a single step, invoke its skill directly (e.g. `@flowx-discover`) or ask your agent to run a single step.
@@ -80,6 +82,10 @@ flowx_output/
 │   ├── inventory.json      # discover: activity inventory
 │   ├── profile_report.csv  # profile: per-pipeline complexity report
 │   ├── <pipeline>.arm.json # discover: verbatim original ADF/ARM pipeline source
+│   ├── conversion_plan.json # route: the recommendation and the user's per-component decisions
+│   ├── routing_review.html # route: the standard review page drawn from the plan
+│   ├── agentic_conversion.json # fill-agentic: the agent's conversion output, re-applied by every route
+│   ├── route_audit.json    # package: what each routing unit was converted to, and the routing conversation
 │   └── configuration.json  # modify: the collected configuration answers
 └── .work/                  # transient intermediates (translation report, IR, gaps.json); pruned by prepare
 ```

@@ -99,6 +99,7 @@ Or run individual phases:
 /flowx:flowx-discover    # Parse the source (ADF JSON / Airflow DAGs), produce inventory + complexity report
 /flowx:flowx-enrich      # Validate and record agent-authored insights on the inventory
 /flowx:flowx-convert     # Deterministic + agentic translation
+/flowx:flowx-route       # Decide deterministic vs. agentic per pipeline group and fill the agentic groups (ADF)
 /flowx:flowx-package     # Generate DABs project
 ```
 
@@ -262,6 +263,10 @@ flowx_output/
     agentic_insights.json     # enrich: validated agent-authored insights, rebuilt into inventory.json
     profile_report.csv        # discover: per-pipeline complexity report
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
+    conversion_plan.json      # route: the recommendation, suggested groupings and the user's per-component decisions
+    routing_review.html       # route: the standard review page drawn from the plan
+    agentic_conversion.json   # fill-agentic (ADF): the agent's conversion output per routed-agentic unit, re-applied by every route
+    route_audit.json          # package: routing decisions, outcomes, history, conversation and hashes, written when a plan is recorded
     configuration.json        # modify: collected configuration answers
   .work/                      # transient intermediates (translation report, IR, gaps.json); pruned by package
 ```

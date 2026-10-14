@@ -689,6 +689,20 @@ class TestInputsCli:
         exit_code = adapter_cli_main(["inputs", "package"])
         assert exit_code == 0
 
+    def test_inputs_package_asks_catalog_and_schema_as_one_catalog_schema_answer(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        # The agent reads these descriptions to word its question, so both carry the one-answer format.
+        exit_code = adapter_cli_main(["inputs", "package"])
+        assert exit_code == 0
+        options = {q["option_id"]: q for q in json.loads(capsys.readouterr().out)["options"]}
+        assert (options["catalog"]["default"], options["schema"]["default"]) == ("main", "default")
+        for option_id, part in (("catalog", "before the dot"), ("schema", "after the dot")):
+            description = options[option_id]["description"]
+            assert "``catalog.schema``" in description
+            assert "``main.default``" in description
+            assert part in description
+
     def test_inputs_writes_to_file(self, tmp_path: Path):
         out = tmp_path / "options.json"
         exit_code = adapter_cli_main(["inputs", "package", "--out", str(out)])
