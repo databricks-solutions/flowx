@@ -1009,7 +1009,7 @@ def _authored_buildable_violations(authored_pipelines: list[dict[str, Any]]) -> 
             continue
         label = pipeline.get("name") if isinstance(pipeline.get("name"), str) else f"pipeline[{index}]"
         tasks = pipeline.get("tasks")
-        if not isinstance(tasks, list) or not tasks:
+        if not isinstance(tasks, list) or not tasks or not all(isinstance(task, dict) for task in tasks):
             violations.append(f"{label}: authored pipeline needs a non-empty 'tasks' list; give it the tasks to run")
         if pipeline.get("migration_status") == "excluded":
             violations.append(

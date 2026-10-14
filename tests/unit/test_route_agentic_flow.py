@@ -1332,9 +1332,10 @@ def test_fill_refuses_a_pipeline_name_that_is_not_a_non_empty_string(tmp_path: P
         lambda pipeline: pipeline.update(tasks="load"),
         lambda pipeline: pipeline.update(tasks={"name": "load"}),
         lambda pipeline: pipeline.update(tasks=None),
+        lambda pipeline: pipeline.update(tasks=["load"]),
         lambda pipeline: pipeline.update(migration_status="excluded"),
     ],
-    ids=["no-tasks", "empty-tasks", "tasks-a-string", "tasks-an-object", "tasks-null", "excluded"],
+    ids=["no-tasks", "empty-tasks", "tasks-a-string", "tasks-an-object", "tasks-null", "tasks-strings", "excluded"],
 )
 def test_fill_refuses_an_authored_pipeline_package_would_not_build(tmp_path: Path, edit: Any) -> None:
     _route_parent_agentic(tmp_path, _report_two_pipelines())

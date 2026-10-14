@@ -103,8 +103,8 @@ _CONVERSATION_KEYS = {"question", "answer"}
 _INSIGHTS_RECOVERY = (
     "enrich may have stopped between its two writes, or one of the files was edited. To recover, run enrich "
     f"again with the same insights (locally, first delete metadata/{ENRICH_LOCK_FILENAME} if it is still there; "
-    "on the hosted MCP server, run discover again, then enrich prepare and apply; running discover again also "
-    "clears conversion_plan.json and agentic_conversion.json, so route and fill again afterwards)"
+    "on the hosted MCP server, run discover again, then enrich prepare and apply; running discover again moves "
+    "conversion_plan.json and agentic_conversion.json into metadata/archive/, so route and fill again afterwards)"
 )
 
 
