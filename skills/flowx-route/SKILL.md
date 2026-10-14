@@ -158,7 +158,7 @@ otherwise P = ⌈N / L⌉.
 | C1 fan-in | Fan-in isn't required, or only a few sources feed each logical table (a UNION view over a handful is fine) | `lakeflow_connect_fan_in` (unconfirmed) | M1 out |
 | C2 pipelines | P ≤ saved pipelines per workspace. Warn when P > concurrent updates | `pipelines_saved_per_workspace`, `pipelines_concurrent_updates_per_workspace` | M1 strained or out |
 | C3 tables | N plus the tables the metastore already holds fits per metastore, and tables per schema and schemas per catalog fit | `uc_tables_per_metastore`, `uc_tables_per_schema`, `uc_schemas_per_catalog` | M1 out, or a quota and a multi-catalog plan |
-| C4 history | Current state is enough, or every table has a change feed that carries every change, on a source tier that supports it | Source docs | M1 gives current state only; M2 gives state per run |
+| C4 history | Current state is enough, or every table has a change feed that carries every change, on a source tier that supports it | Source docs | M1 is limited to SCD1 without CDC and M2 gives state per run only, so SCD2 required without CDC tips to A1 |
 | C5 mode | Gateway: P always-on classic gateways are acceptable. Integrated CDC: the workspace has it enabled | `sqlserver_gateway_one_gateway_per_pipeline`, `sqlserver_gateway_compute`, `sqlserver_integrated_cdc_workspace_enablement` | Pick the other mode, or M1 out |
 | C6 run time | ⌈P / min(concurrent updates, chosen concurrency)⌉ × the minimum update run fits the allowed run time. A pipeline task inside For each runs one iteration at a time | `pipelines_concurrent_updates_per_workspace`, `sqlserver_integrated_cdc_minimum_extraction`, `pipelines_pipeline_task_in_for_each` | M1 out |
 | C7 cost floor | P × updates per day × the minimum update run × the cluster rate fits the budget or today's spend. Compare M2, which pays mostly for sources that changed | `sqlserver_integrated_cdc_minimum_extraction` | M1 not preferred |
@@ -172,7 +172,7 @@ otherwise P = ⌈N / L⌉.
 **Suggestion order:**
 
 1. **M1** when C1 to C12 all pass. It's the managed option.
-2. **M2** when M1 fails on C1, C2, C3, C6 or C7, and C13 passes.
+2. **M2** when M1 fails on C1, C2, C3, C6, C7, C10 or C11, and C13 passes.
 3. **D1** when the customer wants like-for-like, or no database ingestion is in scope.
 4. **A1** when no pattern passes, or the requirements conflict.
 
