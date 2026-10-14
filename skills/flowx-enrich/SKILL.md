@@ -157,6 +157,10 @@ know" is recorded as `fact: unknown` and isn't asked again. A count the user onl
 `assumed`, not `user`. `flowx-route` carries these into the plan's `conversation` and asks only about
 facts still open.
 
+When the source guide's database-source signal is present, also record the source system and
+connector in that pipeline's `conversion_notes`, for example `source: SQL Server via AzureSqlSource`
+(or `SqlServerSource`, `SqlMISource`).
+
 ## Run enrich — MCP tool or venv CLI
 
 Run the **`setup`** skill first if you haven't. Both paths run the same validate-and-record contract.

@@ -120,9 +120,11 @@ component (next section). Record each question and answer in the plan's `convers
 
 ### Qualify the target pattern before you suggest one
 
-A component that ingests from a database can land in one of four patterns. The library doesn't run
-these checks; you do, from the facts and the limits, and you record them as free text in the plan's
-`conversation`.
+A component that ingests from a database can land in one of four patterns. Tell which components do
+from the `source:` line enrich wrote in a pipeline's `conversion_notes`, or else from the signals in
+`flowx-discover`'s `sources/adf.md`; the connector picks the `platform-limits.json` rows. The library
+doesn't run these checks; you do, from the facts and the limits, and you record them as free text in
+the plan's `conversation`.
 
 | Pattern | What it is | Facts it needs | Decision |
 |---|---|---|---|
