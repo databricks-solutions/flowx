@@ -514,6 +514,38 @@ def test_different_arm_expression_file_names_under_one_folder_never_join() -> No
     assert edges == []
 
 
+def test_different_arm_file_names_with_a_quoted_at_sign_never_join() -> None:
+    """An ARM file name holding a quoted ``@`` is not reduced to an ADF shape, so two different ones never join."""
+    dataset = _adls_dataset(
+        "ds_landing",
+        file_system="raw",
+        folder_path="@dataset().folderPath",
+        linked_service="ls_lake",
+        file_name="@dataset().fileName",
+    )
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_landing": dataset},
+        linked_services={"ls_lake": _adls_linked_service("ls_lake", account="acct")},
+    )
+
+    def _reference(file_name: str) -> AdfDatasetReference:
+        return AdfDatasetReference(
+            reference_name="ds_landing", parameters={"folderPath": "landing", "fileName": file_name}
+        )
+
+    _, writes = activity_data_assets(
+        AdfActivity(name="Write", type="Copy", outputs=[_reference("[concat(variables('a'), '@x.csv')]")]), definitions
+    )
+    reads, _ = activity_data_assets(
+        AdfActivity(name="Read", type="Copy", inputs=[_reference("[concat(variables('b'), '@x.csv')]")]), definitions
+    )
+
+    assert writes[0].signature != reads[0].signature
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert edges == []
+
+
 def test_distinct_parameter_bindings_of_same_dataset_are_all_retained() -> None:
     """Same dataset ref, different params -> distinct physical assets, both kept (not collapsed)."""
     dataset = AdfDataset(
@@ -1023,4 +1055,89 @@ def test_same_folder_shape_in_different_buckets_does_not_join_by_signature(locat
     edges = data_edges_from_endpoints(
         [("WriteSales", asset) for asset in sales_writes], [("ReadHR", asset) for asset in hr_reads]
     )
+    assert edges == []
+
+
+_LINKED_SERVICE_STORE_LOCATIONS = [
+    "SftpLocation",
+    "FileServerLocation",
+    "FtpServerLocation",
+    "AzureFileStorageLocation",
+    "HdfsLocation",
+    "HttpServerLocation",
+]
+
+
+def _server_definitions(
+    location_type: str, linked_service_parameters: dict | None = None, **servers: str
+) -> AdfDefinitions:
+    """One parameterised-folder dataset per entry, on linked service ``servers[name]``; the location names no store."""
+    linked_service_properties: dict = {"typeProperties": {"host": "files.example.com"}}
+    if linked_service_parameters:
+        linked_service_properties["parameters"] = linked_service_parameters
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: AdfDataset(
+                name=name,
+                type="DelimitedText",
+                properties={
+                    "typeProperties": {"location": {"type": location_type, "folderPath": "@dataset().folderPath"}},
+                    "linkedServiceName": {"referenceName": linked_service},
+                },
+            )
+            for name, linked_service in servers.items()
+        },
+        linked_services={
+            linked_service: AdfLinkedService(name=linked_service, type="Sftp", properties=linked_service_properties)
+            for linked_service in servers.values()
+        },
+    )
+
+
+@pytest.mark.parametrize("location_type", _LINKED_SERVICE_STORE_LOCATIONS)
+def test_same_folder_shape_on_different_servers_does_not_join_by_signature(location_type: str) -> None:
+    """When only the linked service names the server or share, its plain name qualifies the signature."""
+    definitions = _server_definitions(location_type, ds_sales="ls_sales_server", ds_hr="ls_hr_server")
+    _, sales_writes = activity_data_assets(_landing_copy("WriteSales", dataset="ds_sales", produced=True), definitions)
+    hr_reads, _ = activity_data_assets(_landing_copy("ReadHR", dataset="ds_hr", produced=False), definitions)
+
+    assert sales_writes[0].signature == "ST[ls_sales_server]/FP[landing|slots=1]/FN[None]"
+    assert hr_reads[0].signature == "ST[ls_hr_server]/FP[landing|slots=1]/FN[None]"
+    edges = data_edges_from_endpoints(
+        [("WriteSales", asset) for asset in sales_writes], [("ReadHR", asset) for asset in hr_reads]
+    )
+    assert edges == []
+
+
+@pytest.mark.parametrize("location_type", _LINKED_SERVICE_STORE_LOCATIONS)
+def test_same_folder_shape_on_one_server_still_joins_by_signature(location_type: str) -> None:
+    """Two datasets on the same plain linked service keep their signature edge, naming that linked service."""
+    definitions = _server_definitions(location_type, ds_out="ls_server", ds_in="ls_server")
+    _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[ls_server]/FP[landing|slots=1]/FN[None]")
+    ]
+
+
+@pytest.mark.parametrize("location_type", _LINKED_SERVICE_STORE_LOCATIONS)
+@pytest.mark.parametrize(
+    ("linked_service", "linked_service_parameters"),
+    [("[parameters('ls')]", None), ("ls_any_server", {"host": {"type": "String"}})],
+)
+def test_server_store_without_a_plain_linked_service_gives_no_signature(
+    location_type: str, linked_service: str, linked_service_parameters: dict | None
+) -> None:
+    """An ARM-named or parameterised linked service cannot name the server, so no signature can join on folder shape."""
+    definitions = _server_definitions(
+        location_type, linked_service_parameters, ds_out=linked_service, ds_in=linked_service
+    )
+    _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
+
+    assert writes[0].signature == reads[0].signature == ""
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert edges == []

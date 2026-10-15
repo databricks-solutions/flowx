@@ -51,6 +51,17 @@ _ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
 _DATASET_PARAM_RE = re.compile(r"^@dataset\(\)\.([A-Za-z_][A-Za-z0-9_]*)$")
 _ARM_EXPRESSION_RE = re.compile(r"^\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\(.*\]$", re.DOTALL)
 _RUN_TIME_PATH_OVERRIDES = ("wildcardFolderPath", "wildcardFileName", "fileListPath", "prefix")
+# Location types that name no store of their own: the server or share is set on the linked service.
+_LINKED_SERVICE_STORE_LOCATIONS = frozenset(
+    {
+        "SftpLocation",
+        "FileServerLocation",
+        "FtpServerLocation",
+        "AzureFileStorageLocation",
+        "HdfsLocation",
+        "HttpServerLocation",
+    }
+)
 
 # Runtime references inside a path expression. Each is a value only knowable at
 # run time; for a *structural* signature we collapse them all to one slot token so
@@ -174,7 +185,10 @@ def _dataset_ref_to_asset(
 
     A path signature is prefixed with the dataset's store when that store is known
     (see :func:`_resolve_dataset_store`), so two datasets on different containers or
-    accounts that merely share a folder shape never join.
+    accounts that merely share a folder shape never join. A location whose store is
+    named only on the linked service (SFTP, FTP, a file share, HDFS, HTTP) gets no
+    signature at all when that store is not known, because the folder shape alone
+    cannot tell two servers apart.
     """
     if location_overridden:
         return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))
@@ -187,6 +201,8 @@ def _dataset_ref_to_asset(
     store = _resolve_dataset_store(dataset_ref, definitions, context) if path_signature is not None else None
     if path_signature is not None and store:
         path_signature = f"ST[{store}]/{path_signature}"
+    elif path_signature is not None and _location_type(dataset_ref, definitions) in _LINKED_SERVICE_STORE_LOCATIONS:
+        path_signature = None
     return DataAsset(
         signature=path_signature if path_signature is not None else "",
         identity=None,
@@ -502,9 +518,10 @@ def _resolve_dataset_store(
     dataset's store is ``<file system>@<account>`` when both are literal. When the
     file system is literal but the account cannot be read (a Key Vault or masked
     connection string, for example), the linked service name stands in for the
-    account, as long as the linked service takes no parameters. ``None`` whenever
-    the store is not provable, so the caller leaves the signature unqualified rather
-    than guess.
+    account, as long as the linked service takes no parameters. A location whose
+    server or share lives on the linked service (SFTP, FTP, a file share, HDFS, HTTP)
+    is named by that plain, unparameterised linked service name alone. ``None``
+    whenever the store is not provable, so the caller never guesses one.
     """
     properties = _dataset_props(dataset_ref, definitions)
     if properties is None:
@@ -516,6 +533,8 @@ def _resolve_dataset_store(
     location = type_props.get("location")
     if not isinstance(location, dict):
         return None
+    if location.get("type") in _LINKED_SERVICE_STORE_LOCATIONS:
+        return _unparameterised_linked_service_name(properties, definitions)
     file_system, account = _resolve_file_store(
         location,
         _backing_linked_service(properties, definitions),
@@ -526,6 +545,16 @@ def _resolve_dataset_store(
         return None
     store = account or _unparameterised_linked_service_name(properties, definitions)
     return f"{file_system}@{store}" if store else None
+
+
+def _location_type(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> str | None:
+    """The ``type`` of the dataset's file location, such as ``SftpLocation``, or ``None``."""
+    properties = _dataset_props(dataset_ref, definitions)
+    if properties is None:
+        return None
+    type_props = properties.get("typeProperties") or properties
+    location = type_props.get("location")
+    return location.get("type") if isinstance(location, dict) else None
 
 
 def _resolve_file_store(
@@ -698,18 +727,20 @@ def _normalize_path_expression(expression: Any, *, require_physical: bool = Fals
     expression such as ``[parameters('folder')]`` or a ``{{`` placeholder gives
     ``None`` too, even when a quoted literal inside it holds ``@``; an ADF ``@``
     expression is still reduced to its shape. Without it that value is kept
-    verbatim, so two different ones never match.
+    verbatim, and so is an ARM expression holding a quoted ``@``, so two different
+    ones never match.
     """
     if isinstance(expression, dict):
         expression = expression.get("value", "")
     if not isinstance(expression, str) or not expression.strip():
         return None
     text = expression.strip()
-    if require_physical and ("{{" in text or _ARM_EXPRESSION_RE.match(text)):
+    is_arm_expression = bool(_ARM_EXPRESSION_RE.match(text))
+    if require_physical and ("{{" in text or is_arm_expression):
         return None
-    if "@" not in text:
-        # A bare literal value (no ADF expression): the whole string is the literal
-        # path / filename, with no runtime slots.
+    if "@" not in text or is_arm_expression:
+        # A bare literal value or an unevaluated ARM expression (no ADF expression):
+        # the whole string is kept as the literal path / filename, with no runtime slots.
         literal = re.sub(r"/+", "/", text).strip("/")
         return f"{literal}|slots=0" if literal else None
     marked = _PARAM_REF_RE.sub("<P>", text)
