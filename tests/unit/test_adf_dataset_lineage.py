@@ -1010,6 +1010,89 @@ def test_same_folder_shape_on_one_container_of_a_hidden_account_still_joins() ->
     ]
 
 
+def _unprovable_store_definitions(
+    location_type: str, file_system_key: str, linked_service: str, **file_systems: str
+) -> AdfDefinitions:
+    """One parameterised-folder dataset per entry, on file system ``file_systems[name]`` of *linked_service*.
+
+    The only loaded linked service, ``ls_generic_store``, takes its account as a parameter, and an ARM-named
+    *linked_service* is not loaded at all, so neither can prove which account holds the file system.
+    """
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: AdfDataset(
+                name=name,
+                type="DelimitedText",
+                properties={
+                    "typeProperties": {
+                        "location": {
+                            "type": location_type,
+                            file_system_key: file_system,
+                            "folderPath": "@dataset().folderPath",
+                        }
+                    },
+                    "linkedServiceName": {"referenceName": linked_service},
+                },
+            )
+            for name, file_system in file_systems.items()
+        },
+        linked_services={
+            "ls_generic_store": AdfLinkedService(
+                name="ls_generic_store",
+                type="AzureBlobFS",
+                properties={
+                    "typeProperties": {"url": "https://@{linkedService().accountName}.dfs.core.windows.net"},
+                    "parameters": {"accountName": {"type": "String"}},
+                },
+            )
+        },
+    )
+
+
+_LITERAL_FILE_SYSTEM_LOCATIONS = [
+    ("AzureBlobFSLocation", "fileSystem"),
+    ("AzureBlobStorageLocation", "container"),
+    ("AmazonS3Location", "bucketName"),
+    ("GoogleCloudStorageLocation", "bucketName"),
+]
+
+
+@pytest.mark.parametrize(("location_type", "file_system_key"), _LITERAL_FILE_SYSTEM_LOCATIONS)
+@pytest.mark.parametrize("linked_service", ["ls_generic_store", "[parameters('ls')]"])
+def test_literal_file_systems_on_an_unprovable_store_give_no_signature(
+    location_type: str, file_system_key: str, linked_service: str
+) -> None:
+    """``sales`` and ``hr`` are different stores even with the account unknown, so they never join on folder shape."""
+    definitions = _unprovable_store_definitions(
+        location_type, file_system_key, linked_service, ds_sales="sales", ds_hr="hr"
+    )
+    _, sales_writes = activity_data_assets(_landing_copy("WriteSales", dataset="ds_sales", produced=True), definitions)
+    hr_reads, _ = activity_data_assets(_landing_copy("ReadHR", dataset="ds_hr", produced=False), definitions)
+
+    assert sales_writes[0].identity is None and hr_reads[0].identity is None
+    assert sales_writes[0].signature == hr_reads[0].signature == ""
+    edges = data_edges_from_endpoints(
+        [("WriteSales", asset) for asset in sales_writes], [("ReadHR", asset) for asset in hr_reads]
+    )
+    assert edges == []
+
+
+@pytest.mark.parametrize("linked_service", ["ls_generic_store", "[parameters('ls')]"])
+def test_parameterised_file_system_on_an_unprovable_store_keeps_its_unqualified_signature(
+    linked_service: str,
+) -> None:
+    """A file system left as ``@dataset().fs`` names no store, so the folder shape still joins, unqualified."""
+    definitions = _unprovable_store_definitions(
+        "AzureBlobFSLocation", "fileSystem", linked_service, ds_out="@dataset().fs", ds_in="@dataset().fs"
+    )
+    _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [("signature", "FP[landing|slots=1]/FN[None]")]
+
+
 def test_arm_expression_linked_service_name_never_qualifies_an_identity() -> None:
     """A linked service named by an unevaluated ARM expression is not a plain name, so it gives no table identity."""
     definitions = _definitions(
