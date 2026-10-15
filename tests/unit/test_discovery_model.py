@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from flowx.discovery_serde import _node_from_dict, _node_to_dict, source_graph_from_dict, source_graph_to_dict
 from flowx.models.discovery import (
     CONCEPT_COPY_DATA,
@@ -68,6 +70,21 @@ def test_partial_source_node_dict_falls_back_to_model_defaults():
     assert node.data_writes == []
     assert node.properties == {}
     assert node.raw is None
+
+
+def test_unknown_node_type_is_rejected():
+    """A node_type outside the three known kinds raises instead of quietly becoming a SourceNode."""
+    unknown = {
+        "node_type": "LoopNode",
+        "source_id": "n1",
+        "task_key": "run",
+        "concept": CONCEPT_NOTEBOOK,
+        "source": SOURCE_AIRFLOW,
+        "branches": {"body": []},
+    }
+
+    with pytest.raises(ValueError, match="LoopNode"):
+        _node_from_dict(unknown)
 
 
 def test_container_node_holds_labelled_branches():

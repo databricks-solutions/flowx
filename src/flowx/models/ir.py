@@ -130,10 +130,12 @@ class ControlEdge:
 class DataEdge:
     """A proven data hand-off between a producing and a consuming task.
 
-    A producer writes a :class:`DataAsset` that a consumer later reads. The two
-    tiers from #36 are recorded on the edge itself: ``match_kind`` says whether
-    the two assets were joined on resolved physical ``identity`` or on their
-    neutral ``signature``, and ``match_key`` is the value they matched on.
+    A producer writes a :class:`DataAsset` that a consumer reads; the pairing
+    matches assets, not run order (see
+    :func:`~flowx.lineage.data_edges_from_endpoints`). The two tiers from #36 are
+    recorded on the edge itself: ``match_kind`` says whether the two assets were
+    joined on resolved physical ``identity`` or on their neutral ``signature``,
+    and ``match_key`` is the value they matched on.
 
     Attributes:
         source_task_key: Task key of the producer (writes the asset).
