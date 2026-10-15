@@ -206,6 +206,9 @@ def data_edges_from_endpoints(
 
     edges: list[DataEdge] = []
     seen: set[tuple[str, str, str, str]] = set()
+    # Every writer pairs with every reader of the same asset regardless of run order: two parallel
+    # writers both hand off, and so does a writer that runs after the reader. "Proven" means the
+    # assets match, not that this writer's output is the one the reader sees.
     for producer_key, producer_asset in producer_list:
         for consumer_key, consumer_asset in consumer_list:
             if producer_key == consumer_key:

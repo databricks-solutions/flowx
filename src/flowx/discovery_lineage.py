@@ -1,11 +1,9 @@
 """Source-neutral lineage derivation over the discovery graph contract.
 
-The parallel of :mod:`flowx.lineage`, which derives a
-:class:`~flowx.models.ir.Lineage` block over the Databricks IR. This module
-derives the same block over the source-neutral discovery graph
-(:mod:`flowx.models.discovery`) instead, so the discover phase can attach lineage
-to a :class:`~flowx.models.discovery.SourceGraph` before any IR translation
-exists.
+Derives a :class:`~flowx.models.ir.Lineage` block over the source-neutral
+discovery graph (:mod:`flowx.models.discovery`), so the discover phase can attach
+lineage to a :class:`~flowx.models.discovery.SourceGraph` before any IR
+translation exists.
 
 It reuses :mod:`flowx.lineage`'s primitive cores -- :func:`control_edges_from_calls`
 and :func:`data_edges_from_endpoints` -- so the two-tier match, the self-edge drop,
@@ -131,7 +129,7 @@ def build_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] 
     )
 
 
-def with_graph_lineage(graph: SourceGraph) -> SourceGraph:
+def with_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] | None = None) -> SourceGraph:
     """Return a *new* graph carrying its derived lineage, leaving the input untouched.
 
     Pure: builds the lineage block and attaches it via :func:`dataclasses.replace`
@@ -139,8 +137,11 @@ def with_graph_lineage(graph: SourceGraph) -> SourceGraph:
 
     Args:
         graph: The source graph to copy.
+        known_workflows: Names of the workflows present in this export, passed
+            straight to :func:`build_graph_lineage`. Without it, every named callee
+            counts as resolved, even one missing from the export.
 
     Returns:
         A shallow copy of *graph* with :attr:`SourceGraph.lineage` populated.
     """
-    return dataclasses.replace(graph, lineage=build_graph_lineage(graph))
+    return dataclasses.replace(graph, lineage=build_graph_lineage(graph, known_workflows=known_workflows))

@@ -48,6 +48,7 @@ SOURCE_GRAPHS_FILENAME = "source_graphs.json"
 SOURCE_GRAPHS_CONTRACT_VERSION = "1"
 
 _HASHED_DOCUMENT_KEYS = ("contract_version", "source", "graphs")
+_NODE_TYPES = frozenset({"SourceNode", "ContainerNode", "GapNode"})
 
 
 def source_graph_to_dict(graph: SourceGraph) -> dict[str, Any]:
@@ -118,19 +119,28 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
 
     Returns:
         The JSON-friendly document, ready to write.
+
+    Raises:
+        ValueError: A graph's ``source`` differs from *source*, so the reader would
+            refuse the document.
     """
     document: dict[str, Any] = {
         "contract_version": SOURCE_GRAPHS_CONTRACT_VERSION,
         "source": source,
         "graphs": [source_graph_to_dict(graph) for graph in graphs],
     }
+    _check_graph_sources(document)
     document["graph_sha256"] = [_canonical_sha256(graph) for graph in document["graphs"]]
     document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
     return document
 
 
 def write_source_graphs(path: Path, graphs: list[SourceGraph], *, source: str) -> dict[str, Any]:
-    """Write the persisted source-graph document to *path* and return what was written."""
+    """Write the persisted source-graph document to *path* and return what was written.
+
+    Builds the document with :func:`source_graphs_document`, so a graph from another
+    source raises before anything is written.
+    """
     document = source_graphs_document(graphs, source=source)
     path.write_text(json.dumps(document, indent=2), encoding="utf-8")
     return document
@@ -139,10 +149,10 @@ def write_source_graphs(path: Path, graphs: list[SourceGraph], *, source: str) -
 def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
     """Read the graphs back out of a ``source_graphs.json`` document, failing closed on drift.
 
-    Any document on contract version ``"1"`` is accepted, including one written
-    without the content hashes. When hashes are present they must all match the
-    content, so a hand-edited or truncated file raises instead of quietly handing a
-    different graph to a later phase.
+    Only contract version ``"1"`` is accepted. Both content hashes are required and
+    must match the content, and every graph must come from the document's ``source``,
+    so a hand-edited or truncated file raises instead of quietly handing a different
+    graph to a later phase.
 
     Args:
         document: The parsed JSON document.
@@ -151,8 +161,9 @@ def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
         The rehydrated graphs, in file order.
 
     Raises:
-        ValueError: The contract version is unsupported, ``graphs`` is not a list, or
-            a recorded hash does not match the content.
+        ValueError: The contract version is unsupported, ``graphs`` is not a list, a
+            graph's ``source`` differs from the document's, or a hash is missing or
+            does not match the content.
     """
     version = document.get("contract_version")
     if version != SOURCE_GRAPHS_CONTRACT_VERSION:
@@ -163,16 +174,27 @@ def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
     if not isinstance(graphs, list):
         raise ValueError("source_graphs document has no 'graphs' list")
     recorded_graph_hashes = document.get("graph_sha256")
-    if recorded_graph_hashes is not None:
-        actual_graph_hashes = [_canonical_sha256(graph) for graph in graphs]
-        if recorded_graph_hashes != actual_graph_hashes:
-            raise ValueError("source_graphs graph_sha256 does not match the graphs it was recorded for")
+    if recorded_graph_hashes is None:
+        raise ValueError("source_graphs document is missing graph_sha256")
+    actual_graph_hashes = [_canonical_sha256(graph) for graph in graphs]
+    if recorded_graph_hashes != actual_graph_hashes:
+        raise ValueError("source_graphs graph_sha256 does not match the graphs it was recorded for")
     recorded_document_hash = document.get("document_sha256")
-    if recorded_document_hash is not None:
-        actual_document_hash = _canonical_sha256({key: document.get(key) for key in _HASHED_DOCUMENT_KEYS})
-        if recorded_document_hash != actual_document_hash:
-            raise ValueError("source_graphs document_sha256 does not match the document content")
+    if recorded_document_hash is None:
+        raise ValueError("source_graphs document is missing document_sha256")
+    actual_document_hash = _canonical_sha256({key: document.get(key) for key in _HASHED_DOCUMENT_KEYS})
+    if recorded_document_hash != actual_document_hash:
+        raise ValueError("source_graphs document_sha256 does not match the document content")
+    _check_graph_sources(document)
     return [source_graph_from_dict(graph) for graph in graphs]
+
+
+def _check_graph_sources(document: dict[str, Any]) -> None:
+    """Raise when any graph in *document* comes from a source other than the document's own."""
+    source = document.get("source")
+    for graph in document["graphs"]:
+        if graph.get("source") != source:
+            raise ValueError(f"source_graphs document for source {source!r} holds a graph from another source")
 
 
 def read_source_graphs(path: Path) -> list[SourceGraph]:
@@ -302,6 +324,8 @@ def _node_from_dict(raw: dict[str, Any]) -> SourceNode:
     ``concept`` is passed through only when the dict carries a non-empty value,
     so a partial :class:`GapNode` dict (no ``concept`` key) rehydrates with the
     model default ``CONCEPT_GAP`` instead of being overridden with ``""``.
+    A ``node_type`` other than the three node classes raises rather than
+    quietly becoming a plain :class:`SourceNode` and dropping its extra fields.
     """
     common: dict[str, Any] = {
         "source_id": raw.get("source_id", ""),
@@ -322,6 +346,8 @@ def _node_from_dict(raw: dict[str, Any]) -> SourceNode:
         common["concept"] = concept
 
     node_type = raw.get("node_type", "SourceNode")
+    if node_type not in _NODE_TYPES:
+        raise ValueError(f"Unknown discovery node_type {node_type!r}; expected one of {sorted(_NODE_TYPES)}")
     if node_type == "GapNode":
         # Leave `concept` unset when absent so GapNode's CONCEPT_GAP default wins.
         return GapNode(**common, reason=raw.get("reason"))
