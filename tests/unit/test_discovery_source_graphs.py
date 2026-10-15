@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from flowx.discovery_serde import (
+    _HASHED_DOCUMENT_KEYS,
     SOURCE_GRAPHS_CONTRACT_VERSION,
+    _canonical_sha256,
     read_source_graphs,
     source_graph_to_dict,
     source_graphs_document,
@@ -95,10 +97,23 @@ def test_edited_graph_with_both_hashes_deleted_fails_closed() -> None:
 
 def test_graph_from_another_source_is_rejected() -> None:
     """A document labelled with one source cannot carry graphs from another, even with matching hashes."""
-    document = source_graphs_document([_graph("first")], source="other")
+    document = source_graphs_document([_graph("first")], source="unit")
+    document["source"] = "other"
+    document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
 
-    with pytest.raises(ValueError, match="source"):
+    with pytest.raises(ValueError, match="holds a graph from another source"):
         source_graphs_from_document(document)
+
+
+def test_writer_refuses_a_graph_from_another_source(tmp_path: Path) -> None:
+    """Discover cannot save a document that the reader would refuse later."""
+    path = tmp_path / "source_graphs.json"
+
+    with pytest.raises(ValueError, match="holds a graph from another source"):
+        source_graphs_document([_graph("first")], source="other")
+    with pytest.raises(ValueError, match="holds a graph from another source"):
+        write_source_graphs(path, [_graph("first")], source="other")
+    assert not path.exists()
 
 
 def test_edited_graph_fails_closed() -> None:

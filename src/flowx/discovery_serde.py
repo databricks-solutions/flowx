@@ -121,12 +121,17 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
 
     Returns:
         The JSON-friendly document, ready to write.
+
+    Raises:
+        ValueError: A graph's ``source`` differs from *source*, so the reader would
+            refuse the document.
     """
     document: dict[str, Any] = {
         "contract_version": SOURCE_GRAPHS_CONTRACT_VERSION,
         "source": source,
         "graphs": [source_graph_to_dict(graph) for graph in graphs],
     }
+    _check_graph_sources(document)
     document["graph_sha256"] = [_canonical_sha256(graph) for graph in document["graphs"]]
     document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
     return document
@@ -178,11 +183,16 @@ def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
     actual_document_hash = _canonical_sha256({key: document.get(key) for key in _HASHED_DOCUMENT_KEYS})
     if recorded_document_hash != actual_document_hash:
         raise ValueError("source_graphs document_sha256 does not match the document content")
+    _check_graph_sources(document)
+    return [source_graph_from_dict(graph) for graph in graphs]
+
+
+def _check_graph_sources(document: dict[str, Any]) -> None:
+    """Raise when any graph in *document* comes from a source other than the document's own."""
     source = document.get("source")
-    for graph in graphs:
+    for graph in document["graphs"]:
         if graph.get("source") != source:
             raise ValueError(f"source_graphs document for source {source!r} holds a graph from another source")
-    return [source_graph_from_dict(graph) for graph in graphs]
 
 
 def read_source_graphs(path: Path) -> list[SourceGraph]:
