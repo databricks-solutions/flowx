@@ -138,7 +138,11 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
 
 
 def write_source_graphs(path: Path, graphs: list[SourceGraph], *, source: str) -> dict[str, Any]:
-    """Write the persisted source-graph document to *path* and return what was written."""
+    """Write the persisted source-graph document to *path* and return what was written.
+
+    Builds the document with :func:`source_graphs_document`, so a graph from another
+    source raises before anything is written.
+    """
     document = source_graphs_document(graphs, source=source)
     path.write_text(json.dumps(document, indent=2), encoding="utf-8")
     return document
