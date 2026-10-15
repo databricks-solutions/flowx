@@ -16,7 +16,7 @@ mutated.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 
 from flowx.models.ir import ControlEdge, DataAsset, DataEdge
 
@@ -24,6 +24,8 @@ from flowx.models.ir import ControlEdge, DataAsset, DataEdge
 def control_edges_from_calls(
     source_workflow: str,
     calls: Iterable[tuple[str, bool | None, str]],
+    *,
+    known_workflows: Collection[str] | None = None,
 ) -> list[ControlEdge]:
     """Assemble deduplicated control edges from raw invocation primitives.
 
@@ -37,11 +39,15 @@ def control_edges_from_calls(
         calls: One ``(target_workflow, wait_for_completion, via_task_key)`` triple
             per call site, in the order they should be considered. ``target_workflow``
             may be empty when the callee could not be resolved from a partial export.
+        known_workflows: Names of the workflows present in this export. When given,
+            an edge is resolved only when its target is one of them, so a callee
+            missing from the export stays unresolved. When ``None``, any non-empty
+            target counts as resolved.
 
     Returns:
         Deduplicated control edges in first-seen order. A call whose target equals
-        ``source_workflow`` is dropped (no self-edge); an empty target is kept with
-        ``resolved=False`` rather than dropped.
+        ``source_workflow`` is dropped (no self-edge); an empty or unknown target is
+        kept with ``resolved=False`` rather than dropped.
     """
     edges: list[ControlEdge] = []
     seen: set[tuple[str, str, str]] = set()
@@ -59,7 +65,7 @@ def control_edges_from_calls(
                 target_workflow=target_name,
                 via_task_key=via_task_key,
                 wait_for_completion=wait,
-                resolved=bool(target_name),
+                resolved=bool(target_name) and (known_workflows is None or target_name in known_workflows),
             )
         )
     return edges
@@ -115,6 +121,9 @@ def data_edges_from_endpoints(
 
     edges: list[DataEdge] = []
     seen: set[tuple[str, str, str, str]] = set()
+    # Every writer pairs with every reader of the same asset regardless of run order: two parallel
+    # writers both hand off, and so does a writer that runs after the reader. "Proven" means the
+    # assets match, not that this writer's output is the one the reader sees.
     for producer_key, producer_asset in producer_list:
         for consumer_key, consumer_asset in consumer_list:
             if producer_key == consumer_key:

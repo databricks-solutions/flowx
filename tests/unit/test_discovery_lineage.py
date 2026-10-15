@@ -17,9 +17,11 @@ from flowx.discovery_lineage import (
     walk_nodes,
     with_graph_lineage,
 )
+from flowx.lineage import control_edges_from_calls
 from flowx.models.discovery import (
     SOURCE_ADF,
     ContainerNode,
+    SourceDependency,
     SourceGraph,
     SourceNode,
 )
@@ -189,3 +191,45 @@ def test_with_graph_lineage_returns_new_graph_and_leaves_input_untouched() -> No
     assert graph.lineage is None
     assert result is not graph
     assert len(result.lineage.control_edges) == 1
+
+
+def test_control_edge_to_a_callee_missing_from_known_workflows_is_unresolved() -> None:
+    """A named callee that is not in the export stays unresolved instead of looking resolved."""
+    graph = _graph(_node("call_child", invokes="child"), _node("call_missing", invokes="missing"), name="parent")
+    edges = build_graph_lineage(graph, known_workflows={"parent", "child"}).control_edges
+    assert [(edge.target_workflow, edge.resolved) for edge in edges] == [("child", True), ("missing", False)]
+
+
+def test_control_edges_from_calls_checks_known_workflows() -> None:
+    edges = control_edges_from_calls(
+        "parent", [("child", None, "a"), ("missing", None, "b")], known_workflows={"child"}
+    )
+    assert [edge.resolved for edge in edges] == [True, False]
+
+
+# --------------------------------------------------------------------------- #
+# Data edges ignore run order
+# --------------------------------------------------------------------------- #
+
+
+def test_every_writer_of_an_asset_hands_off_to_its_reader() -> None:
+    """Two parallel writers of one asset each get an edge to the reader; the match does not pick one."""
+    graph = _graph(
+        _node("writer_one", writes=[DataAsset(signature="ds", identity="x.y")]),
+        _node("writer_two", writes=[DataAsset(signature="ds", identity="x.y")]),
+        _node("reader", reads=[DataAsset(signature="ds", identity="x.y")]),
+    )
+    edges = build_graph_lineage(graph).data_edges
+    assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [
+        ("writer_one", "reader"),
+        ("writer_two", "reader"),
+    ]
+
+
+def test_writer_that_runs_after_the_reader_still_gets_an_edge() -> None:
+    """The match ignores run order, so a writer downstream of the reader still pairs with it."""
+    reader = _node("reader", reads=[DataAsset(signature="ds", identity="x.y")])
+    writer = _node("writer", writes=[DataAsset(signature="ds", identity="x.y")])
+    writer.dependencies = [SourceDependency(upstream="reader")]
+    edges = build_graph_lineage(_graph(reader, writer)).data_edges
+    assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [("writer", "reader")]

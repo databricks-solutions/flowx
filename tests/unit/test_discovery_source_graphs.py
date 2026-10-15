@@ -73,15 +73,32 @@ def test_hashes_do_not_depend_on_formatting(tmp_path: Path) -> None:
     assert [graph.name for graph in read_source_graphs(compact)] == ["first"]
 
 
-def test_document_without_hashes_is_accepted() -> None:
-    """A version-1 file written without hashes (the Airflow discover shape) still reads."""
-    document = {
-        "contract_version": "1",
-        "source": "airflow",
-        "graphs": [source_graph_to_dict(_graph("dag"))],
-    }
+@pytest.mark.parametrize("missing_key", ["graph_sha256", "document_sha256"])
+def test_document_missing_a_hash_is_rejected(missing_key: str) -> None:
+    """Deleting a hash field cannot get an edited file past verification."""
+    document = source_graphs_document([_graph("first")], source="unit")
+    del document[missing_key]
 
-    assert [graph.name for graph in source_graphs_from_document(document)] == ["dag"]
+    with pytest.raises(ValueError, match=f"missing {missing_key}"):
+        source_graphs_from_document(document)
+
+
+def test_edited_graph_with_both_hashes_deleted_fails_closed() -> None:
+    document = source_graphs_document([_graph("first")], source="unit")
+    document["graphs"][0]["tasks"][0]["native_type"] = "Edited"
+    del document["graph_sha256"]
+    del document["document_sha256"]
+
+    with pytest.raises(ValueError, match="missing graph_sha256"):
+        source_graphs_from_document(document)
+
+
+def test_graph_from_another_source_is_rejected() -> None:
+    """A document labelled with one source cannot carry graphs from another, even with matching hashes."""
+    document = source_graphs_document([_graph("first")], source="other")
+
+    with pytest.raises(ValueError, match="source"):
+        source_graphs_from_document(document)
 
 
 def test_edited_graph_fails_closed() -> None:
