@@ -22,8 +22,10 @@ from typing import Any
 from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
+    ControlEdge,
     CopyActivity,
     DataAsset,
+    DataEdge,
     DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
@@ -83,6 +85,8 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
         }
     if pipeline.translation_configuration is not None:
         result["translation_configuration"] = configuration_to_dict(pipeline.translation_configuration)
+    if pipeline.lineage is not None:
+        result["lineage"] = lineage_to_dict(pipeline.lineage)
     return result
 
 
@@ -146,6 +150,48 @@ def lineage_to_dict(lineage: Lineage) -> dict[str, Any]:
         ],
         "motifs": [_motif_annotation_to_dict(motif) for motif in lineage.motifs],
     }
+
+
+def lineage_from_dict(raw: dict[str, Any]) -> Lineage:
+    """Rehydrate a :class:`Lineage` block from the dict :func:`lineage_to_dict` emits.
+
+    The one inverse shared by the translation report and the discovery graph, so a
+    lineage block reads back the same way wherever it was written.
+    """
+    return Lineage(
+        control_edges=[
+            ControlEdge(
+                source_workflow=edge.get("source_workflow", ""),
+                target_workflow=edge.get("target_workflow", ""),
+                via_task_key=edge.get("via_task_key", ""),
+                wait_for_completion=edge.get("wait_for_completion"),
+                resolved=bool(edge.get("resolved", True)),
+            )
+            for edge in raw.get("control_edges") or []
+        ],
+        data_edges=[
+            DataEdge(
+                source_task_key=edge.get("source_task_key", ""),
+                target_task_key=edge.get("target_task_key", ""),
+                match_kind=edge.get("match_kind", ""),
+                match_key=edge.get("match_key", ""),
+                identity=edge.get("identity"),
+                asset_type=edge.get("asset_type"),
+            )
+            for edge in raw.get("data_edges") or []
+        ],
+        motifs=[
+            MotifAnnotation(
+                motif_id=motif.get("motif_id", ""),
+                member_task_keys=list(motif.get("member_task_keys") or []),
+                display_name=motif.get("display_name"),
+                databricks_replacement=motif.get("databricks_replacement"),
+                notes=list(motif.get("notes") or []),
+                source_type_hint=motif.get("source_type_hint"),
+            )
+            for motif in raw.get("motifs") or []
+        ],
+    )
 
 
 def _motif_annotation_to_dict(motif: MotifAnnotation) -> dict[str, Any]:
@@ -226,6 +272,12 @@ def activity_to_dict(task: Activity) -> dict[str, Any]:
         task_dict["libraries"] = task.libraries
     if task.parameter_approximations:
         task_dict["parameter_approximations"] = task.parameter_approximations
+    if task.motif_id:
+        task_dict["motif_id"] = task.motif_id
+    if task.data_reads:
+        task_dict["data_reads"] = [data_asset_to_dict(asset) for asset in task.data_reads]
+    if task.data_writes:
+        task_dict["data_writes"] = [data_asset_to_dict(asset) for asset in task.data_writes]
 
     extra = activity_extra_fields(task)
     task_dict.update(extra)
@@ -420,7 +472,7 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             if activity.job_parameters:
                 extra["job_parameters"] = activity.job_parameters
         case MotifActivity():
-            extra["motif_id"] = activity.motif_id
+            # motif_id now lives on the Activity base and is serialised by activity_to_dict.
             extra["display_name"] = activity.display_name
             extra["databricks_replacement"] = activity.databricks_replacement
             extra["matched_activity_names"] = activity.matched_activity_names

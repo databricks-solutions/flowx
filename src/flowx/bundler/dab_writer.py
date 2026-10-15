@@ -26,6 +26,7 @@ from flowx.bundler.inner_job_params import normalize_value
 from flowx.bundler.notebook_writer import write_notebooks
 from flowx.bundler.prereqs_writer import ManualParameter, build_prereqs, render_setup_md
 from flowx.bundler.setup_generator import generate_setup_tasks
+from flowx.ir_serde import data_asset_from_dict, lineage_from_dict
 from flowx.models.dab import DabNotebook
 from flowx.models.ir import (
     Activity,
@@ -2021,6 +2022,7 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         ):
             raise ValueError(f"Invalid Pipeline email notification entry: {event!r}")
         email_notifications[str(event)] = list(recipients)
+    raw_lineage = pipeline_dict.get("lineage")
 
     pipeline = Pipeline(
         name=pipeline_dict.get("name", "unknown"),
@@ -2037,6 +2039,7 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         reconciliation_status=pipeline_dict.get("reconciliation_status"),
         migration_status=pipeline_dict.get("migration_status", "included"),
         audit=dict(pipeline_dict.get("audit") or {}),
+        lineage=lineage_from_dict(raw_lineage) if raw_lineage else None,
     )
     return pipeline, parameters
 
@@ -2258,9 +2261,10 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             bridge_required_parameters=dict(task_ir.get("bridge_required_parameters") or {}),
         )
     if task_type == "MotifActivity":
+        # motif_id arrives via ``base`` (Activity now owns the field); passing it again here
+        # would raise "multiple values for keyword argument 'motif_id'".
         return MotifActivity(
             **base,
-            motif_id=task_ir.get("motif_id", "unknown"),
             display_name=task_ir.get("display_name", base["name"]),
             databricks_replacement=task_ir.get("databricks_replacement", "notebook"),
             matched_activity_names=list(task_ir.get("matched_activity_names", [])),
@@ -2311,6 +2315,9 @@ def _common_activity_kwargs(task_ir: dict[str, Any]) -> dict[str, Any]:
         "required_parameters": dict(task_ir.get("required_parameters") or {}),
         "compute_mode": task_ir.get("compute_mode"),
         "notifications": task_ir.get("notifications"),
+        "motif_id": task_ir.get("motif_id"),
+        "data_reads": [data_asset_from_dict(asset) for asset in task_ir.get("data_reads") or []],
+        "data_writes": [data_asset_from_dict(asset) for asset in task_ir.get("data_writes") or []],
     }
 
 
