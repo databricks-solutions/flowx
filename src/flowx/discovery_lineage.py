@@ -129,7 +129,7 @@ def build_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] 
     )
 
 
-def with_graph_lineage(graph: SourceGraph) -> SourceGraph:
+def with_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] | None = None) -> SourceGraph:
     """Return a *new* graph carrying its derived lineage, leaving the input untouched.
 
     Pure: builds the lineage block and attaches it via :func:`dataclasses.replace`
@@ -137,8 +137,11 @@ def with_graph_lineage(graph: SourceGraph) -> SourceGraph:
 
     Args:
         graph: The source graph to copy.
+        known_workflows: Names of the workflows present in this export, passed
+            straight to :func:`build_graph_lineage`. Without it, every named callee
+            counts as resolved, even one missing from the export.
 
     Returns:
         A shallow copy of *graph* with :attr:`SourceGraph.lineage` populated.
     """
-    return dataclasses.replace(graph, lineage=build_graph_lineage(graph))
+    return dataclasses.replace(graph, lineage=build_graph_lineage(graph, known_workflows=known_workflows))

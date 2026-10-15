@@ -200,6 +200,12 @@ def test_control_edge_to_a_callee_missing_from_known_workflows_is_unresolved() -
     assert [(edge.target_workflow, edge.resolved) for edge in edges] == [("child", True), ("missing", False)]
 
 
+def test_with_graph_lineage_marks_a_callee_missing_from_known_workflows_unresolved() -> None:
+    graph = _graph(_node("call_child", invokes="child"), _node("call_missing", invokes="missing"), name="parent")
+    edges = with_graph_lineage(graph, known_workflows={"parent", "child"}).lineage.control_edges
+    assert [(edge.target_workflow, edge.resolved) for edge in edges] == [("child", True), ("missing", False)]
+
+
 def test_control_edges_from_calls_checks_known_workflows() -> None:
     edges = control_edges_from_calls(
         "parent", [("child", None, "a"), ("missing", None, "b")], known_workflows={"child"}
