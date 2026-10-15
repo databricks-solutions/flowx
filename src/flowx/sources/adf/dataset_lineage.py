@@ -22,7 +22,10 @@ Two tiers, exactly as #36 established them:
   anchor, prefixed ``ST[<store>]/`` when the dataset's store is known (see
   :func:`_resolve_dataset_store`), so two datasets on different stores that merely
   share a folder shape never join. An unknown store is never guessed: the signature
-  stays unqualified, and a qualified and an unqualified signature never join.
+  stays unqualified, and a qualified and an unqualified signature never join. A
+  dataset that names its store (a literal container or bucket, or a server set on its
+  linked service) but cannot prove the rest of it gets no signature, since the folder
+  shape alone cannot tell two such stores apart.
   It is **never** the bare dataset reference name: two unrelated opaque
   references that merely share a name must not join (#36's explicit rule), so when
   neither a physical identity nor a path-anchored signature is available the
@@ -185,10 +188,13 @@ def _dataset_ref_to_asset(
 
     A path signature is prefixed with the dataset's store when that store is known
     (see :func:`_resolve_dataset_store`), so two datasets on different containers or
-    accounts that merely share a folder shape never join. A location whose store is
-    named only on the linked service (SFTP, FTP, a file share, HDFS, HTTP) gets no
-    signature at all when that store is not known, because the folder shape alone
-    cannot tell two servers apart.
+    accounts that merely share a folder shape never join. A dataset whose location
+    names its store but cannot prove all of it gets no signature at all, because the
+    folder shape alone cannot tell two such stores apart: a literal container or
+    bucket whose account is unknown, or a location whose store is named only on the
+    linked service (SFTP, FTP, a file share, HDFS, HTTP), when that linked service is
+    not a plain, unparameterised name. A file system that is itself parameterised
+    names no store, so its signature stays unqualified.
     """
     if location_overridden:
         return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))
@@ -201,7 +207,7 @@ def _dataset_ref_to_asset(
     store = _resolve_dataset_store(dataset_ref, definitions, context) if path_signature is not None else None
     if path_signature is not None and store:
         path_signature = f"ST[{store}]/{path_signature}"
-    elif path_signature is not None and _location_type(dataset_ref, definitions) in _LINKED_SERVICE_STORE_LOCATIONS:
+    elif path_signature is not None and _location_names_store(dataset_ref, definitions, context):
         path_signature = None
     return DataAsset(
         signature=path_signature if path_signature is not None else "",
@@ -547,14 +553,33 @@ def _resolve_dataset_store(
     return f"{file_system}@{store}" if store else None
 
 
-def _location_type(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> str | None:
-    """The ``type`` of the dataset's file location, such as ``SftpLocation``, or ``None``."""
+def _location_names_store(
+    dataset_ref: AdfDatasetReference,
+    definitions: AdfDefinitions,
+    context: TranslationContext,
+) -> bool:
+    """Say whether the dataset's file location tells its store apart from others, provable or not.
+
+    That is a literal file system (ADLS file system, Blob container, S3 / GCS bucket),
+    or a location whose server or share is set on the linked service (SFTP, FTP, a file
+    share, HDFS, HTTP). A file system that is itself parameterised names no store.
+    """
     properties = _dataset_props(dataset_ref, definitions)
     if properties is None:
-        return None
+        return False
     type_props = properties.get("typeProperties") or properties
     location = type_props.get("location")
-    return location.get("type") if isinstance(location, dict) else None
+    if not isinstance(location, dict):
+        return False
+    if location.get("type") in _LINKED_SERVICE_STORE_LOCATIONS:
+        return True
+    file_system, _ = _resolve_file_store(
+        location,
+        _backing_linked_service(properties, definitions),
+        _effective_dataset_params(dataset_ref, properties),
+        context,
+    )
+    return file_system is not None
 
 
 def _resolve_file_store(
