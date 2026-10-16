@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).parents[2]
 FIXTURES = ROOT / "tests/integration/azure/adf"
@@ -88,12 +89,18 @@ def test_every_fixture_pipeline_is_in_a_case() -> None:
     assert covered == fixtures, f"uncovered={sorted(fixtures - covered)} unknown={sorted(covered - fixtures)}"
 
 
-def test_blob_event_expected_url_documents_known_arm_id_bug() -> None:
-    """Keep the current ARM-ID URL visible until the separate flowx bug is fixed."""
-    expected = CASES / "full-factory/expected/bundles"
-    matches = [path for path in expected.rglob("*.yml") if "file_arrival" in path.read_text(encoding="utf-8")]
-    assert matches
-    assert any("url: <STORAGE_ACCOUNT_ID>" in path.read_text(encoding="utf-8") for path in matches)
+def _full_factory_job(bundle: str) -> dict[str, Any]:
+    resources = CASES / f"full-factory/expected/bundles/{bundle}/resources/{bundle}.yml"
+    return next(iter(yaml.safe_load(resources.read_text(encoding="utf-8"))["resources"]["jobs"].values()))
+
+
+# Known flowx bugs recorded in the expected outputs. Each test asserts the correct behaviour and is
+# expected to fail; strict=True turns the fix into an XPASS failure so the marker gets removed.
+@pytest.mark.xfail(strict=True, reason="flowx bug: BlobEventsTrigger scope (ARM id) is emitted as file_arrival url")
+def test_blob_events_trigger_uses_storage_url() -> None:
+    """The file-arrival URL points at the container path, not the storage-account resource ID."""
+    url = _full_factory_job("all_activity_types")["trigger"]["file_arrival"]["url"]
+    assert url.startswith("abfss://raw@") and url.endswith("/blobs/csv/")
 
 
 def test_live_definition_allowlist_rejects_translation_changes() -> None:
