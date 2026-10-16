@@ -108,9 +108,9 @@ ADF source containing those pipelines, every shared dataset, linked service, and
 runtimes are left out because flowx doesn't load them), and only triggers that reference a selected pipeline. `expected/` records normalized inventory, per-pipeline
 IR, gaps, and the complete packaged bundle tree.
 
-The `full-factory` case runs every fixture pipeline together and sets `"aggregate_only": true`, so it
-records only the factory-wide outputs: inventory, gaps, `DEPLOY.md`, and `metadata/profile_report.csv`.
-Per-pipeline output is covered by the single-pipeline cases. Add new fixture pipelines to its `case.json` too.
+Every case keeps its own complete `expected/` tree, even when that repeats another case's output, so a change to
+one case never silently changes what another checks. `full-factory` runs every fixture pipeline together and
+`motifs` runs every `motif-*` pipeline; add new fixture pipelines to the matching `case.json` too.
 
 To add a case, create its `case.json`, then regenerate expected artifacts offline:
 

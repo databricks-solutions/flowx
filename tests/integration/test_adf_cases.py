@@ -18,8 +18,6 @@ ROOT = Path(__file__).parents[2]
 FIXTURES = ROOT / "tests/integration/azure/adf"
 CASES = FIXTURES / "cases"
 PHASES = ("discover", "convert", "package")
-# Cases marked aggregate_only check just these package outputs; their per-pipeline output is covered elsewhere.
-AGGREGATE_FILES = ("DEPLOY.md", "metadata/profile_report.csv")
 SHARED_DIRS = ("datasets", "linked_services", "dataflows")
 LIVE_DEFINITION_DIRS = (*SHARED_DIRS, "pipelines", "triggers")
 LIVE_ENV = {
@@ -60,7 +58,6 @@ def test_adf_case(case_dir: Path, phase: str, case_results, pytestconfig: pytest
     update = pytestconfig.getoption("--update-expected")
     result = case_results(case_dir)
     expected = case_dir / "expected"
-    aggregate_only = _read_json(case_dir / "case.json").get("aggregate_only", False)
 
     if phase == "discover":
         if update:
@@ -69,24 +66,13 @@ def test_adf_case(case_dir: Path, phase: str, case_results, pytestconfig: pytest
             assert result["inventory"] == _read_json(expected / "inventory.json")
     elif phase == "convert":
         if update:
-            if not aggregate_only:
-                shutil.rmtree(expected / "ir", ignore_errors=True)
-                for pipeline, value in result["ir"].items():
-                    _write_json(expected / "ir" / f"{pipeline}.json", value)
+            shutil.rmtree(expected / "ir", ignore_errors=True)
+            for pipeline, value in result["ir"].items():
+                _write_json(expected / "ir" / f"{pipeline}.json", value)
             _write_json(expected / "gaps.json", result["gaps"])
         else:
-            if not aggregate_only:
-                expected_ir = {path.stem: _read_json(path) for path in sorted((expected / "ir").glob("*.json"))}
-                assert result["ir"] == expected_ir
+            assert result["ir"] == {path.stem: _read_json(path) for path in sorted((expected / "ir").glob("*.json"))}
             assert result["gaps"] == _read_json(expected / "gaps.json")
-    elif aggregate_only:
-        for relative in AGGREGATE_FILES:
-            actual = (result["output"] / relative).read_bytes()
-            if update:
-                (expected / "bundles" / relative).parent.mkdir(parents=True, exist_ok=True)
-                (expected / "bundles" / relative).write_bytes(actual)
-            else:
-                assert actual == (expected / "bundles" / relative).read_bytes(), relative
     elif update:
         _copy_tree(result["output"], expected / "bundles")
     else:
@@ -107,11 +93,13 @@ def test_every_fixture_pipeline_is_in_a_case() -> None:
     covered = {pipeline for case_dir in _case_dirs() for pipeline in _read_json(case_dir / "case.json")["pipelines"]}
     assert covered == fixtures, f"uncovered={sorted(fixtures - covered)} unknown={sorted(covered - fixtures)}"
     assert set(_read_json(CASES / "full-factory/case.json")["pipelines"]) == fixtures
+    motifs = {pipeline for pipeline in fixtures if pipeline.startswith("motif-")}
+    assert set(_read_json(CASES / "motifs/case.json")["pipelines"]) == motifs
 
 
 def test_blob_event_expected_url_documents_known_arm_id_bug() -> None:
     """Keep the current ARM-ID URL visible until the separate flowx bug is fixed."""
-    expected = CASES / "all-activity-types/expected/bundles"
+    expected = CASES / "full-factory/expected/bundles"
     matches = [path for path in expected.rglob("*.yml") if "file_arrival" in path.read_text(encoding="utf-8")]
     assert matches
     assert any("url: <STORAGE_ACCOUNT_ID>" in path.read_text(encoding="utf-8") for path in matches)
@@ -165,7 +153,7 @@ def test_whole_export_reports_all_files_and_paths(tmp_path: Path) -> None:
 
 def test_expected_artifacts_are_not_subject_to_line_ending_conversion() -> None:
     """Generated CSV CRLF bytes must survive checkout unchanged."""
-    sample = CASES / "execute-pipeline-pair/expected/bundles/metadata/profile_report.csv"
+    sample = CASES / "full-factory/expected/bundles/metadata/profile_report.csv"
     result = subprocess.run(
         ["git", "check-attr", "text", "--", str(sample.relative_to(ROOT))],
         cwd=ROOT,
@@ -196,13 +184,14 @@ def test_live_read_only_trigger_and_integration_runtime_fields(tmp_path: Path) -
     trigger["properties"]["annotations"] = []
     _write_json(trigger_path, trigger)
 
-    case_dir = CASES / "execute-pipeline-pair"
+    case_dir = CASES / "full-factory"
     result = _run_case(_read_json(case_dir / "case.json"), live, tmp_path)
     source = tmp_path / "source"
     assert not (source / "integration_runtimes").exists()
     copied_trigger = _read_json(source / "triggers/schedule.json")["properties"]
     assert copied_trigger["annotations"] == []
     assert copied_trigger["runtimeState"] == "Stopped"
+    assert all(_read_json(path)["properties"]["runtimeState"] == "Stopped" for path in source.glob("triggers/*.json"))
 
     assert result["inventory"] == _read_json(case_dir / "expected/inventory.json")
     assert result["ir"] == {path.stem: _read_json(path) for path in sorted((case_dir / "expected/ir").glob("*.json"))}

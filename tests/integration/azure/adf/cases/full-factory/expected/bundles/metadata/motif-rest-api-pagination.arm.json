@@ -1,0 +1,65 @@
+{
+  "name": "motif-rest-api-pagination",
+  "properties": {
+    "activities": [
+      {
+        "name": "initial-request",
+        "type": "WebActivity",
+        "typeProperties": {
+          "method": "GET",
+          "url": "https://example.invalid/api/items"
+        }
+      },
+      {
+        "dependsOn": [
+          {
+            "activity": "initial-request",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "name": "paginate",
+        "type": "Until",
+        "typeProperties": {
+          "activities": [
+            {
+              "name": "page-request",
+              "type": "WebActivity",
+              "typeProperties": {
+                "method": "GET",
+                "url": "https://example.invalid/api/items?page=next"
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "page-request",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "name": "set-continuation",
+              "type": "SetVariable",
+              "typeProperties": {
+                "value": "done",
+                "variableName": "continuation"
+              }
+            }
+          ],
+          "expression": {
+            "type": "Expression",
+            "value": "@empty(variables('continuation'))"
+          },
+          "timeout": "0.00:05:00"
+        }
+      }
+    ],
+    "variables": {
+      "continuation": {
+        "type": "String"
+      }
+    }
+  }
+}
