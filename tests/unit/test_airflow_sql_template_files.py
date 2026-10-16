@@ -210,3 +210,42 @@ def test_bash_length_expansion_is_not_a_jinja_comment(tmp_path: Path) -> None:
     pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='echo ${#ROWS[@]} # done')")
 
     assert not isinstance(_task(pipeline), PlaceholderActivity)
+
+
+def test_symlinked_dag_searches_the_folder_it_is_linked_from(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "load.sql").write_text("SELECT 'repo'", encoding="utf-8")
+    dag_source = (
+        "from airflow import DAG\n"
+        "from airflow.providers.databricks.operators.databricks_sql import DatabricksSqlOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = DatabricksSqlOperator(task_id='t', sql='load.sql')\n"
+    )
+    (repository / "job.py").write_text(dag_source, encoding="utf-8")
+    dags = tmp_path / "dags"
+    dags.mkdir()
+    (dags / "load.sql").write_text("SELECT 'dags'", encoding="utf-8")
+    (dags / "job.py").symlink_to(repository / "job.py")
+
+    pipeline = load_airflow_dag(dags / "job.py")
+
+    assert _task(pipeline).sql == "SELECT 'dags'"
+
+
+def test_relative_dag_path_searches_its_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dags = tmp_path / "dags"
+    dags.mkdir()
+    (dags / "load.sql").write_text("SELECT 1", encoding="utf-8")
+    (dags / "dag.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.providers.databricks.operators.databricks_sql import DatabricksSqlOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = DatabricksSqlOperator(task_id='t', sql='load.sql')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    pipeline = load_airflow_dag(Path("dags/dag.py"))
+
+    assert _task(pipeline).sql == "SELECT 1"

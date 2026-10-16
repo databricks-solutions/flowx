@@ -167,7 +167,8 @@ def _load_airflow_module(
                     "task_key": var_to_task_key[trigger_var],
                     "covered_capture_ids": sorted(covered_tasks),
                 }
-    template_search_paths = (dag_path.resolve().parent, *template_search_directories(visitor))
+    # Airflow searches the DAG file's folder as imported, without following symlinks.
+    template_search_paths = (dag_path.absolute().parent, *template_search_directories(visitor))
     dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions, visitor.default_args)
     dropped |= dataproc_plan.dropped
     upstreams = _rewire_dropped(upstreams, dropped)
