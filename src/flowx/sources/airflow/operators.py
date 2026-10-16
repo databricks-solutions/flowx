@@ -32,6 +32,7 @@ from flowx.models.ir import (
     SqlActivity,
 )
 from flowx.sources.airflow import callable_notebook, dataproc, templating, teradata
+from flowx.sources.airflow.template_files import find_template_file
 from flowx.utils import normalize_task_key
 
 # --------------------------------------------------------------------------------------
@@ -662,7 +663,8 @@ def _shell_activity(ctx: OperatorContext, command_kwarg: str) -> Activity:
     utilities = teradata.find_utilities(command)
     if utilities:
         scripts = [
-            teradata.script_record(path, ctx.template_search_paths) for path in teradata.script_references(command)
+            teradata.script_record(path, ctx.template_search_paths, remote=ctx.operator == "SSHOperator")
+            for path in teradata.script_references(command)
         ]
         return _teradata_placeholder(ctx, utilities, scripts, teradata.heredoc_scripts(command))
     submit = parse_spark_submit(command)
@@ -701,7 +703,10 @@ def _build_bteq(ctx: OperatorContext) -> Activity:
     """A BteqOperator runs a BTEQ script, inline as ``sql`` or from ``file_path``, through the bteq client."""
     file_path = literal_str(ctx.kwargs.get("file_path"))
     sql = literal_str(ctx.kwargs.get("sql"))
-    scripts = [teradata.script_record(file_path, ctx.template_search_paths)] if file_path is not None else []
+    remote = "ssh_conn_id" in ctx.kwargs
+    scripts = (
+        [teradata.script_record(file_path, ctx.template_search_paths, remote=remote)] if file_path is not None else []
+    )
     return _teradata_placeholder(ctx, ["bteq"], scripts, [sql] if sql is not None and file_path is None else [])
 
 
@@ -710,8 +715,12 @@ def _build_teradata_sql(ctx: OperatorContext) -> Activity:
     statements = _literal_statements(ctx.kwargs.get("sql"))
     if len(statements) == 1 and statements[0].endswith(".sql"):
         name = statements[0]
-        path, detail = _find_template_file(name, ctx.template_search_paths)
-        record = {"path": name, "unresolved": detail} if path is None else teradata.script_record(str(path), ())
+        path, detail = find_template_file(name, ctx.template_search_paths)
+        record = (
+            {"path": name, "unresolved": detail}
+            if path is None
+            else teradata.script_record(str(path), ctx.template_search_paths)
+        )
         record["path"] = name
         return _teradata_placeholder(ctx, [], [record], [])
     return _teradata_placeholder(ctx, [], [], statements)
@@ -809,26 +818,9 @@ _SQL_FILE_EXTENSIONS = (".sql", ".hql")
 _JINJA_STATEMENT_OR_COMMENT = re.compile(r"\{%|\{#")
 
 
-def _find_template_file(name: str, search_paths: tuple[Path, ...]) -> tuple[Path | None, str]:
-    """Finds a template file the way Airflow's Jinja loader does, or explains why it cannot.
-
-    Jinja splits the name on ``/``, ignores empty and ``.`` segments, refuses ``..``, and returns the
-    first match across the search paths.
-    """
-    parts = [part for part in name.split("/") if part and part != "."]
-    if ".." in parts:
-        return None, "climbs out of the template search path"
-    for root in search_paths:
-        candidate = root.joinpath(*parts)
-        if candidate.is_file():
-            return candidate, str(candidate)
-    searched = ", ".join(str(root) for root in search_paths) or "an empty search path"
-    return None, f"was not found in {searched}"
-
-
 def _read_template_file(name: str, search_paths: tuple[Path, ...]) -> tuple[str | None, str]:
     """Loads a template file's text as Airflow renders it, returning the resolved path or why it failed."""
-    path, detail = _find_template_file(name, search_paths)
+    path, detail = find_template_file(name, search_paths)
     if path is None:
         return None, detail
     try:

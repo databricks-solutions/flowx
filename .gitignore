@@ -47,3 +47,6 @@ tmp_adf_ingest_*/
 *.key
 credentials.json
 /fixlog/
+
+# Isaac tool state
+.isaac/

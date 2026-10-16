@@ -84,7 +84,7 @@ def test_large_script_is_recorded_without_content(tmp_path: Path) -> None:
     data = ("SELECT 1;\n" * (teradata.MAXIMUM_ATTACHED_SCRIPT_BYTES // 10 + 1)).encode()
     script.write_bytes(data)
 
-    record = teradata.script_record(str(script), ())
+    record = teradata.script_record(str(script), (tmp_path,))
 
     assert record["size_bytes"] == len(data)
     assert record["sha256"] == hashlib.sha256(data).hexdigest()
@@ -112,11 +112,11 @@ def test_bash_bteq_becomes_a_gap_with_its_script(tmp_path: Path) -> None:
     assert pipeline.reconciliation_status == "verified_with_gaps"
 
 
-def test_missing_absolute_script_is_recorded_as_unresolved(tmp_path: Path) -> None:
+def test_ssh_script_is_never_read_locally(tmp_path: Path) -> None:
     pipeline = _load(tmp_path, "SSHOperator(task_id='t', ssh_conn_id='edge', command='fastload < /opt/x.fl')")
 
     [script] = _teradata(pipeline)["scripts"]
-    assert script == {"path": "/opt/x.fl", "unresolved": "was not found in /opt"}
+    assert script == {"path": "/opt/x.fl", "unresolved": "is on the SSH host, so discover cannot read it"}
 
 
 def test_heredoc_bteq_carries_the_inline_script(tmp_path: Path) -> None:
@@ -287,3 +287,76 @@ def test_bteq_operator_sql_naming_a_file_is_sent_as_written(tmp_path: Path) -> N
 
     details = _teradata(pipeline)
     assert (details["scripts"], details["inline_scripts"]) == ([], ["daily.sql"])
+
+
+# --------------------------------------------------------------------------------------
+# Command structure and lookup rules
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    ['echo "run bteq later"', "grep bteq log.txt", "ls /opt/bteq/ && echo bteq", "printf 'mload\\n'"],
+)
+def test_utility_named_as_an_argument_is_not_a_call(command: str) -> None:
+    assert teradata.find_utilities(command) == []
+
+
+@pytest.mark.parametrize(
+    ("command", "references"),
+    [
+        ("sudo -u td bteq < /opt/a.bteq", ["/opt/a.bteq"]),
+        ("timeout 600 bteq < a.bteq", ["a.bteq"]),
+        ("LOGON=x nice -n 10 bteq < a.bteq", ["a.bteq"]),
+        ('bash -c "bteq < a.bteq"', ["a.bteq"]),
+        ('ssh edge "bteq < a.bteq"', ["a.bteq"]),
+        ("ssh edge bteq < a.bteq", ["a.bteq"]),
+        ("set -e # start\nbteq < a.bteq\necho done", ["a.bteq"]),
+        ("out=$(bteq < a.bteq)", ["a.bteq"]),
+    ],
+)
+def test_utility_in_command_position_is_found(command: str, references: list[str]) -> None:
+    assert teradata.find_utilities(command) == ["bteq"]
+    assert teradata.script_references(command) == references
+
+
+def test_heredoc_marker_with_a_hyphen_is_recognized() -> None:
+    command = "bteq <<END-SQL\nSEL 1;\nEND-SQL"
+
+    assert teradata.heredoc_scripts(command) == ["SEL 1;"]
+
+
+def test_only_heredocs_feeding_a_utility_are_scripts() -> None:
+    command = "cat <<EOF > settings.cfg\nhost=td\nEOF\nbteq < job.sql\ncat <<EOF | bteq\nSEL 1;\nEOF"
+
+    assert teradata.heredoc_scripts(command) == ["SEL 1;"]
+    assert teradata.script_references(command) == ["job.sql"]
+
+
+def test_script_paths_follow_the_template_lookup_rules(tmp_path: Path) -> None:
+    (tmp_path / "dags").mkdir()
+    (tmp_path / "dags" / "inside.bteq").write_text("SEL 1;", encoding="utf-8")
+    (tmp_path / "outside.bteq").write_text("SEL 2;", encoding="utf-8")
+    roots = (tmp_path / "dags",)
+
+    assert teradata.script_record(str(tmp_path / "dags" / "inside.bteq"), roots)["content"] == "SEL 1;"
+    assert "outside the DAG folder" in teradata.script_record(str(tmp_path / "outside.bteq"), roots)["unresolved"]
+    assert "climbs out" in teradata.script_record("../outside.bteq", roots)["unresolved"]
+    assert "climbs out" in teradata.script_record(str(tmp_path / "dags" / ".." / "outside.bteq"), roots)["unresolved"]
+
+
+def test_bteq_operator_over_ssh_does_not_read_a_local_file(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        "BteqOperator(task_id='t', file_path='scripts/daily.bteq', ssh_conn_id='edge')",
+        files={"dags/scripts/daily.bteq": "SEL 1;"},
+    )
+
+    [script] = _teradata(pipeline)["scripts"]
+    assert script == {"path": "scripts/daily.bteq", "unresolved": "is on the SSH host, so discover cannot read it"}
+
+
+def test_plain_shell_command_mentioning_bteq_stays_a_notebook(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='echo \"run bteq later\"')")
+
+    assert isinstance(_task(pipeline), NotebookActivity)
