@@ -4,8 +4,8 @@ output "factory_name" {
 }
 
 output "resource_group_name" {
-  description = "Name of the run-scoped resource group."
-  value       = azurerm_resource_group.test.name
+  description = "Name of the shared resource group the run deploys into."
+  value       = data.azurerm_resource_group.test.name
 }
 
 output "storage_account_id" {
@@ -26,5 +26,5 @@ output "adls_dfs_endpoint" {
 
 output "location" {
   description = "Azure location substituted into integration-runtime fixtures."
-  value       = var.location
+  value       = local.location
 }

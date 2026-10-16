@@ -1,6 +1,7 @@
 locals {
   fixture_root = "${path.module}/../adf"
   run_prefix   = substr(var.name_prefix, 0, 12)
+  location     = data.azurerm_resource_group.test.location
   tags = {
     purpose   = "flowx-integration-test"
     ephemeral = "true"
@@ -24,7 +25,7 @@ locals {
   dataflows = { for filename in local.dataflow_files : filename => jsondecode(file("${local.fixture_root}/dataflows/${filename}")) }
   integration_runtimes = {
     for filename in local.integration_runtime_files : filename => jsondecode(
-      replace(file("${local.fixture_root}/integration_runtimes/${filename}"), "<LOCATION>", var.location)
+      replace(file("${local.fixture_root}/integration_runtimes/${filename}"), "<LOCATION>", local.location)
     )
   }
   linked_service_sources = {
@@ -69,16 +70,15 @@ locals {
   }
 }
 
-resource "azurerm_resource_group" "test" {
-  name     = "${local.run_prefix}-flowx-rg"
-  location = var.location
-  tags     = local.tags
+# The shared resource group is created once by setup-integration.sh; the CI identity may only work inside it.
+data "azurerm_resource_group" "test" {
+  name = var.resource_group_name
 }
 
 resource "azurerm_storage_account" "test" {
   name                      = "${local.run_prefix}flowxsa"
-  resource_group_name       = azurerm_resource_group.test.name
-  location                  = azurerm_resource_group.test.location
+  resource_group_name       = data.azurerm_resource_group.test.name
+  location                  = local.location
   account_tier              = "Standard"
   account_replication_type  = "LRS"
   account_kind              = "StorageV2"
@@ -102,8 +102,8 @@ resource "azapi_resource" "containers" {
 
 resource "azurerm_key_vault" "test" {
   name                          = "${local.run_prefix}-flowx-kv"
-  location                      = azurerm_resource_group.test.location
-  resource_group_name           = azurerm_resource_group.test.name
+  location                      = local.location
+  resource_group_name           = data.azurerm_resource_group.test.name
   tenant_id                     = var.tenant_id
   sku_name                      = "standard"
   rbac_authorization_enabled    = true
@@ -115,8 +115,8 @@ resource "azurerm_key_vault" "test" {
 
 resource "azurerm_data_factory" "test" {
   name                = "${local.run_prefix}-flowx-adf"
-  location            = azurerm_resource_group.test.location
-  resource_group_name = azurerm_resource_group.test.name
+  location            = local.location
+  resource_group_name = data.azurerm_resource_group.test.name
   tags                = local.tags
 }
 

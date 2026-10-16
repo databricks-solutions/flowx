@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-python_bin="$(cat .migration-venv)"
+python_bin=.venv/bin/python
 failed_bundles=()
 for bundle in "${FLOWX_OUTPUT}"/*/databricks.yml; do
   bundle_name="$(basename "$(dirname "${bundle}")")"

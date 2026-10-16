@@ -1,6 +1,6 @@
 # Azure live integration suite
 
-This suite deploys an ephemeral Azure Data Factory and supporting resources, exports the factory
+This suite deploys an ephemeral Azure Data Factory and supporting resources into one shared resource group, exports the factory
 through the Azure REST API, and runs flowx against that live export. Expected-output cases under
 `adf/cases/` exercise discover, convert, and package offline and against the live export. The workflow
 validates translation and Databricks bundle structure; it never deploys a bundle.
@@ -13,6 +13,7 @@ proceed; organizations that require trusted-branch-only environments should use 
 or post-merge `main` run instead. Add these environment secrets:
 
 - `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` for OIDC. Do not create a client secret.
+- `AZURE_RESOURCE_GROUP`, the shared resource group that every run deploys into.
 - `RESOURCE_OWNER_EMAIL` for the required `owner` tag on live Azure resources.
 - Either `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` for headless Claude Code. When neither is present, 
   deterministic conversion and bundle checks still run and the workflow reports that agentic resolution was 
@@ -26,47 +27,88 @@ or post-merge `main` run instead. Add these environment secrets:
 The workflow never prints secret values. Fork pull requests cannot reach the protected environment 
 because both the `not-a-fork` job and the live job dependency reject them.
 
+### What keeps a pull request from misusing Azure
+
+The live job runs the pull request's own code, including its workflow file, scripts, and Terraform, with Azure
+credentials. Two guards stand between a pull request and those credentials:
+
+- **Approval by someone else.** The environment needs at least two required reviewers and prevents self-review,
+  so a run always waits for approval from someone other than the person who triggered it. Approvers should read
+  the pull request's changes to `.github/` and `tests/integration/azure/terraform/` before approving.
+- **A plan check before apply.** `apply-terraform.sh` saves a plan, refuses it if any resource would be deleted
+  or replaced, and then applies that exact saved plan. It also refuses Terraform config that uses `local-exec` or
+  `remote-exec` provisioners or the `external` data source, because those run commands a plan can't show.
+  Teardown still runs a normal `terraform destroy`.
+
+The Azure role reaches only the shared resource group (see below), so even an approved run can't touch anything
+else in the subscription.
+
 The agentic step loads the `flowx:flowx-convert` ADF guide, reads the translation report and sanitized ADF
 export, and writes one result per `PlaceholderActivity` under `agentic_results/`. Claude runs in `dontAsk`
-mode with read/search tools and file edits permitted only in that directory, and has no Bash access. Notebook
+mode with read/search tools and file edits permitted only in that directory, and has no Bash access. Its `Read`
+access is limited to the flowx output, the ADF export, the plugin copy, and `agentic_results/`; `/proc`, home
+credential caches such as `~/.azure`, `.git/`, and the Terraform state are denied. The workflow also signs the
+Azure CLI out and deletes `~/.azure` before Claude starts; Terraform teardown signs in through GitHub OIDC on its
+own. Claude Code is installed with `npm ci --ignore-scripts` from `.github/claude-code/package-lock.json`. Notebook
 results carry source inline rather than creating separate executable files. The workflow validates each result's merge
 schema, detects changes outside `agentic_results/` (including ignored files), and then invokes flowx's strict
 `--merge-agentic` command. Missing Claude credentials explicitly skip this step; configured credentials make
 any Claude, validation, or merge failure fail the job after the remaining deterministic checks run.
 The workflow loads a read-only plugin copy from the runner's temporary directory because Claude Code denies
-all writes beneath a plugin directory, which would otherwise include `agentic_results/` in the checkout.
+all writes beneath a plugin directory, which would otherwise include `agentic_results/` in the checkout. CI
+scripts are copied the same way so Claude can't change scripts that run after it. That copy only guards against
+Claude: the scripts still come from the pull request.
+
+Every tool is installed before the Azure sign-in, from a lock file with hashes or a pinned checksum: Python
+packages with `uv sync --frozen`, Claude Code from its npm lock file, and Terraform and the Databricks CLI by
+`install-pinned-tool.sh`, which checks each download against the SHA-256 from the release's `SHA256SUMS`.
+Terraform providers come from the committed `.terraform.lock.hcl` (`terraform init -lockfile=readonly`).
+
+Live runs share one resource group, so the live job uses a single repository-wide concurrency group that never
+cancels a run in progress. A new run waits until the current one has torn down.
 
 ## One-time Azure and GitHub setup
 
-`make setup-integration` creates the Entra application and OIDC credential, registers providers, installs and assigns
-the least-privilege custom role, protects the GitHub environment, and sets its secrets. It requires Bash,
+`make setup-integration` creates the Entra application and OIDC credential, registers providers, creates the shared
+resource group, installs the custom role and assigns it on that resource group only, protects the GitHub environment,
+and sets its secrets. It requires Bash,
 `az`, `gh`, and `jq`, plus active Azure and GitHub CLI logins. The operator needs permission to create 
 Entra applications, administer the repository environment, register providers, and create/assign roles 
 (normally User Access Administrator or Owner for that last setup operation). The CI identity itself receives
 only the custom deployer role, never Owner.
 
 The setup registers `Microsoft.Resources`, `Microsoft.DataFactory`, `Microsoft.Storage`,
-`Microsoft.KeyVault`, and `Microsoft.EventGrid`. Its custom role contains exactly these actions:
+`Microsoft.KeyVault`, and `Microsoft.EventGrid`.
 
-- `Microsoft.Resources/subscriptions/read`
-- `Microsoft.Resources/subscriptions/resourceGroups/*`
-- `Microsoft.DataFactory/factories/*`
-- `Microsoft.Storage/storageAccounts/*`
-- `Microsoft.KeyVault/vaults/*`
-- `Microsoft.EventGrid/eventSubscriptions/read`
-- `Microsoft.EventGrid/eventSubscriptions/write`
-- `Microsoft.EventGrid/eventSubscriptions/delete`
+### The shared resource group
 
-The Event Grid permission covers the linked subscription created and removed with the stopped Blob Events
-trigger; it grants no other Event Grid resource operations.
+All test resources live in one resource group, `flowx-live-integration` by default (set `RESOURCE_GROUP` or
+`--resource-group`, and `LOCATION` or `--location` for its region). The setup creates it once. Terraform reads it
+with a data source and deploys each run's resources into it under run-unique names tagged
+`purpose=flowx-integration-test` and `run=<prefix>`. Teardown deletes only that run's resources, never the group.
 
-Existing installations must rerun `make setup-integration ARGS="providers"` and `make setup-integration ARGS="role"`
-(or the full `make setup-integration ARGS="setup"`)
-to register Event Grid and update the existing custom role. Role-definition changes can take a few minutes to
-propagate, so wait a few minutes after `make setup-integration ARGS="role"` before rerunning the workflow.
+The custom role is assignable and assigned only on that resource group. It lists the exact actions
+Terraform needs (`REQUIRED_ROLE_ACTIONS` in `.github/scripts/setup-integration.sh`): read the resource group;
+read, write, and delete the storage account, its blob containers, the Key Vault, the data factory and its
+child resources, and the Event Grid subscription the Blob Events trigger uses; and read the storage
+account's blob, file, queue, and table service settings. It can't create or delete resource groups. Its
+`NotActions` also block storage-key listing, account SAS, key regeneration, and Key Vault access-policy writes
+(shared-key access is disabled in `main.tf`).
+
+This role is narrower than before but isn't a full sandbox. A dedicated sandbox subscription is still
+recommended. If a live run fails with an authorization error for an action not listed, add that exact action
+to `REQUIRED_ROLE_ACTIONS` and rerun `role`.
+
+Existing installations must rerun `make setup-integration ARGS="role"` (or the full
+`make setup-integration ARGS="setup"`), then `ARGS="secrets"` to add `AZURE_RESOURCE_GROUP`, and
+`ARGS="environment"` to turn on self-review prevention. The `role` step removes the old subscription-wide
+assignment of the same role before narrowing it. Role-definition changes can take a few minutes to propagate, so
+wait a few minutes after `make setup-integration ARGS="role"` before rerunning the workflow. Resource groups
+left by older runs (`<prefix>-flowx-rg`) aren't managed by the new setup; delete them by hand.
 
 Configuration comes from flags or these environment variables: `GITHUB_REPO`, `AZURE_SUBSCRIPTION_ID`, 
-`APP_NAME`, `ENV_NAME`, `ROLE_NAME`, and the required comma-separated `REVIEWERS`. `RESOURCE_OWNER_EMAIL`
+`APP_NAME`, `ENV_NAME`, `ROLE_NAME`, `RESOURCE_GROUP`, `LOCATION`, and the required comma-separated `REVIEWERS`,
+which must name at least two GitHub users. `RESOURCE_OWNER_EMAIL`
 is also required when setting environment secrets. Defaults are derived
 from the current CLI context or use `flowx-live-integration`. Claude and optional Databricks secret values 
 may be exported as `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `DATABRICKS_HOST`, and `DATABRICKS_TOKEN`; 
@@ -84,12 +126,13 @@ non-interactive automation. Running `make setup-integration` without `ARGS` defa
 uses the protected-environment subject `repo:<owner>/<repo>:environment:flowx-live-integration`; no client secret
 is created. Terraform provider auto-registration remains disabled.
 
-Use the `cleanup` subcommand to inspect tagged cleanup candidates. Deletion requires both an exact resource-group
-name and explicit confirmation; it never performs wildcard deletion:
+Use the `cleanup` subcommand to list the run tags of test resources left in the shared resource group.
+Deletion requires an exact run tag and explicit confirmation, deletes only that run's tagged resources, and never
+deletes the resource group:
 
 ```bash
 make setup-integration ARGS="cleanup"
-make setup-integration ARGS="cleanup --delete exact-resource-group-name"
+make setup-integration ARGS="cleanup --delete exact-run-tag"
 ```
 
 ## Run locally
@@ -134,7 +177,8 @@ separate flowx fix.
 
 To validate or deploy the Azure harness locally, authenticate using an OIDC-capable shell or another temporary
 Azure CLI credential and set `TF_VAR_subscription_id`, `TF_VAR_tenant_id`, `TF_VAR_client_id`, and a lowercase
-run-unique `TF_VAR_name_prefix`. Run Terraform from `terraform/`. Always run `terraform destroy` afterward.
+run-unique `TF_VAR_name_prefix`, and `TF_VAR_resource_group_name` for an existing resource group. Run Terraform
+from `terraform/`. Always run `terraform destroy` afterward.
 
 Troubleshooting: if the first apply cannot read storage data-plane properties, set 
 `features { storage { data_plane_available = false } }` or grant the deployer the required storage data-plane
@@ -162,13 +206,14 @@ intentionally preserves the valid ADF shape; this is a known loader gap.
 
 Every taggable base Azure resource is tagged `purpose=flowx-integration-test`, `ephemeral=true`,
 `managedBy=terraform`, with its run prefix, and with `owner` set from the protected
-`RESOURCE_OWNER_EMAIL` environment secret. The workflow runs `terraform destroy` under `if: always()` and
-then deletes the exact
-Terraform-output resource group as a safety net. It never performs a broad or wildcard deletion.
+`RESOURCE_OWNER_EMAIL` environment secret. The workflow runs `terraform destroy` under `if: always()`, which
+removes only this run's resources. Anything a failed teardown leaves behind shows up in
+`make setup-integration ARGS="cleanup"`.
 
 Fixtures contain no PII, credentials, tenant or subscription IDs, private endpoints, or usable connection 
 strings. Values that would identify an environment use angle-bracket placeholders, dummy `example.invalid`
 URLs, managed identity, parameters, or Key Vault references. Linked-service definitions reference a Key 
 Vault secret named `integration-placeholder`; it intentionally does not exist because pipelines are never 
 executed. The Key Vault contains no secret values. The workflow strips ARM `id` and `etag` fields before 
-any export reaches flowx or Claude. Resources are isolated in a collision-resistant, run-scoped resource group.
+any export reaches flowx or Claude. Each run's resources have collision-resistant, run-unique names in the shared
+resource group.

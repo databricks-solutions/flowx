@@ -32,7 +32,7 @@ All skills and the bootstrap script are designed to run on **Databricks serverle
 
 - **venv:** `bootstrap.sh` creates the venv at `/Workspace/Users/<current user>/.migration-skills`
   on Databricks and `<plugin_dir>/.venv` locally, writing the interpreter path to
-  `<plugin_dir>/.migration-venv`. It falls back to `--without-pip` + `get-pip.py` when `ensurepip`
+  `<plugin_dir>/.migration-venv`. It falls back to `--without-pip` plus a pinned, hash-checked pip wheel when `ensurepip`
   is unavailable (standard on serverless images).
 - **Auth:** `workspace_downloader.py` auto-detects `DATABRICKS_RUNTIME_VERSION` and writes
   `~/.databrickscfg` from `dbruntime.databricks_repl_context` so the SDK can authenticate.

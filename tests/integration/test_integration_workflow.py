@@ -15,11 +15,13 @@ import yaml
 
 WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "integration.yml"
 PUSH_WORKFLOW = WORKFLOW.with_name("push.yml")
+ALL_WORKFLOWS = sorted(WORKFLOW.parent.glob("*.yml"))
 SCRIPTS = WORKFLOW.parents[1] / "scripts"
 AGENTIC_STRUCTURE_CHECK = SCRIPTS / "check-agentic-structure.py"
 RESOLVE_AGENTIC = SCRIPTS / "resolve-agentic-gaps.sh"
 SNAPSHOT_TREE = SCRIPTS / "snapshot-tree.sh"
 VALIDATE_BUNDLES = SCRIPTS / "validate-bundles.sh"
+INSTALL_PINNED_TOOL = SCRIPTS / "install-pinned-tool.sh"
 WORKFLOW_AND_SCRIPTS = "\n".join(
     [WORKFLOW.read_text(encoding="utf-8"), *(path.read_text(encoding="utf-8") for path in sorted(SCRIPTS.iterdir()))]
 )
@@ -28,13 +30,26 @@ WORKFLOW_AND_SCRIPTS = "\n".join(
 def test_claude_runs_with_restricted_tools_outside_the_checkout() -> None:
     """Claude reads its prompt from stdin, has no Bash, edits only agentic_results/, and loads a plugin copy."""
     script = RESOLVE_AGENTIC.read_text(encoding="utf-8")
-    invocation = re.search(r"if ! claude -p \\\n(?P<flags>.*?)<<CLAUDE_PROMPT", script, re.DOTALL)
+    invocation = re.search(r'if ! "\$\{CLAUDE_BIN\}" -p \\\n(?P<flags>.*?)<<CLAUDE_PROMPT', script, re.DOTALL)
     assert invocation, "Claude must receive its prompt from the CLAUDE_PROMPT heredoc"
     flags = invocation.group("flags")
     assert "--permission-mode dontAsk" in flags
-    assert '--allowedTools="Read,Edit(agentic_results/**),Glob,Grep"' in flags
+    assert '--allowedTools="${allowed_reads},Edit(agentic_results/**),Glob,Grep"' in flags
+    assert '--disallowedTools="${denied_reads}"' in flags
     assert "Bash" not in flags
-    assert '--plugin-dir "${RUNNER_TEMP}/flowx-plugin"' in script
+    assert 'plugin_dir="${RUNNER_TEMP}/flowx-plugin"' in script
+    assert '--plugin-dir "${plugin_dir}"' in flags
+
+
+def test_claude_reads_only_its_inputs_and_never_credentials() -> None:
+    """Read is limited to named paths, and runner secrets, credential caches, and .git are denied."""
+    script = RESOLVE_AGENTIC.read_text(encoding="utf-8")
+    allowed = re.search(r'^allowed_reads="(?P<rules>[^"]+)"$', script, re.MULTILINE)
+    assert allowed
+    assert all(re.fullmatch(r"Read\(.+/\*\*\)", rule) for rule in allowed.group("rules").split(","))
+    denied = "".join(re.findall(r'^denied_reads\+?="([^"]+)"$', script, re.MULTILINE))
+    for rule in ("Read(//proc/**)", "Read(~/.azure/**)", "Read(~/.config/**)", "Read(./.git/**)"):
+        assert rule in denied
 
 
 def test_snapshot_helper_handles_links_and_detects_changes(tmp_path: Path) -> None:
@@ -197,6 +212,27 @@ def test_agentic_structure_reports_all_failures_without_source(tmp_path: Path) -
     assert "SECRET_INVALID_SOURCE" not in result.stderr
 
 
+def test_agentic_structure_does_not_echo_values_claude_wrote(tmp_path: Path) -> None:
+    """Failure messages name the field, never the unexpected value, so hostile output can't reach the log."""
+    hostile = "::warning::HOSTILE_VALUE"
+    expected = [{"pipeline": "pipeline", "activity_name": "activity", "task_key": "activity", "depends_on": []}]
+    task = {"name": "activity", "type": hostile, "task_key": hostile, "depends_on": [{"task_key": hostile}]}
+    expected_path = tmp_path / "expected.json"
+    report_path = tmp_path / "report.json"
+    expected_path.write_text(json.dumps(expected), encoding="utf-8")
+    report_path.write_text(json.dumps({"name": "pipeline", "tasks": [task]}), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(AGENTIC_STRUCTURE_CHECK), str(expected_path), str(report_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    for field in ("type:", "task_key:", "depends_on:"):
+        assert f"pipeline/activity: {field}" in result.stderr
+    assert "HOSTILE_VALUE" not in result.stderr
+
+
 def test_required_bundle_variable_parser_uses_real_yaml_shapes(tmp_path: Path) -> None:
     """The embedded parser handles defaults, target values, and absent variables."""
     workflow = VALIDATE_BUNDLES.read_text(encoding="utf-8")
@@ -244,7 +280,8 @@ def test_bundle_parser_failure_fails_validation_step(tmp_path: Path) -> None:
     broken_python = tmp_path / "broken-python"
     broken_python.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
     broken_python.chmod(0o700)
-    (tmp_path / ".migration-venv").write_text(f"{broken_python}\n", encoding="utf-8")
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / ".venv" / "bin" / "python").symlink_to(broken_python)
     bundle_dir = tmp_path / "output" / "broken-bundle"
     bundle_dir.mkdir(parents=True)
     (bundle_dir / "databricks.yml").write_text("variables: null\n", encoding="utf-8")
@@ -263,21 +300,74 @@ def test_bundle_parser_failure_fails_validation_step(tmp_path: Path) -> None:
 
 def test_post_claude_steps_use_runner_temp_scripts() -> None:
     """Claude cannot alter scripts executed by later privileged or always-run steps."""
-    workflow = WORKFLOW.read_text(encoding="utf-8")
-    post_claude = workflow.split("- name: Report unexpected agentic-step failure", 1)[1]
-    assert ".github/scripts/" not in post_claude
-    referenced = re.findall(r'run: \'"\$\{CI_SCRIPTS\}/([^"/]+)"\'', post_claude)
-    assert referenced == [
+    steps = _live_steps()
+    after_claude = steps[_step_index(steps, "Resolve agentic gaps with Claude Code") + 1 :]
+    runs = [step["run"] for step in after_claude if "run" in step]
+    assert not any(".github/scripts/" in run for run in runs)
+    assert [re.search(r"\$\{CI_SCRIPTS\}/([^\"]+)", run).group(1) for run in runs] == [
         "report-agentic-failure.sh",
         "verify-claude-worktree.sh",
         "merge-agentic-results.sh",
         "validate-agentic-structure.sh",
         "package-integration-results.sh",
-        "check-databricks-credentials.sh",
         "validate-bundles.sh",
         "enforce-integration-results.sh",
         "teardown-integration.sh",
     ]
+
+
+def test_every_checkout_disables_persisted_credentials() -> None:
+    """No checkout leaves a GitHub token in .git/config for later steps, or Claude, to find."""
+    checkouts = [
+        step
+        for path in ALL_WORKFLOWS
+        for job in yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"].values()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    ]
+    assert len(checkouts) >= 5
+    assert all(step.get("with", {}).get("persist-credentials") is False for step in checkouts)
+
+
+def test_live_runs_queue_instead_of_overlapping() -> None:
+    """All runs share one resource group, so the live job uses one fixed group and never cancels a deploy."""
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    assert "concurrency" not in workflow
+    concurrency = workflow["jobs"]["integration"]["concurrency"]
+    assert concurrency == {"group": "flowx-live-integration", "cancel-in-progress": False}
+
+
+def test_installs_happen_before_azure_login_from_pinned_sources() -> None:
+    """Packages and tools come from lock files or pinned checksums, all before Azure credentials exist."""
+    steps = _live_steps()
+    login = next(index for index, step in enumerate(steps) if str(step.get("uses", "")).startswith("azure/login@"))
+    installs = [
+        _step_index(steps, "Install flowx from the lock file"),
+        _step_index(steps, "Install Terraform"),
+        _step_index(steps, "Install Claude Code"),
+        _step_index(steps, "Install Databricks CLI"),
+    ]
+    assert max(installs) < login
+    assert steps[installs[0]]["run"] == "uv sync --frozen"
+    assert not any(str(step.get("uses", "")).startswith(("hashicorp/", "databricks/")) for step in steps)
+    for step in steps:
+        assert not re.search(r"bootstrap\.sh|pip install|npm install", step.get("run", ""))
+    assert "npm ci --ignore-scripts" in (SCRIPTS / "install-claude-code.sh").read_text(encoding="utf-8")
+    assert "sha256sum --check --strict" in INSTALL_PINNED_TOOL.read_text(encoding="utf-8")
+
+
+def test_azure_cli_is_signed_out_before_claude_and_teardown_always_runs() -> None:
+    """Claude never runs while the Azure CLI token cache exists, and destroy runs even after failures."""
+    steps = _live_steps()
+    export = _step_index(steps, "Export deployed ADF definitions")
+    sign_out = _step_index(steps, "Sign out of Azure CLI before Claude runs")
+    claude = _step_index(steps, "Resolve agentic gaps with Claude Code")
+    assert export < sign_out < claude
+    assert steps[sign_out]["if"] == "always()"
+    assert 'rm -rf "${HOME}/.azure"' in (SCRIPTS / "sign-out-azure-cli.sh").read_text(encoding="utf-8")
+    teardown = steps[_step_index(steps, "Destroy ephemeral Azure resources")]
+    assert teardown["if"] == "always()"
+    assert teardown is steps[-1]
 
 
 def test_workflow_script_references_are_executable() -> None:
@@ -300,16 +390,24 @@ def test_ci_script_bootstrap_is_job_local_and_precedes_uses() -> None:
         trusted_uses = [index for index, step in enumerate(steps) if "${CI_SCRIPTS}" in step.get("run", "")]
         direct_uses = [index for index, step in enumerate(steps) if ".github/scripts/" in step.get("run", "")]
         for index in direct_uses:
-            assert steps[index].get("name") == "Copy trusted CI scripts outside the checkout", job_name
+            assert steps[index].get("name") == "Copy CI scripts out of Claude's reach", job_name
         if not trusted_uses:
             continue
         checkout = next(
             index for index, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/checkout@")
         )
         bootstrap = next(
-            index
-            for index, step in enumerate(steps)
-            if step.get("name") == "Copy trusted CI scripts outside the checkout"
+            index for index, step in enumerate(steps) if step.get("name") == "Copy CI scripts out of Claude's reach"
         )
         assert bootstrap == checkout + 1, job_name
         assert bootstrap < min(trusted_uses), job_name
+
+
+def _live_steps() -> list[dict]:
+    """Return the steps of the live integration job."""
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["integration"]["steps"]
+
+
+def _step_index(steps: list[dict], name: str) -> int:
+    """Return the position of the step with this exact name."""
+    return next(index for index, step in enumerate(steps) if step.get("name") == name)

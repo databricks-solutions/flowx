@@ -17,9 +17,7 @@ if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
   exit 0
 fi
 echo "configured=true" >> "${GITHUB_OUTPUT}"
-if ! npm install --global @anthropic-ai/claude-code@2.1.296; then
-  fail_agentic "Claude Code CLI installation failed"
-fi
+[[ -x "${CLAUDE_BIN:-}" ]] || fail_agentic "Claude Code CLI is not installed"
 plugin_dir="${RUNNER_TEMP}/flowx-plugin"
 mkdir -p "${plugin_dir}"
 cp -R .claude-plugin skills "${plugin_dir}/"
@@ -44,15 +42,21 @@ source "${RUNNER_TEMP}/snapshot-worktree.sh"
 worktree_snapshot="${RUNNER_TEMP}/pre-claude-worktree.sha256"
 snapshot_worktree > "${worktree_snapshot}"
 chmod 000 "${TF_STATE_DIR}" "${TF_DATA_DIR}"
-if ! claude -p \
-  --plugin-dir "${RUNNER_TEMP}/flowx-plugin" \
+# Claude may read only its inputs, the plugin, and its own results. Absolute paths take a leading "/" to
+# become "//path". The denies cover runner secrets and credential caches even if the allow list grows.
+allowed_reads="Read(./${FLOWX_OUTPUT}/**),Read(/${ADF_EXPORT_DIR}/**),Read(/${plugin_dir}/**),Read(./agentic_results/**)"
+denied_reads="Read(//proc/**),Read(~/.azure/**),Read(~/.config/**),Read(~/.docker/**),Read(~/.npmrc)"
+denied_reads+=",Read(~/.databrickscfg),Read(./.git/**),Read(tests/integration/azure/terraform/**)"
+denied_reads+=",Read(/${TF_STATE_DIR}/**),Read(/${TF_DATA_DIR}/**)"
+if ! "${CLAUDE_BIN}" -p \
+  --plugin-dir "${plugin_dir}" \
   --permission-mode dontAsk \
   --permission-prompts none \
   --tools="Read,Edit,Write,Glob,Grep,Skill" \
-  --allowedTools="Read,Edit(agentic_results/**),Glob,Grep" \
-  --disallowedTools="Read(tests/integration/azure/terraform/**),Read(/${TF_STATE_DIR}/**),Read(/${TF_DATA_DIR}/**)" <<CLAUDE_PROMPT
+  --allowedTools="${allowed_reads},Edit(agentic_results/**),Glob,Grep" \
+  --disallowedTools="${denied_reads}" <<CLAUDE_PROMPT
 Use the flowx:flowx-convert skill, specifically the ADF agentic-gap instructions in
-skills/flowx-convert/sources/adf.md steps 4 and 5. Read
+${plugin_dir}/skills/flowx-convert/sources/adf.md steps 4 and 5. Read
 ${FLOWX_OUTPUT}/.work/translation_report.json, ${FLOWX_OUTPUT}/.work/gaps.json, and the
 exported ADF definitions under ${ADF_EXPORT_DIR}. Produce one merge result for each
 PlaceholderActivity in translation_report.json. This is the exact expected task list:

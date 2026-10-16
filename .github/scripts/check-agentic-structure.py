@@ -50,7 +50,7 @@ def _dependencies(value: Any) -> list[Any]:
 
 
 def validate(expected: list[dict[str, Any]], report: dict[str, Any]) -> list[str]:
-    """Return every structural failure without exposing generated source."""
+    """Return every structural failure without echoing values Claude wrote, which may be hostile."""
     failures: list[str] = []
     pipelines = report.get("pipelines", [report])
     by_pipeline = {
@@ -67,17 +67,17 @@ def validate(expected: list[dict[str, Any]], report: dict[str, Any]) -> list[str
 
         actual_type = task.get("type")
         if actual_type not in VALID_TYPES:
-            failures.append(f"{label}: type: expected valid task type, actual {actual_type!r}")
+            failures.append(f"{label}: type: expected a valid task type, got an unexpected value")
 
         expected_key = item.get("task_key")
         actual_key = task.get("task_key")
         if actual_key != expected_key:
-            failures.append(f"{label}: task_key: expected {expected_key!r}, actual {actual_key!r}")
+            failures.append(f"{label}: task_key: changed from the placeholder's value")
 
         expected_dependencies = _dependencies(item.get("depends_on"))
         actual_dependencies = _dependencies(task.get("depends_on"))
         if actual_dependencies != expected_dependencies:
-            failures.append(f"{label}: depends_on: expected {expected_dependencies!r}, actual {actual_dependencies!r}")
+            failures.append(f"{label}: depends_on: changed from the placeholder's dependencies")
 
         if actual_type == "NotebookActivity":
             source = task.get("generated_source")
