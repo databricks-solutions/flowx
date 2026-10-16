@@ -122,49 +122,70 @@ ExecuteDataFlow, SqlServerStoredProcedure, AzureFunction, WebHook, Custom, Execu
 
 Each integration test case is a folder in `tests/integration/azure/adf/cases/<case>/`. It names one or more ADF
 pipelines, runs them through discover, convert, and package, and compares the output with the checked-in files in
-`expected/`. To add a case:
+`expected/`.
 
-1. If the case needs a new pipeline, add its JSON under `tests/integration/azure/adf/pipelines/`. Add any new
-   datasets, linked services, data flows, or triggers under the matching folder in `tests/integration/azure/adf/`.
-   Terraform deploys every file in these folders.
-2. If a fixture needs an Azure resource that isn't deployed yet (e.g. SQL server):
-   - Add it to `tests/integration/azure/terraform/main.tf` with `tags = local.tags`. Prefer free or stopped
-     resources; teardown deletes the whole resource group, so nothing else is needed for cleanup.
-   - If fixtures need its name, ID, or URL, use a new `<PLACEHOLDER>` token and wire it through four places:
-     a `replace()` in `main.tf`, an output in `outputs.tf` (mark it `sensitive` if it identifies the environment),
-     an `ADF_CASE_*` line in `.github/scripts/export-adf.sh`, and the placeholder map in
-     `tests/integration/test_adf_cases.py`.
-   - Add any new resource provider to `REQUIRED_PROVIDERS` and any new permission to `REQUIRED_ROLE_ACTIONS` in
-     `.github/scripts/setup-integration.sh`. Keep permissions to the specific actions needed. Include actions on
-     linked resources too; for example, Blob Events triggers need `Microsoft.EventGrid/eventSubscriptions/write` on
-     the storage account.
-   - Re-apply setup with `make setup-integration ARGS="providers"`, then `ARGS="role"`, wait a few minutes, and run
-     `ARGS="verify"`.
-3. Use placeholders, never real values. Use angle-bracket tokens such as `<KEY_VAULT_URI>` or
-   `<STORAGE_ACCOUNT_ID>`, `example.invalid` hosts, and the `integration-placeholder` Key Vault secret.
-   Parameterize linked services with `@{linkedService().name}` strings, not expression objects.
-4. Create `tests/integration/azure/adf/cases/<case>/case.json`:
-   ```json
-   {"description": "What this case covers", "pipelines": ["pipeline-a", "pipeline-b"]}
-   ```
-5. Generate the expected output offline:
-   `PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py --update-expected`
-6. Review the diff in `expected/` as you would any code change. It records what flowx produces today, so check that
-   it's correct rather than just accepting it.
-7. Run the offline checks with `make integration`. These confirm every reference resolves, every fixture pipeline is
-   in at least one case, and the expected output matches. If a new pipeline changes the activity totals, update
-   `test_strategy_counts_are_broad_and_stable`.
-8. Push to a non-draft PR from this repo. The live workflow deploys the fixtures to Azure, exports them, and runs the
-   same cases against the export.
+### Integration test conventions
 
-Conventions:
-
+- Never modify, remove, delete, or destroy resources that are not described in existing 
+  `tests/integration/azure/terraform/` definitions.
 - Order integration test modules as imports, constants, public `test_*` functions, then private helpers.
 - Put shared pytest fixtures in `tests/integration/conftest.py`.
 - Put workflow shell logic in `.github/scripts/`, not in workflow YAML.
 - Run `make setup-integration ARGS="setup"` once for Azure and GitHub setup, and `ARGS="verify"` to check it.
 
 See `tests/integration/azure/README.md` for details.
+
+### Adding a new case
+
+Follow the steps below to add a new integration test case.
+
+#### 1. Add a new pipeline definition
+
+If the case needs a new pipeline, add its ARM JSON under `tests/integration/azure/adf/pipelines/`. Add ARM JSON
+for any new datasets, linked services, data flows, or triggers under the matching folder in 
+`tests/integration/azure/adf/`.
+
+#### 2. Add terraform for new Azure resources
+
+If a fixture needs a new Azure resource not deployed in `tests/integration/azure/terraform/`:
+
+1. Add a new resource to `tests/integration/azure/terraform/main.tf` with `tags = local.tags`. Use free or 
+   stopped resources if possible.
+2. When fixtures need a resource name, ID, or URL, add a new `<PLACEHOLDER>` token and reference it in:
+   1. A `replace()` in `main.tf`
+   2. An output in `outputs.tf` (mark it `sensitive` if it identifies the environment)
+   3. An `ADF_CASE_*` line in `.github/scripts/export-adf.sh`
+   4. The placeholder map in `tests/integration/test_adf_cases.py`.
+3. Add any new resource provider to `REQUIRED_PROVIDERS` and any new permission to `REQUIRED_ROLE_ACTIONS` in
+   `.github/scripts/setup-integration.sh`. Scope permissions to only the needed actions. Include actions on
+   related resources. For example, Blob Events triggers need `Microsoft.EventGrid/eventSubscriptions/write` 
+   on the related storage account.
+4. Re-apply setup with `make setup-integration ARGS="providers"`, then `ARGS="role"`, wait a few minutes, then
+   run `ARGS="verify"`.
+
+#### 3. Create a test case
+
+Create a new test case in `tests/integration/azure/adf/cases/<case>/case.json`:
+```json
+{"description": "What this case covers", "pipelines": ["pipeline-a", "pipeline-b"]}
+```
+
+#### 4. Generate the expected output
+
+Generate the expected output offline by running:
+```shell
+PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py --update-expected
+```
+
+#### 5. Review the expected output
+
+Review the results in `expected/` as you would any code change. The output shows what flowx produces today. Check 
+that it's correct rather. Do not accept the output without verifying.
+
+#### 6. Run offline checks
+
+Run offline checks with `make integration`. If a new pipeline changes the activity totals, update
+`test_strategy_counts_are_broad_and_stable`.
 
 ## Code Style Rules
 
