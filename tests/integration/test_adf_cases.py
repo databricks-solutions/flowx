@@ -18,6 +18,8 @@ ROOT = Path(__file__).parents[2]
 FIXTURES = ROOT / "tests/integration/azure/adf"
 CASES = FIXTURES / "cases"
 PHASES = ("discover", "convert", "package")
+# Cases marked aggregate_only check just these package outputs; their per-pipeline output is covered elsewhere.
+AGGREGATE_FILES = ("DEPLOY.md", "metadata/profile_report.csv")
 SHARED_DIRS = ("datasets", "linked_services", "dataflows")
 LIVE_DEFINITION_DIRS = (*SHARED_DIRS, "pipelines", "triggers")
 LIVE_ENV = {
@@ -58,6 +60,7 @@ def test_adf_case(case_dir: Path, phase: str, case_results, pytestconfig: pytest
     update = pytestconfig.getoption("--update-expected")
     result = case_results(case_dir)
     expected = case_dir / "expected"
+    aggregate_only = _read_json(case_dir / "case.json").get("aggregate_only", False)
 
     if phase == "discover":
         if update:
@@ -66,13 +69,24 @@ def test_adf_case(case_dir: Path, phase: str, case_results, pytestconfig: pytest
             assert result["inventory"] == _read_json(expected / "inventory.json")
     elif phase == "convert":
         if update:
-            shutil.rmtree(expected / "ir", ignore_errors=True)
-            for pipeline, value in result["ir"].items():
-                _write_json(expected / "ir" / f"{pipeline}.json", value)
+            if not aggregate_only:
+                shutil.rmtree(expected / "ir", ignore_errors=True)
+                for pipeline, value in result["ir"].items():
+                    _write_json(expected / "ir" / f"{pipeline}.json", value)
             _write_json(expected / "gaps.json", result["gaps"])
         else:
-            assert result["ir"] == {path.stem: _read_json(path) for path in sorted((expected / "ir").glob("*.json"))}
+            if not aggregate_only:
+                expected_ir = {path.stem: _read_json(path) for path in sorted((expected / "ir").glob("*.json"))}
+                assert result["ir"] == expected_ir
             assert result["gaps"] == _read_json(expected / "gaps.json")
+    elif aggregate_only:
+        for relative in AGGREGATE_FILES:
+            actual = (result["output"] / relative).read_bytes()
+            if update:
+                (expected / "bundles" / relative).parent.mkdir(parents=True, exist_ok=True)
+                (expected / "bundles" / relative).write_bytes(actual)
+            else:
+                assert actual == (expected / "bundles" / relative).read_bytes(), relative
     elif update:
         _copy_tree(result["output"], expected / "bundles")
     else:
@@ -92,6 +106,7 @@ def test_every_fixture_pipeline_is_in_a_case() -> None:
     fixtures = {path.stem for path in (FIXTURES / "pipelines").glob("*.json")}
     covered = {pipeline for case_dir in _case_dirs() for pipeline in _read_json(case_dir / "case.json")["pipelines"]}
     assert covered == fixtures, f"uncovered={sorted(fixtures - covered)} unknown={sorted(covered - fixtures)}"
+    assert set(_read_json(CASES / "full-factory/case.json")["pipelines"]) == fixtures
 
 
 def test_blob_event_expected_url_documents_known_arm_id_bug() -> None:

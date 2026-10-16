@@ -184,8 +184,8 @@ that it's correct. Do not accept the output without verifying.
 
 #### 6. Run offline checks
 
-Run offline checks with `make integration`. If a new pipeline changes the activity totals, update
-`test_strategy_counts_are_broad_and_stable`.
+Run offline checks with `make integration`. If you added a new pipeline, also add it to
+`cases/full-factory/case.json`. If it changes the activity totals, update `test_strategy_counts_are_broad_and_stable`.
 
 ## Code Style Rules
 
