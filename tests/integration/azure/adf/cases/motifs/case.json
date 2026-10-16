@@ -1,1 +1,0 @@
-{"description":"All motif pipelines","pipelines":["motif-activity-and-notify","motif-incremental-watermark","motif-metadata-bulk-copy","motif-rest-api-pagination"]}

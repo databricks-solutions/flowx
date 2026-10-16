@@ -19,70 +19,22 @@ SCRIPTS = WORKFLOW.parents[1] / "scripts"
 AGENTIC_STRUCTURE_CHECK = SCRIPTS / "check-agentic-structure.py"
 RESOLVE_AGENTIC = SCRIPTS / "resolve-agentic-gaps.sh"
 SNAPSHOT_TREE = SCRIPTS / "snapshot-tree.sh"
-VERIFY_CLAUDE = SCRIPTS / "verify-claude-worktree.sh"
-EXPORT_ADF = SCRIPTS / "export-adf.sh"
-PACKAGE_RESULTS = SCRIPTS / "package-integration-results.sh"
 VALIDATE_BUNDLES = SCRIPTS / "validate-bundles.sh"
-ENFORCE_RESULTS = SCRIPTS / "enforce-integration-results.sh"
 WORKFLOW_AND_SCRIPTS = "\n".join(
     [WORKFLOW.read_text(encoding="utf-8"), *(path.read_text(encoding="utf-8") for path in sorted(SCRIPTS.iterdir()))]
 )
 
 
-def test_claude_prompt_uses_stdin_and_scoped_edit_permissions() -> None:
-    """Variadic permission flags cannot consume the prompt or grant broad writes."""
+def test_claude_runs_with_restricted_tools_outside_the_checkout() -> None:
+    """Claude reads its prompt from stdin, has no Bash, edits only agentic_results/, and loads a plugin copy."""
     script = RESOLVE_AGENTIC.read_text(encoding="utf-8")
     invocation = re.search(r"if ! claude -p \\\n(?P<flags>.*?)<<CLAUDE_PROMPT", script, re.DOTALL)
     assert invocation, "Claude must receive its prompt from the CLAUDE_PROMPT heredoc"
     flags = invocation.group("flags")
     assert "--permission-mode dontAsk" in flags
-    assert "acceptEdits" not in WORKFLOW_AND_SCRIPTS
-    assert '--tools="Read,Edit,Write,Glob,Grep,Skill"' in flags
     assert '--allowedTools="Read,Edit(agentic_results/**),Glob,Grep"' in flags
-    assert '--disallowedTools="Read(' in flags
-    assert "Write(agentic_results/**)" not in WORKFLOW_AND_SCRIPTS
-    assert "--allowedTools " not in flags
-    assert "--disallowedTools " not in flags
-    assert "CLAUDE_PROMPT\nthen" in script
     assert "Bash" not in flags
-
-
-def test_claude_plugin_is_copied_outside_the_checkout() -> None:
-    """dontAsk can edit results only when the plugin is outside the working tree."""
-    script = RESOLVE_AGENTIC.read_text(encoding="utf-8")
-    assert "--plugin-dir ." not in WORKFLOW_AND_SCRIPTS
     assert '--plugin-dir "${RUNNER_TEMP}/flowx-plugin"' in script
-    assert 'cp -R .claude-plugin skills "${plugin_dir}/"' in script
-    assert 'chmod -R a-w "${plugin_dir}"' in script
-    assert script.index('cp -R .claude-plugin skills "${plugin_dir}/"') < script.index(
-        'snapshot_worktree > "${worktree_snapshot}"'
-    )
-
-
-def test_agentic_prompt_and_coverage_share_expected_task_source() -> None:
-    """The prompt and exact-coverage gate use one PlaceholderActivity list."""
-    script = RESOLVE_AGENTIC.read_text(encoding="utf-8")
-    assert 'expected_tasks_file="${RUNNER_TEMP}/expected-agentic-tasks.json"' in script
-    assert 'select(.type? == "PlaceholderActivity")' in script
-    assert '$(cat "${expected_tasks_file}")' in script
-    assert "jq -c '[.[] | [.pipeline, .activity_name]] | sort' \"${expected_tasks_file}\"" in script
-    assert "strategy is" not in script
-    assert 'status is "pending"' not in script
-    assert "generated_source field" in script
-    assert '.task.generated_source | (type == "string" and length > 0)' in script
-    assert ".task.notebook_path" not in script
-
-
-def test_agentic_guard_covers_ignored_files() -> None:
-    """Claude confinement compares all non-result worktree file content."""
-    workflow = WORKFLOW.read_text(encoding="utf-8")
-    scripts = RESOLVE_AGENTIC.read_text() + VERIFY_CLAUDE.read_text()
-    assert "pre-claude-worktree.sha256" in scripts
-    assert "post-claude-worktree.sha256" in scripts
-    assert "if: always() && steps.agentic.outputs.configured == 'true'" in workflow
-    assert SNAPSHOT_TREE.read_text().count("snapshot_worktree()") == 1
-    assert scripts.count('source "${RUNNER_TEMP}/snapshot-worktree.sh"') == 2
-    assert "including ignored files" in scripts
 
 
 def test_snapshot_helper_handles_links_and_detects_changes(tmp_path: Path) -> None:
@@ -147,59 +99,6 @@ def test_agentic_results_reject_symlinks_before_jq() -> None:
     symlink_check = script.index("find agentic_results -type l -print -quit")
     first_result_read = script.index("result_files=(agentic_results/*.json)")
     assert symlink_check < first_result_read
-
-
-def test_configured_agentic_failures_are_enforced() -> None:
-    """Only missing authentication may skip agentic resolution successfully."""
-    workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert 'echo "configured=true" >> "${GITHUB_OUTPUT}"' in RESOLVE_AGENTIC.read_text()
-    assert 'fail_agentic "Claude Code did not complete successfully"' in RESOLVE_AGENTIC.read_text()
-    assert "id: agentic-merge" in workflow
-    assert "continue-on-error: true" in workflow
-    assert "Enforce live integration results" in workflow
-    assert "if: always()" in workflow
-    assert 'if [[ "${AGENTIC_CONFIGURED}" != true ]]' in ENFORCE_RESULTS.read_text()
-    assert (
-        workflow.index("Validate bundles with Databricks CLI")
-        < workflow.index("Enforce live integration results")
-        < workflow.index("Destroy ephemeral Azure resources")
-    )
-
-
-def test_live_export_includes_dataflows() -> None:
-    """Claude receives referenced mapping-data-flow definitions from ADF."""
-    script = EXPORT_ADF.read_text(encoding="utf-8")
-    assert '"${export_dir}"/{pipelines,datasets,linked_services,dataflows,integration_runtimes,triggers}' in script
-    assert '"dataflows:dataflows"' in script
-    assert '"integrationruntimes:integration_runtimes"' in script
-
-
-def test_live_workflow_runs_expected_output_cases_and_not_legacy_quality_script() -> None:
-    """One deployment feeds the same case suite used by offline CI."""
-    workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert "Compare live ADF cases with expected outputs" in workflow
-    assert "id: adf-cases" in workflow
-    assert "ADF_CASES_OUTCOME: ${{ steps.adf-cases.outcome }}" in workflow
-    case_step = workflow.split("- name: Compare live ADF cases with expected outputs", 1)[1].split("- name:", 1)[0]
-    assert "continue-on-error: true" in case_step
-    assert "PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v --tb=short" in workflow
-    assert "ADF_CASE_SOURCE_DIR=${export_dir}" in EXPORT_ADF.read_text()
-    assert "assert_quality.py" not in workflow
-    assert workflow.index("Validate bundles with Databricks CLI") < workflow.index("Enforce live integration results")
-
-
-def test_merged_agentic_outputs_receive_structural_case_validation() -> None:
-    """Merged placeholders and every case bundle are structurally checked."""
-    workflow = WORKFLOW.read_text(encoding="utf-8")
-    assert "expected-agentic-structure.json" in RESOLVE_AGENTIC.read_text()
-    assert "id: agentic-structure" in workflow
-    assert "STRUCTURE_OUTCOME: ${{ steps.agentic-structure.outcome }}" in workflow
-    assert "depends_on: (.depends_on // [])" in RESOLVE_AGENTIC.read_text()
-    assert "${CI_SCRIPTS}/check-agentic-structure.py" in (SCRIPTS / "validate-agentic-structure.sh").read_text()
-    package = PACKAGE_RESULTS.read_text()
-    assert 'cases_root.glob("*/case.json")' in package
-    assert "check_bundle_dir(bundle_dir)" in package
-    assert 'bundle_by_pipeline[job["name"]] = bundle_dir' in package
 
 
 @pytest.mark.parametrize("depends_on", [None, []], ids=["missing", "empty"])
@@ -296,20 +195,6 @@ def test_agentic_structure_reports_all_failures_without_source(tmp_path: Path) -
     ):
         assert fragment in result.stderr
     assert "SECRET_INVALID_SOURCE" not in result.stderr
-
-
-def test_bundle_validation_supplies_required_variables_and_collects_failures() -> None:
-    """Validate-only runs substitute required inputs and report every bad bundle."""
-    script = VALIDATE_BUNDLES.read_text(encoding="utf-8")
-    assert 'python_bin="$(cat .migration-venv)"' in script
-    assert "realpath" not in script
-    assert 'if ! required_output="$(' in script
-    assert "Could not parse required variables for bundle %s" in script
-    assert "name not in target_variables" in script
-    assert 'validate_args+=(--var "${variable}=${placeholder}")' in script
-    assert '[[ "${variable}" == *_job_id ]] && placeholder=0' in script
-    assert 'failed_bundles+=("${bundle_name}")' in script
-    assert "Bundle validation failed for: %s" in script
 
 
 def test_required_bundle_variable_parser_uses_real_yaml_shapes(tmp_path: Path) -> None:

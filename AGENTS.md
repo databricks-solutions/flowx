@@ -126,7 +126,7 @@ pipelines, runs them through discover, convert, and package, and compares the ou
 
 ### Integration test conventions
 
-- Never modify, remove, delete, or destroy resources that are not described in existing 
+- Never modify, remove, delete, or destroy resources that are not described in existing
   `tests/integration/azure/terraform/` definitions.
 - Order integration test modules as imports, constants, public `test_*` functions, then private helpers.
 - Put shared pytest fixtures in `tests/integration/conftest.py`.
@@ -142,14 +142,14 @@ Follow the steps below to add a new integration test case.
 #### 1. Add a new pipeline definition
 
 If the case needs a new pipeline, add its ARM JSON under `tests/integration/azure/adf/pipelines/`. Add ARM JSON
-for any new datasets, linked services, data flows, or triggers under the matching folder in 
+for any new datasets, linked services, data flows, or triggers under the matching folder in
 `tests/integration/azure/adf/`.
 
 #### 2. Add terraform for new Azure resources
 
 If a fixture needs a new Azure resource not deployed in `tests/integration/azure/terraform/`:
 
-1. Add a new resource to `tests/integration/azure/terraform/main.tf` with `tags = local.tags`. Use free or 
+1. Add a new resource to `tests/integration/azure/terraform/main.tf` with `tags = local.tags`. Use free or
    stopped resources if possible.
 2. When fixtures need a resource name, ID, or URL, add a new `<PLACEHOLDER>` token and reference it in:
    1. A `replace()` in `main.tf`
@@ -158,7 +158,7 @@ If a fixture needs a new Azure resource not deployed in `tests/integration/azure
    4. The placeholder map in `tests/integration/test_adf_cases.py`.
 3. Add any new resource provider to `REQUIRED_PROVIDERS` and any new permission to `REQUIRED_ROLE_ACTIONS` in
    `.github/scripts/setup-integration.sh`. Scope permissions to only the needed actions. Include actions on
-   related resources. For example, Blob Events triggers need `Microsoft.EventGrid/eventSubscriptions/write` 
+   related resources. For example, Blob Events triggers need `Microsoft.EventGrid/eventSubscriptions/write`
    on the related storage account.
 4. Re-apply setup with `make setup-integration ARGS="providers"`, then `ARGS="role"`, wait a few minutes, then
    run `ARGS="verify"`.
@@ -179,8 +179,8 @@ PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py --update-expect
 
 #### 5. Review the expected output
 
-Review the results in `expected/` as you would any code change. The output shows what flowx produces today. Check 
-that it's correct rather. Do not accept the output without verifying.
+Review the results in `expected/` as you would any code change. The output shows what flowx produces today. Check
+that it's correct. Do not accept the output without verifying.
 
 #### 6. Run offline checks
 

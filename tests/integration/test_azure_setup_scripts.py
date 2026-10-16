@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).parents[2] / ".github" / "scripts" / "setup-integration.sh"
+EXPORT_SCRIPT = SCRIPT.with_name("export-adf.sh")
 TERRAFORM = Path(__file__).parent / "azure" / "terraform" / "main.tf"
 BASH = Path("/bin/bash")
 SECRET = "must-never-appear-in-output"
@@ -21,6 +23,92 @@ SENSITIVE_ENV = {
     "DATABRICKS_TOKEN",
     "RESOURCE_OWNER_EMAIL",
 }
+
+
+@pytest.fixture
+def stub_path(tmp_path: Path) -> tuple[Path, Path]:
+    """Provide deterministic CLIs that reject unexpected writes."""
+    jq = shutil.which("jq")
+    if jq is None:
+        pytest.skip("jq is required for the setup-script tests")
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    mutation_log = tmp_path / "mutations"
+    az_stub = binary_dir / "az"
+    az_stub.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "account show "*"--query name"*) echo "Flowx Test Subscription" ;;
+  "account show"*"--query id"*) echo "00000000-0000-0000-0000-000000000001" ;;
+  "account show"*"--query tenantId"*) echo "00000000-0000-0000-0000-000000000002" ;;
+  "account show"*) echo '{}' ;;
+  *"ad app list"*) [[ "${STUB_FRESH:-}" == 1 ]] || echo "00000000-0000-0000-0000-000000000003" ;;
+  *"ad sp list"*)
+    [[ "${STUB_FRESH:-}" == 1 || "${STUB_NO_SP:-}" == 1 ]] ||
+      echo "00000000-0000-0000-0000-000000000004" ;;
+  *"federated-credential list"*) echo '{"id":"credential-id","name":"existing-name",
+    "issuer":"https://token.actions.githubusercontent.com",
+    "audiences":["api://AzureADTokenExchange"]}' ;;
+  *"provider show"*) if [[ "${STUB_FRESH:-}" == 1 ]]; then echo "NotRegistered"; else echo "Registered"; fi ;;
+  *"role definition list"*"-o json"*)
+    if [[ "${STUB_ROLE_MISMATCH:-}" == 1 ]]; then actions='["Microsoft.Resources/subscriptions/read"]';
+    else actions='["Microsoft.Resources/subscriptions/read","Microsoft.Resources/subscriptions/resourceGroups/*",
+      "Microsoft.DataFactory/factories/*","Microsoft.Storage/storageAccounts/*","Microsoft.KeyVault/vaults/*",
+      "Microsoft.EventGrid/eventSubscriptions/read","Microsoft.EventGrid/eventSubscriptions/write",
+      "Microsoft.EventGrid/eventSubscriptions/delete"]'; fi
+    printf '[{"assignableScopes":["/subscriptions/00000000-0000-0000-0000-000000000001"],
+      "permissions":[{"actions":%s,"notActions":[],"dataActions":[],"notDataActions":[]}],
+      "roleName":"flowx-live-integration-deployer","id":"role-id"}]\n' "$actions" ;;
+  *"role definition list"*) [[ "${STUB_FRESH:-}" == 1 ]] || echo "role-id" ;;
+  *"role assignment list"*)
+    [[ "${STUB_NO_SP:-}" != 1 ]] || { echo 'placeholder assignment lookup' >> "$MUTATION_LOG"; exit 88; }
+    echo "assignment-id" ;;
+  *"role definition update"*)
+    if [[ "${ALLOW_ROLE_UPDATE:-}" == 1 ]]; then
+      previous=''
+      for argument in "$@"; do
+        if [[ "$previous" == --role-definition ]]; then cat "$argument" > "$ROLE_JSON_LOG"; fi
+        previous=$argument
+      done
+    else echo "$*" >> "$MUTATION_LOG"; exit 91; fi ;;
+  *"group list"*) echo "flowx-orphan-exact" ;;
+  *" create"*|*" update"*|*" register"*|*" delete"*|*" account set"*)
+    echo "$*" >> "$MUTATION_LOG"; exit 91 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    gh_stub = binary_dir / "gh"
+    gh_stub.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "auth status") exit 0 ;;
+  *"repo view"*) echo "databricks-solutions/flowx" ;;
+  *"api users/"*) echo "12345" ;;
+  *"api repos/"*"/environments/"*) echo '{"protection_rules":[
+    {"type":"required_reviewers","reviewers":[{"type":"User","reviewer":{"login":"flowx-reviewer","id":12345}}]}
+  ]}' ;;
+  *"secret list"*)
+    printf 'AZURE_CLIENT_ID\nAZURE_TENANT_ID\nAZURE_SUBSCRIPTION_ID\n'
+    [[ "${STUB_MISSING_OWNER:-}" == 1 ]] || printf 'RESOURCE_OWNER_EMAIL\n' ;;
+  *"secret set"*)
+    if [[ "${ALLOW_SECRET_WRITE:-}" == 1 ]]; then
+      printf '%s\n' "$*" >> "$GH_ARGV_LOG"
+      input=$(cat)
+      printf '%s\n' "$input" >> "$GH_STDIN_LOG"
+    else echo "$*" >> "$MUTATION_LOG"; exit 91; fi ;;
+  *"--method PUT"*) echo "$*" >> "$MUTATION_LOG"; exit 91 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    jq_stub = binary_dir / "jq"
+    jq_stub.write_text(f'#!/usr/bin/env bash\nexec "{jq}" "$@"\n', encoding="utf-8")
+    for path in (az_stub, gh_stub, jq_stub):
+        path.chmod(0o755)
+    return binary_dir, mutation_log
 
 
 @pytest.mark.parametrize("subcommand", SUBCOMMANDS)
@@ -156,6 +244,42 @@ def test_cleanup_without_delete_only_lists(stub_path: tuple[Path, Path]) -> None
     assert result.returncode == 0, result.stdout + result.stderr
     assert "flowx-orphan-exact" in result.stdout
     assert not mutation_log.exists()
+
+
+def test_export_follows_next_link_pages(tmp_path: Path) -> None:
+    """The ADF export keeps resources from every page and looks up the subscription once."""
+    if shutil.which("jq") is None:
+        pytest.skip("jq is required for the export-script test")
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    az_log = tmp_path / "az-calls"
+    (binary_dir / "terraform").write_text('#!/usr/bin/env bash\necho "${@: -1}"\n', encoding="utf-8")
+    (binary_dir / "az").write_text(
+        """#!/usr/bin/env bash
+echo "$*" >> "$AZ_LOG"
+case "$*" in
+  "account show"*) echo "00000000-0000-0000-0000-000000000001" ;;
+  *"/pipelines?api-version"*) echo '{"value":[{"name":"first","properties":{}}],"nextLink":"https://page-two"}' ;;
+  *"https://page-two"*) echo '{"value":[{"name":"second","properties":{}}]}' ;;
+  *) echo '{"value":[]}' ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    for path in binary_dir.iterdir():
+        path.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{binary_dir}:{os.environ['PATH']}",
+        "AZ_LOG": str(az_log),
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_ENV": str(tmp_path / "github-env"),
+    }
+    subprocess.run([str(BASH), str(EXPORT_SCRIPT)], cwd=tmp_path, env=environment, check=True)
+
+    exported = sorted(path.name for path in (tmp_path / "adf-export/pipelines").glob("*.json"))
+    assert exported == ["first.json", "second.json"]
+    assert az_log.read_text().count("account show") == 1
 
 
 def test_bash_syntax() -> None:

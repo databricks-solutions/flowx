@@ -104,8 +104,8 @@ PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v
 ### Expected-output cases
 
 Each `adf/cases/<case>/case.json` names one or more fixture pipelines. The test constructs a temporary
-ADF source containing those pipelines, every shared dataset/linked service/dataflow/integration runtime,
-and only triggers that reference a selected pipeline. `expected/` records normalized inventory, per-pipeline
+ADF source containing those pipelines, every shared dataset, linked service, and dataflow (integration
+runtimes are left out because flowx doesn't load them), and only triggers that reference a selected pipeline. `expected/` records normalized inventory, per-pipeline
 IR, gaps, and the complete packaged bundle tree.
 
 To add a case, create its `case.json`, then regenerate expected artifacts offline:

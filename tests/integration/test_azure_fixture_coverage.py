@@ -6,13 +6,9 @@ import json
 from collections import Counter
 from pathlib import Path
 
-import pytest
-
 from flowx.models.adf_ast import TranslationStrategy
 from flowx.motifs.detector import detect_motifs
 from flowx.sources.adf.loader import AGENTIC_TYPES, DETERMINISTIC_TYPES, build_inventory, load_adf_definitions
-
-pytestmark = pytest.mark.integration
 
 FIXTURE_ROOT = Path(__file__).parent / "azure" / "adf"
 EXPECTED_TRIGGER_TYPES = {"ScheduleTrigger", "TumblingWindowTrigger", "BlobEventsTrigger"}

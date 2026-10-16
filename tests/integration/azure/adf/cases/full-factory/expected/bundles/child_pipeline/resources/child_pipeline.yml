@@ -1,9 +1,0 @@
-resources:
-  jobs:
-    child_pipeline:
-      name: child-pipeline
-      tasks:
-      - task_key: child-notebook
-        existing_cluster_id: <DATABRICKS_CLUSTER_ID>
-        notebook_task:
-          notebook_path: /Shared/flowx/child
