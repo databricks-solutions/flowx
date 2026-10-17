@@ -42,8 +42,10 @@ credentials. Two guards stand between a pull request and those credentials:
   - It refuses any Terraform CLI configuration that could change where providers come from (`TF_CLI_CONFIG_FILE`,
     `TF_PLUGIN_CACHE_DIR`, or `~/.terraformrc`).
   - After `init`, it refuses `local-exec` or `remote-exec` provisioners (on any resource, including
-    `null_resource` and `terraform_data`) and the `external` data source. It scans the root config and every
-    module `init` recorded. These run commands a plan can't show.
+    `null_resource` and `terraform_data`) and the `external` data source, because these run commands a plan can't
+    show. It scans the root config and every module `init` recorded. In `.tf` files it refuses the words
+    `provisioner` and `external` anywhere, even in comments, so layout can't hide them. It parses `.tf.json` files
+    and refuses those keys however they're spaced or escaped.
   - It saves a plan, refuses it if any resource would be deleted or replaced, and applies that exact saved plan.
 
   When Dependabot updates the lock file, update `lock_sha256` in `apply-terraform.sh` in the same pull request.

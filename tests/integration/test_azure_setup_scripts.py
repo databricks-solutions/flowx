@@ -420,26 +420,54 @@ def test_apply_stops_when_the_plan_deletes_anything(tmp_path: Path, actions: lis
     assert any("-lockfile=readonly" in call for call in calls if call.startswith("init"))
 
 
-@pytest.mark.parametrize(
-    "snippet",
-    [
+COMMAND_RUNNING_CONFIG = {
+    "local-exec": (
+        "main.tf",
         'resource "terraform_data" "run" {\n  provisioner "local-exec" {\n    command = "id"\n  }\n}',
+    ),
+    "remote-exec": (
+        "main.tf",
         'resource "null_resource" "run" {\n  provisioner "remote-exec" {\n    inline = ["id"]\n  }\n}',
-        'data "external" "run" {\n  program = ["id"]\n}',
-        '{"resource": {"terraform_data": {"run": {"provisioner": [{"local-exec": {"command": "id"}}]}}}}',
-    ],
-    ids=["local-exec", "remote-exec", "external", "json"],
-)
-def test_apply_rejects_config_that_runs_commands(tmp_path: Path, snippet: str) -> None:
-    """Provisioners and the external data source are refused before validate, plan, or apply run."""
+    ),
+    "external": ("main.tf", 'data "external" "run" {\n  program = ["id"]\n}'),
+    "hcl-comment": ("main.tf", 'resource "terraform_data" "run" {\n  provisioner /* hidden */ "local-exec" {\n  }\n}'),
+    "hcl-bare-label": ("main.tf", 'resource "terraform_data" "run" {\n  provisioner local-exec {\n  }\n}'),
+    "hcl-split-data": ("main.tf", 'data /* hidden */ external "run" {\n  program = ["id"]\n}'),
+    "json": ("main.tf.json", '{"resource": {"terraform_data": {"run": {"provisioner": [{"local-exec": {}}]}}}}'),
+    "json-multiline": (
+        "main.tf.json",
+        '{"resource": {"terraform_data": {"run": {"provisioner"\n  :\n [{"local-exec": {}}]}}}}',
+    ),
+    "json-escaped": (
+        "main.tf.json",
+        '{"resource": {"terraform_data": {"run": {"provisi\\u006fner": [{"local-exec": {}}]}}}}',
+    ),
+    "json-external": ("main.tf.json", '{"data": {"external"\n: {"run": {"program": ["id"]}}}}'),
+}
+
+
+@pytest.mark.parametrize("location", ["root", "module"])
+@pytest.mark.parametrize("case", sorted(COMMAND_RUNNING_CONFIG))
+def test_apply_rejects_config_that_runs_commands(tmp_path: Path, case: str, location: str) -> None:
+    """Provisioners and the external data source are refused however they're laid out, in the root or a module."""
+    filename, content = COMMAND_RUNNING_CONFIG[case]
     config = tmp_path / "config"
     config.mkdir()
-    filename = "main.tf.json" if snippet.startswith("{") else "main.tf"
-    (config / filename).write_text(snippet + "\n", encoding="utf-8")
-    result, calls = _run_apply(tmp_path, config, ["create"])
+    target = config if location == "root" else tmp_path / "outside-module"
+    target.mkdir(exist_ok=True)
+    (target / filename).write_text(content + "\n", encoding="utf-8")
+    modules = {"Modules": [{"Key": "", "Source": "", "Dir": "."}, {"Key": "m", "Dir": str(target)}]}
+    result, calls = _run_apply(tmp_path, config, ["create"], {"STUB_MODULES_JSON": json.dumps(modules)})
     assert result.returncode != 0
     assert "must not use provisioners" in result.stdout
     assert [call.split()[0] for call in calls] == ["init"]
+
+
+def test_apply_accepts_the_real_terraform_config(tmp_path: Path) -> None:
+    """The checked-in config passes the scan, so the word checks don't refuse it by accident."""
+    result, calls = _run_apply(tmp_path, TERRAFORM_DIR, ["create"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert calls[-1].startswith("apply")
 
 
 @pytest.mark.parametrize("module_kind", ["local", "downloaded"])
@@ -601,8 +629,8 @@ def _run_apply(
 
     The stub's init writes STUB_MODULES_JSON, when set, where real init records the modules it found.
     """
-    if shutil.which("jq") is None or shutil.which("sha256sum") is None:
-        pytest.skip("jq and sha256sum are required for the apply-script test")
+    if shutil.which("jq") is None or not (shutil.which("sha256sum") or shutil.which("shasum")):
+        pytest.skip("jq and sha256sum or shasum are required for the apply-script test")
     lock = config / ".terraform.lock.hcl"
     if not lock.exists():
         shutil.copy(TERRAFORM_DIR / ".terraform.lock.hcl", lock)
