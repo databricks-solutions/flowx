@@ -50,7 +50,6 @@ RESOURCE_GROUP=${RESOURCE_GROUP:-flowx-live-integration}
 LOCATION=${LOCATION:-eastus2}
 TEST_TAG=purpose=flowx-integration-test
 REQUIRED_PROVIDERS='Microsoft.Resources Microsoft.DataFactory Microsoft.Storage Microsoft.KeyVault Microsoft.EventGrid'
-# The actions Terraform in tests/integration/azure/terraform uses, granted only on RESOURCE_GROUP.
 REQUIRED_ROLE_ACTIONS='[
   "Microsoft.Resources/subscriptions/resourceGroups/read",
   "Microsoft.Storage/storageAccounts/read",
@@ -91,7 +90,6 @@ REQUIRED_ROLE_ACTIONS='[
   "Microsoft.EventGrid/eventSubscriptions/write",
   "Microsoft.EventGrid/eventSubscriptions/delete"
 ]'
-# Shared-key access is disabled in Terraform; these keep key and access-policy changes out even if Actions widen.
 REQUIRED_ROLE_NOT_ACTIONS='[
   "Microsoft.Storage/storageAccounts/listKeys/action",
   "Microsoft.Storage/storageAccounts/listAccountSas/action",
@@ -261,7 +259,6 @@ step_role() {
     '{Name:$name,IsCustom:true,Description:"Deploy flowx live integration fixtures into one resource group",Actions:$actions,NotActions:$not_actions,AssignableScopes:[$scope]}' > "$role_file"
   role_id=$(az role definition list --name "$ROLE_NAME" --scope "$scope" --query '[0].id' -o tsv)
   if [[ -n "$role_id" && "$sp_id" != '<service-principal-object-id>' ]]; then
-    # Older setups assigned this role to the whole subscription; Azure won't narrow the role while that exists.
     legacy_assignment=$(legacy_assignment_ids)
     # shellcheck disable=SC2086
     [[ -z "$legacy_assignment" ]] || run_write az role assignment delete --ids $legacy_assignment ||
@@ -396,8 +393,6 @@ legacy_assignment_ids() {
     --query "[?scope=='$subscription_scope'].id" -o tsv
 }
 
-# Lists the run tags of test resources left in the shared resource group, and deletes one run's resources.
-# The resource group itself is never deleted.
 cleanup_orphans() {
   local runs resource_ids
   runs=$(az resource list --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP" --tag "$TEST_TAG" \
@@ -421,7 +416,6 @@ validate_owner_email() {
     die "RESOURCE_OWNER_EMAIL must be a non-empty email-like value"
 }
 
-# GitHub logins are case-insensitive, so "Alice,alice" is one reviewer.
 count_reviewers() {
   tr ',' '\n' <<< "$REVIEWERS" | sed 's/[[:space:]]//g' | grep . | sort -fu | wc -l
 }

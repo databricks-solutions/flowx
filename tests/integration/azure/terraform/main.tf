@@ -70,7 +70,6 @@ locals {
   }
 }
 
-# The shared resource group is created once by setup-integration.sh; the CI identity may only work inside it.
 data "azurerm_resource_group" "test" {
   name = var.resource_group_name
 }

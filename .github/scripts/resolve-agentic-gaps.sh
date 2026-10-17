@@ -37,16 +37,10 @@ jq '
 ' "${FLOWX_OUTPUT}/.work/translation_report.json" > "${RUNNER_TEMP}/expected-agentic-structure.json"
 cp "${GITHUB_WORKSPACE}/.github/scripts/snapshot-tree.sh" "${RUNNER_TEMP}/snapshot-worktree.sh"
 chmod a-w "${RUNNER_TEMP}/snapshot-worktree.sh"
-# shellcheck source=/dev/null
 source "${RUNNER_TEMP}/snapshot-worktree.sh"
 worktree_snapshot="${RUNNER_TEMP}/pre-claude-worktree.sha256"
 snapshot_worktree > "${worktree_snapshot}"
 chmod 000 "${TF_STATE_DIR}" "${TF_DATA_DIR}"
-# Claude may read and search only its inputs, the plugin, and its own results. --restricted keeps Read, Glob,
-# and Grep inside the checkout and the --add-dir paths, which path-scoped rules alone don't do for Glob. Inside
-# the checkout these tools can still see the pull request's own files; the Read denies, which also apply to
-# Glob and Grep, keep .git, credential caches, and Terraform state out. Absolute paths take a leading "/" to
-# become "//path". This was checked against Claude Code 2.1.296.
 allowed_dirs=("./${FLOWX_OUTPUT}/**" "/${ADF_EXPORT_DIR}/**" "/${plugin_dir}/**" "./agentic_results/**")
 allowed_tools=""
 for tool in Read Glob Grep; do

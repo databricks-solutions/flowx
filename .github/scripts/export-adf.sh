@@ -10,7 +10,6 @@ for mapping in "pipelines:pipelines" "datasets:datasets" "linkedservices:linked_
   resource_type="${mapping%%:*}"
   directory="${mapping##*:}"
   url="${factory_url}/${resource_type}?api-version=2018-06-01"
-  # ADF list responses are paged; follow nextLink until the last page.
   while [[ -n "${url}" ]]; do
     page="$(az rest --method get --url "${url}" --output json)"
     jq -c '.value[]' <<<"${page}" |

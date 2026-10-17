@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Installs the Claude Code version pinned in .github/claude-code/package-lock.json. npm ci checks every
-# package against the lock file's integrity hash, and --ignore-scripts skips the postinstall step, so the
-# workflow runs the native binary from the platform package directly.
 if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
   echo "No Claude authentication secret is configured; skipping the Claude Code install."
   exit 0

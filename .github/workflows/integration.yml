@@ -5,30 +5,30 @@ on:
   push:
     branches: [main]
     paths:
-      - tests/integration/azure/**
-      - .github/scripts/**
-      - .github/claude-code/**
+      - ".github/scripts/**"
+      - ".github/claude-code/**"
+      - ".github/workflows/integration.yml"
       - "!.github/scripts/setup-integration.sh"
       - "!.github/scripts/check-formatting.sh"
       - "!.github/scripts/verify-requirements.sh"
+      - "tests/integration/azure/**"
+      - "tests/integration/test_azure_fixture_coverage.py"
+      - "tests/integration/test_adf_cases.py"
       - "!tests/integration/azure/README.md"
-      - tests/integration/test_azure_fixture_coverage.py
-      - tests/integration/test_adf_cases.py
-      - src/flowx/sources/adf/**
-      - .github/workflows/integration.yml
+      - "src/flowx/sources/adf/**"
   pull_request:
     paths:
-      - tests/integration/azure/**
-      - .github/scripts/**
-      - .github/claude-code/**
+      - ".github/scripts/**"
+      - ".github/claude-code/**"
+      - ".github/workflows/integration.yml"
       - "!.github/scripts/setup-integration.sh"
       - "!.github/scripts/check-formatting.sh"
       - "!.github/scripts/verify-requirements.sh"
+      - "tests/integration/azure/**"
+      - "tests/integration/test_azure_fixture_coverage.py"
+      - "tests/integration/test_adf_cases.py"
       - "!tests/integration/azure/README.md"
-      - tests/integration/test_azure_fixture_coverage.py
-      - tests/integration/test_adf_cases.py
-      - src/flowx/sources/adf/**
-      - .github/workflows/integration.yml
+      - "src/flowx/sources/adf/**"
 
 permissions:
   contents: read
@@ -98,7 +98,6 @@ jobs:
         shell: bash
         run: '"${CI_SCRIPTS}/check-required-configuration.sh"'
 
-      # Everything is installed from hash-checked lock files or pinned checksums before signing in to Azure.
       - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
         with:
           version: "0.11.2"

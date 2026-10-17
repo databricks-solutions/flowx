@@ -28,7 +28,7 @@ variable "owner_email" {
 }
 
 variable "resource_group_name" {
-  description = "Existing resource group that holds every run's resources. Its region is used for them too."
+  description = "Resource group for the integration resources."
   type        = string
 }
 
