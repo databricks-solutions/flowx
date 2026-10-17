@@ -166,6 +166,27 @@ def _excluded_dags(parameters: dict[str, Any]) -> list[str]:
     return [str(item) for item in value]
 
 
+def _packaging_args(parameters: dict[str, Any]) -> list[Any]:
+    """Forwards the bundle-layout parameters to ``package`` as its CLI flags.
+
+    A ``group_spec`` on its own means "package by this spec", so it fills in ``per-group`` and
+    ``spec`` for whichever of the other two is unset. Otherwise unset keys are left off so the CLI's
+    own defaults apply (``per-pipeline``, ``inferred``), and a bad value reaches the CLI unchanged so
+    it is refused there exactly as on the command line.
+    """
+    group_spec = parameters.get("group_spec")
+    packaging_mode = parameters.get("packaging_mode") or ("per-group" if group_spec else None)
+    group_by = parameters.get("group_by") or ("spec" if group_spec else None)
+    args: list[Any] = []
+    if packaging_mode:
+        args += ["--packaging-mode", packaging_mode]
+    if group_by:
+        args += ["--group-by", group_by]
+    if group_spec:
+        args += ["--group-spec", group_spec]
+    return args
+
+
 def _cmd_inputs(p: dict[str, Any]) -> dict[str, Any]:
     phase = p["phase"]
     args = ["inputs", phase]
@@ -354,6 +375,7 @@ def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
         args += ["--no-download-workspace-files"]
     if p.get("keep_intermediates"):
         args += ["--keep-intermediates"]
+    args += _packaging_args(p)
     result = runner.run_adapter(args)
     out = Path(output_dir)
     setup_md = runner.read_text(out / "SETUP.md") or runner.read_text(out / "setup" / "SETUP.md")
@@ -458,7 +480,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": False, "status": "failed", "failed_phase": "apply_answers", "steps": steps}
 
         package_res = runner.run_adapter(
-            ["package", "--output-dir", output_dir, "--catalog", catalog, "--schema", schema]
+            ["package", "--output-dir", output_dir, "--catalog", catalog, "--schema", schema, *_packaging_args(p)]
         )
         extra = _bundle_output(p, out) if package_res.ok else {}
         steps["package"] = _phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra)
@@ -559,10 +581,17 @@ def build_server() -> FastMCP:
           | source_dir).
         - "package": output_dir, output_volume_path, output_workspace_path, report_path,
           catalog(default "main"), schema(default "default"), bundle_name, profile,
-          download_workspace_files(bool), keep_intermediates(bool).
+          download_workspace_files(bool), keep_intermediates(bool), packaging_mode, group_by, group_spec.
+          ``packaging_mode`` ("per-pipeline" default | "single" | "per-group") lays a multi-pipeline
+          migration out into bundles; for "per-group", ``group_by`` is "inferred" (default, by the Run
+          Pipeline call graph) or "spec", which needs ``group_spec``: a JSON/YAML file mapping pipelines
+          to groups (sending it alone implies "per-group" and "spec"). It must be a path the server
+          itself can read, so on the hosted server use ``group_by`` "inferred" or a server-local path.
+          An unrecognized value is refused with ``ok: false``.
         - "migrate": source(req), one ADF source key | airflow_source_path (req), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
-          exclude_dag | exclude_dags (Airflow, repeatable list),
+          exclude_dag | exclude_dags (Airflow, repeatable list), packaging_mode, group_by, group_spec
+          (as for "package"),
           answers(list of "ID=VALUE"), interactive(bool, default true), lookup_csv — runs
           discover→convert→package, returning the full option schema once (status "needs_input") when
           configuration is available; re-call once with the complete answers to apply (see below).
