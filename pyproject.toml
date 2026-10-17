@@ -1,10 +1,14 @@
 [project]
 name = "databricks-flowx"
 version = "0.1.0"
-description = "ADF to Databricks Lakeflow Jobs translator via Declarative Automation Bundles"
+description = "Translate data pipelines to Databricks Lakeflow Jobs via Declarative Automation Bundles."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{name = "Greg Hansen", email = "gregory.hansen@databricks.com"}]
+maintainers = [
+    {name = "Greg Hansen", email = "gregory.hansen@databricks.com"},
+    {name = "Peter Park", email = "peter.park@databricks.com"}
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
