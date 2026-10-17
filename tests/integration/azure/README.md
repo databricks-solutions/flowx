@@ -55,8 +55,9 @@ credentials. Two guards stand between a pull request and those credentials:
   `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=darwin_amd64`. That includes
   after a Dependabot update, which may record only one platform. Then update `lock_sha256` in
   `apply-terraform.sh` in the same pull request.
-  Teardown still runs a normal `terraform destroy`. These checks are lint, not a sandbox: a pull request that
-  edits `apply-terraform.sh` can remove them, and approval is the guard for that.
+  Teardown still runs a normal `terraform destroy`. These checks are a sanity check, not a security boundary:
+  an approved pull request can edit `apply-terraform.sh` or run commands in earlier workflow steps. Approval by
+  a trusted reviewer is the real boundary.
 
 The Azure role reaches only the shared resource group (see below), so even an approved run can't touch anything
 else in the subscription.

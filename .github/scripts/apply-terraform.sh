@@ -19,12 +19,15 @@ terraform init -input=false -lockfile=readonly -backend-config="path=${TF_STATE_
 config_dirs=(.)
 modules_json="${TF_DATA_DIR:-.terraform}/modules/modules.json"
 if [[ -f "${modules_json}" ]]; then
-  module_dirs="$(jq -r '.Modules[].Dir' "${modules_json}")" || fail "Could not read ${modules_json}."
-  while IFS= read -r module_dir; do config_dirs+=("${module_dir}"); done <<< "${module_dirs}"
+  # `find .` already covers modules under the root, including .terraform/modules; add only local modules outside it.
+  module_dirs="$(jq -r '.Modules[].Dir | select(startswith("..") or startswith("/"))' "${modules_json}")" ||
+    fail "Could not read ${modules_json}."
+  while IFS= read -r module_dir; do [[ -z "${module_dir}" ]] || config_dirs+=("${module_dir}"); done <<< "${module_dirs}"
 fi
 symlinks="$(find "${config_dirs[@]}" -type l)" || fail "Could not list the Terraform config files."
 [[ -z "${symlinks}" ]] || fail "Terraform config must not contain symlinks: ${symlinks//$'\n'/, }"
 config_files="$(mktemp)"
+trap 'rm -f "${config_files}"' EXIT
 find "${config_dirs[@]}" -type f \( -name '*.tf' -o -name '*.tf.json' \) -print0 > "${config_files}" ||
   fail "Could not list the Terraform config files."
 while IFS= read -r -d '' config_file; do
@@ -34,7 +37,6 @@ while IFS= read -r -d '' config_file; do
     ! grep -Eqw 'provisioner|external' "${config_file}"
   fi || fail "Terraform config must not use provisioners or the external data source: ${config_file}"
 done < "${config_files}"
-rm -f "${config_files}"
 
 terraform fmt -check
 terraform validate

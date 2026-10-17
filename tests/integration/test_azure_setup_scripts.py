@@ -574,7 +574,7 @@ def test_apply_rejects_terraform_cli_configuration(tmp_path: Path, override: str
 
 
 def test_export_follows_next_link_pages(tmp_path: Path) -> None:
-    """The ADF export keeps resources from every page and looks up the subscription once."""
+    """The ADF export keeps every page, writes every resource type, and looks up the subscription once."""
     if shutil.which("jq") is None:
         pytest.skip("jq is required for the export-script test")
     binary_dir = tmp_path / "bin"
@@ -588,7 +588,7 @@ case "$*" in
   "account show"*) echo "00000000-0000-0000-0000-000000000001" ;;
   *"/pipelines?api-version"*) echo '{"value":[{"name":"first","properties":{}}],"nextLink":"https://page-two"}' ;;
   *"https://page-two"*) echo '{"value":[{"name":"second","properties":{}}]}' ;;
-  *) echo '{"value":[]}' ;;
+  *) echo '{"value":[{"name":"factory/only","properties":{}}]}' ;;
 esac
 """,
         encoding="utf-8",
@@ -606,12 +606,15 @@ esac
 
     exported = sorted(path.name for path in (tmp_path / "adf-export/pipelines").glob("*.json"))
     assert exported == ["first.json", "second.json"]
+    for directory in ("datasets", "linked_services", "dataflows", "integration_runtimes", "triggers"):
+        assert [path.name for path in (tmp_path / "adf-export" / directory).iterdir()] == ["only.json"], directory
     assert az_log.read_text().count("account show") == 1
 
 
-def test_bash_syntax() -> None:
-    """The consolidated setup script parses under the system Bash 3.2."""
-    subprocess.run([str(BASH), "-n", str(SCRIPT)], check=True)
+@pytest.mark.parametrize("script", sorted(SCRIPT.parent.glob("*.sh")), ids=lambda path: path.name)
+def test_bash_syntax(script: Path) -> None:
+    """Every workflow shell script parses under the system Bash 3.2."""
+    subprocess.run([str(BASH), "-n", str(script)], check=True)
 
 
 def test_every_taggable_terraform_resource_uses_owner_tags() -> None:

@@ -28,16 +28,30 @@ WORKFLOW_AND_SCRIPTS = "\n".join(
 
 
 def test_claude_runs_with_restricted_tools_outside_the_checkout(tmp_path: Path) -> None:
-    """Claude gets its prompt on stdin, has no Bash, edits only agentic_results/, and loads a plugin copy."""
+    """Claude runs restricted in dontAsk mode with no Bash and a deny list, and loads a read-only plugin copy.
+
+    The copy is made in RUNNER_TEMP and made read-only before the worktree snapshot, and acceptEdits is never used.
+    """
     flags, prompt = _claude_invocation(tmp_path)
     assert "--restricted" in flags
     assert flags[flags.index("--permission-mode") + 1] == "dontAsk"
     assert flags[flags.index("--tools") + 1] == "Read,Edit,Write,Glob,Grep,Skill"
+    assert flags[flags.index("--disallowedTools") + 1]
     plugin_dir = str(tmp_path / "temp" / "flowx-plugin")
     assert flags[flags.index("--plugin-dir") + 1] == plugin_dir
     assert _values(flags, "--add-dir") == [str(tmp_path / "temp" / "adf-export"), plugin_dir]
     assert "Bash" not in " ".join(flags)
+    assert "acceptEdits" not in WORKFLOW_AND_SCRIPTS
     assert "PlaceholderActivity" in prompt
+    script = RESOLVE_AGENTIC.read_text(encoding="utf-8")
+    steps = [
+        'plugin_dir="${RUNNER_TEMP}/flowx-plugin"',
+        'cp -R .claude-plugin skills "${plugin_dir}/"',
+        'chmod -R a-w "${plugin_dir}"',
+        'snapshot_worktree > "${worktree_snapshot}"',
+    ]
+    assert all(step in script for step in steps)
+    assert [script.index(step) for step in steps] == sorted(script.index(step) for step in steps)
 
 
 def test_claude_reads_and_searches_only_its_inputs(tmp_path: Path) -> None:
