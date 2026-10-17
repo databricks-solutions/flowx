@@ -49,7 +49,11 @@ credentials. Two guards stand between a pull request and those credentials:
     Terraform follows symlinks the scan would skip, and it fails if it can't list a directory.
   - It saves a plan, refuses it if any resource would be deleted or replaced, and applies that exact saved plan.
 
-  When Dependabot updates the lock file, update `lock_sha256` in `apply-terraform.sh` in the same pull request.
+  The lock file must hold hashes for every platform that runs Terraform, or `init` fails on the others with
+  "does not match any of the checksums recorded in the dependency lock file". Regenerate it from `terraform/` with
+  `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=darwin_amd64`. That includes
+  after a Dependabot update, which may record only one platform. Then update `lock_sha256` in
+  `apply-terraform.sh` in the same pull request.
   Teardown still runs a normal `terraform destroy`. These checks are lint, not a sandbox: a pull request that
   edits `apply-terraform.sh` can remove them, and approval is the guard for that.
 

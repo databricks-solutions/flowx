@@ -17,6 +17,7 @@ APPLY_SCRIPT = SCRIPT.with_name("apply-terraform.sh")
 TEARDOWN_SCRIPT = SCRIPT.with_name("teardown-integration.sh")
 TERRAFORM_DIR = Path(__file__).parent / "azure" / "terraform"
 TERRAFORM = TERRAFORM_DIR / "main.tf"
+README = TERRAFORM_DIR.parent / "README.md"
 BASH = Path("/bin/bash")
 SECRET = "must-never-appear-in-output"
 RESOURCE_GROUP_SCOPE = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/flowx-live-integration"
@@ -378,26 +379,38 @@ def test_cleanup_deletes_one_runs_resources_but_never_the_group(stub_path: tuple
 
 def test_teardown_destroys_run_resources_and_keeps_the_resource_group(tmp_path: Path) -> None:
     """Teardown runs terraform destroy and makes no Azure CLI call that could delete the shared group."""
-    binary_dir = tmp_path / "bin"
-    binary_dir.mkdir()
-    calls = tmp_path / "calls"
-    for tool in ("terraform", "az"):
-        (binary_dir / tool).write_text(f'#!/usr/bin/env bash\necho "{tool} $*" >> "$CALLS"\n', encoding="utf-8")
-        (binary_dir / tool).chmod(0o755)
-    environment = {
-        **os.environ,
-        "PATH": f"{binary_dir}:{os.environ['PATH']}",
-        "CALLS": str(calls),
-        "RUNNER_TEMP": str(tmp_path),
-        "CI_SCRIPTS": str(tmp_path / "ci-scripts"),
-        "TF_STATE_DIR": str(tmp_path / "state"),
-        "TF_DATA_DIR": str(tmp_path / "data"),
-        "GITHUB_RUN_ID": "1",
-        "GITHUB_RUN_ATTEMPT": "1",
-    }
-    result = subprocess.run([str(BASH), str(TEARDOWN_SCRIPT)], cwd=tmp_path, env=environment, capture_output=True)
+    state = tmp_path / "state" / "terraform.tfstate"
+    state.parent.mkdir()
+    state.write_text("{}", encoding="utf-8")
+    result, calls = _run_teardown(tmp_path)
     assert result.returncode == 0, result.stderr
-    assert calls.read_text().splitlines() == ["terraform destroy -auto-approve -input=false"]
+    assert calls == ["terraform destroy -auto-approve -input=false"]
+
+
+def test_teardown_skips_when_apply_never_ran(tmp_path: Path) -> None:
+    """With no state, as when init fails, teardown succeeds without calling Terraform or Azure."""
+    result, calls = _run_teardown(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "nothing to destroy" in result.stdout
+    assert calls == []
+
+
+def test_provider_lock_covers_every_ci_platform() -> None:
+    """Each provider has one h1 hash per platform in the README's lock command, including the Linux runner.
+
+    A lock made on one machine holds a single h1 hash per provider, and init on any other platform then fails.
+    """
+    lock = (TERRAFORM_DIR / ".terraform.lock.hcl").read_text(encoding="utf-8")
+    providers = re.findall(r'^provider "(?P<name>[^"]+)" \{\n(?P<body>.*?)^\}', lock, re.MULTILINE | re.DOTALL)
+    assert {name for name, _ in providers} == {
+        "registry.terraform.io/azure/azapi",
+        "registry.terraform.io/hashicorp/azurerm",
+    }
+    platforms = re.search(r"terraform providers lock((?: -platform=\w+)+)", README.read_text(encoding="utf-8"))
+    assert platforms and "-platform=linux_amd64" in platforms.group(1)
+    platform_count = platforms.group(1).count("-platform=")
+    for name, body in providers:
+        assert body.count('"h1:') == platform_count, name
 
 
 @pytest.mark.parametrize(
@@ -700,5 +713,31 @@ fi
     )
     result = subprocess.run(
         [str(BASH), str(APPLY_SCRIPT)], cwd=config, env=environment, capture_output=True, text=True, check=False
+    )
+    return result, calls.read_text().splitlines() if calls.exists() else []
+
+
+def _run_teardown(tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run teardown-integration.sh with stub terraform and az CLIs that record their calls."""
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    calls = tmp_path / "calls"
+    for tool in ("terraform", "az"):
+        (binary_dir / tool).write_text(f'#!/usr/bin/env bash\necho "{tool} $*" >> "$CALLS"\n', encoding="utf-8")
+        (binary_dir / tool).chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{binary_dir}:{os.environ['PATH']}",
+        "CALLS": str(calls),
+        "RUNNER_TEMP": str(tmp_path),
+        "CI_SCRIPTS": str(tmp_path / "ci-scripts"),
+        "TF_STATE_DIR": str(tmp_path / "state"),
+        "TF_STATE_PATH": str(tmp_path / "state" / "terraform.tfstate"),
+        "TF_DATA_DIR": str(tmp_path / "data"),
+        "GITHUB_RUN_ID": "1",
+        "GITHUB_RUN_ATTEMPT": "1",
+    }
+    result = subprocess.run(
+        [str(BASH), str(TEARDOWN_SCRIPT)], cwd=tmp_path, env=environment, capture_output=True, text=True, check=False
     )
     return result, calls.read_text().splitlines() if calls.exists() else []

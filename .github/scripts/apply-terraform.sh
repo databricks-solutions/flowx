@@ -10,8 +10,8 @@ fail() {
 
 # The lock file is pinned by hash. It lists only registry.terraform.io/hashicorp/azurerm 4.81.0 and
 # registry.terraform.io/azure/azapi 2.13.0 with their package hashes, and -lockfile=readonly makes init refuse
-# any other provider. Update the hash below when Dependabot updates the lock file.
-lock_sha256=be5b0a021819cdcab3a19877cf81400a8f0611b554c6daeea683460210d1e1c5
+# any other provider. Update the hash below when the lock file changes; see the README for how to regenerate it.
+lock_sha256=2cb3c3f60c93da0e8c6d76def055c40dd4fdcd779165c7d703e680bdd50e08dc
 sha256=(sha256sum)
 command -v sha256sum >/dev/null || sha256=(shasum -a 256)
 [[ "$("${sha256[@]}" < .terraform.lock.hcl | cut -d ' ' -f 1)" == "${lock_sha256}" ]] ||
