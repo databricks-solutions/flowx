@@ -34,51 +34,60 @@ CASE_PHASES = [
 CASE_IDS = [f"{case_dir.name}-{phase}" for case_dir, phase in CASE_PHASES]
 
 
-@pytest.mark.parametrize(("case_dir", "phase"), CASE_PHASES, ids=CASE_IDS)
-def test_adf_case(case_dir: Path, phase: str, tmp_path: Path, pytestconfig: pytest.Config) -> None:
-    """Run one expected-output phase for one selected pipeline case."""
-    update = pytestconfig.getoption("--update-expected")
+@pytest.fixture(scope="module")
+def case_results(tmp_path_factory: pytest.TempPathFactory, pytestconfig: pytest.Config):
+    """Run each case's discover, convert, and package phases once and share the results across phase tests."""
     source_root = Path(os.getenv("ADF_CASE_SOURCE_DIR", str(FIXTURES)))
-    if update and source_root.resolve() != FIXTURES.resolve():
+    if pytestconfig.getoption("--update-expected") and source_root.resolve() != FIXTURES.resolve():
         pytest.fail("--update-expected only accepts the checked-in fixture source")
-    case = _read_json(case_dir / "case.json")
-    source = tmp_path / "source"
-    output = tmp_path / "output"
-    _build_case_source(case, source_root, source)
-    _run("discover", source, output)
-    inventory = _normalize_inventory(output / "metadata/inventory.json")
+    results: dict[Path, dict[str, Any]] = {}
+
+    def get(case_dir: Path) -> dict[str, Any]:
+        if case_dir not in results:
+            results[case_dir] = _run_case(
+                _read_json(case_dir / "case.json"), source_root, tmp_path_factory.mktemp(case_dir.name)
+            )
+        return results[case_dir]
+
+    return get
+
+
+@pytest.mark.parametrize(("case_dir", "phase"), CASE_PHASES, ids=CASE_IDS)
+def test_adf_case(case_dir: Path, phase: str, case_results, pytestconfig: pytest.Config) -> None:
+    """Check one expected-output phase for one selected pipeline case."""
+    update = pytestconfig.getoption("--update-expected")
+    result = case_results(case_dir)
     expected = case_dir / "expected"
 
     if phase == "discover":
         if update:
-            _write_json(expected / "inventory.json", inventory)
+            _write_json(expected / "inventory.json", result["inventory"])
         else:
-            assert inventory == _read_json(expected / "inventory.json")
-        return
-
-    _run("convert", source, output)
-    ir, gaps = _capture_convert(output)
-    if phase == "convert":
+            assert result["inventory"] == _read_json(expected / "inventory.json")
+    elif phase == "convert":
         if update:
             shutil.rmtree(expected / "ir", ignore_errors=True)
-            for pipeline, value in ir.items():
+            for pipeline, value in result["ir"].items():
                 _write_json(expected / "ir" / f"{pipeline}.json", value)
-            _write_json(expected / "gaps.json", gaps)
+            _write_json(expected / "gaps.json", result["gaps"])
         else:
-            assert ir == {path.stem: _read_json(path) for path in sorted((expected / "ir").glob("*.json"))}
-            assert gaps == _read_json(expected / "gaps.json")
-        return
-
-    _run("package", source, output)
-    if update:
-        _copy_tree(output, expected / "bundles")
+            assert result["ir"] == {path.stem: _read_json(path) for path in sorted((expected / "ir").glob("*.json"))}
+            assert result["gaps"] == _read_json(expected / "gaps.json")
+    elif phase == "package":
+        if update:
+            _copy_tree(result["output"], expected / "bundles")
+        else:
+            _assert_tree(expected / "bundles", result["output"])
     else:
-        _assert_tree(expected / "bundles", output)
+        raise ValueError(f"unknown phase: {phase}")
 
 
 def test_live_export_matches_fixtures() -> None:
     """Show every unexpected GET field across the complete live export at once."""
-    _assert_live_export(Path(os.getenv("ADF_CASE_SOURCE_DIR", str(FIXTURES))))
+    source_root = os.getenv("ADF_CASE_SOURCE_DIR")
+    if not source_root:
+        pytest.skip("ADF_CASE_SOURCE_DIR is not set; there is no live export to compare")
+    _assert_live_export(Path(source_root))
 
 
 def test_every_fixture_pipeline_is_in_a_case() -> None:
@@ -86,6 +95,9 @@ def test_every_fixture_pipeline_is_in_a_case() -> None:
     fixtures = {path.stem for path in (FIXTURES / "pipelines").glob("*.json")}
     covered = {pipeline for case_dir in _case_dirs() for pipeline in _read_json(case_dir / "case.json")["pipelines"]}
     assert covered == fixtures, f"uncovered={sorted(fixtures - covered)} unknown={sorted(covered - fixtures)}"
+    assert set(_read_json(CASES / "full-factory/case.json")["pipelines"]) == fixtures
+    motifs = {pipeline for pipeline in fixtures if pipeline.startswith("motif-")}
+    assert set(_read_json(CASES / "motifs/case.json")["pipelines"]) == motifs
 
 
 def test_blob_event_expected_url_documents_known_arm_id_bug() -> None:
@@ -156,7 +168,7 @@ def test_expected_artifacts_are_not_subject_to_line_ending_conversion() -> None:
 
 
 def test_live_read_only_trigger_and_integration_runtime_fields(tmp_path: Path) -> None:
-    """Live read-only fields are retained for triggers and ignored with unloaded IRs."""
+    """ADF-added trigger defaults are kept, and live-only pipeline and IR state doesn't change the output."""
     live = tmp_path / "live"
     for directory in (*SHARED_DIRS, "integration_runtimes", "pipelines", "triggers"):
         shutil.copytree(FIXTURES / directory, live / directory)
@@ -169,23 +181,25 @@ def test_live_read_only_trigger_and_integration_runtime_fields(tmp_path: Path) -
         pipeline = _read_json(pipeline_path)
         pipeline["properties"]["lastPublishTime"] = "2026-10-13T12:34:56Z"
         _write_json(pipeline_path, pipeline)
+    trigger_path = live / "triggers/schedule.json"
+    trigger = _read_json(trigger_path)
+    assert "annotations" not in trigger["properties"]
+    trigger["properties"]["annotations"] = []
+    _write_json(trigger_path, trigger)
 
     case_dir = CASES / "full-factory"
-    case = _read_json(case_dir / "case.json")
-    source = tmp_path / "source"
-    output = tmp_path / "output"
-    _build_case_source(case, live, source)
+    result = _run_case(_read_json(case_dir / "case.json"), live, tmp_path)
+    source = result["source"]
     assert not (source / "integration_runtimes").exists()
+    copied_trigger = _read_json(source / "triggers/schedule.json")["properties"]
+    assert copied_trigger["annotations"] == []
+    assert copied_trigger["runtimeState"] == "Stopped"
     assert all(_read_json(path)["properties"]["runtimeState"] == "Stopped" for path in source.glob("triggers/*.json"))
 
-    _run("discover", source, output)
-    assert _normalize_inventory(output / "metadata/inventory.json") == _read_json(case_dir / "expected/inventory.json")
-    _run("convert", source, output)
-    ir, gaps = _capture_convert(output)
-    assert ir == {path.stem: _read_json(path) for path in sorted((case_dir / "expected/ir").glob("*.json"))}
-    assert gaps == _read_json(case_dir / "expected/gaps.json")
-    _run("package", source, output)
-    _assert_tree(case_dir / "expected/bundles", output)
+    assert result["inventory"] == _read_json(case_dir / "expected/inventory.json")
+    assert result["ir"] == {path.stem: _read_json(path) for path in sorted((case_dir / "expected/ir").glob("*.json"))}
+    assert result["gaps"] == _read_json(case_dir / "expected/gaps.json")
+    _assert_tree(case_dir / "expected/bundles", result["output"])
 
 
 def _read_json(path: Path) -> Any:
@@ -344,6 +358,19 @@ def _build_case_source(case: dict[str, Any], source_root: Path, destination: Pat
         trigger = _read_json(fixture_path)
         if _pipeline_references(trigger).intersection(selected):
             _copy_definition(source_root, fixture_path.relative_to(FIXTURES), destination)
+
+
+def _run_case(case: dict[str, Any], source_root: Path, workdir: Path) -> dict[str, Any]:
+    """Build a case source under workdir, then run discover, convert, and package on it once."""
+    source = workdir / "source"
+    output = workdir / "output"
+    _build_case_source(case, source_root, source)
+    _run("discover", source, output)
+    inventory = _normalize_inventory(output / "metadata/inventory.json")
+    _run("convert", source, output)
+    ir, gaps = _capture_convert(output)
+    _run("package", source, output)
+    return {"inventory": inventory, "ir": ir, "gaps": gaps, "output": output, "source": source}
 
 
 def _run(phase: str, source: Path, output: Path) -> None:

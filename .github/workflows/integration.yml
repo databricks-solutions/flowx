@@ -5,32 +5,30 @@ on:
   push:
     branches: [main]
     paths:
-      - tests/integration/azure/**
-      - .github/scripts/**
+      - ".github/scripts/**"
+      - ".github/claude-code/**"
+      - ".github/workflows/integration.yml"
       - "!.github/scripts/setup-integration.sh"
       - "!.github/scripts/check-formatting.sh"
       - "!.github/scripts/verify-requirements.sh"
+      - "tests/integration/azure/**"
+      - "tests/integration/test_azure_fixture_coverage.py"
+      - "tests/integration/test_adf_cases.py"
       - "!tests/integration/azure/README.md"
-      - tests/integration/test_azure_fixture_coverage.py
-      - tests/integration/test_adf_cases.py
-      - src/flowx/sources/adf/**
-      - .github/workflows/integration.yml
+      - "src/flowx/sources/adf/**"
   pull_request:
     paths:
-      - tests/integration/azure/**
-      - .github/scripts/**
+      - ".github/scripts/**"
+      - ".github/claude-code/**"
+      - ".github/workflows/integration.yml"
       - "!.github/scripts/setup-integration.sh"
       - "!.github/scripts/check-formatting.sh"
       - "!.github/scripts/verify-requirements.sh"
+      - "tests/integration/azure/**"
+      - "tests/integration/test_azure_fixture_coverage.py"
+      - "tests/integration/test_adf_cases.py"
       - "!tests/integration/azure/README.md"
-      - tests/integration/test_azure_fixture_coverage.py
-      - tests/integration/test_adf_cases.py
-      - src/flowx/sources/adf/**
-      - .github/workflows/integration.yml
-
-concurrency:
-  group: live-${{ github.ref }}
-  cancel-in-progress: true
+      - "src/flowx/sources/adf/**"
 
 permissions:
   contents: read
@@ -51,6 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
         with:
@@ -68,6 +68,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: flowx-live-integration
+    # Every run shares one resource group, so runs queue instead of overlapping or cancelling mid-deploy.
+    concurrency:
+      group: flowx-live-integration
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -76,8 +80,10 @@ jobs:
       FLOWX_OUTPUT: flowx_output
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
-      - name: Copy trusted CI scripts outside the checkout
+      - name: Copy CI scripts out of Claude's reach
         shell: bash
         run: '"${GITHUB_WORKSPACE}/.github/scripts/bootstrap-ci-scripts.sh"'
 
@@ -85,11 +91,12 @@ jobs:
         shell: bash
         run: '"${CI_SCRIPTS}/configure-terraform-paths.sh"'
 
-      - name: Check required owner configuration
+      - name: Check required configuration
         env:
           RESOURCE_OWNER_EMAIL: ${{ secrets.RESOURCE_OWNER_EMAIL }}
+          TF_VAR_resource_group_name: ${{ secrets.AZURE_RESOURCE_GROUP }}
         shell: bash
-        run: '"${CI_SCRIPTS}/check-owner-configuration.sh"'
+        run: '"${CI_SCRIPTS}/check-required-configuration.sh"'
 
       - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
         with:
@@ -97,10 +104,31 @@ jobs:
           checksum: "7ac2ca0449c8d68dae9b99e635cd3bc9b22a4cb1de64b7c43716398447d42981"
           python-version: "3.12"
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
-        with:
-          terraform_version: "1.9.8"
-          terraform_wrapper: false
+      - name: Normalize uv.lock to the public package index
+        run: sed -i -E 's#https://[a-zA-Z0-9._-]+/simple#https://pypi.org/simple#g' uv.lock
+
+      - name: Install flowx from the lock file
+        run: uv sync --frozen
+
+      - name: Install Terraform
+        run: '"${CI_SCRIPTS}/install-pinned-tool.sh" terraform'
+
+      - name: Install Claude Code
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: '"${CI_SCRIPTS}/install-claude-code.sh"'
+
+      - name: Check optional Databricks credentials
+        id: databricks-auth
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: '"${CI_SCRIPTS}/check-databricks-credentials.sh"'
+
+      - name: Install Databricks CLI
+        if: steps.databricks-auth.outputs.configured == 'true'
+        run: '"${CI_SCRIPTS}/install-pinned-tool.sh" databricks'
 
       - name: Derive collision-resistant run prefix
         shell: bash
@@ -129,14 +157,17 @@ jobs:
           TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_owner_email: ${{ secrets.RESOURCE_OWNER_EMAIL }}
+          TF_VAR_resource_group_name: ${{ secrets.AZURE_RESOURCE_GROUP }}
         run: '"${CI_SCRIPTS}/apply-terraform.sh"'
-
-      - name: Bootstrap flowx
-        run: bash scripts/bootstrap.sh
 
       - name: Export deployed ADF definitions
         shell: bash
         run: '"${CI_SCRIPTS}/export-adf.sh"'
+
+      - name: Sign out of Azure CLI before Claude runs
+        if: always()
+        shell: bash
+        run: '"${CI_SCRIPTS}/sign-out-azure-cli.sh"'
 
       - name: Compare live ADF cases with expected outputs
         id: adf-cases
@@ -180,17 +211,6 @@ jobs:
       - name: Package merged translation
         run: '"${CI_SCRIPTS}/package-integration-results.sh"'
 
-      - name: Check optional Databricks credentials
-        id: databricks-auth
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: '"${CI_SCRIPTS}/check-databricks-credentials.sh"'
-
-      - name: Install Databricks CLI
-        if: steps.databricks-auth.outputs.configured == 'true'
-        uses: databricks/setup-cli@00763fa457b36b8608132f9e8a4b21f16caa247b # v0.299.0
-
       - name: Validate bundles with Databricks CLI
         if: steps.databricks-auth.outputs.configured == 'true'
         env:
@@ -221,5 +241,6 @@ jobs:
           TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_owner_email: ${{ secrets.RESOURCE_OWNER_EMAIL }}
+          TF_VAR_resource_group_name: ${{ secrets.AZURE_RESOURCE_GROUP }}
         shell: bash
         run: '"${CI_SCRIPTS}/teardown-integration.sh"'

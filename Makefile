@@ -61,7 +61,7 @@ help:
 	@echo "  ci           		Install dependencies (frozen lockfile)"
 	@echo "  test         		Run unit tests"
 	@echo "  integration  		Run integration tests"
-	@echo "  integration-live\tRun integration tests including live-marked tests"
+	@echo "  integration-live\tRun integration tests including any marked integration (live Azure)"
 	@echo "  setup-integration\tRun one-time Azure/GitHub integration setup (ARGS=...)"
 	@echo "  fmt          		Format and lint code"
 	@echo "  precommit    		Format, lint, and refresh requirements.txt (run before committing)"
