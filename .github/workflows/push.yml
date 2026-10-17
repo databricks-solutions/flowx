@@ -74,5 +74,6 @@ jobs:
           version: "0.11.2"
           checksum: "7ac2ca0449c8d68dae9b99e635cd3bc9b22a4cb1de64b7c43716398447d42981"
           python-version: "3.12"
+          enable-cache: false
       - run: make check-skills
 
