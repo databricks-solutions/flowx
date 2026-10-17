@@ -295,7 +295,7 @@ step_environment() {
   done
   new_temp_file; environment_file=$NEW_TEMP_FILE
   jq -n --argjson reviewers "$reviewer_json" \
-    '{wait_timer:0,prevent_self_review:true,reviewers:$reviewers,deployment_branch_policy:null}' > "$environment_file"
+    '{wait_timer:0,prevent_self_review:false,reviewers:$reviewers,deployment_branch_policy:null}' > "$environment_file"
   run_write gh api --method PUT -H 'Accept: application/vnd.github+json' \
     "repos/${GITHUB_REPO}/environments/${ENV_NAME}" --input "$environment_file" ||
     die "cannot configure environment; repository administrator permission is required"
@@ -335,7 +335,7 @@ step_secrets() {
 }
 
 verify_setup() {
-  local failures=0 provider state role_json role_matches role_id assignment environment reviewer_count self_review secret_names secret_name
+  local failures=0 provider state role_json role_matches role_id assignment environment reviewer_count secret_names secret_name
   lookup_identity
   [[ -n "$app_id" ]] || die "Entra app $APP_NAME was not found"
   [[ -n "$sp_id" ]] || die "service principal for $APP_NAME was not found"
@@ -376,10 +376,6 @@ verify_setup() {
     'if type == "object" then [.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | unique_by(.reviewer.id) | length else 0 end' \
     <<< "$environment")
   ((reviewer_count >= 2)) || { echo 'MISSING/MISMATCH: environment needs at least 2 required reviewers' >&2; failures=$((failures + 1)); }
-  self_review=$(json_value "invalid environment response from GitHub" \
-    'if type == "object" then [.protection_rules[]? | select(.type=="required_reviewers") | .prevent_self_review] == [true] else false end' \
-    <<< "$environment")
-  [[ "$self_review" == true ]] || { echo 'MISMATCH: environment must prevent self-review' >&2; failures=$((failures + 1)); }
   secret_names=$(gh secret list --repo "$GITHUB_REPO" --env "$ENV_NAME" --json name --jq '.[].name')
   for secret_name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP RESOURCE_OWNER_EMAIL; do
     grep -Fxq "$secret_name" <<< "$secret_names" || { echo "MISSING: environment secret $secret_name" >&2; failures=$((failures + 1)); }
@@ -421,7 +417,7 @@ count_reviewers() {
 }
 
 if [[ "$COMMAND" == setup || "$COMMAND" == environment ]] && (($(count_reviewers) < 2)); then
-  die "REVIEWERS (or --reviewers) must list at least 2 GitHub users so nobody approves their own run"
+  die "REVIEWERS (or --reviewers) must list at least 2 GitHub users"
 fi
 if [[ "$COMMAND" == setup ]]; then
   if [[ -n "${RESOURCE_OWNER_EMAIL:-}" ]]; then validate_owner_email

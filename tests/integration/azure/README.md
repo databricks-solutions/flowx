@@ -32,9 +32,10 @@ because both the `not-a-fork` job and the live job dependency reject them.
 The live job runs the pull request's own code, including its workflow file, scripts, and Terraform, with Azure
 credentials. Two guards stand between a pull request and those credentials:
 
-- **Approval by someone else.** The environment needs at least two required reviewers and prevents self-review,
-  so a run always waits for approval from someone other than the person who triggered it. Approvers should read
-  the pull request's changes to `.github/` and `tests/integration/azure/terraform/` before approving.
+- **Approval by a listed reviewer.** A run waits until one of the environment's required reviewers approves it.
+  Setup requires at least two reviewers. Self-review is allowed, so a reviewer can approve a run of their own
+  pull request (see the accepted risks below). Approvers should read the pull request's changes to `.github/`
+  and `tests/integration/azure/terraform/` before approving.
 - **Checks before apply.** `apply-terraform.sh` runs these checks in order:
   - It refuses to start unless `.terraform.lock.hcl` matches its pinned SHA-256. The lock file lists only
     `hashicorp/azurerm` and `azure/azapi` at their pinned versions, and `init -lockfile=readonly` refuses any
@@ -121,7 +122,7 @@ to `REQUIRED_ROLE_ACTIONS` and rerun `role`.
 
 Existing installations must rerun `make setup-integration ARGS="role"` (or the full
 `make setup-integration ARGS="setup"`), then `ARGS="secrets"` to add `AZURE_RESOURCE_GROUP`, and
-`ARGS="environment"` to turn on self-review prevention. The `role` step removes the old subscription-wide
+`ARGS="environment"` if the environment has fewer than two required reviewers. The `role` step removes the old subscription-wide
 assignment of the same role before narrowing it. Role-definition changes can take a few minutes to propagate, so
 wait a few minutes after `make setup-integration ARGS="role"` before rerunning the workflow. Resource groups
 left by older runs (`<prefix>-flowx-rg`) aren't managed by the new setup; delete them by hand.
@@ -238,6 +239,11 @@ executed. The Key Vault contains no secret values. The workflow strips ARM `id` 
 any export reaches flowx or Claude. Each run's resources have collision-resistant, run-unique names in the shared
 resource group.
 
-Accepted risk: the role includes `Microsoft.EventGrid/eventSubscriptions/write` on the shared resource group,
-because the Blob Events trigger fixture needs it. An approved run could use it to send that group's storage events
-to a webhook outside Azure. The events only describe test resources in that group, and approval is the guard.
+Accepted risks:
+
+- **Self-review.** A pull request author who is a listed reviewer can approve their own pull request's live run.
+  That run uses the pull request's code with the Azure role, which reaches only the shared resource group.
+- **Event Grid.** The role includes `Microsoft.EventGrid/eventSubscriptions/write` on the shared resource group,
+  because the Blob Events trigger fixture needs it. An approved run could use it to send that group's storage
+  events to a webhook outside Azure. The events only describe test resources in that group, and approval is the
+  guard.

@@ -109,7 +109,7 @@ case "$*" in
     elif [[ "${STUB_ONE_REVIEWER:-}" != 1 ]]; then
       reviewers+=',{"type":"User","reviewer":{"login":"second","id":67890}}'
     fi
-    if [[ "${STUB_SELF_REVIEW:-}" == 1 ]]; then self_review=false; else self_review=true; fi
+    if [[ "${STUB_PREVENT_SELF_REVIEW:-}" == 1 ]]; then self_review=true; else self_review=false; fi
     printf '{"protection_rules":[{"type":"required_reviewers","prevent_self_review":%s,"reviewers":[%s]}]}\n' \
       "$self_review" "$reviewers" ;;
   *"secret list"*)
@@ -250,8 +250,18 @@ def test_verify_passes_for_a_correct_setup(stub_path: tuple[Path, Path]) -> None
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_environment_prevents_self_review(stub_path: tuple[Path, Path], tmp_path: Path) -> None:
-    """The protected environment stops a reviewer from approving their own run."""
+@pytest.mark.parametrize("stub", ["STUB_SELF_REVIEW", "STUB_PREVENT_SELF_REVIEW"])
+def test_verify_accepts_either_self_review_setting(stub_path: tuple[Path, Path], stub: str) -> None:
+    """Verify doesn't check prevent_self_review, so it passes whether self-review is allowed or not."""
+    binary_dir, mutation_log = stub_path
+    environment = _clean_environment(binary_dir, mutation_log)
+    environment[stub] = "1"
+    result = _run_script(["verify"], environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_environment_allows_self_review(stub_path: tuple[Path, Path], tmp_path: Path) -> None:
+    """The environment lets a listed reviewer approve their own run, which is an accepted risk."""
     binary_dir, mutation_log = stub_path
     environment_json_log = tmp_path / "environment.json"
     environment = _clean_environment(binary_dir, mutation_log)
@@ -259,7 +269,7 @@ def test_environment_prevents_self_review(stub_path: tuple[Path, Path], tmp_path
     result = _run_script(["environment", "--yes"], environment)
     assert result.returncode == 0, result.stdout + result.stderr
     settings = json.loads(environment_json_log.read_text())
-    assert settings["prevent_self_review"] is True
+    assert settings["prevent_self_review"] is False
     assert len(settings["reviewers"]) == 2
     assert not mutation_log.exists()
 
@@ -279,13 +289,12 @@ def test_setup_requires_two_distinct_reviewers(stub_path: tuple[Path, Path], rev
 @pytest.mark.parametrize(
     ("stub", "message"),
     [
-        ("STUB_SELF_REVIEW", "environment must prevent self-review"),
         ("STUB_ONE_REVIEWER", "environment needs at least 2 required reviewers"),
         ("STUB_DUPLICATE_REVIEWER", "environment needs at least 2 required reviewers"),
     ],
 )
-def test_verify_rejects_weak_environment_protection(stub_path: tuple[Path, Path], stub: str, message: str) -> None:
-    """Verification fails when one person could approve their own live run."""
+def test_verify_rejects_too_few_reviewers(stub_path: tuple[Path, Path], stub: str, message: str) -> None:
+    """Verification fails unless the environment has at least two distinct required reviewers."""
     binary_dir, mutation_log = stub_path
     environment = _clean_environment(binary_dir, mutation_log)
     environment[stub] = "1"
