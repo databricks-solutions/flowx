@@ -463,6 +463,40 @@ def test_apply_rejects_config_that_runs_commands(tmp_path: Path, case: str, loca
     assert [call.split()[0] for call in calls] == ["init"]
 
 
+@pytest.mark.parametrize("link", ["tf-file", "tf-json-file", "module-dir"])
+def test_apply_rejects_symlinks_that_could_hide_a_provisioner(tmp_path: Path, link: str) -> None:
+    """Terraform follows symlinks the scan would skip, so a symlinked file or module dir is refused."""
+    config = tmp_path / "config"
+    config.mkdir()
+    hidden = tmp_path / "hidden"
+    hidden.mkdir()
+    (hidden / "main.tf").write_text(COMMAND_RUNNING_CONFIG["local-exec"][1] + "\n", encoding="utf-8")
+    (hidden / "main.tf.json").write_text(COMMAND_RUNNING_CONFIG["json"][1] + "\n", encoding="utf-8")
+    modules = {"Modules": [{"Key": "", "Source": "", "Dir": "."}]}
+    if link == "tf-file":
+        (config / "hidden.tf").symlink_to(hidden / "main.tf")
+    elif link == "tf-json-file":
+        (config / "hidden.tf.json").symlink_to(hidden / "main.tf.json")
+    else:
+        (tmp_path / "module-link").symlink_to(hidden, target_is_directory=True)
+        modules["Modules"].append({"Key": "m", "Dir": "../module-link"})
+    result, calls = _run_apply(tmp_path, config, ["create"], {"STUB_MODULES_JSON": json.dumps(modules)})
+    assert result.returncode != 0
+    assert "must not contain symlinks" in result.stdout
+    assert [call.split()[0] for call in calls] == ["init"]
+
+
+def test_apply_fails_when_a_module_dir_cannot_be_listed(tmp_path: Path) -> None:
+    """A module dir that can't be listed fails the scan instead of being skipped."""
+    config = tmp_path / "config"
+    config.mkdir()
+    modules = {"Modules": [{"Key": "", "Source": "", "Dir": "."}, {"Key": "m", "Dir": "../missing-module"}]}
+    result, calls = _run_apply(tmp_path, config, ["create"], {"STUB_MODULES_JSON": json.dumps(modules)})
+    assert result.returncode != 0
+    assert "Could not list the Terraform config files" in result.stdout
+    assert [call.split()[0] for call in calls] == ["init"]
+
+
 def test_apply_accepts_the_real_terraform_config(tmp_path: Path) -> None:
     """The checked-in config passes the scan, so the word checks don't refuse it by accident."""
     result, calls = _run_apply(tmp_path, TERRAFORM_DIR, ["create"])

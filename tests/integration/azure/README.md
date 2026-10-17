@@ -45,7 +45,8 @@ credentials. Two guards stand between a pull request and those credentials:
     `null_resource` and `terraform_data`) and the `external` data source, because these run commands a plan can't
     show. It scans the root config and every module `init` recorded. In `.tf` files it refuses the words
     `provisioner` and `external` anywhere, even in comments, so layout can't hide them. It parses `.tf.json` files
-    and refuses those keys however they're spaced or escaped.
+    and refuses those keys however they're spaced or escaped. It refuses any symlink in those directories, since
+    Terraform follows symlinks the scan would skip, and it fails if it can't list a directory.
   - It saves a plan, refuses it if any resource would be deleted or replaced, and applies that exact saved plan.
 
   When Dependabot updates the lock file, update `lock_sha256` in `apply-terraform.sh` in the same pull request.

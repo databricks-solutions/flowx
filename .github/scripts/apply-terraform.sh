@@ -30,15 +30,23 @@ terraform init -input=false -lockfile=readonly -backend-config="path=${TF_STATE_
 config_dirs=(.)
 modules_json="${TF_DATA_DIR:-.terraform}/modules/modules.json"
 if [[ -f "${modules_json}" ]]; then
-  while IFS= read -r module_dir; do config_dirs+=("${module_dir}"); done < <(jq -r '.Modules[].Dir' "${modules_json}")
+  module_dirs="$(jq -r '.Modules[].Dir' "${modules_json}")" || fail "Could not read ${modules_json}."
+  while IFS= read -r module_dir; do config_dirs+=("${module_dir}"); done <<< "${module_dirs}"
 fi
+# Terraform follows symlinks the scan would skip, so none are allowed. A failed listing fails the check.
+symlinks="$(find "${config_dirs[@]}" -type l)" || fail "Could not list the Terraform config files."
+[[ -z "${symlinks}" ]] || fail "Terraform config must not contain symlinks: ${symlinks//$'\n'/, }"
+config_files="$(mktemp)"
+find "${config_dirs[@]}" -type f \( -name '*.tf' -o -name '*.tf.json' \) -print0 > "${config_files}" ||
+  fail "Could not list the Terraform config files."
 while IFS= read -r -d '' config_file; do
   if [[ "${config_file}" == *.tf.json ]]; then
     jq -e '[.. | objects | keys[]] | any(. == "provisioner" or . == "external") | not' "${config_file}" >/dev/null
   else
     ! grep -Eqw 'provisioner|external' "${config_file}"
   fi || fail "Terraform config must not use provisioners or the external data source: ${config_file}"
-done < <(find "${config_dirs[@]}" -type f \( -name '*.tf' -o -name '*.tf.json' \) -print0)
+done < "${config_files}"
+rm -f "${config_files}"
 
 terraform fmt -check
 terraform validate
