@@ -21,6 +21,8 @@ AGENTIC_STRUCTURE_CHECK = SCRIPTS / "check-agentic-structure.py"
 RESOLVE_AGENTIC = SCRIPTS / "resolve-agentic-gaps.sh"
 SNAPSHOT_TREE = SCRIPTS / "snapshot-tree.sh"
 VALIDATE_BUNDLES = SCRIPTS / "validate-bundles.sh"
+REQUIRED_BUNDLE_VARIABLES = SCRIPTS / "required-bundle-variables.py"
+PACKAGE_RESULTS = SCRIPTS / "package-integration-results.py"
 INSTALL_PINNED_TOOL = SCRIPTS / "install-pinned-tool.sh"
 WORKFLOW_AND_SCRIPTS = "\n".join(
     [WORKFLOW.read_text(encoding="utf-8"), *(path.read_text(encoding="utf-8") for path in sorted(SCRIPTS.iterdir()))]
@@ -255,16 +257,7 @@ def test_agentic_structure_does_not_echo_values_claude_wrote(tmp_path: Path) -> 
 
 
 def test_required_bundle_variable_parser_uses_real_yaml_shapes(tmp_path: Path) -> None:
-    """The embedded parser handles defaults, target values, and absent variables."""
-    workflow = VALIDATE_BUNDLES.read_text(encoding="utf-8")
-    match = re.search(
-        r'"\$\{python_bin\}" - "\$\{bundle\}" 2>/dev/null <<\'PY\'\n(?P<body>.*?)\n\s*PY',
-        workflow,
-        re.DOTALL,
-    )
-    assert match, "required-variable parser must remain extractable"
-    parser = re.sub(r"^ {10}", "", match.group("body"), flags=re.MULTILINE)
-
+    """The parser handles defaults, target values, and absent variables."""
     fixtures = {
         "mixed.yml": (
             "variables:\n"
@@ -287,8 +280,7 @@ def test_required_bundle_variable_parser_uses_real_yaml_shapes(tmp_path: Path) -
         bundle = tmp_path / filename
         bundle.write_text(content, encoding="utf-8")
         result = subprocess.run(
-            [sys.executable, "-", str(bundle)],
-            input=parser,
+            [sys.executable, str(REQUIRED_BUNDLE_VARIABLES), str(bundle)],
             capture_output=True,
             check=True,
             text=True,
@@ -310,13 +302,42 @@ def test_bundle_parser_failure_fails_validation_step(tmp_path: Path) -> None:
     result = subprocess.run(
         ["/bin/bash", str(VALIDATE_BUNDLES)],
         cwd=tmp_path,
-        env={**os.environ, "FLOWX_OUTPUT": str(tmp_path / "output")},
+        env={**os.environ, "FLOWX_OUTPUT": str(tmp_path / "output"), "CI_SCRIPTS": str(SCRIPTS)},
         capture_output=True,
         check=False,
         text=True,
     )
     assert result.returncode != 0
     assert "Could not parse required variables for bundle broken-bundle." in result.stdout
+
+
+def test_required_bundle_variable_parser_fails_on_invalid_yaml(tmp_path: Path) -> None:
+    """Unparseable YAML exits non-zero, so validate-bundles.sh reports it instead of omitting --var flags."""
+    bundle = tmp_path / "databricks.yml"
+    bundle.write_text("variables: [unclosed\n", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(REQUIRED_BUNDLE_VARIABLES), str(bundle)], capture_output=True, check=False, text=True
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
+def test_package_results_checks_each_case_bundle_and_writes_summary(tmp_path: Path) -> None:
+    """Each case pipeline's bundle passes the invariants, and the inventory counts go to the step summary."""
+    _package_results_fixture(tmp_path, [{"task_key": "wait"}])
+    result = _run_package_results(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "summary").read_text() == "- ADF cases: 1 pipelines, 3 activities.\n"
+
+
+def test_package_results_fails_when_a_case_bundle_breaks_an_invariant(tmp_path: Path) -> None:
+    """A bundle with a broken invariant fails the step and names the case and the finding."""
+    _package_results_fixture(tmp_path, [{"task_key": "wait"}, {"task_key": "wait"}])
+    result = _run_package_results(tmp_path)
+    assert result.returncode != 0
+    assert "case-one" in result.stderr
+    assert "duplicate_task_key" in result.stderr
+    assert not (tmp_path / "summary").exists()
 
 
 def test_post_claude_steps_use_runner_temp_scripts() -> None:
@@ -486,6 +507,34 @@ open({str(prompt_log)!r}, "w").write(sys.stdin.read())
         subprocess.run(["chmod", "-R", "u+w", str(tmp_path / "temp")], check=False)
     flags = [flag for argument in json.loads(arguments_log.read_text()) for flag in argument.split("=", 1)]
     return flags, prompt_log.read_text()
+
+
+def _package_results_fixture(tmp_path: Path, tasks: list[dict[str, str]]) -> None:
+    """Lay out one case and one packaged bundle whose job has the given tasks."""
+    case_dir = tmp_path / "tests/integration/azure/adf/cases/case-one"
+    case_dir.mkdir(parents=True)
+    (case_dir / "case.json").write_text(json.dumps({"pipelines": ["pipeline_one"]}), encoding="utf-8")
+    bundle = tmp_path / "output" / "bundle_one"
+    (bundle / "resources").mkdir(parents=True)
+    (bundle / "databricks.yml").write_text("bundle:\n  name: bundle_one\n", encoding="utf-8")
+    jobs = {"resources": {"jobs": {"pipeline_one": {"name": "pipeline_one", "tasks": tasks}}}}
+    (bundle / "resources" / "pipeline_one.yml").write_text(yaml.safe_dump(jobs), encoding="utf-8")
+    (tmp_path / "output" / "metadata").mkdir()
+    inventory = {"summary": {"pipeline_count": 1, "activity_count": 3}}
+    (tmp_path / "output" / "metadata" / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+
+
+def _run_package_results(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run package-integration-results.py from tmp_path as the workflow does from the checkout."""
+    environment = {
+        **os.environ,
+        "FLOWX_OUTPUT": str(tmp_path / "output"),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        "PYTHONPATH": str(WORKFLOW.parents[2] / "src"),
+    }
+    return subprocess.run(
+        [sys.executable, str(PACKAGE_RESULTS)], cwd=tmp_path, env=environment, capture_output=True, text=True
+    )
 
 
 def _values(flags: list[str], name: str) -> list[str]:

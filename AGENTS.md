@@ -130,7 +130,7 @@ pipelines, runs them through discover, convert, and package, and compares the ou
   `tests/integration/azure/terraform/` definitions.
 - Order integration test modules as imports, constants, public `test_*` functions, then private helpers.
 - Put shared pytest fixtures in `tests/integration/conftest.py`.
-- Put workflow shell logic in `.github/scripts/`, not in workflow YAML.
+- Put workflow shell logic in `.github/scripts/`, not in workflow YAML. Put any Python it needs in a `.py` file there, not a heredoc.
 - Run `make setup-integration ARGS="setup"` once for Azure and GitHub setup, and `ARGS="verify"` to check it.
 
 See `tests/integration/azure/README.md` for details.
