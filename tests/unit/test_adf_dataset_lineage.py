@@ -1373,3 +1373,21 @@ def test_a_reference_that_passes_no_folder_gets_no_signature_from_the_dataset_fo
     reads, _ = activity_data_assets(_file_copy("Read", dataset="ds_in", produced=False), definitions)
 
     assert writes[0].signature == reads[0].signature == ""
+
+
+def test_a_quoted_interpolation_marker_inside_a_whole_expression_stays_literal_text() -> None:
+    """In ``@concat('foo/', '@{left}')`` the quoted ``'@{left}'`` is text, so it never matches ``'@{right}'``."""
+    definitions = _landing_definitions(ds_out=("sales", "acctA"), ds_in=("sales", "acctA"))
+    _, writes = activity_data_assets(
+        _folder_binding_copy("Write", dataset="ds_out", folder_path="@concat('foo/', '@{left}')", produced=True),
+        definitions,
+    )
+    reads, _ = activity_data_assets(
+        _folder_binding_copy("Read", dataset="ds_in", folder_path="@concat('foo/', '@{right}')", produced=False),
+        definitions,
+    )
+
+    assert writes[0].signature == "ST[sales@acctA]/FP[foo/@{left}]/FN[]"
+    assert reads[0].signature == "ST[sales@acctA]/FP[foo/@{right}]/FN[]"
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert edges == []

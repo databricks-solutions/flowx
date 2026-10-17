@@ -786,10 +786,11 @@ def _path_shape(expression: Any, bindings: dict[str, Any], *, require_physical: 
         return None
     if is_arm_expression or "@" not in text:
         shape: str | None = text
+    elif text.startswith("@") and not text.startswith("@{"):
+        # ADF reads a value that opens with ``@`` as one whole expression, so a quoted ``'@{x}'`` inside it is text.
+        shape = _expression_shape(text[1:], bindings, require_physical=require_physical)
     elif "@{" in text:
         shape = _interpolation_shape(text, bindings, require_physical=require_physical)
-    elif text.startswith("@"):
-        shape = _expression_shape(text[1:], bindings, require_physical=require_physical)
     else:
         shape = text
     return re.sub(r"/+", "/", shape).strip("/") if shape is not None else None
