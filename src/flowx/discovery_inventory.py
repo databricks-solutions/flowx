@@ -1,0 +1,255 @@
+"""Source-agnostic projection of the discovery graph contract to ``inventory.json``.
+
+The discover phase writes ``metadata/inventory.json`` and the reporting layer
+(:mod:`flowx.reporting.coverage`) and MCP surface (:mod:`flowx.mcp.runner`) read
+it back. Historically each source built that JSON straight from its own AST, so
+the shape drifted per source. This module is the single place that turns the
+discovery graph contract (:mod:`flowx.models.discovery`) into the inventory shape, so
+every source that maps onto :class:`~flowx.models.discovery.SourceGraph` emits the
+*same* top-level document -- ``{source, source_dir, pipelines, summary}`` -- from
+one code path.
+
+The projection is deliberately small and additive over the historical ADF shape:
+
+* top level gains a ``source`` discriminator (``"adf"`` / ``"airflow"``);
+* each activity keeps its byte-compatible ``name`` / ``type`` / ``strategy`` (and
+  ``depends_on`` names when present) and gains the standardised ``task_key``
+  (the node's unique key, which motif ``member_task_keys`` and source-specific
+  layers join on), ``original_type``, ``dependencies`` (upstream **with
+  conditions**), and the verbatim per-node ``raw``;
+* a node whose ``properties`` mark it ``inventory_visible: False`` (for example an
+  Airflow TaskGroup kept only for structure) is left out of the activity list and
+  the counts, while its children are still listed;
+* each pipeline entry gains an additive ``lineage`` block (control + data edges)
+  when its :class:`~flowx.models.discovery.SourceGraph` carries derived lineage;
+* each pipeline entry gains an additive ``motifs`` list -- the multi-activity
+  patterns a source *detects* at discover time and records on the graph itself
+  (``SourceGraph.lineage.motifs``, so they sit inside the hashed source graph),
+  surfaced here **without** collapsing the member activities. In the inventory
+  they stay **decoupled from the lineage block**: the inventory's
+  ``lineage.motifs`` is always empty, as it always has been; the key is omitted
+  when a pipeline has no detected motif. Collapse remains a *convert* decision
+  (:mod:`flowx.motifs.collapser`), never a discover one, so every member activity
+  still appears as its own entry in ``activities``;
+* the ``summary`` keeps the historical count block, and a top-level
+  ``source_graphs_sha256`` records which persisted ``source_graphs.json`` the
+  inventory was projected from, when the caller passes it.
+
+Lineage is placed per pipeline -- one block beside that pipeline's ``activities``
+-- to mirror the shared discovery serde, where lineage is a per-graph field
+(:func:`flowx.discovery_serde.source_graph_to_dict`). The block is produced by the
+one shared serialiser (:func:`flowx.ir_serde.lineage_to_dict`, the same one the
+serde consumes), so its edges have the same shape as the serde's. Unlike the
+serde's block, its ``motifs`` is always empty: motifs appear only under the
+pipeline's own ``motifs`` key, so reading the inventory block back through
+:func:`flowx.discovery_serde.source_graph_from_dict` recovers the edges but not the
+motifs. It is a new key only: a graph with no derived lineage (``graph.lineage is None``) omits it
+entirely, so the historical consumer keys (``source`` / ``pipelines`` /
+``activities`` / ``summary``) are untouched.
+
+A node's translation ``strategy`` is a Databricks-*target* classification rather
+than a source concept, so it is not a typed field on the discovery graph. By
+convention a mapper stashes it under ``node.properties["strategy"]`` (see
+:data:`STRATEGY_PROPERTY`); this module reads it there. Detected motifs are
+different: they are deterministic facts about the source, so a source records
+them on the graph as :class:`~flowx.models.ir.MotifAnnotation` entries in
+``lineage.motifs`` and this module projects them. Anything else a source wants to layer on -- Airflow's
+audited-count block, findings, reconciliation status -- rides additively on top
+of this base and is out of scope here.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from flowx.ir_serde import lineage_to_dict
+from flowx.models.discovery import ContainerNode, SourceGraph, SourceNode
+from flowx.models.ir import Lineage, MotifAnnotation
+
+# Well-known property key under which a mapper records a node's Databricks-target
+# translation strategy ("deterministic" / "agentic" / "unsupported"). Kept in the
+# free-form properties seam because strategy is a target concern, not a shared
+# source concept, so it earns no typed field on the discovery graph.
+STRATEGY_PROPERTY = "strategy"
+INVENTORY_VISIBLE_PROPERTY = "inventory_visible"
+
+_DETERMINISTIC = "deterministic"
+_AGENTIC = "agentic"
+
+
+def build_source_inventory(
+    graphs: list[SourceGraph],
+    *,
+    source: str,
+    source_dir: str,
+    include_empty_pipelines: bool = True,
+    source_graphs_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Project a list of source graphs into the ``inventory.json`` document.
+
+    Args:
+        graphs: The source workflows to inventory, already mapped onto the
+            discovery graph contract.
+        source: Source discriminator for the top-level ``source`` field
+            (``SOURCE_ADF`` / ``SOURCE_AIRFLOW``).
+        source_dir: Original source directory, echoed back for provenance.
+        include_empty_pipelines: When ``False``, a graph that contributes no
+            activities is left out of the ``pipelines`` list but still counted in
+            ``summary.pipeline_count`` -- this reproduces ADF's long-standing
+            behaviour of omitting zero-activity pipelines from the per-pipeline
+            listing while still reporting them in the totals. Sources that list
+            every workflow (Airflow) leave this ``True``.
+        source_graphs_sha256: The ``document_sha256`` of the persisted
+            ``source_graphs.json`` these graphs were written to, recorded as a
+            top-level key so later phases can tell which saved graph the
+            inventory describes. Omitted when ``None``.
+
+    A graph whose ``lineage.motifs`` is non-empty gives its pipeline entry an
+    additive ``motifs`` list. Exact-duplicate detections (same ``motif_id`` and
+    same member set) collapse to one (see :func:`_dedupe_motif_entries`);
+    overlapping-but-distinct matches are all kept.
+
+    Returns:
+        A JSON-friendly dict with ``source``, ``source_dir``, ``pipelines`` and
+        ``summary`` keys, plus ``source_graphs_sha256`` when given.
+    """
+    pipeline_entries: list[dict[str, Any]] = []
+    deterministic = 0
+    agentic = 0
+    unsupported = 0
+
+    for graph in graphs:
+        flattened = [
+            node for node in _flatten_nodes(graph.tasks) if node.properties.get(INVENTORY_VISIBLE_PROPERTY, True)
+        ]
+        for node in flattened:
+            strategy = node.properties.get(STRATEGY_PROPERTY)
+            if strategy == _DETERMINISTIC:
+                deterministic += 1
+            elif strategy == _AGENTIC:
+                agentic += 1
+            else:
+                unsupported += 1
+        if flattened or include_empty_pipelines:
+            entry: dict[str, Any] = {
+                "name": graph.name,
+                "activities": [_activity_entry(node) for node in flattened],
+            }
+            if graph.lineage is not None:
+                edges_only = Lineage(control_edges=graph.lineage.control_edges, data_edges=graph.lineage.data_edges)
+                entry["lineage"] = lineage_to_dict(edges_only)
+                if graph.lineage.motifs:
+                    entry["motifs"] = _dedupe_motif_entries([_motif_entry(motif) for motif in graph.lineage.motifs])
+            pipeline_entries.append(entry)
+
+    total = deterministic + agentic + unsupported
+    coverage_pct = round((deterministic + agentic) / total * 100, 1) if total else 0.0
+
+    inventory: dict[str, Any] = {
+        "source": source,
+        "source_dir": source_dir,
+        "pipelines": pipeline_entries,
+        "summary": {
+            "pipeline_count": len(graphs),
+            "activity_count": total,
+            "deterministic_count": deterministic,
+            "agentic_count": agentic,
+            "unsupported_count": unsupported,
+            "coverage_pct": coverage_pct,
+        },
+    }
+    if source_graphs_sha256 is not None:
+        inventory["source_graphs_sha256"] = source_graphs_sha256
+    return inventory
+
+
+def _flatten_nodes(nodes: list[SourceNode]) -> list[SourceNode]:
+    """Flatten container branches into one depth-first activity list.
+
+    Order is parent, then each branch's children in the branch's own insertion
+    order, recursively -- so an ``IfCondition``'s ``true`` branch precedes its
+    ``false`` branch and a ``Switch``'s cases precede its ``default``, matching the
+    order the source declared them.
+    """
+    flattened: list[SourceNode] = []
+    for node in nodes:
+        flattened.append(node)
+        if isinstance(node, ContainerNode):
+            for children in node.branches.values():
+                flattened.extend(_flatten_nodes(children))
+    return flattened
+
+
+def _activity_entry(node: SourceNode) -> dict[str, Any]:
+    """Build one per-activity inventory entry from a node.
+
+    The first three keys (plus ``depends_on`` when the node has dependencies)
+    reproduce the historical ADF activity shape byte-for-byte; the rest are the
+    additive standardised fields.
+    """
+    entry: dict[str, Any] = {
+        "name": node.name if node.name is not None else node.task_key,
+        "type": node.native_type,
+        "strategy": node.properties.get(STRATEGY_PROPERTY),
+    }
+    upstream_names = [dependency.upstream for dependency in node.dependencies]
+    if upstream_names:
+        entry["depends_on"] = upstream_names
+
+    entry["task_key"] = node.task_key
+    entry["original_type"] = node.native_type
+    entry["dependencies"] = [
+        {
+            "upstream": dependency.upstream,
+            "conditions": list(dependency.conditions),
+            "resolved": dependency.resolved,
+        }
+        for dependency in node.dependencies
+    ]
+    if node.raw is not None:
+        entry["raw"] = node.raw
+    return entry
+
+
+def _motif_entry(motif: MotifAnnotation) -> dict[str, Any]:
+    """Project one motif annotation into its additive inventory entry.
+
+    Surfacing only: ``member_task_keys`` names the participating activities as the
+    detector claimed them (for ADF these are the activity names, which are the
+    same values used as each activity entry's ``task_key``, so a consumer can join
+    a motif back to its members). The detector reports its confidence as
+    human-readable rationale rather than a numeric score, so the annotation's
+    ``notes`` are surfaced verbatim as ``confidence_notes``, the inventory's
+    long-standing key.
+    """
+    return {
+        "motif_id": motif.motif_id,
+        "display_name": motif.display_name,
+        "databricks_replacement": motif.databricks_replacement,
+        "member_task_keys": list(motif.member_task_keys),
+        "source_type_hint": motif.source_type_hint,
+        "confidence_notes": list(motif.notes),
+    }
+
+
+def _dedupe_motif_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse exact-duplicate motif entries, preserving first-seen order.
+
+    A detector can report the same match more than once (e.g. two upstreams that
+    each pair with the same notification activity), which would otherwise emit
+    identical inventory entries. Two entries are the *same* motif only when they
+    share both ``motif_id`` **and** the exact same set of ``member_task_keys``;
+    such duplicates collapse to the first occurrence. Entries that merely overlap
+    -- same ``motif_id`` but a different member set -- are genuinely distinct
+    matches and are all kept. The member comparison is order-insensitive (a set),
+    so the same activities in a different order still count as one motif.
+    """
+    seen: set[tuple[str, frozenset[str]]] = set()
+    deduped: list[dict[str, Any]] = []
+    for entry in entries:
+        identity = (entry["motif_id"], frozenset(entry["member_task_keys"]))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(entry)
+    return deduped
