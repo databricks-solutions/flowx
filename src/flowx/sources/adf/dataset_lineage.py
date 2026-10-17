@@ -18,14 +18,14 @@ Two tiers, exactly as #36 established them:
   identity the signature mirrors that identity, so the weak tier can never join a
   resolved asset to an unresolved one on a coincidence. For an unresolved reference
   the signature is the *structural path signature* (#36's "expression" tier: the
-  literal path skeleton plus its parameter-slot count) when the path has a literal
-  anchor, prefixed ``ST[<store>]/`` when the dataset's store is known (see
-  :func:`_resolve_dataset_store`), so two datasets on different stores that merely
-  share a folder shape never join. An unknown store is never guessed: the signature
-  stays unqualified, and a qualified and an unqualified signature never join. A
-  dataset that names its store (a literal container or bucket, or a server set on its
-  linked service) but cannot prove the rest of it gets no signature, since the folder
-  shape alone cannot tell two such stores apart.
+  dataset's literal folder and file-name text, with a ``<P>`` slot where each runtime
+  value sits) when the folder has a literal anchor, prefixed ``ST[<store>]/`` when the
+  dataset's store is known (see :func:`_resolve_dataset_store`), so two datasets on
+  different stores that merely share a folder shape never join. An unknown store is
+  never guessed: the signature stays unqualified, and a qualified and an unqualified
+  signature never join. A dataset that names its store (a literal container or
+  bucket, or a server set on its linked service) but cannot prove the rest of it gets
+  no signature, since the folder shape alone cannot tell two such stores apart.
   It is **never** the bare dataset reference name: two unrelated opaque
   references that merely share a name must not join (#36's explicit rule), so when
   neither a physical identity nor a path-anchored signature is available the
@@ -77,7 +77,9 @@ _PARAM_REF_RE = re.compile(
     r"|dataset\(\)\.\w+"
     r"|activity\('[^']*'\)\.[\w.]+"
 )
-_QUOTED_LITERAL_RE = re.compile(r"'([^']*)'")
+_SHAPE_TOKEN_RE = re.compile(rf"'(?P<literal>[^']*)'|(?P<reference>{_PARAM_REF_RE.pattern})")
+_DATASET_PARAMETER_REF_RE = re.compile(r"dataset\(\)\.(\w+)")
+_INTERPOLATION_RE = re.compile(r"@\{([^}]*)\}")
 
 
 # --------------------------------------------------------------------------- #
@@ -203,12 +205,13 @@ def _dataset_ref_to_asset(
         # Mirror the identity into the signature so the weak tier never joins a
         # resolved asset to an unresolved one that merely shares a physical value.
         return DataAsset(signature=identity, identity=identity, asset_type=_asset_type(dataset_ref, definitions))
-    path_signature = _path_signature(dataset_ref.parameters)
-    store = _resolve_dataset_store(dataset_ref, definitions, context) if path_signature is not None else None
-    if path_signature is not None and store:
-        path_signature = f"ST[{store}]/{path_signature}"
-    elif path_signature is not None and _location_names_store(dataset_ref, definitions, context):
-        path_signature = None
+    path_signature = _path_signature(dataset_ref, definitions)
+    if path_signature is not None:
+        store, location_names_store = _resolve_dataset_store(dataset_ref, definitions, context)
+        if store:
+            path_signature = f"ST[{store}]/{path_signature}"
+        elif location_names_store:
+            path_signature = None
     return DataAsset(
         signature=path_signature if path_signature is not None else "",
         identity=None,
@@ -372,15 +375,24 @@ def _resolve_param_value(
 
 
 def _effective_dataset_params(dataset_ref: AdfDatasetReference, dataset_props: dict[str, Any]) -> dict[str, Any]:
-    """Effective parameter map: declared dataset defaults first, call-site overrides win."""
-    declared = dataset_props.get("parameters") or {}
+    """Effective parameter map: declared dataset defaults first, call-site overrides win.
+
+    Declared or call-site ``parameters`` that are not a map (a list, say) bind nothing,
+    rather than crashing the whole discover run.
+    """
+    declared = dataset_props.get("parameters")
     effective: dict[str, Any] = {}
-    for name, spec in declared.items():
-        if isinstance(spec, dict) and "defaultValue" in spec:
-            effective[name] = spec["defaultValue"]
-    if dataset_ref.parameters:
-        effective.update(dict(dataset_ref.parameters))
+    if isinstance(declared, dict):
+        for name, spec in declared.items():
+            if isinstance(spec, dict) and "defaultValue" in spec:
+                effective[name] = spec["defaultValue"]
+    effective.update(_call_site_parameters(dataset_ref))
     return effective
+
+
+def _call_site_parameters(dataset_ref: AdfDatasetReference) -> dict[str, Any]:
+    """The parameters the reference passes, or an empty map when they are missing or not a map."""
+    return dict(dataset_ref.parameters) if isinstance(dataset_ref.parameters, dict) else {}
 
 
 def _resolve_table_reference(
@@ -517,69 +529,51 @@ def _resolve_dataset_store(
     dataset_ref: AdfDatasetReference,
     definitions: AdfDefinitions,
     context: TranslationContext,
-) -> str | None:
-    """Name the store a dataset lives in, even when its full path or table does not resolve.
+) -> tuple[str | None, bool]:
+    """Name the store a dataset lives in, and say whether its file location names one at all.
 
-    A table dataset's store is the one :func:`_resolve_table_store` names. A file
-    dataset's store is ``<file system>@<account>`` when both are literal. When the
-    file system is literal but the account cannot be read (a Key Vault or masked
-    connection string, for example), the linked service name stands in for the
-    account, as long as the linked service takes no parameters. A location whose
-    server or share lives on the linked service (SFTP, FTP, a file share, HDFS, HTTP)
-    is named by that plain, unparameterised linked service name alone. ``None``
-    whenever the store is not provable, so the caller never guesses one.
+    Returns ``(store, location_names_store)``. A table dataset's store is the one
+    :func:`_resolve_table_store` names. A file dataset's store is
+    ``<file system>@<account>`` when both are literal. When the file system is literal
+    but the account cannot be read (a Key Vault or masked connection string, for
+    example), the linked service name stands in for the account, as long as the
+    linked service takes no parameters. A location whose server or share lives on the
+    linked service (SFTP, FTP, a file share, HDFS, HTTP) is named by that plain,
+    unparameterised linked service name alone. The store is ``None`` whenever it is
+    not provable, so the caller never guesses one.
+
+    ``location_names_store`` is ``True`` when the file location tells its store apart
+    from others, provable or not: a literal file system (ADLS file system, Blob
+    container, S3 / GCS bucket), or a location whose server or share is set on the
+    linked service. A file system that is itself parameterised names no store.
     """
     properties = _dataset_props(dataset_ref, definitions)
     if properties is None:
-        return None
+        return None, False
+    type_props = properties.get("typeProperties") or properties
+    location = type_props.get("location")
+    file_system: str | None = None
+    account: str | None = None
+    location_names_store = False
+    if isinstance(location, dict):
+        location_names_store = location.get("type") in _LINKED_SERVICE_STORE_LOCATIONS
+        if not location_names_store:
+            file_system, account = _resolve_file_store(
+                location,
+                _backing_linked_service(properties, definitions),
+                _effective_dataset_params(dataset_ref, properties),
+                context,
+            )
+            location_names_store = file_system is not None
     _, table = _resolve_table_reference(dataset_ref, properties, context)
     if table:
-        return _resolve_table_store(properties, definitions)
-    type_props = properties.get("typeProperties") or properties
-    location = type_props.get("location")
-    if not isinstance(location, dict):
-        return None
-    if location.get("type") in _LINKED_SERVICE_STORE_LOCATIONS:
-        return _unparameterised_linked_service_name(properties, definitions)
-    file_system, account = _resolve_file_store(
-        location,
-        _backing_linked_service(properties, definitions),
-        _effective_dataset_params(dataset_ref, properties),
-        context,
-    )
+        return _resolve_table_store(properties, definitions), location_names_store
+    if not location_names_store:
+        return None, False
     if file_system is None:
-        return None
+        return _unparameterised_linked_service_name(properties, definitions), True
     store = account or _unparameterised_linked_service_name(properties, definitions)
-    return f"{file_system}@{store}" if store else None
-
-
-def _location_names_store(
-    dataset_ref: AdfDatasetReference,
-    definitions: AdfDefinitions,
-    context: TranslationContext,
-) -> bool:
-    """Say whether the dataset's file location tells its store apart from others, provable or not.
-
-    That is a literal file system (ADLS file system, Blob container, S3 / GCS bucket),
-    or a location whose server or share is set on the linked service (SFTP, FTP, a file
-    share, HDFS, HTTP). A file system that is itself parameterised names no store.
-    """
-    properties = _dataset_props(dataset_ref, definitions)
-    if properties is None:
-        return False
-    type_props = properties.get("typeProperties") or properties
-    location = type_props.get("location")
-    if not isinstance(location, dict):
-        return False
-    if location.get("type") in _LINKED_SERVICE_STORE_LOCATIONS:
-        return True
-    file_system, _ = _resolve_file_store(
-        location,
-        _backing_linked_service(properties, definitions),
-        _effective_dataset_params(dataset_ref, properties),
-        context,
-    )
-    return file_system is not None
+    return (f"{file_system}@{store}" if store else None), True
 
 
 def _resolve_file_store(
@@ -720,59 +714,122 @@ def _is_physical(value: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _path_signature(parameters: dict[str, Any] | None) -> str | None:
-    """Structural signature of a reference's parameterised folderPath / fileName.
+def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> str | None:
+    """Structural signature of the folder and file name a parameterised reference points at.
 
-    Requires a resolvable **folderPath** literal anchor. A file name alone is too
-    weak a discriminator: many unrelated activities write ``.csv`` / ``.json`` files
-    to opaque parameterised folders, so a signature built only from a file extension
-    would join them all -- re-creating the explosion the identity-only join avoids.
-    Anchoring on the literal folder segment keeps the match specific to a real,
-    named location.
+    As in #36, only a reference that passes a ``folderPath`` with literal text gets
+    one. A file name alone is too weak a discriminator: many unrelated activities write
+    ``.csv`` / ``.json`` files to opaque parameterised folders, so a signature built
+    only from a file extension would join them all -- re-creating the explosion the
+    identity-only join avoids. Anchoring on the literal folder segment keeps the match
+    specific to a real, named location.
 
-    ``None`` when the folder path has no literal segment to anchor on.
+    The folder and file name are then read from the dataset's own ``location``, with
+    each ``dataset().<name>`` in them filled in from the reference's parameters
+    (call-site values first, then the dataset's declared defaults). So
+    ``@concat('bronze/', dataset().folderPath)`` and ``@concat('silver/',
+    dataset().folderPath)`` stay apart even when both are called with ``folderPath:
+    "orders"``. When the location sets no folder or file name, or the dataset is not
+    in the export, the ``folderPath`` / ``fileName`` the call site passes stands in for
+    it. A file name with no literal text gives an empty ``FN[]``.
+
+    ``None`` when the reference passes no anchored ``folderPath``, or the dataset's
+    own folder has no literal segment to anchor on.
     """
-    if not parameters:
+    call_site = _call_site_parameters(dataset_ref)
+    passed_folder = _path_shape(call_site.get("folderPath"), {}, require_physical=True)
+    if passed_folder is None or not _has_literal_anchor(passed_folder):
         return None
-    folder_signature = _normalize_path_expression(parameters.get("folderPath"), require_physical=True)
-    if folder_signature is None:
+    properties = _dataset_props(dataset_ref, definitions) or {}
+    type_props = properties.get("typeProperties") or properties
+    written_location = type_props.get("location")
+    location: dict[str, Any] = written_location if isinstance(written_location, dict) else {}
+    bindings = _effective_dataset_params(dataset_ref, properties)
+
+    def _shape_of(key: str, *, require_physical: bool) -> str | None:
+        written = location.get(key)
+        if isinstance(written, dict):
+            written = written.get("value")
+        if isinstance(written, str) and written.strip():
+            return _path_shape(written, bindings, require_physical=require_physical)
+        return _path_shape(call_site.get(key), {}, require_physical=require_physical)
+
+    folder_shape = _shape_of("folderPath", require_physical=True)
+    if folder_shape is None or not _has_literal_anchor(folder_shape):
         return None
-    file_signature = _normalize_path_expression(parameters.get("fileName"))
-    return f"FP[{folder_signature}]/FN[{file_signature}]"
+    file_shape = _shape_of("fileName", require_physical=False)
+    return f"FP[{folder_shape}]/FN[{file_shape if file_shape and _has_literal_anchor(file_shape) else ''}]"
 
 
-def _normalize_path_expression(expression: Any, *, require_physical: bool = False) -> str | None:
-    """Reduce a (possibly parameterised) ADF path expression to a structural signature.
+def _path_shape(expression: Any, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
+    """Reduce a (possibly parameterised) ADF path expression to its structural shape.
 
-    Keeps the literal path segments and collapses every runtime reference to a
-    single ``<P>`` slot, so the result captures the path *shape* (literal skeleton
-    plus slot count) without guessing the runtime value. Returns ``None`` when
-    there is no literal segment to anchor on (a signature of only slots is too weak
-    a join key -- never guess). With *require_physical*, an unevaluated ARM
-    expression such as ``[parameters('folder')]`` or a ``{{`` placeholder gives
-    ``None`` too, even when a quoted literal inside it holds ``@``; an ADF ``@``
-    expression is still reduced to its shape. Without it that value is kept
-    verbatim, and so is an ARM expression holding a quoted ``@``, so two different
-    ones never match.
+    Keeps the literal path text in place and writes ``<P>`` where each runtime value
+    sits, so ``landing/<P>`` and ``<P>/landing`` stay apart, without guessing the
+    runtime value. A ``dataset().<name>`` bound in *bindings* is replaced by the shape
+    of its bound value instead. Gives ``""`` for a missing or empty value.
+
+    With *require_physical*, an unevaluated ARM expression such as
+    ``[parameters('folder')]`` or a ``{{`` placeholder, here or in a bound value,
+    gives ``None``, even when a quoted literal inside it holds ``@``; an ADF ``@``
+    expression is still reduced to its shape. Without it that value is kept verbatim,
+    and so is an ARM expression holding a quoted ``@``, so two different ones never
+    match.
     """
     if isinstance(expression, dict):
         expression = expression.get("value", "")
-    if not isinstance(expression, str) or not expression.strip():
-        return None
+    if not isinstance(expression, str):
+        return ""
     text = expression.strip()
     is_arm_expression = bool(_ARM_EXPRESSION_RE.match(text))
     if require_physical and ("{{" in text or is_arm_expression):
         return None
-    if "@" not in text or is_arm_expression:
-        # A bare literal value or an unevaluated ARM expression (no ADF expression):
-        # the whole string is kept as the literal path / filename, with no runtime slots.
-        literal = re.sub(r"/+", "/", text).strip("/")
-        return f"{literal}|slots=0" if literal else None
-    marked = _PARAM_REF_RE.sub("<P>", text)
-    literal = re.sub(r"/+", "/", "".join(_QUOTED_LITERAL_RE.findall(marked))).strip("/")
-    if not literal:
-        return None
-    return f"{literal}|slots={marked.count('<P>')}"
+    if is_arm_expression or "@" not in text:
+        shape: str | None = text
+    elif "@{" in text:
+        shape = _interpolation_shape(text, bindings, require_physical=require_physical)
+    elif text.startswith("@"):
+        shape = _expression_shape(text[1:], bindings, require_physical=require_physical)
+    else:
+        shape = text
+    return re.sub(r"/+", "/", shape).strip("/") if shape is not None else None
+
+
+def _interpolation_shape(text: str, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
+    """Shape of an interpolated string: text outside ``@{...}`` is literal, each ``@{...}`` is an expression."""
+    pieces: list[str] = []
+    literal_start = 0
+    for match in _INTERPOLATION_RE.finditer(text):
+        expression_shape = _expression_shape(match.group(1), bindings, require_physical=require_physical)
+        if expression_shape is None:
+            return None
+        pieces.extend((text[literal_start : match.start()], expression_shape))
+        literal_start = match.end()
+    pieces.append(text[literal_start:])
+    return "".join(pieces)
+
+
+def _expression_shape(expression: str, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
+    """Shape of one ADF expression body: its quoted literals and runtime values, in the order written."""
+    pieces: list[str] = []
+    for match in _SHAPE_TOKEN_RE.finditer(expression):
+        if match.group("literal") is not None:
+            pieces.append(match.group("literal"))
+            continue
+        dataset_parameter = _DATASET_PARAMETER_REF_RE.fullmatch(match.group("reference"))
+        if dataset_parameter is None or dataset_parameter.group(1) not in bindings:
+            pieces.append("<P>")
+            continue
+        bound_shape = _path_shape(bindings[dataset_parameter.group(1)], {}, require_physical=require_physical)
+        if bound_shape is None:
+            return None
+        pieces.append(bound_shape or "<P>")
+    return "".join(pieces)
+
+
+def _has_literal_anchor(shape: str) -> bool:
+    """``True`` when *shape* holds literal text besides ``<P>`` slots and slashes; only slots is too weak a key."""
+    return bool(re.sub(r"<P>|/", "", shape).strip())
 
 
 # --------------------------------------------------------------------------- #

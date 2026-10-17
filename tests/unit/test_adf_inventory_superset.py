@@ -228,7 +228,7 @@ def test_detected_motifs_are_saved_inside_the_hashed_graphs(tmp_path: Path) -> N
 
 
 def test_discover_twice_on_the_same_export_gives_identical_inventory_bytes(tmp_path: Path) -> None:
-    """The same export always gives the same ``inventory.json`` bytes, so it carries no ``generated_at``."""
+    """The same export and ``--source-dir`` always give the same ``inventory.json`` bytes: no ``generated_at``."""
     first = (_run_discover(tmp_path / "first") / "inventory.json").read_bytes()
     second = (_run_discover(tmp_path / "second") / "inventory.json").read_bytes()
 

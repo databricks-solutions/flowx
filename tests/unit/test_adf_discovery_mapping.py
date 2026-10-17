@@ -8,6 +8,8 @@ outcome conditions, and control-flow nesting maps to labelled container branches
 
 from __future__ import annotations
 
+import pytest
+
 from flowx.discovery_inventory import STRATEGY_PROPERTY
 from flowx.models.adf_ast import AdfDefinitions
 from flowx.models.discovery import (
@@ -215,6 +217,30 @@ def test_execute_pipeline_edge_is_resolved_only_when_the_child_is_in_the_export(
     assert parent.lineage is not None
     resolved_by_target = {edge.target_workflow: edge.resolved for edge in parent.lineage.control_edges}
     assert resolved_by_target == {"child": True, "missing": False}
+
+
+@pytest.mark.parametrize("reference", [None, ["child"], 7, {"referenceName": 7}, {"referenceName": None}])
+def test_execute_pipeline_reference_that_is_not_a_name_stays_unresolved(reference: object) -> None:
+    """A ``pipeline`` reference such as ``null`` names no child, so its edge is unresolved, not a child ``"None"``."""
+    definitions = AdfDefinitions(
+        pipelines=[
+            _parse_pipeline_json(
+                {
+                    "name": "parent",
+                    "properties": {
+                        "activities": [
+                            {"name": "RunOdd", "type": "ExecutePipeline", "typeProperties": {"pipeline": reference}}
+                        ]
+                    },
+                }
+            ),
+            _parse_pipeline_json({"name": "None", "properties": {"activities": []}}),
+        ]
+    )
+    parent = adf_definitions_to_source_graphs(definitions)[0]
+
+    assert parent.lineage is not None
+    assert [(edge.target_workflow, edge.resolved) for edge in parent.lineage.control_edges] == [("", False)]
 
 
 def _execute_pipeline(name: str, child: str) -> dict:
