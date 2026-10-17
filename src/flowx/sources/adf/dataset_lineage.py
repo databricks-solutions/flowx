@@ -18,9 +18,11 @@ Two tiers, exactly as #36 established them:
   identity the signature mirrors that identity, so the weak tier can never join a
   resolved asset to an unresolved one on a coincidence. For an unresolved reference
   the signature is the *structural path signature* (#36's "expression" tier: the
-  dataset's literal folder and file-name text, with a ``<P>`` slot where each runtime
-  value sits) when the folder has a literal anchor, prefixed ``ST[<store>]/`` when the
-  dataset's store is known (see :func:`_resolve_dataset_store`), so two datasets on
+  dataset's folder and file name with their literal text kept in place -- quoted
+  text, ``concat`` pieces, and text outside ``@{...}`` -- and exactly one ``<P>`` slot
+  for every other run-time value or function call, wherever it sits) when the folder
+  has a literal anchor, prefixed ``ST[<store>]/`` when the dataset's store is known
+  (see :func:`_resolve_dataset_store`), so two datasets on
   different stores that merely share a folder shape never join. An unknown store is
   never guessed: the signature stays unqualified, and a qualified and an unqualified
   signature never join. A dataset that names its store (a literal container or
@@ -66,24 +68,9 @@ _LINKED_SERVICE_STORE_LOCATIONS = frozenset(
     }
 )
 
-# Runtime references inside a path expression. Each is a value only knowable at
-# run time; for a *structural* signature we collapse them all to one slot token so
-# that, e.g., a writer's ``pipeline().parameters.entityID`` and a reader's
-# ``item().entityID`` (the same value passed down a ForEach) share the same shape.
-# System values such as ``pipeline().RunId`` or ``utcNow()`` are slots too, so a
-# run-specific folder never looks like the literal folder it sits under.
-_PARAM_REF_RE = re.compile(
-    r"pipeline\(\)(?:\.\w+)+"
-    r"|item\(\)(?:\.\w+)*"
-    r"|variables\('[^']*'\)"
-    r"|dataset\(\)\.\w+"
-    r"|activity\('[^']*'\)\.[\w.]+"
-    r"|trigger\(\)(?:\.\w+)+"
-    r"|linkedService\(\)\.\w+"
-    r"|(?i:utcnow|guid)\([^()]*\)"
-)
-_SHAPE_TOKEN_RE = re.compile(rf"'(?P<literal>[^']*)'|(?P<reference>{_PARAM_REF_RE.pattern})")
-_DATASET_PARAMETER_REF_RE = re.compile(r"dataset\(\)\.(\w+)")
+_QUOTED_LITERAL_RE = re.compile(r"'((?:[^']|'')*)'", re.DOTALL)
+_CONCAT_CALL_RE = re.compile(r"concat\s*\((?P<arguments>.*)\)", re.IGNORECASE | re.DOTALL)
+_DATASET_PARAMETER_RE = re.compile(r"dataset\(\)\??\.(\w+)")
 _INTERPOLATION_RE = re.compile(r"@\{([^}]*)\}")
 
 
@@ -723,7 +710,10 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
     """Structural signature of the folder and file name a parameterised reference points at.
 
     As in #36, only a reference that passes a ``folderPath`` with literal text gets
-    one. A file name alone is too weak a discriminator: many unrelated activities write
+    one: quoted text in an expression, or text outside the ``@{...}`` blocks of an
+    interpolated value, so ``landing/@{item().run}`` qualifies, and joins, just as
+    ``@concat('landing/', item().run)`` does. A file name alone is too weak a
+    discriminator: many unrelated activities write
     ``.csv`` / ``.json`` files to opaque parameterised folders, so a signature built
     only from a file extension would join them all -- re-creating the explosion the
     identity-only join avoids. Anchoring on the literal folder segment keeps the match
@@ -771,8 +761,23 @@ def _path_shape(expression: Any, bindings: dict[str, Any], *, require_physical: 
 
     Keeps the literal path text in place and writes ``<P>`` where each runtime value
     sits, so ``landing/<P>`` and ``<P>/landing`` stay apart, without guessing the
-    runtime value. A ``dataset().<name>`` bound in *bindings* is replaced by the shape
-    of its bound value instead. Gives ``""`` for a missing or empty value.
+    runtime value. A ``dataset().<name>`` bound in *bindings* is replaced by its bound
+    value's shape instead. Repeated slashes collapse, and leading and trailing ones go,
+    only once the whole shape is put together, so a bound ``bronze/`` followed by
+    ``orders`` reads ``bronze/orders``. Gives ``""`` for a missing or empty value; see
+    :func:`_raw_path_shape` for how each part of the value is read.
+    """
+    shape = _raw_path_shape(expression, bindings, require_physical=require_physical)
+    return re.sub(r"/+", "/", shape).strip("/") if shape is not None else None
+
+
+def _raw_path_shape(expression: Any, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
+    """Shape of an ADF path value with its slashes left exactly as written.
+
+    A value that opens with ``@`` (but not ``@{``) is one whole ADF expression, so a
+    quoted ``'@{x}'`` inside it is text. A value holding ``@{`` is interpolated: the
+    text outside each ``@{...}`` is literal and each block is an expression. Any other
+    value, and an unevaluated ARM expression, is kept verbatim.
 
     With *require_physical*, an unevaluated ARM expression such as
     ``[parameters('folder')]`` or a ``{{`` placeholder, here or in a bound value,
@@ -789,16 +794,13 @@ def _path_shape(expression: Any, bindings: dict[str, Any], *, require_physical: 
     is_arm_expression = bool(_ARM_EXPRESSION_RE.match(text))
     if require_physical and ("{{" in text or is_arm_expression):
         return None
-    if is_arm_expression or "@" not in text:
-        shape: str | None = text
-    elif text.startswith("@") and not text.startswith("@{"):
-        # ADF reads a value that opens with ``@`` as one whole expression, so a quoted ``'@{x}'`` inside it is text.
-        shape = _expression_shape(text[1:], bindings, require_physical=require_physical)
-    elif "@{" in text:
-        shape = _interpolation_shape(text, bindings, require_physical=require_physical)
-    else:
-        shape = text
-    return re.sub(r"/+", "/", shape).strip("/") if shape is not None else None
+    if is_arm_expression:
+        return text
+    if text.startswith("@") and not text.startswith("@{"):
+        return _expression_shape(text[1:], bindings, require_physical=require_physical)
+    if "@{" in text:
+        return _interpolation_shape(text, bindings, require_physical=require_physical)
+    return text
 
 
 def _interpolation_shape(text: str, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
@@ -816,21 +818,69 @@ def _interpolation_shape(text: str, bindings: dict[str, Any], *, require_physica
 
 
 def _expression_shape(expression: str, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
-    """Shape of one ADF expression body: its quoted literals and runtime values, in the order written."""
-    pieces: list[str] = []
-    for match in _SHAPE_TOKEN_RE.finditer(expression):
-        if match.group("literal") is not None:
-            pieces.append(match.group("literal"))
+    """Shape of one ADF expression body, read so that no run-time value is ever dropped.
+
+    A quoted ``'text'`` (``''`` is an escaped quote) is that text. ``concat(...)`` is
+    its arguments' shapes joined in order. A ``dataset().<name>`` (or
+    ``dataset()?.<name>``) bound in *bindings* is its bound value's shape, slashes and
+    all. Anything else -- any other function call, ``pipeline()``, ``item()``,
+    ``activity(...)``, a subscript, a number -- is one ``<P>``, so none of its
+    argument text ever reads as part of the path.
+    """
+    expression = expression.strip()
+    literal = _QUOTED_LITERAL_RE.fullmatch(expression)
+    if literal is not None:
+        return literal.group(1).replace("''", "'")
+    arguments = _concat_arguments(expression)
+    if arguments is not None:
+        pieces: list[str] = []
+        for argument in arguments:
+            argument_shape = _expression_shape(argument, bindings, require_physical=require_physical)
+            if argument_shape is None:
+                return None
+            pieces.append(argument_shape)
+        return "".join(pieces)
+    dataset_parameter = _DATASET_PARAMETER_RE.fullmatch(expression)
+    if dataset_parameter is None or dataset_parameter.group(1) not in bindings:
+        return "<P>"
+    bound_shape = _raw_path_shape(bindings[dataset_parameter.group(1)], {}, require_physical=require_physical)
+    if bound_shape is None:
+        return None
+    return bound_shape or "<P>"
+
+
+def _concat_arguments(expression: str) -> list[str] | None:
+    """The top-level arguments of *expression* when it is exactly one ``concat(...)`` call, else ``None``.
+
+    Commas split arguments only outside quotes and outside any nested parentheses or
+    brackets, so ``concat('a,b', f(x, y))`` has two arguments.
+    """
+    match = _CONCAT_CALL_RE.fullmatch(expression)
+    if match is None:
+        return None
+    body = match.group("arguments")
+    arguments: list[str] = []
+    argument_start = 0
+    depth = 0
+    in_quote = False
+    for index, character in enumerate(body):
+        if character == "'":
+            in_quote = not in_quote
+        elif in_quote:
             continue
-        dataset_parameter = _DATASET_PARAMETER_REF_RE.fullmatch(match.group("reference"))
-        if dataset_parameter is None or dataset_parameter.group(1) not in bindings:
-            pieces.append("<P>")
-            continue
-        bound_shape = _path_shape(bindings[dataset_parameter.group(1)], {}, require_physical=require_physical)
-        if bound_shape is None:
-            return None
-        pieces.append(bound_shape or "<P>")
-    return "".join(pieces)
+        elif character in "([":
+            depth += 1
+        elif character in ")]":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif character == "," and depth == 0:
+            arguments.append(body[argument_start:index])
+            argument_start = index + 1
+    if in_quote or depth:
+        return None
+    arguments.append(body[argument_start:])
+    return arguments
 
 
 def _has_literal_anchor(shape: str) -> bool:
