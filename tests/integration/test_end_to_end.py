@@ -31,10 +31,6 @@ adf_translation_gap = pytest.mark.xfail(
     strict=False,
 )
 
-# ---------------------------------------------------------------------------
-# TestTranslateAllPipelines — simulates "translate all pipelines"
-# ---------------------------------------------------------------------------
-
 
 class TestTranslateAllPipelines:
     """Tests simulating 'translate all pipelines' prompt."""
@@ -86,11 +82,6 @@ class TestTranslateAllPipelines:
             for rf in resource_files:
                 content = yaml.safe_load(rf.read_text())
                 assert content is not None
-
-
-# ---------------------------------------------------------------------------
-# TestTranslateSpecificPipeline — simulates "translate a specific pipeline"
-# ---------------------------------------------------------------------------
 
 
 class TestTranslateSpecificPipeline:
@@ -171,11 +162,6 @@ class TestTranslateSpecificPipeline:
         assert len(placeholders) >= 1
 
 
-# ---------------------------------------------------------------------------
-# TestActivityTypeTranslation — specific activity translation accuracy
-# ---------------------------------------------------------------------------
-
-
 class TestActivityTypeTranslation:
     """Tests for specific activity type translation accuracy."""
 
@@ -222,11 +208,6 @@ class TestActivityTypeTranslation:
             if task.depends_on:
                 for dep in task.depends_on:
                     assert dep.outcome in ("Succeeded", "Failed", "Completed", "Skipped", None)
-
-
-# ---------------------------------------------------------------------------
-# TestBundleOutput — DAB bundle output validity
-# ---------------------------------------------------------------------------
 
 
 class TestBundleOutput:
@@ -305,11 +286,6 @@ class TestBundleOutput:
             setup_dir = tmp_path / "src" / "setup"
             assert setup_dir.exists()
             assert any(setup_dir.glob("*.py"))
-
-
-# ---------------------------------------------------------------------------
-# TestInventoryAccuracy — activity classification accuracy
-# ---------------------------------------------------------------------------
 
 
 class TestInventoryAccuracy:

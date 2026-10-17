@@ -17,9 +17,7 @@ if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
   exit 0
 fi
 echo "configured=true" >> "${GITHUB_OUTPUT}"
-if ! npm install --global @anthropic-ai/claude-code@2.1.296; then
-  fail_agentic "Claude Code CLI installation failed"
-fi
+[[ -x "${CLAUDE_BIN:-}" ]] || fail_agentic "Claude Code CLI is not installed"
 plugin_dir="${RUNNER_TEMP}/flowx-plugin"
 mkdir -p "${plugin_dir}"
 cp -R .claude-plugin skills "${plugin_dir}/"
@@ -39,20 +37,31 @@ jq '
 ' "${FLOWX_OUTPUT}/.work/translation_report.json" > "${RUNNER_TEMP}/expected-agentic-structure.json"
 cp "${GITHUB_WORKSPACE}/.github/scripts/snapshot-tree.sh" "${RUNNER_TEMP}/snapshot-worktree.sh"
 chmod a-w "${RUNNER_TEMP}/snapshot-worktree.sh"
-# shellcheck source=/dev/null
 source "${RUNNER_TEMP}/snapshot-worktree.sh"
 worktree_snapshot="${RUNNER_TEMP}/pre-claude-worktree.sha256"
 snapshot_worktree > "${worktree_snapshot}"
 chmod 000 "${TF_STATE_DIR}" "${TF_DATA_DIR}"
-if ! claude -p \
-  --plugin-dir "${RUNNER_TEMP}/flowx-plugin" \
+allowed_dirs=("./${FLOWX_OUTPUT}/**" "/${ADF_EXPORT_DIR}/**" "/${plugin_dir}/**" "./agentic_results/**")
+allowed_tools=""
+for tool in Read Glob Grep; do
+  for allowed_dir in "${allowed_dirs[@]}"; do allowed_tools+="${tool}(${allowed_dir}),"; done
+done
+allowed_tools+="Edit(agentic_results/**)"
+denied_reads="Read(//proc/**),Read(~/.azure/**),Read(~/.config/**),Read(~/.docker/**),Read(~/.npmrc)"
+denied_reads+=",Read(~/.databrickscfg),Read(./.git/**),Read(tests/integration/azure/terraform/**)"
+denied_reads+=",Read(/${TF_STATE_DIR}/**),Read(/${TF_DATA_DIR}/**)"
+if ! "${CLAUDE_BIN}" -p \
+  --restricted \
+  --add-dir "${ADF_EXPORT_DIR}" \
+  --add-dir "${plugin_dir}" \
+  --plugin-dir "${plugin_dir}" \
   --permission-mode dontAsk \
   --permission-prompts none \
   --tools="Read,Edit,Write,Glob,Grep,Skill" \
-  --allowedTools="Read,Edit(agentic_results/**),Glob,Grep" \
-  --disallowedTools="Read(tests/integration/azure/terraform/**),Read(/${TF_STATE_DIR}/**),Read(/${TF_DATA_DIR}/**)" <<CLAUDE_PROMPT
+  --allowedTools="${allowed_tools}" \
+  --disallowedTools="${denied_reads}" <<CLAUDE_PROMPT
 Use the flowx:flowx-convert skill, specifically the ADF agentic-gap instructions in
-skills/flowx-convert/sources/adf.md steps 4 and 5. Read
+${plugin_dir}/skills/flowx-convert/sources/adf.md steps 4 and 5. Read
 ${FLOWX_OUTPUT}/.work/translation_report.json, ${FLOWX_OUTPUT}/.work/gaps.json, and the
 exported ADF definitions under ${ADF_EXPORT_DIR}. Produce one merge result for each
 PlaceholderActivity in translation_report.json. This is the exact expected task list:

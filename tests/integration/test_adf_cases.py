@@ -73,10 +73,13 @@ def test_adf_case(case_dir: Path, phase: str, case_results, pytestconfig: pytest
         else:
             assert result["ir"] == {path.stem: _read_json(path) for path in sorted((expected / "ir").glob("*.json"))}
             assert result["gaps"] == _read_json(expected / "gaps.json")
-    elif update:
-        _copy_tree(result["output"], expected / "bundles")
+    elif phase == "package":
+        if update:
+            _copy_tree(result["output"], expected / "bundles")
+        else:
+            _assert_tree(expected / "bundles", result["output"])
     else:
-        _assert_tree(expected / "bundles", result["output"])
+        raise ValueError(f"unknown phase: {phase}")
 
 
 def test_live_export_matches_fixtures() -> None:
@@ -186,7 +189,7 @@ def test_live_read_only_trigger_and_integration_runtime_fields(tmp_path: Path) -
 
     case_dir = CASES / "full-factory"
     result = _run_case(_read_json(case_dir / "case.json"), live, tmp_path)
-    source = tmp_path / "source"
+    source = result["source"]
     assert not (source / "integration_runtimes").exists()
     copied_trigger = _read_json(source / "triggers/schedule.json")["properties"]
     assert copied_trigger["annotations"] == []
@@ -367,7 +370,7 @@ def _run_case(case: dict[str, Any], source_root: Path, workdir: Path) -> dict[st
     _run("convert", source, output)
     ir, gaps = _capture_convert(output)
     _run("package", source, output)
-    return {"inventory": inventory, "ir": ir, "gaps": gaps, "output": output}
+    return {"inventory": inventory, "ir": ir, "gaps": gaps, "output": output, "source": source}
 
 
 def _run(phase: str, source: Path, output: Path) -> None:

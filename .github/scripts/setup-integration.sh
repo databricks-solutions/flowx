@@ -11,23 +11,25 @@ Usage: setup-integration.sh [subcommand] [options]
 Subcommands:
   setup        run all setup steps (default)
   verify       check setup without making changes
-  cleanup      list tagged resource groups; use --delete NAME to remove one
+  cleanup      list leftover test runs in the resource group; use --delete RUN to remove one
   identity     create or reuse the Entra app, SP, and OIDC credential
   providers    register required Azure providers
-  role         create/update and assign the least-privilege role
+  role         create the shared resource group, then create/update the custom role and assign it there
   environment  create/update the protected GitHub environment
   secrets      set GitHub environment secrets
 
 Options:
   --github-repo OWNER/REPO  --subscription-id ID  --app-name NAME
-  --env-name NAME           --role-name NAME       --reviewers USER[,USER...]
-  --delete NAME             exact resource group (cleanup only)
+  --env-name NAME           --role-name NAME       --reviewers USER,USER[,USER...]
+  --resource-group NAME     --location REGION
+  --delete RUN              exact run tag whose resources to delete (cleanup only)
   --dry-run                 print writes without performing them
   --yes                     skip confirmation
   --help
 
 Environment variables:
   GITHUB_REPO, AZURE_SUBSCRIPTION_ID, APP_NAME, ENV_NAME, ROLE_NAME, REVIEWERS
+  RESOURCE_GROUP, LOCATION
   RESOURCE_OWNER_EMAIL, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY
   DATABRICKS_HOST, DATABRICKS_TOKEN
 EOF
@@ -37,15 +39,63 @@ COMMAND=setup
 case "${1:-}" in
   setup|verify|cleanup|identity|providers|role|environment|secrets) COMMAND=$1; shift ;;
 esac
-DRY_RUN=false YES=false SHOW_HELP=false DELETE_GROUP=''
+DRY_RUN=false YES=false SHOW_HELP=false DELETE_RUN=''
 GITHUB_REPO=${GITHUB_REPO:-}
 AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID:-}
 APP_NAME=${APP_NAME:-flowx-live-integration}
 ENV_NAME=${ENV_NAME:-flowx-live-integration}
 ROLE_NAME=${ROLE_NAME:-flowx-live-integration-deployer}
 REVIEWERS=${REVIEWERS:-}
+RESOURCE_GROUP=${RESOURCE_GROUP:-flowx-live-integration}
+LOCATION=${LOCATION:-eastus2}
+TEST_TAG=purpose=flowx-integration-test
 REQUIRED_PROVIDERS='Microsoft.Resources Microsoft.DataFactory Microsoft.Storage Microsoft.KeyVault Microsoft.EventGrid'
-REQUIRED_ROLE_ACTIONS='["Microsoft.Resources/subscriptions/read","Microsoft.Resources/subscriptions/resourceGroups/*","Microsoft.DataFactory/factories/*","Microsoft.Storage/storageAccounts/*","Microsoft.KeyVault/vaults/*","Microsoft.EventGrid/eventSubscriptions/read","Microsoft.EventGrid/eventSubscriptions/write","Microsoft.EventGrid/eventSubscriptions/delete"]'
+REQUIRED_ROLE_ACTIONS='[
+  "Microsoft.Resources/subscriptions/resourceGroups/read",
+  "Microsoft.Storage/storageAccounts/read",
+  "Microsoft.Storage/storageAccounts/write",
+  "Microsoft.Storage/storageAccounts/delete",
+  "Microsoft.Storage/storageAccounts/blobServices/read",
+  "Microsoft.Storage/storageAccounts/blobServices/containers/read",
+  "Microsoft.Storage/storageAccounts/blobServices/containers/write",
+  "Microsoft.Storage/storageAccounts/blobServices/containers/delete",
+  "Microsoft.Storage/storageAccounts/fileServices/read",
+  "Microsoft.Storage/storageAccounts/queueServices/read",
+  "Microsoft.Storage/storageAccounts/tableServices/read",
+  "Microsoft.KeyVault/vaults/read",
+  "Microsoft.KeyVault/vaults/write",
+  "Microsoft.KeyVault/vaults/delete",
+  "Microsoft.DataFactory/factories/read",
+  "Microsoft.DataFactory/factories/write",
+  "Microsoft.DataFactory/factories/delete",
+  "Microsoft.DataFactory/factories/linkedservices/read",
+  "Microsoft.DataFactory/factories/linkedservices/write",
+  "Microsoft.DataFactory/factories/linkedservices/delete",
+  "Microsoft.DataFactory/factories/integrationruntimes/read",
+  "Microsoft.DataFactory/factories/integrationruntimes/write",
+  "Microsoft.DataFactory/factories/integrationruntimes/delete",
+  "Microsoft.DataFactory/factories/datasets/read",
+  "Microsoft.DataFactory/factories/datasets/write",
+  "Microsoft.DataFactory/factories/datasets/delete",
+  "Microsoft.DataFactory/factories/dataflows/read",
+  "Microsoft.DataFactory/factories/dataflows/write",
+  "Microsoft.DataFactory/factories/dataflows/delete",
+  "Microsoft.DataFactory/factories/pipelines/read",
+  "Microsoft.DataFactory/factories/pipelines/write",
+  "Microsoft.DataFactory/factories/pipelines/delete",
+  "Microsoft.DataFactory/factories/triggers/read",
+  "Microsoft.DataFactory/factories/triggers/write",
+  "Microsoft.DataFactory/factories/triggers/delete",
+  "Microsoft.EventGrid/eventSubscriptions/read",
+  "Microsoft.EventGrid/eventSubscriptions/write",
+  "Microsoft.EventGrid/eventSubscriptions/delete"
+]'
+REQUIRED_ROLE_NOT_ACTIONS='[
+  "Microsoft.Storage/storageAccounts/listKeys/action",
+  "Microsoft.Storage/storageAccounts/listAccountSas/action",
+  "Microsoft.Storage/storageAccounts/regeneratekey/action",
+  "Microsoft.KeyVault/vaults/accessPolicies/write"
+]'
 while (($#)); do
   case "$1" in
     --github-repo) [[ $# -ge 2 ]] || die "$1 requires a value"; GITHUB_REPO=$2; shift 2 ;;
@@ -54,7 +104,9 @@ while (($#)); do
     --env-name) [[ $# -ge 2 ]] || die "$1 requires a value"; ENV_NAME=$2; shift 2 ;;
     --role-name) [[ $# -ge 2 ]] || die "$1 requires a value"; ROLE_NAME=$2; shift 2 ;;
     --reviewers) [[ $# -ge 2 ]] || die "$1 requires a value"; REVIEWERS=$2; shift 2 ;;
-    --delete) [[ $# -ge 2 ]] || die "$1 requires one exact name"; DELETE_GROUP=$2; shift 2 ;;
+    --resource-group) [[ $# -ge 2 ]] || die "$1 requires a value"; RESOURCE_GROUP=$2; shift 2 ;;
+    --location) [[ $# -ge 2 ]] || die "$1 requires a value"; LOCATION=$2; shift 2 ;;
+    --delete) [[ $# -ge 2 ]] || die "$1 requires one exact run tag"; DELETE_RUN=$2; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --yes) YES=true; shift ;;
     --help|-h) SHOW_HELP=true; shift ;;
@@ -62,7 +114,9 @@ while (($#)); do
   esac
 done
 $SHOW_HELP && { usage; exit 0; }
-[[ "$COMMAND" == cleanup || -z "$DELETE_GROUP" ]] || die "--delete is valid only with cleanup"
+[[ "$COMMAND" == cleanup || -z "$DELETE_RUN" ]] || die "--delete is valid only with cleanup"
+[[ "$RESOURCE_GROUP" =~ ^[A-Za-z0-9._()-]{1,90}$ ]] || die "RESOURCE_GROUP must be a valid Azure resource group name"
+[[ "$LOCATION" =~ ^[a-z0-9]+$ ]] || die "LOCATION must be an Azure region name such as eastus2"
 
 TEMP_FILES=()
 cleanup_temp_files() {
@@ -191,11 +245,25 @@ step_role() {
   elif [[ -z "$sp_id" ]]; then
     if $DRY_RUN; then sp_id='<service-principal-object-id>'; else die "service principal does not exist; run identity"; fi
   fi
-  scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}"
+  if az group show --subscription "$AZURE_SUBSCRIPTION_ID" --name "$RESOURCE_GROUP" >/dev/null 2>&1; then
+    log "Reusing resource group $RESOURCE_GROUP"
+  else
+    run_write az group create --subscription "$AZURE_SUBSCRIPTION_ID" --name "$RESOURCE_GROUP" \
+      --location "$LOCATION" --tags "$TEST_TAG" || die "cannot create resource group $RESOURCE_GROUP"
+  fi
+  scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}"
+  subscription_scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}"
   new_temp_file; role_file=$NEW_TEMP_FILE
-  jq -n --arg name "$ROLE_NAME" --arg scope "$scope" --argjson actions "$REQUIRED_ROLE_ACTIONS" \
-    '{Name:$name,IsCustom:true,Description:"Deploy flowx live integration fixtures",Actions:$actions,NotActions:[],AssignableScopes:[$scope]}' > "$role_file"
+  jq -n --arg name "$ROLE_NAME" --arg scope "$scope" \
+    --argjson actions "$REQUIRED_ROLE_ACTIONS" --argjson not_actions "$REQUIRED_ROLE_NOT_ACTIONS" \
+    '{Name:$name,IsCustom:true,Description:"Deploy flowx live integration fixtures into one resource group",Actions:$actions,NotActions:$not_actions,AssignableScopes:[$scope]}' > "$role_file"
   role_id=$(az role definition list --name "$ROLE_NAME" --scope "$scope" --query '[0].id' -o tsv)
+  if [[ -n "$role_id" && "$sp_id" != '<service-principal-object-id>' ]]; then
+    legacy_assignment=$(legacy_assignment_ids)
+    # shellcheck disable=SC2086
+    [[ -z "$legacy_assignment" ]] || run_write az role assignment delete --ids $legacy_assignment ||
+      die "cannot remove the old subscription-wide role assignment"
+  fi
   if [[ -z "$role_id" ]]; then
     if $DRY_RUN; then role_id='<role-definition-id>'; run_write az role definition create --role-definition "$role_file"; else
       role_id=$(az role definition create --role-definition "$role_file" --query id -o tsv) ||
@@ -256,6 +324,7 @@ step_secrets() {
   set_secret AZURE_TENANT_ID "$tenant_id"
   set_secret AZURE_SUBSCRIPTION_ID "$AZURE_SUBSCRIPTION_ID"
   set_secret RESOURCE_OWNER_EMAIL "$RESOURCE_OWNER_EMAIL"
+  set_secret AZURE_RESOURCE_GROUP "$RESOURCE_GROUP"
   prompt_optional CLAUDE_CODE_OAUTH_TOKEN 'Claude Code OAuth token'
   prompt_optional ANTHROPIC_API_KEY 'Anthropic API key'
   prompt_optional DATABRICKS_HOST 'Databricks host'
@@ -278,16 +347,20 @@ verify_setup() {
     state=$(az provider show --subscription "$AZURE_SUBSCRIPTION_ID" --namespace "$provider" --query registrationState -o tsv 2>/dev/null || true)
     [[ "$state" == Registered ]] || { echo "MISSING/MISMATCH: provider $provider is not registered" >&2; failures=$((failures + 1)); }
   done
-  scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}"
+  az group show --subscription "$AZURE_SUBSCRIPTION_ID" --name "$RESOURCE_GROUP" >/dev/null 2>&1 ||
+    { echo "MISSING: resource group $RESOURCE_GROUP" >&2; failures=$((failures + 1)); }
+  scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}"
+  subscription_scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}"
   role_json=$(az role definition list --name "$ROLE_NAME" --scope "$scope" -o json)
-  required_actions=$REQUIRED_ROLE_ACTIONS
   # shellcheck disable=SC2016
   role_matches=$(json_value "invalid role-definition response from Azure" \
     'if type == "array" then
        (length == 1) and
        (((.[0].permissions // []) | map(.actions // []) | add // [] | sort) == ($expected | sort)) and
-       (((.[0].assignableScopes // []) | index($scope)) != null)
-     else false end' --arg scope "$scope" --argjson expected "$required_actions" <<< "$role_json")
+       (((.[0].permissions // []) | map(.notActions // []) | add // [] | sort) == ($expected_not | sort)) and
+       ((.[0].assignableScopes // []) == [$scope])
+     else false end' --arg scope "$scope" --argjson expected "$REQUIRED_ROLE_ACTIONS" \
+    --argjson expected_not "$REQUIRED_ROLE_NOT_ACTIONS" <<< "$role_json")
   [[ "$role_matches" == true ]] || { echo "MISSING/MISMATCH: custom role definition $ROLE_NAME" >&2; failures=$((failures + 1)); }
   role_id=$(json_value "invalid role-definition response from Azure" \
     'if type == "array" then .[0].id // empty else empty end' <<< "$role_json")
@@ -295,30 +368,43 @@ verify_setup() {
     assignment=$(az role assignment list --assignee-object-id "$sp_id" --scope "$scope" --role "$role_id" --query '[0].id' -o tsv)
   else assignment=''; fi
   [[ -n "$assignment" ]] || { echo "MISSING/MISMATCH: role assignment $ROLE_NAME" >&2; failures=$((failures + 1)); }
+  if [[ -n "$role_id" && -n "$(legacy_assignment_ids)" ]]; then
+    echo "MISMATCH: role $ROLE_NAME is still assigned to the whole subscription; rerun role" >&2; failures=$((failures + 1))
+  fi
   environment=$(gh api "repos/${GITHUB_REPO}/environments/${ENV_NAME}") || { echo "MISSING: GitHub environment $ENV_NAME" >&2; failures=$((failures + 1)); environment='{}'; }
   reviewer_count=$(json_value "invalid environment response from GitHub" \
-    'if type == "object" then [.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | length else 0 end' \
+    'if type == "object" then [.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | unique_by(.reviewer.id) | length else 0 end' \
     <<< "$environment")
-  ((reviewer_count > 0)) || { echo 'MISSING/MISMATCH: environment has no required reviewers' >&2; failures=$((failures + 1)); }
+  ((reviewer_count >= 2)) || { echo 'MISSING/MISMATCH: environment needs at least 2 required reviewers' >&2; failures=$((failures + 1)); }
   secret_names=$(gh secret list --repo "$GITHUB_REPO" --env "$ENV_NAME" --json name --jq '.[].name')
-  for secret_name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID RESOURCE_OWNER_EMAIL; do
+  for secret_name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP RESOURCE_OWNER_EMAIL; do
     grep -Fxq "$secret_name" <<< "$secret_names" || { echo "MISSING: environment secret $secret_name" >&2; failures=$((failures + 1)); }
   done
   ((failures == 0)) || die "$failures verification check(s) failed"
   log 'Verification passed (secret names only; values were never read).'
 }
 
+legacy_assignment_ids() {
+  az role assignment list --assignee-object-id "$sp_id" --scope "$subscription_scope" --role "$role_id" \
+    --query "[?scope=='$subscription_scope'].id" -o tsv
+}
+
 cleanup_orphans() {
-  groups=$(az group list --subscription "$AZURE_SUBSCRIPTION_ID" --tag purpose=flowx-integration-test --query '[].name' -o tsv)
-  if [[ -z "$groups" ]]; then log "No resource groups tagged purpose=flowx-integration-test"; else printf '%s\n' "$groups"; fi
-  [[ -n "$DELETE_GROUP" ]] || return 0
-  grep -Fxq -- "$DELETE_GROUP" <<< "$groups" || die "refusing to delete: $DELETE_GROUP is not an exact tagged group name"
+  local runs resource_ids
+  runs=$(az resource list --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP" --tag "$TEST_TAG" \
+    --query '[].tags.run' -o tsv | sort -u)
+  if [[ -z "$runs" ]]; then log "No test resources left in $RESOURCE_GROUP"; else printf '%s\n' "$runs"; fi
+  [[ -n "$DELETE_RUN" ]] || return 0
+  grep -Fxq -- "$DELETE_RUN" <<< "$runs" || die "refusing to delete: $DELETE_RUN is not an exact run tag in $RESOURCE_GROUP"
   confirm_target
   if ! $YES; then
-    read -r -p "Type the exact resource-group name to delete: " confirmation
-    [[ "$confirmation" == "$DELETE_GROUP" ]] || die "name did not match; cancelled"
+    read -r -p "Type the exact run tag to delete its resources: " confirmation
+    [[ "$confirmation" == "$DELETE_RUN" ]] || die "run tag did not match; cancelled"
   fi
-  run_write az group delete --subscription "$AZURE_SUBSCRIPTION_ID" --name "$DELETE_GROUP" --yes
+  resource_ids=$(az resource list --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$RESOURCE_GROUP" \
+    --tag "run=$DELETE_RUN" --query "[?tags.purpose=='flowx-integration-test'].id" -o tsv)
+  # shellcheck disable=SC2086
+  run_write az resource delete --ids $resource_ids
 }
 
 validate_owner_email() {
@@ -326,8 +412,13 @@ validate_owner_email() {
     die "RESOURCE_OWNER_EMAIL must be a non-empty email-like value"
 }
 
-[[ "$COMMAND" == setup || "$COMMAND" == environment ]] && [[ -z "$REVIEWERS" ]] &&
-  die "REVIEWERS (or --reviewers) is required before setup can begin"
+count_reviewers() {
+  tr ',' '\n' <<< "$REVIEWERS" | sed 's/[[:space:]]//g' | grep . | sort -fu | wc -l
+}
+
+if [[ "$COMMAND" == setup || "$COMMAND" == environment ]] && (($(count_reviewers) < 2)); then
+  die "REVIEWERS (or --reviewers) must list at least 2 GitHub users"
+fi
 if [[ "$COMMAND" == setup ]]; then
   if [[ -n "${RESOURCE_OWNER_EMAIL:-}" ]]; then validate_owner_email
   elif [[ ! -t 0 ]]; then die "RESOURCE_OWNER_EMAIL is required before setup can begin"

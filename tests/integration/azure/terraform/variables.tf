@@ -27,10 +27,9 @@ variable "owner_email" {
   }
 }
 
-variable "location" {
-  description = "Azure region for the integration resources."
+variable "resource_group_name" {
+  description = "Resource group for the integration resources."
   type        = string
-  default     = "eastus2"
 }
 
 variable "name_prefix" {

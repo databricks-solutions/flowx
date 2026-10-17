@@ -32,7 +32,7 @@ All skills and the bootstrap script are designed to run on **Databricks serverle
 
 - **venv:** `bootstrap.sh` creates the venv at `/Workspace/Users/<current user>/.migration-skills`
   on Databricks and `<plugin_dir>/.venv` locally, writing the interpreter path to
-  `<plugin_dir>/.migration-venv`. It falls back to `--without-pip` + `get-pip.py` when `ensurepip`
+  `<plugin_dir>/.migration-venv`. It falls back to `--without-pip` plus a pinned, hash-checked pip wheel when `ensurepip`
   is unavailable (standard on serverless images).
 - **Auth:** `workspace_downloader.py` auto-detects `DATABRICKS_RUNTIME_VERSION` and writes
   `~/.databrickscfg` from `dbruntime.databricks_repl_context` so the SDK can authenticate.
@@ -130,7 +130,7 @@ pipelines, runs them through discover, convert, and package, and compares the ou
   `tests/integration/azure/terraform/` definitions.
 - Order integration test modules as imports, constants, public `test_*` functions, then private helpers.
 - Put shared pytest fixtures in `tests/integration/conftest.py`.
-- Put workflow shell logic in `.github/scripts/`, not in workflow YAML.
+- Put workflow shell logic in `.github/scripts/`, not in workflow YAML. Put any Python it needs in a `.py` file there, not a heredoc.
 - Run `make setup-integration ARGS="setup"` once for Azure and GitHub setup, and `ARGS="verify"` to check it.
 
 See `tests/integration/azure/README.md` for details.
