@@ -19,10 +19,8 @@ terraform init -input=false -lockfile=readonly -backend-config="path=${TF_STATE_
 config_dirs=(.)
 modules_json="${TF_DATA_DIR:-.terraform}/modules/modules.json"
 if [[ -f "${modules_json}" ]]; then
-  # `find .` already covers modules under the root, including .terraform/modules; add only local modules outside it.
-  module_dirs="$(jq -r '.Modules[].Dir | select(startswith("..") or startswith("/"))' "${modules_json}")" ||
-    fail "Could not read ${modules_json}."
-  while IFS= read -r module_dir; do [[ -z "${module_dir}" ]] || config_dirs+=("${module_dir}"); done <<< "${module_dirs}"
+  module_dirs="$(jq -r '.Modules[].Dir' "${modules_json}")" || fail "Could not read ${modules_json}."
+  while IFS= read -r module_dir; do config_dirs+=("${module_dir}"); done <<< "${module_dirs}"
 fi
 symlinks="$(find "${config_dirs[@]}" -type l)" || fail "Could not list the Terraform config files."
 [[ -z "${symlinks}" ]] || fail "Terraform config must not contain symlinks: ${symlinks//$'\n'/, }"
@@ -31,11 +29,16 @@ trap 'rm -f "${config_files}"' EXIT
 find "${config_dirs[@]}" -type f \( -name '*.tf' -o -name '*.tf.json' \) -print0 > "${config_files}" ||
   fail "Could not list the Terraform config files."
 while IFS= read -r -d '' config_file; do
+  status=0
   if [[ "${config_file}" == *.tf.json ]]; then
-    jq -e '[.. | objects | keys[]] | any(. == "provisioner" or . == "external") | not' "${config_file}" >/dev/null
+    jq -e '[.. | objects | keys[]] | any(. == "provisioner" or . == "external")' "${config_file}" >/dev/null ||
+      status=$?
   else
-    ! grep -Eqw 'provisioner|external' "${config_file}"
-  fi || fail "Terraform config must not use provisioners or the external data source: ${config_file}"
+    grep -Eqw 'provisioner|external' "${config_file}" || status=$?
+  fi
+  # Both exit 0 on a match and 1 on none; anything else means the file couldn't be scanned.
+  ((status != 0)) || fail "Terraform config must not use provisioners or the external data source: ${config_file}"
+  ((status == 1)) || fail "Could not scan ${config_file}."
 done < "${config_files}"
 
 terraform fmt -check

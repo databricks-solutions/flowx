@@ -508,6 +508,38 @@ def test_apply_rejects_symlinks_that_could_hide_a_provisioner(tmp_path: Path, li
     assert [call.split()[0] for call in calls] == ["init"]
 
 
+@pytest.mark.parametrize("module_dir", ["../outside-module", "./../outside-module", ".terraform/../../outside-module"])
+def test_apply_scans_every_module_dir_however_its_path_is_written(tmp_path: Path, module_dir: str) -> None:
+    """A recorded module outside the root is scanned whatever form its relative path takes."""
+    config = tmp_path / "config"
+    (config / ".terraform").mkdir(parents=True)
+    (tmp_path / "outside-module").mkdir()
+    (tmp_path / "outside-module" / "main.tf").write_text(
+        COMMAND_RUNNING_CONFIG["local-exec"][1] + "\n", encoding="utf-8"
+    )
+    modules = {"Modules": [{"Key": "", "Source": "", "Dir": "."}, {"Key": "m", "Dir": module_dir}]}
+    result, calls = _run_apply(tmp_path, config, ["create"], {"STUB_MODULES_JSON": json.dumps(modules)})
+    assert result.returncode != 0
+    assert "must not use provisioners" in result.stdout
+    assert [call.split()[0] for call in calls] == ["init"]
+
+
+def test_apply_fails_when_grep_cannot_scan_a_file(tmp_path: Path) -> None:
+    """A grep error is not read as "no match", so a file that can't be scanned stops the run."""
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "main.tf").write_text('resource "terraform_data" "ok" {}\n', encoding="utf-8")
+    grep_dir = tmp_path / "grep-bin"
+    grep_dir.mkdir()
+    (grep_dir / "grep").write_text("#!/usr/bin/env bash\nexit 2\n", encoding="utf-8")
+    (grep_dir / "grep").chmod(0o755)
+    path = f"{grep_dir}:{tmp_path / 'bin'}:{os.environ['PATH']}"
+    result, calls = _run_apply(tmp_path, config, ["create"], {"PATH": path})
+    assert result.returncode != 0
+    assert "Could not scan ./main.tf" in result.stdout
+    assert [call.split()[0] for call in calls] == ["init"]
+
+
 def test_apply_fails_when_a_module_dir_cannot_be_listed(tmp_path: Path) -> None:
     """A module dir that can't be listed fails the scan instead of being skipped."""
     config = tmp_path / "config"
