@@ -35,19 +35,31 @@ credentials. Two guards stand between a pull request and those credentials:
 - **Approval by someone else.** The environment needs at least two required reviewers and prevents self-review,
   so a run always waits for approval from someone other than the person who triggered it. Approvers should read
   the pull request's changes to `.github/` and `tests/integration/azure/terraform/` before approving.
-- **A plan check before apply.** `apply-terraform.sh` saves a plan, refuses it if any resource would be deleted
-  or replaced, and then applies that exact saved plan. It also refuses Terraform config that uses `local-exec` or
-  `remote-exec` provisioners or the `external` data source, because those run commands a plan can't show.
-  Teardown still runs a normal `terraform destroy`.
+- **Checks before apply.** `apply-terraform.sh` runs these checks in order:
+  - It refuses to start unless `.terraform.lock.hcl` matches its pinned SHA-256. The lock file lists only
+    `hashicorp/azurerm` and `azure/azapi` at their pinned versions, and `init -lockfile=readonly` refuses any
+    other provider.
+  - It refuses any Terraform CLI configuration that could change where providers come from (`TF_CLI_CONFIG_FILE`,
+    `TF_PLUGIN_CACHE_DIR`, or `~/.terraformrc`).
+  - After `init`, it refuses `local-exec` or `remote-exec` provisioners (on any resource, including
+    `null_resource` and `terraform_data`) and the `external` data source. It scans the root config and every
+    module `init` recorded. These run commands a plan can't show.
+  - It saves a plan, refuses it if any resource would be deleted or replaced, and applies that exact saved plan.
+
+  When Dependabot updates the lock file, update `lock_sha256` in `apply-terraform.sh` in the same pull request.
+  Teardown still runs a normal `terraform destroy`. These checks are lint, not a sandbox: a pull request that
+  edits `apply-terraform.sh` can remove them, and approval is the guard for that.
 
 The Azure role reaches only the shared resource group (see below), so even an approved run can't touch anything
 else in the subscription.
 
 The agentic step loads the `flowx:flowx-convert` ADF guide, reads the translation report and sanitized ADF
 export, and writes one result per `PlaceholderActivity` under `agentic_results/`. Claude runs in `dontAsk`
-mode with read/search tools and file edits permitted only in that directory, and has no Bash access. Its `Read`
-access is limited to the flowx output, the ADF export, the plugin copy, and `agentic_results/`; `/proc`, home
-credential caches such as `~/.azure`, `.git/`, and the Terraform state are denied. The workflow also signs the
+mode with read/search tools and file edits permitted only in that directory, and has no Bash access. Its
+`Read`, `Glob`, and `Grep` rules allow only the flowx output, the ADF export, the plugin copy, and
+`agentic_results/`. `--restricted` keeps those tools inside the checkout and those directories. `/proc`, home
+credential caches such as `~/.azure`, `.git/`, and the Terraform state are denied. Claude Code always lets these
+tools read the checkout itself, which is the pull request's own code. The workflow also signs the
 Azure CLI out and deletes `~/.azure` before Claude starts; Terraform teardown signs in through GitHub OIDC on its
 own. Claude Code is installed with `npm ci --ignore-scripts` from `.github/claude-code/package-lock.json`. Notebook
 results carry source inline rather than creating separate executable files. The workflow validates each result's merge
@@ -61,7 +73,8 @@ Claude: the scripts still come from the pull request.
 
 Every tool is installed before the Azure sign-in, from a lock file with hashes or a pinned checksum: Python
 packages with `uv sync --frozen`, Claude Code from its npm lock file, and Terraform and the Databricks CLI by
-`install-pinned-tool.sh`, which checks each download against the SHA-256 from the release's `SHA256SUMS`.
+`install-pinned-tool.sh`, which checks each download against a SHA-256 pinned in the script. Each pin was copied
+from that release's `SHA256SUMS` file, and keeping it in the repo means a changed release asset fails the check.
 Terraform providers come from the committed `.terraform.lock.hcl` (`terraform init -lockfile=readonly`).
 
 Live runs share one resource group, so the live job uses a single repository-wide concurrency group that never
@@ -217,3 +230,7 @@ Vault secret named `integration-placeholder`; it intentionally does not exist be
 executed. The Key Vault contains no secret values. The workflow strips ARM `id` and `etag` fields before 
 any export reaches flowx or Claude. Each run's resources have collision-resistant, run-unique names in the shared
 resource group.
+
+Accepted risk: the role includes `Microsoft.EventGrid/eventSubscriptions/write` on the shared resource group,
+because the Blob Events trigger fixture needs it. An approved run could use it to send that group's storage events
+to a webhook outside Azure. The events only describe test resources in that group, and approval is the guard.

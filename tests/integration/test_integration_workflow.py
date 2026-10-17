@@ -27,29 +27,36 @@ WORKFLOW_AND_SCRIPTS = "\n".join(
 )
 
 
-def test_claude_runs_with_restricted_tools_outside_the_checkout() -> None:
-    """Claude reads its prompt from stdin, has no Bash, edits only agentic_results/, and loads a plugin copy."""
-    script = RESOLVE_AGENTIC.read_text(encoding="utf-8")
-    invocation = re.search(r'if ! "\$\{CLAUDE_BIN\}" -p \\\n(?P<flags>.*?)<<CLAUDE_PROMPT', script, re.DOTALL)
-    assert invocation, "Claude must receive its prompt from the CLAUDE_PROMPT heredoc"
-    flags = invocation.group("flags")
-    assert "--permission-mode dontAsk" in flags
-    assert '--allowedTools="${allowed_reads},Edit(agentic_results/**),Glob,Grep"' in flags
-    assert '--disallowedTools="${denied_reads}"' in flags
-    assert "Bash" not in flags
-    assert 'plugin_dir="${RUNNER_TEMP}/flowx-plugin"' in script
-    assert '--plugin-dir "${plugin_dir}"' in flags
+def test_claude_runs_with_restricted_tools_outside_the_checkout(tmp_path: Path) -> None:
+    """Claude gets its prompt on stdin, has no Bash, edits only agentic_results/, and loads a plugin copy."""
+    flags, prompt = _claude_invocation(tmp_path)
+    assert "--restricted" in flags
+    assert flags[flags.index("--permission-mode") + 1] == "dontAsk"
+    assert flags[flags.index("--tools") + 1] == "Read,Edit,Write,Glob,Grep,Skill"
+    plugin_dir = str(tmp_path / "temp" / "flowx-plugin")
+    assert flags[flags.index("--plugin-dir") + 1] == plugin_dir
+    assert _values(flags, "--add-dir") == [str(tmp_path / "temp" / "adf-export"), plugin_dir]
+    assert "Bash" not in " ".join(flags)
+    assert "PlaceholderActivity" in prompt
 
 
-def test_claude_reads_only_its_inputs_and_never_credentials() -> None:
-    """Read is limited to named paths, and runner secrets, credential caches, and .git are denied."""
-    script = RESOLVE_AGENTIC.read_text(encoding="utf-8")
-    allowed = re.search(r'^allowed_reads="(?P<rules>[^"]+)"$', script, re.MULTILINE)
-    assert allowed
-    assert all(re.fullmatch(r"Read\(.+/\*\*\)", rule) for rule in allowed.group("rules").split(","))
-    denied = "".join(re.findall(r'^denied_reads\+?="([^"]+)"$', script, re.MULTILINE))
-    for rule in ("Read(//proc/**)", "Read(~/.azure/**)", "Read(~/.config/**)", "Read(./.git/**)"):
-        assert rule in denied
+def test_claude_reads_and_searches_only_its_inputs(tmp_path: Path) -> None:
+    """Read, Glob, and Grep share one scoped allow list, and credential caches, /proc, and .git are denied."""
+    flags, _ = _claude_invocation(tmp_path)
+    allowed = _rules(flags[flags.index("--allowedTools") + 1])
+    denied = _rules(flags[flags.index("--disallowedTools") + 1])
+    allowed_dirs = {
+        "./flowx_output/**",
+        f"/{tmp_path}/temp/adf-export/**",
+        f"/{tmp_path}/temp/flowx-plugin/**",
+        "./agentic_results/**",
+    }
+    for tool in ("Read", "Glob", "Grep"):
+        assert {path for name, path in allowed if name == tool} == allowed_dirs, tool
+    assert ("Edit", "agentic_results/**") in allowed
+    assert all(path for _, path in allowed), "every allowed tool must be scoped to a path"
+    for path in ("//proc/**", "~/.azure/**", "~/.config/**", "./.git/**", f"/{tmp_path}/state/**"):
+        assert ("Read", path) in denied
 
 
 def test_snapshot_helper_handles_links_and_detects_changes(tmp_path: Path) -> None:
@@ -411,3 +418,72 @@ def _live_steps() -> list[dict]:
 def _step_index(steps: list[dict], name: str) -> int:
     """Return the position of the step with this exact name."""
     return next(index for index, step in enumerate(steps) if step.get("name") == name)
+
+
+def _claude_invocation(tmp_path: Path) -> tuple[list[str], str]:
+    """Run resolve-agentic-gaps.sh with a stub Claude CLI and return the arguments and prompt it received."""
+    if shutil.which("jq") is None:
+        pytest.skip("jq is required for the Claude invocation test")
+    root = WORKFLOW.parents[2]
+    workspace = tmp_path / "workspace"
+    (workspace / ".github" / "scripts").mkdir(parents=True)
+    # The real snapshot needs GNU find and isn't what this checks.
+    (workspace / ".github" / "scripts" / "snapshot-tree.sh").write_text(
+        "snapshot_worktree() { :; }\n", encoding="utf-8"
+    )
+    for directory in (".claude-plugin", "skills"):
+        shutil.copytree(root / directory, workspace / directory)
+    (workspace / "flowx_output" / ".work").mkdir(parents=True)
+    report = {"name": "pipeline", "tasks": [{"name": "gap", "type": "PlaceholderActivity", "task_key": "gap"}]}
+    (workspace / "flowx_output" / ".work" / "translation_report.json").write_text(json.dumps(report), encoding="utf-8")
+    (tmp_path / "temp" / "adf-export").mkdir(parents=True)
+    for directory in ("state", "data"):
+        (tmp_path / directory).mkdir()
+    arguments_log = tmp_path / "claude-arguments.json"
+    prompt_log = tmp_path / "claude-prompt"
+    claude = tmp_path / "claude"
+    claude.write_text(
+        f"""#!{sys.executable}
+import json, sys
+open({str(arguments_log)!r}, "w").write(json.dumps(sys.argv[1:]))
+open({str(prompt_log)!r}, "w").write(sys.stdin.read())
+""",
+        encoding="utf-8",
+    )
+    claude.chmod(0o755)
+    environment = {
+        **os.environ,
+        "CLAUDE_CODE_OAUTH_TOKEN": "stub",
+        "CLAUDE_BIN": str(claude),
+        "FLOWX_OUTPUT": "flowx_output",
+        "ADF_EXPORT_DIR": str(tmp_path / "temp" / "adf-export"),
+        "RUNNER_TEMP": str(tmp_path / "temp"),
+        "GITHUB_WORKSPACE": str(workspace),
+        "GITHUB_OUTPUT": str(tmp_path / "github-output"),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        "TF_STATE_DIR": str(tmp_path / "state"),
+        "TF_DATA_DIR": str(tmp_path / "data"),
+    }
+    try:
+        subprocess.run(["bash", str(RESOLVE_AGENTIC)], cwd=workspace, env=environment, capture_output=True, check=False)
+    finally:
+        for directory in ("state", "data"):
+            (tmp_path / directory).chmod(0o700)
+        subprocess.run(["chmod", "-R", "u+w", str(tmp_path / "temp")], check=False)
+    flags = [flag for argument in json.loads(arguments_log.read_text()) for flag in argument.split("=", 1)]
+    return flags, prompt_log.read_text()
+
+
+def _values(flags: list[str], name: str) -> list[str]:
+    """Return every value passed for a repeated command-line flag."""
+    return [flags[index + 1] for index, flag in enumerate(flags) if flag == name]
+
+
+def _rules(rule_list: str) -> set[tuple[str, str]]:
+    """Split a comma-separated permission list such as "Read(./a/**),Grep" into (tool, path) pairs."""
+    rules = set()
+    for rule in rule_list.split(","):
+        match = re.fullmatch(r"(?P<tool>\w+)(?:\((?P<path>.*)\))?", rule)
+        assert match, rule
+        rules.add((match.group("tool"), match.group("path") or ""))
+    return rules

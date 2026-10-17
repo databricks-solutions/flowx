@@ -376,7 +376,7 @@ verify_setup() {
   fi
   environment=$(gh api "repos/${GITHUB_REPO}/environments/${ENV_NAME}") || { echo "MISSING: GitHub environment $ENV_NAME" >&2; failures=$((failures + 1)); environment='{}'; }
   reviewer_count=$(json_value "invalid environment response from GitHub" \
-    'if type == "object" then [.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | length else 0 end' \
+    'if type == "object" then [.protection_rules[]? | select(.type=="required_reviewers") | .reviewers[]?] | unique_by(.reviewer.id) | length else 0 end' \
     <<< "$environment")
   ((reviewer_count >= 2)) || { echo 'MISSING/MISMATCH: environment needs at least 2 required reviewers' >&2; failures=$((failures + 1)); }
   self_review=$(json_value "invalid environment response from GitHub" \

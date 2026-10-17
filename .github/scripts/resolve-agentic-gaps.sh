@@ -42,18 +42,29 @@ source "${RUNNER_TEMP}/snapshot-worktree.sh"
 worktree_snapshot="${RUNNER_TEMP}/pre-claude-worktree.sha256"
 snapshot_worktree > "${worktree_snapshot}"
 chmod 000 "${TF_STATE_DIR}" "${TF_DATA_DIR}"
-# Claude may read only its inputs, the plugin, and its own results. Absolute paths take a leading "/" to
-# become "//path". The denies cover runner secrets and credential caches even if the allow list grows.
-allowed_reads="Read(./${FLOWX_OUTPUT}/**),Read(/${ADF_EXPORT_DIR}/**),Read(/${plugin_dir}/**),Read(./agentic_results/**)"
+# Claude may read and search only its inputs, the plugin, and its own results. --restricted keeps Read, Glob,
+# and Grep inside the checkout and the --add-dir paths, which path-scoped rules alone don't do for Glob. Inside
+# the checkout these tools can still see the pull request's own files; the Read denies, which also apply to
+# Glob and Grep, keep .git, credential caches, and Terraform state out. Absolute paths take a leading "/" to
+# become "//path". This was checked against Claude Code 2.1.296.
+allowed_dirs=("./${FLOWX_OUTPUT}/**" "/${ADF_EXPORT_DIR}/**" "/${plugin_dir}/**" "./agentic_results/**")
+allowed_tools=""
+for tool in Read Glob Grep; do
+  for allowed_dir in "${allowed_dirs[@]}"; do allowed_tools+="${tool}(${allowed_dir}),"; done
+done
+allowed_tools+="Edit(agentic_results/**)"
 denied_reads="Read(//proc/**),Read(~/.azure/**),Read(~/.config/**),Read(~/.docker/**),Read(~/.npmrc)"
 denied_reads+=",Read(~/.databrickscfg),Read(./.git/**),Read(tests/integration/azure/terraform/**)"
 denied_reads+=",Read(/${TF_STATE_DIR}/**),Read(/${TF_DATA_DIR}/**)"
 if ! "${CLAUDE_BIN}" -p \
+  --restricted \
+  --add-dir "${ADF_EXPORT_DIR}" \
+  --add-dir "${plugin_dir}" \
   --plugin-dir "${plugin_dir}" \
   --permission-mode dontAsk \
   --permission-prompts none \
   --tools="Read,Edit,Write,Glob,Grep,Skill" \
-  --allowedTools="${allowed_reads},Edit(agentic_results/**),Glob,Grep" \
+  --allowedTools="${allowed_tools}" \
   --disallowedTools="${denied_reads}" <<CLAUDE_PROMPT
 Use the flowx:flowx-convert skill, specifically the ADF agentic-gap instructions in
 ${plugin_dir}/skills/flowx-convert/sources/adf.md steps 4 and 5. Read

@@ -104,7 +104,10 @@ case "$*" in
     else echo "$*" >> "$MUTATION_LOG"; exit 91; fi ;;
   *"api repos/"*"/environments/"*)
     reviewers='{"type":"User","reviewer":{"login":"flowx-reviewer","id":12345}}'
-    [[ "${STUB_ONE_REVIEWER:-}" == 1 ]] || reviewers+=',{"type":"User","reviewer":{"login":"second","id":67890}}'
+    if [[ "${STUB_DUPLICATE_REVIEWER:-}" == 1 ]]; then reviewers+=",$reviewers"
+    elif [[ "${STUB_ONE_REVIEWER:-}" != 1 ]]; then
+      reviewers+=',{"type":"User","reviewer":{"login":"second","id":67890}}'
+    fi
     if [[ "${STUB_SELF_REVIEW:-}" == 1 ]]; then self_review=false; else self_review=true; fi
     printf '{"protection_rules":[{"type":"required_reviewers","prevent_self_review":%s,"reviewers":[%s]}]}\n' \
       "$self_review" "$reviewers" ;;
@@ -277,6 +280,7 @@ def test_setup_requires_two_distinct_reviewers(stub_path: tuple[Path, Path], rev
     [
         ("STUB_SELF_REVIEW", "environment must prevent self-review"),
         ("STUB_ONE_REVIEWER", "environment needs at least 2 required reviewers"),
+        ("STUB_DUPLICATE_REVIEWER", "environment needs at least 2 required reviewers"),
     ],
 )
 def test_verify_rejects_weak_environment_protection(stub_path: tuple[Path, Path], stub: str, message: str) -> None:
@@ -419,19 +423,69 @@ def test_apply_stops_when_the_plan_deletes_anything(tmp_path: Path, actions: lis
 @pytest.mark.parametrize(
     "snippet",
     [
-        'provisioner "local-exec" {\n  command = "id"\n}',
-        'provisioner "remote-exec" {\n  inline = ["id"]\n}',
+        'resource "terraform_data" "run" {\n  provisioner "local-exec" {\n    command = "id"\n  }\n}',
+        'resource "null_resource" "run" {\n  provisioner "remote-exec" {\n    inline = ["id"]\n  }\n}',
         'data "external" "run" {\n  program = ["id"]\n}',
+        '{"resource": {"terraform_data": {"run": {"provisioner": [{"local-exec": {"command": "id"}}]}}}}',
     ],
+    ids=["local-exec", "remote-exec", "external", "json"],
 )
 def test_apply_rejects_config_that_runs_commands(tmp_path: Path, snippet: str) -> None:
-    """Provisioners and the external data source are refused before Terraform starts."""
+    """Provisioners and the external data source are refused before validate, plan, or apply run."""
     config = tmp_path / "config"
     config.mkdir()
-    (config / "main.tf").write_text(f'resource "terraform_data" "test" {{\n{snippet}\n}}\n', encoding="utf-8")
+    filename = "main.tf.json" if snippet.startswith("{") else "main.tf"
+    (config / filename).write_text(snippet + "\n", encoding="utf-8")
     result, calls = _run_apply(tmp_path, config, ["create"])
     assert result.returncode != 0
-    assert "must not use local-exec" in result.stdout
+    assert "must not use provisioners" in result.stdout
+    assert [call.split()[0] for call in calls] == ["init"]
+
+
+@pytest.mark.parametrize("module_kind", ["local", "downloaded"])
+def test_apply_rejects_provisioners_inside_modules(tmp_path: Path, module_kind: str) -> None:
+    """A provisioner in a local module or one init downloaded is found through the modules init recorded."""
+    config = tmp_path / "config"
+    config.mkdir()
+    module_dir = tmp_path / "outside-module" if module_kind == "local" else tmp_path / "data" / "modules" / "m"
+    module_dir.mkdir(parents=True)
+    (module_dir / "main.tf").write_text(
+        'resource "terraform_data" "run" {\n  provisioner "local-exec" {\n    command = "id"\n  }\n}\n',
+        encoding="utf-8",
+    )
+    source = "../outside-module" if module_kind == "local" else "example.invalid/module"
+    (config / "main.tf").write_text(f'module "m" {{\n  source = "{source}"\n}}\n', encoding="utf-8")
+    modules = {"Modules": [{"Key": "", "Source": "", "Dir": "."}, {"Key": "m", "Dir": str(module_dir)}]}
+    result, calls = _run_apply(tmp_path, config, ["create"], {"STUB_MODULES_JSON": json.dumps(modules)})
+    assert result.returncode != 0
+    assert "must not use provisioners" in result.stdout
+    assert [call.split()[0] for call in calls] == ["init"]
+
+
+def test_apply_rejects_a_changed_provider_lock_file(tmp_path: Path) -> None:
+    """Only the pinned lock file, with its two providers and their hashes, gets as far as init."""
+    config = tmp_path / "config"
+    config.mkdir()
+    lock = (TERRAFORM_DIR / ".terraform.lock.hcl").read_text(encoding="utf-8")
+    (config / ".terraform.lock.hcl").write_text(
+        lock + '\nprovider "registry.terraform.io/hashicorp/external" {\n  version = "2.3.5"\n}\n', encoding="utf-8"
+    )
+    result, calls = _run_apply(tmp_path, config, ["create"])
+    assert result.returncode != 0
+    assert "lock file changed" in result.stdout
+    assert calls == []
+
+
+@pytest.mark.parametrize("override", ["TF_CLI_CONFIG_FILE", "TF_PLUGIN_CACHE_DIR", "terraformrc"])
+def test_apply_rejects_terraform_cli_configuration(tmp_path: Path, override: str) -> None:
+    """CLI configuration could change where providers come from, so any of it stops the run before init."""
+    extra_environment = {} if override == "terraformrc" else {override: str(tmp_path / "override")}
+    if override == "terraformrc":
+        (tmp_path / "home").mkdir()
+        (tmp_path / "home" / ".terraformrc").write_text("provider_installation {}\n", encoding="utf-8")
+    result, calls = _run_apply(tmp_path, TERRAFORM_DIR, ["create"], extra_environment)
+    assert result.returncode != 0
+    assert "No Terraform CLI configuration" in result.stdout
     assert calls == []
 
 
@@ -540,26 +594,48 @@ def _script_json(variable: str) -> str:
     return json.dumps(json.loads(match.group("value")))
 
 
-def _run_apply(tmp_path: Path, config: Path, actions: list[str]) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    """Run apply-terraform.sh against a stub terraform whose plan changes one resource with the given actions."""
-    if shutil.which("jq") is None:
-        pytest.skip("jq is required for the apply-script test")
+def _run_apply(
+    tmp_path: Path, config: Path, actions: list[str], extra_environment: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run apply-terraform.sh with a stub terraform whose plan gives one resource the given actions.
+
+    The stub's init writes STUB_MODULES_JSON, when set, where real init records the modules it found.
+    """
+    if shutil.which("jq") is None or shutil.which("sha256sum") is None:
+        pytest.skip("jq and sha256sum are required for the apply-script test")
+    lock = config / ".terraform.lock.hcl"
+    if not lock.exists():
+        shutil.copy(TERRAFORM_DIR / ".terraform.lock.hcl", lock)
     binary_dir = tmp_path / "bin"
     binary_dir.mkdir()
     calls = tmp_path / "terraform-calls"
     plan = {"resource_changes": [{"address": "azurerm_storage_account.test", "change": {"actions": actions}}]}
     (binary_dir / "terraform").write_text(
-        '#!/usr/bin/env bash\necho "$*" >> "$CALLS"\n[[ "$1" != show ]] || echo "$STUB_PLAN"\n', encoding="utf-8"
+        """#!/usr/bin/env bash
+echo "$*" >> "$CALLS"
+if [[ "$1" == init && -n "${STUB_MODULES_JSON:-}" ]]; then
+  mkdir -p "$TF_DATA_DIR/modules"; echo "$STUB_MODULES_JSON" > "$TF_DATA_DIR/modules/modules.json"
+fi
+[[ "$1" != show ]] || echo "$STUB_PLAN"
+""",
+        encoding="utf-8",
     )
     (binary_dir / "terraform").chmod(0o755)
     environment = {
-        **os.environ,
-        "PATH": f"{binary_dir}:{os.environ['PATH']}",
-        "CALLS": str(calls),
-        "STUB_PLAN": json.dumps(plan),
-        "TF_STATE_DIR": str(tmp_path / "state"),
-        "TF_STATE_PATH": str(tmp_path / "state" / "terraform.tfstate"),
+        key: value for key, value in os.environ.items() if key not in {"TF_CLI_CONFIG_FILE", "TF_PLUGIN_CACHE_DIR"}
     }
+    environment.update(
+        {
+            "PATH": f"{binary_dir}:{os.environ['PATH']}",
+            "HOME": str(tmp_path / "home"),
+            "CALLS": str(calls),
+            "STUB_PLAN": json.dumps(plan),
+            "TF_DATA_DIR": str(tmp_path / "data"),
+            "TF_STATE_DIR": str(tmp_path / "state"),
+            "TF_STATE_PATH": str(tmp_path / "state" / "terraform.tfstate"),
+            **(extra_environment or {}),
+        }
+    )
     result = subprocess.run(
         [str(BASH), str(APPLY_SCRIPT)], cwd=config, env=environment, capture_output=True, text=True, check=False
     )

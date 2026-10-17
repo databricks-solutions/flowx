@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Installs a pinned CLI after checking it against the SHA-256 listed in that release's SHA256SUMS file.
+# Installs a pinned CLI after checking it against a pinned SHA-256. Each hash was copied from that release's
+# SHA256SUMS file; pinning it here means a changed release asset fails the check.
 tool=$1
 case "${tool}" in
   terraform)
