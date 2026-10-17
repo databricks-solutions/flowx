@@ -1391,3 +1391,46 @@ def test_a_quoted_interpolation_marker_inside_a_whole_expression_stays_literal_t
     assert reads[0].signature == "ST[sales@acctA]/FP[foo/@{right}]/FN[]"
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert edges == []
+
+
+@pytest.mark.parametrize(
+    "runtime_value", ["pipeline().RunId", "pipeline().TriggerTime", "utcNow()", "utcnow('yyyy')", "trigger().startTime"]
+)
+def test_a_system_runtime_value_in_a_folder_is_a_slot_not_nothing(runtime_value: str) -> None:
+    """``landing/<run id>`` is not the literal folder ``landing``, so the two never join on folder shape."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name,
+                file_system="sales",
+                folder_path="@dataset().folderPath",
+                linked_service="ls_acctA",
+                file_name="@dataset().fileName",
+            )
+            for name in ("ds_out", "ds_in")
+        },
+        linked_services={"ls_acctA": _adls_linked_service("ls_acctA", account="acctA")},
+    )
+
+    def _reference(dataset: str, folder_path: str) -> AdfDatasetReference:
+        return AdfDatasetReference(
+            reference_name=dataset,
+            parameters={
+                "folderPath": {"value": folder_path, "type": "Expression"},
+                "fileName": {"value": "@item().name", "type": "Expression"},
+            },
+        )
+
+    _, writes = activity_data_assets(
+        AdfActivity(name="Write", type="Copy", outputs=[_reference("ds_out", f"@concat('landing/', {runtime_value})")]),
+        definitions,
+    )
+    reads, _ = activity_data_assets(
+        AdfActivity(name="Read", type="Copy", inputs=[_reference("ds_in", "landing")]), definitions
+    )
+
+    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert reads[0].signature == "ST[sales@acctA]/FP[landing]/FN[]"
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert edges == []

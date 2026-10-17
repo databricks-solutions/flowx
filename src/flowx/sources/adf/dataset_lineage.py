@@ -70,12 +70,17 @@ _LINKED_SERVICE_STORE_LOCATIONS = frozenset(
 # run time; for a *structural* signature we collapse them all to one slot token so
 # that, e.g., a writer's ``pipeline().parameters.entityID`` and a reader's
 # ``item().entityID`` (the same value passed down a ForEach) share the same shape.
+# System values such as ``pipeline().RunId`` or ``utcNow()`` are slots too, so a
+# run-specific folder never looks like the literal folder it sits under.
 _PARAM_REF_RE = re.compile(
-    r"pipeline\(\)\.parameters\.\w+"
+    r"pipeline\(\)(?:\.\w+)+"
     r"|item\(\)(?:\.\w+)*"
     r"|variables\('[^']*'\)"
     r"|dataset\(\)\.\w+"
     r"|activity\('[^']*'\)\.[\w.]+"
+    r"|trigger\(\)(?:\.\w+)+"
+    r"|linkedService\(\)\.\w+"
+    r"|(?i:utcnow|guid)\([^()]*\)"
 )
 _SHAPE_TOKEN_RE = re.compile(rf"'(?P<literal>[^']*)'|(?P<reference>{_PARAM_REF_RE.pattern})")
 _DATASET_PARAMETER_REF_RE = re.compile(r"dataset\(\)\.(\w+)")
