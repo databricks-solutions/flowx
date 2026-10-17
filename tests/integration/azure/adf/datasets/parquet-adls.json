@@ -1,0 +1,1 @@
+{"name":"parquet-adls","properties":{"type":"Parquet","linkedServiceName":{"referenceName":"adls-gen2","type":"LinkedServiceReference"},"typeProperties":{"location":{"type":"AzureBlobFSLocation","fileSystem":"curated","folderPath":"parquet"},"compressionCodec":"snappy"}}}

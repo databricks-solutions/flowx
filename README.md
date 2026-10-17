@@ -289,7 +289,7 @@ for deployment (SDK notebook or CLI script) and Genie Code registration.
 make dev               # Install dependencies (uses uv)
 make test              # Run unit tests
 make integration       # Run integration tests (excludes the live-Azure suite; gates CI)
-make integration-live  # Also run tests needing live ADF access (az login + factory access)
+make integration-live  # Also run tests marked integration (live Azure; none today)
 make fmt               # Format + lint (ruff + mypy)
 make clean             # Remove build artifacts
 ```

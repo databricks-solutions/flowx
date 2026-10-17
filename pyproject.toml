@@ -84,7 +84,7 @@ addopts = "--no-header"
 cache_dir = ".venv/pytest-cache"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
-    "integration: marks tests that require live Azure Data Factory access",
+    "integration: marks tests that need live Azure access; make integration skips them (none use it today)",
     "slow: marks tests that are slow to run",
 ]
 
@@ -92,7 +92,11 @@ markers = [
 cache-dir = ".venv/ruff-cache"
 target-version = "py312"
 line-length = 120
-exclude = ["templates/*", "tests/resources/airflow/review_repros/*"]
+exclude = [
+    "templates/*",
+    "tests/resources/airflow/review_repros/*",
+    "tests/integration/azure/adf/cases/*/expected/bundles/**",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

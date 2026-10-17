@@ -1,4 +1,4 @@
-.PHONY: clean dev ci test integration integration-live fmt help docs-install docs-clean docs-build docs-serve lock-dependencies requirements precommit
+.PHONY: clean dev ci test integration integration-live setup-integration fmt help docs-install docs-clean docs-build docs-serve lock-dependencies requirements precommit
 
 clean:
 	rm -rf .venv .pytest_cache .ruff_cache .mypy_cache __pycache__
@@ -19,6 +19,9 @@ integration:
 
 integration-live:
 	PYTHONPATH=src uv run pytest tests/integration -v -m "not slow"
+
+setup-integration:
+	.github/scripts/setup-integration.sh $(ARGS)
 
 fmt:
 	uv run ruff format src/ tests/
@@ -58,6 +61,8 @@ help:
 	@echo "  ci           		Install dependencies (frozen lockfile)"
 	@echo "  test         		Run unit tests"
 	@echo "  integration  		Run integration tests"
+	@echo "  integration-live\tRun integration tests including any marked integration (live Azure)"
+	@echo "  setup-integration\tRun one-time Azure/GitHub integration setup (ARGS=...)"
 	@echo "  fmt          		Format and lint code"
 	@echo "  precommit    		Format, lint, and refresh requirements.txt (run before committing)"
 	@echo "  clean        		Remove build artifacts"

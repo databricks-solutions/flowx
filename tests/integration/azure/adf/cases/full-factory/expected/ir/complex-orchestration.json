@@ -1,0 +1,86 @@
+{
+  "audit": {},
+  "migration_status": "included",
+  "name": "complex-orchestration",
+  "not_translatable": [],
+  "parameters": null,
+  "reconciliation_status": null,
+  "schedule": {
+    "kind": "schedule",
+    "pause_status": "PAUSED",
+    "quartz_cron_expression": "0 0 0 * * ?",
+    "timezone_id": "UTC"
+  },
+  "tags": {
+    "pipeline": "complex-orchestration",
+    "source": "adf"
+  },
+  "tasks": [
+    {
+      "name": "_init_state",
+      "task_key": "_init_state",
+      "type": "SetVariableActivity",
+      "value_kind": "literal",
+      "variable_name": "state",
+      "variable_value": "start"
+    },
+    {
+      "name": "launch-child",
+      "pipeline_name": "child-pipeline",
+      "task_key": "launch-child",
+      "type": "ExecutePipelineActivity",
+      "wait_on_completion": true
+    },
+    {
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "depends_on": [
+        {
+          "outcome": "Succeeded",
+          "task_key": "launch-child"
+        }
+      ],
+      "name": "mixed-script",
+      "original_type": "Script",
+      "raw_definition": {
+        "dependsOn": [
+          {
+            "activity": "launch-child",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "linkedServiceName": {
+          "referenceName": "azure-sql",
+          "type": "LinkedServiceReference"
+        },
+        "name": "mixed-script",
+        "type": "Script",
+        "typeProperties": {
+          "scripts": [
+            {
+              "text": "SELECT 1",
+              "type": "Query"
+            }
+          ]
+        }
+      },
+      "task_key": "mixed-script",
+      "type": "PlaceholderActivity"
+    },
+    {
+      "depends_on": [
+        {
+          "outcome": "Succeeded",
+          "task_key": "mixed-script"
+        }
+      ],
+      "name": "complete",
+      "task_key": "complete",
+      "type": "SetVariableActivity",
+      "value_kind": "literal",
+      "variable_name": "state",
+      "variable_value": "complete"
+    }
+  ]
+}

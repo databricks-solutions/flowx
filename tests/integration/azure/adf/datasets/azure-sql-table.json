@@ -1,0 +1,1 @@
+{"name":"azure-sql-table","properties":{"type":"AzureSqlTable","linkedServiceName":{"referenceName":"azure-sql","type":"LinkedServiceReference"},"typeProperties":{"schema":"dbo","table":"flowx_integration"}}}

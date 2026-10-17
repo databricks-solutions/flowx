@@ -1,0 +1,1 @@
+{"name":"databricks-delta-lake","properties":{"type":"AzureDatabricksDeltaLake","typeProperties":{"domain":"https://example.invalid","clusterId":"<DATABRICKS_CLUSTER_ID>","workspaceResourceId":"<DATABRICKS_WORKSPACE_RESOURCE_ID>"}}}
