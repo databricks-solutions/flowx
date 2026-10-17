@@ -39,10 +39,10 @@ def control_edges_from_calls(
         calls: One ``(target_workflow, wait_for_completion, via_task_key)`` triple
             per call site, in the order they should be considered. ``target_workflow``
             may be empty when the callee could not be resolved from a partial export.
-        known_workflows: Names of the workflows present in this export. When given,
-            an edge is resolved only when its target is one of them, so a callee
-            missing from the export stays unresolved. When ``None``, any non-empty
-            target counts as resolved.
+        known_workflows: Names of the workflows present in this export. An edge is
+            resolved only when its target is one of them, so a callee missing from
+            the export stays unresolved. When ``None``, nothing can be confirmed and
+            every edge is unresolved.
 
     Returns:
         Deduplicated control edges in first-seen order. A call whose target equals
@@ -65,7 +65,7 @@ def control_edges_from_calls(
                 target_workflow=target_name,
                 via_task_key=via_task_key,
                 wait_for_completion=wait,
-                resolved=bool(target_name) and (known_workflows is None or target_name in known_workflows),
+                resolved=bool(target_name) and known_workflows is not None and target_name in known_workflows,
             )
         )
     return edges

@@ -415,3 +415,23 @@ def test_inventory_records_the_source_graphs_hash_only_when_given() -> None:
     assert "source_graphs_sha256" not in without
     assert with_hash["source_graphs_sha256"] == "abc"
     assert {key: value for key, value in with_hash.items() if key != "source_graphs_sha256"} == without
+
+
+def test_missing_or_unknown_strategy_is_listed_as_unsupported() -> None:
+    """A node counted as unsupported says ``unsupported`` in its activity entry too."""
+    no_strategy = _node("n1", "Notebook", "deterministic")
+    no_strategy.properties = {}
+    graph = SourceGraph(
+        name="g1",
+        source="unit",
+        tasks=[no_strategy, _node("n2", "Notebook", "experimental"), _node("n3", "Notebook", "agentic")],
+    )
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/src")
+
+    assert [activity["strategy"] for activity in inventory["pipelines"][0]["activities"]] == [
+        "unsupported",
+        "unsupported",
+        "agentic",
+    ]
+    assert inventory["summary"]["unsupported_count"] == 2

@@ -116,6 +116,15 @@ def test_writer_refuses_a_graph_from_another_source(tmp_path: Path) -> None:
     assert not path.exists()
 
 
+def test_unknown_top_level_key_is_rejected() -> None:
+    """A key the hashes do not cover cannot ride along unverified."""
+    document = source_graphs_document([_graph("first")], source="unit")
+    document["extra"] = {"injected": True}
+
+    with pytest.raises(ValueError, match="extra"):
+        source_graphs_from_document(document)
+
+
 def test_edited_graph_fails_closed() -> None:
     """Changing a graph after discover wrote it is caught by the per-graph hash."""
     document = source_graphs_document([_graph("first")], source="unit")

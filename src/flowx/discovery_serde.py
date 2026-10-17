@@ -50,6 +50,7 @@ SOURCE_GRAPHS_FILENAME = "source_graphs.json"
 SOURCE_GRAPHS_CONTRACT_VERSION = "1"
 
 _HASHED_DOCUMENT_KEYS = ("contract_version", "source", "graphs")
+_DOCUMENT_KEYS = frozenset({*_HASHED_DOCUMENT_KEYS, "graph_sha256", "document_sha256"})
 _NODE_TYPES = frozenset({"SourceNode", "ContainerNode", "GapNode"})
 
 
@@ -111,8 +112,9 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
     The envelope is ``{contract_version, source, graphs}``, the same keys the Airflow
     discover phase writes, plus two content hashes so a later phase can prove it is
     reading exactly what discover produced: ``graph_sha256`` holds one hash per graph,
-    in the same order as ``graphs``, and ``document_sha256`` covers the whole envelope.
-    Both are taken over canonical JSON (sorted keys, compact separators), so they do
+    in the same order as ``graphs``, and ``document_sha256`` covers ``contract_version``,
+    ``source`` and ``graphs``. The reader refuses any other top-level key, so nothing
+    rides along unhashed. Both are taken over canonical JSON (sorted keys, compact separators), so they do
     not depend on how the file happens to be indented.
 
     Args:
@@ -151,10 +153,11 @@ def write_source_graphs(path: Path, graphs: list[SourceGraph], *, source: str) -
 def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
     """Read the graphs back out of a ``source_graphs.json`` document, failing closed on drift.
 
-    Only contract version ``"1"`` is accepted. Both content hashes are required and
-    must match the content, and every graph must come from the document's ``source``,
-    so a hand-edited or truncated file raises instead of quietly handing a different
-    graph to a later phase.
+    Only contract version ``"1"`` is accepted, with no top-level keys beyond the
+    envelope and its two hashes. Both content hashes are required and must match the
+    content, and every graph must come from the document's ``source``, so a
+    hand-edited or truncated file raises instead of quietly handing a different graph
+    to a later phase.
 
     Args:
         document: The parsed JSON document.
@@ -163,15 +166,18 @@ def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
         The rehydrated graphs, in file order.
 
     Raises:
-        ValueError: The contract version is unsupported, ``graphs`` is not a list, a
-            graph's ``source`` differs from the document's, or a hash is missing or
-            does not match the content.
+        ValueError: The contract version is unsupported, the document has an unknown
+            top-level key, ``graphs`` is not a list, a graph's ``source`` differs from
+            the document's, or a hash is missing or does not match the content.
     """
     version = document.get("contract_version")
     if version != SOURCE_GRAPHS_CONTRACT_VERSION:
         raise ValueError(
             f"Unsupported source_graphs contract_version {version!r}; expected {SOURCE_GRAPHS_CONTRACT_VERSION!r}"
         )
+    unknown_keys = sorted(set(document) - _DOCUMENT_KEYS)
+    if unknown_keys:
+        raise ValueError(f"source_graphs document has unexpected top-level keys {unknown_keys}")
     graphs = document.get("graphs")
     if not isinstance(graphs, list):
         raise ValueError("source_graphs document has no 'graphs' list")
