@@ -141,7 +141,7 @@ def translate_pipeline(
 
     # C-05 (VAREX-002): synthesise init SetVariable tasks for variables with a defaultValue, seeding
     # variable_cache so @variables('X') resolves to the init task's value instead of a self-referential dangler.
-    init_variable_activities, context = _build_variable_init_activities(pipeline, context)
+    init_variable_activities, context, synthesized_init_keys = _build_variable_init_activities(pipeline, context)
     translated_activities: list[Activity] = list(init_variable_activities)
 
     sorted_activities = _topological_visit(pipeline.activities)
@@ -183,6 +183,7 @@ def translate_pipeline(
         tasks=translated_activities,
         tags={"source": "adf", "pipeline": pipeline.name},
         schedule=schedule,
+        synthesized_variable_init_keys=synthesized_init_keys,
     )
 
     # Whole-IR expression rewrite: catches @{...} tokens the per-activity translators missed (raw SQL
@@ -772,7 +773,7 @@ def _normalize_timezone(tz: Any) -> str:
 def _build_variable_init_activities(
     pipeline: AdfPipeline,
     context: TranslationContext,
-) -> tuple[list[Activity], TranslationContext]:
+) -> tuple[list[Activity], TranslationContext, frozenset[str]]:
     """Synthesise init SetVariable IR tasks for variables carrying defaultValue.
 
     C-05 (VAREX-002): without an explicit ADF SetVariable activity, a
@@ -781,13 +782,18 @@ def _build_variable_init_activities(
     ``{{tasks.X.values.X}}`` reference.  This helper emits an init task
     per default-valued variable so the variable_cache carries a real
     setter task_key.
+
+    Also returns the exact set of synthesised init task keys so the
+    package-time pruning in :func:`prepare_workflow` can identify these tasks
+    explicitly and never act on a customer-authored task.
     """
     from flowx.parser.expression_parser import resolve_expression
 
     if not pipeline.variables:
-        return [], context
+        return [], context, frozenset()
 
     init_tasks: list[Activity] = []
+    init_keys: set[str] = set()
     for var_name, var_def in pipeline.variables.items():
         default = var_def.default_value
         if default is None:
@@ -833,12 +839,13 @@ def _build_variable_init_activities(
             required_parameters=required_parameters,
         )
         init_tasks.append(init_activity)
+        init_keys.add(task_key)
         # Register the synthesised setter so @variables('X') resolves to {{tasks._init_X.values.X}}; when
         # the value is itself a DAB ref (e.g. @utcNow()), inline it directly.
         dab_ref_value = variable_value if value_kind == "dab_ref" else None
         context = context.with_variable(var_name, task_key, dab_ref_value=dab_ref_value)
         context = context.with_activity(init_activity.name, init_activity)
-    return init_tasks, context
+    return init_tasks, context, frozenset(init_keys)
 
 
 def _topological_visit(activities: list[AdfActivity]) -> list[AdfActivity]:

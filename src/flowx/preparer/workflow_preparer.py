@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from flowx.models.dab import DabNotebook, ParameterApproximation, SecretInstruction, SetupTask
@@ -336,9 +337,12 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
     # Updated in pipeline-declaration order so AppendVariable sees the
     # most-recent prior writer of each variable.
     variable_task_keys_map: dict[str, str] = {}
+    prepared_inits: dict[str, PreparedActivity] = {}
 
     for activity in pipeline.tasks:
         prepared = prepare_activity(activity, scope=scope, variable_task_keys=variable_task_keys_map)
+        if activity.task_key in pipeline.synthesized_variable_init_keys:
+            prepared_inits[activity.task_key] = prepared
         all_tasks.append(prepared.task)
         all_tasks.extend(prepared.extra_tasks)
         artifacts = merge_prepared_artifacts(artifacts, prepared)
@@ -358,6 +362,8 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
                 original_key = dep.get("task_key")
                 if original_key in task_key_remap:
                     dep["task_key"] = task_key_remap[original_key]
+
+    all_tasks, artifacts = _prune_dead_variable_inits(all_tasks, artifacts, prepared_inits)
 
     seen_secrets: set[tuple[str, str]] = set()
     unique_secrets: list[SecretInstruction] = []
@@ -448,6 +454,119 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         description=pipeline.description if is_airflow else None,
         tags=dict(pipeline.tags) if is_airflow else {},
     )
+
+
+def _prune_dead_variable_inits(
+    tasks: list[dict[str, Any]],
+    artifacts: PreparedArtifacts,
+    prepared_inits: dict[str, PreparedActivity],
+) -> tuple[list[dict[str, Any]], PreparedArtifacts]:
+    """Drops synthesised variable-init tasks that nothing references, with their notebooks and setup tasks.
+
+    Args:
+        tasks: Prepared parent-job task dicts.
+        artifacts: Artifacts accumulated while preparing *tasks*.
+        prepared_inits: Prepared output of each translator-synthesised ``_init_<var>`` task, by task key.
+
+    Returns:
+        The ``(tasks, artifacts)`` pair with every dead init task removed.
+
+    Notes:
+        The ADF translator emits an init task per default-valued variable so every read has a
+        writer to bind to; once an explicit SetVariable dominates every read, the init task is dead
+        weight that still runs and reads as a duplicate of the real setter.  Pruning runs here, on
+        the fully prepared tasks, because only now are all references final: the agentic merge has
+        happened, and preparers have materialised references the IR never shows (AppendVariable's
+        ``source_task_key``, ForEach inner-job parameters, notebook dispatch stubs).  Only
+        translator-synthesised keys are eligible, so a customer-authored task is never removed.
+    """
+    dead_keys = find_dead_variable_inits(tasks, artifacts, prepared_inits)
+    if not dead_keys:
+        return tasks, artifacts
+    dead_notebooks = {id(notebook) for key in dead_keys for notebook in prepared_inits[key].notebooks}
+    dead_setup_tasks = {id(setup_task) for key in dead_keys for setup_task in prepared_inits[key].setup_tasks}
+    pruned_artifacts = replace(
+        artifacts,
+        notebooks=tuple(notebook for notebook in artifacts.notebooks if id(notebook) not in dead_notebooks),
+        setup_tasks=tuple(setup_task for setup_task in artifacts.setup_tasks if id(setup_task) not in dead_setup_tasks),
+    )
+    return [task for task in tasks if task.get("task_key") not in dead_keys], pruned_artifacts
+
+
+def find_dead_variable_inits(
+    tasks: list[dict[str, Any]],
+    artifacts: PreparedArtifacts,
+    prepared_inits: dict[str, PreparedActivity],
+) -> frozenset[str]:
+    """Returns the synthesised variable-init task keys that nothing else references.
+
+    Args:
+        tasks: Prepared parent-job task dicts.
+        artifacts: Artifacts accumulated while preparing *tasks*; their notebooks and inner
+            workflows (e.g. ForEach sub-jobs) are scanned too.
+        prepared_inits: Prepared output of each translator-synthesised ``_init_<var>`` task, by task key.
+
+    Returns:
+        The init task keys present in *tasks* that are safe to drop.
+
+    Notes:
+        A reference is any of the forms the preparers emit: an anchored task-value token
+        (``tasks.<key>.values``), a ``depends_on`` edge, a parameter whose whole value is the key
+        (AppendVariable's ``source_task_key``), or a ``taskKey='<key>'`` read in generated notebook
+        code.  Matching these forms rather than a bare substring avoids a false keep when the key
+        text merely appears inside an unrelated key or path, such as a sibling ``_init_x_2`` or a
+        notebook path ``/Shared/_init_x_report``.  Only an init's own task and notebook are
+        ignored, so an init read by another init stays live.
+    """
+    init_keys = {task["task_key"] for task in tasks if task.get("task_key") in prepared_inits}
+    # Whole string values cover depends_on edges and bare-key parameters alike.
+    referencing_tasks = [
+        (task.get("task_key"), json.dumps(task, default=str), set(_iter_string_values(task)))
+        for task in _iter_workflow_tasks(tasks, artifacts.inner_workflows)
+    ]
+    dead_keys: set[str] = set()
+    for key in init_keys:
+        own_notebooks = {id(notebook) for notebook in prepared_inits[key].notebooks}
+        referenced_by_task = any(
+            owner != key and (f"tasks.{key}.values" in serialized_task or key in reference_values)
+            for owner, serialized_task, reference_values in referencing_tasks
+        )
+        referenced_by_notebook = any(
+            _notebook_references(notebook.content, key)
+            for notebook in artifacts.notebooks
+            if id(notebook) not in own_notebooks
+        )
+        if not referenced_by_task and not referenced_by_notebook:
+            dead_keys.add(key)
+    return frozenset(dead_keys)
+
+
+def _iter_string_values(value: Any) -> Iterable[str]:
+    """Yields every string leaf of a nested dict / list structure."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for nested in value.values():
+            yield from _iter_string_values(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _iter_string_values(nested)
+
+
+def _notebook_references(content: str, task_key: str) -> bool:
+    """Reports whether generated notebook *content* reads a task value published by *task_key*."""
+    return any(
+        token in content for token in (f"tasks.{task_key}.values", f"taskKey='{task_key}'", f'taskKey="{task_key}"')
+    )
+
+
+def _iter_workflow_tasks(
+    tasks: list[dict[str, Any]], inner_workflows: Iterable[PreparedWorkflow]
+) -> Iterable[dict[str, Any]]:
+    """Yields *tasks* followed by every task of the (recursively nested) inner workflows."""
+    yield from tasks
+    for workflow in inner_workflows:
+        yield from _iter_workflow_tasks(workflow.tasks, workflow.inner_workflows)
 
 
 def _detect_cross_foreach_variable_reads(activities: list[Activity]) -> list[SetupTask]:

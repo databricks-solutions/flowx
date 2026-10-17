@@ -70,6 +70,8 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
     }
     if pipeline.bundle_variables:
         result["bundle_variables"] = pipeline.bundle_variables
+    if pipeline.synthesized_variable_init_keys:
+        result["synthesized_variable_init_keys"] = sorted(pipeline.synthesized_variable_init_keys)
     if pipeline.description is not None:
         result["description"] = pipeline.description
     if pipeline.timeout_seconds is not None:
