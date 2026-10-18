@@ -624,7 +624,9 @@ def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, repl
     because flowx owns those for an authored component.  It also keeps the
     placeholder's source metadata (notifications, compute mode, description,
     lineage, source definition and the like) for each field the agent leaves
-    out; a value the agent sets wins.  Returns True when a match was replaced.
+    out, except its cluster id and libraries, which a component only takes
+    from its task fragment; a value the agent sets wins.  Returns True when a
+    match was replaced.
     """
     nested_keys = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
     for index, task in enumerate(tasks):
@@ -673,7 +675,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     wrote to the workspace; the prepare phase then references it directly.  An
     ``AgenticComponentActivity`` keeps the placeholder's name, task key,
     dependencies, timeout, and retries whatever the agent wrote, and the
-    placeholder's source metadata wherever the agent leaves a field out.
+    placeholder's source metadata wherever the agent leaves a field out, except
+    its cluster id and libraries, which a component only takes from its task
+    fragment.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.

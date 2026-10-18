@@ -450,14 +450,25 @@ def test_agentic_component_task_fragment_keeps_its_own_description_and_compute(t
     ]
 
 
-def test_agentic_component_setting_libraries_or_a_cluster_on_the_activity_fails():
+@pytest.mark.parametrize(
+    ("activity_fields", "named_fields"),
+    [
+        ({"libraries": [{"pypi": {"package": "great-expectations"}}]}, "libraries"),
+        ({"existing_cluster_id": "0101-abc"}, "existing_cluster_id"),
+        (
+            {"libraries": [{"pypi": {"package": "great-expectations"}}], "existing_cluster_id": "0101-abc"},
+            "existing_cluster_id, libraries",
+        ),
+    ],
+    ids=["libraries", "existing_cluster_id", "both"],
+)
+def test_agentic_component_setting_libraries_or_a_cluster_on_the_activity_fails(activity_fields, named_fields):
     """The bundle never reads these on a component, so the task would run on serverless without the package."""
     serialized = {
         "type": "AgenticComponentActivity",
         "name": "Run",
         "task_key": "run",
-        "libraries": [{"pypi": {"package": "great-expectations"}}],
-        "existing_cluster_id": "0101-abc",
+        **activity_fields,
         "files": [{"path": "notebooks/run.py", "content": "print('run')\n"}],
         "task": {"notebook_task": {"notebook_path": "../src/notebooks/run.py"}},
     }
@@ -466,7 +477,7 @@ def test_agentic_component_setting_libraries_or_a_cluster_on_the_activity_fails(
     with pytest.raises(
         ValueError,
         match=(
-            "Agentic component 'run' sets existing_cluster_id, libraries on the activity, where the bundle "
+            f"Agentic component 'run' sets {named_fields} on the activity, where the bundle "
             "never reads them; set them in the task fragment instead"
         ),
     ):
