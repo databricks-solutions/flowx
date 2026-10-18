@@ -19,7 +19,8 @@ The projection is deliberately small and additive over the historical ADF shape:
   conditions**), and the verbatim per-node ``raw``;
 * a node whose ``properties`` mark it ``inventory_visible: False`` (for example an
   Airflow TaskGroup kept only for structure) is left out of the activity list and
-  the counts, while its children are still listed;
+  the counts, while its children are still listed; any value other than exactly
+  ``False`` keeps the node listed and counted;
 * each pipeline entry gains an additive ``lineage`` block (control + data edges)
   when its :class:`~flowx.models.discovery.SourceGraph` carries derived lineage;
 * each pipeline entry gains an additive ``motifs`` list -- the multi-activity
@@ -62,8 +63,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from flowx.discovery_lineage import walk_nodes
 from flowx.ir_serde import lineage_to_dict
-from flowx.models.discovery import ContainerNode, SourceGraph, SourceNode
+from flowx.models.discovery import SourceGraph, SourceNode
 from flowx.models.ir import Lineage, MotifAnnotation
 
 # Well-known property key under which a mapper records a node's Databricks-target
@@ -75,6 +77,7 @@ INVENTORY_VISIBLE_PROPERTY = "inventory_visible"
 
 _DETERMINISTIC = "deterministic"
 _AGENTIC = "agentic"
+_UNSUPPORTED = "unsupported"
 
 
 def build_source_inventory(
@@ -120,10 +123,10 @@ def build_source_inventory(
 
     for graph in graphs:
         flattened = [
-            node for node in _flatten_nodes(graph.tasks) if node.properties.get(INVENTORY_VISIBLE_PROPERTY, True)
+            node for node in walk_nodes(graph.tasks) if node.properties.get(INVENTORY_VISIBLE_PROPERTY) is not False
         ]
         for node in flattened:
-            strategy = node.properties.get(STRATEGY_PROPERTY)
+            strategy = _strategy(node)
             if strategy == _DETERMINISTIC:
                 deterministic += 1
             elif strategy == _AGENTIC:
@@ -163,21 +166,13 @@ def build_source_inventory(
     return inventory
 
 
-def _flatten_nodes(nodes: list[SourceNode]) -> list[SourceNode]:
-    """Flatten container branches into one depth-first activity list.
+def _strategy(node: SourceNode) -> str:
+    """Return the node's strategy, treating a missing or unrecognised one as unsupported.
 
-    Order is parent, then each branch's children in the branch's own insertion
-    order, recursively -- so an ``IfCondition``'s ``true`` branch precedes its
-    ``false`` branch and a ``Switch``'s cases precede its ``default``, matching the
-    order the source declared them.
+    The summary counts and the activity entry both use this, so they always agree.
     """
-    flattened: list[SourceNode] = []
-    for node in nodes:
-        flattened.append(node)
-        if isinstance(node, ContainerNode):
-            for children in node.branches.values():
-                flattened.extend(_flatten_nodes(children))
-    return flattened
+    strategy = node.properties.get(STRATEGY_PROPERTY)
+    return strategy if strategy in (_DETERMINISTIC, _AGENTIC) else _UNSUPPORTED
 
 
 def _activity_entry(node: SourceNode) -> dict[str, Any]:
@@ -190,7 +185,7 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "name": node.name if node.name is not None else node.task_key,
         "type": node.native_type,
-        "strategy": node.properties.get(STRATEGY_PROPERTY),
+        "strategy": _strategy(node),
     }
     upstream_names = [dependency.upstream for dependency in node.dependencies]
     if upstream_names:

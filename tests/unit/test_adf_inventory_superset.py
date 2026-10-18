@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from flowx.discovery_serde import read_source_graphs
 from flowx.reporting.coverage import build_coverage_rows
 from flowx.sources.adf.loader import build_inventory, load_adf_definitions, main
@@ -228,7 +230,7 @@ def test_detected_motifs_are_saved_inside_the_hashed_graphs(tmp_path: Path) -> N
 
 
 def test_discover_twice_on_the_same_export_gives_identical_inventory_bytes(tmp_path: Path) -> None:
-    """The same export always gives the same ``inventory.json`` bytes, so it carries no ``generated_at``."""
+    """The same export and ``--source-dir`` always give the same ``inventory.json`` bytes: no ``generated_at``."""
     first = (_run_discover(tmp_path / "first") / "inventory.json").read_bytes()
     second = (_run_discover(tmp_path / "second") / "inventory.json").read_bytes()
 
@@ -268,3 +270,70 @@ def test_pipeline_filter_still_resolves_a_child_that_is_in_the_export(tmp_path: 
     assert graphs[0].lineage is not None
     resolved_by_target = {edge.target_workflow: edge.resolved for edge in graphs[0].lineage.control_edges}
     assert resolved_by_target == {"child": True, "missing": False}
+
+
+def test_discover_prints_the_inventory_activity_count_labelled_raw_including_nested(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The console total is the inventory's own count, which includes nested activities, and says so."""
+    metadata = _run_discover(tmp_path)
+    activity_count = json.loads((metadata / "inventory.json").read_text())["summary"]["activity_count"]
+
+    assert f"Total activities:     {activity_count}  (raw activities, incl. nested)" in capsys.readouterr().out
+
+
+def test_a_motif_detected_twice_is_counted_once_in_the_graph_and_the_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The profile report and the saved graph read one de-duplicated list, so their motif counts agree."""
+    from flowx.motifs import detector
+    from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
+    from flowx.sources.adf.loader import attach_motifs_to_graphs, build_profile_rows, detect_motifs_by_pipeline
+
+    definitions = load_adf_definitions(FIXTURES_DIR)
+    original = detector.detect_motifs
+    detected = {pipeline.name: original(pipeline, definitions) for pipeline in definitions.pipelines}
+    name = next(pipeline_name for pipeline_name, found in detected.items() if found)
+    monkeypatch.setattr(detector, "detect_motifs", lambda pipeline, defs: detected[pipeline.name] * 2)
+
+    motifs_by_pipeline = detect_motifs_by_pipeline(definitions)
+    graphs = adf_definitions_to_source_graphs(definitions)
+    attach_motifs_to_graphs(graphs, motifs_by_pipeline)
+    graph = next(graph for graph in graphs if graph.name == name)
+    row = next(row for row in build_profile_rows(definitions, motifs_by_pipeline) if row["pipeline"] == name)
+
+    assert len(motifs_by_pipeline[name]) == len(detected[name])
+    assert graph.lineage is not None and len(graph.lineage.motifs) == len(detected[name])
+    assert row["collapsible_patterns"] == len(detected[name])
+
+
+def test_a_motif_detected_over_the_same_members_in_another_order_is_counted_once_everywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One motif over the same activities, in any order, is one motif in the profile, saved graph and inventory."""
+    import csv
+    from dataclasses import replace
+
+    from flowx.motifs import detector
+
+    definitions = load_adf_definitions(FIXTURES_DIR)
+    original = detector.detect_motifs
+    name, motif = next(
+        (pipeline.name, found[0])
+        for pipeline in definitions.pipelines
+        if (found := original(pipeline, definitions)) and len(found[0].matched_activities) > 1
+    )
+    reordered = replace(motif, matched_activities=list(reversed(motif.matched_activities)))
+    monkeypatch.setattr(
+        detector, "detect_motifs", lambda pipeline, defs: [motif, reordered] if pipeline.name == name else []
+    )
+
+    metadata = _run_discover(tmp_path)
+
+    with (metadata / "profile_report.csv").open(newline="") as handle:
+        row = next(row for row in csv.DictReader(handle) if row["pipeline"] == name)
+    graph = next(graph for graph in read_source_graphs(metadata / "source_graphs.json") if graph.name == name)
+    inventory = json.loads((metadata / "inventory.json").read_text())
+    entry = next(entry for entry in inventory["pipelines"] if entry["name"] == name)
+
+    assert row["collapsible_patterns"] == "1"
+    assert graph.lineage is not None and len(graph.lineage.motifs) == 1
+    assert len(entry["motifs"]) == 1

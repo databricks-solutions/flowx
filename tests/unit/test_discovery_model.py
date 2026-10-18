@@ -87,6 +87,22 @@ def test_unknown_node_type_is_rejected():
         _node_from_dict(unknown)
 
 
+@pytest.mark.parametrize(
+    ("node_type", "extra_field"),
+    [(None, "branches"), ("SourceNode", "branches"), ("GapNode", "branches"), ("ContainerNode", "reason")],
+)
+def test_node_dict_with_a_field_its_type_cannot_hold_is_rejected(node_type, extra_field):
+    """Container branches or a gap reason on the wrong kind of node raise instead of being dropped."""
+    raw = {"source_id": "n1", "task_key": "run", "concept": CONCEPT_NOTEBOOK, "source": SOURCE_AIRFLOW}
+    if node_type is not None:
+        raw["node_type"] = node_type
+    child = {"node_type": "SourceNode", "task_key": "child"}
+    raw[extra_field] = {"body": [child]} if extra_field == "branches" else "x"
+
+    with pytest.raises(ValueError, match=extra_field):
+        _node_from_dict(raw)
+
+
 def test_container_node_holds_labelled_branches():
     """A ContainerNode nests child nodes under source-named branch labels."""
     container = ContainerNode(
