@@ -171,8 +171,8 @@ def test_mcp_package_honours_an_explicit_group_spec(no_bundle_upload, tmp_path: 
     assert (mcp_dir / "team_b" / "databricks.yml").exists()
 
 
-@pytest.mark.parametrize("parameters", [{"packaging_mode": "per-group"}, {}])
-def test_mcp_package_uses_a_group_spec_sent_without_group_by(no_bundle_upload, tmp_path: Path, parameters):
+@pytest.mark.parametrize("parameters", [{"packaging_mode": "per-group"}, {"group_by": "spec"}, {}])
+def test_mcp_package_uses_a_group_spec_with_its_layout_left_unset(no_bundle_upload, tmp_path: Path, parameters):
     spec_path = _write_group_spec(tmp_path)
 
     result, mcp_dir, cli_dir = _package_both_ways(
@@ -403,6 +403,10 @@ def _migrate(output_dir: Path, parameters: dict[str, Any]) -> dict[str, Any]:
         ),
         (
             {"group_spec": "/tmp/groups.json"},
+            ["--packaging-mode", "per-group", "--group-by", "spec", "--group-spec", "/tmp/groups.json"],
+        ),
+        (
+            {"group_by": "spec", "group_spec": "/tmp/groups.json"},
             ["--packaging-mode", "per-group", "--group-by", "spec", "--group-spec", "/tmp/groups.json"],
         ),
         ({"group_spec": ""}, []),
