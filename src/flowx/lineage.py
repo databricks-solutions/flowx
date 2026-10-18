@@ -79,16 +79,20 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
     - **identity** -- when both sides resolved to a physical identity, they match
       only if those identities are equal. Two differently-resolved identities do
       *not* fall through to a signature match; that is what manufactured the
-      spurious edges #36 removed.
+      spurious edges #36 removed. An empty identity counts as unresolved.
     - **signature** -- when at least one identity is unresolved, fall back to the
-      neutral descriptor and match on equal, non-empty signatures.
+      neutral descriptor and match on equal, non-empty signatures. When both sides
+      name their ``asset_type`` and the types differ, they are different things
+      that happen to share a weak name, so they do not match.
 
     Returns:
         ``(match_kind, match_key, identity)`` when the pair matches, else ``None``.
     """
-    if producer.identity is not None and consumer.identity is not None:
+    if producer.identity and consumer.identity:
         if producer.identity == consumer.identity:
             return "identity", producer.identity, producer.identity
+        return None
+    if producer.asset_type and consumer.asset_type and producer.asset_type != consumer.asset_type:
         return None
     if producer.signature and producer.signature == consumer.signature:
         # A signature match proves nothing physical, so it never claims either side's identity.

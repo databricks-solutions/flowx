@@ -101,6 +101,29 @@ def test_distinct_identities_do_not_fall_back_to_signature() -> None:
     assert build_graph_lineage(graph).data_edges == []
 
 
+def test_empty_identities_do_not_join_on_identity() -> None:
+    """An empty identity is not a resolved one, so two different paths never join on it."""
+    graph = _graph(
+        _node("writer", writes=[DataAsset(signature="bronze/orders", identity="")]),
+        _node("reader", reads=[DataAsset(signature="silver/orders", identity="")]),
+    )
+    assert build_graph_lineage(graph).data_edges == []
+
+
+def test_signature_match_needs_the_same_asset_type_when_both_are_known() -> None:
+    """A file and an in-memory value that share a weak name are different things and never link."""
+    mismatched = _graph(
+        _node("writer", writes=[DataAsset(signature="orders", asset_type="file")]),
+        _node("reader", reads=[DataAsset(signature="orders", asset_type="value")]),
+    )
+    one_side_unknown = _graph(
+        _node("writer", writes=[DataAsset(signature="orders", asset_type="file")]),
+        _node("reader", reads=[DataAsset(signature="orders")]),
+    )
+    assert build_graph_lineage(mismatched).data_edges == []
+    assert [edge.asset_type for edge in build_graph_lineage(one_side_unknown).data_edges] == ["file"]
+
+
 def test_fan_out_one_writer_many_readers() -> None:
     graph = _graph(
         _node("writer", writes=[DataAsset(signature="ds", identity="x.y")]),
@@ -257,3 +280,16 @@ def test_with_graph_lineage_keeps_motifs_already_on_the_graph() -> None:
 
     assert result.lineage.motifs == [motif]
     assert [edge.target_workflow for edge in result.lineage.control_edges] == ["child"]
+
+
+def test_invocation_target_that_is_not_a_string_stays_unresolved() -> None:
+    """A list, number or mapping is never turned into a callee name, so it cannot match a real workflow."""
+    graph = _graph(
+        _node("call_list", invokes=["child"], wait="yes"),
+        _node("call_number", invokes=7),
+        _node("call_mapping", invokes={"referenceName": "child"}),
+        name="parent",
+    )
+    edges = build_graph_lineage(graph, known_workflows={"['child']", "7", "child"}).control_edges
+    assert [(edge.target_workflow, edge.resolved) for edge in edges] == [("", False), ("", False), ("", False)]
+    assert edges[0].wait_for_completion is None

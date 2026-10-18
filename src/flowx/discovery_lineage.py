@@ -63,6 +63,8 @@ def build_graph_control_edges(
 
     One edge per node that carries the :data:`INVOKES_WORKFLOW_PROPERTY` marker,
     found anywhere in the graph (fan-out inside ForEach / If / Switch preserved).
+    A marker that is not a string gives an empty, unresolved target rather than a
+    made-up name, and a wait flag that is not a boolean is recorded as unknown.
     Delegates the self-edge drop, dedup, and unresolved-callee recording to the
     shared :func:`~flowx.lineage.control_edges_from_calls`.
 
@@ -79,9 +81,13 @@ def build_graph_control_edges(
         for node in walk_nodes(graph.tasks):
             if INVOKES_WORKFLOW_PROPERTY not in node.properties:
                 continue
-            target = node.properties.get(INVOKES_WORKFLOW_PROPERTY) or ""
+            target = node.properties.get(INVOKES_WORKFLOW_PROPERTY)
             wait = node.properties.get(INVOKES_WAIT_PROPERTY)
-            yield str(target), wait, node.task_key
+            yield (
+                target if isinstance(target, str) else "",
+                wait if isinstance(wait, bool) else None,
+                node.task_key,
+            )
 
     return control_edges_from_calls(graph.name, _calls(), known_workflows=known_workflows)
 
