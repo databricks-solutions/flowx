@@ -267,6 +267,7 @@ flowx_output/
     routing_review.html       # route: the standard review page drawn from the plan
     agentic_conversion.json   # fill-agentic (ADF): the agent's conversion output per routed-agentic unit, re-applied by every route
     route_audit.json          # package: routing decisions, outcomes, history, conversation and hashes, written when a plan is recorded
+    packaged_bundles.json     # package: the bundle folders it wrote, so the next package archives the ones it no longer writes
     configuration.json        # modify: collected configuration answers
   .work/                      # transient intermediates (translation report, IR, gaps.json); pruned by package
 ```

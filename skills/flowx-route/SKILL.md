@@ -451,8 +451,9 @@ Package overwrites the bundle files it generates, so hand edits to them are lost
 `metadata/archive/<UTC time>/`. To keep a change to an agentic unit's resource, put it in the authored
 pipeline's resource `definition` and run fill-agentic. With `--keep-intermediates` (MCP
 `keep_intermediates`) package leaves `.work/` in place, so you can start at route or fill-agentic. A
-re-package after the pipeline count or names change can leave the earlier bundle folders (one per
-pipeline) in the output folder; remove them. A re-discover moves `metadata/` and `.work/`, the plan
+re-package after the pipeline count or names change moves the earlier bundle folders it recorded in
+`metadata/packaged_bundles.json` into `metadata/archive/<UTC time>/`, so a pipeline an agentic unit
+replaced under a new name no longer sits beside the new one. A re-discover moves `metadata/` and `.work/`, the plan
 and the fills with them, into `metadata/archive/<UTC time>/`. A deploy uploads `metadata/archive/`
 with the bundle unless it is git-ignored; nothing in it is a job or pipeline the bundle deploys.
 

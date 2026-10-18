@@ -196,6 +196,12 @@ Where:
 - A `resources/*.yml` that this package does not write again (one an earlier package wrote, or one
   added by hand) is moved into `metadata/archive/<UTC time>/` with an `archive.json`, so it no longer
   deploys and is kept for audit. The files package does write again are overwritten.
+- Package records the bundle folders it wrote in `metadata/packaged_bundles.json` (`"."` for one bundle
+  at the top of the output folder, otherwise one folder per pipeline). The next package moves every
+  recorded folder it no longer writes into the same archive: a pipeline an agentic unit replaced under a
+  new name, the per-pipeline folders when a convert narrows to one pipeline, or the top-level bundle when
+  it widens again. A folder package never recorded stays where it is. A malformed record stops package
+  before it writes anything; discover archives it with the rest of `metadata/`.
 - `metadata/archive/` sits inside the bundle folder, so `databricks bundle deploy` uploads it with
   the rest unless it is git-ignored; nothing in it is a job or pipeline the bundle deploys.
 
@@ -359,5 +365,6 @@ All under the shared `<output_dir>`:
 | `metadata/<pipeline>.arm.json` | Verbatim original ADF/ARM source (from discover) |
 | `metadata/configuration.json` | Collected configuration answers (from modify) |
 | `metadata/route_audit.json` | What each routing unit was converted to; written only when a routing plan is recorded (see `flowx-route`) |
+| `metadata/packaged_bundles.json` | The bundle folders the latest package wrote, so the next one archives those it no longer writes |
 
 > **Notification destinations.** When a `activity_and_notify` motif was opted into a Slack/Teams/PagerDuty/Generic-Webhook destination, the destination is created (or reused by display name) via the SDK at **prompt time** (the `modify` phase), and its resolved id is carried in the report; package simply wires that id into the task's `webhook_notifications`. If the report has no pre-resolved id (creation was deferred or failed earlier), package retries the create; failing that — e.g. no workspace auth — a `notification_destination` setup task is emitted in SETUP.md instead and the task ships without notifications. Email destinations use raw `email_notifications` and never create an SDK destination.

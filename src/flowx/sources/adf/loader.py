@@ -1050,7 +1050,8 @@ def clear_stale_outputs(output_dir: Path) -> Path | None:
     pipelines' source ARM and generated notebooks in the packaged bundle.
 
     Nothing is deleted: everything this run would remove (the plan, the review page, the insights,
-    the route baseline, the agent's fills, the bundle) moves into
+    the route baseline, the agent's fills, the bundle, and the per-pipeline bundle folders package
+    recorded in ``metadata/packaged_bundles.json``) moves into
     ``metadata/archive/<UTC time>/`` under its own relative path, with an ``archive.json`` that
     records what moved, from where and when, so an earlier run can still be audited. Earlier
     archives stay where they are, and package keeps ``metadata/``, so the archive survives later
@@ -1064,11 +1065,21 @@ def clear_stale_outputs(output_dir: Path) -> Path | None:
 
     Notes:
         Only flowx-managed entries are touched (never the directory itself or unrelated
-        files), so pointing ``output_dir`` at a populated directory stays safe.
+        files), so pointing ``output_dir`` at a populated directory stays safe. A record that is
+        malformed is archived with the rest of ``metadata/`` and its folders are left where they are:
+        discover is how the hosted server gets out of a stuck output folder, so it never refuses here.
     """
+    from flowx.bundler.dab_writer import read_packaged_bundles
+
     archive_parent = output_dir / "metadata" / ARCHIVE_DIRNAME
     entries = [output_dir / name for name in _MANAGED_OUTPUT_DIRS if name != "metadata"]
     entries += [output_dir / name for name in _MANAGED_OUTPUT_FILES]
+    try:
+        recorded_bundles = read_packaged_bundles(output_dir)
+    except ValueError as error:
+        logger.warning("Leaving earlier bundle folders in place: %s", error)
+        recorded_bundles = []
+    entries += [output_dir / name for name in recorded_bundles if name != "." and name not in _MANAGED_OUTPUT_DIRS]
     if (output_dir / "metadata").is_dir():
         entries += [child for child in (output_dir / "metadata").iterdir() if child != archive_parent]
     entries = [entry for entry in entries if entry.exists()]
