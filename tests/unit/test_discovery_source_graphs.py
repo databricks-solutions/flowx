@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from flowx.discovery_serde import (
+    _HASHED_DOCUMENT_KEYS,
     SOURCE_GRAPHS_CONTRACT_VERSION,
+    canonical_sha256,
     read_source_graphs,
     source_graph_to_dict,
     source_graphs_document,
@@ -17,7 +19,7 @@ from flowx.discovery_serde import (
 )
 from flowx.ir_serde import lineage_to_dict
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceDependency, SourceGraph, SourceNode
-from flowx.models.ir import Lineage, MotifAnnotation
+from flowx.models.ir import ControlEdge, Lineage, MotifAnnotation
 
 
 def _graph(name: str) -> SourceGraph:
@@ -73,15 +75,54 @@ def test_hashes_do_not_depend_on_formatting(tmp_path: Path) -> None:
     assert [graph.name for graph in read_source_graphs(compact)] == ["first"]
 
 
-def test_document_without_hashes_is_accepted() -> None:
-    """A version-1 file written without hashes (the Airflow discover shape) still reads."""
-    document = {
-        "contract_version": "1",
-        "source": "airflow",
-        "graphs": [source_graph_to_dict(_graph("dag"))],
-    }
+@pytest.mark.parametrize("missing_key", ["graph_sha256", "document_sha256"])
+def test_document_missing_a_hash_is_rejected(missing_key: str) -> None:
+    """Deleting a hash field cannot get an edited file past verification."""
+    document = source_graphs_document([_graph("first")], source="unit")
+    del document[missing_key]
 
-    assert [graph.name for graph in source_graphs_from_document(document)] == ["dag"]
+    with pytest.raises(ValueError, match=f"missing {missing_key}"):
+        source_graphs_from_document(document)
+
+
+def test_edited_graph_with_both_hashes_deleted_fails_closed() -> None:
+    document = source_graphs_document([_graph("first")], source="unit")
+    document["graphs"][0]["tasks"][0]["native_type"] = "Edited"
+    del document["graph_sha256"]
+    del document["document_sha256"]
+
+    with pytest.raises(ValueError, match="missing graph_sha256"):
+        source_graphs_from_document(document)
+
+
+def test_graph_from_another_source_is_rejected() -> None:
+    """A document labelled with one source cannot carry graphs from another, even with matching hashes."""
+    document = source_graphs_document([_graph("first")], source="unit")
+    document["source"] = "other"
+    document["document_sha256"] = canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
+
+    with pytest.raises(ValueError, match="holds a graph from another source"):
+        source_graphs_from_document(document)
+
+
+def test_writer_refuses_a_graph_from_another_source(tmp_path: Path) -> None:
+    """Discover cannot save a document that the reader would refuse later."""
+    path = tmp_path / "source_graphs.json"
+
+    with pytest.raises(ValueError, match="holds a graph from another source"):
+        source_graphs_document([_graph("first")], source="other")
+    with pytest.raises(ValueError, match="holds a graph from another source"):
+        write_source_graphs(path, [_graph("first")], source="other")
+    assert not path.exists()
+
+
+def test_unknown_top_level_key_is_rejected() -> None:
+    """A key the hashes do not cover cannot ride along unverified."""
+    document = source_graphs_document([_graph("first")], source="unit")
+    document["extra"] = {"injected": True}
+
+    with pytest.raises(ValueError, match="extra"):
+        source_graphs_from_document(document)
 
 
 def test_edited_graph_fails_closed() -> None:
@@ -109,6 +150,79 @@ def test_unknown_contract_version_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="contract_version"):
         source_graphs_from_document(document)
+
+
+def _rehash(document: dict) -> dict:
+    """Recompute both hashes after an edit, so a test reaches the checks that come after them."""
+    document["graph_sha256"] = [canonical_sha256(graph) for graph in document["graphs"]]
+    document["document_sha256"] = canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
+    return document
+
+
+@pytest.mark.parametrize("recorded", ["missing", "false", 1])
+def test_missing_or_non_boolean_resolved_reads_as_unresolved(recorded) -> None:
+    """Only an explicit ``true`` means resolved; anything else read back is unresolved."""
+    graph = _graph("first")
+    graph.lineage = Lineage(
+        control_edges=[ControlEdge(source_workflow="first", target_workflow="missing", via_task_key="a")]
+    )
+    document = source_graphs_document([graph], source="unit")
+    edge = document["graphs"][0]["lineage"]["control_edges"][0]
+    dependency = document["graphs"][0]["tasks"][1]["dependencies"][0]
+    for raw in (edge, dependency):
+        if recorded == "missing":
+            del raw["resolved"]
+        else:
+            raw["resolved"] = recorded
+
+    [restored] = source_graphs_from_document(_rehash(document))
+
+    assert restored.lineage.control_edges[0].resolved is False
+    assert restored.tasks[1].dependencies[0].resolved is False
+
+
+@pytest.mark.parametrize("recorded", ["true", 0])
+def test_non_boolean_wait_for_completion_reads_as_unset(recorded) -> None:
+    """A saved wait flag that is not a boolean comes back as unknown, never verbatim."""
+    graph = _graph("first")
+    graph.lineage = Lineage(
+        control_edges=[
+            ControlEdge(source_workflow="first", target_workflow="child", via_task_key="a", wait_for_completion=True)
+        ]
+    )
+    document = source_graphs_document([graph], source="unit")
+    document["graphs"][0]["lineage"]["control_edges"][0]["wait_for_completion"] = recorded
+
+    [restored] = source_graphs_from_document(_rehash(document))
+
+    assert restored.lineage.control_edges[0].wait_for_completion is None
+
+
+def _graph_with_parameters_list(document: dict) -> None:
+    document["graphs"][0]["parameters"] = [1]
+
+
+def _graph_with_tasks_map(document: dict) -> None:
+    document["graphs"][0]["tasks"] = {"a": {}}
+
+
+def _graph_that_is_a_string(document: dict) -> None:
+    document["graphs"][0] = "first"
+
+
+@pytest.mark.parametrize("edit", [_graph_with_parameters_list, _graph_with_tasks_map, _graph_that_is_a_string])
+def test_malformed_graph_shape_raises_value_error(edit) -> None:
+    """A graph whose shape is wrong is refused with the reader's documented error, not a crash."""
+    document = source_graphs_document([_graph("first")], source="unit")
+    edit(document)
+
+    with pytest.raises(ValueError, match="malformed"):
+        source_graphs_from_document(_rehash(document))
+
+
+def test_document_that_is_not_an_object_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="JSON object"):
+        source_graphs_from_document([])  # type: ignore[arg-type]
 
 
 def _motif(hint: str | None) -> MotifAnnotation:

@@ -8,6 +8,8 @@ outcome conditions, and control-flow nesting maps to labelled container branches
 
 from __future__ import annotations
 
+import pytest
+
 from flowx.discovery_inventory import STRATEGY_PROPERTY
 from flowx.models.adf_ast import AdfDefinitions
 from flowx.models.discovery import (
@@ -191,6 +193,96 @@ def test_definitions_map_preserves_pipeline_order(adf_definitions) -> None:
     graphs = adf_definitions_to_source_graphs(adf_definitions)
     assert [g.name for g in graphs] == [p.name for p in adf_definitions.pipelines]
     assert all(g.source == SOURCE_ADF for g in graphs)
+
+
+def test_execute_pipeline_edge_is_resolved_only_when_the_child_is_in_the_export() -> None:
+    """A child pipeline missing from the export gives an unresolved edge; one that is present gives a resolved edge."""
+
+    def _execute(name: str, child: str) -> dict:
+        return {"name": name, "type": "ExecutePipeline", "typeProperties": {"pipeline": {"referenceName": child}}}
+
+    definitions = AdfDefinitions(
+        pipelines=[
+            _parse_pipeline_json(
+                {
+                    "name": "parent",
+                    "properties": {"activities": [_execute("RunChild", "child"), _execute("RunMissing", "missing")]},
+                }
+            ),
+            _parse_pipeline_json({"name": "child", "properties": {"activities": []}}),
+        ]
+    )
+    parent = adf_definitions_to_source_graphs(definitions)[0]
+
+    assert parent.lineage is not None
+    resolved_by_target = {edge.target_workflow: edge.resolved for edge in parent.lineage.control_edges}
+    assert resolved_by_target == {"child": True, "missing": False}
+
+
+@pytest.mark.parametrize("reference", [None, ["child"], 7, {"referenceName": 7}, {"referenceName": None}])
+def test_execute_pipeline_reference_that_is_not_a_name_stays_unresolved(reference: object) -> None:
+    """A ``pipeline`` reference such as ``null`` names no child, so its edge is unresolved, not a child ``"None"``."""
+    definitions = AdfDefinitions(
+        pipelines=[
+            _parse_pipeline_json(
+                {
+                    "name": "parent",
+                    "properties": {
+                        "activities": [
+                            {"name": "RunOdd", "type": "ExecutePipeline", "typeProperties": {"pipeline": reference}}
+                        ]
+                    },
+                }
+            ),
+            _parse_pipeline_json({"name": "None", "properties": {"activities": []}}),
+        ]
+    )
+    parent = adf_definitions_to_source_graphs(definitions)[0]
+
+    assert parent.lineage is not None
+    assert [(edge.target_workflow, edge.resolved) for edge in parent.lineage.control_edges] == [("", False)]
+
+
+def _execute_pipeline(name: str, child: str) -> dict:
+    return {"name": name, "type": "ExecutePipeline", "typeProperties": {"pipeline": {"referenceName": child}}}
+
+
+def test_execute_pipeline_child_is_matched_case_insensitively_like_adf() -> None:
+    """A reference to ``Child`` resolves to the exported ``child`` under that spelling; a missing one keeps its own."""
+    activities = [
+        _execute_pipeline("RunChild", "Child"),
+        _execute_pipeline("RunChildAgain", "CHILD"),
+        _execute_pipeline("RunMissing", "Missing"),
+    ]
+    definitions = AdfDefinitions(
+        pipelines=[
+            _parse_pipeline_json({"name": "parent", "properties": {"activities": activities}}),
+            _parse_pipeline_json({"name": "child", "properties": {"activities": []}}),
+        ]
+    )
+    parent = adf_definitions_to_source_graphs(definitions)[0]
+
+    assert parent.lineage is not None
+    assert [(edge.target_workflow, edge.via_task_key, edge.resolved) for edge in parent.lineage.control_edges] == [
+        ("child", "RunChild", True),
+        ("child", "RunChildAgain", True),
+        ("Missing", "RunMissing", False),
+    ]
+
+
+def test_execute_pipeline_calling_itself_in_another_case_is_not_an_edge() -> None:
+    """ADF names are case-insensitive, so ``Parent`` running ``parent`` is a self-call and gives no edge."""
+    definitions = AdfDefinitions(
+        pipelines=[
+            _parse_pipeline_json(
+                {"name": "Parent", "properties": {"activities": [_execute_pipeline("RunSelf", "parent")]}}
+            ),
+        ]
+    )
+    parent = adf_definitions_to_source_graphs(definitions)[0]
+
+    assert parent.lineage is not None
+    assert parent.lineage.control_edges == []
 
 
 # ---------------------------------------------------------------------------

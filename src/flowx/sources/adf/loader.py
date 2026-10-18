@@ -893,18 +893,38 @@ def detect_motifs_by_pipeline(definitions: AdfDefinitions) -> dict[str, list[Det
     from a single detection pass. Detection is best-effort: a pipeline whose
     detection raises is logged and recorded with an empty list, never allowed to
     hard-fail discover. This only *detects* motifs -- it never collapses their
-    member activities, which stays a convert-phase decision.
+    member activities, which stays a convert-phase decision. Repeated detections are
+    kept once (see :func:`_distinct_detections`), so the saved graph, the inventory and
+    the profile report's pattern count all read the same list.
     """
     from flowx.motifs.detector import detect_motifs
 
     results: dict[str, list[DetectedMotif]] = {}
     for pipeline in definitions.pipelines:
         try:
-            results[pipeline.name] = detect_motifs(pipeline, definitions)
+            results[pipeline.name] = _distinct_detections(detect_motifs(pipeline, definitions))
         except Exception as exc:  # noqa: BLE001 - detection must never hard-fail discover
             logger.warning("Motif detection failed for pipeline %r: %s", pipeline.name, exc)
             results[pipeline.name] = []
     return results
+
+
+def _distinct_detections(detections: list[DetectedMotif]) -> list[DetectedMotif]:
+    """Drop repeated motif detections, keeping the first one seen and the original order.
+
+    Two detections are the same motif when they have the same motif id and claim the
+    same activities, in any order. That is the rule the inventory uses to collapse
+    repeats, so the profile report and the saved graph count motifs the way the
+    inventory lists them.
+    """
+    seen: set[tuple[str, frozenset[str]]] = set()
+    distinct: list[DetectedMotif] = []
+    for motif in detections:
+        key = (motif.definition.motif_id, frozenset(motif.matched_activities))
+        if key not in seen:
+            seen.add(key)
+            distinct.append(motif)
+    return distinct
 
 
 def attach_motifs_to_graphs(graphs: list[SourceGraph], motifs_by_pipeline: Mapping[str, list[DetectedMotif]]) -> None:
@@ -1130,6 +1150,8 @@ def main(argv: list[str] | None = None) -> int:
     if not definitions.pipelines:
         _warn_no_pipelines_found(args.source_dir)
 
+    exported_pipeline_names = {pipeline.name for pipeline in definitions.pipelines}
+
     # Filter to a single pipeline when --pipeline is specified
     if args.pipeline:
         matched = [pipeline for pipeline in definitions.pipelines if pipeline.name == args.pipeline]
@@ -1164,7 +1186,7 @@ def main(argv: list[str] | None = None) -> int:
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
     inventory_path = metadata_dir / "inventory.json"
-    source_graphs = adf_definitions_to_source_graphs(definitions)
+    source_graphs = adf_definitions_to_source_graphs(definitions, known_workflows=exported_pipeline_names)
     # Detect motifs once and share the result: the graphs carry them (so they are saved and
     # hashed with each graph), the inventory surfaces them, the profile report counts them.
     motifs_by_pipeline = detect_motifs_by_pipeline(definitions)

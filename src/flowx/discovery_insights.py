@@ -13,8 +13,9 @@ There is **no LLM here** -- the tool only validates and records, mirroring the
 author-then-validate-record contract :mod:`flowx.agentic` uses for gap resolution. That
 keeps the deterministic inventory trustworthy and every insight accountable:
 
-* every ``pipeline`` and every relationship endpoint must be a real pipeline in the
-  inventory (foreign-key validation);
+* every ``pipeline`` and every relationship endpoint must be a pipeline the inventory lists
+  (foreign-key validation), except that a ``control`` relationship whose edge resolves (below) may
+  name a pipeline discover left unlisted, since that edge proves the pipeline is in the export;
 * a ``control`` relationship edge must resolve to a real ``ControlEdge`` in the inventory's
   ``lineage`` -- the full ``(from, to, via_task_key)`` triple, so the annotation connects
   exactly the pipelines it claims, not merely some edge that shares a ``via_task_key``;
@@ -123,13 +124,20 @@ _EDGE_TYPES = ("control", "inferred")
 # --------------------------------------------------------------------------- #
 
 
+def _inventory_pipelines(inventory: dict[str, Any]) -> list[dict[str, Any]]:
+    """The inventory's pipeline entries that are objects; a malformed ``pipelines`` value lists none."""
+    pipelines = inventory.get("pipelines")
+    if not isinstance(pipelines, list):
+        return []
+    return [pipeline for pipeline in pipelines if isinstance(pipeline, dict)]
+
+
 def _pipeline_names(inventory: dict[str, Any]) -> set[str]:
-    """The set of real pipeline names in the inventory (the foreign-key domain)."""
-    return {
-        str(pipeline["name"])
-        for pipeline in inventory.get("pipelines", [])
-        if isinstance(pipeline, dict) and pipeline.get("name") is not None
-    }
+    """The pipeline names the inventory lists (the foreign-key domain, which only a resolved control edge widens).
+
+    Only string names count.
+    """
+    return {pipeline["name"] for pipeline in _inventory_pipelines(inventory) if isinstance(pipeline.get("name"), str)}
 
 
 def _control_edge_triples(inventory: dict[str, Any]) -> set[tuple[str, str, str]]:
@@ -139,21 +147,21 @@ def _control_edge_triples(inventory: dict[str, Any]) -> set[tuple[str, str, str]
     ``activities``), so every pipeline's ``lineage.control_edges`` are gathered into one set.
     Resolving on the full triple -- not the bare ``via_task_key`` -- pins a relationship to a
     *specific* edge: a callee is often invoked from several callers, so a ``via_task_key``
-    alone could match an edge between the wrong pair.
+    alone could match an edge between the wrong pair. Only edges discover marked ``resolved``
+    with string fields count; a malformed ``lineage`` block contributes none.
     """
     triples: set[tuple[str, str, str]] = set()
-    for pipeline in inventory.get("pipelines", []):
-        if not isinstance(pipeline, dict):
-            continue
-        lineage = pipeline.get("lineage") or {}
-        for edge in lineage.get("control_edges", []):
-            if (
-                isinstance(edge, dict)
-                and edge.get("source_workflow") is not None
-                and edge.get("target_workflow") is not None
-                and edge.get("via_task_key") is not None
-            ):
-                triples.add((str(edge["source_workflow"]), str(edge["target_workflow"]), str(edge["via_task_key"])))
+    for pipeline in _inventory_pipelines(inventory):
+        lineage = pipeline.get("lineage")
+        edges = lineage.get("control_edges") if isinstance(lineage, dict) else None
+        for edge in edges if isinstance(edges, list) else []:
+            if not isinstance(edge, dict) or edge.get("resolved") is not True:
+                continue
+            source, target, via_task_key = (
+                edge.get(key) for key in ("source_workflow", "target_workflow", "via_task_key")
+            )
+            if isinstance(source, str) and isinstance(target, str) and isinstance(via_task_key, str):
+                triples.add((source, target, via_task_key))
     return triples
 
 
@@ -271,18 +279,36 @@ def _validate_relationships(
             violations.append(f"{loc}: unknown field {key!r}")
         from_pipeline = relationship.get("from_pipeline")
         to_pipeline = relationship.get("to_pipeline")
+        edge = relationship.get("lineage_edge")
+        resolves_control_edge = _resolves_control_edge(edge, from_pipeline, to_pipeline, control_triples)
         for endpoint, value in (("from_pipeline", from_pipeline), ("to_pipeline", to_pipeline)):
             if not value:
                 violations.append(f"{loc}: missing required field {endpoint!r}")
             elif not isinstance(value, str):
                 violations.append(f"{loc}: {endpoint!r} must be a string, got {type(value).__name__}")
-            elif value not in names:
+            elif value not in names and not resolves_control_edge:
                 violations.append(f"{loc}: {endpoint} {value!r} not in inventory")
         violations.extend(_validate_optional_strings(relationship, _RELATIONSHIP_TEXT_FIELDS, loc))
-        violations.extend(
-            _validate_edge(relationship.get("lineage_edge"), loc, from_pipeline, to_pipeline, control_triples)
-        )
+        violations.extend(_validate_edge(edge, loc, from_pipeline, to_pipeline, resolves_control_edge))
     return violations
+
+
+def _resolves_control_edge(
+    edge: Any,
+    from_pipeline: Any,
+    to_pipeline: Any,
+    control_triples: set[tuple[str, str, str]],
+) -> bool:
+    """Whether *edge* is a ``control`` edge naming one of the inventory's resolved control edges, end to end.
+
+    Such an edge proves both endpoints are pipelines in the export, so they count as foreign keys
+    even when discover left one unlisted (filtered out with ``--pipeline``, or a pipeline with no
+    activities).
+    """
+    if not isinstance(edge, dict) or edge.get("edge_type") != "control":
+        return False
+    triple = (from_pipeline, to_pipeline, edge.get("edge_identity"))
+    return all(isinstance(part, str) for part in triple) and triple in control_triples
 
 
 def _validate_optional_strings(record: dict[str, Any], fields: tuple[str, ...], loc: str) -> list[str]:
@@ -299,7 +325,7 @@ def _validate_edge(
     loc: str,
     from_pipeline: Any,
     to_pipeline: Any,
-    control_triples: set[tuple[str, str, str]],
+    resolves_control_edge: bool,
 ) -> list[str]:
     """Validate one ``lineage_edge`` reference.
 
@@ -344,14 +370,14 @@ def _validate_edge(
         for inferred_only in ("evidence", "confidence"):
             if inferred_only in edge:
                 problems.append(f"{loc}.lineage_edge: {inferred_only!r} is only valid on an 'inferred' edge")
-        # Resolve the full triple only when the identity and both endpoints are usable strings
+        # Report an unresolved triple only when the identity and both endpoints are usable strings
         # (a bad identity / endpoint is already reported here or by the caller).
         if (
             isinstance(identity, str)
             and identity
             and isinstance(from_pipeline, str)
             and isinstance(to_pipeline, str)
-            and (from_pipeline, to_pipeline, identity) not in control_triples
+            and not resolves_control_edge
         ):
             problems.append(
                 f"{loc}.lineage_edge: control edge {identity!r} does not resolve to a lineage edge "
@@ -570,14 +596,22 @@ def _load_source_graphs(output_dir: Path, inventory: dict[str, Any]) -> tuple[li
     """Read the saved ``source_graphs.json`` the inventory records, as ``(graphs, violations)``.
 
     An inventory without a recorded hash (an older discover, or a source that does not persist
-    graphs yet) has nothing to read, so it yields ``(None, [])``. Otherwise the saved file must be
-    intact and its document hash must be the one the inventory records, so insights are never
-    bound to a stale graph; any problem yields ``(None, [violation])``.
+    graphs yet) has nothing to read, so it yields ``(None, [])`` -- unless ``source_graphs.json`` is
+    saved beside it, which means the hash was removed from the inventory, so that is a violation.
+    Otherwise the saved file must be intact and its document hash must be the one the inventory
+    records, so insights are never bound to a stale graph. The two unhashed settings the rebuild
+    takes from ``inventory.json`` must also hold up: ``source`` must be the graphs' own source and
+    ``source_dir`` a string. Any problem yields ``(None, [violation])``.
     """
     recorded = inventory.get(_SOURCE_GRAPHS_HASH_KEY)
-    if recorded is None:
-        return None, []
     graphs_path = Path(output_dir) / "metadata" / SOURCE_GRAPHS_FILENAME
+    if recorded is None:
+        if graphs_path.exists():
+            return None, [
+                f"inventory.json records no {_SOURCE_GRAPHS_HASH_KEY} but {SOURCE_GRAPHS_FILENAME} exists, so "
+                "inventory.json was edited after discover; re-run discover"
+            ]
+        return None, []
     if not graphs_path.is_file():
         return None, [
             f"inventory.json records source_graphs_sha256 but {SOURCE_GRAPHS_FILENAME} is missing; re-run discover"
@@ -588,9 +622,20 @@ def _load_source_graphs(output_dir: Path, inventory: dict[str, Any]) -> tuple[li
             raise ValueError(f"expected a JSON object, got {type(document).__name__}")
         if document.get("document_sha256") != recorded:
             return None, [f"inventory.json was projected from a different {SOURCE_GRAPHS_FILENAME}; re-run discover"]
-        return source_graphs_from_document(document), []
+        graphs = source_graphs_from_document(document)
     except (OSError, json.JSONDecodeError, ValueError) as error:
         return None, [f"{SOURCE_GRAPHS_FILENAME} is not usable: {error}"]
+    violations: list[str] = []
+    if inventory.get("source") != document.get("source"):
+        violations.append(
+            f"inventory.json source {inventory.get('source')!r} does not match {SOURCE_GRAPHS_FILENAME} source "
+            f"{document.get('source')!r}"
+        )
+    if not isinstance(inventory.get("source_dir"), str):
+        violations.append(
+            f"inventory.json source_dir must be a string, got {type(inventory.get('source_dir')).__name__}"
+        )
+    return (None, violations) if violations else (graphs, [])
 
 
 # Sources whose discover leaves zero-activity pipelines out of the per-pipeline listing (see the ADF loader).
