@@ -100,7 +100,8 @@ of those four keys yourself:
   `cascade` (non-empty strings) and `decision_driver` are optional.
 - **Relationship edges** come in two tiers:
   - `control` — an **annotation** of a proven control edge. `edge_identity` must be the
-    `via_task_key` of a real `control_edges` entry whose `source_workflow`/`target_workflow` match
+    `via_task_key` of a real `control_edges` entry, marked `"resolved": true`, whose
+    `source_workflow`/`target_workflow` match
     your `from_pipeline`/`to_pipeline`. Do **not** set `evidence`/`confidence` — the proven edge is
     the evidence.
   - `inferred` — a coupling the deterministic layer never found (data flow inside notebook code, an

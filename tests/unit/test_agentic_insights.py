@@ -296,6 +296,51 @@ def test_unhashed_source_graphs_with_malformed_entries_are_a_violation_not_a_cra
     assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
 
 
+def test_deleting_the_graph_hash_from_the_inventory_does_not_skip_the_check(tmp_path: Path) -> None:
+    """With source_graphs.json saved, an inventory missing its hash was edited, so its pipelines are not trusted."""
+    inventory_path = _discover(tmp_path)
+    edited = json.loads(inventory_path.read_text(encoding="utf-8"))
+    del edited["source_graphs_sha256"]
+    edited["pipelines"].append({"name": "ghost", "activities": []})
+    inventory_path.write_text(json.dumps(edited, indent=2), encoding="utf-8")
+    inventory_bytes = inventory_path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights={"pipeline_insights": [{"pipeline": "ghost"}]})
+
+    assert result["ok"] is False
+    assert any(
+        f"records no source_graphs_sha256 but {SOURCE_GRAPHS_FILENAME} exists" in violation
+        for violation in result["violations"]
+    )
+    assert inventory_path.read_bytes() == inventory_bytes
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("source", "airflow", "inventory.json source 'airflow' does not match source_graphs.json source 'adf'"),
+        ("source_dir", None, "inventory.json source_dir must be a string, got NoneType"),
+    ],
+)
+def test_the_unhashed_inventory_settings_must_agree_with_the_saved_graphs(
+    tmp_path: Path, key: str, value: Any, message: str
+) -> None:
+    """The source label decides which pipelines are listed, so it must be the graphs' own source."""
+    inventory_path = _discover(tmp_path)
+    edited = json.loads(inventory_path.read_text(encoding="utf-8"))
+    edited[key] = value
+    inventory_path.write_text(json.dumps(edited, indent=2), encoding="utf-8")
+    inventory_bytes = inventory_path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights=_authored(tmp_path))
+
+    assert result["ok"] is False
+    assert message in result["violations"]
+    assert inventory_path.read_bytes() == inventory_bytes
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
+
+
 def test_a_second_enrich_cannot_interleave_with_one_already_writing(tmp_path: Path, monkeypatch: Any) -> None:
     """Pause one enrich between its two replaces and run another: the two files must still agree."""
     inventory_path = _discover(tmp_path)

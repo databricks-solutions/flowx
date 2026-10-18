@@ -28,7 +28,8 @@ a single additive `insights` key; you never pass it anything for that step.
 
 This is the standard step **between discover and route** in the flowx workflow. `flowx-discover`
 chains into this skill by default; the routing step (`flowx-route`) reads the `insights` block to
-present the agentic conversion option per connected component.
+present the agentic conversion option per connected component. The one-shot MCP `migrate` command
+runs discover, convert and package without it, so it records no insights.
 
 ## No LLM inside flowx: you author, the library validates and records
 
@@ -58,7 +59,8 @@ narrative.
    MCP server, through `enrich` with `action="prepare"`; see below). Note every
    pipeline `name` (these are the only valid foreign keys), and each pipeline's `lineage` block — in
    particular `lineage.control_edges`, each `{source_workflow, target_workflow, via_task_key}`. A
-   deterministic **control** relationship you annotate must match one of these exactly. When the
+   deterministic **control** relationship you annotate must match one of these exactly, and only an
+   edge marked `"resolved": true` can be annotated. When the
    inventory records a top-level `source_graphs_sha256` (ADF discover does), copy it into
    `authored_against` by default, so enrich can refuse your insights if discover runs again before
    you submit them; when it records none, leave `authored_against` out.
