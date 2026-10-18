@@ -357,28 +357,37 @@ def test_agentic_components_declaring_an_identical_pipeline_resource_write_it_on
     assert check_bundle_dir(tmp_path).ok
 
 
-def test_agentic_components_declaring_one_pipeline_definition_with_different_extra_fields_write_it_once(tmp_path):
-    first = AgenticComponentActivity(
-        name="First",
-        task_key="first",
-        resources=[{**RESOURCES[0], "comment": "for first"}],
+@pytest.mark.parametrize(
+    "extra_fields",
+    [{"comment": "for orders"}, {"permissions": [{"level": "CAN_MANAGE", "group_name": "data-eng"}]}],
+    ids=["comment", "permissions"],
+)
+def test_agentic_component_resource_entry_with_an_unknown_field_fails(tmp_path, extra_fields):
+    """Only the definition is written, so a field such as permissions would be dropped without notice."""
+    activity = AgenticComponentActivity(
+        name="Ingest orders",
+        task_key="ingest_orders",
+        resources=[{**RESOURCES[0], **extra_fields}],
         task=TASK,
     )
-    second = AgenticComponentActivity(
-        name="Second",
-        task_key="second",
-        resources=[{**RESOURCES[0], "comment": "for second"}],
-        task=TASK,
-    )
-    serialized_pipeline = json.loads(json.dumps(pipeline_to_dict(Pipeline(name="orders", tasks=[first, second]))))
-    restored_pipeline, _ = pipeline_dict_to_ir(serialized_pipeline)
 
-    created_files = write_bundle(prepare_workflow(restored_pipeline), tmp_path)
+    with pytest.raises(
+        ValueError,
+        match=f"'ingest_orders' resource 'orders_ingestion' has unknown field\\(s\\) {next(iter(extra_fields))};",
+    ):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[activity])), tmp_path)
+    assert not (tmp_path / "resources").exists()
 
-    resource_path = (tmp_path / "resources" / "orders_ingestion.yml").resolve()
-    assert created_files.count(resource_path) == 1
-    pipeline_resource = yaml.safe_load(resource_path.read_text(encoding="utf-8"))
-    assert pipeline_resource == {"resources": {"pipelines": {"orders_ingestion": PIPELINE_DEFINITION}}}
+
+def test_serialized_agentic_component_with_an_unknown_field_fails():
+    """A typo such as ``file`` for ``files`` would otherwise drop the authored file without notice."""
+    serialized = {
+        **activity_to_dict(_activity()),
+        "file": [{"path": "notebooks/extra.py", "content": "print('extra')\n"}],
+    }
+
+    with pytest.raises(ValueError, match="Agentic component 'ingest_orders' has unknown field\\(s\\) file"):
+        pipeline_dict_to_ir({"name": "orders", "tasks": [serialized]})
 
 
 def test_agentic_components_sharing_a_resource_key_with_different_definitions_fail(tmp_path):
@@ -468,6 +477,20 @@ def test_agentic_component_rejects_windows_rooted_or_drive_relative_paths(path):
 
     with pytest.raises(ValueError, match="relative to the bundle src directory"):
         prepare_workflow(Pipeline(name="unsafe", tasks=[activity]))
+
+
+@pytest.mark.parametrize("path", ["notebooks\\run.py", "notebooks/sub\\run.py"])
+def test_agentic_component_rejects_backslash_separated_file_paths(path):
+    """On POSIX hosts a backslash is part of the file name, so the file the task runs would not exist."""
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[{"path": path, "content": "print('run')\n"}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/run.py"}},
+    )
+
+    with pytest.raises(ValueError, match="must be a forward-slash path relative to the bundle src directory"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
 
 
 @pytest.mark.parametrize(
@@ -1059,6 +1082,77 @@ def test_agentic_component_for_each_task_without_a_keyed_task_body_fails(for_eac
 
     with pytest.raises(ValueError, match="'run' for_each_task must carry its task as a mapping with a task_key"):
         prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+def test_agentic_component_for_each_body_setting_flowx_owned_fields_fails():
+    """The loop body's wiring and run policy are flowx's too; only the body's own task_key is authored."""
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        task={
+            "for_each_task": {
+                "inputs": "[1, 2]",
+                "task": {
+                    "task_key": "run_item",
+                    "depends_on": [{"task_key": "ghost"}],
+                    "run_if": "ALL_DONE",
+                    "max_retries": 9,
+                    "timeout_seconds": 5,
+                    "retry_on_timeout": True,
+                    "notebook_task": {"notebook_path": "../src/notebooks/item.py"},
+                },
+            }
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "'run' task wiring sets flowx-owned field\\(s\\) "
+            "depends_on, max_retries, retry_on_timeout, run_if, timeout_seconds;"
+        ),
+    ):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+@pytest.mark.parametrize(
+    ("task", "message"),
+    [
+        ({"notebook_task": {}}, "notebook_task.notebook_path must be a non-empty string"),
+        ({"notebook_task": {"notebook_path": None}}, "notebook_task.notebook_path must be a non-empty string"),
+        ({"notebook_task": {"notebook_path": ""}}, "notebook_task.notebook_path must be a non-empty string"),
+        (
+            {"notebook_task": {"notebook_path": "../src/notebooks/run.py", "base_parameters": ["a"]}},
+            "notebook_task.base_parameters must be a mapping",
+        ),
+        (
+            {"notebook_task": {"notebook_path": "../src/notebooks/run.py", "base_parameters": None}},
+            "notebook_task.base_parameters must be a mapping",
+        ),
+        ({"run_job_task": {"job_id": 123, "job_parameters": None}}, "run_job_task.job_parameters must be a mapping"),
+        ({"run_job_task": {"job_id": 123, "job_parameters": ["a"]}}, "run_job_task.job_parameters must be a mapping"),
+        (
+            {
+                "for_each_task": {
+                    "inputs": "[1, 2]",
+                    "task": {"task_key": "run_item", "notebook_task": {"notebook_path": None}},
+                }
+            },
+            "notebook_task.notebook_path must be a non-empty string",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "wrap",
+    [lambda activity: activity, _inside_for_each, _inside_for_each_with_siblings],
+    ids=["top_level", "for_each", "for_each_with_siblings"],
+)
+def test_agentic_component_task_fields_flowx_wiring_reads_must_have_their_shape(tmp_path, task, message, wrap):
+    """flowx's wiring passes read these fields, so a null or list value would crash packaging instead."""
+    activity = AgenticComponentActivity(name="Run", task_key="run", task=task)
+
+    with pytest.raises(ValueError, match=f"Agentic component 'run' {message}"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[wrap(activity)])), tmp_path)
 
 
 def test_agentic_component_for_each_body_parameters_that_look_dynamic_are_written_as_given(tmp_path):

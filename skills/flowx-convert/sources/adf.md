@@ -76,15 +76,18 @@ Write one JSON file per resolved gap into `<output_dir>/agentic_results/`:
 are inherited from the placeholder when omitted, preserving dependency edges.
 
 When no typed task fits, use `"type": "AgenticComponentActivity"` instead. It carries `files`
-(each a relative `path` below the bundle's `src/` with exactly one of text `content` or base64
-`binary_content` and no other field, written byte for byte; two paths that differ only in letter case,
-or a file path another file uses as its directory, are refused),
-pipeline `resources` (`resource_key` plus a `definition` mapping), optional job `environments`
-(each exactly an `environment_key` plus a `spec` mapping), and a raw Databricks `task` fragment with
-exactly one `<kind>_task` payload. A `spark_python_task`, `python_wheel_task`, `spark_jar_task` or
-`dbt_task` must name its compute (`environment_key`, `job_cluster_key`, `existing_cluster_id` or
-`new_cluster`), and a `spark_submit_task`, which runs only on a new cluster, must name `new_cluster`
-or a `job_cluster_key`; otherwise package refuses it. A task names at most one compute, a compute
+(each a forward-slash relative `path` below the bundle's `src/` with exactly one of text `content` or
+base64 `binary_content` and no other field, written byte for byte; two paths that differ only in letter
+case, or a file path another file uses as its directory, are refused),
+pipeline `resources` (each exactly a `resource_key` plus a `definition` mapping), optional job
+`environments` (each exactly an `environment_key` plus a `spec` mapping), and a raw Databricks `task`
+fragment with exactly one `<kind>_task` payload. A field the component does not define (such as `file`
+for `files`) is refused. A `notebook_task` must set a non-empty `notebook_path`, and a notebook
+`base_parameters` or a `run_job_task.job_parameters`, when set, must be a mapping. A
+`spark_python_task`, `python_wheel_task`, `spark_jar_task` or `dbt_task` must name its compute
+(`environment_key`, `job_cluster_key`, `existing_cluster_id` or `new_cluster`), and a
+`spark_submit_task`, which runs only on a new cluster, must name `new_cluster` or a `job_cluster_key`;
+otherwise package refuses it. A task names at most one compute, a compute
 key set to null or an empty value names no compute and is refused too, and a `for_each_task` must
 carry its body `task` with its own `task_key`; the body is checked the same way and written as given. A component cannot declare a job
 cluster, so a `job_cluster_key` must be one flowx defines (`default_cluster`, `single_node_cluster`
@@ -97,9 +100,10 @@ once).
 
 flowx owns `task_key`, `depends_on`, `run_if`, `timeout_seconds`, `max_retries`,
 `min_retry_interval_millis` and `retry_on_timeout`; setting any of them in the fragment is an
-error. On merge, the component's `name`, `task_key`, `depends_on`,
-`timeout_seconds`, `max_retries` and `min_retry_interval_millis` always come from the placeholder;
-any values you set for them on the activity are replaced. The placeholder's other source metadata
+error, and so is setting any of them other than `task_key` in a `for_each_task` body. On merge, the
+component's `name`, `task_key`, `depends_on`, `timeout_seconds`, `max_retries` and
+`min_retry_interval_millis` always come from the placeholder; any values you set for them on the
+activity are replaced. The placeholder's other source metadata
 (`notifications`, `compute_mode`, `description`, `data_reads`, `data_writes`, `raw_definition` and the
 like) is kept for each field you leave out; a value you set wins. flowx does not override or remove any
 other value the fragment sets, except in three wiring passes that apply to authored tasks exactly as

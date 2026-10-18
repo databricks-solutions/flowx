@@ -36,38 +36,55 @@ _PAYLOAD_COMPUTE_KEYS = {
     "spark_submit_task": ("job_cluster_key", "new_cluster"),
 }
 _BUNDLE_JOB_CLUSTER_KEYS = (DEFAULT_JOB_CLUSTER_KEY, SINGLE_NODE_JOB_CLUSTER_KEY, MULTI_NODE_JOB_CLUSTER_KEY)
+_PAYLOAD_PARAMETER_FIELDS = {"notebook_task": "base_parameters", "run_job_task": "job_parameters"}
 _FILE_FIELDS = frozenset({"path", "content", "binary_content"})
+_RESOURCE_FIELDS = frozenset({"resource_key", "definition"})
 
 
 def _source_relative_path(raw_path: object) -> str:
-    """Return a safe path relative to the bundle's ``src`` directory."""
-    relative_path = PurePosixPath(str(raw_path))
-    windows_path = PureWindowsPath(str(raw_path))
+    """Return a safe forward-slash path relative to the bundle's ``src`` directory.
+
+    A backslash is refused rather than read as a separator: on POSIX hosts it is part of the file
+    name, so the same path would land somewhere else depending on the host that packages it.
+    """
+    path_text = str(raw_path)
+    relative_path = PurePosixPath(path_text)
     if (
-        relative_path.is_absolute()
-        or windows_path.is_absolute()
-        # A drive or root without the other ("C:x.py", "\\tmp\\x.py") is not absolute on Windows but
-        # still resolves outside the bundle once joined to the output directory.
-        or windows_path.drive
-        or windows_path.root
+        "\\" in path_text
+        or relative_path.is_absolute()
+        # A drive without a root ("C:x.py") is not absolute, but on Windows it still resolves outside
+        # the bundle once joined to the output directory.
+        or PureWindowsPath(path_text).drive
         or relative_path.as_posix() == "."
         or ".." in relative_path.parts
-        or ".." in windows_path.parts
     ):
-        raise ValueError(f"Agentic component file path {raw_path!r} must be relative to the bundle src directory")
+        raise ValueError(
+            f"Agentic component file path {raw_path!r} must be a forward-slash path relative to the bundle "
+            "src directory"
+        )
     return relative_path.as_posix()
 
 
-def _check_task_payload(task_key: str, task: dict[str, object]) -> None:
-    """Require exactly one executable task payload (``notebook_task``, ``pipeline_task``, ...).
+def _check_task_payload(
+    task_key: str, task: dict[str, object], *, owned_fields: frozenset[str] = FLOWX_OWNED_TASK_FIELDS
+) -> None:
+    """Refuse flowx-owned fields and require exactly one executable task payload (``notebook_task``, ...).
 
     Databricks names every task type ``<kind>_task``. A fragment with none packages fine but is
     rejected at deploy time, and one with two leaves which runs undefined, so both fail here.
     The same goes for a task that needs compute but names none it can run on, names more than one,
     sets a compute key to a null or empty value, or names a job cluster the bundle does not define.
-    A ``for_each_task`` must carry its body task with a ``task_key``, and that body is checked the
-    same way.
+    flowx's wiring passes read a ``notebook_task``'s ``notebook_path`` and ``base_parameters`` and a
+    ``run_job_task``'s ``job_parameters``, so the path must be a non-empty string and the parameters,
+    when set, a mapping. A ``for_each_task`` must carry its body task with a ``task_key``, and that body
+    is checked the same way; its own ``task_key`` is the one flowx-owned field it may set.
     """
+    set_owned_fields = sorted(owned_fields & task.keys())
+    if set_owned_fields:
+        raise ValueError(
+            f"Agentic component {task_key!r} task wiring sets flowx-owned field(s) "
+            f"{', '.join(set_owned_fields)}; set dependencies and run policy on the activity instead"
+        )
     payloads = sorted(key for key in task if key.endswith("_task"))
     if len(payloads) != 1:
         found = ", ".join(payloads) if payloads else "none"
@@ -78,6 +95,13 @@ def _check_task_payload(task_key: str, task: dict[str, object]) -> None:
     payload = task[payloads[0]]
     if not isinstance(payload, dict):
         raise ValueError(f"Agentic component {task_key!r} task payload {payloads[0]} must be a mapping")
+    if payloads[0] == "notebook_task" and (
+        not isinstance(payload.get("notebook_path"), str) or not payload["notebook_path"]
+    ):
+        raise ValueError(f"Agentic component {task_key!r} notebook_task.notebook_path must be a non-empty string")
+    parameters_field = _PAYLOAD_PARAMETER_FIELDS.get(payloads[0])
+    if parameters_field is not None and parameters_field in payload and not isinstance(payload[parameters_field], dict):
+        raise ValueError(f"Agentic component {task_key!r} {payloads[0]}.{parameters_field} must be a mapping")
     named_compute_keys = [compute_key for compute_key in _COMPUTE_KEYS if compute_key in task]
     if len(named_compute_keys) > 1:
         raise ValueError(
@@ -106,7 +130,7 @@ def _check_task_payload(task_key: str, task: dict[str, object]) -> None:
             raise ValueError(
                 f"Agentic component {task_key!r} for_each_task must carry its task as a mapping with a task_key"
             )
-        _check_task_payload(task_key, body)
+        _check_task_payload(task_key, body, owned_fields=FLOWX_OWNED_TASK_FIELDS - {"task_key"})
 
 
 def _mark_authored(task: dict[str, Any]) -> dict[str, Any]:
@@ -122,11 +146,12 @@ def _mark_authored(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def _check_resource(task_key: str, resource: object) -> None:
-    """Reject a resource that is not a mapping of a plain-identifier key to a definition mapping.
+    """Reject a resource that is not exactly a plain-identifier key and a definition mapping.
 
     Each resource is written to ``resources/<resource_key>.yml``, so a key with path characters
     could land outside the ``resources`` directory or overwrite another bundle file. The definition
     becomes the body of ``resources.pipelines.<resource_key>``, which the bundle expects to be a mapping.
+    Nothing else on the entry is written, so any other field is refused rather than dropped.
     """
     if not isinstance(resource, dict):
         raise ValueError(
@@ -137,6 +162,12 @@ def _check_resource(task_key: str, resource: object) -> None:
         raise ValueError(
             f"Agentic component {task_key!r} resource key {resource_key!r} must be a plain identifier "
             "of lowercase letters, digits, and single underscores"
+        )
+    unknown_fields = sorted(str(field_name) for field_name in resource.keys() - _RESOURCE_FIELDS)
+    if unknown_fields:
+        raise ValueError(
+            f"Agentic component {task_key!r} resource {resource_key!r} has unknown field(s) "
+            f"{', '.join(unknown_fields)}; a resource carries only resource_key and definition"
         )
     if not isinstance(resource.get("definition"), dict):
         raise ValueError(f"Agentic component {task_key!r} resource {resource_key!r} definition must be a mapping")
@@ -213,7 +244,8 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
 
     The task's key, dependencies, run condition, timeout, and retries always come from
     the activity, never from the authored fragment, so an agent cannot rewire or re-time
-    a task behind flowx's back. A fragment that tries to set any of them is rejected. When
+    a task behind flowx's back. A fragment that tries to set any of them is rejected, and so
+    is a ``for_each_task`` body that sets any of them other than its own ``task_key``. When
     the component replaces a placeholder through ``merge_agentic``, the activity's own name,
     key, dependencies, timeout, and retries are taken from that placeholder, and so is any
     source metadata the component leaves out, such as its notifications and lineage.
@@ -255,12 +287,16 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     before the job YAML is written.
 
     Raises:
-        ValueError: The authored task fragment sets a flowx-owned field, a file entry is
-            malformed, has a field other than ``path``, ``content`` and ``binary_content``, or
-            its path escapes the bundle's ``src`` directory, a resource is malformed or its key
-            is not a plain identifier, an environment is malformed, a binary file is not valid
-            base64, the task does not carry exactly one executable payload mapping, a
-            ``for_each_task`` carries no task mapping with a ``task_key``, the task names more
+        ValueError: The authored task fragment, or a ``for_each_task`` body other than by its
+            ``task_key``, sets a flowx-owned field, a file entry is malformed, has a field other
+            than ``path``, ``content`` and ``binary_content``, or its path uses a backslash or
+            escapes the bundle's ``src`` directory, a resource is malformed, has a field other than
+            ``resource_key`` and ``definition``, or its key is not a plain identifier, an
+            environment is malformed, a binary file is not valid base64, the task does not carry
+            exactly one executable payload mapping, a ``notebook_task`` has no non-empty
+            ``notebook_path`` string, a notebook ``base_parameters`` or ``run_job_task``
+            ``job_parameters`` is set to something other than a mapping, a ``for_each_task``
+            carries no task mapping with a ``task_key``, the task names more
             than one compute or sets a compute key to null or an empty value, a
             ``spark_python_task``, ``python_wheel_task``, ``spark_jar_task`` or ``dbt_task``
             names no compute, a ``spark_submit_task`` names neither ``new_cluster`` nor a
@@ -268,12 +304,6 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
             one of the bundle's job clusters.
     """
     del scope
-    owned_fields = sorted(FLOWX_OWNED_TASK_FIELDS & activity.task.keys())
-    if owned_fields:
-        raise ValueError(
-            f"Agentic component {activity.task_key!r} task wiring sets flowx-owned field(s) "
-            f"{', '.join(owned_fields)}; set dependencies and run policy on the activity instead"
-        )
     _check_task_payload(activity.task_key, activity.task)
     for resource in activity.resources:
         _check_resource(activity.task_key, resource)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 import json
 import re
 import sys
@@ -1115,11 +1116,10 @@ def _collect_pipeline_resources(workflow: PreparedWorkflow) -> list[dict[str, An
         workflow: The prepared workflow being written.
 
     Returns:
-        Flat list of pipeline-resource dicts (each with ``resource_key``
+        Flat list of pipeline-resource dicts (each exactly ``resource_key``
         and ``definition``), including entries from inner workflows. A
         resource declared more than once with the same key and definition
-        appears once, so it is written once; other fields on the entry are
-        never written and play no part in that comparison.
+        appears once, so it is written once.
     """
     resources: list[dict[str, Any]] = []
     for current in [workflow, *workflow.inner_workflows]:
@@ -2244,12 +2244,22 @@ def _reconstruct_configuration(raw: dict[str, Any] | None) -> Any:
     )
 
 
+_AGENTIC_COMPONENT_FIELDS = frozenset(
+    {"type", *(component_field.name for component_field in dataclasses.fields(AgenticComponentActivity))}
+)
+
+
 def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
     """Rehydrates a typed Activity from its serialised IR dict.
 
     Recurses into control-flow inner activities (ForEach, IfCondition,
     Switch).  Unknown ``type`` strings fall back to PlaceholderActivity
     so the rest of the pipeline can still be prepared.
+
+    Raises:
+        ValueError: An ``AgenticComponentActivity`` carries a field the
+            class does not define, such as ``file`` for ``files``; it is
+            refused rather than dropped.
     """
     task_type = task_ir.get("type", "")
     base = _common_activity_kwargs(task_ir)
@@ -2450,6 +2460,9 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             lookup_values=list(task_ir.get("lookup_values") or []),
         )
     if task_type == "AgenticComponentActivity":
+        unknown_fields = sorted(task_ir.keys() - _AGENTIC_COMPONENT_FIELDS)
+        if unknown_fields:
+            raise ValueError(f"Agentic component {base['task_key']!r} has unknown field(s) {', '.join(unknown_fields)}")
         return AgenticComponentActivity(
             **base,
             files=list(task_ir.get("files") or []),

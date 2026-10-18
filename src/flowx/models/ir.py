@@ -699,15 +699,15 @@ class AgenticComponentActivity(Activity):
 
     Attributes:
         files: Files to write below the bundle's ``src`` directory. Each entry
-            carries a relative ``path`` and either UTF-8 ``content`` or
-            base64-encoded ``binary_content``. A file may share its path with
-            another component's file or a generated notebook only when the
-            content is identical. It may not differ from another file's path
-            only in letter case, and no file path may also be another file's
-            directory.
-        resources: Pipeline resources in the existing ``resource_key`` plus
-            raw ``definition`` shape used by the bundle writer. Components may
-            declare the same resource only with an identical definition; it
+            carries a forward-slash relative ``path`` and either UTF-8
+            ``content`` or base64-encoded ``binary_content``. A file may
+            share its path with another component's file or a generated
+            notebook only when the content is identical. It may not differ
+            from another file's path only in letter case, and no file path
+            may also be another file's directory.
+        resources: Pipeline resources, each exactly a ``resource_key`` plus a
+            raw ``definition``, the shape used by the bundle writer. Components
+            may declare the same resource only with an identical definition; it
             is then written once.
         environments: Job environments in the Jobs API ``environment_key``
             plus ``spec`` shape, for a serverless task that names one through
