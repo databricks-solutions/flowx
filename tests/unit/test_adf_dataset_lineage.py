@@ -1731,3 +1731,66 @@ def test_a_file_name_that_is_only_a_function_over_a_bound_value_keeps_its_key() 
 
     assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:toLower('A')>]"
     assert edges == []
+
+
+@pytest.mark.parametrize(
+    "year_folder", ["@concat('landing/', string(dataset().year))", "@concat('landing/', dataset().year)"]
+)
+def test_a_numeric_bound_value_keeps_its_value_in_the_folder(year_folder: str) -> None:
+    """A ``year`` bound to 2024 and one bound to 2025 are different folders, plain or wrapped in a function."""
+    definitions = _sales_definitions(ds_out=year_folder, ds_in=year_folder)
+
+    def _year_copy(name: str, *, dataset: str, year: int, produced: bool) -> AdfActivity:
+        reference = AdfDatasetReference(
+            reference_name=dataset,
+            parameters={
+                "folderPath": "landing",
+                "year": year,
+                "fileName": {"value": "@item().name", "type": "Expression"},
+            },
+        )
+        if produced:
+            return AdfActivity(name=name, type="Copy", outputs=[reference])
+        return AdfActivity(name=name, type="Copy", inputs=[reference])
+
+    def _edges(written_year: int, read_year: int) -> list:
+        _, writes = activity_data_assets(
+            _year_copy("Write", dataset="ds_out", year=written_year, produced=True), definitions
+        )
+        reads, _ = activity_data_assets(
+            _year_copy("Read", dataset="ds_in", year=read_year, produced=False), definitions
+        )
+        return data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+
+    assert _edges(2024, 2025) == []
+    assert len(_edges(2024, 2024)) == 1
+
+
+def test_an_apostrophe_in_a_bound_value_never_merges_two_keyed_slots() -> None:
+    """``O'Brien`` and ``O' Brien`` are different folders, so the keyed slot quotes the bound value ADF's way."""
+    wrapped_folder = "@concat('bronze/', toLower(dataset().folderPath))"
+    definitions = _sales_definitions(ds_out=wrapped_folder, ds_in=wrapped_folder)
+    written, read, edges = _write_then_read(definitions, written=("ds_out", "O'Brien"), read=("ds_in", "O' Brien"))
+
+    assert written == "ST[sales@acctA]/FP[bronze/<P:toLower('O''Brien')>]/FN[]"
+    assert written != read
+    assert edges == []
+
+
+def test_a_closing_brace_inside_quoted_text_does_not_end_an_interpolation_block() -> None:
+    """In ``x/@{concat('}', item().x)}/y`` the quoted ``}`` is text, so the block is one expression."""
+    definitions = _sales_definitions(ds_out="@dataset().folderPath", ds_in="@dataset().folderPath")
+    written, _, _ = _write_then_read(
+        definitions, written=("ds_out", "x/@{concat('}', item().x)}/y"), read=("ds_in", "x/y")
+    )
+
+    assert written == "ST[sales@acctA]/FP[x/}<P>/y]/FN[]"
+
+
+def test_an_escaped_at_sign_is_literal_folder_text() -> None:
+    """ADF reads ``@@landing`` as the literal folder ``@landing``, so it is path text, not a run-time value."""
+    definitions = _sales_definitions(ds_out="@dataset().folderPath", ds_in="@dataset().folderPath")
+    written, read, edges = _write_then_read(definitions, written=("ds_out", "@@landing"), read=("ds_in", "@@landing"))
+
+    assert written == "ST[sales@acctA]/FP[@landing]/FN[]"
+    assert edges == [("signature", written)]

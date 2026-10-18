@@ -20,10 +20,11 @@ Two tiers, exactly as #36 established them:
   the signature is the *structural path signature* (#36's "expression" tier: the
   dataset's folder and file name with their literal text kept in place -- quoted
   text, ``concat`` pieces, and text outside ``@{...}`` -- and exactly one ``<P>`` slot
-  for every other run-time value or function call, wherever it sits) when the folder
-  has a literal anchor, prefixed ``ST[<store>]/`` when the dataset's store is known
-  (see :func:`_resolve_dataset_store`), so two datasets on
-  different stores that merely share a folder shape never join. An unknown store is
+  for every other run-time value or function call, wherever it sits, keyed by any
+  bound ``dataset()`` value it uses) when the folder has a literal anchor, prefixed
+  ``ST[<store>]/`` when the dataset's store is known (see
+  :func:`_resolve_dataset_store`), so two datasets on different stores that merely
+  share a folder shape never join. An unknown store is
   never guessed: the signature stays unqualified, and a qualified and an unqualified
   signature never join. A dataset that names its store (a literal container or
   bucket, or a server set on its linked service) but cannot prove the rest of it gets
@@ -71,7 +72,6 @@ _LINKED_SERVICE_STORE_LOCATIONS = frozenset(
 _QUOTED_LITERAL_RE = re.compile(r"'((?:[^']|'')*)'", re.DOTALL)
 _CONCAT_CALL_RE = re.compile(r"concat\s*\((?P<arguments>.*)\)", re.IGNORECASE | re.DOTALL)
 _DATASET_PARAMETER_RE = re.compile(r"dataset\(\)\??\.(\w+)")
-_INTERPOLATION_RE = re.compile(r"@\{([^}]*)\}")
 _RUNTIME_SLOT_RE = re.compile(r"<P(?::(?:[^<>]|<P>)*)?>")
 
 
@@ -705,6 +705,13 @@ def _is_physical(value: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Structural path signature (tier 2, #36's "expression" tier)
 # --------------------------------------------------------------------------- #
+#
+# The rule: only provably literal text forms the path. Any other value, whatever
+# function or reference it is, is one placeholder slot where it sits, so no link is
+# ever made from a non-literal value standing in for a folder. A function over a bound
+# dataset() value is a slot keyed by that value, never path text.
+# tests/unit/test_adf_path_signature_corpus.py checks this over generated
+# expressions: add a new ADF construct there rather than patching the shape for it.
 
 
 def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> str | None:
@@ -778,8 +785,10 @@ def _raw_path_shape(expression: Any, bindings: dict[str, Any], *, require_physic
 
     A value that opens with ``@`` (but not ``@{``) is one whole ADF expression, so a
     quoted ``'@{x}'`` inside it is text. A value holding ``@{`` is interpolated: the
-    text outside each ``@{...}`` is literal and each block is an expression. Any other
-    value, and an unevaluated ARM expression, is kept verbatim.
+    text outside each ``@{...}`` is literal and each block is an expression. A value
+    that opens with ``@@`` is the literal text after the first ``@``, as ADF reads it.
+    A number or boolean is its text. Any other value, and an unevaluated ARM
+    expression, is kept verbatim.
 
     With *require_physical*, an unevaluated ARM expression such as
     ``[parameters('folder')]`` or a ``{{`` placeholder, here or in a bound value,
@@ -790,6 +799,8 @@ def _raw_path_shape(expression: Any, bindings: dict[str, Any], *, require_physic
     """
     if isinstance(expression, dict):
         expression = expression.get("value", "")
+    if isinstance(expression, (bool, int, float)):
+        return str(expression)
     if not isinstance(expression, str):
         return ""
     text = expression.strip()
@@ -798,6 +809,8 @@ def _raw_path_shape(expression: Any, bindings: dict[str, Any], *, require_physic
         return None
     if is_arm_expression:
         return text
+    if text.startswith("@@"):
+        return text[1:]
     if text.startswith("@") and not text.startswith("@{"):
         return _expression_shape(text[1:], bindings, require_physical=require_physical)
     if "@{" in text:
@@ -809,14 +822,37 @@ def _interpolation_shape(text: str, bindings: dict[str, Any], *, require_physica
     """Shape of an interpolated string: text outside ``@{...}`` is literal, each ``@{...}`` is an expression."""
     pieces: list[str] = []
     literal_start = 0
-    for match in _INTERPOLATION_RE.finditer(text):
-        expression_shape = _expression_shape(match.group(1), bindings, require_physical=require_physical)
+    for block_start, block_end in _interpolation_blocks(text):
+        expression_shape = _expression_shape(
+            text[block_start + 2 : block_end - 1], bindings, require_physical=require_physical
+        )
         if expression_shape is None:
             return None
-        pieces.extend((text[literal_start : match.start()], expression_shape))
-        literal_start = match.end()
+        pieces.extend((text[literal_start:block_start], expression_shape))
+        literal_start = block_end
     pieces.append(text[literal_start:])
     return "".join(pieces)
+
+
+def _interpolation_blocks(text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` of each ``@{...}`` block in *text*, where a ``}`` inside quoted text does not close one.
+
+    An ``@{`` with no closing ``}`` is left as literal text, as ADF would print it.
+    """
+    blocks: list[tuple[int, int]] = []
+    search_from = 0
+    while (block_start := text.find("@{", search_from)) != -1:
+        in_quote = False
+        for index in range(block_start + 2, len(text)):
+            if text[index] == "'":
+                in_quote = not in_quote
+            elif text[index] == "}" and not in_quote:
+                blocks.append((block_start, index + 1))
+                search_from = index + 1
+                break
+        else:
+            break
+    return blocks
 
 
 def _expression_shape(expression: str, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
@@ -826,8 +862,9 @@ def _expression_shape(expression: str, bindings: dict[str, Any], *, require_phys
     its arguments' shapes joined in order. A ``dataset().<name>`` (or
     ``dataset()?.<name>``) bound in *bindings* is its bound value's shape, slashes and
     all. Anything else -- any other function call, ``pipeline()``, ``item()``,
-    ``activity(...)``, a subscript, a number -- is one ``<P>``, so none of its
-    argument text ever reads as part of the path.
+    ``activity(...)``, a subscript, a number -- is one slot (see
+    :func:`_runtime_slot`), so none of its argument text ever reads as part of the
+    path.
     """
     expression = expression.strip()
     literal = _QUOTED_LITERAL_RE.fullmatch(expression)
@@ -868,7 +905,8 @@ def _runtime_slot(expression: str, bindings: dict[str, Any], *, require_physical
         bound_shape = _raw_path_shape(bindings[match.group(1)], {}, require_physical=require_physical)
         if bound_shape is None:
             return None
-        pieces.extend((expression[piece_start : match.start()], f"'{bound_shape}'"))
+        quoted_bound_shape = bound_shape.replace("'", "''")
+        pieces.extend((expression[piece_start : match.start()], f"'{quoted_bound_shape}'"))
         piece_start = match.end()
     if not pieces:
         return "<P>"
