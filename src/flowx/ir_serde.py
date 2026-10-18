@@ -575,6 +575,7 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
         "reconciliation_status": pipeline.reconciliation_status,
         "migration_status": pipeline.migration_status,
         "audit": dict(pipeline.audit),
+        "lineage": lineage_to_dict(pipeline.lineage) if pipeline.lineage is not None else None,
     }
 
 

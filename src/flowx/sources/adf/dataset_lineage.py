@@ -450,12 +450,21 @@ def _pick_dataset_field(
 
 
 def _linked_service_reference(dataset_props: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Return the dataset's linked service name and the parameters its reference binds."""
+    """Return the dataset's linked service name and the parameters its reference binds.
+
+    The name is ``""`` unless it is a plain name: an unevaluated ``[parameters('ls')]``
+    or any other expression names no linked service, even if a definition happens to be
+    loaded under that key, so it can never prove a store.
+    """
     linked_service_reference = dataset_props.get("linkedServiceName") or {}
-    if not isinstance(linked_service_reference, dict):
-        return str(linked_service_reference), {}
-    parameters = linked_service_reference.get("parameters")
-    return linked_service_reference.get("referenceName") or "", parameters if isinstance(parameters, dict) else {}
+    if isinstance(linked_service_reference, dict):
+        name = linked_service_reference.get("referenceName")
+        parameters = linked_service_reference.get("parameters")
+    else:
+        name, parameters = linked_service_reference, None
+    if not isinstance(name, str) or not name or not _is_physical(name):
+        return "", {}
+    return name, parameters if isinstance(parameters, dict) else {}
 
 
 def _backing_linked_service(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> Any:

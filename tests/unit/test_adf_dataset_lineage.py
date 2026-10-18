@@ -1877,3 +1877,29 @@ def test_a_function_over_an_unreadable_bound_value_never_shares_a_key_with_an_em
     assert written == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
     assert read == "ST[sales@acctA]/FP[landing/<P:tolower('')>]/FN[]"
     assert edges == []
+
+
+def test_an_arm_named_linked_service_never_gives_an_identity_even_when_it_is_loaded() -> None:
+    """``[parameters('ls')]`` is not a plain name, so even a loaded definition under that key proves no store."""
+    arm_name = "[parameters('ls')]"
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_file": _adls_dataset(
+                "ds_file", file_system="sales", folder_path="raw", linked_service=arm_name, file_name="orders.csv"
+            ),
+            "ds_table": _table_dataset("ds_table", schema="dbo", table="Orders", linked_service=arm_name),
+        },
+        linked_services={
+            arm_name: AdfLinkedService(
+                name=arm_name,
+                type="AzureBlobFS",
+                properties={
+                    "typeProperties": {"url": "https://acctA.dfs.core.windows.net", "server": "sql.example.com"}
+                },
+            )
+        },
+    )
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_file"), definitions) is None
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_table"), definitions) is None

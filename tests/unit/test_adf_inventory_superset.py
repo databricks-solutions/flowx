@@ -280,3 +280,26 @@ def test_discover_prints_the_inventory_activity_count_labelled_raw_including_nes
     activity_count = json.loads((metadata / "inventory.json").read_text())["summary"]["activity_count"]
 
     assert f"Total activities:     {activity_count}  (raw activities, incl. nested)" in capsys.readouterr().out
+
+
+def test_a_motif_detected_twice_is_counted_once_in_the_graph_and_the_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The profile report and the saved graph read one de-duplicated list, so their motif counts agree."""
+    from flowx.motifs import detector
+    from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
+    from flowx.sources.adf.loader import attach_motifs_to_graphs, build_profile_rows, detect_motifs_by_pipeline
+
+    definitions = load_adf_definitions(FIXTURES_DIR)
+    original = detector.detect_motifs
+    detected = {pipeline.name: original(pipeline, definitions) for pipeline in definitions.pipelines}
+    name = next(pipeline_name for pipeline_name, found in detected.items() if found)
+    monkeypatch.setattr(detector, "detect_motifs", lambda pipeline, defs: detected[pipeline.name] * 2)
+
+    motifs_by_pipeline = detect_motifs_by_pipeline(definitions)
+    graphs = adf_definitions_to_source_graphs(definitions)
+    attach_motifs_to_graphs(graphs, motifs_by_pipeline)
+    graph = next(graph for graph in graphs if graph.name == name)
+    row = next(row for row in build_profile_rows(definitions, motifs_by_pipeline) if row["pipeline"] == name)
+
+    assert len(motifs_by_pipeline[name]) == len(detected[name])
+    assert graph.lineage is not None and len(graph.lineage.motifs) == len(detected[name])
+    assert row["collapsible_patterns"] == len(detected[name])

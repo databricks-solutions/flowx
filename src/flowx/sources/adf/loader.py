@@ -893,18 +893,39 @@ def detect_motifs_by_pipeline(definitions: AdfDefinitions) -> dict[str, list[Det
     from a single detection pass. Detection is best-effort: a pipeline whose
     detection raises is logged and recorded with an empty list, never allowed to
     hard-fail discover. This only *detects* motifs -- it never collapses their
-    member activities, which stays a convert-phase decision.
+    member activities, which stays a convert-phase decision. A detection repeated
+    with the same fields is kept once, so the saved graph and the profile report's
+    pattern count read the same list.
     """
     from flowx.motifs.detector import detect_motifs
 
     results: dict[str, list[DetectedMotif]] = {}
     for pipeline in definitions.pipelines:
         try:
-            results[pipeline.name] = detect_motifs(pipeline, definitions)
+            results[pipeline.name] = _distinct_detections(detect_motifs(pipeline, definitions))
         except Exception as exc:  # noqa: BLE001 - detection must never hard-fail discover
             logger.warning("Motif detection failed for pipeline %r: %s", pipeline.name, exc)
             results[pipeline.name] = []
     return results
+
+
+def _distinct_detections(detections: list[DetectedMotif]) -> list[DetectedMotif]:
+    """*detections* in order, without repeats of the fields a motif annotation records."""
+    seen: set[tuple[Any, ...]] = set()
+    distinct: list[DetectedMotif] = []
+    for motif in detections:
+        key = (
+            motif.definition.motif_id,
+            tuple(motif.matched_activities),
+            motif.definition.display_name,
+            motif.definition.databricks_replacement,
+            tuple(motif.confidence_notes),
+            motif.source_type_hint,
+        )
+        if key not in seen:
+            seen.add(key)
+            distinct.append(motif)
+    return distinct
 
 
 def attach_motifs_to_graphs(graphs: list[SourceGraph], motifs_by_pipeline: Mapping[str, list[DetectedMotif]]) -> None:

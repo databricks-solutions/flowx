@@ -522,3 +522,15 @@ def test_a_control_edge_saved_as_resolved_still_reads_back_resolved() -> None:
     )
 
     assert [control_edge.resolved for control_edge in lineage.control_edges] == [True]
+
+
+def test_the_pipeline_debug_dict_includes_its_lineage_block() -> None:
+    """The debug dict promises every field, so it carries the pipeline's lineage too."""
+    from flowx.ir_serde import pipeline_to_debug_dict
+    from flowx.models.ir import ControlEdge, Lineage, Pipeline
+
+    edge = ControlEdge(source_workflow="parent", target_workflow="child", via_task_key="Run", resolved=True)
+    debug = pipeline_to_debug_dict(Pipeline(name="parent", lineage=Lineage(control_edges=[edge])))
+
+    assert debug["lineage"]["control_edges"][0]["target_workflow"] == "child"
+    assert pipeline_to_debug_dict(Pipeline(name="parent"))["lineage"] is None
