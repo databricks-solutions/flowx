@@ -893,9 +893,9 @@ def detect_motifs_by_pipeline(definitions: AdfDefinitions) -> dict[str, list[Det
     from a single detection pass. Detection is best-effort: a pipeline whose
     detection raises is logged and recorded with an empty list, never allowed to
     hard-fail discover. This only *detects* motifs -- it never collapses their
-    member activities, which stays a convert-phase decision. A detection repeated
-    with the same fields is kept once, so the saved graph and the profile report's
-    pattern count read the same list.
+    member activities, which stays a convert-phase decision. Repeated detections are
+    kept once (see :func:`_distinct_detections`), so the saved graph, the inventory and
+    the profile report's pattern count all read the same list.
     """
     from flowx.motifs.detector import detect_motifs
 
@@ -910,18 +910,17 @@ def detect_motifs_by_pipeline(definitions: AdfDefinitions) -> dict[str, list[Det
 
 
 def _distinct_detections(detections: list[DetectedMotif]) -> list[DetectedMotif]:
-    """*detections* in order, without repeats of the fields a motif annotation records."""
-    seen: set[tuple[Any, ...]] = set()
+    """Drop repeated motif detections, keeping the first one seen and the original order.
+
+    Two detections are the same motif when they have the same motif id and claim the
+    same activities, in any order. That is the rule the inventory uses to collapse
+    repeats, so the profile report and the saved graph count motifs the way the
+    inventory lists them.
+    """
+    seen: set[tuple[str, frozenset[str]]] = set()
     distinct: list[DetectedMotif] = []
     for motif in detections:
-        key = (
-            motif.definition.motif_id,
-            tuple(motif.matched_activities),
-            motif.definition.display_name,
-            motif.definition.databricks_replacement,
-            tuple(motif.confidence_notes),
-            motif.source_type_hint,
-        )
+        key = (motif.definition.motif_id, frozenset(motif.matched_activities))
         if key not in seen:
             seen.add(key)
             distinct.append(motif)

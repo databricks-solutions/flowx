@@ -303,3 +303,37 @@ def test_a_motif_detected_twice_is_counted_once_in_the_graph_and_the_profile(mon
     assert len(motifs_by_pipeline[name]) == len(detected[name])
     assert graph.lineage is not None and len(graph.lineage.motifs) == len(detected[name])
     assert row["collapsible_patterns"] == len(detected[name])
+
+
+def test_a_motif_detected_over_the_same_members_in_another_order_is_counted_once_everywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One motif over the same activities, in any order, is one motif in the profile, saved graph and inventory."""
+    import csv
+    from dataclasses import replace
+
+    from flowx.motifs import detector
+
+    definitions = load_adf_definitions(FIXTURES_DIR)
+    original = detector.detect_motifs
+    name, motif = next(
+        (pipeline.name, found[0])
+        for pipeline in definitions.pipelines
+        if (found := original(pipeline, definitions)) and len(found[0].matched_activities) > 1
+    )
+    reordered = replace(motif, matched_activities=list(reversed(motif.matched_activities)))
+    monkeypatch.setattr(
+        detector, "detect_motifs", lambda pipeline, defs: [motif, reordered] if pipeline.name == name else []
+    )
+
+    metadata = _run_discover(tmp_path)
+
+    with (metadata / "profile_report.csv").open(newline="") as handle:
+        row = next(row for row in csv.DictReader(handle) if row["pipeline"] == name)
+    graph = next(graph for graph in read_source_graphs(metadata / "source_graphs.json") if graph.name == name)
+    inventory = json.loads((metadata / "inventory.json").read_text())
+    entry = next(entry for entry in inventory["pipelines"] if entry["name"] == name)
+
+    assert row["collapsible_patterns"] == "1"
+    assert graph.lineage is not None and len(graph.lineage.motifs) == 1
+    assert len(entry["motifs"]) == 1

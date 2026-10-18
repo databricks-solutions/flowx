@@ -57,15 +57,18 @@ _ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
 _DATASET_PARAM_RE = re.compile(r"^@dataset\(\)\.([A-Za-z_][A-Za-z0-9_]*)$")
 _ARM_EXPRESSION_RE = re.compile(r"^\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\(.*\]$", re.DOTALL)
 _RUN_TIME_PATH_OVERRIDES = ("wildcardFolderPath", "wildcardFileName", "fileListPath", "prefix")
-# Location types that name no store of their own: the server or share is set on the linked service.
+# Location types (lower-cased) that name no store of their own: the server, share, lakehouse or
+# account is set on the linked service.
 _LINKED_SERVICE_STORE_LOCATIONS = frozenset(
     {
-        "SftpLocation",
-        "FileServerLocation",
-        "FtpServerLocation",
-        "AzureFileStorageLocation",
-        "HdfsLocation",
-        "HttpServerLocation",
+        "sftplocation",
+        "fileserverlocation",
+        "ftpserverlocation",
+        "azurefilestoragelocation",
+        "hdfslocation",
+        "httpserverlocation",
+        "lakehouselocation",
+        "azuredatalakestorelocation",
     }
 )
 
@@ -188,9 +191,10 @@ def _dataset_ref_to_asset(
     names its store but cannot prove all of it gets no signature at all, because the
     folder shape alone cannot tell two such stores apart: a literal container or
     bucket whose account is unknown, or a location whose store is named only on the
-    linked service (SFTP, FTP, a file share, HDFS, HTTP), when that linked service is
-    not a plain, unparameterised name. A file system that is itself parameterised
-    names no store, so its signature stays unqualified.
+    linked service (SFTP, FTP, a file share, HDFS, HTTP, a Fabric Lakehouse, ADLS
+    Gen1), when that linked service is not a plain, unparameterised name. A file
+    system that is itself parameterised names no store, so its signature stays
+    unqualified.
     """
     if location_overridden:
         return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))
@@ -523,8 +527,6 @@ def _unparameterised_linked_service_name(dataset_props: dict[str, Any], definiti
     linked_service = definitions.get_linked_service(linked_service_name)
     if linked_service is not None and linked_service.properties.get("parameters"):
         return None
-    if not _is_physical(linked_service_name):
-        return None
     return linked_service_name
 
 
@@ -540,15 +542,18 @@ def _resolve_dataset_store(
     ``<file system>@<account>`` when both are literal. When the file system is literal
     but the account cannot be read (a Key Vault or masked connection string, for
     example), the linked service name stands in for the account, as long as the
-    linked service takes no parameters. A location whose server or share lives on the
-    linked service (SFTP, FTP, a file share, HDFS, HTTP) is named by that plain,
-    unparameterised linked service name alone. The store is ``None`` whenever it is
-    not provable, so the caller never guesses one.
+    linked service takes no parameters. A location whose server, share, lakehouse or
+    account lives on the linked service (SFTP, FTP, a file share, HDFS, HTTP, a Fabric
+    Lakehouse, ADLS Gen1) is named by that plain, unparameterised linked service name
+    alone. The location type is compared case-insensitively, since ADF documents both
+    ``LakeHouseLocation`` and ``LakehouseLocation``. The store is ``None`` whenever it
+    is not provable, so the caller never guesses one.
 
     ``location_names_store`` is ``True`` when the file location tells its store apart
     from others, provable or not: a literal file system (ADLS file system, Blob
-    container, S3 / GCS bucket), or a location whose server or share is set on the
-    linked service. A file system that is itself parameterised names no store.
+    container, S3 / GCS bucket), or a location whose server, share, lakehouse or
+    account is set on the linked service. A file system that is itself parameterised
+    names no store.
     """
     properties = _dataset_props(dataset_ref, definitions)
     if properties is None:
@@ -559,7 +564,10 @@ def _resolve_dataset_store(
     account: str | None = None
     location_names_store = False
     if isinstance(location, dict):
-        location_names_store = location.get("type") in _LINKED_SERVICE_STORE_LOCATIONS
+        location_type = location.get("type")
+        location_names_store = (
+            isinstance(location_type, str) and location_type.lower() in _LINKED_SERVICE_STORE_LOCATIONS
+        )
         if not location_names_store:
             file_system, account = _resolve_file_store(
                 location,

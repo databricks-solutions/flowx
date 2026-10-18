@@ -1148,6 +1148,9 @@ _LINKED_SERVICE_STORE_LOCATIONS = [
     "AzureFileStorageLocation",
     "HdfsLocation",
     "HttpServerLocation",
+    "LakeHouseLocation",
+    "LakehouseLocation",
+    "AzureDataLakeStoreLocation",
 ]
 
 
