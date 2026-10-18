@@ -1612,7 +1612,7 @@ def test_a_function_over_a_bound_folder_is_a_keyed_slot_not_folder_text() -> Non
     )
     written, read, edges = _write_then_read(definitions, written=("ds_out", "orders"), read=("ds_in", "bronze/orders"))
 
-    assert written == "ST[sales@acctA]/FP[bronze/<P:toLower('orders')>]/FN[]"
+    assert written == "ST[sales@acctA]/FP[bronze/<P:tolower('orders')>]/FN[]"
     assert edges == []
 
 
@@ -1658,7 +1658,7 @@ def test_a_function_over_different_bound_file_names_never_links() -> None:
     reads, _ = activity_data_assets(_file_copy("Read", dataset="ds_in", file_name="B", produced=False), definitions)
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:toLower('A')>.csv]"
+    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:tolower('A')>.csv]"
     assert edges == []
 
 
@@ -1692,7 +1692,7 @@ def test_a_function_over_the_same_bound_file_name_still_links() -> None:
     reads, _ = activity_data_assets(AdfActivity(name="Read", type="Copy", inputs=[reference["ds_in"]]), definitions)
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
 
-    assert [edge.match_key for edge in edges] == ["ST[sales@acctA]/FP[landing/<P>]/FN[<P:toLower('A')>.csv]"]
+    assert [edge.match_key for edge in edges] == ["ST[sales@acctA]/FP[landing/<P>]/FN[<P:tolower('A')>.csv]"]
 
 
 def test_a_file_name_that_is_only_a_function_over_a_bound_value_keeps_its_key() -> None:
@@ -1729,7 +1729,7 @@ def test_a_file_name_that_is_only_a_function_over_a_bound_value_keeps_its_key() 
     )
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:toLower('A')>]"
+    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:tolower('A')>]"
     assert edges == []
 
 
@@ -1772,7 +1772,7 @@ def test_an_apostrophe_in_a_bound_value_never_merges_two_keyed_slots() -> None:
     definitions = _sales_definitions(ds_out=wrapped_folder, ds_in=wrapped_folder)
     written, read, edges = _write_then_read(definitions, written=("ds_out", "O'Brien"), read=("ds_in", "O' Brien"))
 
-    assert written == "ST[sales@acctA]/FP[bronze/<P:toLower('O''Brien')>]/FN[]"
+    assert written == "ST[sales@acctA]/FP[bronze/<P:tolower('O''Brien')>]/FN[]"
     assert written != read
     assert edges == []
 
@@ -1793,4 +1793,29 @@ def test_an_escaped_at_sign_is_literal_folder_text() -> None:
     written, read, edges = _write_then_read(definitions, written=("ds_out", "@@landing"), read=("ds_in", "@@landing"))
 
     assert written == "ST[sales@acctA]/FP[@landing]/FN[]"
+    assert edges == [("signature", written)]
+
+
+@pytest.mark.parametrize("year_folder", ["landing/@{2024}", "@concat('landing/', 2024)"])
+def test_a_number_in_an_expression_is_literal_folder_text(year_folder: str) -> None:
+    """``@{2024}`` always prints ``2024``, so the folder is ``landing/2024`` and never joins a run-time year."""
+    definitions = _sales_definitions(ds_out="@dataset().folderPath", ds_in="@dataset().folderPath")
+    written, read, edges = _write_then_read(
+        definitions, written=("ds_out", year_folder), read=("ds_in", "landing/@{item().year}")
+    )
+
+    assert written == "ST[sales@acctA]/FP[landing/2024]/FN[]"
+    assert read == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert edges == []
+
+
+def test_function_names_in_a_keyed_slot_ignore_case_as_adf_does() -> None:
+    """``toLower`` and ``TOLOWER`` are the same ADF function, so over the same bound value they still join."""
+    definitions = _sales_definitions(
+        ds_out="@concat('bronze/', toLower(dataset().folderPath))",
+        ds_in="@concat('bronze/', TOLOWER(dataset().folderPath))",
+    )
+    written, read, edges = _write_then_read(definitions, written=("ds_out", "Orders"), read=("ds_in", "Orders"))
+
+    assert written == read == "ST[sales@acctA]/FP[bronze/<P:tolower('Orders')>]/FN[]"
     assert edges == [("signature", written)]

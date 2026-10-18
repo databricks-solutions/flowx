@@ -72,6 +72,7 @@ _LINKED_SERVICE_STORE_LOCATIONS = frozenset(
 _QUOTED_LITERAL_RE = re.compile(r"'((?:[^']|'')*)'", re.DOTALL)
 _CONCAT_CALL_RE = re.compile(r"concat\s*\((?P<arguments>.*)\)", re.IGNORECASE | re.DOTALL)
 _DATASET_PARAMETER_RE = re.compile(r"dataset\(\)\??\.(\w+)")
+_NUMBER_LITERAL_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _RUNTIME_SLOT_RE = re.compile(r"<P(?::(?:[^<>]|<P>)*)?>")
 
 
@@ -870,6 +871,8 @@ def _expression_shape(expression: str, bindings: dict[str, Any], *, require_phys
     literal = _QUOTED_LITERAL_RE.fullmatch(expression)
     if literal is not None:
         return literal.group(1).replace("''", "'")
+    if _NUMBER_LITERAL_RE.fullmatch(expression):
+        return expression
     arguments = _concat_arguments(expression)
     if arguments is not None:
         pieces: list[str] = []
@@ -893,7 +896,7 @@ def _runtime_slot(expression: str, bindings: dict[str, Any], *, require_physical
 
     A plain run-time value is ``<P>``. A call over a ``dataset().<name>`` the call site
     bound, such as ``toLower(dataset().folderPath)`` called with ``orders``, is
-    ``<P:toLower('orders')>``: still one slot that is never path text, but two of them
+    ``<P:tolower('orders')>``: still one slot that is never path text, but two of them
     match only when the call and its bound inputs match, so ``orders`` and
     ``customers`` never join. ``None`` when a bound value is not physical.
     """
@@ -911,13 +914,17 @@ def _runtime_slot(expression: str, bindings: dict[str, Any], *, require_physical
     if not pieces:
         return "<P>"
     pieces.append(expression[piece_start:])
-    return f"<P:{_without_unquoted_whitespace(''.join(pieces))}>"
+    return f"<P:{_canonical_slot_key(''.join(pieces))}>"
 
 
-def _without_unquoted_whitespace(text: str) -> str:
-    """*text* with whitespace outside quotes removed, so spacing never tells two keyed slots apart."""
+def _canonical_slot_key(text: str) -> str:
+    """*text* lower-cased and without whitespace outside quotes.
+
+    So neither spacing nor the case of an ADF function name (ADF reads ``toLower`` and
+    ``TOLOWER`` alike) tells two keyed slots apart; quoted text keeps its case.
+    """
     return "".join(
-        part if index % 2 else re.sub(r"\s+", "", part)
+        part if index % 2 else re.sub(r"\s+", "", part).lower()
         for index, part in enumerate(re.split(r"('(?:[^']|'')*')", text))
     )
 
@@ -959,7 +966,7 @@ def _concat_arguments(expression: str) -> list[str] | None:
 def _has_literal_anchor(shape: str) -> bool:
     """``True`` when *shape* holds literal text besides slots and slashes; only slots is too weak a key.
 
-    A keyed slot such as ``<P:toLower('orders')>`` is still a slot, so its key never counts as literal text.
+    A keyed slot such as ``<P:tolower('orders')>`` is still a slot, so its key never counts as literal text.
     """
     return bool(_RUNTIME_SLOT_RE.sub("", shape).replace("/", "").strip())
 
