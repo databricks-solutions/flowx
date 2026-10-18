@@ -42,6 +42,15 @@ from flowx.sources.airflow.loader.schedule import _asset_definitions, _extract_t
 _EDGE_MODIFIER_CONSTRUCTS = frozenset({"Label"})
 
 
+def _is_literal_string_statement(statement: ast.stmt) -> bool:
+    """Returns whether *statement* is a literal string expression, such as a docstring."""
+    return (
+        isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Constant)
+        and isinstance(statement.value.value, str)
+    )
+
+
 class _DagVisitor(ast.NodeVisitor):
     """Collects operator calls, dependency edges, and the DAG's schedule."""
 
@@ -110,6 +119,13 @@ class _DagVisitor(ast.NodeVisitor):
         # TaskFlow: function name -> (definition, decorator dotted-name) for @task-decorated defs.
         # Pre-scanned so a @task def defined after the @dag body that uses it is still resolved.
         self.taskflow_defs: dict[str, tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]] = {}
+        # Bare static invocations anywhere in the module (`helper()`), so a wiring-only helper
+        # that Airflow executes once can be followed by both the capture pass and the audit.
+        self._statically_called_names = {
+            node.func.id
+            for node in ast.walk(module)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
         # @task_group def names -- a group is a sub-pipeline, not a single renderable task, so an
         # invocation routes to a placeholder + gap rather than being expanded here.
         self.taskgroup_defs: set[str] = set()
@@ -170,6 +186,9 @@ class _DagVisitor(ast.NodeVisitor):
         if not is_dag_definition:
             if self._dag_scope_depth:
                 self._claimed_statement_ids.add(id(node))
+                return
+            if self._is_static_wiring_helper(node):
+                self._descend_wiring_helper(node)
             return
         if is_dag_definition:
             self.is_taskflow_dag = True
@@ -192,6 +211,70 @@ class _DagVisitor(ast.NodeVisitor):
         finally:
             if is_dag_definition:
                 self._dag_scope_depth -= 1
+            self._scope_stack.pop()
+
+    def _is_static_wiring_helper(self, node: ast.FunctionDef) -> bool:
+        """Returns whether *node* is a statically invoked helper whose body only wires tasks.
+
+        Airflow applies the helper's statements only when it runs. Both this capture pass and the
+        independent source audit follow the same rule -- module-level definition, no decorators, no
+        parameters, wiring-only statements (shift chains, ``chain``/``cross_downstream``, and
+        ``set_upstream``/``set_downstream``), and at least one static invocation -- so reconciliation
+        compares the same edges on both sides. A helper that cannot be followed this way stays under
+        the existing rules instead of being silently reduced to a claimless body.
+        """
+        if node.name not in self._statically_called_names:
+            return False
+        if node.decorator_list:
+            return False
+        if (
+            node.args.args
+            or node.args.posonlyargs
+            or node.args.kwonlyargs
+            or node.args.vararg
+            or node.args.kwarg
+        ):
+            return False
+        body = list(node.body)
+        if body and _is_literal_string_statement(body[0]):
+            body = body[1:]
+        return all(self._is_wiring_statement(statement) for statement in body)
+
+    def _is_wiring_statement(self, statement: ast.stmt) -> bool:
+        if not isinstance(statement, ast.Expr):
+            return False
+        value = statement.value
+        if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.RShift, ast.LShift)):
+            return True
+        if not isinstance(value, ast.Call):
+            return False
+        if isinstance(value.func, ast.Name) and value.func.id in ("chain", "cross_downstream"):
+            return True
+        return isinstance(value.func, ast.Attribute) and value.func.attr in ("set_upstream", "set_downstream")
+
+    def _descend_wiring_helper(self, node: ast.FunctionDef) -> None:
+        """Follows a wiring helper the way Airflow runs it: the captured edges all apply.
+
+        Each statement must resolve to a capture; anything else lands in ``unclaimed_statements``
+        so reconciliation fails closed instead of verifying with a missing dependency.
+        """
+        self._scope_stack.append(node)
+        try:
+            for statement in node.body:
+                unclaimed_calls_before = len(self.unclaimed_task_calls)
+                unresolved_before = len(self.unresolved_constructs)
+                self.visit(statement)
+                if id(statement) in self._claimed_statement_ids:
+                    continue
+                if (
+                    len(self.unclaimed_task_calls) > unclaimed_calls_before
+                    or len(self.unresolved_constructs) > unresolved_before
+                ):
+                    continue
+                if _is_literal_string_statement(statement):
+                    continue
+                self.unclaimed_statements.append(statement)
+        finally:
             self._scope_stack.pop()
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:

@@ -11,6 +11,29 @@ from typing import Any
 _EDGE_MODIFIER_CONSTRUCTS = frozenset({"Label"})
 
 
+def _is_literal_string_statement(statement: ast.stmt) -> bool:
+    """Returns whether *statement* is a literal string expression, such as a docstring."""
+    return (
+        isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Constant)
+        and isinstance(statement.value.value, str)
+    )
+
+
+def _is_wiring_statement(statement: ast.stmt) -> bool:
+    """Returns whether *statement* only expresses task dependency wiring."""
+    if not isinstance(statement, ast.Expr):
+        return False
+    value = statement.value
+    if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.RShift, ast.LShift)):
+        return True
+    if not isinstance(value, ast.Call):
+        return False
+    if isinstance(value.func, ast.Name) and value.func.id in ("chain", "cross_downstream"):
+        return True
+    return isinstance(value.func, ast.Attribute) and value.func.attr in ("set_upstream", "set_downstream")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuditCandidate:
     """One source construct that must be accounted for by capture and translation."""
@@ -110,6 +133,11 @@ class _SourceAuditor(ast.NodeVisitor):
             for node in module.body
             if isinstance(node, ast.FunctionDef) and _single_operator_return(node, self.aliases)
         }
+        self.called_names = {
+            node.func.id
+            for node in ast.walk(module)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
 
     def _candidate(self, kind: str, code: str, node: ast.AST, **details: Any) -> AuditCandidate:
         key = (kind, getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
@@ -136,6 +164,34 @@ class _SourceAuditor(ast.NodeVisitor):
             for statement in node.body:
                 if not isinstance(statement, ast.FunctionDef):
                     self.visit(statement)
+        elif self._is_static_wiring_helper(node):
+            # A statically invoked wiring helper applies its edges when Airflow runs it, so the
+            # audit follows the same rule as the capture pass and both report the same edges.
+            for statement in node.body:
+                self.visit(statement)
+
+    def _is_static_wiring_helper(self, node: ast.FunctionDef) -> bool:
+        """Returns whether *node* is a statically invoked, wiring-only helper (the visitor's rule).
+
+        The guards here must match ``_DagVisitor._is_static_wiring_helper`` so that reconciliation
+        compares identical edge sets on both sides and fails closed on any shape one side skips.
+        """
+        if node.name not in self.called_names:
+            return False
+        if node.decorator_list:
+            return False
+        if (
+            node.args.args
+            or node.args.posonlyargs
+            or node.args.kwonlyargs
+            or node.args.vararg
+            or node.args.kwarg
+        ):
+            return False
+        body = list(node.body)
+        if body and _is_literal_string_statement(body[0]):
+            body = body[1:]
+        return all(_is_wiring_statement(statement) for statement in body)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         """Treats decorated async callables as TaskFlow definitions, not DAG-body statements."""

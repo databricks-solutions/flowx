@@ -585,6 +585,74 @@ def test_classic_dag_default_args_do_not_leak_to_unwired_operators(tmp_path: Pat
     assert [(task.task_key, task.max_retries) for task in pipeline.tasks] == [("inside", 4)]
 
 
+def test_wiring_helper_edges_are_followed(tmp_path: Path) -> None:
+    dag_path = tmp_path / "wiring_helper.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "dag = DAG('helper_edges', schedule=None)\n"
+        "start = BashOperator(task_id='start', bash_command='x', dag=dag)\n"
+        "t = BashOperator(task_id='t', bash_command='x', dag=dag)\n"
+        "def wire():\n"
+        "    start >> t\n"
+        "wire()\n",
+        encoding="utf-8",
+    )
+
+    pipeline = airflow_loader.load_pipelines(dag_path)[0]
+    tasks = {task.task_key: task for task in pipeline.tasks}
+
+    assert pipeline.reconciliation_status == "verified"
+    assert [dependency.task_key for dependency in tasks["t"].depends_on or []] == ["start"]
+    assert pipeline.audit["audited_edge_count"] == 1
+    assert pipeline.audit["captured_edge_count"] == 1
+
+
+def test_dag_context_wiring_helper_edges_are_followed(tmp_path: Path) -> None:
+    dag_path = tmp_path / "context_wiring_helper.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG('context_helper_edges', schedule=None) as dag:\n"
+        "    start = BashOperator(task_id='start', bash_command='x')\n"
+        "    t = BashOperator(task_id='t', bash_command='x')\n"
+        "def wire():\n"
+        "    start >> t\n"
+        "wire()\n",
+        encoding="utf-8",
+    )
+
+    pipeline = airflow_loader.load_airflow_dag(dag_path)
+    tasks = {task.task_key: task for task in pipeline.tasks}
+
+    assert pipeline.reconciliation_status == "verified"
+    assert [dependency.task_key for dependency in tasks["t"].depends_on or []] == ["start"]
+
+
+def test_uncalled_wiring_helper_adds_no_edges(tmp_path: Path) -> None:
+    # Airflow only applies the helper's wiring when it runs, so an uncalled helper
+    # must leave the DAG exactly as Airflow sees it (no dependency).
+    dag_path = tmp_path / "uncalled_wiring_helper.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "dag = DAG('uncalled_helper', schedule=None)\n"
+        "start = BashOperator(task_id='start', bash_command='x', dag=dag)\n"
+        "t = BashOperator(task_id='t', bash_command='x', dag=dag)\n"
+        "def wire():\n"
+        "    start >> t\n",
+        encoding="utf-8",
+    )
+
+    pipeline = airflow_loader.load_pipelines(dag_path)[0]
+    tasks = {task.task_key: task for task in pipeline.tasks}
+
+    assert pipeline.reconciliation_status == "verified"
+    assert tasks["t"].depends_on in (None, [])
+    assert pipeline.audit["audited_edge_count"] == 0
+    assert pipeline.audit["captured_edge_count"] == 0
+
+
 def test_decorated_dag_factory_override_emits_each_invocation(tmp_path: Path) -> None:
     dag_path = tmp_path / "decorated_factory.py"
     dag_path.write_text(
