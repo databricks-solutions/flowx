@@ -342,7 +342,7 @@ the package phase writes verbatim:
       "task_key": "ingest_all",
       "type": "AgenticComponentActivity",
       "files": [
-        {"path": "src/ingest/lakeflow_connect.py", "content": "# authored pipeline source ..."}
+        {"path": "ingest/lakeflow_connect.py", "content": "# authored pipeline source ..."}
       ],
       "resources": [
         {"resource_key": "ingest_all_pipeline", "definition": { "channel": "current", "...": "raw pipeline resource" }}
@@ -354,15 +354,21 @@ the package phase writes verbatim:
 }
 ```
 
-- `tags` — the authored pipeline **must** set `tags.source` to `"adf"` (routing/agentic is ADF-only);
+- `tags`: the authored pipeline **must** set `tags.source` to `"adf"` (routing/agentic is ADF-only);
   fill-agentic fails closed otherwise.
-- `files` — files written below the bundle `src/`; each is `path` + either UTF-8 `content` or
-  base64 `binary_content`.
-- `resources` — bundle resources in the `resource_key` + raw `definition` shape the bundle writer
+- `files`: files written below the bundle `src/`, so `path` is relative to it (a resource refers to
+  one as `../src/<path>`); each is `path` + either UTF-8 `content` or base64 `binary_content`.
+- `resources`: bundle resources in the `resource_key` + raw `definition` shape the bundle writer
   expects.
-- `task` — the raw Databricks task fragment (`pipeline_task` or `notebook_task`) wiring to an
-  authored resource or file.
-- `raw_definition` — the original source definition, retained for provenance.
+- `environments` (optional): job environments, each `environment_key` + `spec`, for a serverless task
+  that names one.
+- `task`: the raw Databricks task fragment (`pipeline_task` or `notebook_task`) wiring to an
+  authored resource or file. Libraries and compute go here, never on the activity.
+- `raw_definition`: the original source definition, retained for provenance.
+
+The full contract, including every field package refuses, is the `AgenticComponentActivity` section of
+`flowx-convert`'s `sources/adf.md`. fill-agentic runs each authored pipeline through package's prepare
+and bundle-writing path, so a component package would refuse is refused at fill, with nothing written.
 
 **Default the Lakeflow pipeline / Connect resource `channel` to `current` (stable/GA).** Do **not**
 emit `channel: preview` by default. Let the enriched insight's **structured `release_state`** drive

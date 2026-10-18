@@ -25,7 +25,7 @@ the in-place dependency rewrite in ``motifs/collapser.py``.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 
 from flowx.models.ir import (
     Activity,
@@ -76,6 +76,8 @@ def walk_activities(activities: list[Activity]) -> Iterator[Activity]:
 def control_edges_from_calls(
     source_workflow: str,
     calls: Iterable[tuple[str, bool | None, str]],
+    *,
+    known_workflows: Collection[str] | None = None,
 ) -> list[ControlEdge]:
     """Assemble deduplicated control edges from raw invocation primitives.
 
@@ -89,11 +91,15 @@ def control_edges_from_calls(
         calls: One ``(target_workflow, wait_for_completion, via_task_key)`` triple
             per call site, in the order they should be considered. ``target_workflow``
             may be empty when the callee could not be resolved from a partial export.
+        known_workflows: Names of the workflows present in this export. An edge is
+            resolved only when its target is one of them, so a callee missing from
+            the export stays unresolved. When ``None``, nothing can be confirmed and
+            every edge is unresolved.
 
     Returns:
         Deduplicated control edges in first-seen order. A call whose target equals
-        ``source_workflow`` is dropped (no self-edge); an empty target is kept with
-        ``resolved=False`` rather than dropped.
+        ``source_workflow`` is dropped (no self-edge); an empty or unknown target is
+        kept with ``resolved=False`` rather than dropped.
     """
     edges: list[ControlEdge] = []
     seen: set[tuple[str, str, str]] = set()
@@ -111,13 +117,13 @@ def control_edges_from_calls(
                 target_workflow=target_name,
                 via_task_key=via_task_key,
                 wait_for_completion=wait,
-                resolved=bool(target_name),
+                resolved=bool(target_name) and known_workflows is not None and target_name in known_workflows,
             )
         )
     return edges
 
 
-def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
+def build_control_edges(pipeline: Pipeline, *, known_workflows: Collection[str] | None = None) -> list[ControlEdge]:
     """Derive cross-workflow invocation edges for a pipeline.
 
     Emits one :class:`ControlEdge` per invoking activity -- an
@@ -131,6 +137,8 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
 
     Args:
         pipeline: The translated pipeline IR.
+        known_workflows: Names of the workflows present in this export; see
+            :func:`control_edges_from_calls`.
 
     Returns:
         Deduplicated list of control edges, in first-seen order.
@@ -146,7 +154,7 @@ def build_control_edges(pipeline: Pipeline) -> list[ControlEdge]:
                     # job_name is the caller's own task key, so it is not a cross-workflow edge.
                     yield activity.job_name or "", None, activity.task_key
 
-    return control_edges_from_calls(pipeline.name, _calls())
+    return control_edges_from_calls(pipeline.name, _calls(), known_workflows=known_workflows)
 
 
 def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, str | None] | None:
@@ -157,16 +165,20 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
     - **identity** -- when both sides resolved to a physical identity, they match
       only if those identities are equal. Two differently-resolved identities do
       *not* fall through to a signature match; that is what manufactured the
-      spurious edges #36 removed.
+      spurious edges #36 removed. An empty identity counts as unresolved.
     - **signature** -- when at least one identity is unresolved, fall back to the
-      neutral descriptor and match on equal, non-empty signatures.
+      neutral descriptor and match on equal, non-empty signatures. When both sides
+      name their ``asset_type`` and the types differ (compared exactly), they are
+      different things that happen to share a weak name, so they do not match.
 
     Returns:
         ``(match_kind, match_key, identity)`` when the pair matches, else ``None``.
     """
-    if producer.identity is not None and consumer.identity is not None:
+    if producer.identity and consumer.identity:
         if producer.identity == consumer.identity:
             return "identity", producer.identity, producer.identity
+        return None
+    if producer.asset_type and consumer.asset_type and producer.asset_type != consumer.asset_type:
         return None
     if producer.signature and producer.signature == consumer.signature:
         # A signature match proves nothing physical, so it never claims either side's identity.
@@ -198,6 +210,9 @@ def data_edges_from_endpoints(
 
     edges: list[DataEdge] = []
     seen: set[tuple[str, str, str, str]] = set()
+    # Every writer pairs with every reader of the same asset regardless of run order: two parallel
+    # writers both hand off, and so does a writer that runs after the reader. "Proven" means the
+    # assets match, not that this writer's output is the one the reader sees.
     for producer_key, producer_asset in producer_list:
         for consumer_key, consumer_asset in consumer_list:
             if producer_key == consumer_key:
@@ -284,17 +299,19 @@ def build_motif_annotations(pipeline: Pipeline) -> list[MotifAnnotation]:
     return annotations
 
 
-def build_lineage(pipeline: Pipeline) -> Lineage:
+def build_lineage(pipeline: Pipeline, *, known_workflows: Collection[str] | None = None) -> Lineage:
     """Compose the full source-neutral lineage block for a pipeline.
 
     Args:
         pipeline: The translated pipeline IR.
+        known_workflows: Names of the workflows present in this export; see
+            :func:`control_edges_from_calls`.
 
     Returns:
         A :class:`Lineage` with control edges, data edges, and motif annotations.
     """
     return Lineage(
-        control_edges=build_control_edges(pipeline),
+        control_edges=build_control_edges(pipeline, known_workflows=known_workflows),
         data_edges=build_data_edges(pipeline),
         motifs=build_motif_annotations(pipeline),
     )

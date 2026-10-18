@@ -39,10 +39,16 @@ the Switch's own default branch or another case.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 
 from flowx.discovery_inventory import STRATEGY_PROPERTY
-from flowx.discovery_lineage import INVOKES_WAIT_PROPERTY, INVOKES_WORKFLOW_PROPERTY, build_graph_lineage
+from flowx.discovery_lineage import (
+    INVOKES_WAIT_PROPERTY,
+    INVOKES_WORKFLOW_PROPERTY,
+    build_graph_lineage,
+    walk_nodes,
+)
 from flowx.models.adf_ast import AdfActivity, AdfDefinitions, AdfParameter, AdfPipeline, AdfTrigger, AdfVariable
 from flowx.models.discovery import (
     CONCEPT_BRANCH,
@@ -102,7 +108,9 @@ _CONCEPT_BY_TYPE: dict[str, str] = {
 }
 
 
-def adf_definitions_to_source_graphs(definitions: AdfDefinitions) -> list[SourceGraph]:
+def adf_definitions_to_source_graphs(
+    definitions: AdfDefinitions, *, known_workflows: Collection[str] | None = None
+) -> list[SourceGraph]:
     """Map every pipeline in *definitions* to a shared :class:`SourceGraph`.
 
     Pipeline order is preserved so downstream consumers see the same ordering the
@@ -112,16 +120,35 @@ def adf_definitions_to_source_graphs(definitions: AdfDefinitions) -> list[Source
     :attr:`SourceGraph.lineage` block is derived (control + data edges) once its
     nodes' reads / writes and invocation markers are populated -- data edges are
     joined within a single graph, matching the per-workflow scope of the shared
-    :class:`~flowx.models.ir.Lineage` model.
+    :class:`~flowx.models.ir.Lineage` model. An ``ExecutePipeline`` edge is resolved
+    only when its child pipeline is one of the pipelines in this export.
 
     ``definitions`` is threaded down to the activity mapper so a node's data assets
-    resolve against the factory's datasets and linked services.
+    resolve against the factory's datasets and linked services. ``known_workflows``
+    names every pipeline in the export; pass it when *definitions* holds only some
+    of them (such as under ``--pipeline``), so a child that was exported but not
+    selected still counts as resolved. It defaults to the pipelines in *definitions*.
+    A child is matched case-insensitively, as ADF matches pipeline names, and a
+    matched child is recorded under its exported spelling; an unmatched one keeps
+    the spelling written at the call site.
     """
     graphs = [adf_pipeline_to_source_graph(pipeline, definitions) for pipeline in definitions.pipelines]
     _attach_schedules(graphs, definitions.triggers)
+    exported_names = known_workflows if known_workflows is not None else [graph.name for graph in graphs]
+    exported_spelling = {name.lower(): name for name in exported_names}
+    exported_pipeline_names = set(exported_spelling.values())
     for graph in graphs:
-        graph.lineage = build_graph_lineage(graph)
+        _use_exported_child_spelling(graph, exported_spelling)
+        graph.lineage = build_graph_lineage(graph, known_workflows=exported_pipeline_names)
     return graphs
+
+
+def _use_exported_child_spelling(graph: SourceGraph, exported_spelling: dict[str, str]) -> None:
+    """Rewrite each ``ExecutePipeline`` child name to the exported pipeline it names, ignoring case."""
+    for node in walk_nodes(graph.tasks):
+        callee = node.properties.get(INVOKES_WORKFLOW_PROPERTY)
+        if isinstance(callee, str) and callee.lower() in exported_spelling:
+            node.properties[INVOKES_WORKFLOW_PROPERTY] = exported_spelling[callee.lower()]
 
 
 def _attach_schedules(graphs: list[SourceGraph], triggers: list[AdfTrigger]) -> None:
@@ -306,17 +333,17 @@ def _record_invocation(activity: AdfActivity, properties: dict[str, Any]) -> Non
     ADF ``typeProperties`` the convert-time translator reads, then recorded under
     the source-neutral :data:`INVOKES_WORKFLOW_PROPERTY` / :data:`INVOKES_WAIT_PROPERTY`
     keys so the source-agnostic control-edge derivation can find them without
-    knowing anything about ADF. An empty / missing callee still records the marker
-    (with an empty target) so the edge is reported as unresolved rather than dropped.
+    knowing anything about ADF. An empty / missing callee, or a reference that is
+    neither a reference object nor a name (``null``, say), still records the marker
+    with an empty target, so the edge is reported as unresolved rather than dropped.
     """
     if activity.type != "ExecutePipeline":
         return
     type_properties = activity.type_properties or {}
-    reference = type_properties.get("pipeline", {})
+    reference = type_properties.get("pipeline")
     if isinstance(reference, dict):
-        callee = reference.get("referenceName", "") or ""
-    else:
-        callee = str(reference)
+        reference = reference.get("referenceName")
+    callee = reference if isinstance(reference, str) else ""
     properties[INVOKES_WORKFLOW_PROPERTY] = callee
     properties[INVOKES_WAIT_PROPERTY] = bool(type_properties.get("waitOnCompletion", True))
 

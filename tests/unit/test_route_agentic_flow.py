@@ -1703,3 +1703,23 @@ def test_a_gap_fill_retargeted_by_hand_is_not_applied(tmp_path: Path, edit: Any)
     stored = load_agentic_output(tmp_path)
     assert stored.gap_fills == []
     assert len(stored.edited) == 1
+
+
+@pytest.mark.parametrize(
+    "field",
+    [{"libraries": [{"whl": "../src/x.whl"}]}, {"existing_cluster_id": "1234-5678-abc"}],
+    ids=["libraries", "cluster"],
+)
+def test_fill_refuses_a_component_that_puts_libraries_or_compute_on_the_activity(tmp_path: Path, field: Any) -> None:
+    """The component contract package enforces applies at fill, so nothing is stored for a component it would refuse."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    authored = _named_lfc_pipeline("parent_lfc")
+    authored["tasks"][0].update(field)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+
+    with pytest.raises(ValueError, match=next(iter(field))):
+        apply_agentic_output(tmp_path, ["parent"], [authored])
+
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()

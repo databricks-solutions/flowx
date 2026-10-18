@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 import hashlib
 import json
 import re
 import sys
 import tempfile
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -1068,7 +1069,9 @@ def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, sch
 
     The notebook writer gives a clashing file a ``__N`` suffix, and setup notebooks are written later and
     replace whatever is there, but every task still points at the original path, so one task would run the
-    other file's code.
+    other file's code. Paths that differ only in letter case are one file on macOS and Windows, and a file
+    path cannot also be a directory another file lives in, so an authored path that clashes that way fails
+    too.
     """
     authored_paths: set[str] = set()
     signatures_by_path: dict[str, set[object]] = {}
@@ -1087,6 +1090,27 @@ def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, sch
             raise ValueError(
                 f"Agentic component file {relative_path!r} shares its path with another file in the bundle that "
                 "has different content; give each component its own file path"
+            )
+    paths_by_folded_path: dict[str, set[str]] = {}
+    for relative_path in signatures_by_path:
+        paths_by_folded_path.setdefault(relative_path.casefold(), set()).add(relative_path)
+    for relative_path in sorted(authored_paths):
+        folded_path = relative_path.casefold()
+        folded_parents = {parent.as_posix() for parent in PurePosixPath(folded_path).parents}
+        clashing_paths = sorted(
+            other_path
+            for other_folded_path, other_paths in paths_by_folded_path.items()
+            if other_folded_path == folded_path
+            or other_folded_path in folded_parents
+            or other_folded_path.startswith(f"{folded_path}/")
+            for other_path in other_paths
+            if other_path != relative_path
+        )
+        if clashing_paths:
+            raise ValueError(
+                f"Agentic component file {relative_path!r} clashes on disk with {clashing_paths[0]!r}: paths that "
+                "differ only in case are one file on case-insensitive file systems, and a file cannot also be "
+                "a directory; give each file its own path"
             )
 
 
@@ -1492,11 +1516,10 @@ def _collect_pipeline_resources(workflow: PreparedWorkflow) -> list[dict[str, An
         workflow: The prepared workflow being written.
 
     Returns:
-        Flat list of pipeline-resource dicts (each with ``resource_key``
+        Flat list of pipeline-resource dicts (each exactly ``resource_key``
         and ``definition``), including entries from inner workflows. A
         resource declared more than once with the same key and definition
-        appears once, so it is written once; other fields on the entry are
-        never written and play no part in that comparison.
+        appears once, so it is written once.
     """
     resources: list[dict[str, Any]] = []
     for current in [workflow, *workflow.inner_workflows]:
@@ -2621,12 +2644,22 @@ def _reconstruct_configuration(raw: dict[str, Any] | None) -> Any:
     )
 
 
+_AGENTIC_COMPONENT_FIELDS = frozenset(
+    {"type", *(component_field.name for component_field in dataclasses.fields(AgenticComponentActivity))}
+)
+
+
 def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
     """Rehydrates a typed Activity from its serialised IR dict.
 
     Recurses into control-flow inner activities (ForEach, IfCondition,
     Switch).  Unknown ``type`` strings fall back to PlaceholderActivity
     so the rest of the pipeline can still be prepared.
+
+    Raises:
+        ValueError: An ``AgenticComponentActivity`` carries a field the
+            class does not define, such as ``file`` for ``files``; it is
+            refused rather than dropped.
     """
     task_type = task_ir.get("type", "")
     base = _common_activity_kwargs(task_ir)
@@ -2827,6 +2860,9 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             lookup_values=list(task_ir.get("lookup_values") or []),
         )
     if task_type == "AgenticComponentActivity":
+        unknown_fields = sorted(task_ir.keys() - _AGENTIC_COMPONENT_FIELDS)
+        if unknown_fields:
+            raise ValueError(f"Agentic component {base['task_key']!r} has unknown field(s) {', '.join(unknown_fields)}")
         return AgenticComponentActivity(
             **base,
             files=list(task_ir.get("files") or []),

@@ -158,7 +158,10 @@ def lineage_from_dict(raw: dict[str, Any]) -> Lineage:
     """Rehydrate a :class:`Lineage` block from the dict :func:`lineage_to_dict` emits.
 
     The one inverse shared by the translation report and the discovery graph, so a
-    lineage block reads back the same way wherever it was written.
+    lineage block reads back the same way wherever it was written. A control edge is
+    resolved only when it was saved with ``resolved: true``; a missing or non-boolean
+    flag reads back as unresolved, never as resolved. A ``wait_for_completion`` that
+    is not a boolean reads back as unset (``None``).
     """
     return Lineage(
         control_edges=[
@@ -166,8 +169,8 @@ def lineage_from_dict(raw: dict[str, Any]) -> Lineage:
                 source_workflow=edge.get("source_workflow", ""),
                 target_workflow=edge.get("target_workflow", ""),
                 via_task_key=edge.get("via_task_key", ""),
-                wait_for_completion=edge.get("wait_for_completion"),
-                resolved=bool(edge.get("resolved", True)),
+                wait_for_completion=wait if isinstance(wait := edge.get("wait_for_completion"), bool) else None,
+                resolved=edge.get("resolved") is True,
             )
             for edge in raw.get("control_edges") or []
         ],
@@ -583,6 +586,7 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
         "reconciliation_status": pipeline.reconciliation_status,
         "migration_status": pipeline.migration_status,
         "audit": dict(pipeline.audit),
+        "lineage": lineage_to_dict(pipeline.lineage) if pipeline.lineage is not None else None,
     }
 
 
@@ -593,6 +597,19 @@ _PLACEHOLDER_OWNED_COMPONENT_FIELDS = (
     "timeout_seconds",
     "max_retries",
     "min_retry_interval_millis",
+)
+
+# Source metadata a merged component keeps from its placeholder unless the agent sets its own.
+_PLACEHOLDER_INHERITED_COMPONENT_FIELDS = (
+    "description",
+    "cluster",
+    "compute_mode",
+    "notifications",
+    "parameter_approximations",
+    "motif_id",
+    "data_reads",
+    "data_writes",
+    "raw_definition",
 )
 
 
@@ -627,7 +644,10 @@ def replace_task_by_name(tasks: list[dict[str, Any]], activity_name: str, replac
     downstream dependency edges stay intact.  An ``AgenticComponentActivity`` replacement instead
     always takes its identity, dependencies, timeout, and retries from the placeholder, dropping any
     value the agent set (or the placeholder lacks), because flowx owns those for an authored
-    component.  Returns True when a match was replaced.
+    component.  It also keeps the placeholder's source metadata (notifications, compute mode,
+    description, lineage, source definition and the like) for each field the agent leaves out,
+    except its cluster id and libraries, which a component only takes from its task fragment; a
+    value the agent sets wins.  Returns True when a match was replaced.
     """
     found = _locate_task(tasks, activity_name)
     if found is None:
@@ -640,6 +660,9 @@ def replace_task_by_name(tasks: list[dict[str, Any]], activity_name: str, replac
                 replacement[field_name] = task[field_name]
             else:
                 replacement.pop(field_name, None)
+        for field_name in _PLACEHOLDER_INHERITED_COMPONENT_FIELDS:
+            if field_name not in replacement and field_name in task:
+                replacement[field_name] = task[field_name]
     else:
         replacement.setdefault("task_key", task.get("task_key"))
         replacement.setdefault("name", activity_name)
@@ -665,7 +688,10 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     ``NotebookActivity`` whose ``notebook_path`` points at a notebook the agent
     wrote to the workspace; the prepare phase then references it directly.  An
     ``AgenticComponentActivity`` keeps the placeholder's name, task key,
-    dependencies, timeout, and retries whatever the agent wrote.
+    dependencies, timeout, and retries whatever the agent wrote, and the
+    placeholder's source metadata wherever the agent leaves a field out, except
+    its cluster id and libraries, which a component only takes from its task
+    fragment.
 
     This fills convert's own agentic gaps. A pipeline the routing record routes agentic is filled
     only by ``fill-agentic``, so a result that names one, or an untargeted result that would
