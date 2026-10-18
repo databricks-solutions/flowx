@@ -429,12 +429,11 @@ def test_agentic_component_rejects_malformed_authored_payloads(files, resources,
 
 
 def test_agentic_component_task_fragment_keeps_its_own_description_and_compute(tmp_path):
-    """Only the flowx-owned fields come from the activity; the fragment's compute is not overridden."""
+    """Only the flowx-owned fields come from the activity, so its description does not reach the task."""
     activity = AgenticComponentActivity(
         name="Run job",
         task_key="run_job",
         description="Copied from the source activity",
-        existing_cluster_id="0101-123456-abcdefgh",
         files=[{"path": "jobs/run.py", "content": "print('run')\n"}],
         task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "job_cluster_key": "default_cluster"},
     )
@@ -449,6 +448,29 @@ def test_agentic_component_task_fragment_keeps_its_own_description_and_compute(t
             "job_cluster_key": "default_cluster",
         }
     ]
+
+
+def test_agentic_component_setting_libraries_or_a_cluster_on_the_activity_fails():
+    """The bundle never reads these on a component, so the task would run on serverless without the package."""
+    serialized = {
+        "type": "AgenticComponentActivity",
+        "name": "Run",
+        "task_key": "run",
+        "libraries": [{"pypi": {"package": "great-expectations"}}],
+        "existing_cluster_id": "0101-abc",
+        "files": [{"path": "notebooks/run.py", "content": "print('run')\n"}],
+        "task": {"notebook_task": {"notebook_path": "../src/notebooks/run.py"}},
+    }
+    pipeline, _ = pipeline_dict_to_ir({"name": "orders", "tasks": [serialized]})
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Agentic component 'run' sets existing_cluster_id, libraries on the activity, where the bundle "
+            "never reads them; set them in the task fragment instead"
+        ),
+    ):
+        prepare_workflow(pipeline)
 
 
 def test_agentic_component_rejects_binary_content_that_is_not_plain_base64():
@@ -1239,7 +1261,10 @@ def test_agentic_component_file_paths_that_clash_on_disk_fail(tmp_path, first_pa
 def test_merged_agentic_component_keeps_the_placeholder_source_metadata_it_leaves_out(
     tmp_path, agent_sets_notifications
 ):
-    """Notifications, compute mode, description, lineage and the source definition survive the merge."""
+    """Notifications, compute mode, description, lineage and the source definition survive the merge.
+
+    The placeholder's cluster id and libraries do not, because a component only takes them from its fragment.
+    """
     collapsed = {"destination": "email", "events": ["on_failure"], "args": {"addresses": ["flowx@example.com"]}}
     authored = {"destination": "email", "events": ["on_success"], "args": {"addresses": ["owner@example.com"]}}
     orders = DataAsset(signature="table:sales.orders", identity="sales.orders", asset_type="table")
@@ -1254,6 +1279,8 @@ def test_merged_agentic_component_keeps_the_placeholder_source_metadata_it_leave
                 description="Transform orders",
                 compute_mode="serverless",
                 notifications=collapsed,
+                existing_cluster_id="0101-abc",
+                libraries=[{"pypi": {"package": "great-expectations"}}],
                 data_reads=[orders],
                 data_writes=[orders],
                 raw_definition=SOURCE_DEFINITION,
@@ -1280,6 +1307,8 @@ def test_merged_agentic_component_keeps_the_placeholder_source_metadata_it_leave
     assert merged.data_reads == [orders]
     assert merged.data_writes == [orders]
     assert merged.raw_definition == SOURCE_DEFINITION
+    assert merged.existing_cluster_id is None
+    assert merged.libraries is None
 
     write_bundle(prepare_workflow(merged_pipeline), tmp_path / "bundle")
     job_resource = yaml.safe_load((tmp_path / "bundle" / "resources" / "orders.yml").read_text(encoding="utf-8"))

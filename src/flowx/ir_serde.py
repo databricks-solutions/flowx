@@ -602,10 +602,8 @@ _PLACEHOLDER_OWNED_COMPONENT_FIELDS = (
 _PLACEHOLDER_INHERITED_COMPONENT_FIELDS = (
     "description",
     "cluster",
-    "existing_cluster_id",
     "compute_mode",
     "notifications",
-    "libraries",
     "parameter_approximations",
     "motif_id",
     "data_reads",

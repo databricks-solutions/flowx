@@ -248,7 +248,11 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     is a ``for_each_task`` body that sets any of them other than its own ``task_key``. When
     the component replaces a placeholder through ``merge_agentic``, the activity's own name,
     key, dependencies, timeout, and retries are taken from that placeholder, and so is any
-    source metadata the component leaves out, such as its notifications and lineage.
+    source metadata the component leaves out, such as its notifications and lineage. Of the
+    activity's own fields, only ``notifications`` and ``compute_mode`` change the task flowx
+    writes. Libraries and compute belong in the fragment, so a component that sets
+    ``libraries`` or ``existing_cluster_id`` on the activity is rejected, and a merge never
+    copies them from the placeholder.
 
     flowx does not override or remove any other value the fragment sets, except in three
     wiring passes that run on authored tasks exactly as on generated ones:
@@ -287,7 +291,8 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     before the job YAML is written.
 
     Raises:
-        ValueError: The authored task fragment, or a ``for_each_task`` body other than by its
+        ValueError: The activity sets ``libraries`` or ``existing_cluster_id`` instead of the
+            fragment, the authored task fragment, or a ``for_each_task`` body other than by its
             ``task_key``, sets a flowx-owned field, a file entry is malformed, has a field other
             than ``path``, ``content`` and ``binary_content``, or its path uses a backslash or
             escapes the bundle's ``src`` directory, a resource is malformed, has a field other than
@@ -304,6 +309,13 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
             one of the bundle's job clusters.
     """
     del scope
+    fragment_values = {"existing_cluster_id": activity.existing_cluster_id, "libraries": activity.libraries}
+    misplaced_fields = [field_name for field_name, value in fragment_values.items() if value]
+    if misplaced_fields:
+        raise ValueError(
+            f"Agentic component {activity.task_key!r} sets {', '.join(misplaced_fields)} on the activity, where "
+            "the bundle never reads them; set them in the task fragment instead"
+        )
     _check_task_payload(activity.task_key, activity.task)
     for resource in activity.resources:
         _check_resource(activity.task_key, resource)
