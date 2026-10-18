@@ -730,7 +730,8 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
 
     The folder and file name are then read from the dataset's own ``location``, with
     each ``dataset().<name>`` in them filled in from the reference's parameters
-    (call-site values first, then the dataset's declared defaults). So
+    (call-site values first, then the dataset's declared defaults); a value that does
+    not read as text, such as ``null``, is left a run-time slot. So
     ``@concat('bronze/', dataset().folderPath)`` and ``@concat('silver/',
     dataset().folderPath)`` stay apart even when both are called with ``folderPath:
     "orders"``. When the location sets no folder or file name, or the dataset is not
@@ -748,7 +749,11 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
     type_props = properties.get("typeProperties") or properties
     written_location = type_props.get("location")
     location: dict[str, Any] = written_location if isinstance(written_location, dict) else {}
-    bindings = _effective_dataset_params(dataset_ref, properties)
+    bindings = {
+        name: value
+        for name, value in _effective_dataset_params(dataset_ref, properties).items()
+        if _reads_as_text(value)
+    }
 
     def _shape_of(key: str, *, require_physical: bool) -> str | None:
         written = location.get(key)
@@ -764,6 +769,18 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
     file_shape = _shape_of("fileName", require_physical=False)
     names_a_file = file_shape and (_has_literal_anchor(file_shape) or "<P:" in file_shape)
     return f"FP[{folder_shape}]/FN[{file_shape if names_a_file else ''}]"
+
+
+def _reads_as_text(value: Any) -> bool:
+    """``True`` when a bound parameter *value* is text ADF can splice into a path, even ``""``.
+
+    That is a string, number or boolean, given bare or as an Expression's ``value``. A
+    ``null``, a list, or an Expression with no ``value`` says nothing about the path,
+    so it is no more known than a parameter the call site never bound.
+    """
+    if isinstance(value, dict):
+        value = value.get("value")
+    return isinstance(value, (str, bool, int, float))
 
 
 def _path_shape(expression: Any, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
@@ -885,10 +902,7 @@ def _expression_shape(expression: str, bindings: dict[str, Any], *, require_phys
     dataset_parameter = _DATASET_PARAMETER_RE.fullmatch(expression)
     if dataset_parameter is None or dataset_parameter.group(1) not in bindings:
         return _runtime_slot(expression, bindings, require_physical=require_physical)
-    bound_shape = _raw_path_shape(bindings[dataset_parameter.group(1)], {}, require_physical=require_physical)
-    if bound_shape is None:
-        return None
-    return bound_shape or "<P>"
+    return _raw_path_shape(bindings[dataset_parameter.group(1)], {}, require_physical=require_physical)
 
 
 def _runtime_slot(expression: str, bindings: dict[str, Any], *, require_physical: bool) -> str | None:

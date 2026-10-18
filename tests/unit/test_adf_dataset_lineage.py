@@ -1819,3 +1819,61 @@ def test_function_names_in_a_keyed_slot_ignore_case_as_adf_does() -> None:
 
     assert written == read == "ST[sales@acctA]/FP[bronze/<P:tolower('Orders')>]/FN[]"
     assert edges == [("signature", written)]
+
+
+def _subfolder_definitions(folder_path: str, **sub_defaults: object) -> AdfDefinitions:
+    """One dataset per entry writing its folder as *folder_path*, ``sub`` defaulting to ``sub_defaults[name]``.
+
+    Plus ``ds_plain``, whose folder is just ``@dataset().folderPath``.
+    """
+    definitions = _sales_definitions(ds_plain="@dataset().folderPath", **dict.fromkeys(sub_defaults, folder_path))
+    for name, sub_default in sub_defaults.items():
+        definitions.datasets[name].properties["parameters"] = {
+            "folderPath": {"type": "String"},
+            "sub": {"type": "String", "defaultValue": sub_default},
+            "fileName": {"type": "String"},
+        }
+    return definitions
+
+
+_UNREADABLE_BOUND_VALUES = [None, ["archive"], {"type": "Expression"}]
+
+
+def test_an_empty_bound_value_adds_nothing_to_the_folder() -> None:
+    """``landing/`` plus a ``sub`` defaulting to ``""`` is the folder ``landing``, not a run-time subfolder of it."""
+    definitions = _subfolder_definitions("@concat(dataset().folderPath, dataset().sub)", ds_sub="")
+    written, _, literal_edges = _write_then_read(
+        definitions, written=("ds_sub", "landing/"), read=("ds_plain", "landing")
+    )
+    _, _, runtime_edges = _write_then_read(
+        definitions, written=("ds_sub", "landing/"), read=("ds_plain", "@concat('landing/', item().day)")
+    )
+
+    assert written == "ST[sales@acctA]/FP[landing]/FN[]"
+    assert literal_edges == [("signature", written)]
+    assert runtime_edges == []
+
+
+@pytest.mark.parametrize("sub_default", _UNREADABLE_BOUND_VALUES)
+def test_an_unreadable_bound_value_is_a_runtime_slot(sub_default: object) -> None:
+    """A ``sub`` defaulting to ``null`` (or a list, or an Expression with no value) is unknown, so it is a ``<P>``."""
+    definitions = _subfolder_definitions("@concat(dataset().folderPath, dataset().sub)", ds_sub=sub_default)
+    written, _, edges = _write_then_read(definitions, written=("ds_sub", "landing/"), read=("ds_plain", "landing"))
+
+    assert written == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert edges == []
+
+
+@pytest.mark.parametrize("sub_default", _UNREADABLE_BOUND_VALUES)
+def test_a_function_over_an_unreadable_bound_value_never_shares_a_key_with_an_empty_one(sub_default: object) -> None:
+    """``toLower`` over a ``null`` ``sub`` is a plain ``<P>``, never the same slot as ``toLower('')``."""
+    definitions = _subfolder_definitions(
+        "@concat('landing/', toLower(dataset().sub))", ds_unknown=sub_default, ds_empty=""
+    )
+    written, read, edges = _write_then_read(
+        definitions, written=("ds_unknown", "landing"), read=("ds_empty", "landing")
+    )
+
+    assert written == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert read == "ST[sales@acctA]/FP[landing/<P:tolower('')>]/FN[]"
+    assert edges == []
