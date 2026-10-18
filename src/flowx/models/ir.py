@@ -89,7 +89,10 @@ class DataAsset:
             ``"table"`` / ``"file"`` / ``"volume"`` as well as non-physical /
             logical ones like ``"value"`` (an XCom / TaskFlow return) or
             ``"logical"`` (a named logical dataset). The vocabulary is not
-            closed; ``None`` when unknown.
+            closed; ``None`` when unknown. The signature tier refuses a match
+            when both sides set ``asset_type`` and the two differ, compared
+            exactly, so the writer and reader of one asset must spell it the
+            same way.
         properties: Free-form extra attributes carried through verbatim.
     """
 

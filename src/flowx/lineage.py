@@ -91,10 +91,10 @@ def control_edges_from_calls(
         calls: One ``(target_workflow, wait_for_completion, via_task_key)`` triple
             per call site, in the order they should be considered. ``target_workflow``
             may be empty when the callee could not be resolved from a partial export.
-        known_workflows: Names of the workflows present in this export. When given,
-            an edge is resolved only when its target is one of them, so a callee
-            missing from the export stays unresolved. When ``None``, any non-empty
-            target counts as resolved.
+        known_workflows: Names of the workflows present in this export. An edge is
+            resolved only when its target is one of them, so a callee missing from
+            the export stays unresolved. When ``None``, nothing can be confirmed and
+            every edge is unresolved.
 
     Returns:
         Deduplicated control edges in first-seen order. A call whose target equals
@@ -117,7 +117,7 @@ def control_edges_from_calls(
                 target_workflow=target_name,
                 via_task_key=via_task_key,
                 wait_for_completion=wait,
-                resolved=bool(target_name) and (known_workflows is None or target_name in known_workflows),
+                resolved=bool(target_name) and known_workflows is not None and target_name in known_workflows,
             )
         )
     return edges
@@ -165,16 +165,20 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
     - **identity** -- when both sides resolved to a physical identity, they match
       only if those identities are equal. Two differently-resolved identities do
       *not* fall through to a signature match; that is what manufactured the
-      spurious edges #36 removed.
+      spurious edges #36 removed. An empty identity counts as unresolved.
     - **signature** -- when at least one identity is unresolved, fall back to the
-      neutral descriptor and match on equal, non-empty signatures.
+      neutral descriptor and match on equal, non-empty signatures. When both sides
+      name their ``asset_type`` and the types differ (compared exactly), they are
+      different things that happen to share a weak name, so they do not match.
 
     Returns:
         ``(match_kind, match_key, identity)`` when the pair matches, else ``None``.
     """
-    if producer.identity is not None and consumer.identity is not None:
+    if producer.identity and consumer.identity:
         if producer.identity == consumer.identity:
             return "identity", producer.identity, producer.identity
+        return None
+    if producer.asset_type and consumer.asset_type and producer.asset_type != consumer.asset_type:
         return None
     if producer.signature and producer.signature == consumer.signature:
         # A signature match proves nothing physical, so it never claims either side's identity.
