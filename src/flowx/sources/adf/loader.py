@@ -1072,6 +1072,31 @@ def clear_stale_outputs(output_dir: Path) -> Path | None:
     if (output_dir / "metadata").is_dir():
         entries += [child for child in (output_dir / "metadata").iterdir() if child != archive_parent]
     entries = [entry for entry in entries if entry.exists()]
+    record_path = archive_outputs(output_dir, entries, reason="discover started a fresh run in this output folder")
+    if record_path is None:
+        for entry in entries:
+            shutil.rmtree(entry, ignore_errors=True)
+    return record_path
+
+
+def archive_outputs(output_dir: Path, entries: list[Path], *, reason: str) -> Path | None:
+    """Moves ``entries`` (files or folders inside ``output_dir``) into a new ``metadata/archive/<UTC time>/``.
+
+    Each entry keeps its path relative to ``output_dir``, and an ``archive.json`` beside them records
+    when and why they moved and, per file, where it came from, where it went and its SHA-256, so what
+    a re-run replaced can still be audited. Discover uses it for a whole earlier run and package for
+    the resource files it no longer writes.
+
+    Args:
+        output_dir: Migration output directory the entries live in.
+        entries: The files or folders to move; ones that no longer exist are skipped.
+        reason: Why they moved, recorded in ``archive.json``.
+
+    Returns:
+        The path of the archive record, or ``None`` when the entries hold no file (nothing moves).
+    """
+    archive_parent = output_dir / "metadata" / ARCHIVE_DIRNAME
+    entries = [entry for entry in entries if entry.exists()]
     moved_files = sorted(
         path.relative_to(output_dir).as_posix()
         for entry in entries
@@ -1079,8 +1104,6 @@ def clear_stale_outputs(output_dir: Path) -> Path | None:
         if path.is_file()
     )
     if not moved_files:
-        for entry in entries:
-            shutil.rmtree(entry, ignore_errors=True)
         return None
 
     archived_at = datetime.now(UTC)
@@ -1097,7 +1120,7 @@ def clear_stale_outputs(output_dir: Path) -> Path | None:
     archive_relative = archive_root.relative_to(output_dir).as_posix()
     record = {
         "archived_at": archived_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "reason": "discover started a fresh run in this output folder",
+        "reason": reason,
         "moved": [
             {
                 "from": relative,
@@ -1110,10 +1133,11 @@ def clear_stale_outputs(output_dir: Path) -> Path | None:
     record_path = archive_root / ARCHIVE_RECORD_FILENAME
     record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     logger.info(
-        "Moved %d file(s) from the earlier run in %s to %s; %s lists them",
+        "Moved %d file(s) from the earlier run in %s to %s (%s); %s lists them",
         len(moved_files),
         output_dir,
         archive_root,
+        reason,
         ARCHIVE_RECORD_FILENAME,
     )
     return record_path

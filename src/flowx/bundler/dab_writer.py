@@ -187,10 +187,6 @@ def write_bundle(
 
     resources_dir = output_dir / "resources"
     resources_dir.mkdir(parents=True, exist_ok=True)
-    # databricks.yml includes every resources/*.yml, so a resource an earlier package wrote (say, an
-    # agentic unit the user has since routed deterministic) would still deploy unless it is cleared.
-    for stale_resource_path in resources_dir.glob("*.yml"):
-        stale_resource_path.unlink()
     job_yml_path = resources_dir / f"{resource_key}.yml"
     hoisted_global_names = set(hoisted_global_variables)
     job_resource = _build_job_resource(
@@ -567,6 +563,27 @@ def _live_report_failures(
     ]
 
 
+def _archive_unwritten_resources(output_dir: Path, bundle_dirs: list[Path], written: list[Path]) -> Path | None:
+    """Move every ``resources/*.yml`` this package did not write into the archive, before it can deploy.
+
+    ``databricks.yml`` includes every ``resources/*.yml``, so a resource an earlier package wrote (say,
+    an agentic unit the user has since routed deterministic) would still deploy. Package overwrites the
+    files it writes again; any other one, a file added by hand included, moves into
+    ``metadata/archive/<UTC time>/`` with an ``archive.json`` rather than being deleted. Returns the
+    archive record, or ``None`` when nothing moved.
+    """
+    from flowx.sources.adf.loader import archive_outputs
+
+    written_paths = {Path(path).resolve() for path in written}
+    unwritten = [
+        path
+        for bundle_dir in bundle_dirs
+        for path in sorted((bundle_dir / "resources").glob("*.yml"))
+        if path.resolve() not in written_paths
+    ]
+    return archive_outputs(output_dir, unwritten, reason="package wrote the bundle again without these resource files")
+
+
 def _file_sha256(path: Path) -> str | None:
     """SHA-256 of a file's bytes, or ``None`` when it cannot be read."""
     try:
@@ -878,13 +895,15 @@ def main(argv: list[str] | None = None) -> int:
             all_created.extend(created)
             print(f"  [{index + 1}/{len(workflows)}] {workflow.name}: {len(created)} files")
 
-    # Tier-0 structural check over the emitted bundle(s): duplicate task keys / job params,
-    # dangling depends_on, undeclared {{job.parameters.X}}, leaked YAML anchors. Source-agnostic.
     bundle_dirs = (
         [args.output_dir]
         if shared_airflow_bundle or len(workflows) == 1
         else [args.output_dir / normalize_task_key(workflow.name) for workflow in workflows]
     )
+    _archive_unwritten_resources(args.output_dir, bundle_dirs, all_created)
+
+    # Tier-0 structural check over the emitted bundle(s): duplicate task keys / job params,
+    # dangling depends_on, undeclared {{job.parameters.X}}, leaked YAML anchors. Source-agnostic.
     invariant_violations = 0
     for bundle_dir in bundle_dirs:
         result = check_bundle_dir(bundle_dir)

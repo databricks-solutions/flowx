@@ -193,6 +193,11 @@ Where:
   fill-agentic for a unit whose output changes, modify if it was used, then package. The decisions,
   conversation, stored fills and modify's answers are kept in `metadata/`; hand edits to generated
   bundle files and `resources/*.yml` are not. See "After package" in the `flowx-route` skill.
+- A `resources/*.yml` that this package does not write again (one an earlier package wrote, or one
+  added by hand) is moved into `metadata/archive/<UTC time>/` with an `archive.json`, so it no longer
+  deploys and is kept for audit. The files package does write again are overwritten.
+- `metadata/archive/` sits inside the bundle folder, so `databricks bundle deploy` uploads it with
+  the rest unless it is git-ignored; nothing in it is a job or pipeline the bundle deploys.
 
 **Workspace artifact downloading (default: enabled).** When the report references workspace-resident notebooks (`/Shared/...`), DBFS Spark JARs (`dbfs:/...`), or Spark Python files, the preparer downloads them via the Databricks CLI auth so the resulting bundle is self-contained and deployable across environments. Downloaded notebooks are downloaded under `src/notebooks/` and bound to the default `job_cluster` (since they may rely on classic-compute features). The original `notebook_path` in the resource YAML is rewritten to the bundle-relative path `../src/notebooks/<file>.py`.
 
@@ -345,7 +350,7 @@ All under the shared `<output_dir>`:
 | File | Description |
 |---|---|
 | `databricks.yml` | Root bundle configuration |
-| `resources/*.yml` | Job and pipeline YAML definitions; each package clears the folder first, so a resource an earlier package wrote doesn't linger |
+| `resources/*.yml` | Job and pipeline YAML definitions; a file this package doesn't write again moves into `metadata/archive/<UTC time>/`, so a resource an earlier package wrote doesn't linger |
 | `src/notebooks/*.py` | Generated notebooks |
 | `src/setup/*.py` | Infrastructure setup scripts |
 | `SETUP.md` | Human-readable setup instructions |

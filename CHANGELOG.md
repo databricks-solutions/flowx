@@ -19,7 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 - Re-running discover over an output folder that already holds a run now moves that run's outputs
-  into `metadata/archive/<UTC time>/`, with an `archive.json` of what moved, instead of deleting them
+  into `metadata/archive/<UTC time>/`, with an `archive.json` of what moved, instead of deleting them;
+  re-running package does the same for any resource file it no longer writes
 
 ## [0.1.0]
 

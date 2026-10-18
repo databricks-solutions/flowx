@@ -656,3 +656,42 @@ def test_re_packaging_after_reversing_an_agentic_decision_drops_the_agentic_reso
     assert sorted(path.name for path in (tmp_path / "resources").glob("*.yml")) == ["solo.yml"]
     audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
     assert audit["components"][0]["outcome"] == "deterministic"
+    (archived,) = _archived(tmp_path)
+    assert [entry["from"] for entry in archived["moved"]] == ["resources/solo_agentic.yml"]
+
+
+def _archived(output_dir: Path) -> list[dict[str, Any]]:
+    """Every archive record under metadata/archive/, oldest first."""
+    records = sorted((output_dir / "metadata" / "archive").glob("*/archive.json"))
+    return [json.loads(record.read_text(encoding="utf-8")) for record in records]
+
+
+def test_re_packaging_moves_a_resource_file_it_no_longer_writes_into_the_archive(tmp_path: Path) -> None:
+    """A resource package does not write again, hand-added ones included, is moved aside, never deleted."""
+    _setup(tmp_path, _inventory())
+    assert _package(tmp_path) == 0
+    hand_added = tmp_path / "resources" / "team_alerts.yml"
+    hand_added.write_text("resources:\n  jobs: {}\n", encoding="utf-8")
+    content = hand_added.read_bytes()
+
+    assert _package(tmp_path) == 0
+
+    assert sorted(path.name for path in (tmp_path / "resources").glob("*.yml")) == ["solo.yml"]
+    (record,) = _archived(tmp_path)
+    (moved,) = record["moved"]
+    assert moved["from"] == "resources/team_alerts.yml"
+    assert (tmp_path / moved["to"]).read_bytes() == content
+    assert moved["sha256"] == hashlib.sha256(content).hexdigest()
+    assert record["reason"].startswith("package")
+
+
+def test_re_packaging_the_same_bundle_archives_nothing(tmp_path: Path) -> None:
+    """Package overwrites the files it writes again; only what it would remove goes to the archive."""
+    _setup(tmp_path, _inventory())
+    assert _package(tmp_path) == 0
+    written = (tmp_path / "resources" / "solo.yml").read_bytes()
+
+    assert _package(tmp_path) == 0
+
+    assert (tmp_path / "resources" / "solo.yml").read_bytes() == written
+    assert not (tmp_path / "metadata" / "archive").exists()
