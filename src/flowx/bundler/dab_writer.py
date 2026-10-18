@@ -567,10 +567,8 @@ def _live_report_failures(
 # The bundle folders the latest package wrote, kept under metadata/: "." for one bundle at the top of the
 # output folder, otherwise one folder per pipeline named by normalize_task_key.
 PACKAGED_BUNDLES_FILENAME = "packaged_bundles.json"
-# What a bundle at the top of the output folder holds besides metadata/; the names a recorded bundle
-# folder may never be moved under, since they are that bundle's (or metadata/) and not a pipeline's.
+# What a bundle at the top of the output folder holds besides metadata/.
 _TOP_LEVEL_BUNDLE_ENTRIES = ("databricks.yml", "SETUP.md", "WARNINGS.md", "resources", "src")
-_NEVER_MOVED_FOLDERS = frozenset({"metadata", "resources", "src", "setup"})
 
 
 def read_packaged_bundles(output_dir: Path) -> list[str]:
@@ -609,24 +607,48 @@ def _is_bundle_folder_name(name: Any) -> bool:
     return isinstance(name, str) and (name == "." or (bool(name) and normalize_task_key(name) == name))
 
 
-def _archive_stale_outputs(
-    output_dir: Path, bundle_dirs: list[Path], written: list[Path], previous_bundles: list[str]
-) -> Path | None:
-    """Move what this package no longer writes into the archive, then record the bundle folders it wrote.
+def _archive_stale_bundles(output_dir: Path, bundle_dirs: list[Path], previous_bundles: list[str]) -> Path | None:
+    """Move every bundle folder the previous package recorded and this one will not write into the archive.
 
-    ``databricks.yml`` includes every ``resources/*.yml``, so a resource an earlier package wrote (say, an
-    agentic unit the user has since routed deterministic) would still deploy; and a bundle folder an
-    earlier package wrote for a pipeline this report no longer has (an agentic unit's pipelines replaced
-    under new names, or a narrower convert) would stay beside the new bundles, complete and deployable.
-    Package overwrites the files it writes again. Any other ``resources/*.yml`` in a bundle it writes, a
-    file added by hand included, and every bundle folder on the previous record it no longer writes,
-    move into ``metadata/archive/<UTC time>/`` with an ``archive.json`` rather than being deleted. A
-    folder package never recorded is left alone. Returns the archive record, or ``None`` when nothing moved.
+    A bundle folder an earlier package wrote for a pipeline this report no longer has (an agentic unit's
+    pipelines replaced under new names, or a narrower convert) would otherwise stay beside the new
+    bundles, complete and deployable. For ``"."`` that is the top-level bundle's own entries. Package
+    runs this once its staging preflight passes and before it writes anything into the output folder,
+    so a name the old and new layouts share (a pipeline named Src and the top-level bundle's ``src/``)
+    is cleared before the new bundle lands there instead of being mixed into it. The folders move into
+    ``metadata/archive/<UTC time>/`` with an ``archive.json`` rather than being deleted. A folder package
+    never recorded, and ``metadata/`` itself, are left alone. Returns the archive record, or ``None``
+    when nothing moved.
     """
     from flowx.sources.adf.loader import archive_outputs
 
     output_dir = Path(output_dir)
-    current = [bundle_dir.relative_to(output_dir).as_posix() for bundle_dir in bundle_dirs]
+    current = {bundle_dir.relative_to(output_dir).as_posix() for bundle_dir in bundle_dirs}
+    entries = sorted(
+        {
+            output_dir / entry
+            for name in previous_bundles
+            if name not in current and name != "metadata"
+            for entry in (_TOP_LEVEL_BUNDLE_ENTRIES if name == "." else [name])
+        }
+    )
+    return archive_outputs(output_dir, entries, reason="package no longer writes these bundle folders")
+
+
+def _archive_stale_outputs(output_dir: Path, bundle_dirs: list[Path], written: list[Path]) -> Path | None:
+    """Move the resource files this package did not write into the archive, then record its bundle folders.
+
+    ``databricks.yml`` includes every ``resources/*.yml``, so a resource an earlier package wrote (say, an
+    agentic unit the user has since routed deterministic) would still deploy. Package overwrites the files
+    it writes again; after writing, any other ``resources/*.yml`` in a bundle it wrote, a file added by
+    hand included, moves into ``metadata/archive/<UTC time>/`` with an ``archive.json`` rather than being
+    deleted. Then ``metadata/packaged_bundles.json`` records the bundle folders this package wrote, so the
+    next package and discover's reset know which ones to move. Returns the archive record, or ``None``
+    when nothing moved.
+    """
+    from flowx.sources.adf.loader import archive_outputs
+
+    output_dir = Path(output_dir)
     written_paths = {Path(path).resolve() for path in written}
     entries = [
         path
@@ -634,18 +656,12 @@ def _archive_stale_outputs(
         for path in sorted((bundle_dir / "resources").glob("*.yml"))
         if path.resolve() not in written_paths
     ]
-    for name in previous_bundles:
-        if name in current or name in _NEVER_MOVED_FOLDERS:
-            continue
-        names = [entry for entry in _TOP_LEVEL_BUNDLE_ENTRIES if entry not in current] if name == "." else [name]
-        entries += [output_dir / entry for entry in names]
-    record_path = archive_outputs(
-        output_dir, entries, reason="package no longer writes these bundle folders or resource files"
-    )
+    record_path = archive_outputs(output_dir, entries, reason="package no longer writes these resource files")
     metadata_dir = output_dir / "metadata"
     metadata_dir.mkdir(parents=True, exist_ok=True)
+    current = sorted(bundle_dir.relative_to(output_dir).as_posix() for bundle_dir in bundle_dirs)
     (metadata_dir / PACKAGED_BUNDLES_FILENAME).write_text(
-        json.dumps({"bundles": sorted(current)}, indent=2) + "\n", encoding="utf-8"
+        json.dumps({"bundles": current}, indent=2) + "\n", encoding="utf-8"
     )
     return record_path
 
@@ -939,6 +955,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    bundle_dirs = (
+        [args.output_dir]
+        if shared_airflow_bundle or len(workflows) == 1
+        else [args.output_dir / normalize_task_key(workflow.name) for workflow in workflows]
+    )
+    _archive_stale_bundles(args.output_dir, bundle_dirs, previous_bundles)
+
     all_created: list[Path] = []
     if shared_airflow_bundle:
         combined = _combine_airflow_workflows(workflows)
@@ -970,12 +993,7 @@ def main(argv: list[str] | None = None) -> int:
             all_created.extend(created)
             print(f"  [{index + 1}/{len(workflows)}] {workflow.name}: {len(created)} files")
 
-    bundle_dirs = (
-        [args.output_dir]
-        if shared_airflow_bundle or len(workflows) == 1
-        else [args.output_dir / normalize_task_key(workflow.name) for workflow in workflows]
-    )
-    _archive_stale_outputs(args.output_dir, bundle_dirs, all_created, previous_bundles)
+    _archive_stale_outputs(args.output_dir, bundle_dirs, all_created)
 
     # Tier-0 structural check over the emitted bundle(s): duplicate task keys / job params,
     # dangling depends_on, undeclared {{job.parameters.X}}, leaked YAML anchors. Source-agnostic.

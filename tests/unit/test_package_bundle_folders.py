@@ -119,18 +119,37 @@ def test_widening_from_one_pipeline_moves_the_top_level_bundle(tmp_path: Path) -
 
 @pytest.mark.parametrize("pipeline", ["Src", "Resources"])
 def test_widening_keeps_a_new_bundle_folder_named_like_a_top_level_entry(tmp_path: Path, pipeline: str) -> None:
-    """A pipeline whose folder is src/ or resources/ keeps the bundle just written there."""
+    """A pipeline whose folder is src/ or resources/ gets a clean bundle there; the old entry is archived first."""
     folder = pipeline.lower()
     assert _package(tmp_path, ["alpha"]) == 0
+    old_notebook = tmp_path / "src" / "notebooks" / "alpha.py"
+    old_notebook.parent.mkdir(parents=True)
+    old_notebook.write_text("print('alpha')\n", encoding="utf-8")
 
     assert _package(tmp_path, [pipeline, "load"]) == 0
 
     assert _bundles(tmp_path) == sorted(["load", folder])
     assert _record(tmp_path) == {"bundles": sorted(["load", folder])}
+    assert (tmp_path / folder / "databricks.yml").is_file()
+    assert (tmp_path / folder / "resources" / f"{folder}.yml").is_file()
+    assert not (tmp_path / "resources" / "alpha.yml").exists()
+    assert not old_notebook.exists()
     (record,) = _archived(tmp_path)
     moved = {entry["from"] for entry in record["moved"]}
-    assert "databricks.yml" in moved
-    assert not any(path.startswith(f"{folder}/") for path in moved)
+    assert {"databricks.yml", "resources/alpha.yml", "src/notebooks/alpha.py"} <= moved
+
+
+def test_narrowing_away_a_pipeline_named_like_a_top_level_entry_moves_its_bundle(tmp_path: Path) -> None:
+    """A recorded src/ bundle folder is archived like any other once package stops writing it."""
+    assert _package(tmp_path, ["Src", "load"]) == 0
+
+    assert _package(tmp_path, ["load"]) == 0
+
+    assert _bundles(tmp_path) == ["."]
+    assert _record(tmp_path) == {"bundles": ["."]}
+    (record,) = _archived(tmp_path)
+    moved = {entry["from"] for entry in record["moved"]}
+    assert {"src/databricks.yml", "src/resources/src.yml", "load/databricks.yml"} <= moved
 
 
 def test_re_packaging_the_same_pipelines_moves_nothing(tmp_path: Path) -> None:
@@ -179,20 +198,25 @@ def test_a_malformed_or_unsafe_record_is_refused_before_anything_is_written(
     assert _bundles(tmp_path) == []
 
 
-def test_a_recorded_name_the_top_level_bundle_uses_is_never_moved(tmp_path: Path) -> None:
-    """A hand-edited record naming metadata/ or src/ can't make package move what the top-level bundle holds."""
+def test_a_recorded_metadata_folder_is_never_moved(tmp_path: Path) -> None:
+    """A hand-edited record naming metadata/ can't make package move it; the new top-level bundle is complete."""
     assert _package(tmp_path, ["alpha", "beta"]) == 0
     (tmp_path / RECORD).write_text(json.dumps({"bundles": ["alpha", "beta", "metadata", "src"]}), encoding="utf-8")
-    kept = tmp_path / "src" / "helper.py"
-    kept.parent.mkdir()
-    kept.write_text("print('kept')\n", encoding="utf-8")
+    kept = tmp_path / "metadata" / "notes.txt"
+    kept.write_text("kept\n", encoding="utf-8")
+    stale = tmp_path / "src" / "helper.py"
+    stale.parent.mkdir()
+    stale.write_text("print('stale')\n", encoding="utf-8")
 
     assert _package(tmp_path, ["alpha"]) == 0
 
     assert _bundles(tmp_path) == ["."]
-    assert kept.is_file() and (tmp_path / "metadata" / "packaged_bundles.json").is_file()
+    assert _record(tmp_path) == {"bundles": ["."]}
+    assert kept.is_file()
+    assert (tmp_path / "databricks.yml").is_file() and (tmp_path / "resources" / "alpha.yml").is_file()
+    assert not stale.exists()
     (record,) = _archived(tmp_path)
-    assert {entry["from"].split("/")[0] for entry in record["moved"]} == {"alpha", "beta"}
+    assert {entry["from"].split("/")[0] for entry in record["moved"]} == {"alpha", "beta", "src"}
 
 
 def test_re_running_discover_moves_the_recorded_bundle_folders_into_the_archive(tmp_path: Path) -> None:
