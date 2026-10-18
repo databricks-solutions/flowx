@@ -10,7 +10,7 @@ import yaml
 
 from flowx.bundler.dab_writer import _combine_airflow_workflows, pipeline_dict_to_ir, write_bundle
 from flowx.ir_serde import activity_to_dict, merge_agentic_results, pipeline_to_dict
-from flowx.models.dab import SetupTask
+from flowx.models.dab import DabNotebook, SetupTask
 from flowx.models.ir import (
     AgenticComponentActivity,
     Dependency,
@@ -1002,3 +1002,139 @@ def test_agentic_component_text_file_is_written_byte_for_byte(tmp_path, content)
     write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[activity])), tmp_path)
 
     assert (tmp_path / "src" / "notebooks" / "run.py").read_bytes() == content.encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "compute",
+    [
+        {"existing_cluster_id": None},
+        {"existing_cluster_id": ""},
+        {"new_cluster": None},
+        {"new_cluster": {}},
+        {"environment_key": ""},
+        {"environment_key": ["serverless"]},
+        {"job_cluster_key": None},
+    ],
+)
+def test_agentic_component_compute_key_without_a_usable_value_fails(compute):
+    """A compute key set to null or empty names no compute, so the task would package and fail at deploy."""
+    activity = AgenticComponentActivity(
+        name="Run", task_key="run", task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, **compute}
+    )
+
+    with pytest.raises(ValueError, match=f"'run' {next(iter(compute))} must be a non-empty"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+def test_agentic_component_with_two_compute_bindings_fails():
+    """A task runs on one compute, so naming two leaves which one undefined."""
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        task={
+            "spark_python_task": {"python_file": "../src/jobs/run.py"},
+            "existing_cluster_id": "0101-abc",
+            "job_cluster_key": "default_cluster",
+        },
+    )
+
+    with pytest.raises(
+        ValueError, match="'run' task names more than one compute: existing_cluster_id, job_cluster_key"
+    ):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+@pytest.mark.parametrize(
+    "for_each_task",
+    [
+        {"inputs": "[1, 2]"},
+        {"inputs": "[1, 2]", "task": []},
+        {"inputs": "[1, 2]", "task": {"notebook_task": {"notebook_path": "../src/notebooks/item.py"}}},
+        {"inputs": "[1, 2]", "task": {"task_key": "", "notebook_task": {"notebook_path": "../src/notebooks/item.py"}}},
+    ],
+)
+def test_agentic_component_for_each_task_without_a_keyed_task_body_fails(for_each_task):
+    activity = AgenticComponentActivity(name="Run", task_key="run", task={"for_each_task": for_each_task})
+
+    with pytest.raises(ValueError, match="'run' for_each_task must carry its task as a mapping with a task_key"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+def test_agentic_component_for_each_body_parameters_that_look_dynamic_are_written_as_given(tmp_path):
+    """The loop body is authored too, so the clean-up meant for generated tasks must not drop its parameters."""
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        task={
+            "for_each_task": {
+                "inputs": "[1, 2]",
+                "task": {
+                    "task_key": "run_item",
+                    "notebook_task": {
+                        "notebook_path": "/Workspace/Shared/etl/item",
+                        "base_parameters": {"total": "@concat(1, 2)"},
+                    },
+                    "existing_cluster_id": "0101-abc",
+                },
+            }
+        },
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[activity])), tmp_path)
+
+    job = _jobs_by_task_key(tmp_path)["run"]
+    body = job["tasks"][0]["for_each_task"]["task"]
+    assert body["notebook_task"]["base_parameters"] == {"total": "@concat(1, 2)"}
+    assert "_authored" not in body
+
+
+def test_agentic_component_file_matching_a_generated_file_except_the_added_newline_fails(tmp_path):
+    """A generated file gains a trailing newline when written, so the authored bytes would not be kept."""
+    custom = AgenticComponentActivity(
+        name="Custom",
+        task_key="custom",
+        files=[{"path": "notebooks/run.py", "content": "print('run')"}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/run.py"}},
+    )
+    workflow = prepare_workflow(Pipeline(name="orders", tasks=[custom]))
+    workflow.notebooks.append(DabNotebook(relative_path="notebooks/run.py", content="print('run')"))
+
+    with pytest.raises(ValueError, match="'notebooks/run.py' shares its path"):
+        write_bundle(workflow, tmp_path)
+
+
+def test_agentic_component_file_entry_with_an_unknown_field_fails():
+    """An unknown field such as an encoding flag would be dropped and the file written as plain text."""
+    activity = AgenticComponentActivity(
+        name="Wheel",
+        task_key="wheel",
+        files=[{"path": "libraries/orders.whl", "content": "UEsDBAoAAAAA", "encoding": "base64"}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/orders.py"}},
+    )
+
+    with pytest.raises(ValueError, match="'wheel' file 'libraries/orders.whl' has unknown field\\(s\\) encoding"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+@pytest.mark.parametrize(
+    ("first_path", "second_path"),
+    [("jobs/Run.py", "jobs/run.py"), ("jobs", "jobs/run.py"), ("Jobs", "jobs/run.py"), ("jobs/run.py", "jobs")],
+)
+def test_agentic_component_file_paths_that_clash_on_disk_fail(tmp_path, first_path, second_path):
+    """Paths that differ only in case are one file on macOS and Windows, and a file cannot also be a directory."""
+    first = AgenticComponentActivity(
+        name="First",
+        task_key="first",
+        files=[{"path": first_path, "content": "print('first')\n"}],
+        task={"spark_python_task": {"python_file": f"../src/{first_path}"}, "existing_cluster_id": "0101-abc"},
+    )
+    second = AgenticComponentActivity(
+        name="Second",
+        task_key="second",
+        files=[{"path": second_path, "content": "print('second')\n"}],
+        task={"spark_python_task": {"python_file": f"../src/{second_path}"}, "existing_cluster_id": "0101-abc"},
+    )
+
+    with pytest.raises(ValueError, match="clashes on disk with"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
+    assert not (tmp_path / "src").exists()

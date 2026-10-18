@@ -9,7 +9,7 @@ import re
 import sys
 import tempfile
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -668,7 +668,9 @@ def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, sch
 
     The notebook writer gives a clashing file a ``__N`` suffix, and setup notebooks are written later and
     replace whatever is there, but every task still points at the original path, so one task would run the
-    other file's code.
+    other file's code. Paths that differ only in letter case are one file on macOS and Windows, and a file
+    path cannot also be a directory another file lives in, so an authored path that clashes that way fails
+    too.
     """
     authored_paths: set[str] = set()
     signatures_by_path: dict[str, set[object]] = {}
@@ -687,6 +689,27 @@ def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, sch
             raise ValueError(
                 f"Agentic component file {relative_path!r} shares its path with another file in the bundle that "
                 "has different content; give each component its own file path"
+            )
+    paths_by_folded_path: dict[str, set[str]] = {}
+    for relative_path in signatures_by_path:
+        paths_by_folded_path.setdefault(relative_path.casefold(), set()).add(relative_path)
+    for relative_path in sorted(authored_paths):
+        folded_path = relative_path.casefold()
+        folded_parents = {parent.as_posix() for parent in PurePosixPath(folded_path).parents}
+        clashing_paths = sorted(
+            other_path
+            for other_folded_path, other_paths in paths_by_folded_path.items()
+            if other_folded_path == folded_path
+            or other_folded_path in folded_parents
+            or other_folded_path.startswith(f"{folded_path}/")
+            for other_path in other_paths
+            if other_path != relative_path
+        )
+        if clashing_paths:
+            raise ValueError(
+                f"Agentic component file {relative_path!r} clashes on disk with {clashing_paths[0]!r}: paths that "
+                "differ only in case are one file on case-insensitive file systems, and a file cannot also be "
+                "a directory; give each file its own path"
             )
 
 
