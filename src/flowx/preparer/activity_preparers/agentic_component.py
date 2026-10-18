@@ -248,8 +248,8 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     is a ``for_each_task`` body that sets any of them other than its own ``task_key``. When
     the component replaces a placeholder through ``merge_agentic``, the activity's own name,
     key, dependencies, timeout, and retries are taken from that placeholder, and so is any
-    source metadata the component leaves out, such as its notifications and lineage. Of the
-    activity's own fields, only ``notifications`` and ``compute_mode`` change the task flowx
+    source metadata the component leaves out, such as its notifications and lineage. Of that
+    source metadata, only ``notifications`` and ``compute_mode`` change the task flowx
     writes. Libraries and compute belong in the fragment, so a component that sets
     ``libraries`` or ``existing_cluster_id`` on the activity is rejected, and a merge never
     copies them from the placeholder.
