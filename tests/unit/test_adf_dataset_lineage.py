@@ -1572,3 +1572,162 @@ def test_a_folder_that_is_only_a_formatted_date_gets_no_signature() -> None:
 
     assert written == read == ""
     assert edges == []
+
+
+_WRAPPED_BOUND_FOLDERS = [
+    "@concat('bronze/', toLower(dataset().folderPath))",
+    "@concat('bronze/', string(dataset().folderPath))",
+    "@concat('bronze/', trim(dataset().folderPath))",
+    "@concat('bronze/', replace(dataset().folderPath, '-', '_'))",
+    "@concat('bronze/', if(equals(dataset().folderPath, 'archive'), 'old', dataset().folderPath))",
+    "bronze/@{toLower(dataset().folderPath)}",
+]
+
+
+@pytest.mark.parametrize("wrapped_folder", _WRAPPED_BOUND_FOLDERS)
+def test_a_function_over_different_bound_folders_never_links(wrapped_folder: str) -> None:
+    """``toLower('orders')`` and ``toLower('customers')`` are different folders, so the call keeps its bound value."""
+    definitions = _sales_definitions(ds_out=wrapped_folder, ds_in=wrapped_folder)
+    written, read, edges = _write_then_read(definitions, written=("ds_out", "orders"), read=("ds_in", "customers"))
+
+    assert written != read
+    assert "orders" in written and "customers" in read
+    assert edges == []
+
+
+@pytest.mark.parametrize("wrapped_folder", _WRAPPED_BOUND_FOLDERS)
+def test_a_function_over_the_same_bound_folder_still_links(wrapped_folder: str) -> None:
+    """The same function over the same bound ``orders`` is the same folder on both sides, so it still joins."""
+    definitions = _sales_definitions(ds_out=wrapped_folder, ds_in=wrapped_folder)
+    written, read, edges = _write_then_read(definitions, written=("ds_out", "orders"), read=("ds_in", "orders"))
+
+    assert written == read
+    assert edges == [("signature", written)]
+
+
+def test_a_function_over_a_bound_folder_is_a_keyed_slot_not_folder_text() -> None:
+    """``bronze/`` + ``toLower(orders)`` is a slot keyed by its input, never the literal folder ``bronze/orders``."""
+    definitions = _sales_definitions(
+        ds_out="@concat('bronze/', toLower(dataset().folderPath))", ds_in="@dataset().folderPath"
+    )
+    written, read, edges = _write_then_read(definitions, written=("ds_out", "orders"), read=("ds_in", "bronze/orders"))
+
+    assert written == "ST[sales@acctA]/FP[bronze/<P:toLower('orders')>]/FN[]"
+    assert edges == []
+
+
+def test_a_keyed_slot_alone_cannot_anchor_a_folder_signature() -> None:
+    """A folder that is only ``toLower(dataset().folderPath)`` has no literal text, so it gets no signature."""
+    definitions = _sales_definitions(ds_out="@toLower(dataset().folderPath)", ds_in="@toLower(dataset().folderPath)")
+    written, read, edges = _write_then_read(definitions, written=("ds_out", "orders"), read=("ds_in", "orders"))
+
+    assert written == read == ""
+    assert edges == []
+
+
+def test_a_function_over_different_bound_file_names_never_links() -> None:
+    """``toLower('A') + '.csv'`` and ``toLower('B') + '.csv'`` are different files, so they never join."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name,
+                file_system="sales",
+                folder_path="@dataset().folderPath",
+                linked_service="ls_acctA",
+                file_name="@concat(toLower(dataset().fileName), '.csv')",
+            )
+            for name in ("ds_out", "ds_in")
+        },
+        linked_services={"ls_acctA": _adls_linked_service("ls_acctA", account="acctA")},
+    )
+
+    def _file_copy(name: str, *, dataset: str, file_name: str, produced: bool) -> AdfActivity:
+        reference = AdfDatasetReference(
+            reference_name=dataset,
+            parameters={
+                "folderPath": {"value": "@concat('landing/', item().run)", "type": "Expression"},
+                "fileName": file_name,
+            },
+        )
+        if produced:
+            return AdfActivity(name=name, type="Copy", outputs=[reference])
+        return AdfActivity(name=name, type="Copy", inputs=[reference])
+
+    _, writes = activity_data_assets(_file_copy("Write", dataset="ds_out", file_name="A", produced=True), definitions)
+    reads, _ = activity_data_assets(_file_copy("Read", dataset="ds_in", file_name="B", produced=False), definitions)
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+
+    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:toLower('A')>.csv]"
+    assert edges == []
+
+
+def test_a_function_over_the_same_bound_file_name_still_links() -> None:
+    """The same function over the same bound file name names the same file, so the two still join."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name,
+                file_system="sales",
+                folder_path="@dataset().folderPath",
+                linked_service="ls_acctA",
+                file_name="@concat(toLower(dataset().fileName), '.csv')",
+            )
+            for name in ("ds_out", "ds_in")
+        },
+        linked_services={"ls_acctA": _adls_linked_service("ls_acctA", account="acctA")},
+    )
+    reference = {
+        name: AdfDatasetReference(
+            reference_name=name,
+            parameters={
+                "folderPath": {"value": "@concat('landing/', item().run)", "type": "Expression"},
+                "fileName": "A",
+            },
+        )
+        for name in ("ds_out", "ds_in")
+    }
+    _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference["ds_out"]]), definitions)
+    reads, _ = activity_data_assets(AdfActivity(name="Read", type="Copy", inputs=[reference["ds_in"]]), definitions)
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+
+    assert [edge.match_key for edge in edges] == ["ST[sales@acctA]/FP[landing/<P>]/FN[<P:toLower('A')>.csv]"]
+
+
+def test_a_file_name_that_is_only_a_function_over_a_bound_value_keeps_its_key() -> None:
+    """``toLower('A')`` and ``toLower('B')`` name different files, so even with no literal text they never join."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name,
+                file_system="sales",
+                folder_path="@dataset().folderPath",
+                linked_service="ls_acctA",
+                file_name="@toLower(dataset().fileName)",
+            )
+            for name in ("ds_out", "ds_in")
+        },
+        linked_services={"ls_acctA": _adls_linked_service("ls_acctA", account="acctA")},
+    )
+
+    def _reference(name: str, file_name: str) -> AdfDatasetReference:
+        return AdfDatasetReference(
+            reference_name=name,
+            parameters={
+                "folderPath": {"value": "@concat('landing/', item().run)", "type": "Expression"},
+                "fileName": file_name,
+            },
+        )
+
+    _, writes = activity_data_assets(
+        AdfActivity(name="Write", type="Copy", outputs=[_reference("ds_out", "A")]), definitions
+    )
+    reads, _ = activity_data_assets(
+        AdfActivity(name="Read", type="Copy", inputs=[_reference("ds_in", "B")]), definitions
+    )
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+
+    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:toLower('A')>]"
+    assert edges == []

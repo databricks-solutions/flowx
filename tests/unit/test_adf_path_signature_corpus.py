@@ -4,9 +4,15 @@ Every run-time piece in a folder -- a parameter, a ForEach item, an activity out
 call -- must leave exactly one ``<P>`` slot where it sits: it never vanishes, and none of its argument text leaks into
 the folder. So a folder reads the same whichever run-time piece it holds, and swapping that piece for ``item().x``
 leaves its signature unchanged. Each case writes a ``sales@acctA`` dataset with ``folderPath`` bound to one spelling.
+
+A function over a value the call site bound is one slot too, keyed by that value: two bound values never share a
+signature, and neither ever reads as folder text. A new run-time construct belongs in this corpus, not in a
+per-value patch to the shape code.
 """
 
 from __future__ import annotations
+
+import re
 
 import pytest
 
@@ -95,3 +101,53 @@ def test_a_runtime_piece_is_one_slot_where_it_sits(folder: str, piece: str, spel
     assert "<P>" in signature
     assert signature == _written_signature(_spell(spelling, folder, "item().x")[0])
     assert signature == f"ST[sales@acctA]/FP[{expected_shape}]/FN[]"
+
+
+_BOUND_WRAPPERS = [
+    "toLower({})",
+    "string({})",
+    "trim({})",
+    "replace({}, '-', '_')",
+    "if(equals({}, 'archive'), 'old', {})",
+    "toUpper(concat('x', {}))",
+]
+
+_BOUND_VALUES = ["orders", "customers", "orders-2024"]
+
+
+def _bound_signature(folder: str, wrapper: str, spelling: str, value: str) -> str:
+    """The signature of a dataset whose folder wraps ``dataset().folderPath`` in *wrapper*, called with *value*."""
+    call = wrapper.format(*["dataset().folderPath"] * wrapper.count("{}"))
+    location = f"@concat('{folder}/', {call})" if spelling == "concat" else f"{folder}/@{{{call}}}"
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_wrapped": AdfDataset(
+                name="ds_wrapped",
+                type="DelimitedText",
+                properties={
+                    "typeProperties": {"location": {"fileSystem": "sales", "folderPath": location}},
+                    "linkedServiceName": {"referenceName": "ls_acctA"},
+                },
+            )
+        },
+        linked_services=_DEFINITIONS.linked_services,
+    )
+    reference = AdfDatasetReference(reference_name="ds_wrapped", parameters={"folderPath": value})
+    _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference]), definitions)
+    return writes[0].signature
+
+
+@pytest.mark.parametrize("spelling", ["concat", "interpolated"])
+@pytest.mark.parametrize("wrapper", _BOUND_WRAPPERS)
+@pytest.mark.parametrize("folder", _LITERAL_FOLDERS)
+def test_a_function_over_a_bound_value_is_one_slot_keyed_by_that_value(
+    folder: str, wrapper: str, spelling: str
+) -> None:
+    """Different bound values never share a signature, and the call never reads as folder text or a literal folder."""
+    signatures = {value: _bound_signature(folder, wrapper, spelling, value) for value in _BOUND_VALUES}
+
+    assert len(set(signatures.values())) == len(_BOUND_VALUES)
+    for value, signature in signatures.items():
+        assert re.sub(r"<P:(?:[^<>]|<P>)*>", "<P>", signature) == f"ST[sales@acctA]/FP[{folder}/<P>]/FN[]"
+        assert signature != _written_signature(f"{folder}/{value}")

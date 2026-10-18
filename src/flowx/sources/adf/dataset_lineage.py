@@ -72,6 +72,7 @@ _QUOTED_LITERAL_RE = re.compile(r"'((?:[^']|'')*)'", re.DOTALL)
 _CONCAT_CALL_RE = re.compile(r"concat\s*\((?P<arguments>.*)\)", re.IGNORECASE | re.DOTALL)
 _DATASET_PARAMETER_RE = re.compile(r"dataset\(\)\??\.(\w+)")
 _INTERPOLATION_RE = re.compile(r"@\{([^}]*)\}")
+_RUNTIME_SLOT_RE = re.compile(r"<P(?::(?:[^<>]|<P>)*)?>")
 
 
 # --------------------------------------------------------------------------- #
@@ -753,7 +754,8 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
     if folder_shape is None or not _has_literal_anchor(folder_shape):
         return None
     file_shape = _shape_of("fileName", require_physical=False)
-    return f"FP[{folder_shape}]/FN[{file_shape if file_shape and _has_literal_anchor(file_shape) else ''}]"
+    names_a_file = file_shape and (_has_literal_anchor(file_shape) or "<P:" in file_shape)
+    return f"FP[{folder_shape}]/FN[{file_shape if names_a_file else ''}]"
 
 
 def _path_shape(expression: Any, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
@@ -842,11 +844,44 @@ def _expression_shape(expression: str, bindings: dict[str, Any], *, require_phys
         return "".join(pieces)
     dataset_parameter = _DATASET_PARAMETER_RE.fullmatch(expression)
     if dataset_parameter is None or dataset_parameter.group(1) not in bindings:
-        return "<P>"
+        return _runtime_slot(expression, bindings, require_physical=require_physical)
     bound_shape = _raw_path_shape(bindings[dataset_parameter.group(1)], {}, require_physical=require_physical)
     if bound_shape is None:
         return None
     return bound_shape or "<P>"
+
+
+def _runtime_slot(expression: str, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
+    """The one slot a run-time expression leaves, keyed by any bound ``dataset()`` value it uses.
+
+    A plain run-time value is ``<P>``. A call over a ``dataset().<name>`` the call site
+    bound, such as ``toLower(dataset().folderPath)`` called with ``orders``, is
+    ``<P:toLower('orders')>``: still one slot that is never path text, but two of them
+    match only when the call and its bound inputs match, so ``orders`` and
+    ``customers`` never join. ``None`` when a bound value is not physical.
+    """
+    pieces: list[str] = []
+    piece_start = 0
+    for match in _DATASET_PARAMETER_RE.finditer(expression):
+        if match.group(1) not in bindings or expression.count("'", 0, match.start()) % 2:
+            continue
+        bound_shape = _raw_path_shape(bindings[match.group(1)], {}, require_physical=require_physical)
+        if bound_shape is None:
+            return None
+        pieces.extend((expression[piece_start : match.start()], f"'{bound_shape}'"))
+        piece_start = match.end()
+    if not pieces:
+        return "<P>"
+    pieces.append(expression[piece_start:])
+    return f"<P:{_without_unquoted_whitespace(''.join(pieces))}>"
+
+
+def _without_unquoted_whitespace(text: str) -> str:
+    """*text* with whitespace outside quotes removed, so spacing never tells two keyed slots apart."""
+    return "".join(
+        part if index % 2 else re.sub(r"\s+", "", part)
+        for index, part in enumerate(re.split(r"('(?:[^']|'')*')", text))
+    )
 
 
 def _concat_arguments(expression: str) -> list[str] | None:
@@ -884,8 +919,11 @@ def _concat_arguments(expression: str) -> list[str] | None:
 
 
 def _has_literal_anchor(shape: str) -> bool:
-    """``True`` when *shape* holds literal text besides ``<P>`` slots and slashes; only slots is too weak a key."""
-    return bool(re.sub(r"<P>|/", "", shape).strip())
+    """``True`` when *shape* holds literal text besides slots and slashes; only slots is too weak a key.
+
+    A keyed slot such as ``<P:toLower('orders')>`` is still a slot, so its key never counts as literal text.
+    """
+    return bool(_RUNTIME_SLOT_RE.sub("", shape).replace("/", "").strip())
 
 
 # --------------------------------------------------------------------------- #
