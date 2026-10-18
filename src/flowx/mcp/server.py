@@ -171,18 +171,27 @@ def _packaging_args(parameters: dict[str, Any]) -> list[Any]:
 
     A ``group_spec`` on its own means "package by this spec", so it fills in ``per-group`` and
     ``spec`` for whichever of the other two is unset. Otherwise unset keys are left off so the CLI's
-    own defaults apply (``per-pipeline``, ``inferred``), and a bad value reaches the CLI unchanged so
-    it is refused there exactly as on the command line.
+    own defaults apply (``per-pipeline``, ``inferred``). Only a missing key, ``None`` or ``""`` counts
+    as unset; any other value, ``0`` or ``False`` included, reaches the CLI unchanged so it is refused
+    there exactly as on the command line.
     """
-    group_spec = parameters.get("group_spec")
-    packaging_mode = parameters.get("packaging_mode") or ("per-group" if group_spec else None)
-    group_by = parameters.get("group_by") or ("spec" if group_spec else None)
+
+    def given(key: str) -> Any:
+        value = parameters.get(key)
+        return None if value is None or value == "" else value
+
+    group_spec = given("group_spec")
+    packaging_mode = given("packaging_mode")
+    group_by = given("group_by")
+    if group_spec is not None:
+        packaging_mode = "per-group" if packaging_mode is None else packaging_mode
+        group_by = "spec" if group_by is None else group_by
     args: list[Any] = []
-    if packaging_mode:
+    if packaging_mode is not None:
         args += ["--packaging-mode", packaging_mode]
-    if group_by:
+    if group_by is not None:
         args += ["--group-by", group_by]
-    if group_spec:
+    if group_spec is not None:
         args += ["--group-spec", group_spec]
     return args
 

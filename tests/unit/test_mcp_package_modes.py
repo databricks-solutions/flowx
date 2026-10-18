@@ -53,10 +53,10 @@ def _tree(root: Path) -> dict[str, str]:
     return {str(path.relative_to(root)): path.read_text() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-def _cli_flags(parameters: dict[str, str]) -> list[str]:
+def _cli_flags(parameters: dict[str, Any]) -> list[str]:
     flags: list[str] = []
     for key, value in parameters.items():
-        flags += [f"--{key.replace('_', '-')}", value]
+        flags += [f"--{key.replace('_', '-')}", str(value)]
     return flags
 
 
@@ -139,10 +139,16 @@ def test_mcp_package_uses_a_group_spec_sent_without_group_by(no_bundle_upload, t
 
 
 @pytest.mark.parametrize(
-    "parameters",
-    [{"packaging_mode": "bogus"}, {"packaging_mode": "per-group", "group_by": "bogus"}],
+    ("parameters", "bad_value"),
+    [
+        ({"packaging_mode": "bogus"}, "bogus"),
+        ({"packaging_mode": "per-group", "group_by": "bogus"}, "bogus"),
+        ({"packaging_mode": 0}, "0"),
+        ({"packaging_mode": False}, "False"),
+        ({"packaging_mode": "per-group", "group_by": False}, "False"),
+    ],
 )
-def test_mcp_package_refuses_a_bad_value_like_the_cli(no_bundle_upload, tmp_path: Path, capsys, parameters):
+def test_mcp_package_refuses_a_bad_value_like_the_cli(no_bundle_upload, tmp_path: Path, capsys, parameters, bad_value):
     mcp_dir, cli_dir = tmp_path / "mcp", tmp_path / "cli"
     _write_converted_state(mcp_dir)
     _write_converted_state(cli_dir)
@@ -153,8 +159,8 @@ def test_mcp_package_refuses_a_bad_value_like_the_cli(no_bundle_upload, tmp_path
 
     assert mcp_result["ok"] is False
     assert mcp_result["process"]["returncode"] == cli_exit.value.code == 2
-    assert "invalid choice: 'bogus'" in mcp_result["process"]["stderr"]
-    assert "invalid choice: 'bogus'" in capsys.readouterr().err
+    assert f"invalid choice: '{bad_value}'" in mcp_result["process"]["stderr"]
+    assert f"invalid choice: '{bad_value}'" in capsys.readouterr().err
     assert not (mcp_dir / "databricks.yml").exists() and not list(mcp_dir.glob("*/databricks.yml"))
 
 
