@@ -19,7 +19,8 @@ The projection is deliberately small and additive over the historical ADF shape:
   conditions**), and the verbatim per-node ``raw``;
 * a node whose ``properties`` mark it ``inventory_visible: False`` (for example an
   Airflow TaskGroup kept only for structure) is left out of the activity list and
-  the counts, while its children are still listed;
+  the counts, while its children are still listed; any value other than exactly
+  ``False`` keeps the node listed and counted;
 * each pipeline entry gains an additive ``lineage`` block (control + data edges)
   when its :class:`~flowx.models.discovery.SourceGraph` carries derived lineage;
 * each pipeline entry gains an additive ``motifs`` list -- the multi-activity
@@ -121,7 +122,9 @@ def build_source_inventory(
     unsupported = 0
 
     for graph in graphs:
-        flattened = [node for node in walk_nodes(graph.tasks) if node.properties.get(INVENTORY_VISIBLE_PROPERTY, True)]
+        flattened = [
+            node for node in walk_nodes(graph.tasks) if node.properties.get(INVENTORY_VISIBLE_PROPERTY) is not False
+        ]
         for node in flattened:
             strategy = _strategy(node)
             if strategy == _DETERMINISTIC:

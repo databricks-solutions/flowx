@@ -181,6 +181,23 @@ def test_missing_or_non_boolean_resolved_reads_as_unresolved(recorded) -> None:
     assert restored.tasks[1].dependencies[0].resolved is False
 
 
+@pytest.mark.parametrize("recorded", ["true", 0])
+def test_non_boolean_wait_for_completion_reads_as_unset(recorded) -> None:
+    """A saved wait flag that is not a boolean comes back as unknown, never verbatim."""
+    graph = _graph("first")
+    graph.lineage = Lineage(
+        control_edges=[
+            ControlEdge(source_workflow="first", target_workflow="child", via_task_key="a", wait_for_completion=True)
+        ]
+    )
+    document = source_graphs_document([graph], source="unit")
+    document["graphs"][0]["lineage"]["control_edges"][0]["wait_for_completion"] = recorded
+
+    [restored] = source_graphs_from_document(_rehash(document))
+
+    assert restored.lineage.control_edges[0].wait_for_completion is None
+
+
 def _graph_with_parameters_list(document: dict) -> None:
     document["graphs"][0]["parameters"] = [1]
 

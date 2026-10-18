@@ -15,8 +15,10 @@ shared by the lineage substrate and the discovery graph. That shape is a general
 best-effort description of what a task reads/writes -- not physical-only: a
 resolvable physical ``identity`` when there is one (else ``None``), an
 always-present ``signature``, and an open ``asset_type`` that also covers
-non-physical / logical / value hand-offs (e.g. an Airflow XCom). A graph's derived
-:class:`~flowx.models.ir.Lineage` block is serialised through ``ir_serde``'s
+non-physical / logical / value hand-offs (e.g. an Airflow XCom). When a writer and
+a reader of one asset both set ``asset_type``, the signature tier matches them only
+if the two are exactly equal, so both sides must spell the type the same way. A
+graph's derived :class:`~flowx.models.ir.Lineage` block is serialised through ``ir_serde``'s
 ``lineage_to_dict`` for the same reason; its inverse (:func:`_lineage_from_dict`)
 lives here because ``ir_serde`` ships only the forward direction.
 
@@ -155,9 +157,11 @@ def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
 
     Only contract version ``"1"`` is accepted, with no top-level keys beyond the
     envelope and its two hashes. Both content hashes are required and must match the
-    content, every graph must come from the document's ``source``, and every graph
-    must have the shape the writer gives it, so a hand-edited or truncated file raises
-    instead of quietly handing a different graph to a later phase.
+    content, and every graph must come from the document's ``source``, so a
+    hand-edited or truncated file raises instead of quietly handing a different graph
+    to a later phase. A document that is not a JSON object, a graph entry that is not
+    a JSON object, and a graph the reader cannot rehydrate also raise. Field types
+    are not otherwise checked.
 
     Args:
         document: The parsed JSON document.
@@ -168,8 +172,9 @@ def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
     Raises:
         ValueError: The document is not a JSON object, the contract version is
             unsupported, the document has an unknown top-level key, ``graphs`` is not
-            a list, a graph is malformed, a graph's ``source`` differs from the
-            document's, or a hash is missing or does not match the content.
+            a list, a graph entry is not a JSON object or cannot be rehydrated, a
+            graph's ``source`` differs from the document's, or a hash is missing or
+            does not match the content.
     """
     if not isinstance(document, dict):
         raise ValueError("source_graphs document is not a JSON object")
@@ -230,7 +235,8 @@ def _lineage_from_dict(raw: dict[str, Any]) -> Lineage:
     The inverse of that forward serialiser (which ``ir_serde`` does not itself
     ship), so a discovery graph's lineage round-trips through this module. A
     control edge is resolved only when it records ``resolved: true``; a missing or
-    non-boolean value reads as unresolved.
+    non-boolean value reads as unresolved. A ``wait_for_completion`` that is not a
+    boolean reads as unset (``None``).
     """
     return Lineage(
         control_edges=[
@@ -238,7 +244,7 @@ def _lineage_from_dict(raw: dict[str, Any]) -> Lineage:
                 source_workflow=edge.get("source_workflow", ""),
                 target_workflow=edge.get("target_workflow", ""),
                 via_task_key=edge.get("via_task_key", ""),
-                wait_for_completion=edge.get("wait_for_completion"),
+                wait_for_completion=wait if isinstance(wait := edge.get("wait_for_completion"), bool) else None,
                 resolved=edge.get("resolved") is True,
             )
             for edge in raw.get("control_edges") or []

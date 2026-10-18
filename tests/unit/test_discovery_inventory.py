@@ -8,6 +8,8 @@ any particular front-end.
 
 from __future__ import annotations
 
+import pytest
+
 from flowx.discovery_inventory import INVENTORY_VISIBLE_PROPERTY, STRATEGY_PROPERTY, build_source_inventory
 from flowx.discovery_serde import source_graph_from_dict, source_graph_to_dict
 from flowx.models.discovery import (
@@ -435,3 +437,18 @@ def test_missing_or_unknown_strategy_is_listed_as_unsupported() -> None:
         "agentic",
     ]
     assert inventory["summary"]["unsupported_count"] == 2
+
+
+@pytest.mark.parametrize("marker", [None, 0, ""])
+def test_only_an_explicit_false_visibility_marker_hides_a_node(marker) -> None:
+    """A falsy but non-boolean ``inventory_visible`` keeps the node listed and counted."""
+    marked = _visible_node("marked", "unsupported")
+    marked.properties[INVENTORY_VISIBLE_PROPERTY] = marker
+    graph = SourceGraph(name="g1", source="unit", tasks=[_visible_node("plain", "deterministic"), marked])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/src")
+
+    assert [activity["task_key"] for activity in inventory["pipelines"][0]["activities"]] == ["plain", "marked"]
+    assert inventory["summary"]["activity_count"] == 2
+    assert inventory["summary"]["unsupported_count"] == 1
+    assert inventory["summary"]["coverage_pct"] == 50.0

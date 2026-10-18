@@ -82,8 +82,8 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
       spurious edges #36 removed. An empty identity counts as unresolved.
     - **signature** -- when at least one identity is unresolved, fall back to the
       neutral descriptor and match on equal, non-empty signatures. When both sides
-      name their ``asset_type`` and the types differ, they are different things
-      that happen to share a weak name, so they do not match.
+      name their ``asset_type`` and the types differ (compared exactly), they are
+      different things that happen to share a weak name, so they do not match.
 
     Returns:
         ``(match_kind, match_key, identity)`` when the pair matches, else ``None``.
