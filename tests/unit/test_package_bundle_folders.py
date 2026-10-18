@@ -117,6 +117,22 @@ def test_widening_from_one_pipeline_moves_the_top_level_bundle(tmp_path: Path) -
     assert (tmp_path / "metadata").is_dir()
 
 
+@pytest.mark.parametrize("pipeline", ["Src", "Resources"])
+def test_widening_keeps_a_new_bundle_folder_named_like_a_top_level_entry(tmp_path: Path, pipeline: str) -> None:
+    """A pipeline whose folder is src/ or resources/ keeps the bundle just written there."""
+    folder = pipeline.lower()
+    assert _package(tmp_path, ["alpha"]) == 0
+
+    assert _package(tmp_path, [pipeline, "load"]) == 0
+
+    assert _bundles(tmp_path) == sorted(["load", folder])
+    assert _record(tmp_path) == {"bundles": sorted(["load", folder])}
+    (record,) = _archived(tmp_path)
+    moved = {entry["from"] for entry in record["moved"]}
+    assert "databricks.yml" in moved
+    assert not any(path.startswith(f"{folder}/") for path in moved)
+
+
 def test_re_packaging_the_same_pipelines_moves_nothing(tmp_path: Path) -> None:
     assert _package(tmp_path, ["alpha", "beta"]) == 0
 

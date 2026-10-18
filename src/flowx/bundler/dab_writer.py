@@ -637,7 +637,8 @@ def _archive_stale_outputs(
     for name in previous_bundles:
         if name in current or name in _NEVER_MOVED_FOLDERS:
             continue
-        entries += [output_dir / entry for entry in _TOP_LEVEL_BUNDLE_ENTRIES] if name == "." else [output_dir / name]
+        names = [entry for entry in _TOP_LEVEL_BUNDLE_ENTRIES if entry not in current] if name == "." else [name]
+        entries += [output_dir / entry for entry in names]
     record_path = archive_outputs(
         output_dir, entries, reason="package no longer writes these bundle folders or resource files"
     )
