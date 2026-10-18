@@ -19,7 +19,7 @@ Two tiers, exactly as #36 established them:
   resolved asset to an unresolved one on a coincidence. For an unresolved reference
   the signature is the *structural path signature* (#36's "expression" tier: the
   dataset's folder and file name with their literal text kept in place -- quoted
-  text, ``concat`` pieces, and text outside ``@{...}`` -- and exactly one ``<P>`` slot
+  text, numbers, ``concat`` pieces, and text outside ``@{...}`` -- and exactly one ``<P>`` slot
   for every other run-time value or function call, wherever it sits, keyed by any
   bound ``dataset()`` value it uses) when the folder has a literal anchor, prefixed
   ``ST[<store>]/`` when the dataset's store is known (see
@@ -719,7 +719,7 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
     """Structural signature of the folder and file name a parameterised reference points at.
 
     As in #36, only a reference that passes a ``folderPath`` with literal text gets
-    one: quoted text in an expression, or text outside the ``@{...}`` blocks of an
+    one: quoted text or a number in an expression, or text outside the ``@{...}`` blocks of an
     interpolated value, so ``landing/@{item().run}`` qualifies, and joins, just as
     ``@concat('landing/', item().run)`` does. A file name alone is too weak a
     discriminator: many unrelated activities write
@@ -876,11 +876,11 @@ def _interpolation_blocks(text: str) -> list[tuple[int, int]]:
 def _expression_shape(expression: str, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
     """Shape of one ADF expression body, read so that no run-time value is ever dropped.
 
-    A quoted ``'text'`` (``''`` is an escaped quote) is that text. ``concat(...)`` is
-    its arguments' shapes joined in order. A ``dataset().<name>`` (or
-    ``dataset()?.<name>``) bound in *bindings* is its bound value's shape, slashes and
-    all. Anything else -- any other function call, ``pipeline()``, ``item()``,
-    ``activity(...)``, a subscript, a number -- is one slot (see
+    A quoted ``'text'`` (``''`` is an escaped quote) is that text, and a number is its
+    digits. ``concat(...)`` is its arguments' shapes joined in order. A
+    ``dataset().<name>`` (or ``dataset()?.<name>``) bound in *bindings* is its bound
+    value's shape, slashes and all. Anything else -- any other function call,
+    ``pipeline()``, ``item()``, ``activity(...)``, a subscript -- is one slot (see
     :func:`_runtime_slot`), so none of its argument text ever reads as part of the
     path.
     """
