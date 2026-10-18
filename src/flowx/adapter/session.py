@@ -394,10 +394,11 @@ _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
         prompt="Path to a pipeline->group spec (only for --packaging-mode per-group with explicit groups)?",
         description=(
             "Optional. JSON/YAML file mapping pipelines to group names (``{pipeline: group}`` or "
-            "``{group: [pipelines]}``). When set, package is run with ``--packaging-mode per-group "
-            "--group-by spec --group-spec <path>``. Leave blank to infer groups from the Run "
-            "Pipeline call graph. It must be a path the server itself can read, so on the hosted "
-            "server use ``--group-by inferred`` or a server-local path."
+            "``{group: [pipelines]}``). Set packaging mode to ``per-group`` when giving one: package "
+            "then runs with ``--packaging-mode per-group --group-by spec --group-spec <path>``. Through "
+            "MCP a spec with any other packaging mode is refused; the CLI ignores it. Leave blank to "
+            "infer groups from the Run Pipeline call graph. It must be a path the server itself can "
+            "read, so on the hosted server use ``--group-by inferred`` or a server-local path."
         ),
         default="",
         required=False,
