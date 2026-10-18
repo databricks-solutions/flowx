@@ -99,7 +99,9 @@ flowx owns `task_key`, `depends_on`, `run_if`, `timeout_seconds`, `max_retries`,
 `min_retry_interval_millis` and `retry_on_timeout`; setting any of them in the fragment is an
 error. On merge, the component's `name`, `task_key`, `depends_on`,
 `timeout_seconds`, `max_retries` and `min_retry_interval_millis` always come from the placeholder;
-any values you set for them on the activity are replaced. flowx does not override or remove any
+any values you set for them on the activity are replaced. The placeholder's other source metadata
+(`notifications`, `compute_mode`, `description`, `data_reads`, `data_writes`, `raw_definition` and the
+like) is kept for each field you leave out; a value you set wins. flowx does not override or remove any
 other value the fragment sets, except in three wiring passes that apply to authored tasks exactly as
 to generated ones:
 

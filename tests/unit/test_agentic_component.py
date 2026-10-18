@@ -13,6 +13,7 @@ from flowx.ir_serde import activity_to_dict, merge_agentic_results, pipeline_to_
 from flowx.models.dab import DabNotebook, SetupTask
 from flowx.models.ir import (
     AgenticComponentActivity,
+    DataAsset,
     Dependency,
     ForEachActivity,
     IfConditionActivity,
@@ -1138,3 +1139,58 @@ def test_agentic_component_file_paths_that_clash_on_disk_fail(tmp_path, first_pa
     with pytest.raises(ValueError, match="clashes on disk with"):
         write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
     assert not (tmp_path / "src").exists()
+
+
+@pytest.mark.parametrize("agent_sets_notifications", [False, True])
+def test_merged_agentic_component_keeps_the_placeholder_source_metadata_it_leaves_out(
+    tmp_path, agent_sets_notifications
+):
+    """Notifications, compute mode, description, lineage and the source definition survive the merge."""
+    collapsed = {"destination": "email", "events": ["on_failure"], "args": {"addresses": ["flowx@example.com"]}}
+    authored = {"destination": "email", "events": ["on_success"], "args": {"addresses": ["owner@example.com"]}}
+    orders = DataAsset(signature="table:sales.orders", identity="sales.orders", asset_type="table")
+    report = tmp_path / "translation_report.json"
+    placeholders = Pipeline(
+        name="orders",
+        tasks=[
+            PlaceholderActivity(
+                name="Transform",
+                task_key="transform",
+                original_type="ExecuteDataFlow",
+                description="Transform orders",
+                compute_mode="serverless",
+                notifications=collapsed,
+                data_reads=[orders],
+                data_writes=[orders],
+                raw_definition=SOURCE_DEFINITION,
+            )
+        ],
+    )
+    report.write_text(json.dumps(pipeline_to_dict(placeholders)), encoding="utf-8")
+    results = tmp_path / "agentic_results"
+    results.mkdir()
+    component = {"type": "AgenticComponentActivity", "resources": RESOURCES, "task": TASK}
+    if agent_sets_notifications:
+        component["notifications"] = authored
+    (results / "transform.json").write_text(
+        json.dumps({"activity_name": "Transform", "task": component}), encoding="utf-8"
+    )
+
+    assert merge_agentic_results(report, results) == (1, 0)
+    merged_pipeline, _ = pipeline_dict_to_ir(json.loads(report.read_text(encoding="utf-8")))
+    merged = merged_pipeline.tasks[0]
+    assert isinstance(merged, AgenticComponentActivity)
+    assert merged.notifications == (authored if agent_sets_notifications else collapsed)
+    assert merged.compute_mode == "serverless"
+    assert merged.description == "Transform orders"
+    assert merged.data_reads == [orders]
+    assert merged.data_writes == [orders]
+    assert merged.raw_definition == SOURCE_DEFINITION
+
+    write_bundle(prepare_workflow(merged_pipeline), tmp_path / "bundle")
+    job_resource = yaml.safe_load((tmp_path / "bundle" / "resources" / "orders.yml").read_text(encoding="utf-8"))
+    expected_recipient = "owner@example.com" if agent_sets_notifications else "flowx@example.com"
+    task = job_resource["resources"]["jobs"]["orders"]["tasks"][0]
+    assert task["email_notifications"] == {
+        ("on_success" if agent_sets_notifications else "on_failure"): [expected_recipient]
+    }

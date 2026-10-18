@@ -594,6 +594,21 @@ _PLACEHOLDER_OWNED_COMPONENT_FIELDS = (
     "min_retry_interval_millis",
 )
 
+# Source metadata a merged component keeps from its placeholder unless the agent sets its own.
+_PLACEHOLDER_INHERITED_COMPONENT_FIELDS = (
+    "description",
+    "cluster",
+    "existing_cluster_id",
+    "compute_mode",
+    "notifications",
+    "libraries",
+    "parameter_approximations",
+    "motif_id",
+    "data_reads",
+    "data_writes",
+    "raw_definition",
+)
+
 
 def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, replacement: dict[str, Any]) -> bool:
     """Replace the task named *activity_name* with *replacement*, recursing into containers.
@@ -604,8 +619,10 @@ def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, repl
     edges stay intact.  An ``AgenticComponentActivity`` replacement instead
     always takes its identity, dependencies, timeout, and retries from the
     placeholder, dropping any value the agent set (or the placeholder lacks),
-    because flowx owns those for an authored component.  Returns True when a
-    match was replaced.
+    because flowx owns those for an authored component.  It also keeps the
+    placeholder's source metadata (notifications, compute mode, description,
+    lineage, source definition and the like) for each field the agent leaves
+    out; a value the agent sets wins.  Returns True when a match was replaced.
     """
     nested_keys = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
     for index, task in enumerate(tasks):
@@ -616,6 +633,9 @@ def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, repl
                         replacement[field_name] = task[field_name]
                     else:
                         replacement.pop(field_name, None)
+                for field_name in _PLACEHOLDER_INHERITED_COMPONENT_FIELDS:
+                    if field_name not in replacement and field_name in task:
+                        replacement[field_name] = task[field_name]
             else:
                 replacement.setdefault("task_key", task.get("task_key"))
                 replacement.setdefault("name", activity_name)
@@ -650,7 +670,8 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     ``NotebookActivity`` whose ``notebook_path`` points at a notebook the agent
     wrote to the workspace; the prepare phase then references it directly.  An
     ``AgenticComponentActivity`` keeps the placeholder's name, task key,
-    dependencies, timeout, and retries whatever the agent wrote.
+    dependencies, timeout, and retries whatever the agent wrote, and the
+    placeholder's source metadata wherever the agent leaves a field out.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
