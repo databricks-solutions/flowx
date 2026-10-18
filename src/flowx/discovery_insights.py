@@ -133,7 +133,10 @@ def _inventory_pipelines(inventory: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _pipeline_names(inventory: dict[str, Any]) -> set[str]:
-    """The set of real pipeline names in the inventory (the foreign-key domain); only string names count."""
+    """The pipeline names the inventory lists (the foreign-key domain, which only a resolved control edge widens).
+
+    Only string names count.
+    """
     return {pipeline["name"] for pipeline in _inventory_pipelines(inventory) if isinstance(pipeline.get("name"), str)}
 
 
