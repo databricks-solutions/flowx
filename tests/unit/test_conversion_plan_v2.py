@@ -197,7 +197,107 @@ def test_apply_plan_refuses_a_stale_plan(tmp_path: Path) -> None:
 
 def _recorded_plan(**component_fields: Any) -> dict[str, Any]:
     component = {"component_id": "component-1", "members": ["solo"], "decision": "agentic", **component_fields}
-    return {"schema_version": SCHEMA_VERSION, "components": [component]}
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "inventory_sha256": "inv",
+        "source_graphs_sha256": None,
+        "agentic_insights_sha256": None,
+        "components": [component],
+    }
+
+
+def _write_recorded_plan(output_dir: Path, document: dict[str, Any]) -> None:
+    metadata = output_dir / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "conversion_plan.json").write_text(json.dumps(document), encoding="utf-8")
+
+
+def test_the_well_formed_recorded_plan_the_load_tests_start_from_loads(tmp_path: Path) -> None:
+    _write_recorded_plan(tmp_path, _recorded_plan())
+
+    assert ConversionPlan.load(tmp_path) is not None
+
+
+@pytest.mark.parametrize(
+    ("document", "key"),
+    [
+        ({**_recorded_plan(), "conversaton": []}, "conversaton"),
+        (_recorded_plan(desicion="deterministic"), "desicion"),
+        ({**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "acepted": True}]}, "acepted"),
+        ({**_recorded_plan(), "conversation": [{"question": "q", "answer": "a", "asked_by": "agent"}]}, "asked_by"),
+        (_recorded_plan(assignments=[{"pipeline": "solo", "route": "agentic", "note": "x"}]), "note"),
+    ],
+    ids=["top-level", "component", "grouping", "conversation", "assignment"],
+)
+def test_a_recorded_plan_with_an_unknown_key_is_refused_on_load(
+    tmp_path: Path, document: dict[str, Any], key: str
+) -> None:
+    """Route refuses these keys, so a reader must not drop them: package and the fill load through here."""
+    _write_recorded_plan(tmp_path, document)
+
+    with pytest.raises(ValueError, match=f"unknown key '{key}'"):
+        ConversionPlan.load(tmp_path)
+
+
+@pytest.mark.parametrize("key", ["inventory_sha256", "source_graphs_sha256", "agentic_insights_sha256"])
+def test_a_recorded_plan_missing_a_binding_hash_is_refused_on_load(tmp_path: Path, key: str) -> None:
+    document = _recorded_plan()
+    del document[key]
+    _write_recorded_plan(tmp_path, document)
+
+    with pytest.raises(ValueError, match=f"needs '{key}'"):
+        ConversionPlan.load(tmp_path)
+
+
+def test_a_recorded_plan_with_no_inventory_fingerprint_is_refused_on_load(tmp_path: Path) -> None:
+    _write_recorded_plan(tmp_path, {**_recorded_plan(), "inventory_sha256": None})
+
+    with pytest.raises(ValueError, match="needs 'inventory_sha256'"):
+        ConversionPlan.load(tmp_path)
+
+
+def test_package_refuses_a_plan_given_an_unknown_key_after_route(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup(tmp_path, _inventory())
+    assert routing.record_plan(tmp_path, plan=_decide("deterministic"))["ok"] is True
+    plan_path = tmp_path / "metadata" / "conversion_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["conversaton"] = [{"question": "Why migrate?", "answer": "Cost"}]
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+    code = package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"])
+
+    assert code == 1
+    assert "unknown key 'conversaton'" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda plan: plan["components"][0].update(recommended="deterministic"),
+        lambda plan: plan["components"][0]["options"]["deterministic"].update(capable=True),
+        lambda plan: plan.update(findings=["nothing to see"]),
+    ],
+    ids=["recommended", "options", "findings"],
+)
+def test_package_refuses_a_plan_whose_library_owned_facts_were_edited(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], edit: Any
+) -> None:
+    """Route recomputes these from the inventory; a recorded copy that no longer matches was edited by hand."""
+    _setup(tmp_path, _inventory())
+    assert routing.record_plan(tmp_path, plan=_decide("deterministic"))["ok"] is True
+    plan_path = tmp_path / "metadata" / "conversion_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    edit(plan)
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+    code = package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"])
+
+    assert code == 1
+    assert "library-owned" in capsys.readouterr().err
+    assert not (tmp_path / "databricks.yml").exists()
 
 
 @pytest.mark.parametrize(
@@ -211,6 +311,8 @@ def _recorded_plan(**component_fields: Any) -> dict[str, Any]:
         {**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "components": "component-1"}]},
         {**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "basis": 5}]},
         {**_recorded_plan(), "findings": 5},
+        {**_recorded_plan(), "findings": [None]},
+        _recorded_plan(assignments=[{"pipeline": "solo", "route": "agentc", "task_keys": []}]),
     ],
     ids=[
         "assignment-not-an-object",
@@ -221,6 +323,8 @@ def _recorded_plan(**component_fields: Any) -> dict[str, Any]:
         "grouping-components-not-a-list",
         "grouping-basis-not-a-list",
         "findings-not-a-list",
+        "finding-not-a-string",
+        "assignment-route-unknown",
     ],
 )
 def test_a_malformed_nested_field_is_refused_on_load(tmp_path: Path, document: dict[str, Any]) -> None:

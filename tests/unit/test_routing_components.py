@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import ControlEdge, Lineage
@@ -150,3 +152,61 @@ def test_component_membership_and_ordering_are_deterministic() -> None:
     second, _ = build_components(_inventory(graphs))
     assert first == second
     assert first == [["a", "m"], ["z"]]
+
+
+def _hand_edited(inventory: dict[str, Any], pipeline: str, **fields: Any) -> dict[str, Any]:
+    """The inventory with one pipeline's entry overwritten, as a hand edit would leave it."""
+    for entry in inventory["pipelines"]:
+        if entry["name"] == pipeline:
+            entry.update(fields)
+    return inventory
+
+
+@pytest.mark.parametrize(
+    "edge",
+    [
+        {"source_workflow": "a", "target_workflow": "b", "via_task_key": "call_b"},
+        {"source_workflow": "a", "target_workflow": "b", "via_task_key": "call_b", "resolved": "false"},
+        {"source_workflow": "a", "target_workflow": "b", "via_task_key": "call_b", "resolved": None},
+    ],
+    ids=["missing", "the-string-false", "null"],
+)
+def test_an_edge_not_recorded_as_resolved_never_joins_two_pipelines(edge: dict[str, Any]) -> None:
+    inventory = _hand_edited(_inventory([_graph("a"), _graph("b")]), "a", lineage={"control_edges": [edge]})
+
+    components, findings = build_components(inventory)
+
+    assert components == [["a"], ["b"]]
+    assert len(findings) == 1 and "call_b" in findings[0]
+
+
+@pytest.mark.parametrize(
+    "lineage", [[1], {"control_edges": {"a": "b"}}, {"control_edges": "b"}, "a->b"], ids=["list", "dict", "str", "text"]
+)
+def test_a_malformed_lineage_block_is_read_as_no_edges(lineage: Any) -> None:
+    inventory = _hand_edited(_inventory([_graph("a"), _graph("b")]), "a", lineage=lineage)
+
+    assert build_components(inventory) == ([["a"], ["b"]], [])
+
+
+def test_a_pipeline_name_that_is_not_a_string_is_not_a_pipeline_identity() -> None:
+    """A number would become the string "7" and join an edge to a real pipeline named "7"."""
+    edge = {"source_workflow": "a", "target_workflow": "7", "via_task_key": "call_7", "resolved": True}
+    inventory = _inventory([_graph("a"), _graph("7"), _graph("b")])
+    _hand_edited(inventory, "7", name=7)
+    _hand_edited(inventory, "a", lineage={"control_edges": [edge]})
+
+    components, findings = build_components(inventory)
+
+    assert components == [["a"], ["b"]]
+    assert len(findings) == 1 and "call_7" in findings[0]
+
+
+def test_an_edge_endpoint_that_is_not_a_string_is_unresolved() -> None:
+    edge = {"source_workflow": "a", "target_workflow": ["b"], "via_task_key": "call_b", "resolved": True}
+    inventory = _hand_edited(_inventory([_graph("a"), _graph("b")]), "a", lineage={"control_edges": [edge]})
+
+    components, findings = build_components(inventory)
+
+    assert components == [["a"], ["b"]]
+    assert findings and "['b']" not in findings[0]

@@ -128,6 +128,8 @@ def test_missing_strategy_counts_as_unsupported_gap() -> None:
     assert recommended == "agentic"
     assert options["deterministic"]["activity_counts"] == {"deterministic": 0, "agentic": 0, "unsupported": 1}
     assert options["deterministic"]["uncovered"][0]["activity"] == "mystery"
+    # The count and the per-activity entry are two views of one fact, so they name the same fallback.
+    assert options["deterministic"]["uncovered"][0]["strategy"] == "unsupported"
 
 
 def test_agentic_option_surfaces_insight_patterns_with_simplification_prominent() -> None:

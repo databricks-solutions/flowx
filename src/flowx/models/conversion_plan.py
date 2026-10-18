@@ -61,6 +61,18 @@ DISCLOSED_RELEASE_STATES: tuple[str, ...] = ("public_preview", "private_preview"
 BASIS_INFERRED_RELATIONSHIP = "inferred_relationship"
 BASIS_SHARED_PATTERN = "shared_pattern"
 
+# Each level of the plan holds authored keys and library-owned keys; any other key is refused, both
+# when route validates an authored plan and when a recorded plan is read back.
+PLAN_AUTHORED_KEYS = frozenset({"components", "suggested_groupings", "conversation"})
+PLAN_BINDING_KEYS = ("inventory_sha256", "source_graphs_sha256", "agentic_insights_sha256")
+PLAN_LIBRARY_KEYS = frozenset({"schema_version", *PLAN_BINDING_KEYS, "findings"})
+COMPONENT_AUTHORED_KEYS = frozenset({"component_id", "members", "decision", "rationale", "assignments"})
+COMPONENT_LIBRARY_KEYS = frozenset({"recommended", "options"})
+GROUPING_AUTHORED_KEYS = frozenset({"grouping_id", "accepted"})
+GROUPING_LIBRARY_KEYS = frozenset({"components", "members", "basis"})
+CONVERSATION_KEYS = frozenset({"question", "answer"})
+ASSIGNMENT_KEYS = frozenset({"pipeline", "task_keys", "route", "pattern", "boundary"})
+
 
 @dataclass(slots=True, kw_only=True)
 class NodeAssignment:
@@ -327,12 +339,18 @@ class ConversionPlan:
 
 
 def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
-    """What keeps a recorded plan document from loading: a missing or malformed list, entry or nested field.
+    """What keeps a recorded plan document from loading: a missing, unknown or malformed key, entry or field.
 
     Every nested value the models rehydrate is checked here, so a hand-edited plan is refused with a
-    ``ValueError`` rather than crashing while it is read.
+    ``ValueError`` rather than crashing while it is read, and a key the models do not hold is refused
+    rather than dropped. Each binding hash must be present: the inventory fingerprint as a string, and
+    the source graphs and insights hashes as a string or ``null`` when there is none.
     """
-    problems: list[str] = []
+    problems = _unknown_key_problems(raw, PLAN_AUTHORED_KEYS | PLAN_LIBRARY_KEYS, "the plan")
+    for key in PLAN_BINDING_KEYS:
+        value = raw.get(key)
+        if key not in raw or not (isinstance(value, str) or (value is None and key != "inventory_sha256")):
+            problems.append(f"the plan needs '{key}', the hash route recorded")
     components = raw.get("components")
     if not isinstance(components, list):
         problems.append("'components' must be a list")
@@ -341,6 +359,11 @@ def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
             if not isinstance(component, dict):
                 problems.append(f"components[{index}] must be an object")
                 continue
+            problems.extend(
+                _unknown_key_problems(
+                    component, COMPONENT_AUTHORED_KEYS | COMPONENT_LIBRARY_KEYS, f"components[{index}]"
+                )
+            )
             if not isinstance(component.get("component_id"), str) or not component["component_id"]:
                 problems.append(f"components[{index}] needs a 'component_id'")
             if not _is_list_of(component.get("members"), str) or not component["members"]:
@@ -359,6 +382,7 @@ def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
             if not isinstance(grouping, dict) or not isinstance(grouping.get("grouping_id"), str):
                 problems.append(f"{loc} must be an object with a 'grouping_id'")
                 continue
+            problems.extend(_unknown_key_problems(grouping, GROUPING_AUTHORED_KEYS | GROUPING_LIBRARY_KEYS, loc))
             for key, kind in (("components", str), ("members", str), ("basis", dict)):
                 if key in grouping and not _is_list_of(grouping[key], kind):
                     problems.append(f"{loc} '{key}' must be a list")
@@ -370,9 +394,17 @@ def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
         for item in conversation
     ):
         problems.append("'conversation' must be a list of {question, answer} objects")
-    if not isinstance(raw.get("findings", []), list):
-        problems.append("'findings' must be a list")
+    else:
+        for index, item in enumerate(conversation):
+            problems.extend(_unknown_key_problems(item, CONVERSATION_KEYS, f"conversation[{index}]"))
+    if not _is_list_of(raw.get("findings", []), str):
+        problems.append("'findings' must be a list of strings")
     return problems
+
+
+def _unknown_key_problems(entry: dict[str, Any], known: frozenset[str], loc: str) -> list[str]:
+    """One problem per key of ``entry`` outside ``known``, in sorted order."""
+    return [f"{loc} has an unknown key {key!r}" for key in sorted(set(entry) - known)]
 
 
 def _assignment_problems(assignments: Any, loc: str) -> list[str]:
@@ -384,6 +416,9 @@ def _assignment_problems(assignments: Any, loc: str) -> list[str]:
         if not isinstance(assignment, dict):
             problems.append(f"{loc} assignments[{index}] must be an object")
             continue
+        problems.extend(_unknown_key_problems(assignment, ASSIGNMENT_KEYS, f"{loc} assignments[{index}]"))
+        if assignment.get("route") not in ASSIGNMENT_ROUTES:
+            problems.append(f"{loc} assignments[{index}] has route {assignment.get('route')!r}")
         for key in ("task_keys", "boundary"):
             if key in assignment and not isinstance(assignment[key], list):
                 problems.append(f"{loc} assignments[{index}] '{key}' must be a list")
