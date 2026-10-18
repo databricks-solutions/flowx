@@ -40,7 +40,7 @@ This phase runs one of two ways; run the **`setup`** skill first if you haven't.
                                             "schema": "<schema>", "bundle_name": "<optional>", "profile": "<optional>",
                                             "download_workspace_files": true,
                                             "packaging_mode": "<optional, ADF only: per-pipeline|single|per-group>",
-                                            "group_by": "<optional inferred|spec>", "group_spec": "<optional path, per-group only>",
+                                            "group_by": "<optional inferred|spec, per-group only>", "group_spec": "<optional path, per-group only>",
                                             "output_volume_path": "<optional /Volumes/... target>",
                                             "output_workspace_path": "<optional /Workspace/... target>"})
   flowx(command="workspace_paths", parameters={"source": "adf", "report_path": "...", "source_dir": "<optional source dir>"})

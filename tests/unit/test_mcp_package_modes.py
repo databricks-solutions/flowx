@@ -2,13 +2,15 @@
 
 The CLI's ``package --packaging-mode/--group-by/--group-spec`` decides how a multi-pipeline migration
 is laid out into bundles. These tests package the same converted state through MCP and through the
-CLI and check both write the same files, and that a bad value is refused the same way. Skipped where
-the optional ``mcp`` dependency is absent.
+CLI and check both write the same files, that a bad value is refused the same way, and that a
+combination of values the CLI would quietly ignore is refused before anything runs. Skipped where the
+optional ``mcp`` dependency is absent.
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -189,28 +191,6 @@ def test_mcp_package_uses_a_group_spec_with_its_layout_left_unset(no_bundle_uplo
     }
 
 
-_SPEC_CONFLICTS = [
-    ({"packaging_mode": "per-pipeline"}, "packaging_mode 'per-pipeline'"),
-    ({"packaging_mode": "single"}, "packaging_mode 'single'"),
-    ({"group_by": "inferred"}, "group_by 'inferred'"),
-    ({"packaging_mode": "per-group", "group_by": "inferred"}, "group_by 'inferred'"),
-    ({"packaging_mode": ""}, "packaging_mode ''"),
-]
-
-
-@pytest.mark.parametrize(("parameters", "conflict"), _SPEC_CONFLICTS)
-def test_mcp_package_refuses_a_group_spec_with_a_contradicting_layout(tmp_path: Path, parameters, conflict):
-    spec_path = _write_group_spec(tmp_path)
-    output_dir = tmp_path / "out"
-    _write_converted_state(output_dir)
-
-    result = _call_flowx("package", {"output_dir": str(output_dir), "group_spec": str(spec_path), **parameters})
-
-    assert result["ok"] is False
-    assert repr(str(spec_path)) in result["error"] and conflict in result["error"]
-    assert not _has_bundle(output_dir)
-
-
 def test_inputs_package_answers_with_a_spec_package_by_that_spec(no_bundle_upload, tmp_path: Path):
     """The hosted flow: answer ``inputs package`` as its group_spec text says, then package with those answers."""
     answers = _inputs_package_defaults()
@@ -231,20 +211,16 @@ def test_inputs_package_answers_with_a_spec_package_by_that_spec(no_bundle_uploa
     }
 
 
-def test_inputs_package_default_mode_with_a_spec_is_refused_not_ignored(tmp_path: Path):
+def test_inputs_package_defaults_package_like_the_cli(no_bundle_upload, tmp_path: Path):
+    """The hosted flow: keep every ``inputs package`` default and package with those answers."""
     answers = _inputs_package_defaults()
-    spec_path = _write_group_spec(tmp_path)
-    output_dir = tmp_path / "out"
-    _write_converted_state(output_dir)
 
-    result = _call_flowx(
-        "package",
-        {"output_dir": str(output_dir), "packaging_mode": answers["packaging_mode"], "group_spec": str(spec_path)},
+    result, mcp_dir, cli_dir = _package_both_ways(
+        tmp_path, {key: answers[key] for key in ("catalog", "schema", "packaging_mode", "group_spec")}, {}
     )
 
-    assert result["ok"] is False
-    assert f"packaging_mode {answers['packaging_mode']!r}" in result["error"]
-    assert not _has_bundle(output_dir)
+    assert result["ok"], result["process"]
+    assert _tree(mcp_dir) == _tree(cli_dir)
 
 
 @pytest.mark.parametrize(
@@ -277,20 +253,6 @@ def test_mcp_package_still_refuses_a_bad_value_for_a_multi_dag_airflow_report(no
     assert result["process"]["returncode"] == 2
     assert "invalid choice: 'bogus'" in result["process"]["stderr"]
     assert not _has_bundle(output_dir)
-
-
-@pytest.mark.parametrize(
-    ("parameters", "cli_parameters"),
-    [
-        ({"group_spec": ""}, {}),
-        ({"packaging_mode": "per-group", "group_spec": ""}, {"packaging_mode": "per-group"}),
-    ],
-)
-def test_mcp_package_treats_a_blank_group_spec_as_unset(no_bundle_upload, tmp_path: Path, parameters, cli_parameters):
-    result, mcp_dir, cli_dir = _package_both_ways(tmp_path, parameters, cli_parameters)
-
-    assert result["ok"], result["process"]
-    assert _tree(mcp_dir) == _tree(cli_dir)
 
 
 @pytest.mark.parametrize(
@@ -327,10 +289,6 @@ _MISSING_SPEC_PATH = "/nonexistent/flowx/groups.json"
 @pytest.mark.parametrize(
     ("parameters", "message"),
     [
-        (
-            {"packaging_mode": "per-group", "group_by": "spec"},
-            "per-group with --group-by spec requires a --group-spec file.",
-        ),
         ({"group_spec": _MISSING_SPEC_PATH}, f"group spec file not found: {_MISSING_SPEC_PATH}"),
         ({"packaging_mode": "per-group", "group_spec": {"team_a": ["caller"]}}, "group spec file not found"),
     ],
@@ -380,40 +338,9 @@ class _FakeResult:
         return {"returncode": 0, "stdout": "", "stderr": ""}
 
 
-def _migrate(output_dir: Path, parameters: dict[str, Any]) -> dict[str, Any]:
-    return server._cmd_migrate(
-        {
-            "source": "adf",
-            "adf_source_path": str(output_dir.parent / "adf"),
-            "output_dir": str(output_dir),
-            "interactive": False,
-            **parameters,
-        }
-    )
-
-
-@pytest.mark.parametrize(
-    ("parameters", "expected_flags"),
-    [
-        ({}, []),
-        ({"packaging_mode": "single"}, ["--packaging-mode", "single"]),
-        (
-            {"packaging_mode": "per-group", "group_by": "spec", "group_spec": "/tmp/groups.json"},
-            ["--packaging-mode", "per-group", "--group-by", "spec", "--group-spec", "/tmp/groups.json"],
-        ),
-        (
-            {"group_spec": "/tmp/groups.json"},
-            ["--packaging-mode", "per-group", "--group-by", "spec", "--group-spec", "/tmp/groups.json"],
-        ),
-        (
-            {"group_by": "spec", "group_spec": "/tmp/groups.json"},
-            ["--packaging-mode", "per-group", "--group-by", "spec", "--group-spec", "/tmp/groups.json"],
-        ),
-        ({"group_spec": ""}, []),
-        ({"packaging_mode": "per-group", "group_spec": ""}, ["--packaging-mode", "per-group"]),
-    ],
-)
-def test_migrate_forwards_the_packaging_mode(monkeypatch, tmp_path: Path, parameters, expected_flags):
+@pytest.fixture
+def adapter_calls(monkeypatch) -> list[list[str]]:
+    """Turns every adapter run into a successful no-op and records its argv, so nothing is packaged."""
     calls: list[list[str]] = []
 
     def fake_run_adapter(args, **_kwargs):
@@ -425,12 +352,75 @@ def test_migrate_forwards_the_packaging_mode(monkeypatch, tmp_path: Path, parame
     monkeypatch.setattr(runner, "summarize_translation", lambda out: {})
     monkeypatch.setattr(runner, "list_tree", lambda out: [])
     monkeypatch.setattr(runner, "read_tree", lambda out: {"files": {}, "truncated": []})
+    return calls
 
-    result = _migrate(tmp_path / "out", parameters)
 
-    assert result["status"] == "completed"
-    package_argv = next(argv for argv in calls if argv[0] == "package")
+def _parameters_for(command: str, output_dir: Path, packaging: dict[str, Any]) -> dict[str, Any]:
+    """The fewest parameters *command* needs to write to *output_dir*, plus the given packaging keys."""
+    parameters = {"output_dir": str(output_dir), **packaging}
+    if command == "migrate":
+        parameters.update(source="adf", adf_source_path=str(output_dir.parent / "adf"), interactive=False)
+    return parameters
+
+
+def _migrate(output_dir: Path, parameters: dict[str, Any]) -> dict[str, Any]:
+    return server._cmd_migrate(_parameters_for("migrate", output_dir, parameters))
+
+
+def _layout_parameters(layout: tuple[Any, Any, Any]) -> dict[str, Any]:
+    """The packaging keys a ``(packaging_mode, group_by, group_spec)`` layout sends; ``None`` leaves a key out."""
+    keys = ("packaging_mode", "group_by", "group_spec")
+    return {key: value for key, value in zip(keys, layout, strict=True) if value is not None}
+
+
+_GROUP_SPEC = "/tmp/groups.json"
+_SPEC_LAYOUT = ["--packaging-mode", "per-group", "--group-by", "spec", "--group-spec", _GROUP_SPEC]
+_FORWARDED_LAYOUTS = {
+    (None, None, None): [],
+    ("per-pipeline", None, None): ["--packaging-mode", "per-pipeline"],
+    ("single", None, None): ["--packaging-mode", "single"],
+    ("per-group", None, None): ["--packaging-mode", "per-group"],
+    ("per-group", "inferred", None): ["--packaging-mode", "per-group", "--group-by", "inferred"],
+    (None, None, ""): [],
+    ("per-pipeline", None, ""): ["--packaging-mode", "per-pipeline"],
+    ("single", None, ""): ["--packaging-mode", "single"],
+    ("per-group", None, ""): ["--packaging-mode", "per-group"],
+    ("per-group", "inferred", ""): ["--packaging-mode", "per-group", "--group-by", "inferred"],
+    (None, None, _GROUP_SPEC): _SPEC_LAYOUT,
+    (None, "spec", _GROUP_SPEC): _SPEC_LAYOUT,
+    ("per-group", None, _GROUP_SPEC): _SPEC_LAYOUT,
+    ("per-group", "spec", _GROUP_SPEC): _SPEC_LAYOUT,
+}
+_REFUSED_LAYOUTS = [
+    layout
+    for layout in itertools.product(
+        [None, "per-pipeline", "single", "per-group"], [None, "inferred", "spec"], [None, "", _GROUP_SPEC]
+    )
+    if layout not in _FORWARDED_LAYOUTS
+] + [("", None, _GROUP_SPEC)]
+
+
+@pytest.mark.parametrize("command", ["package", "migrate"])
+@pytest.mark.parametrize(("layout", "expected_flags"), list(_FORWARDED_LAYOUTS.items()), ids=str)
+def test_a_layout_that_fits_is_forwarded_verbatim(adapter_calls, tmp_path: Path, command, layout, expected_flags):
+    result = _call_flowx(command, _parameters_for(command, tmp_path / "out", _layout_parameters(layout)))
+
+    assert result["ok"], result
+    package_argv = next(argv for argv in adapter_calls if argv[0] == "package")
     assert package_argv[package_argv.index("--schema") + 2 :] == expected_flags
+
+
+@pytest.mark.parametrize("command", ["package", "migrate"])
+@pytest.mark.parametrize("layout", _REFUSED_LAYOUTS, ids=str)
+def test_a_layout_that_does_not_fit_is_refused_before_anything_runs(adapter_calls, tmp_path: Path, command, layout):
+    packaging = _layout_parameters(layout)
+
+    result = _call_flowx(command, _parameters_for(command, tmp_path / "out", packaging))
+
+    assert result["ok"] is False
+    for key, value in packaging.items():
+        assert f"{key} {value!r}" in result["error"]
+    assert adapter_calls == []
 
 
 @pytest.mark.parametrize(
@@ -438,7 +428,6 @@ def test_migrate_forwards_the_packaging_mode(monkeypatch, tmp_path: Path, parame
     [
         ({"packaging_mode": ""}, 2, "invalid choice: ''"),
         ({"packaging_mode": "per-group", "group_by": ""}, 2, "invalid choice: ''"),
-        ({"packaging_mode": "per-group", "group_by": "spec"}, 1, "requires a --group-spec file"),
         ({"group_spec": _MISSING_SPEC_PATH}, 1, "group spec file not found"),
     ],
 )
@@ -462,33 +451,3 @@ def test_migrate_refuses_a_bad_packaging_value_like_package(
     assert result["steps"]["package"]["process"]["returncode"] == returncode
     assert message in result["steps"]["package"]["process"]["stderr"]
     assert not _has_bundle(output_dir)
-
-
-@pytest.mark.parametrize(("parameters", "conflict"), _SPEC_CONFLICTS)
-def test_migrate_refuses_a_group_spec_with_a_contradicting_layout_before_discover(
-    monkeypatch, tmp_path: Path, parameters, conflict
-):
-    spec_path = _write_group_spec(tmp_path)
-    calls: list[list[Any]] = []
-
-    def fake_run_adapter(args, **_kwargs):
-        calls.append(args)
-        return _FakeResult()
-
-    monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
-
-    result = _call_flowx(
-        "migrate",
-        {
-            "source": "adf",
-            "adf_source_path": str(tmp_path / "adf"),
-            "output_dir": str(tmp_path / "out"),
-            "interactive": False,
-            "group_spec": str(spec_path),
-            **parameters,
-        },
-    )
-
-    assert result["ok"] is False
-    assert repr(str(spec_path)) in result["error"] and conflict in result["error"]
-    assert calls == []
