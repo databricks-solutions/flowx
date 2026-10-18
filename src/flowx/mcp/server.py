@@ -453,9 +453,9 @@ def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
     """
     output_dir = p.get("output_dir", "./flowx_output")
     members = p.get("members")
-    if isinstance(members, list):
-        members = ",".join(str(member) for member in members)
-    if not members:
+    if isinstance(members, list) and all(isinstance(member, str) and member for member in members):
+        members = ",".join(members)
+    if not isinstance(members, str) or not members:
         return {"ok": False, "error": "provide 'members' (a list of pipeline names or comma-separated string)."}
 
     pipelines = p.get("pipelines")

@@ -46,6 +46,8 @@ from flowx.route_agentic import (
     apply_agentic_output,
     apply_plan,
     apply_plan_to_report,
+    load_agentic_output,
+    rebuild,
     replace_unit_pipelines,
     routing_record,
     validate_report_structurally,
@@ -440,7 +442,7 @@ def test_alter_report_handles_the_single_pipeline_report_shape() -> None:
 
 def test_apply_plan_to_report_edits_report_and_gaps_files(tmp_path: Path) -> None:
     _write_work(tmp_path, _report_two_pipelines(), gaps=[])
-    summary = apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
+    summary = apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
     assert summary["agentic_pipelines"] == ["parent"]
 
     report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
@@ -457,7 +459,7 @@ def test_apply_plan_to_report_all_deterministic_leaves_files_byte_identical(tmp_
     report_before = report_path.read_bytes()
     gaps_before = gaps_path.read_bytes()
 
-    summary = apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"))
+    summary = apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"), inventory=None)
     assert summary["agentic_pipelines"] == []
     assert report_path.read_bytes() == report_before
     assert gaps_path.read_bytes() == gaps_before
@@ -471,7 +473,7 @@ def test_apply_plan_to_report_all_deterministic_leaves_files_byte_identical(tmp_
 @pytest.mark.parametrize("pipeline", ["parent", None])
 def test_merge_into_a_routed_agentic_pipeline_is_refused(tmp_path: Path, pipeline: str | None) -> None:
     _write_work(tmp_path, _report_two_pipelines(), gaps=[])
-    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     routed_report = report_path.read_bytes()
     results_dir = tmp_path / "agentic_results"
@@ -489,7 +491,7 @@ def test_merge_into_a_routed_agentic_pipeline_is_refused(tmp_path: Path, pipelin
 @pytest.mark.parametrize("pipeline", ["child", None])
 def test_merge_still_fills_convert_gaps_in_a_deterministic_pipeline(tmp_path: Path, pipeline: str | None) -> None:
     _write_work(tmp_path, _report_with_child_gap(), gaps=[])
-    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     results_dir = tmp_path / "agentic_results"
     results_dir.mkdir()
@@ -605,7 +607,7 @@ def test_an_untargeted_merge_is_checked_where_it_lands_after_earlier_merges(tmp_
         ]
     }
     _write_work(tmp_path, report, gaps=[])
-    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     routed_report = report_path.read_bytes()
     results_dir = tmp_path / "agentic_results"
@@ -629,7 +631,7 @@ def test_route_writes_no_record_when_nothing_is_routed_agentic(tmp_path: Path) -
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     before = report_path.read_bytes()
 
-    apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"))
+    apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"), inventory=None)
 
     assert report_path.read_bytes() == before
 
@@ -641,13 +643,13 @@ def test_reroute_to_different_decision_rebuilds_the_report(tmp_path: Path) -> No
     gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
     converted_report = report_path.read_bytes()
     converted_gaps = gaps_path.read_bytes()
-    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
     first = json.loads(report_path.read_text(encoding="utf-8"))
     first_outcomes = {cid: entry["outcome"] for cid, entry in first[ROUTING_RECORD_KEY]["components"].items()}
     assert first_outcomes["component-1"] == "agentic-not-viable"
     assert first_outcomes["component-2"] == "deterministic"
 
-    apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"))
+    apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"), inventory=None)
 
     assert report_path.read_bytes() == converted_report
     assert gaps_path.read_bytes() == converted_gaps
@@ -655,12 +657,12 @@ def test_reroute_to_different_decision_rebuilds_the_report(tmp_path: Path) -> No
 
 def test_route_takes_a_fresh_convert_as_the_new_baseline(tmp_path: Path) -> None:
     _write_work(tmp_path, _report_two_pipelines(), gaps=[])
-    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
     reconverted = _report_two_pipelines()
     reconverted["pipelines"][1]["tasks"] = [_notebook_task("Load", "load", "/Workspace/Shared/reconverted")]
     _write_work(tmp_path, reconverted, gaps=[])
 
-    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"))
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
 
     baseline = tmp_path / WORK_DIRNAME / "route_baseline" / REPORT_FILENAME
     assert json.loads(baseline.read_text(encoding="utf-8")) == reconverted
@@ -1211,7 +1213,7 @@ def test_combine_re_apply_after_reroute_rebuilds_unchanged(tmp_path: Path) -> No
     report_after_combine = report_path.read_bytes()
 
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
     report_after_reroute = report_path.read_bytes()
 
     assert report_after_combine == report_after_reroute
@@ -1547,3 +1549,157 @@ def test_two_filled_units_drop_an_inventory_only_gap_name_they_share(tmp_path: P
     assert apply_agentic_output(tmp_path, ["child"], [_named_lfc_pipeline("child_lfc")])["ok"] is True
 
     assert json.loads((tmp_path / WORK_DIRNAME / GAPS_FILENAME).read_text(encoding="utf-8")) == []
+
+
+# --------------------------------------------------------------------------- #
+# The saved baseline is checked against the routing record before every rebuild.
+# --------------------------------------------------------------------------- #
+
+
+def _tamper_with_baseline(output_dir: Path) -> None:
+    path = output_dir / WORK_DIRNAME / "route_baseline" / REPORT_FILENAME
+    baseline = json.loads(path.read_text(encoding="utf-8"))
+    baseline["pipelines"][0]["tasks"][0]["comment"] = "edited by hand"
+    path.write_text(json.dumps(baseline, indent=2), encoding="utf-8")
+
+
+def test_a_re_route_refuses_a_baseline_changed_since_the_routing_record(tmp_path: Path) -> None:
+    """Package refuses this baseline, so route must not re-stamp the record with its new hash."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    _tamper_with_baseline(tmp_path)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+
+    with pytest.raises(ValueError, match="baseline is missing or changed"):
+        apply_plan(tmp_path, recorded)
+    assert report_path.read_bytes() == report_before
+
+
+def test_fill_refuses_a_baseline_changed_since_the_routing_record(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    _tamper_with_baseline(tmp_path)
+
+    result = apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])
+
+    assert result["ok"] is False
+    assert "baseline is missing or changed" in result["error"]
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+@pytest.mark.parametrize("edit", ["tamper", "drop-record-hash"])
+def test_merge_refuses_a_baseline_that_does_not_match_the_routing_record(tmp_path: Path, edit: str) -> None:
+    """Without the record's hash the merge used to bind its fill to the string 'None'."""
+    report = _report_with_child_gap()
+    _route_parent_agentic(tmp_path, report)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    if edit == "tamper":
+        _tamper_with_baseline(tmp_path)
+    else:
+        routed = json.loads(report_path.read_text(encoding="utf-8"))
+        del routed[ROUTING_RECORD_KEY]["baseline_report_sha256"]
+        report_path.write_text(json.dumps(routed, indent=2), encoding="utf-8")
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+
+    with pytest.raises(ValueError, match="baseline is missing or changed"):
+        merge_agentic_results(report_path, results_dir)
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+def test_a_merge_result_naming_its_pipeline_with_a_list_is_unmatched(tmp_path: Path) -> None:
+    _write_work(tmp_path, _report_with_child_gap())
+    results_dir = tmp_path / "agentic_results"
+    results_dir.mkdir()
+    (results_dir / "load.json").write_text(
+        json.dumps({"pipeline": ["child"], "activity_name": "Load", "task": _notebook_task("Load", "load")}),
+        encoding="utf-8",
+    )
+
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir) == (0, 1)
+
+
+def test_rebuilding_or_applying_a_plan_requires_the_inventory_argument(tmp_path: Path) -> None:
+    """Leaving the inventory out used to skip the baseline-against-inventory check without a word."""
+    _write_work(tmp_path, _report_two_pipelines())
+
+    with pytest.raises(TypeError, match="inventory"):
+        apply_plan_to_report(tmp_path, _plan())  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="inventory"):
+        rebuild(_report_two_pipelines(), [], _plan(), {}, [], b"{}", b"[]")  # type: ignore[call-arg]
+
+
+# --------------------------------------------------------------------------- #
+# Every field of a stored output or gap fill is covered by its hash.
+# --------------------------------------------------------------------------- #
+
+
+def _two_filled_components(output_dir: Path) -> dict[str, str]:
+    """Route 'parent' and 'child' agentic, fill 'parent' only; return each pipeline's unit id."""
+    _route_parent_agentic(output_dir, _report_two_pipelines(), child="agentic")
+    assert apply_agentic_output(output_dir, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    record = routing_record(json.loads((output_dir / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8")))
+    assert record is not None
+    return {entry["members"][0]: unit_id for unit_id, entry in record["components"].items()}
+
+
+def _edit_store(output_dir: Path, edit: Any) -> None:
+    store_path = output_dir / "metadata" / "agentic_conversion.json"
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    edit(store)
+    store_path.write_text(json.dumps(store, indent=2), encoding="utf-8")
+
+
+def test_a_stored_output_moved_to_another_unit_is_not_applied(tmp_path: Path) -> None:
+    units = _two_filled_components(tmp_path)
+
+    def move(store: dict[str, Any]) -> None:
+        entry = store["components"].pop(units["parent"])
+        store["components"][units["child"]] = {**entry, "members": ["child"]}
+
+    _edit_store(tmp_path, move)
+
+    stored = load_agentic_output(tmp_path)
+    assert units["child"] not in stored.outputs
+    assert stored.edited == [units["child"]]
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda entry: entry.update(replaced=[{"from": "a" * 64, "to": entry["output_sha256"]}]),
+        lambda entry: entry.update(note="kept by hand"),
+    ],
+    ids=["history", "unknown-key"],
+)
+def test_a_stored_output_whose_history_or_keys_were_edited_is_not_applied(tmp_path: Path, edit: Any) -> None:
+    units = _two_filled_components(tmp_path)
+    _edit_store(tmp_path, lambda store: edit(store["components"][units["parent"]]))
+
+    stored = load_agentic_output(tmp_path)
+    assert stored.outputs == {}
+    assert stored.edited == [units["parent"]]
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda fill: fill.update(pipeline="parent"),
+        lambda fill: fill.update(activity_name="Extract"),
+        lambda fill: fill.update(baseline_report_sha256="b" * 64),
+        lambda fill: fill.update(note="kept by hand"),
+    ],
+    ids=["pipeline", "activity", "baseline", "unknown-key"],
+)
+def test_a_gap_fill_retargeted_by_hand_is_not_applied(tmp_path: Path, edit: Any) -> None:
+    report = _report_with_child_gap()
+    _route_parent_agentic(tmp_path, report)
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir) == (1, 0)
+    _edit_store(tmp_path, lambda store: edit(store["gap_fills"][0]))
+
+    stored = load_agentic_output(tmp_path)
+    assert stored.gap_fills == []
+    assert len(stored.edited) == 1

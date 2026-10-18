@@ -14,6 +14,7 @@ the source-audit and graph-identity guarantees.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -691,7 +692,8 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
 
     Raises:
         ValueError: A result would land in a pipeline the routing record routes agentic, or the
-            routing baseline is missing or lacks the task a merge replaced.
+            routing baseline is missing, no longer has the hashes the record names, or lacks the task a
+            merge replaced.
     """
     from flowx.discovery_serde import canonical_sha256
     from flowx.route_agentic import (
@@ -700,7 +702,7 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         WORK_DIRNAME,
         applied_gap_fills,
         load_agentic_output,
-        load_baseline,
+        load_routed_baseline,
         record_gap_fills,
         routed_agentic_pipelines,
         routing_record,
@@ -717,9 +719,12 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         record is not None and destination.resolve() == report_path.resolve() == live_report_path.resolve()
     )
     baseline_by_name: dict[Any, dict[str, Any]] = {}
+    baseline_report_sha256 = ""
     gap_fills: list[dict[str, Any]] = []
     if updates_baseline:
-        baseline_report = load_baseline(output_dir, fresh=False)[0]
+        assert record is not None
+        baseline_report, _, baseline_report_bytes, _ = load_routed_baseline(output_dir, record)
+        baseline_report_sha256 = hashlib.sha256(baseline_report_bytes).hexdigest()
         baseline_pipelines = baseline_report["pipelines"] if "pipelines" in baseline_report else [baseline_report]
         baseline_by_name = {pipeline.get("name"): pipeline for pipeline in baseline_pipelines}
 
@@ -734,6 +739,12 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
             unmatched += 1
             continue
         wanted = data.get("pipeline")
+        if wanted is not None and not isinstance(wanted, str):
+            logger.warning(
+                "Result %s names its pipeline with a %s, not a name", result_file.name, type(wanted).__name__
+            )
+            unmatched += 1
+            continue
         target = next(
             (
                 pipeline
@@ -765,7 +776,6 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         logger.info("Merged agentic result for '%s' from %s", activity_name, result_file.name)
 
     if record is not None and gap_fills:
-        baseline_report_sha256 = str(record.get("baseline_report_sha256"))
         record_gap_fills(output_dir, gap_fills, baseline_report_sha256)
         stored_fills = load_agentic_output(output_dir).gap_fills
         record["gap_fills_sha256"] = canonical_sha256(applied_gap_fills(stored_fills, baseline_report_sha256))

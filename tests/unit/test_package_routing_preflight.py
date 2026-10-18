@@ -86,7 +86,7 @@ def test_package_refuses_a_routing_record_that_does_not_match_the_plan(
     report_path = _setup(tmp_path, _inventory("agentic"))
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
     # The decision is recorded again as deterministic without re-converting, so the report still
     # carries the agentic edit.
     _record(tmp_path, "deterministic")
@@ -115,7 +115,7 @@ def test_package_with_a_deterministic_plan_and_no_record_passes(tmp_path: Path) 
     before = report_path.read_bytes()
     _record(tmp_path, "deterministic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
     assert report_path.read_bytes() == before
 
     assert _package(tmp_path) == 0
@@ -249,7 +249,7 @@ def test_package_refuses_an_agentic_component_with_no_agent_output(
     report_path = _setup(tmp_path, _inventory("agentic"))
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
     assert routing_record(json.loads(report_path.read_text(encoding="utf-8"))) is not None
 
     assert _package(tmp_path) == 1
@@ -267,7 +267,7 @@ def test_package_with_a_current_plan_writes_an_audit_with_hashes(tmp_path: Path)
     baseline_sha256 = hashlib.sha256(report_path.read_bytes()).hexdigest()
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
     _fill_solo(tmp_path)
     record = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
     assert record is not None
@@ -295,7 +295,7 @@ def test_package_refuses_tampered_baseline(tmp_path: Path, capsys: pytest.Captur
     _setup(tmp_path, _inventory("agentic"))
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
 
     baseline_path = tmp_path / "metadata" / ".work" / "route_baseline" / "translation_report.json"
     if not baseline_path.exists():
@@ -312,7 +312,7 @@ def test_package_refuses_stale_unstamped_report(tmp_path: Path, capsys: pytest.C
     report_path = _setup(tmp_path, _inventory("agentic"))
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     report["pipelines"][0]["name"] = "tampered"

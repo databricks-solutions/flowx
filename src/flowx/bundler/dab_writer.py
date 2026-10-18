@@ -498,13 +498,14 @@ def _live_report_failures(
     from flowx.models.conversion_plan import DECISION_AGENTIC
     from flowx.route_agentic import (
         AGENTIC_OUTPUT_FILENAME,
+        BASELINE_CHANGED,
         OUTCOME_AGENTIC_NOT_VIABLE,
         REPORT_FILENAME,
         ROUTING_RECORD_KEY,
         agentic_pipeline_names,
         baseline_pipeline_mismatch,
         load_agentic_output,
-        load_baseline,
+        load_routed_baseline,
         rebuild,
         routing_record,
         routing_record_mismatches,
@@ -525,15 +526,11 @@ def _live_report_failures(
         return failures
 
     try:
-        baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_baseline(
-            output_dir, fresh=False
+        baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_routed_baseline(
+            output_dir, record
         )
     except (OSError, ValueError):
-        return ["the deterministic baseline is missing or changed; re-run convert, then route"]
-    recorded_hashes = (record.get("baseline_report_sha256"), record.get("baseline_gaps_sha256"))
-    actual_hashes = (hashlib.sha256(baseline_report_bytes).hexdigest(), hashlib.sha256(baseline_gaps_bytes).hexdigest())
-    if recorded_hashes != actual_hashes:
-        return ["the deterministic baseline is missing or changed; re-run convert, then route"]
+        return [BASELINE_CHANGED]
     mismatch = baseline_pipeline_mismatch(baseline_report, inventory)
     if mismatch and agentic_pipeline_names(plan_document):
         return [mismatch]
@@ -556,6 +553,7 @@ def _live_report_failures(
         stored.gap_fills,
         baseline_report_bytes,
         baseline_gaps_bytes,
+        inventory=inventory,
     )
     report_without_record = {key: value for key, value in report.items() if key != ROUTING_RECORD_KEY}
     if rebuilt_record != record or report_without_record != rebuilt_report:

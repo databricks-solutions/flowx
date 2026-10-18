@@ -137,6 +137,15 @@ def test_fill_agentic_requires_members(tmp_path: Path) -> None:
     assert out["ok"] is False and "members" in out["error"]
 
 
+@pytest.mark.parametrize("members", [[None], ["parent", 7], ["parent", ""], 5], ids=["null", "number", "empty", "int"])
+def test_fill_agentic_refuses_members_that_are_not_pipeline_names(captured_fill, tmp_path: Path, members) -> None:
+    """``[None]`` used to reach the CLI as ``--members None`` and could match a pipeline named "None"."""
+    out = server._cmd_fill_agentic({"output_dir": str(tmp_path), "members": members, "pipelines": []})
+
+    assert out["ok"] is False and "members" in out["error"]
+    assert captured_fill == []
+
+
 def test_fill_agentic_requires_exactly_one_pipelines_source(tmp_path: Path) -> None:
     both = server._cmd_fill_agentic(
         {"output_dir": str(tmp_path), "members": ["a"], "pipelines": [], "pipelines_path": "x.json"}
