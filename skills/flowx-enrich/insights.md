@@ -69,7 +69,9 @@ of those four keys yourself:
 ### Rules the validator enforces
 
 - **Foreign keys.** Every `pipeline_insights[].pipeline` and every relationship
-  `from_pipeline` / `to_pipeline` must be a real pipeline name in the inventory.
+  `from_pipeline` / `to_pipeline` must be a pipeline name listed in the inventory's `pipelines`.
+  The one exception is a `control` relationship whose edge resolves (see below): its endpoints may
+  name a pipeline discover left unlisted, because the resolved edge proves it is in the export.
 - **One insight per pipeline.** A pipeline may appear in `pipeline_insights` at most once; put
   everything you have to say about it in that one entry.
 - **Field types.** Pipeline names are strings. When present, `pattern_name`, `intent`,
@@ -103,7 +105,8 @@ of those four keys yourself:
     `via_task_key` of a real `control_edges` entry, marked `"resolved": true`, whose
     `source_workflow`/`target_workflow` match
     your `from_pipeline`/`to_pipeline`. Do **not** set `evidence`/`confidence` — the proven edge is
-    the evidence.
+    the evidence. Such an edge can be annotated even when its `target_workflow` is not a listed
+    pipeline (discover ran with `--pipeline`, or the called pipeline has no activities).
   - `inferred` — a coupling the deterministic layer never found (data flow inside notebook code, an
     external trigger, a shared table the parser didn't resolve). There is nothing to resolve
     against, so `edge_identity` is your own non-empty descriptor of the coupling, and you **must** also

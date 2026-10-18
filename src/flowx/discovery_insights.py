@@ -13,8 +13,9 @@ There is **no LLM here** -- the tool only validates and records, mirroring the
 author-then-validate-record contract :mod:`flowx.agentic` uses for gap resolution. That
 keeps the deterministic inventory trustworthy and every insight accountable:
 
-* every ``pipeline`` and every relationship endpoint must be a real pipeline in the
-  inventory (foreign-key validation);
+* every ``pipeline`` and every relationship endpoint must be a pipeline the inventory lists
+  (foreign-key validation), except that a ``control`` relationship whose edge resolves (below) may
+  name a pipeline discover left unlisted, since that edge proves the pipeline is in the export;
 * a ``control`` relationship edge must resolve to a real ``ControlEdge`` in the inventory's
   ``lineage`` -- the full ``(from, to, via_task_key)`` triple, so the annotation connects
   exactly the pipelines it claims, not merely some edge that shares a ``via_task_key``;
@@ -275,18 +276,36 @@ def _validate_relationships(
             violations.append(f"{loc}: unknown field {key!r}")
         from_pipeline = relationship.get("from_pipeline")
         to_pipeline = relationship.get("to_pipeline")
+        edge = relationship.get("lineage_edge")
+        resolves_control_edge = _resolves_control_edge(edge, from_pipeline, to_pipeline, control_triples)
         for endpoint, value in (("from_pipeline", from_pipeline), ("to_pipeline", to_pipeline)):
             if not value:
                 violations.append(f"{loc}: missing required field {endpoint!r}")
             elif not isinstance(value, str):
                 violations.append(f"{loc}: {endpoint!r} must be a string, got {type(value).__name__}")
-            elif value not in names:
+            elif value not in names and not resolves_control_edge:
                 violations.append(f"{loc}: {endpoint} {value!r} not in inventory")
         violations.extend(_validate_optional_strings(relationship, _RELATIONSHIP_TEXT_FIELDS, loc))
-        violations.extend(
-            _validate_edge(relationship.get("lineage_edge"), loc, from_pipeline, to_pipeline, control_triples)
-        )
+        violations.extend(_validate_edge(edge, loc, from_pipeline, to_pipeline, resolves_control_edge))
     return violations
+
+
+def _resolves_control_edge(
+    edge: Any,
+    from_pipeline: Any,
+    to_pipeline: Any,
+    control_triples: set[tuple[str, str, str]],
+) -> bool:
+    """Whether *edge* is a ``control`` edge naming one of the inventory's resolved control edges, end to end.
+
+    Such an edge proves both endpoints are pipelines in the export, so they count as foreign keys
+    even when discover left one unlisted (filtered out with ``--pipeline``, or a pipeline with no
+    activities).
+    """
+    if not isinstance(edge, dict) or edge.get("edge_type") != "control":
+        return False
+    triple = (from_pipeline, to_pipeline, edge.get("edge_identity"))
+    return all(isinstance(part, str) for part in triple) and triple in control_triples
 
 
 def _validate_optional_strings(record: dict[str, Any], fields: tuple[str, ...], loc: str) -> list[str]:
@@ -303,7 +322,7 @@ def _validate_edge(
     loc: str,
     from_pipeline: Any,
     to_pipeline: Any,
-    control_triples: set[tuple[str, str, str]],
+    resolves_control_edge: bool,
 ) -> list[str]:
     """Validate one ``lineage_edge`` reference.
 
@@ -348,14 +367,14 @@ def _validate_edge(
         for inferred_only in ("evidence", "confidence"):
             if inferred_only in edge:
                 problems.append(f"{loc}.lineage_edge: {inferred_only!r} is only valid on an 'inferred' edge")
-        # Resolve the full triple only when the identity and both endpoints are usable strings
+        # Report an unresolved triple only when the identity and both endpoints are usable strings
         # (a bad identity / endpoint is already reported here or by the caller).
         if (
             isinstance(identity, str)
             and identity
             and isinstance(from_pipeline, str)
             and isinstance(to_pipeline, str)
-            and (from_pipeline, to_pipeline, identity) not in control_triples
+            and not resolves_control_edge
         ):
             problems.append(
                 f"{loc}.lineage_edge: control edge {identity!r} does not resolve to a lineage edge "

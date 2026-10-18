@@ -57,10 +57,13 @@ narrative.
 
 1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json` (on the hosted
    MCP server, through `enrich` with `action="prepare"`; see below). Note every
-   pipeline `name` (these are the only valid foreign keys), and each pipeline's `lineage` block — in
+   pipeline `name` (these are the valid foreign keys), and each pipeline's `lineage` block — in
    particular `lineage.control_edges`, each `{source_workflow, target_workflow, via_task_key}`. A
    deterministic **control** relationship you annotate must match one of these exactly, and only an
-   edge marked `"resolved": true` can be annotated. When the
+   edge marked `"resolved": true` can be annotated. Such an edge can be annotated even when its
+   `target_workflow` is not a listed pipeline (discover ran with `--pipeline`, or the called pipeline
+   has no activities); every other relationship endpoint, and every `pipeline_insights[].pipeline`,
+   must be a listed pipeline. When the
    inventory records a top-level `source_graphs_sha256` (ADF discover does), copy it into
    `authored_against` by default, so enrich can refuse your insights if discover runs again before
    you submit them; when it records none, leave `authored_against` out.

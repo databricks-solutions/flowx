@@ -510,6 +510,106 @@ def test_projected_inventory_matches_adf_discover_for_an_empty_pipeline(tmp_path
     assert json.dumps({key: value for key, value in enriched.items() if key != INSIGHTS_KEY}, indent=2) == discovered
 
 
+_WAIT = {"name": "pause", "type": "Wait", "dependsOn": [], "typeProperties": {"waitTimeInSeconds": 1}}
+
+
+def _run_pipeline(child: str) -> dict[str, Any]:
+    reference = {"referenceName": child, "type": "PipelineReference"}
+    return {"name": "run_child", "type": "ExecutePipeline", "dependsOn": [], "typeProperties": {"pipeline": reference}}
+
+
+def _discover_adf_export(
+    tmp_path: Path, activities_by_pipeline: dict[str, list[dict[str, Any]]], *options: str
+) -> dict[str, Any]:
+    """Run the real ADF discover on a small export written under *tmp_path* and return its inventory."""
+    pipelines = tmp_path / "export" / "pipelines"
+    pipelines.mkdir(parents=True)
+    for name, activities in activities_by_pipeline.items():
+        document = {"name": name, "properties": {"activities": activities}}
+        (pipelines / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+    arguments = ["--source-dir", str(tmp_path / "export"), "--output-dir", str(tmp_path / "out"), *options]
+    assert adf_discover_main(arguments) == 0
+    return json.loads((tmp_path / "out" / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+
+
+def _control_relationship(from_pipeline: str, to_pipeline: str) -> dict[str, Any]:
+    return {
+        "from_pipeline": from_pipeline,
+        "to_pipeline": to_pipeline,
+        "lineage_edge": {"edge_type": "control", "edge_identity": "run_child"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("child_activities", "options"),
+    [([_WAIT], ("--pipeline", "Orchestrator")), ([], ())],
+    ids=["child-filtered-out-of-discover", "empty-child"],
+)
+def test_a_resolved_control_edge_into_an_unlisted_pipeline_can_be_annotated(
+    tmp_path: Path, child_activities: list[dict[str, Any]], options: tuple[str, ...]
+) -> None:
+    """Discover lists only Orchestrator yet resolves its edge to Child, so the skill's promise must hold."""
+    export = {"Orchestrator": [_run_pipeline("Child")], "Child": child_activities}
+    inventory = _discover_adf_export(tmp_path, export, *options)
+    assert [pipeline["name"] for pipeline in inventory["pipelines"]] == ["Orchestrator"]
+    [edge] = inventory["pipelines"][0]["lineage"]["control_edges"]
+    assert (edge["target_workflow"], edge["via_task_key"], edge["resolved"]) == ("Child", "run_child", True)
+    relationship = _control_relationship("Orchestrator", "Child")
+
+    result = enrich_inventory(tmp_path / "out", insights={"pipeline_relationships": [relationship]})
+
+    assert result["ok"] is True, result["violations"]
+    enriched = json.loads((tmp_path / "out" / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+    assert enriched[INSIGHTS_KEY]["pipeline_relationships"] == [relationship]
+
+
+def test_an_unresolved_control_edge_into_an_unlisted_pipeline_is_still_refused(tmp_path: Path) -> None:
+    inventory = _discover_adf_export(tmp_path, {"Orchestrator": [_run_pipeline("Missing")]})
+    [edge] = inventory["pipelines"][0]["lineage"]["control_edges"]
+    assert (edge["target_workflow"], edge["via_task_key"], edge["resolved"]) == ("Missing", "run_child", False)
+
+    result = enrich_inventory(
+        tmp_path / "out", insights={"pipeline_relationships": [_control_relationship("Orchestrator", "Missing")]}
+    )
+
+    assert result["ok"] is False
+    assert "pipeline_relationships[0]: to_pipeline 'Missing' not in inventory" in result["violations"]
+
+
+def test_only_a_resolved_control_edge_lets_an_unlisted_pipeline_through(tmp_path: Path) -> None:
+    """A made-up name, an inferred edge, a reversed edge and a pipeline insight still need a listed pipeline."""
+    export = {"Orchestrator": [_run_pipeline("Child")], "Child": [_WAIT]}
+    _discover_adf_export(tmp_path, export, "--pipeline", "Orchestrator")
+    inferred = {
+        "from_pipeline": "Orchestrator",
+        "to_pipeline": "Child",
+        "lineage_edge": {
+            "edge_type": "inferred",
+            "edge_identity": "shared table sales.orders",
+            "evidence": "Both read sales.orders",
+            "confidence": "low",
+        },
+    }
+    authored = {
+        "pipeline_insights": [{"pipeline": "Child", "intent": "Pause."}],
+        "pipeline_relationships": [
+            _control_relationship("Orchestrator", "Ghost"),
+            inferred,
+            _control_relationship("Child", "Orchestrator"),
+        ],
+    }
+
+    result = enrich_inventory(tmp_path / "out", insights=authored)
+
+    assert result["ok"] is False
+    assert {
+        "pipeline_insights[0]: pipeline 'Child' not in inventory",
+        "pipeline_relationships[0]: to_pipeline 'Ghost' not in inventory",
+        "pipeline_relationships[1]: to_pipeline 'Child' not in inventory",
+        "pipeline_relationships[2]: from_pipeline 'Child' not in inventory",
+    } <= set(result["violations"])
+
+
 def test_a_failed_rollback_never_truncates_the_insights_file_and_keeps_the_lock(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
