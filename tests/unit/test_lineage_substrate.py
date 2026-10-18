@@ -115,7 +115,7 @@ def test_control_edges_run_job_activity_is_source_neutral():
         tasks=[RunJobActivity(name="run", task_key="run", job_name="downstream_job")],
     )
 
-    edges = build_control_edges(pipeline)
+    edges = build_control_edges(pipeline, known_workflows={"dag_main", "downstream_job"})
 
     assert len(edges) == 1
     assert edges[0].source_workflow == "dag_main"
@@ -522,6 +522,27 @@ def test_a_control_edge_saved_as_resolved_still_reads_back_resolved() -> None:
     )
 
     assert [control_edge.resolved for control_edge in lineage.control_edges] == [True]
+
+
+@pytest.mark.parametrize(("written_wait", "read_wait"), [("true", None), (0, None), (True, True), (False, False)])
+def test_a_control_edge_wait_flag_reads_back_only_when_it_is_a_boolean(
+    written_wait: object, read_wait: bool | None
+) -> None:
+    """A saved wait flag that is not a boolean comes back as unknown, never verbatim."""
+    lineage = lineage_from_dict(
+        {
+            "control_edges": [
+                {
+                    "source_workflow": "parent",
+                    "target_workflow": "child",
+                    "via_task_key": "Run",
+                    "wait_for_completion": written_wait,
+                }
+            ]
+        }
+    )
+
+    assert [control_edge.wait_for_completion for control_edge in lineage.control_edges] == [read_wait]
 
 
 def test_the_pipeline_debug_dict_includes_its_lineage_block() -> None:
