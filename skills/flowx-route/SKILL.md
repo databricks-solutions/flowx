@@ -308,7 +308,8 @@ Its guarantees:
   pipelines again, rebuilds, validates and writes the result.
 - **Different authored pipelines** replace the stored output for that unit only and add
   `{"from", "to"}` to the entry's `replaced` history (the first fill is not a replacement). The history
-  lives in `agentic_conversion.json`, so it survives switching the unit to deterministic and back.
+  lives in `agentic_conversion.json`, so it survives switching the unit to deterministic and back. An
+  entry edited by hand no longer checks out, so filling it again starts a fresh history.
 - **Unique names**: an authored pipeline name may reuse a member of this unit, or a name the output of
   a unit sharing members with this one authored (a grouping and its own components never apply
   together), but not another name in the same list, a member of another unit, a pipeline another
@@ -403,11 +404,16 @@ Package refuses, writing nothing, when:
   then enrich prepare and apply — running discover again moves `conversion_plan.json` and
   `agentic_conversion.json` into `metadata/archive/`, so route and fill again afterwards);
 - the report carries a routing record but `conversion_plan.json` is missing;
-- the plan is stale against the inventory, is not a complete decision, or has a decision pending;
+- the plan is stale against the inventory, is not a complete decision, or has a decision pending; or
+  it holds a key route does not write, or a recommendation, option, grouping or finding that no longer
+  matches what route records from the inventory (edit only the decisions, `accepted` and the
+  conversation, then route again);
 - a routed-agentic unit has **no agent output yet** — an agentic decision is packaged agentically,
   never as the deterministic stand-in; fill it, or decide it deterministic and route again;
-- the saved baseline no longer has the hashes the record names ("re-run convert, then route"), or a
-  stored output or gap fill was edited ("re-run fill-agentic", or merge that gap again);
+- the saved baseline no longer has the hashes the record names ("re-run convert, then route"; route,
+  fill-agentic and merge refuse it too), or a stored output or gap fill was edited, moved to another
+  unit or pointed at another activity ("re-run fill-agentic", or merge that gap again). Every stored
+  entry carries a hash over all its fields, so any edit to it shows;
 - the live `.work/translation_report.json` does not match a fresh rebuild ("re-run route"), or any
   other packaged report — modify's configured `.work/translation_report.stamped.json`, or a
   `modify --out` copy — does not carry the live report's routing record ("the configured report is
