@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from flowx.bundler.dab_writer import pipeline_dict_to_ir
-from flowx.ir_serde import pipeline_to_dict
+from flowx.ir_serde import lineage_from_dict, pipeline_to_dict
 from flowx.lineage import (
     build_control_edges,
     build_data_edges,
@@ -495,3 +497,28 @@ def test_lineage_block_always_emits_lists_never_null():
     serialised = pipeline_to_dict(pipeline)
 
     assert serialised["lineage"] == {"control_edges": [], "data_edges": [], "motifs": []}
+
+
+@pytest.mark.parametrize("written_resolved", [None, "true", "false", 1])
+def test_a_control_edge_read_back_without_a_true_resolved_flag_is_unresolved(written_resolved: object) -> None:
+    """Only a saved ``resolved: true`` reads back as resolved; a missing or non-boolean flag means unknown."""
+    edge: dict = {"source_workflow": "parent", "target_workflow": "child", "via_task_key": "Run"}
+    if written_resolved is not None:
+        edge["resolved"] = written_resolved
+
+    lineage = lineage_from_dict({"control_edges": [edge]})
+
+    assert [control_edge.resolved for control_edge in lineage.control_edges] == [False]
+
+
+def test_a_control_edge_saved_as_resolved_still_reads_back_resolved() -> None:
+    """A saved ``resolved: true`` round-trips unchanged."""
+    lineage = lineage_from_dict(
+        {
+            "control_edges": [
+                {"source_workflow": "parent", "target_workflow": "child", "via_task_key": "Run", "resolved": True}
+            ]
+        }
+    )
+
+    assert [control_edge.resolved for control_edge in lineage.control_edges] == [True]

@@ -156,7 +156,9 @@ def lineage_from_dict(raw: dict[str, Any]) -> Lineage:
     """Rehydrate a :class:`Lineage` block from the dict :func:`lineage_to_dict` emits.
 
     The one inverse shared by the translation report and the discovery graph, so a
-    lineage block reads back the same way wherever it was written.
+    lineage block reads back the same way wherever it was written. A control edge is
+    resolved only when it was saved with ``resolved: true``; a missing or non-boolean
+    flag reads back as unresolved, never as resolved.
     """
     return Lineage(
         control_edges=[
@@ -165,7 +167,7 @@ def lineage_from_dict(raw: dict[str, Any]) -> Lineage:
                 target_workflow=edge.get("target_workflow", ""),
                 via_task_key=edge.get("via_task_key", ""),
                 wait_for_completion=edge.get("wait_for_completion"),
-                resolved=bool(edge.get("resolved", True)),
+                resolved=edge.get("resolved") is True,
             )
             for edge in raw.get("control_edges") or []
         ],

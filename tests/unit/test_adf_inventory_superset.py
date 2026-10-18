@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from flowx.discovery_serde import read_source_graphs
 from flowx.reporting.coverage import build_coverage_rows
 from flowx.sources.adf.loader import build_inventory, load_adf_definitions, main
@@ -268,3 +270,13 @@ def test_pipeline_filter_still_resolves_a_child_that_is_in_the_export(tmp_path: 
     assert graphs[0].lineage is not None
     resolved_by_target = {edge.target_workflow: edge.resolved for edge in graphs[0].lineage.control_edges}
     assert resolved_by_target == {"child": True, "missing": False}
+
+
+def test_discover_prints_the_inventory_activity_count_labelled_raw_including_nested(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The console total is the inventory's own count, which includes nested activities, and says so."""
+    metadata = _run_discover(tmp_path)
+    activity_count = json.loads((metadata / "inventory.json").read_text())["summary"]["activity_count"]
+
+    assert f"Total activities:     {activity_count}  (raw activities, incl. nested)" in capsys.readouterr().out
