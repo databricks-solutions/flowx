@@ -60,15 +60,25 @@ def _cli_flags(parameters: dict[str, Any]) -> list[str]:
     return flags
 
 
-def _package_both_ways(tmp_path: Path, parameters: dict[str, str]) -> tuple[dict[str, Any], Path, Path]:
-    """Packages identical converted state via MCP and via the CLI; returns the MCP result and both dirs."""
+def _package_both_ways(
+    tmp_path: Path, parameters: dict[str, str], cli_parameters: dict[str, str] | None = None
+) -> tuple[dict[str, Any], Path, Path]:
+    """Packages identical converted state via MCP and via the CLI; returns the MCP result and both dirs.
+
+    The CLI gets *cli_parameters* when given (the flags the MCP call should amount to), else *parameters*.
+    """
     mcp_dir, cli_dir = tmp_path / "mcp", tmp_path / "cli"
     _write_converted_state(mcp_dir)
     _write_converted_state(cli_dir)
     result = server._cmd_package({"output_dir": str(mcp_dir), "download_workspace_files": False, **parameters})
-    exit_code = package_main(["--output-dir", str(cli_dir), "--no-download-workspace-files", *_cli_flags(parameters)])
+    cli_flags = _cli_flags(parameters if cli_parameters is None else cli_parameters)
+    exit_code = package_main(["--output-dir", str(cli_dir), "--no-download-workspace-files", *cli_flags])
     assert exit_code == 0
     return result, mcp_dir, cli_dir
+
+
+def _has_bundle(root: Path) -> bool:
+    return (root / "databricks.yml").exists() or bool(list(root.glob("*/databricks.yml")))
 
 
 @pytest.fixture
@@ -113,23 +123,13 @@ def test_mcp_package_honours_an_explicit_group_spec(no_bundle_upload, tmp_path: 
 def test_mcp_package_uses_a_group_spec_sent_without_group_by(no_bundle_upload, tmp_path: Path, parameters):
     spec_path = tmp_path / "groups.json"
     spec_path.write_text(json.dumps({"team_a": ["caller", "solo"], "team_b": ["callee"]}))
-    mcp_dir, cli_dir = tmp_path / "mcp", tmp_path / "cli"
-    _write_converted_state(mcp_dir)
-    _write_converted_state(cli_dir)
 
-    result = server._cmd_package(
-        {"output_dir": str(mcp_dir), "download_workspace_files": False, "group_spec": str(spec_path), **parameters}
-    )
-    exit_code = package_main(
-        [
-            "--output-dir",
-            str(cli_dir),
-            "--no-download-workspace-files",
-            *_cli_flags({"packaging_mode": "per-group", "group_by": "spec", "group_spec": str(spec_path)}),
-        ]
+    result, mcp_dir, cli_dir = _package_both_ways(
+        tmp_path,
+        {"group_spec": str(spec_path), **parameters},
+        {"packaging_mode": "per-group", "group_by": "spec", "group_spec": str(spec_path)},
     )
 
-    assert exit_code == 0
     assert result["ok"], result["process"]
     assert _tree(mcp_dir) == _tree(cli_dir)
     assert {name for name in _tree(mcp_dir) if name.endswith("databricks.yml")} == {
@@ -139,10 +139,27 @@ def test_mcp_package_uses_a_group_spec_sent_without_group_by(no_bundle_upload, t
 
 
 @pytest.mark.parametrize(
+    ("parameters", "cli_parameters"),
+    [
+        ({"group_spec": ""}, {}),
+        ({"packaging_mode": "per-group", "group_spec": ""}, {"packaging_mode": "per-group"}),
+    ],
+)
+def test_mcp_package_treats_a_blank_group_spec_as_unset(no_bundle_upload, tmp_path: Path, parameters, cli_parameters):
+    result, mcp_dir, cli_dir = _package_both_ways(tmp_path, parameters, cli_parameters)
+
+    assert result["ok"], result["process"]
+    assert _tree(mcp_dir) == _tree(cli_dir)
+
+
+@pytest.mark.parametrize(
     ("parameters", "bad_value"),
     [
         ({"packaging_mode": "bogus"}, "bogus"),
         ({"packaging_mode": "per-group", "group_by": "bogus"}, "bogus"),
+        ({"packaging_mode": ""}, ""),
+        ({"packaging_mode": "per-group", "group_by": ""}, ""),
+        ({"packaging_mode": "", "group_spec": "/tmp/groups.json"}, ""),
         ({"packaging_mode": 0}, "0"),
         ({"packaging_mode": False}, "False"),
         ({"packaging_mode": "per-group", "group_by": False}, "False"),
@@ -161,7 +178,38 @@ def test_mcp_package_refuses_a_bad_value_like_the_cli(no_bundle_upload, tmp_path
     assert mcp_result["process"]["returncode"] == cli_exit.value.code == 2
     assert f"invalid choice: '{bad_value}'" in mcp_result["process"]["stderr"]
     assert f"invalid choice: '{bad_value}'" in capsys.readouterr().err
-    assert not (mcp_dir / "databricks.yml").exists() and not list(mcp_dir.glob("*/databricks.yml"))
+    assert not _has_bundle(mcp_dir)
+
+
+_MISSING_SPEC_PATH = "/nonexistent/flowx/groups.json"
+
+
+@pytest.mark.parametrize(
+    ("parameters", "message"),
+    [
+        (
+            {"packaging_mode": "per-group", "group_by": "spec"},
+            "per-group with --group-by spec requires a --group-spec file.",
+        ),
+        ({"group_spec": _MISSING_SPEC_PATH}, f"group spec file not found: {_MISSING_SPEC_PATH}"),
+        ({"packaging_mode": "per-group", "group_spec": {"team_a": ["caller"]}}, "group spec file not found"),
+    ],
+)
+def test_mcp_package_refuses_an_unusable_group_spec_like_the_cli(
+    no_bundle_upload, tmp_path: Path, capsys, parameters, message
+):
+    mcp_dir, cli_dir = tmp_path / "mcp", tmp_path / "cli"
+    _write_converted_state(mcp_dir)
+    _write_converted_state(cli_dir)
+
+    mcp_result = server._cmd_package({"output_dir": str(mcp_dir), **parameters})
+    exit_code = package_main(["--output-dir", str(cli_dir), *_cli_flags(parameters)])
+
+    assert mcp_result["ok"] is False
+    assert mcp_result["process"]["returncode"] == exit_code == 1
+    assert message in mcp_result["process"]["stderr"]
+    assert message in capsys.readouterr().err
+    assert not _has_bundle(mcp_dir)
 
 
 class _FakeResult:
@@ -172,6 +220,18 @@ class _FakeResult:
 
     def as_dict(self) -> dict[str, object]:
         return {"returncode": 0, "stdout": "", "stderr": ""}
+
+
+def _migrate(output_dir: Path, parameters: dict[str, Any]) -> dict[str, Any]:
+    return server._cmd_migrate(
+        {
+            "source": "adf",
+            "adf_source_path": str(output_dir.parent / "adf"),
+            "output_dir": str(output_dir),
+            "interactive": False,
+            **parameters,
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -187,6 +247,8 @@ class _FakeResult:
             {"group_spec": "/tmp/groups.json"},
             ["--packaging-mode", "per-group", "--group-by", "spec", "--group-spec", "/tmp/groups.json"],
         ),
+        ({"group_spec": ""}, []),
+        ({"packaging_mode": "per-group", "group_spec": ""}, ["--packaging-mode", "per-group"]),
     ],
 )
 def test_migrate_forwards_the_packaging_mode(monkeypatch, tmp_path: Path, parameters, expected_flags):
@@ -202,16 +264,39 @@ def test_migrate_forwards_the_packaging_mode(monkeypatch, tmp_path: Path, parame
     monkeypatch.setattr(runner, "list_tree", lambda out: [])
     monkeypatch.setattr(runner, "read_tree", lambda out: {"files": {}, "truncated": []})
 
-    result = server._cmd_migrate(
-        {
-            "source": "adf",
-            "adf_source_path": str(tmp_path / "adf"),
-            "output_dir": str(tmp_path / "out"),
-            "interactive": False,
-            **parameters,
-        }
-    )
+    result = _migrate(tmp_path / "out", parameters)
 
     assert result["status"] == "completed"
     package_argv = next(argv for argv in calls if argv[0] == "package")
     assert package_argv[package_argv.index("--schema") + 2 :] == expected_flags
+
+
+@pytest.mark.parametrize(
+    ("parameters", "returncode", "message"),
+    [
+        ({"packaging_mode": ""}, 2, "invalid choice: ''"),
+        ({"packaging_mode": "per-group", "group_by": ""}, 2, "invalid choice: ''"),
+        ({"packaging_mode": "per-group", "group_by": "spec"}, 1, "requires a --group-spec file"),
+        ({"group_spec": _MISSING_SPEC_PATH}, 1, "group spec file not found"),
+    ],
+)
+def test_migrate_refuses_a_bad_packaging_value_like_package(
+    monkeypatch, tmp_path: Path, parameters, returncode, message
+):
+    output_dir = tmp_path / "out"
+    _write_converted_state(output_dir)
+    real_run_adapter = runner.run_adapter
+
+    def run_adapter(args, **kwargs):
+        """Skips discover and convert (their output is already on disk) and runs package for real."""
+        return real_run_adapter(args, **kwargs) if args[0] == "package" else _FakeResult()
+
+    monkeypatch.setattr(runner, "run_adapter", run_adapter)
+
+    result = _migrate(output_dir, parameters)
+
+    assert result["ok"] is False
+    assert (result["status"], result["failed_phase"]) == ("failed", "package")
+    assert result["steps"]["package"]["process"]["returncode"] == returncode
+    assert message in result["steps"]["package"]["process"]["stderr"]
+    assert not _has_bundle(output_dir)

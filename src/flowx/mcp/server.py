@@ -171,18 +171,16 @@ def _packaging_args(parameters: dict[str, Any]) -> list[Any]:
 
     A ``group_spec`` on its own means "package by this spec", so it fills in ``per-group`` and
     ``spec`` for whichever of the other two is unset. Otherwise unset keys are left off so the CLI's
-    own defaults apply (``per-pipeline``, ``inferred``). Only a missing key, ``None`` or ``""`` counts
-    as unset; any other value, ``0`` or ``False`` included, reaches the CLI unchanged so it is refused
-    there exactly as on the command line.
+    own defaults apply (``per-pipeline``, ``inferred``). Only a missing key or ``None`` counts as
+    unset, plus a blank ``group_spec`` because ``inputs package`` leaves it blank by default. Any other
+    value, ``""``, ``0`` and ``False`` included, reaches the CLI unchanged so it is refused there
+    exactly as on the command line.
     """
-
-    def given(key: str) -> Any:
-        value = parameters.get(key)
-        return None if value is None or value == "" else value
-
-    group_spec = given("group_spec")
-    packaging_mode = given("packaging_mode")
-    group_by = given("group_by")
+    group_spec = parameters.get("group_spec")
+    if group_spec == "":
+        group_spec = None
+    packaging_mode = parameters.get("packaging_mode")
+    group_by = parameters.get("group_by")
     if group_spec is not None:
         packaging_mode = "per-group" if packaging_mode is None else packaging_mode
         group_by = "spec" if group_by is None else group_by
@@ -592,15 +590,18 @@ def build_server() -> FastMCP:
           catalog(default "main"), schema(default "default"), bundle_name, profile,
           download_workspace_files(bool), keep_intermediates(bool), packaging_mode, group_by, group_spec.
           ``packaging_mode`` ("per-pipeline" default | "single" | "per-group") lays a multi-pipeline
-          migration out into bundles; for "per-group", ``group_by`` is "inferred" (default, by the Run
-          Pipeline call graph) or "spec", which needs ``group_spec``: a JSON/YAML file mapping pipelines
-          to groups (sending it alone implies "per-group" and "spec"). It must be a path the server
-          itself can read, so on the hosted server use ``group_by`` "inferred" or a server-local path.
-          An unrecognized value is refused with ``ok: false``.
+          ADF migration out into bundles; for "per-group", ``group_by`` is "inferred" (default, by the
+          Run Pipeline call graph) or "spec", which needs ``group_spec``: a JSON/YAML file mapping
+          pipelines to groups (sending it alone implies "per-group" and "spec"; blank counts as unset).
+          It must be a path the server itself can read, so on the hosted server use ``group_by``
+          "inferred" or a server-local path. An unrecognized ``packaging_mode`` or ``group_by`` (``""``
+          included) or a missing or malformed ``group_spec`` is refused with ``ok: false``. A multi-DAG
+          Airflow migration is always packaged as one combined bundle and ignores these, refusing only
+          an unrecognized ``packaging_mode`` or ``group_by``.
         - "migrate": source(req), one ADF source key | airflow_source_path (req), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list), packaging_mode, group_by, group_spec
-          (as for "package"),
+          (as for "package", so ignored for a multi-DAG Airflow source),
           answers(list of "ID=VALUE"), interactive(bool, default true), lookup_csv — runs
           discover→convert→package, returning the full option schema once (status "needs_input") when
           configuration is available; re-call once with the complete answers to apply (see below).

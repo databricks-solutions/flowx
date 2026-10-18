@@ -383,7 +383,8 @@ _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
             "``single`` (all pipelines in one bundle), or ``per-group`` (group pipelines into "
             "bundles by their Run Pipeline call graph, or by an explicit --group-spec). Forwarded "
             "to ``package`` as ``--packaging-mode``. For a single-pipeline migration every mode is "
-            "equivalent."
+            "equivalent, and a multi-DAG Airflow migration is always packaged as one combined bundle "
+            "whatever the mode."
         ),
         default="per-pipeline",
         required=False,

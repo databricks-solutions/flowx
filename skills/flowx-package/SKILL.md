@@ -39,7 +39,7 @@ This phase runs one of two ways; run the **`setup`** skill first if you haven't.
   flowx(command="package", parameters={"output_dir": "<dir>", "report_path": "<optional>", "catalog": "<catalog>",
                                             "schema": "<schema>", "bundle_name": "<optional>", "profile": "<optional>",
                                             "download_workspace_files": true,
-                                            "packaging_mode": "<optional per-pipeline|single|per-group>",
+                                            "packaging_mode": "<optional, ADF only: per-pipeline|single|per-group>",
                                             "group_by": "<optional inferred|spec>", "group_spec": "<optional path>",
                                             "output_volume_path": "<optional /Volumes/... target>",
                                             "output_workspace_path": "<optional /Workspace/... target>"})
@@ -105,7 +105,8 @@ Ask the user for the following (provide defaults):
 | Databricks CLI profile | Profile used to download workspace-resident notebooks / JARs / Python files (`--profile`). Required only when the bundle references absolute workspace paths. | resolved from `~/.databrickscfg` (auto-prompt if multiple) |
 
 **Packaging mode** (`--packaging-mode`, surfaced as the `packaging_mode` input) controls how a
-multi-pipeline migration is laid out. For a single-pipeline migration every mode is equivalent.
+multi-pipeline migration is laid out. For a single-pipeline migration every mode is equivalent, and a
+multi-DAG Airflow migration is always packaged as one combined bundle whatever the mode.
 
 - **`per-pipeline`** (default) — one Databricks Asset Bundle per ADF pipeline, each in its own
   `<output_dir>/<pipeline>/` subdirectory. Cross-pipeline `ExecutePipeline` calls become
