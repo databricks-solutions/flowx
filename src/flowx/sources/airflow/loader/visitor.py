@@ -266,6 +266,8 @@ class _DagVisitor(ast.NodeVisitor):
         construct = _construct_name(call.func, self._aliases)
         kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
         dag_node = kwargs.get("dag")
+        if not self._dag_scope_depth and not isinstance(dag_node, ast.Name):
+            return False
         if self._target_dag_variable is not None and not (
             isinstance(dag_node, ast.Name) and dag_node.id == self._target_dag_variable
         ):
