@@ -27,8 +27,9 @@ Two tiers, exactly as #36 established them:
   share a folder shape never join. An unknown store is
   never guessed: the signature stays unqualified, and a qualified and an unqualified
   signature never join. A dataset that names its store (a literal container or
-  bucket, or a server set on its linked service) but cannot prove the rest of it gets
-  no signature, since the folder shape alone cannot tell two such stores apart.
+  bucket, or a server, share, lakehouse or account set on its linked service) but
+  cannot prove the rest of it gets no signature, since the folder shape alone cannot
+  tell two such stores apart.
   It is **never** the bare dataset reference name: two unrelated opaque
   references that merely share a name must not join (#36's explicit rule), so when
   neither a physical identity nor a path-anchored signature is available the
