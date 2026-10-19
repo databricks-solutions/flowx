@@ -311,8 +311,9 @@ class AdfScanner:
         """Billed ADF cost for one subscription from Cost Management, attributed to factories.
 
         One query per subscription, grouped by meter subcategory and resource ID. A row belongs to
-        the first factory whose name appears anywhere in its resource ID (a known over-match, kept
-        as-is), else to a factory whose name equals the ID's last segment.
+        the factory whose name is the ID's `/factories/<name>` segment, compared case-insensitively
+        because Cost Management lowercases resource IDs. (The original matched by substring, so a
+        factory also took the billing of any factory whose name contained its own.)
         """
         url = (
             f"{AZURE_MANAGEMENT_URL}/subscriptions/{subscription_id}"
@@ -364,12 +365,10 @@ class AdfScanner:
         lowered_names = list(dict.fromkeys(name.lower() for name in factory_names))
         for row in properties.get("rows", []):
             record = dict(zip(columns, row))
-            resource_id = record.get("ResourceId", "")
-            matched = next((name for name in lowered_names if name in resource_id.lower()), None)
-            if matched is None:
-                last_segment = resource_id.rstrip("/").split("/")[-1].lower()
-                matched = last_segment if last_segment in lowered_names else None
-            if matched is None:
+            resource_id = record.get("ResourceId", "").lower()
+            _, _, after_factories = resource_id.rpartition("/factories/")
+            matched = after_factories.split("/")[0]
+            if matched not in lowered_names:
                 continue
             result.actual_costs.append(
                 ActualCost(

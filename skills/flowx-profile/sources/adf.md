@@ -53,7 +53,5 @@ fails, the built-in list rates are used, and the report's "Pricing Source" line 
   44.6 hours for 45 short notebook runs while the estimate counted 7.25 hours.
 - A Copy run that doesn't report its DIUs is assumed to have used 4.
 - Data Flow cost assumes a fixed 8 vCores, regardless of the cluster size actually used.
-- Billed rows are attributed to a factory by substring match on the resource ID, so `etl` also
-  claims `etl-prod`'s rows when both exist.
 - Actuals count only the `Azure Data Factory v2` meter subcategory (and empty ones). A compute
   meter Azure introduces under a new name would be left out until it's added.

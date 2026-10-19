@@ -166,22 +166,48 @@ def test_empty_cost_management_is_valid():
     assert result.cost_management_denied == []
 
 
-def test_factory_match_is_by_substring_as_in_the_original():
-    # Known follow-up, ported as-is: "demo-factory" also claims "demo-factory-old"'s billing.
-    rows = {
+def _cost_rows(*rows: tuple[float, str]) -> dict:
+    """A Cost Management response with one row per (cost, factory resource ID)."""
+    return {
         "properties": {
             "columns": [{"name": "PreTaxCost"}, {"name": "MeterSubcategory"}, {"name": "ResourceId"}],
-            "rows": [
-                [
-                    1.0,
-                    "",
-                    "/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.DataFactory/factories/demo-factory-old",
-                ]
-            ],
+            "rows": [[cost, "", resource_id] for cost, resource_id in rows],
         }
     }
-    result, _ = _scan(_mapping(**{COST_QUERY: rows}))
-    assert [(actual.factory_name, actual.currency) for actual in result.actual_costs] == [("demo-factory", "USD")]
+
+
+FACTORY_ID = "/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.DataFactory/factories/"
+
+
+def test_factory_name_that_prefixes_another_does_not_claim_its_billing():
+    # The original matched by substring, so "demo-factory" also took "demo-factory-old"'s billing.
+    result, _ = _scan(_mapping(**{COST_QUERY: _cost_rows((1.0, FACTORY_ID + "demo-factory-old"))}))
+    assert result.actual_costs == []
+
+
+def test_factories_whose_names_prefix_each_other_each_get_their_own_billing():
+    # Live case: "flowx-profiler-test-adf" and "flowx-profiler-test-adf-vnet" in one resource group.
+    factories = {
+        "value": [
+            {"name": "test-adf", "location": "West Europe", "id": FACTORY_ID + "test-adf"},
+            {"name": "test-adf-vnet", "location": "West Europe", "id": FACTORY_ID + "test-adf-vnet"},
+        ]
+    }
+    # Cost Management lowercases resource IDs.
+    rows = _cost_rows((1.0, FACTORY_ID.lower() + "test-adf-vnet"), (2.0, FACTORY_ID.lower() + "test-adf"))
+    result, _ = _scan(
+        _mapping(
+            **{
+                "/subscriptions/SUB/providers/Microsoft.DataFactory/factories?": factories,
+                "/queryPipelineRuns": {"value": []},
+                COST_QUERY: rows,
+            }
+        )
+    )
+    assert sorted((actual.factory_name, actual.cost) for actual in result.actual_costs) == [
+        ("test-adf", 2.0),
+        ("test-adf-vnet", 1.0),
+    ]
 
 
 def test_subscription_names_recorded_for_the_report():
