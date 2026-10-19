@@ -456,13 +456,18 @@ class AdfScanner:
             ir_key = classify_ir(output.get("effectiveIntegrationRuntime", ""), ir_type_map)
             activity_rates = rates.get(ir_key, rates["azure_ir"])
             orchestration = cost_model.orchestration_cost(activity_rates)
-            execution = cost_model.activity_execution_cost(
-                activity_type, ir_key, activity.get("durationInMs", 0) or 0, output, activity_rates
-            )
+            billed = cost_model.billed_execution(output, activity_rates)
+            if billed is not None:
+                bucket, execution = billed
+            else:
+                bucket = cost_model.duration_bucket(activity_type)
+                execution = cost_model.activity_execution_cost(
+                    activity_type, ir_key, activity.get("durationInMs", 0) or 0, output, activity_rates
+                )
             run_costs.orchestration_cost += orchestration
-            if activity_type in cost_model.COPY_ACTIVITY_TYPES:
+            if bucket == "data_movement":
                 run_costs.data_movement_cost += execution
-            elif activity_type in cost_model.EXTERNAL_ACTIVITY_TYPES or activity_type in cost_model.DATA_FLOW_TYPES:
+            elif bucket == "external":
                 run_costs.external_cost += execution
             else:
                 run_costs.pipeline_activity_cost += execution

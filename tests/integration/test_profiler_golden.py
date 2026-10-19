@@ -32,15 +32,22 @@ from flowx.sources.adf.profiler.report import write_reports
 PROFILER_ROOT = Path(__file__).parent / "azure" / "profiler"
 CAPTURE = PROFILER_ROOT / "capture"
 EXPECTED = CAPTURE / "expected"
+AZURE_IR_FACTORY = "flowx-profiler-test-adf"
 VNET_FACTORY = "flowx-profiler-test-adf-vnet"
 
-# The original looks up the IR by the run's "ManagedVnetIR (West Europe)" name, misses because of the
-# region suffix, and prices managed-VNet pipeline and external activities at Azure IR rates. The port
-# strips the suffix (#12 A) and prices them at the managed-VNet rates. Orchestration, data movement, and
-# run counts must still agree for these pipelines.
+# Pipelines where the port deliberately prices differently from the original. Orchestration, data movement,
+# and run counts must still agree for them.
 INTENDED_DIFFERENCES = {
-    (VNET_FACTORY, pipeline): "managed-VNet pipeline/external activity rate (#12 A)"
-    for pipeline in ("pl_databricks_job", "pl_foreach", "pl_lookup_wait", "pl_web_databricks", "pl_web_public")
+    # The original looks up the IR by the run's "ManagedVnetIR (West Europe)" name, misses because of the
+    # region suffix, and prices managed-VNet pipeline and external activities at Azure IR rates. The port
+    # strips the suffix (#12 A) and prices them at the managed-VNet rates.
+    **{
+        (VNET_FACTORY, pipeline): "managed-VNet pipeline/external activity rate (#12 A)"
+        for pipeline in ("pl_databricks_job", "pl_foreach", "pl_lookup_wait", "pl_web_databricks", "pl_web_public")
+    },
+    # The original prices a data flow as 8 vCores x its duration; the port prices the vCore-hours Azure
+    # reports in the run's billingReference (A).
+    (AZURE_IR_FACTORY, "pl_dataflow"): "data flow priced from billingReference vCore-hours (A)",
 }
 RATE_SENSITIVE_FIELDS = {"pipeline_activity_cost", "external_cost", "total_cost"}
 
@@ -99,7 +106,7 @@ def test_intended_differences_still_differ(replayed):
     original = _original_costs()
     ported = {(cost.factory_name, cost.pipeline_name): cost for cost in replayed.pipeline_costs}
     for key in INTENDED_DIFFERENCES:
-        assert ported[key].total_cost > float(original[key]["totalCost"]) + TOLERANCE, key
+        assert ported[key].total_cost != pytest.approx(float(original[key]["totalCost"]), abs=TOLERANCE), key
 
 
 def test_report_matches_expected(replayed, tmp_path, request):

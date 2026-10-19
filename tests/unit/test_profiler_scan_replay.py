@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from flowx.sources.adf.profiler import pricing
+from flowx.sources.adf.profiler import cost_model, pricing
 from flowx.sources.adf.profiler.azure_client import AdfScanner
 
 from .profiler_replay import ReplayTransport
@@ -260,3 +260,56 @@ def test_managed_vnet_notebook_is_priced_at_the_vnet_external_rate():
     assert notebook_run.execution_cost == pytest.approx(
         (2 / 60) * pricing.DEFAULT_PRICING["managed_vnet_ir"]["external_activity_per_hour"], abs=1e-6
     )
+
+
+def test_billed_quantities_from_azure_take_precedence_over_duration():
+    # Azure IR runs report what Azure billed. Here a 3-minute Lookup is billed as 1 minute of pipeline
+    # activity, and a data flow is billed for the 0.354 vCore-hours its cluster used; the duration
+    # estimate would be 3 minutes, and 8 vCores x 3 minutes = 0.4 vCore-hours.
+    activities = {
+        "value": [
+            _activity(
+                "Lookup",
+                180_000,
+                _reference("PipelineActivity", [{"duration": 1 / 60, "meterType": "AzureIR", "unit": "Hours"}]),
+            ),
+            _activity(
+                "ExecuteDataFlow",
+                174_759,
+                _reference("executedataflow", [{"duration": 0.354, "meterType": "Data Flow", "unit": "coreHour"}]),
+            ),
+        ]
+    }
+    result, _ = _scan(_mapping(**{"/queryActivityruns": activities}))
+    lookup_run, data_flow_run = result.activity_runs[:2]
+    lookup_rate = pricing.DEFAULT_PRICING["azure_ir"]["pipeline_activity_per_hour"]
+    assert lookup_run.execution_cost == pytest.approx((1 / 60) * lookup_rate, abs=1e-6)
+    assert data_flow_run.execution_cost == pytest.approx(0.354 * cost_model.DATAFLOW_VCORE_RATE, abs=1e-6)
+
+
+def test_billed_bucket_comes_from_azure_not_the_activity_type():
+    # An activity type the duration fallback doesn't know would land in the pipeline-activity bucket;
+    # Azure says it bills as ExternalActivity, so it lands there.
+    reference = _reference("ExternalActivity", [{"duration": 2 / 60, "meterType": "AzureIR", "unit": "Hours"}])
+    result, _ = _scan(_mapping(**{"/queryActivityruns": {"value": [_activity("SomeNewActivity", 110_713, reference)]}}))
+    pipeline = next(cost for cost in result.pipeline_costs if cost.pipeline_name == "copy_pipeline")
+    assert pipeline.pipeline_activity_cost == 0
+    external_rate = pricing.DEFAULT_PRICING["azure_ir"]["external_activity_per_hour"]
+    assert pipeline.external_cost == pytest.approx(2 * (2 / 60) * external_rate, abs=1e-4)
+
+
+def _reference(activity_type: str, billable_duration: list[dict]) -> dict:
+    return {"activityType": activity_type, "billableDuration": billable_duration}
+
+
+def _activity(activity_type: str, duration_ms: int, billing_reference: dict) -> dict:
+    return {
+        "activityName": activity_type.lower(),
+        "activityType": activity_type,
+        "pipelineName": "copy_pipeline",
+        "durationInMs": duration_ms,
+        "output": {
+            "effectiveIntegrationRuntime": "AutoResolveIntegrationRuntime",
+            "billingReference": billing_reference,
+        },
+    }

@@ -33,11 +33,18 @@ For each activity run in the window:
 
 - **Orchestration**: the integration runtime's per-1000-runs rate, per activity run, plus one trigger
   orchestration per pipeline run at the Azure IR rate.
-- **Execution**: the run's duration, billed in whole minutes with a 1-minute minimum, times:
+- **Execution, from what Azure billed** (Azure IR and self-hosted IR runs): the run's
+  `billingReference` names its billing bucket (data movement, pipeline activity, external activity,
+  or data flow) and the billed quantity (DIU-hours for a copy, hours for an activity, the vCore-hours
+  a data flow's cluster used). The estimate prices that quantity at the bucket's rate. A data flow's
+  vCore-hours are priced at $0.274 per vCore-hour.
+- **Execution, estimated from the duration** (managed-VNet runs, which carry no `billingReference`,
+  and any run whose reference isn't recognized): the run's duration, billed in whole minutes with a
+  1-minute minimum, times:
   - Copy on Azure IR: DIUs used × the data-movement rate per DIU-hour. On a self-hosted IR: the
     hourly data-movement rate.
   - Pipeline activities (Lookup, ForEach, Wait, …) and unknown types: the pipeline-activity rate.
-  - External activities (Databricks, stored procedure, Web, …): the external-activity rate.
+  - External activities (Databricks notebook/job, stored procedure, Web, …): the external-activity rate.
   - Mapping Data Flow: 8 vCores × $0.274 per vCore-hour.
 
 Rates come from the public Azure Retail Prices API for the first factory's region. If that call
@@ -51,8 +58,9 @@ fails, the built-in list rates are used, and the report's "Pricing Source" line 
   IR keeps its compute warm for a time-to-live (TTL, e.g. 60 minutes) after each activity, and Azure bills
   that time. The estimate counts only the activity's own duration. On one live factory, Azure billed
   44.6 hours for 45 short notebook runs while the estimate counted 7.25 hours.
-- A Copy run that doesn't report its DIUs is assumed to have used 4.
-- Data Flow cost assumes a fixed 8 vCores, regardless of the cluster size actually used.
+- When a run is priced from its duration (managed VNet), a Copy that doesn't report its DIUs is
+  assumed to have used 4, and a Data Flow is assumed to use 8 vCores regardless of the cluster size.
+- Data flow vCore-hours are priced at the General Purpose rate ($0.274), whatever the compute tier.
 - Actuals count only the `Azure Data Factory v2` meter subcategory (and empty ones) and the three
   Mapping Data Flow tiers (`Azure Data Factory v2 Data Flow - General Purpose` / `Memory Optimized`
   / `Compute Optimized`). A compute meter Azure introduces under a new name would be left out until

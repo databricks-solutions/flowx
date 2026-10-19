@@ -37,6 +37,7 @@ EXTERNAL_ACTIVITY_TYPES = [
     "Custom",
     "AzureFunctionActivity",
     "WebActivity",
+    "DatabricksJob",
 ]
 DATA_FLOW_TYPES = ["ExecuteDataFlow"]
 DATAFLOW_VCORE_RATE = 0.274  # $/vCore-hour (General Purpose)
@@ -75,3 +76,58 @@ def activity_execution_cost(
         return hours * DATAFLOW_MIN_VCORES * DATAFLOW_VCORE_RATE
     # Pipeline activities and any unknown type both bill at the pipeline-activity rate.
     return hours * rates["pipeline_activity_per_hour"]
+
+
+def duration_bucket(activity_type: str) -> str:
+    """The estimate bucket for a run priced by duration; data flows count as external, as in the original."""
+    if activity_type in COPY_ACTIVITY_TYPES:
+        return "data_movement"
+    if activity_type in EXTERNAL_ACTIVITY_TYPES or activity_type in DATA_FLOW_TYPES:
+        return "external"
+    return "pipeline_activity"
+
+
+# How each billingReference `activityType` maps to an estimate bucket, and the rate for each billed unit.
+_BILLED_BUCKETS = {
+    "datamovement": "data_movement",
+    "pipelineactivity": "pipeline_activity",
+    "externalactivity": "external",
+    "executedataflow": "external",
+}
+_BILLED_UNIT_RATES = {
+    ("data_movement", "diuhours"): "data_movement_per_diu_hour",
+    ("data_movement", "hours"): "data_movement_per_hour",
+    ("pipeline_activity", "hours"): "pipeline_activity_per_hour",
+    ("external", "hours"): "external_activity_per_hour",
+}
+
+
+def billed_execution(output: dict[str, Any], rates: dict[str, float]) -> tuple[str, float] | None:
+    """Execution cost from the billed quantities Azure reports on the run, with the bucket it belongs to.
+
+    Azure IR and self-hosted IR runs carry `output.billingReference`: the billing bucket
+    (`activityType`) and the billed quantity per meter (`billableDuration`, already rounded the way
+    Azure bills it, e.g. DIU-hours for a copy or the vCore-hours a data flow cluster used). Pricing
+    those is more accurate than estimating from the activity's duration. Returns None when there's no
+    reference (managed-VNet runs carry none) or it holds anything this doesn't recognize, so the
+    caller falls back to the duration-based estimate.
+    """
+    reference = output.get("billingReference")
+    if not isinstance(reference, dict):
+        return None
+    bucket = _BILLED_BUCKETS.get(str(reference.get("activityType", "")).lower())
+    entries = reference.get("billableDuration") or []
+    if bucket is None or not entries:
+        return None
+    cost = 0.0
+    for entry in entries:
+        unit = str(entry.get("unit", "")).lower()
+        if unit == "corehour":
+            rate = DATAFLOW_VCORE_RATE if bucket == "external" else None
+        else:
+            rate_key = _BILLED_UNIT_RATES.get((bucket, unit))
+            rate = rates.get(rate_key) if rate_key else None
+        if rate is None:
+            return None
+        cost += float(entry.get("duration", 0) or 0) * rate
+    return bucket, cost

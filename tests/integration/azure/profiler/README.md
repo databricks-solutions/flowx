@@ -36,6 +36,12 @@ if the difference disappears.
 - **Managed-VNet pipeline and external activity rate (#12 A).** The original looks the IR up by the run's
   `ManagedVnetIR (West Europe)` name, misses because of the region suffix, and prices these activities at
   Azure IR rates ($0.005/h and $0.00025/h). The port prices them at the managed-VNet rate ($1.00/h list).
+- **Data flow priced from what Azure billed (A).** The original prices a data flow as 8 vCores × its
+  duration ($1.2056 for `pl_dataflow`); the port prices the vCore-hours each run's `billingReference`
+  reports ($0.9212, close to the 3.29 vCore-hours Cost Management billed). The other Azure IR activities
+  bill whole minutes, which the duration estimate already matched, so they don't change. Separately, the
+  port counts `DatabricksJob` as an external activity (Azure bills it as one), which moves the vnet
+  factory's `pl_databricks_job` from pipeline activity to external; its total is unchanged.
 - **Actuals.** The original reports $0.00 actual compute (it counts only an empty meter subcategory, #11),
   and attributes billing by substring match on the factory name (#1). The port also counts the Mapping Data
   Flow meters (`Azure Data Factory v2 Data Flow - <tier>`), which adds the Azure IR factory's $0.59 of data
