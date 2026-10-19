@@ -53,5 +53,9 @@ fails, the built-in list rates are used, and the report's "Pricing Source" line 
   44.6 hours for 45 short notebook runs while the estimate counted 7.25 hours.
 - A Copy run that doesn't report its DIUs is assumed to have used 4.
 - Data Flow cost assumes a fixed 8 vCores, regardless of the cluster size actually used.
-- Actuals count only the `Azure Data Factory v2` meter subcategory (and empty ones). A compute
-  meter Azure introduces under a new name would be left out until it's added.
+- Actuals count only the `Azure Data Factory v2` meter subcategory (and empty ones) and the three
+  Mapping Data Flow tiers (`Azure Data Factory v2 Data Flow - General Purpose` / `Memory Optimized`
+  / `Compute Optimized`). A compute meter Azure introduces under a new name would be left out until
+  it's added.
+- Wrangling (Power Query) data flows aren't estimated, so their billing is left out of the actuals
+  too.

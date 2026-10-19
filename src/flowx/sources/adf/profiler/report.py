@@ -12,10 +12,20 @@ from typing import Any
 
 from flowx.sources.adf.profiler.models import ProfileResult
 
-# Meter subcategories Cost Management uses for ADF compute/orchestration. Live data tags it
-# "Azure Data Factory v2"; the original script assumed an empty subcategory, so both count. Matched
-# exactly: infrastructure meters such as "Azure Data Factory v2 - Managed Airflow" share the prefix.
-_COMPUTE_METER_SUBCATEGORIES = frozenset({"", "Azure Data Factory v2"})
+# Meter subcategories Cost Management uses for the ADF compute/orchestration the estimate prices. Live
+# data tags it "Azure Data Factory v2", and Mapping Data Flow vCores get one subcategory per compute tier;
+# the original script assumed an empty subcategory, so that counts too. Matched exactly: infrastructure
+# meters such as "Azure Data Factory v2 - Managed Airflow" share the prefix, and wrangling data flows
+# ("... Wrangling Data Flow - ...") aren't estimated.
+_COMPUTE_METER_SUBCATEGORIES = frozenset(
+    {
+        "",
+        "Azure Data Factory v2",
+        "Azure Data Factory v2 Data Flow - General Purpose",
+        "Azure Data Factory v2 Data Flow - Memory Optimized",
+        "Azure Data Factory v2 Data Flow - Compute Optimized",
+    }
+)
 
 _ESTIMATE_BUCKETS = ("orchestration", "data_movement", "pipeline_activity", "external")
 _FACTORY_COLUMNS = [

@@ -14,15 +14,15 @@
 
 | Subscription | Estimated Total | Actual Total | Difference |
 | --- | --- | --- | --- |
-| demo-subscription | $4.1883 | $4.0055 | $-0.1828 |
-| **TOTAL** | **$4.1883** | **$4.0055** | **$-0.1828** |
+| demo-subscription | $4.1883 | $4.5936 | $0.4053 |
+| **TOTAL** | **$4.1883** | **$4.5936** | **$0.4053** |
 
 ## Factory-Level Costs (Estimated vs Actual)
 
 | Subscription | Factory | Est. Orch | Est. Data Mvmt | Est. Pipeline Act | Est. External | Est. Total | Act. Compute | Act. Total | Difference |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | demo-subscription | flowx-profiler-test-adf-vnet | $0.1360 | $0.3500 | $0.9834 | $1.2000 | $2.6694 | $3.8284 | $3.8284 | $1.1590 |
-| demo-subscription | flowx-profiler-test-adf | $0.1630 | $0.1500 | $0.0002 | $1.2057 | $1.5189 | $0.1771 | $0.1771 | $-1.3418 |
+| demo-subscription | flowx-profiler-test-adf | $0.1630 | $0.1500 | $0.0002 | $1.2057 | $1.5189 | $0.7653 | $0.7653 | $-0.7536 |
 
 ## Pipeline-Level Costs (Estimates Only)
 

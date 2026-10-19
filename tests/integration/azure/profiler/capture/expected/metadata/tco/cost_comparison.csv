@@ -1,7 +1,7 @@
 ## Factory-Level Costs (Estimated vs Actual)
 subscription,factory,est_orchestration,est_data_movement,est_pipeline_activity,est_external,est_total,actual_compute,actual_total
 demo-subscription,flowx-profiler-test-adf-vnet,$0.1360,$0.3500,$0.9834,$1.2000,$2.6694,$3.8284,$3.8284
-demo-subscription,flowx-profiler-test-adf,$0.1630,$0.1500,$0.0002,$1.2057,$1.5189,$0.1771,$0.1771
+demo-subscription,flowx-profiler-test-adf,$0.1630,$0.1500,$0.0002,$1.2057,$1.5189,$0.7653,$0.7653
 
 ## Pipeline-Level Costs (Estimates Only)
 subscription,factory,pipeline,runs,est_orchestration,est_data_movement,est_pipeline_activity,est_external,est_total

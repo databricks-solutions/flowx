@@ -111,7 +111,8 @@ How to read it:
 
 - **Estimates** are list/retail rates before discounts, reserved capacity, or enterprise agreements.
 - **Actual compute** counts only billed rows whose meter subcategory is `Azure Data Factory v2`
-  (ADF's compute/orchestration meter). Infrastructure meters (Managed Airflow, Private Link, …)
+  (ADF's compute/orchestration meter) or `Azure Data Factory v2 Data Flow - <tier>` (Mapping Data
+  Flow vCores). Infrastructure meters (Managed Airflow, Private Link, …) and wrangling data flows
   are left out so the comparison is like-for-like.
 - **Pipeline rows** are estimates only. Azure bills per factory unless per-pipeline billing is
   enabled in Factory Settings.

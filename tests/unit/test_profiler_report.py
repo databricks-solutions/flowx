@@ -152,3 +152,24 @@ def test_live_compute_meter_counts_as_actual_compute(tmp_path):
     report.write_reports(result, tmp_path)
     lines = (tmp_path / "metadata" / "tco" / "cost_comparison.csv").read_text().splitlines()
     assert lines[2].endswith(",$26.8000,$26.8000")
+
+
+def test_mapping_data_flow_meters_count_as_actual_compute(tmp_path):
+    # Live Cost Management bills Mapping Data Flow vCores under their own subcategory per compute tier.
+    # The estimate prices ExecuteDataFlow, so those count; wrangling data flows aren't estimated, so they
+    # stay out on both sides.
+    def billed(subcategory: str, cost: float) -> ActualCost:
+        return ActualCost(factory_name="demo-factory", meter_subcategory=subcategory, cost=cost, currency="USD")
+
+    result = _result(
+        actual_costs=[
+            billed("Azure Data Factory v2", 0.25),
+            billed("Azure Data Factory v2 Data Flow - General Purpose", 0.5),
+            billed("Azure Data Factory v2 Data Flow - Memory Optimized", 1.0),
+            billed("Azure Data Factory v2 Data Flow - Compute Optimized", 2.0),
+            billed("Azure Data Factory v2 Wrangling Data Flow - General Purpose", 40.0),
+        ]
+    )
+    report.write_reports(result, tmp_path)
+    lines = (tmp_path / "metadata" / "tco" / "cost_comparison.csv").read_text().splitlines()
+    assert lines[2].endswith(",$3.7500,$3.7500")

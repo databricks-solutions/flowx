@@ -37,8 +37,9 @@ if the difference disappears.
   `ManagedVnetIR (West Europe)` name, misses because of the region suffix, and prices these activities at
   Azure IR rates ($0.005/h and $0.00025/h). The port prices them at the managed-VNet rate ($1.00/h list).
 - **Actuals.** The original reports $0.00 actual compute (it counts only an empty meter subcategory, #11),
-  and attributes billing by substring match on the factory name (#1). The golden file doesn't carry
-  actuals, so these show only in `expected/`.
+  and attributes billing by substring match on the factory name (#1). The port also counts the Mapping Data
+  Flow meters (`Azure Data Factory v2 Data Flow - <tier>`), which adds the Azure IR factory's $0.59 of data
+  flow vCores. The golden file doesn't carry actuals, so these show only in `expected/`.
 
 ## Recapturing
 
