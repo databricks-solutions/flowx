@@ -71,6 +71,7 @@ def audit_module(module: ast.Module, *, target_dag_variable: str | None = None) 
     """Audits one isolated DAG module using a parser independent of the capture visitor."""
     auditor = _SourceAuditor(module, target_dag_variable=target_dag_variable)
     auditor.visit(module)
+    auditor.settle_dagless_tasks()
     return auditor.audit
 
 
@@ -94,6 +95,14 @@ class _SourceAuditor(ast.NodeVisitor):
         self.occurrences: dict[tuple[str, int, int], int] = {}
         self.values: dict[str, Any] = {}
         self.task_refs: dict[str, list[str]] = {}
+        # Tasks built without a DAG of their own while a DAG variable is selected, kept only if wiring
+        # reaches the DAG. Each instance gets a key; current_dagless maps a reference (a variable name or
+        # an inline call's reference) to the instance it denotes right now, so a reassigned variable never
+        # drags its earlier task along. edge_endpoint_keys remembers what each audited edge connected.
+        self.dagless_tasks: dict[str, tuple[AuditCandidate, list[AuditCandidate]]] = {}
+        self.dagless_instance_by_call: dict[int, str] = {}
+        self.current_dagless: dict[str, str] = {}
+        self.edge_endpoint_keys: dict[int, tuple[str, str]] = {}
         self.taskflow_defs = {
             node.name
             for node in ast.walk(module)
@@ -154,6 +163,8 @@ class _SourceAuditor(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign) -> None:
         target = node.targets[0].id if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) else None
+        if target:
+            self.current_dagless.pop(target, None)
         if isinstance(node.value, ast.Call):
             if _leaf(node.value.func, self.aliases) == "DAG":
                 self._audit_settings(node.value)
@@ -162,12 +173,17 @@ class _SourceAuditor(ast.NodeVisitor):
                 if target:
                     self.values[target] = True
                     self.task_refs[target] = [target]
+                    instance = self.dagless_instance_by_call.get(id(node.value))
+                    if instance is not None:
+                        self.current_dagless[target] = instance
                 return
         if target:
             if isinstance(node.value, ast.Name) and node.value.id in self.values:
                 self.values[target] = self.values[node.value.id]
                 if node.value.id in self.task_refs:
                     self.task_refs[target] = list(self.task_refs[node.value.id])
+                if node.value.id in self.current_dagless:
+                    self.current_dagless[target] = self.current_dagless[node.value.id]
                 return
             try:
                 self.values[target] = ast.literal_eval(node.value)
@@ -249,24 +265,26 @@ class _SourceAuditor(ast.NodeVisitor):
         operator, keywords, mapped = _operator_call(call, self.aliases)
         if operator:
             dag = keywords.get("dag")
+            dagless = False
             if self.target_dag_variable is not None and not (
                 isinstance(dag, ast.Name) and dag.id == self.target_dag_variable
             ):
-                return False
+                if not _no_dag_given(dag):
+                    return False
+                dagless = True
             task_id = _literal_string(keywords.get("task_id")) or _literal_string(keywords.get("group_id"))
-            self.audit.tasks.append(
-                self._candidate(
-                    "task",
-                    "operator_task",
-                    call,
-                    operator=operator,
-                    task_id=task_id,
-                    kwargs=sorted(keywords),
-                    mapped=mapped,
-                )
+            candidate = self._candidate(
+                "task",
+                "operator_task",
+                call,
+                operator=operator,
+                task_id=task_id,
+                kwargs=sorted(keywords),
+                mapped=mapped,
             )
+            unresolved = []
             if call.args or any(keyword.arg is None for keyword in call.keywords):
-                self.audit.unresolved.append(
+                unresolved.append(
                     self._candidate(
                         "unresolved",
                         "dynamic_operator_arguments",
@@ -274,6 +292,13 @@ class _SourceAuditor(ast.NodeVisitor):
                         expression=ast.unparse(call),
                     )
                 )
+            if dagless:
+                instance = f"dagless:{len(self.dagless_tasks)}"
+                self.dagless_tasks[instance] = (candidate, unresolved)
+                self.dagless_instance_by_call[id(call)] = instance
+            else:
+                self.audit.tasks.append(candidate)
+                self.audit.unresolved.extend(unresolved)
             return True
         base = _base_call_name(call)
         if base in self.factories:
@@ -306,7 +331,15 @@ class _SourceAuditor(ast.NodeVisitor):
 
     def _audit_position(self, node: ast.expr) -> list[str]:
         if isinstance(node, ast.Call):
-            return [self._call_reference(node)] if self._audit_task_call(node) else []
+            if not self._audit_task_call(node):
+                return []
+            reference = self._call_reference(node)
+            instance = self.dagless_instance_by_call.get(id(node))
+            if instance is None:
+                self.current_dagless.pop(reference, None)
+            else:
+                self.current_dagless[reference] = instance
+            return [reference]
         elif isinstance(node, (ast.List, ast.Tuple)):
             return [reference for item in node.elts for reference in self._audit_position(item)]
         if isinstance(node, ast.Name):
@@ -347,16 +380,52 @@ class _SourceAuditor(ast.NodeVisitor):
     def _add_edges(self, node: ast.AST, upstreams: list[str], downstreams: list[str], syntax: str) -> None:
         for upstream in upstreams:
             for downstream in downstreams:
-                self.audit.edges.append(
-                    self._candidate(
-                        "edge",
-                        "dependency_edge",
-                        node,
-                        syntax=syntax,
-                        upstream=upstream,
-                        downstream=downstream,
-                    )
+                edge = self._candidate(
+                    "edge",
+                    "dependency_edge",
+                    node,
+                    syntax=syntax,
+                    upstream=upstream,
+                    downstream=downstream,
                 )
+                self.audit.edges.append(edge)
+                self.edge_endpoint_keys[id(edge)] = (self._endpoint_key(upstream), self._endpoint_key(downstream))
+
+    def _endpoint_key(self, reference: str) -> str:
+        """Names what an edge endpoint denotes at this point: a ``dag``-less task instance, or a DAG task."""
+        return self.current_dagless.get(reference, f"ref:{reference}")
+
+    def settle_dagless_tasks(self) -> None:
+        """Keeps ``dag``-less tasks that wiring attaches to the selected DAG and forgets the rest.
+
+        Airflow puts an operator built without ``dag=`` into the DAG of whatever task it is wired to, so
+        a ``dag``-less task reachable through audited edges from a DAG task is part of the DAG. One that
+        never connects to it isn't, so neither it nor the edges touching it are audited.
+        """
+        if not self.dagless_tasks:
+            return
+        neighbours: dict[str, set[str]] = {}
+        for edge in self.audit.edges:
+            upstream, downstream = self.edge_endpoint_keys[id(edge)]
+            neighbours.setdefault(upstream, set()).add(downstream)
+            neighbours.setdefault(downstream, set()).add(upstream)
+        reached: set[str] = set()
+        pending = [key for key in neighbours if key.startswith("ref:")]
+        while pending:
+            key = pending.pop()
+            if key in reached:
+                continue
+            reached.add(key)
+            pending.extend(neighbours.get(key, ()))
+        for instance, (candidate, unresolved) in self.dagless_tasks.items():
+            if instance in reached:
+                self.audit.tasks.append(candidate)
+                self.audit.unresolved.extend(unresolved)
+        self.audit.edges = [
+            edge
+            for edge in self.audit.edges
+            if all(key in reached or key.startswith("ref:") for key in self.edge_endpoint_keys[id(edge)])
+        ]
 
     def _audit_settings(self, call: ast.Call) -> None:
         for keyword in call.keywords:
@@ -480,6 +549,11 @@ def _call_argument_names(call: ast.Call) -> list[str]:
     names = [f"arg{index}" for index, _argument in enumerate(call.args)]
     names.extend(keyword.arg or "**kwargs" for keyword in call.keywords)
     return names
+
+
+def _no_dag_given(dag: ast.expr | None) -> bool:
+    """True when ``dag=`` is missing or explicitly ``None``, which Airflow treats the same way."""
+    return dag is None or (isinstance(dag, ast.Constant) and dag.value is None)
 
 
 def _literal_string(node: ast.expr | None) -> str | None:
