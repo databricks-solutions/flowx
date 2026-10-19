@@ -17,7 +17,7 @@ triggers:
 # Profile Current ADF Spend
 
 Scan Azure Data Factory **live** and estimate its current spend: every pipeline run and activity
-run in the last N days (default 90) is priced with the Azure Retail Prices list rates for the
+run in the last N days (default 45, ADF's run-history limit) is priced with the Azure Retail Prices list rates for the
 factory's region, then compared with what Azure actually billed (Cost Management). The result is
 the source-side "what does ADF cost today" number for a migration evaluation.
 
@@ -80,7 +80,7 @@ The roles the identity needs are in `sources/adf.md`.
 ```bash
 export PYTHONPATH="<plugin_dir>/src"
 "$PY" -m flowx.adapter profile --source adf --output-dir <output_dir> \
-  [--days 90] [--subscription-id <id>] [--resource-group <rg> [--factory-name <name>]]
+  [--days 45] [--subscription-id <id>] [--resource-group <rg> [--factory-name <name>]]
 ```
 
 Scope flags:
@@ -90,6 +90,9 @@ Scope flags:
 - `--factory-name` narrows to one factory **only together with `--resource-group`**. On its own it
   is ignored and the whole subscription is scanned (behavior carried over from the original
   profiler).
+- `--days` sets the window (default 45). ADF keeps pipeline runs for only 45 days, so a longer
+  window adds no runs to the estimate while Cost Management still returns actuals for all of it,
+  which makes the actuals look too high.
 
 The phase is not exposed as an MCP `flowx` command yet. In Genie Code, run it from a serverless
 notebook as above.

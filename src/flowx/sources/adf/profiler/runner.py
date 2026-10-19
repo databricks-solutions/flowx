@@ -25,7 +25,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="flowx profile", description="Estimate current ADF spend (live Azure scan).")
     parser.add_argument("--source-dir", help="Accepted for adapter uniformity; ignored (profile scans Azure live).")
     parser.add_argument("--output-dir", default="./flowx_output", help="Shared flowx output directory.")
-    parser.add_argument("--days", type=int, default=90, help="How many days of run history to profile.")
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=45,
+        help="How many days of run history to profile (default 45: ADF keeps pipeline runs for only 45 days).",
+    )
     parser.add_argument("--subscription-id", help="Only scan this subscription.")
     parser.add_argument("--resource-group", help="Only scan this resource group.")
     parser.add_argument("--factory-name", help="Only scan this factory (takes effect together with --resource-group).")

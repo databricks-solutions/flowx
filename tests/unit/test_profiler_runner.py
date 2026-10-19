@@ -76,6 +76,16 @@ def test_main_forwards_filters_and_credentials(tmp_path, monkeypatch, fake_crede
     assert seen["scan"] == {"subscription_id": "SUB", "resource_group": "RG", "factory_name": "f"}
 
 
+def test_default_window_is_adfs_45_day_run_history(tmp_path, monkeypatch):
+    # ADF keeps pipeline runs for 45 days. A longer default would cost only 45 days of runs while
+    # Cost Management returned actuals for the whole window, so actuals would look inflated.
+    seen: dict = {}
+    empty = ProfileResult(region="eastus", pricing_source="test", days=45, total_pipeline_runs=0)
+    monkeypatch.setattr(runner, "AdfScanner", _scanner_returning(empty, seen))
+    assert runner.main(["--output-dir", str(tmp_path)]) == 0
+    assert seen["init"]["days"] == 45
+
+
 def test_main_accepts_and_ignores_source_dir(tmp_path, monkeypatch):
     empty = ProfileResult(region="eastus", pricing_source="test", days=90, total_pipeline_runs=0)
     monkeypatch.setattr(runner, "AdfScanner", _scanner_returning(empty))
