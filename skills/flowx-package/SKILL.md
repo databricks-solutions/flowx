@@ -201,8 +201,9 @@ Where:
   before it writes anything, the next package moves every recorded folder it will not write into
   `metadata/archive/<UTC time>/`: a pipeline an agentic unit replaced under a new name, the per-pipeline
   folders when a convert narrows to one pipeline, or the top-level bundle when it widens again. So a new
-  bundle never lands on top of an old one that shares its folder name. A folder package never recorded stays where it is. A malformed record stops package
-  before it writes anything; discover archives it with the rest of `metadata/`.
+  bundle never lands on top of an old one that shares its folder name. A folder package never recorded
+  stays where it is. A malformed record stops package before it writes anything; discover archives it
+  with the rest of `metadata/`.
 - `metadata/archive/` sits inside the bundle folder, so `databricks bundle deploy` uploads it with
   the rest unless it is git-ignored; nothing in it is a job or pipeline the bundle deploys.
 

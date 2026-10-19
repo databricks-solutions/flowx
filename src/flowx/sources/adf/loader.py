@@ -1116,7 +1116,7 @@ def archive_outputs(output_dir: Path, entries: list[Path], *, reason: str) -> Pa
     Each entry keeps its path relative to ``output_dir``, and an ``archive.json`` beside them records
     when and why they moved and, per file, where it came from, where it went and its SHA-256, so what
     a re-run replaced can still be audited. Discover uses it for a whole earlier run and package for
-    the resource files it no longer writes.
+    the bundle folders and resource files it no longer writes.
 
     Args:
         output_dir: Migration output directory the entries live in.
