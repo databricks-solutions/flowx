@@ -119,7 +119,8 @@ to generated ones:
   they are.
 - Inside a ForEach that runs as its own job, notebook `base_parameters` and `condition_task`
   operands are rewritten for that job: `{{input.x}}` becomes `{{job.parameters.x}}`, ADF
-  expressions become job-parameter references, and non-string values become strings.
+  expressions become job-parameter references, and non-string values become strings. The body of
+  your own `for_each_task` is not rewritten, so its `{{input.x}}` keeps naming that loop's item.
 - A `run_job_task` whose `job_id` is `${resources.jobs.X.id}` for a job outside this bundle is
   pointed at an `X_job_id` bundle variable instead.
 

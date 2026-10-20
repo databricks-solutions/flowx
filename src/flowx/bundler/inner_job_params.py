@@ -109,6 +109,9 @@ def collect_inner_job_params(
 def normalize_inner_task_params(tasks: list[dict[str, Any]]) -> None:
     """Normalise ADF expressions in task dicts for an inner job context.
 
+    The body of an agent-written ``for_each_task`` (marked ``_authored``) is left alone: its
+    ``{{input.x}}`` names that loop's own item, not the enclosing job's parameters.
+
     Args:
         tasks: The inner job's task dicts.
     """
@@ -130,7 +133,7 @@ def normalize_inner_task_params(tasks: list[dict[str, Any]]) -> None:
 
         for_each_task = task.get("for_each_task", {})
         body = for_each_task.get("task")
-        if body:
+        if body and not body.get("_authored"):
             normalize_inner_task_params([body])
 
 
@@ -142,6 +145,9 @@ def _scan_tasks(
     variable_names: set[str] | None = None,
 ) -> None:
     """Recursively scan task dicts for ADF parameter references.
+
+    An agent-written ``for_each_task`` body (marked ``_authored``) is not scanned, because its
+    ``{{input.x}}`` names that loop's own item rather than one the enclosing loop must forward.
 
     Args:
         tasks: List of task dicts to scan.
@@ -170,7 +176,7 @@ def _scan_tasks(
 
         for_each_task = task.get("for_each_task", {})
         body = for_each_task.get("task")
-        if body:
+        if body and not body.get("_authored"):
             _scan_tasks([body], param_names, **field_name_kwargs)
 
 

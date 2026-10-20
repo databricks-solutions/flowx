@@ -1328,3 +1328,40 @@ def test_merged_agentic_component_keeps_the_placeholder_source_metadata_it_leave
     assert task["email_notifications"] == {
         ("on_success" if agent_sets_notifications else "on_failure"): [expected_recipient]
     }
+
+
+def _inside_for_each_holding_an_if_condition(activity: AgenticComponentActivity) -> ForEachActivity:
+    return ForEachActivity(
+        name="Loop", task_key="loop", items_expression='["a"]', inner_activities=[_inside_if_condition(activity)]
+    )
+
+
+@pytest.mark.parametrize("wrap", [_inside_for_each_with_siblings, _inside_for_each_holding_an_if_condition])
+def test_authored_loop_body_inside_a_for_each_job_keeps_its_own_input_references(tmp_path, wrap):
+    """``{{input.x}}`` in an agent-written loop body names that loop's item, not the outer loop's job parameters."""
+    component = AgenticComponentActivity(
+        name="Load tables",
+        task_key="load_tables",
+        task={
+            "for_each_task": {
+                "inputs": '[{"table_name": "orders"}]',
+                "task": {
+                    "task_key": "load_table",
+                    "notebook_task": {
+                        "notebook_path": "/Workspace/Shared/etl/load_table",
+                        "base_parameters": {"table": "{{input.table_name}}"},
+                    },
+                    "existing_cluster_id": "0101-abc",
+                },
+            }
+        },
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[wrap(component)])), tmp_path)
+
+    inner_job = _jobs_by_task_key(tmp_path)["load_table"]
+    authored_loop = next(task for task in inner_job["tasks"] if task["task_key"] == "load_tables")
+    body = authored_loop["for_each_task"]["task"]
+    assert body["notebook_task"]["base_parameters"] == {"table": "{{input.table_name}}"}
+    # Nor is the body's own item forwarded from the outer loop as a job parameter.
+    assert "table_name" not in [parameter["name"] for parameter in inner_job.get("parameters") or []]
