@@ -212,6 +212,18 @@ def test_an_edge_endpoint_that_is_not_a_string_is_unresolved() -> None:
     assert findings and "['b']" not in findings[0]
 
 
+@pytest.mark.parametrize("source", ["", "ghost", 5], ids=["empty", "not-in-the-inventory", "not-a-string"])
+def test_a_resolved_edge_whose_source_is_not_a_pipeline_is_a_finding(source: Any) -> None:
+    """Both ends are checked, so an edge from an unknown caller is reported, never dropped quietly."""
+    edge = {"source_workflow": source, "target_workflow": "b", "via_task_key": "call_b", "resolved": True}
+    inventory = _hand_edited(_inventory([_graph("a"), _graph("b")]), "a", lineage={"control_edges": [edge]})
+
+    components, findings = build_components(inventory)
+
+    assert components == [["a"], ["b"]]
+    assert len(findings) == 1 and "call_b" in findings[0] and "source" in findings[0]
+
+
 def test_carrying_a_plan_forward_moves_each_decision_to_its_components_current_id() -> None:
     """A new pipeline shifts the ids; each carried row takes the id its members have now, so no two rows clash."""
     before = _inventory([_graph("beta"), _graph("gamma")])

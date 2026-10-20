@@ -167,10 +167,9 @@ def build_components(inventory: dict[str, Any]) -> tuple[list[list[str]], list[s
 
     Two pipelines share a component when a **resolved** control edge joins them in either direction
     and both endpoints are real inventory pipelines. Isolated pipelines each form their own
-    singleton component. An edge whose callee is unresolved (``resolved`` is False) or names a
-    pipeline absent from the inventory is **not** used to join anything and is **not** silently
-    severed -- it is recorded as a finding so a partial export never quietly collapses two
-    components into one or drops a coupling.
+    singleton component. An edge that is not resolved, or whose caller or callee is not an inventory
+    pipeline, is **not** used to join anything and is **not** silently severed -- it is recorded as a
+    finding so a partial export never quietly collapses two components into one or drops a coupling.
 
     Args:
         inventory: The discover ``inventory.json`` document (deterministic or enriched).
@@ -201,6 +200,12 @@ def build_components(inventory: dict[str, Any]) -> tuple[list[list[str]], list[s
 
     findings: set[str] = set()
     for source, target, via, resolved in _control_edges(inventory):
+        if not source or source not in names:
+            findings.add(
+                f"control edge from {source or '<unknown>'!r} -> {target or '<unresolved>'!r} (via {via!r}) "
+                "names a source that is not an inventory pipeline; kept as a finding, not severed, and joins nothing"
+            )
+            continue
         if not resolved or not target or target not in names:
             shown_target = target or "<unresolved>"
             findings.add(
@@ -208,8 +213,7 @@ def build_components(inventory: dict[str, Any]) -> tuple[list[list[str]], list[s
                 f"kept as a finding, not severed; {source!r} is routed within its own component"
             )
             continue
-        if source in names:
-            union(source, target)
+        union(source, target)
 
     groups: dict[str, list[str]] = {}
     for name in names:
@@ -771,9 +775,9 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
     exactly as it would in a passed plan. A row whose members still form a component takes that
     component's current id, so a decision follows its pipelines when the ids shift. A component it does
     not list is added pending (``decision: None``) and a suggested grouping it does not list is added
-    not accepted, so decisions survive a re-enrich or a re-route. A re-discover keeps nothing in use: discover moves ``metadata/`` and
-    ``.work/`` into ``metadata/archive/<UTC time>/``, so this plan and the agent's outputs no longer
-    apply and every component starts pending again.
+    not accepted, so decisions survive a re-enrich or a re-route. A re-discover keeps nothing in use:
+    discover moves ``metadata/`` and ``.work/`` into ``metadata/archive/<UTC time>/``, so this plan and
+    the agent's outputs no longer apply and every component starts pending again.
 
     A recorded grouping that route no longer suggests (enrich changed its members, and with them its
     id) is dropped. When it was accepted, its components are set back to pending, so route applies
