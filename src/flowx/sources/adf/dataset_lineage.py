@@ -56,7 +56,25 @@ from flowx.parser.expression_parser import resolve_expression, resolve_interpola
 
 _ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
 _DATASET_PARAM_RE = re.compile(r"^@dataset\(\)\.([A-Za-z_][A-Za-z0-9_]*)$")
-_ARM_EXPRESSION_RE = re.compile(r"^\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\(.*\]$", re.DOTALL)
+_ARM_CALL_RE = re.compile(r"^\[\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\(.*\]$", re.DOTALL)
+# ARM template functions (compared lower-cased, as ARM does). A bracketed value is an unevaluated ARM
+# expression only when it calls one of these, a ``list*`` function, or a ``namespace.function`` of the
+# template's own, so a bracket-quoted SQL name such as ``[Sales (2024)]`` stays a literal.
+_ARM_FUNCTIONS = frozenset(
+    name.lower()
+    for name in (
+        "add and array base64 base64ToJson base64ToString bool cidrHost cidrSubnet coalesce concat contains "
+        "copyIndex createArray createObject dataUri dataUriToString dateTimeAdd dateTimeFromEpoch "
+        "dateTimeToEpoch deployer deployment div empty endsWith environment equals extensionResourceId "
+        "filter first float format greater greaterOrEquals groupBy guid if indexFromEnd indexOf int "
+        "intersection items join json last lastIndexOf length less lessOrEquals managementGroup "
+        "managementGroupResourceId map mapValues max min mod mul newGuid not null objectKeys or padLeft "
+        "parameters parseCidr pickZones providers range reduce reference references replace resourceGroup "
+        "resourceId shallowMerge skip sort split startsWith string sub subscription subscriptionResourceId "
+        "substring take tenant tenantResourceId toLower toObject toUpper trim tryGet tryIndexFromEnd union "
+        "uniqueString uri uriComponent uriComponentToString utcNow variables"
+    ).split()
+)
 _RUN_TIME_PATH_OVERRIDES = ("wildcardFolderPath", "wildcardFileName", "fileListPath", "prefix")
 # Location types (lower-cased) that name no store of their own: the server, share, lakehouse or
 # account is set on the linked service.
@@ -727,7 +745,16 @@ def _is_physical(value: str) -> bool:
     stripped = value.strip()
     if "{{" in value or "@{" in value or stripped.startswith("@"):
         return False
-    return not _ARM_EXPRESSION_RE.match(stripped)
+    return not _is_arm_expression(stripped)
+
+
+def _is_arm_expression(text: str) -> bool:
+    """``True`` when *text* is an unevaluated ARM template expression such as ``[parameters('x')]``."""
+    call = _ARM_CALL_RE.match(text)
+    if call is None:
+        return False
+    function = call.group(1).lower()
+    return "." in function or function.startswith("list") or function in _ARM_FUNCTIONS
 
 
 # --------------------------------------------------------------------------- #
@@ -845,7 +872,7 @@ def _raw_path_shape(expression: Any, bindings: dict[str, Any], *, require_physic
     if not isinstance(expression, str):
         return ""
     text = expression.strip()
-    is_arm_expression = bool(_ARM_EXPRESSION_RE.match(text))
+    is_arm_expression = bool(_is_arm_expression(text))
     if require_physical and ("{{" in text or is_arm_expression):
         return None
     if is_arm_expression:

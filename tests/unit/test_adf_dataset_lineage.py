@@ -646,6 +646,34 @@ def test_bracket_quoted_sql_names_keep_their_identity() -> None:
     )
 
 
+@pytest.mark.parametrize("table", ["[Sales (2024)]", "[Order Details]", "[Sales(2024)]", "[Q1 (draft) totals]"])
+def test_a_bracket_quoted_table_name_with_parentheses_keeps_its_identity(table: str) -> None:
+    """``[Sales (2024)]`` is a SQL name, not an ARM call: only ARM's own functions make an ARM expression."""
+    definitions = _definitions(ds_sales=_table_dataset("ds_sales", schema="dbo", table=table))
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_sales"), definitions) == (
+        f"ls_sql/dbo.{table}"
+    )
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "[parameters('table')]",
+        "[concat('orders_', parameters('region'))]",
+        "[ toLower(variables('table')) ]",
+        "[Parameters ('table')]",
+        "[listKeys(resourceId('x'), '2021-01-01').keys[0].value]",
+        "[contoso.tableName('orders')]",
+    ],
+)
+def test_an_unevaluated_arm_expression_table_name_has_no_identity(table: str) -> None:
+    """An ARM template function call, in any case or spacing, is still unresolved and gives no identity."""
+    definitions = _definitions(ds_sales=_table_dataset("ds_sales", schema="dbo", table=table))
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_sales"), definitions) is None
+
+
 def test_arm_expression_storage_url_has_no_path_identity() -> None:
     """An unevaluated ARM ``url`` is checked whole, so a cut-off fragment never stands in for the account."""
     arm_lake = AdfLinkedService(
