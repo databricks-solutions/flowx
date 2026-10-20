@@ -21,7 +21,8 @@ Two tiers, exactly as #36 established them:
   dataset's folder and file name with their literal text kept in place -- quoted
   text, numbers, ``concat`` pieces, and text outside ``@{...}`` -- and exactly one ``<P>`` slot
   for every other run-time value or function call, wherever it sits, keyed by any
-  bound ``dataset()`` value it uses) when the folder has a literal anchor, prefixed
+  bound ``dataset()`` value it uses) when the reference passes a ``folderPath`` with
+  literal text and the resolved folder has a literal anchor (see :func:`_path_signature`), prefixed
   ``ST[<store>]/`` when the dataset's store is known (see
   :func:`_resolve_dataset_store`), so two datasets on different stores that merely
   share a folder shape never join. An unknown store is
@@ -777,28 +778,22 @@ def _is_arm_expression(text: str) -> bool:
 def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> str | None:
     """Structural signature of the folder and file name a parameterised reference points at.
 
-    As in #36, only a reference that passes a ``folderPath`` with literal text gets
-    one: quoted text or a number in an expression, or text outside the ``@{...}`` blocks of an
-    interpolated value, so ``landing/@{item().run}`` qualifies, and joins, just as
-    ``@concat('landing/', item().run)`` does. A file name alone is too weak a
-    discriminator: many unrelated activities write
-    ``.csv`` / ``.json`` files to opaque parameterised folders, so a signature built
-    only from a file extension would join them all -- re-creating the explosion the
-    identity-only join avoids. Anchoring on the literal folder segment keeps the match
-    specific to a real, named location.
+    Both of these must hold, or the result is ``None``:
 
-    The folder and file name are then read from the dataset's own ``location``, with
-    each ``dataset().<name>`` in them filled in from the reference's parameters
-    (call-site values first, then the dataset's declared defaults); a value that does
-    not read as text, such as ``null``, is left a run-time slot. So
-    ``@concat('bronze/', dataset().folderPath)`` and ``@concat('silver/',
-    dataset().folderPath)`` stay apart even when both are called with ``folderPath:
-    "orders"``. When the location sets no folder or file name, or the dataset is not
-    in the export, the ``folderPath`` / ``fileName`` the call site passes stands in for
-    it. A file name with no literal text gives an empty ``FN[]``.
+    1. The reference passes a ``folderPath`` at the call site with literal text in it:
+       quoted text or a number in an expression, or text outside ``@{...}``, so
+       ``landing/@{item().run}`` qualifies just as ``@concat('landing/', item().run)``
+       does. The dataset's own location is not enough on its own: a reference that
+       passes no anchored ``folderPath`` gets no signature. A file name alone never
+       qualifies, since many unrelated activities write ``.csv`` files to opaque folders.
+    2. The folder the reference resolves to has a literal segment. That folder is the
+       dataset's own ``location.folderPath`` with each ``dataset().<name>`` filled in
+       from the reference's parameters (call-site values, then declared defaults), so
+       ``bronze/`` and ``silver/`` datasets called with the same value stay apart. When
+       the location sets no folder, or the dataset is not in the export, the call-site
+       ``folderPath`` is used instead.
 
-    ``None`` when the reference passes no anchored ``folderPath``, or the dataset's
-    own folder has no literal segment to anchor on.
+    The file name is read the same way; one with no literal text gives ``FN[]``.
     """
     call_site = _call_site_parameters(dataset_ref)
     passed_folder = _path_shape(call_site.get("folderPath"), {}, require_physical=True)
