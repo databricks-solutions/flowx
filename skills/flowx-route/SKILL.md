@@ -389,10 +389,10 @@ the channel — the routing recommendation exposes each agentic option's states 
 - `beta` — the plain factual label **"Beta"**. Emit `channel: preview` only with the cited
   `release_state_source`.
 
-Separately from *how the state is surfaced*, keep the recommendation-eligibility rule: treat a
-**Private Preview** connector as `doNotSuggest` unless the workspace has confirmed
-enrollment/entitlement. And **verify GA-vs-Preview status before recommending any connector or
-Lakeflow Connect pattern**: do not hardcode GA/Preview status or dates (release state changes), check
+As in `flowx-enrich`, the state is disclosure, not a gate: there is no `doNotSuggest` rule, so a
+verified **Private Preview** connector may still be recommended. Show its label, say that Private
+Preview typically needs workspace enrollment, and let the customer decide. And **verify GA-vs-Preview
+status before recommending any connector or Lakeflow Connect pattern**: do not hardcode GA/Preview status or dates (release state changes), check
 the feature's current release state **and** target-workspace availability against the current public
 Databricks docs, and cite the source. (Same structured grounding rule the `flowx-enrich` skill
 applies when authoring recommended patterns.)
