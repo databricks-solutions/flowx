@@ -65,7 +65,7 @@ def render_routing_review(
         source=_source(insights),
         components=_components(plan),
         groupings=_groupings(plan, dropped_groupings or []),
-        conversion=_conversion(units, outcomes),
+        conversion=_conversion(units, outcomes, set(plan.pending_components())),
         conversation=_conversation(plan),
         findings=_findings(plan.findings),
         steer=_steer(),
@@ -354,10 +354,12 @@ def _groupings(plan: ConversionPlan, dropped_groupings: list[dict[str, Any]]) ->
     return f'<div class="stack">{intro}<div class="cards">{"".join(cards)}</div></div>'
 
 
-def _conversion(units: dict[str, dict[str, Any]], outcomes: dict[str, Any]) -> str:
+def _conversion(units: dict[str, dict[str, Any]], outcomes: dict[str, Any], pending_components: set[str]) -> str:
     """What happens next: where conversion stands per unit, and whether the bundle can be packaged.
 
-    A unit decided since route last applied the plan (the routing record has no entry for it, or one
+    A unit is pending while its decision is, or while any component an accepted grouping joins is
+    (``pending_components``), since route applies nothing until every component is decided. A unit
+    decided since route last applied the plan (the routing record has no entry for it, or one
     with other members or another decision) needs route again rather than the agent's build. With no
     record at all, route has applied nothing agentic, so only a deterministic unit counts as applied.
     """
@@ -367,7 +369,7 @@ def _conversion(units: dict[str, dict[str, Any]], outcomes: dict[str, Any]) -> s
     for unit_id, unit in units.items():
         recorded = outcomes.get(unit_id)
         outcome = recorded.get("outcome") if isinstance(recorded, dict) else None
-        if unit["decision"] is None:
+        if unit["decision"] is None or pending_components.intersection(unit.get("components", [])):
             pending.append(unit_id)
         elif (outcomes or unit["decision"] == DECISION_AGENTIC) and unit_record_mismatch(unit_id, recorded, unit):
             not_applied.append(unit_id)

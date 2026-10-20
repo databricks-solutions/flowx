@@ -179,6 +179,30 @@ def test_a_hand_edited_record_entry_reads_as_not_applied(members: Any) -> None:
     assert '<span class="pill pill-pend">1</span><span>Decided, not applied yet</span>' in conversion
 
 
+def test_an_accepted_grouping_over_a_pending_component_still_reads_as_pending() -> None:
+    """Route refuses to apply while any component is pending, so the grouping says to decide, not to re-run."""
+    grouping = SuggestedGrouping(
+        grouping_id="grouping-1",
+        components=["component-1", "component-2"],
+        members=["extract", "mart"],
+        accepted=True,
+    )
+    plan = _plan(
+        components=[
+            ComponentPlan(component_id="component-1", members=["extract"], decision=None),
+            ComponentPlan(component_id="component-2", members=["mart"], decision="agentic"),
+        ],
+        suggested_groupings=[grouping],
+    )
+
+    conversion = _section(render_routing_review(plan, None, None), "conversion")
+
+    assert '<span class="pill pill-pend">1</span><span>Decision pending</span>' in conversion
+    assert '<span class="pill pill-pend">0</span><span>Decided, not applied yet</span>' in conversion
+    assert "The plan is not applied yet. Decide the pending groups, then run route again." in conversion
+    assert "Some decisions are not applied yet." not in conversion
+
+
 def test_a_grouping_says_why_and_whether_it_is_accepted() -> None:
     grouping = SuggestedGrouping(
         grouping_id="grouping-1",
