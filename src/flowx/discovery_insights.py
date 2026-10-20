@@ -29,8 +29,8 @@ records the persisted ``source_graphs.json`` hash it was checked against
 ``source_graphs_sha256``, its deterministic part is projected again from ``source_graphs.json``
 (byte-identical to what discover writes), otherwise discover's deterministic part is reused; that
 same block is added under ``insights``, so the inventory is always built from those two pieces
-rather than patched. Only one enrich writes an output directory at a time, discover refuses to clear
-``metadata/`` while one is running (see :func:`enrich_in_progress`), and the two files are
+rather than patched. Only one enrich writes an output directory at a time; an enrich that finds
+discover ran while it was working writes nothing (see ``_enrich_locked``); and the two files are
 replaced back to back (see ``_write_both_or_neither``). A process killed or interrupted between
 those two replaces, or a rollback that itself fails, can leave ``agentic_insights.json`` a write ahead of
 ``inventory.json``; the lock file then stays behind, so the next enrich refuses until the lock is
@@ -47,7 +47,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
+import secrets
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -665,65 +666,55 @@ class _UnrecoveredWriteError(OSError):
     """The two files may disagree: putting the previous insights file back failed, or an interrupt hit a replace."""
 
 
-class EnrichInProgressError(RuntimeError):
-    """Discover was asked to clear ``metadata/`` while a running enrich holds its lock."""
+class _DiscoverRanError(Exception):
+    """Discover cleared or rewrote ``metadata/`` after this enrich read the inventory, so nothing may be written."""
 
 
-def enrich_in_progress(metadata_dir: Path) -> bool:
-    """Whether an enrich that is still running holds the lock in *metadata_dir*.
+# Reported when discover ran between an enrich's read and its write.
+_DISCOVER_RAN_VIOLATION = "discover ran during this enrich; prepare and enrich again"
 
-    Discover checks this before it clears ``metadata/``: removing the files under a running enrich
-    would let that enrich's old insights overwrite the new inventory. The lock records its holder's
-    process id, so a lock left by a killed enrich, or one with no readable id, counts as stale and
-    discover still clears it.
-    """
+
+def _holds_lock(lock_path: Path, token: str) -> bool:
+    """Whether the lock file at *lock_path* is still the one this enrich created (holding *token*)."""
     try:
-        holder = int((metadata_dir / ENRICH_LOCK_FILENAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return lock_path.read_text(encoding="utf-8") == token
+    except OSError:
         return False
-    if holder <= 0:
-        return False
-    try:
-        os.kill(holder, 0)
-    except PermissionError:
-        return True
-    except (ProcessLookupError, OverflowError):
-        return False
-    return True
 
 
 @contextmanager
-def _enrich_lock(metadata_dir: Path) -> Iterator[bool]:
-    """Hold the output directory's enrich lock, yielding ``False`` when another enrich already holds it.
+def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
+    """Hold the output directory's enrich lock, yielding its token, or ``None`` when another enrich holds it.
 
-    The lock is a file created with ``O_EXCL`` (portable, unlike ``fcntl``) holding this process's
-    id, so :func:`enrich_in_progress` can tell a running enrich from a stale lock. It is removed when
-    the enrich finishes or raises. It is left behind only when the two files may disagree -- a killed
-    process, or an error that is or was raised from :class:`_UnrecoveredWriteError` (a failed
-    rollback, or an interrupt between the two replaces) -- so the next enrich refuses until the lock
-    is removed.
+    The lock is a file created with ``O_EXCL`` (portable, unlike ``fcntl``) holding a random token,
+    so this enrich can tell its own lock from one a later enrich created after discover cleared
+    ``metadata/``. It is removed when the enrich finishes or raises, if it is still this enrich's.
+    It is left behind only when the two files may disagree -- a killed process, or an error that is
+    or was raised from :class:`_UnrecoveredWriteError` (a failed rollback, or an interrupt between
+    the two replaces) -- so the next enrich refuses until the lock is removed.
     """
     lock_path = metadata_dir / ENRICH_LOCK_FILENAME
+    token = secrets.token_hex(16)
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        yield False
+        yield None
         return
     try:
-        os.write(descriptor, f"{os.getpid()}\n".encode())
-    except OSError:
-        lock_path.unlink(missing_ok=True)
-        raise
+        written = os.write(descriptor, token.encode("ascii"))
     finally:
         os.close(descriptor)
+    if written != len(token):
+        lock_path.unlink(missing_ok=True)
+        raise OSError(f"could not write the enrich lock {lock_path}")
     keep_lock = False
     try:
-        yield True
+        yield token
     except BaseException as error:
         keep_lock = isinstance(error, _UnrecoveredWriteError) or isinstance(error.__cause__, _UnrecoveredWriteError)
         raise
     finally:
-        if not keep_lock:
+        if not keep_lock and _holds_lock(lock_path, token):
             lock_path.unlink(missing_ok=True)
 
 
@@ -734,6 +725,7 @@ def _write_both_or_neither(
     inventory_document: dict[str, Any],
     *,
     current_insights: dict[str, Any] | None,
+    still_current: Callable[[], bool],
 ) -> None:
     """Replace ``agentic_insights.json`` and ``inventory.json`` back to back, keeping them consistent.
 
@@ -747,14 +739,21 @@ def _write_both_or_neither(
     first replace on can arrive just after a rename succeeded, so nothing is rolled back: it is
     treated like a kill and re-raised from an :class:`_UnrecoveredWriteError`, keeping the lock.
     Callers hold :func:`_enrich_lock`, so no other enrich writes between, and the fixed temp names
-    mean the next write overwrites and removes any left behind by a killed one.
+    mean the next write overwrites and removes any left behind by a killed one. *still_current* is
+    asked before the temp files are written and again right before the first replace; when it says
+    discover ran since the inventory was read, :class:`_DiscoverRanError` is raised and nothing is
+    replaced.
     """
     previous_insights = None if current_insights is None else json.dumps(current_insights, indent=2).encode("utf-8")
     insights_temporary = insights_path.with_name(f".{insights_path.name}.tmp")
     inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.tmp")
     try:
+        if not still_current():
+            raise _DiscoverRanError
         insights_temporary.write_text(json.dumps(insights_document, indent=2), encoding="utf-8")
         inventory_temporary.write_text(json.dumps(inventory_document, indent=2), encoding="utf-8")
+        if not still_current():
+            raise _DiscoverRanError
         try:
             os.replace(insights_temporary, insights_path)
             try:
@@ -817,8 +816,8 @@ def enrich_inventory(
     if not inventory_path.exists():
         raise FileNotFoundError(f"No inventory.json under {inventory_path.parent}; run the discover phase first.")
     raw = load_insights(insights=insights, insights_path=insights_path)
-    with _enrich_lock(inventory_path.parent) as locked:
-        if not locked:
+    with _enrich_lock(inventory_path.parent) as lock_token:
+        if lock_token is None:
             lock_path = inventory_path.parent / ENRICH_LOCK_FILENAME
             return {
                 "ok": False,
@@ -830,12 +829,19 @@ def enrich_inventory(
                 "pipeline_insights": 0,
                 "relationships": 0,
             }
-        return _enrich_locked(Path(output_dir), inventory_path, raw)
+        return _enrich_locked(Path(output_dir), inventory_path, raw, lock_token)
 
 
-def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any) -> dict[str, Any]:
-    """The read-validate-write half of :func:`enrich_inventory`, run while holding the enrich lock."""
-    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any, lock_token: str) -> dict[str, Any]:
+    """The read-validate-write half of :func:`enrich_inventory`, run while holding the enrich lock.
+
+    The lock only keeps other enrich runs out; discover clears ``metadata/``, the lock with it,
+    without asking. So right before writing, this checks that its lock is still in place and
+    ``inventory.json`` still holds the bytes it read. If discover ran in between, it writes nothing
+    and reports that, so its insights, checked against the old inventory, never overwrite the new one.
+    """
+    inventory_bytes = inventory_path.read_bytes()
+    inventory = json.loads(inventory_bytes.decode("utf-8"))
     if not isinstance(inventory, dict):
         raise ValueError(f"inventory.json must contain a JSON object, got {type(inventory).__name__}")
 
@@ -846,13 +852,26 @@ def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any) -> dict[str
         return {"ok": False, "violations": violations, "pipeline_insights": 0, "relationships": 0}
 
     agentic_insights = build_agentic_insights(deterministic, raw)
-    _write_both_or_neither(
-        inventory_path.with_name(AGENTIC_INSIGHTS_FILENAME),
-        agentic_insights,
-        inventory_path,
-        render_inventory(deterministic, agentic_insights),
-        current_insights=inventory.get(INSIGHTS_KEY),
-    )
+    rendered_inventory = render_inventory(deterministic, agentic_insights)
+    lock_path = inventory_path.parent / ENRICH_LOCK_FILENAME
+
+    def still_current() -> bool:
+        try:
+            return _holds_lock(lock_path, lock_token) and inventory_path.read_bytes() == inventory_bytes
+        except OSError:
+            return False
+
+    try:
+        _write_both_or_neither(
+            inventory_path.with_name(AGENTIC_INSIGHTS_FILENAME),
+            agentic_insights,
+            inventory_path,
+            rendered_inventory,
+            current_insights=inventory.get(INSIGHTS_KEY),
+            still_current=still_current,
+        )
+    except _DiscoverRanError:
+        return {"ok": False, "violations": [_DISCOVER_RAN_VIOLATION], "pipeline_insights": 0, "relationships": 0}
     return {
         "ok": True,
         "violations": [],

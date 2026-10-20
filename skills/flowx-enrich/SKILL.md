@@ -158,8 +158,10 @@ with different insights replaces the block. A validation failure writes nothing.
 
 Only one `enrich` writes an output directory at a time: it holds `metadata/.enrich.lock` from reading
 the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
-writes nothing. `discover` refuses to run while an enrich holds the lock, so it cannot replace the files
-under it; a lock left by an enrich that is no longer running does not stop `discover`. The two files are replaced one right after the other. If replacing `inventory.json`
+writes nothing. `discover` does not wait for the lock: it clears `metadata/`, the lock with it. So right
+before writing, `enrich` checks that its lock and the `inventory.json` it read are both still there; if
+`discover` ran in between, it writes nothing and reports "discover ran during this enrich; prepare and
+enrich again". The two files are replaced one right after the other. If replacing `inventory.json`
 fails, `agentic_insights.json` is put back to the insights the unchanged `inventory.json` holds (or
 removed when it holds none). A process killed or interrupted (Ctrl-C)
 between those two steps, or a failure while putting that file back, can leave

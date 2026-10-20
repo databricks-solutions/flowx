@@ -327,13 +327,13 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
         if not inventory_path.is_file():
             return {"ok": False, "error": f"No inventory.json under {inventory_path.parent}; run discover first."}
         with tempfile.TemporaryDirectory(prefix="flowx-inventory-") as temporary:
-            shutil.copy(inventory_path, temporary)
+            copied_size = Path(shutil.copy(inventory_path, temporary)).stat().st_size
             delivered = _bundle_output(p, Path(temporary))
         if "bundle" in delivered and "inventory.json" not in delivered["bundle"]["files"]:
             return {
                 "ok": False,
                 "error": (
-                    f"inventory.json ({inventory_path.stat().st_size} bytes) is too large to return inline; "
+                    f"inventory.json ({copied_size} bytes) is too large to return inline; "
                     "pass output_volume_path or output_workspace_path to have it uploaded there instead."
                 ),
             }
