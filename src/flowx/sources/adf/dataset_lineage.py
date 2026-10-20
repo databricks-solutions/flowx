@@ -162,8 +162,19 @@ def _is_source_query_key(key: str) -> bool:
 
 
 def _names_any(settings: object, is_override_key: Callable[[str], bool]) -> bool:
-    """``True`` when *settings* is a dict with a non-empty value under a key *is_override_key* accepts."""
-    return isinstance(settings, dict) and any(value and is_override_key(key) for key, value in settings.items())
+    """``True`` when *settings* is a dict with a non-empty value under a key *is_override_key* accepts.
+
+    An Expression object counts by its ``value``, so ``{"type": "Expression", "value": ""}``
+    is as empty as a bare ``""``.
+    """
+    return isinstance(settings, dict) and any(
+        _expression_value(value) and is_override_key(key) for key, value in settings.items()
+    )
+
+
+def _expression_value(value: Any) -> Any:
+    """*value* itself, or the ``value`` of an ADF Expression object (``None`` when it has none)."""
+    return value.get("value") if isinstance(value, dict) else value
 
 
 def _dataset_ref_to_asset(
@@ -494,9 +505,7 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
     linked_service = definitions.get_linked_service(linked_service_name)
     linked_service_properties = linked_service.properties if linked_service is not None else {}
     type_props = linked_service_properties.get("typeProperties") or linked_service_properties
-    connection_string = type_props.get("connectionString")
-    if isinstance(connection_string, dict):
-        connection_string = connection_string.get("value")
+    connection_string = _expression_value(type_props.get("connectionString"))
     if isinstance(connection_string, str) and not _is_physical(connection_string):
         return None
     connection_fields = _connection_string_fields(connection_string) if isinstance(connection_string, str) else {}
@@ -774,9 +783,7 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
     }
 
     def _shape_of(key: str, *, require_physical: bool) -> str | None:
-        written = location.get(key)
-        if isinstance(written, dict):
-            written = written.get("value")
+        written = _expression_value(location.get(key))
         if isinstance(written, str) and written.strip():
             return _path_shape(written, bindings, require_physical=require_physical)
         return _path_shape(call_site.get(key), {}, require_physical=require_physical)
@@ -796,9 +803,7 @@ def _reads_as_text(value: Any) -> bool:
     ``null``, a list, or an Expression with no ``value`` says nothing about the path,
     so it is no more known than a parameter the call site never bound.
     """
-    if isinstance(value, dict):
-        value = value.get("value")
-    return isinstance(value, (str, bool, int, float))
+    return isinstance(_expression_value(value), (str, bool, int, float))
 
 
 def _path_shape(expression: Any, bindings: dict[str, Any], *, require_physical: bool) -> str | None:

@@ -792,6 +792,58 @@ def test_stored_procedure_source_and_sink_get_no_identity() -> None:
     assert [asset.identity for asset in copy_reads] == ["ls_sql/dbo.Orders"]
 
 
+@pytest.mark.parametrize(
+    "empty_value", ["", {"type": "Expression", "value": ""}, {"value": None, "type": "Expression"}]
+)
+def test_an_empty_override_wrapped_in_an_expression_keeps_the_dataset_identity(empty_value: object) -> None:
+    """An Expression object with an empty value overrides nothing, exactly like a bare empty string."""
+    definitions = _definitions(ds_orders=_table_dataset("ds_orders", schema="dbo", table="Orders"))
+    lookup = AdfActivity(
+        name="Lookup",
+        type="Lookup",
+        type_properties={
+            "source": {"type": "SqlSource", "sqlReaderQuery": empty_value},
+            "dataset": {"referenceName": "ds_orders"},
+        },
+    )
+    copy = AdfActivity(
+        name="Copy",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_orders")],
+        type_properties={"sink": {"type": "SqlSink", "sqlWriterStoredProcedureName": empty_value}},
+    )
+    lake_read = AdfActivity(
+        name="ReadLake",
+        type="Copy",
+        inputs=[AdfDatasetReference(reference_name="ds_lake")],
+        type_properties={"source": {"type": "DelimitedTextSource", "storeSettings": {"wildcardFileName": empty_value}}},
+    )
+
+    assert [asset.identity for asset in activity_data_assets(lookup, definitions)[0]] == ["ls_sql/dbo.Orders"]
+    assert [asset.identity for asset in activity_data_assets(copy, definitions)[1]] == ["ls_sql/dbo.Orders"]
+    assert [asset.identity for asset in activity_data_assets(lake_read, _lake_definitions())[0]] == [
+        "abfss://data@acct.dfs.core.windows.net/landing"
+    ]
+
+
+def test_an_override_wrapped_in_an_expression_with_a_value_still_overrides() -> None:
+    """A non-empty Expression query still replaces what the activity reads."""
+    definitions = _definitions(ds_orders=_table_dataset("ds_orders", schema="dbo", table="Orders"))
+    lookup = AdfActivity(
+        name="Lookup",
+        type="Lookup",
+        type_properties={
+            "source": {
+                "type": "SqlSource",
+                "sqlReaderQuery": {"type": "Expression", "value": "@concat('SELECT * FROM ', item().t)"},
+            },
+            "dataset": {"referenceName": "ds_orders"},
+        },
+    )
+
+    assert [asset.identity for asset in activity_data_assets(lookup, definitions)[0]] == [None]
+
+
 def test_connector_specific_query_read_gets_no_identity_edge() -> None:
     """An Oracle ``oracleReaderQuery`` overrides the read like ``sqlReaderQuery``; an empty one does not."""
     definitions = AdfDefinitions(
