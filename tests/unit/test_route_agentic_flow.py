@@ -1239,6 +1239,29 @@ def test_combine_refuses_authored_names_that_clash(tmp_path: Path, authored_name
     assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
 
 
+def test_a_unit_switched_back_to_deterministic_frees_its_authored_names(tmp_path: Path) -> None:
+    """Only a unit whose output is applied holds its names; a stored output no longer applied blocks nothing."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("orders_lfc")])["ok"] is True
+    _route_two_components(tmp_path, parent="deterministic", child="agentic")
+
+    result = apply_agentic_output(tmp_path, ["child"], [_named_lfc_pipeline("orders_lfc")])
+
+    assert result["ok"] is True, result
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert [pipeline["name"] for pipeline in report["pipelines"]] == ["parent", "orders_lfc"]
+
+
+def test_an_applied_units_authored_names_stay_taken(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines(), child="agentic")
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("orders_lfc")])["ok"] is True
+
+    result = apply_agentic_output(tmp_path, ["child"], [_named_lfc_pipeline("orders_lfc")])
+
+    assert result["ok"] is False
+    assert "clash" in result["error"]
+
+
 def test_combine_same_hash_returns_already_applied_true_with_unchanged_message(tmp_path: Path) -> None:
     """Same authored pipelines hash returns already_applied: True with message 'already applied, unchanged'."""
     _setup_routed_agentic(tmp_path, decision="agentic")

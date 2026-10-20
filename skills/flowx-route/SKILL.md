@@ -314,11 +314,11 @@ Its guarantees:
   `{"from", "to"}` to the entry's `replaced` history (the first fill is not a replacement). The history
   lives in `agentic_conversion.json`, so it survives switching the unit to deterministic and back. An
   entry edited by hand no longer checks out, so filling it again starts a fresh history.
-- **Unique names**: an authored pipeline name may reuse a member of this unit, or a name the output of
-  a unit sharing members with this one authored (a grouping and its own components never apply
-  together), but not another name in the same list, a member of another unit, a pipeline another
-  unit's output authored, or a name that shares a bundle folder with another pipeline once normalised
-  (`Sales Load` and `Sales-Load` would overwrite each other).
+- **Unique names**: an authored pipeline name may reuse a member of this unit, but not another name in
+  the same list, a member of another unit, a pipeline another unit's applied output authored, or a name
+  that shares a bundle folder with another pipeline once normalised (`Sales Load` and `Sales-Load`
+  would overwrite each other). A stored output that is no longer applied (its unit routed
+  deterministic since, or joined into a grouping) holds no name.
 - **Buildable**: each authored pipeline needs a non-empty string `name` and a non-empty `tasks` list
   of task objects, and must not be marked `migration_status: "excluded"` (package skips those).
 - **Fully converted**: an authored pipeline that still holds a `PlaceholderActivity` (top level or

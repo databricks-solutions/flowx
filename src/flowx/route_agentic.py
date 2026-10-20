@@ -560,15 +560,11 @@ def rebuild(
     if not isinstance(new_report.get("pipelines"), list):
         new_report = {"pipelines": [new_report]}
 
+    applied = _applied_outputs(plan, outputs)
     units: dict[str, dict[str, Any]] = {}
     for unit_id, unit in routing_units(plan).items():
         members = set(unit["members"])
-        stored = (outputs or {}).get(unit_id)
-        output = (
-            stored
-            if unit["decision"] == DECISION_AGENTIC and stored and set(stored.get("members", [])) == members
-            else None
-        )
+        output = applied.get(unit_id)
         output_sha256 = output.get("output_sha256") if output else None
         if output:
             outcome = OUTCOME_AGENTIC_APPLIED
@@ -592,6 +588,16 @@ def rebuild(
         "components": units,
     }
     return new_report, new_gaps, record
+
+
+def _applied_outputs(plan: dict[str, Any], outputs: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    """The stored unit outputs a rebuild under ``plan`` applies: each agentic unit's, while its members match."""
+    applied: dict[str, dict[str, Any]] = {}
+    for unit_id, unit in routing_units(plan).items():
+        stored = (outputs or {}).get(unit_id)
+        if unit["decision"] == DECISION_AGENTIC and stored and set(stored.get("members", [])) == set(unit["members"]):
+            applied[unit_id] = stored
+    return applied
 
 
 # --------------------------------------------------------------------------- #
@@ -1175,10 +1181,11 @@ def apply_agentic_output(
     membership must exactly match a routed-agentic unit (a component, or an accepted grouping) in the
     plan, and every authored pipeline must carry the correct source tag, hold a non-empty ``tasks`` list
     of task objects with no placeholder task, not be marked ``migration_status`` ``excluded``, and have a
-    non-empty string name of its own: no repeat within the list, no member of another unit, no pipeline another
-    unit's output authored, and no bundle folder shared with another pipeline once normalised. A name
-    may reuse a member of this unit, since the fill replaces it, or a pipeline the output of a unit
-    sharing members with this one authored (a grouping and its own components never apply together).
+    non-empty string name of its own: no repeat within the list, no member of another unit, no pipeline
+    another unit's applied output authored, and no bundle folder shared with another pipeline once
+    normalised. A name may reuse a member of this unit, since the fill replaces it. A stored output the
+    rebuild no longer applies (its unit routed deterministic since, or joined into a grouping) holds no
+    name.
 
     Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_applied", "message"}``.
     ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation, a
@@ -1241,8 +1248,8 @@ def apply_agentic_output(
         member for other_id, unit in routing_units(plan).items() if other_id != unit_id for member in unit["members"]
     } | {
         pipeline.get("name")
-        for other_id, entry in stored.outputs.items()
-        if other_id != unit_id and members.isdisjoint(entry["members"])
+        for other_id, entry in _applied_outputs(plan, stored.outputs).items()
+        if other_id != unit_id
         for pipeline in entry["pipelines"]
         if isinstance(pipeline, dict)
     }
