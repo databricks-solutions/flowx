@@ -108,16 +108,18 @@ _ADF_NESTED_ACTIVITY_KEYS = ("activities", "ifTrueActivities", "ifFalseActivitie
 
 
 def agentic_pipeline_names(plan: dict[str, Any]) -> set[str]:
-    """Return the member pipelines of every component the plan decides ``"agentic"``.
+    """Return the member pipelines of every routing unit the plan routes ``"agentic"``.
 
-    Reads either an authored plan (the agent-supplied ``{"components": [...]}``) or the recorded
-    ``conversion_plan.json`` -- both carry ``members`` and ``decision`` per component.
+    Read from :func:`routing_units`, so an accepted grouping's members count, and this always agrees
+    with the units the record, the fill and package work from. Takes either an authored plan (the
+    agent-supplied ``{"components": [...]}``) or the recorded ``conversion_plan.json``.
     """
-    names: set[str] = set()
-    for component in plan.get("components", []):
-        if isinstance(component, dict) and component.get("decision") == DECISION_AGENTIC:
-            names.update(str(member) for member in component.get("members", []) if isinstance(member, str))
-    return names
+    return {
+        member
+        for unit in routing_units(plan).values()
+        if unit["decision"] == DECISION_AGENTIC
+        for member in unit["members"]
+    }
 
 
 def routing_units(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:

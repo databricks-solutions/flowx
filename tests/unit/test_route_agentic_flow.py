@@ -232,6 +232,27 @@ def test_agentic_pipeline_names_selects_only_agentic_component_members() -> None
     assert agentic_pipeline_names(plan) == {"parent", "shared"}
 
 
+def test_agentic_pipeline_names_gives_the_same_answer_as_the_routing_units() -> None:
+    """An accepted grouping makes its members agentic, whatever its components' own rows still say."""
+    plan = {
+        "components": [
+            {"component_id": "component-1", "members": ["parent"], "decision": None},
+            {"component_id": "component-2", "members": ["child"], "decision": "agentic"},
+            {"component_id": "component-3", "members": ["solo"], "decision": "deterministic"},
+        ],
+        "suggested_groupings": [
+            {
+                "grouping_id": "grouping-1",
+                "components": ["component-1", "component-2"],
+                "members": ["child", "parent"],
+                "accepted": True,
+            }
+        ],
+    }
+
+    assert agentic_pipeline_names(plan) == {"child", "parent"}
+
+
 # --------------------------------------------------------------------------- #
 # Report alteration (the edit step).
 # --------------------------------------------------------------------------- #
