@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from flowx.discovery_inventory import STRATEGY_PROPERTY
+from flowx.discovery_lineage import INVOKES_WAIT_PROPERTY
 from flowx.models.adf_ast import AdfDefinitions
 from flowx.models.discovery import (
     SOURCE_ADF,
@@ -20,6 +21,7 @@ from flowx.models.discovery import (
     SourceNode,
 )
 from flowx.sources.adf.discovery_mapping import (
+    DUPLICATE_SWITCH_CASES_PROPERTY,
     adf_definitions_to_source_graphs,
     adf_pipeline_to_source_graph,
 )
@@ -609,3 +611,123 @@ def test_empty_switch_stays_a_container_with_default_branch() -> None:
     assert isinstance(node, ContainerNode)
     assert list(node.branches.keys()) == ["default"]
     assert node.branches["default"] == []
+
+
+def _parent_calling_child(activities: list[dict]) -> SourceGraph:
+    """The ``parent`` graph for a pipeline running *activities*, exported with its ``child``."""
+    definitions = AdfDefinitions(
+        pipelines=[
+            _parse_pipeline_json({"name": "parent", "properties": {"activities": activities}}),
+            _parse_pipeline_json({"name": "child", "properties": {"activities": []}}),
+        ]
+    )
+    return adf_definitions_to_source_graphs(definitions)[0]
+
+
+def _run_child(name: str, **wait: object) -> dict:
+    """An ExecutePipeline of ``child``; pass ``waitOnCompletion=...`` to set the wait flag as written."""
+    return {"name": name, "type": "ExecutePipeline", "typeProperties": {"pipeline": {"referenceName": "child"}, **wait}}
+
+
+@pytest.mark.parametrize(
+    ("written", "recorded"),
+    [({}, True), ({"waitOnCompletion": True}, True), ({"waitOnCompletion": False}, False)],
+)
+def test_execute_pipeline_wait_flag_is_recorded_when_it_is_a_boolean(written: dict, recorded: bool) -> None:
+    """A real boolean wait flag is kept as written; a missing one takes ADF's translator default, True."""
+    graph = _parent_calling_child([_run_child("RunChild", **written)])
+
+    assert graph.tasks[0].properties[INVOKES_WAIT_PROPERTY] is recorded
+    assert graph.lineage is not None
+    assert [edge.wait_for_completion for edge in graph.lineage.control_edges] == [recorded]
+
+
+@pytest.mark.parametrize("wait", [None, "false", "true", 0, 1, {"type": "Expression", "value": "@true"}])
+def test_execute_pipeline_wait_flag_that_is_not_a_boolean_is_left_unset(wait: object) -> None:
+    """``null``, a string or a number says nothing certain, so the wait is unknown rather than guessed."""
+    graph = _parent_calling_child([_run_child("RunChild", waitOnCompletion=wait)])
+
+    assert INVOKES_WAIT_PROPERTY not in graph.tasks[0].properties
+    assert graph.lineage is not None
+    assert [(edge.target_workflow, edge.wait_for_completion) for edge in graph.lineage.control_edges] == [
+        ("child", None)
+    ]
+
+
+@pytest.mark.parametrize("loop_type", ["ForEach", "Until"])
+def test_a_switch_inside_a_loop_keeps_its_cases_and_their_invocations(loop_type: str) -> None:
+    """A Switch nested in a ForEach or Until body maps its own branches, and calls inside them become edges."""
+    switch = {
+        "name": "Route",
+        "type": "Switch",
+        "typeProperties": {
+            "cases": [
+                {"value": "now", "activities": [_run_child("RunNow", waitOnCompletion=True)]},
+                {"value": "later", "activities": [_run_child("RunLater", waitOnCompletion="false")]},
+            ],
+            "defaultActivities": [{"name": "Idle", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}],
+        },
+    }
+    graph = _parent_calling_child([{"name": "Loop", "type": loop_type, "typeProperties": {"activities": [switch]}}])
+
+    loop = graph.tasks[0]
+    assert isinstance(loop, ContainerNode)
+    [route] = loop.branches["body"]
+    assert isinstance(route, ContainerNode)
+    assert {label: [child.name for child in children] for label, children in route.branches.items()} == {
+        "now": ["RunNow"],
+        "later": ["RunLater"],
+        "default": ["Idle"],
+    }
+    assert graph.lineage is not None
+    assert [(edge.via_task_key, edge.wait_for_completion, edge.resolved) for edge in graph.lineage.control_edges] == [
+        ("RunNow", True, True),
+        ("RunLater", None, True),
+    ]
+
+
+def test_switch_cases_sharing_a_value_are_reported_not_dropped_silently(caplog: pytest.LogCaptureFixture) -> None:
+    """Two cases with one value can only keep one branch; the Switch records which activities lost out, and warns."""
+    activities = [
+        {
+            "name": "Route",
+            "type": "Switch",
+            "typeProperties": {
+                "cases": [
+                    {"value": "full", "activities": [{"name": "CopyA", "type": "Copy"}]},
+                    {"value": "delta", "activities": [{"name": "CopyB", "type": "Copy"}]},
+                    {"value": "full", "activities": [{"name": "CopyC", "type": "Copy"}]},
+                ],
+                "defaultActivities": [{"name": "Wait1", "type": "Wait"}],
+            },
+        }
+    ]
+    with caplog.at_level("WARNING", logger="flowx.sources.adf.discovery_mapping"):
+        graph = _pipeline(activities, name="routing")
+
+    container = graph.tasks[0]
+    assert isinstance(container, ContainerNode)
+    assert list(container.branches.keys()) == ["full", "delta", "default"]
+    assert [child.name for child in container.branches["full"]] == ["CopyC"]
+    assert container.properties[DUPLICATE_SWITCH_CASES_PROPERTY] == [{"value": "full", "dropped_activities": ["CopyA"]}]
+    assert "routing" in caplog.text and "Route" in caplog.text and "CopyA" in caplog.text
+
+
+def test_switch_with_distinct_case_values_records_no_duplicate_finding() -> None:
+    """Distinct case values give no finding, so the property only appears when something was lost."""
+    graph = _pipeline(
+        [
+            {
+                "name": "Route",
+                "type": "Switch",
+                "typeProperties": {
+                    "cases": [
+                        {"value": "full", "activities": [{"name": "CopyA", "type": "Copy"}]},
+                        {"value": "delta", "activities": [{"name": "CopyB", "type": "Copy"}]},
+                    ]
+                },
+            }
+        ]
+    )
+
+    assert DUPLICATE_SWITCH_CASES_PROPERTY not in graph.tasks[0].properties

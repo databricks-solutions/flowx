@@ -39,6 +39,7 @@ the Switch's own default branch or another case.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Collection
 from typing import Any
 
@@ -74,6 +75,12 @@ from flowx.models.discovery import (
 )
 from flowx.sources.adf.dataset_lineage import activity_data_assets
 from flowx.sources.adf.loader import classify_activity
+
+logger = logging.getLogger(__name__)
+
+# Switch node property listing case values declared more than once: each entry is
+# ``{"value": ..., "dropped_activities": [...]}`` naming the activities that lost out.
+DUPLICATE_SWITCH_CASES_PROPERTY = "duplicate_switch_cases"
 
 # Neutral trigger category for each ADF trigger type. Anything unrecognised maps
 # to ``""`` (unknown) with the ADF type preserved verbatim in the schedule
@@ -245,7 +252,7 @@ def adf_pipeline_to_source_graph(pipeline: AdfPipeline, definitions: AdfDefiniti
     if pipeline.folder:
         properties["folder"] = pipeline.folder
 
-    return SourceGraph(
+    graph = SourceGraph(
         name=pipeline.name,
         source=SOURCE_ADF,
         parameters=_parameters_to_specs(pipeline.parameters),
@@ -255,6 +262,21 @@ def adf_pipeline_to_source_graph(pipeline: AdfPipeline, definitions: AdfDefiniti
         properties=properties,
         raw=pipeline.raw,
     )
+    _warn_duplicate_switch_cases(graph)
+    return graph
+
+
+def _warn_duplicate_switch_cases(graph: SourceGraph) -> None:
+    """Log each Switch case that lost its activities to a later case with the same value."""
+    for node in walk_nodes(graph.tasks):
+        for duplicate in node.properties.get(DUPLICATE_SWITCH_CASES_PROPERTY) or []:
+            logger.warning(
+                "Switch %r in pipeline %r declares case %r more than once; only the last is kept, dropping %s",
+                node.name,
+                graph.name,
+                duplicate["value"],
+                duplicate["dropped_activities"],
+            )
 
 
 def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> SourceNode:
@@ -280,6 +302,7 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
 
     branches = _control_flow_branches(activity, definitions)
     if branches is not None:
+        _record_duplicate_switch_cases(activity, properties)
         return ContainerNode(
             source_id=activity.name,
             task_key=activity.name,
@@ -336,6 +359,8 @@ def _record_invocation(activity: AdfActivity, properties: dict[str, Any]) -> Non
     knowing anything about ADF. An empty / missing callee, or a reference that is
     neither a reference object nor a name (``null``, say), still records the marker
     with an empty target, so the edge is reported as unresolved rather than dropped.
+    Only a real boolean wait flag is recorded; ``null``, a string or a number leaves
+    the wait unset (unknown), as the shared control-edge reader expects.
     """
     if activity.type != "ExecutePipeline":
         return
@@ -345,7 +370,34 @@ def _record_invocation(activity: AdfActivity, properties: dict[str, Any]) -> Non
         reference = reference.get("referenceName")
     callee = reference if isinstance(reference, str) else ""
     properties[INVOKES_WORKFLOW_PROPERTY] = callee
-    properties[INVOKES_WAIT_PROPERTY] = bool(type_properties.get("waitOnCompletion", True))
+    wait = type_properties.get("waitOnCompletion", True)
+    if isinstance(wait, bool):
+        properties[INVOKES_WAIT_PROPERTY] = wait
+
+
+def _record_duplicate_switch_cases(activity: AdfActivity, properties: dict[str, Any]) -> None:
+    """Record, and warn about, Switch cases whose value an earlier case already declared.
+
+    The parsed AST keeps one branch per case value, the last one declared, so the
+    graph, the inventory and conversion all see the same activities. An earlier case
+    with the same value is lost; this names its activities so the loss is visible
+    (:func:`_warn_duplicate_switch_cases` logs it once the pipeline name is known).
+    """
+    if activity.type != "Switch":
+        return
+    declared_cases = (activity.type_properties or {}).get("cases") or []
+    last_index_by_value = {str(case.get("value", "")): index for index, case in enumerate(declared_cases)}
+    duplicates = [
+        {
+            "value": value,
+            "dropped_activities": [child.get("name", "") for child in case.get("activities") or []],
+        }
+        for index, case in enumerate(declared_cases)
+        if last_index_by_value[value := str(case.get("value", ""))] != index
+    ]
+    if not duplicates:
+        return
+    properties[DUPLICATE_SWITCH_CASES_PROPERTY] = duplicates
 
 
 def _control_flow_branches(activity: AdfActivity, definitions: AdfDefinitions) -> dict[str, list[SourceNode]] | None:
