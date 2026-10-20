@@ -1,47 +1,16 @@
 """Resolve ADF dataset references into source-neutral :class:`DataAsset` values.
 
-This is the ADF half of data-lineage population (#62b). It re-homes the
-dataset-identity resolver and the path-signature logic first written for the
-closed #36 ADF-only lineage attempt, but emits the shared #61 two-tier
-:class:`~flowx.models.ir.DataAsset` (``identity`` + ``signature``) instead of a
-bespoke edge type, so the source-neutral join in :mod:`flowx.lineage` /
-:mod:`flowx.discovery_lineage` does the matching.
+Each read or write gets two keys, and :mod:`flowx.lineage` joins on them:
 
-Two tiers, exactly as #36 established them:
-
-* **identity** -- the resolved physical location of the asset (a store-qualified
-  ``<server>/schema.table`` or a concrete ``abfss://`` path down to the literal
-  file name, used for Blob and ADLS Gen2 alike since both reach the same account).
-  Present only when it resolves *deterministically* from literals; a parameterised
-  reference is never guessed at and leaves ``identity`` unset. This is the strong join key.
-* **signature** -- the *path-derived* weak key. For an asset with a resolved
-  identity the signature mirrors that identity, so the weak tier can never join a
-  resolved asset to an unresolved one on a coincidence. For an unresolved reference
-  the signature is the *structural path signature* (#36's "expression" tier: the
-  dataset's folder and file name with their literal text kept in place -- quoted
-  text, numbers, ``concat`` pieces, and text outside ``@{...}`` -- and exactly one ``<P>`` slot
-  for every other run-time value or function call, wherever it sits, keyed by any
-  bound ``dataset()`` value it uses) when the reference passes a ``folderPath`` with
-  literal text and the resolved folder has a literal anchor (see :func:`_path_signature`), prefixed
-  ``ST[<store>]/`` when the dataset's store is known (see
-  :func:`_resolve_dataset_store`), so two datasets on different stores that merely
-  share a folder shape never join. An unknown store is
-  never guessed: the signature stays unqualified, and a qualified and an unqualified
-  signature never join. A dataset that names its store (a literal container or
-  bucket, or a server, share, lakehouse or account set on its linked service) but
-  cannot prove the rest of it gets no signature, since the folder shape alone cannot
-  tell two such stores apart.
-  It is **never** the bare dataset reference name: two unrelated opaque
-  references that merely share a name must not join (#36's explicit rule), so when
-  neither a physical identity nor a path-anchored signature is available the
-  signature is left empty and the asset cannot participate in signature matching.
-  The signature is also left empty when the activity overrides the dataset's
-  location at run time (a source query, stored procedure or ``storeSettings`` path
-  override on a read; a sink stored procedure on a write), because the dataset's
-  path is then not what the activity touches.
-
-Only literal, provable values ever become an ``identity`` -- the resolver returns
-``None`` rather than guessing, which is what stopped #36's spurious edges.
+* **identity**, the strong key: the physical table (``<server>/schema.table``) or
+  file path (``abfss://...`` down to the file name). It is set only when every part
+  is a literal; anything parameterised or unresolved leaves it ``None``.
+* **signature**, the weak key. It equals the identity when there is one. Otherwise
+  it is the structural path signature (:func:`_path_signature`): the folder and file
+  name with literal text kept and one ``<P>`` slot per run-time value, prefixed
+  ``ST[<store>]/`` when the store is known. It is empty when nothing literal anchors
+  the path, when the activity overrides the dataset's location at run time, and it
+  is never the bare dataset name, so two opaque references never join by name.
 """
 
 from __future__ import annotations
@@ -56,7 +25,6 @@ from flowx.models.ir import DataAsset, TranslationContext
 from flowx.parser.expression_parser import resolve_expression, resolve_interpolated_string
 
 _ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
-_DATASET_PARAM_RE = re.compile(r"^@dataset\(\)\.([A-Za-z_][A-Za-z0-9_]*)$")
 _ARM_CALL_RE = re.compile(r"^\[\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\(.*\]$", re.DOTALL)
 # ARM template functions (compared lower-cased, as ARM does). A bracketed value is an unevaluated ARM
 # expression only when it calls one of these, a ``list*`` function, or a ``namespace.function`` of the
@@ -109,31 +77,17 @@ def activity_data_assets(
     definitions: AdfDefinitions,
     context: TranslationContext | None = None,
 ) -> tuple[list[DataAsset], list[DataAsset]]:
-    """Resolve the assets an ADF activity reads and writes.
+    """Resolve the assets an ADF activity reads and writes, as ``(data_reads, data_writes)``.
 
-    Captures **every** input and output, not just index 0: a Copy reads its
-    ``source`` dataset(s) and writes its ``sink`` dataset(s), a Lookup reads its
-    ``dataset``, and any activity-level ``inputs`` / ``outputs`` slots are all
-    included. A dataset named in both an activity-level slot and ``typeProperties``
-    is counted once per side so an activity does not emit two identical assets.
+    Every input and output counts, not just the first: a Copy's ``source`` and
+    ``sink`` datasets, a Lookup's ``dataset``, and any activity-level ``inputs`` /
+    ``outputs``. A dataset named in two of those places counts once per side.
 
-    When the activity overrides the dataset's physical source or target at run time,
-    the dataset's own location is not what the activity touches, so that side gets
-    neither an identity nor a signature and cannot join on either tier. Reads are overridden by
-    a source query or stored procedure, or by ``storeSettings`` that give a wildcard
-    folder or file name, a file list, or a prefix; writes by a sink stored procedure,
-    which decides the table itself.
-
-    Args:
-        activity: The ADF activity to resolve.
-        definitions: All loaded ADF definitions (datasets + linked services),
-            needed to resolve a reference to its physical identity.
-        context: Optional translation context for expression resolution; a default
-            (empty) context is used when none is given, mirroring the deterministic
-            discover-time resolution the closed #36 attempt used.
-
-    Returns:
-        ``(data_reads, data_writes)`` as lists of :class:`DataAsset`.
+    When the activity replaces the dataset's location at run time (a source query or
+    stored procedure, a ``storeSettings`` wildcard, file list or prefix on a read; a
+    sink stored procedure on a write), that side gets neither an identity nor a
+    signature, since the dataset's location is not what it touches. *context* is the
+    translation context for expressions; an empty one is used by default.
     """
     resolution_context = context if context is not None else TranslationContext()
     reads_overridden = _location_overridden(activity, produced=False)
@@ -205,27 +159,13 @@ def _dataset_ref_to_asset(
 ) -> DataAsset:
     """Turn one dataset reference into a two-tier :class:`DataAsset`.
 
-    Signature is derived only from the resolved *physical* location -- the identity
-    when it resolves, else the structural path signature. It is **never** the bare
-    dataset reference name (#36's hard rule): two unrelated opaque references that
-    merely share a name must not join, so when neither a physical identity nor a
-    path-anchored signature is available the signature is left empty. An empty
-    signature is falsy, so :func:`~flowx.lineage._match_assets` cannot use it as a
-    join key -- the asset is still captured as a read / write for reporting, it just
-    cannot manufacture a signature-tier edge. When *location_overridden* is set the
-    dataset's location is not what the activity touches, so neither an identity nor a
-    signature is derived from it.
-
-    A path signature is prefixed with the dataset's store when that store is known
-    (see :func:`_resolve_dataset_store`), so two datasets on different containers or
-    accounts that merely share a folder shape never join. A dataset whose location
-    names its store but cannot prove all of it gets no signature at all, because the
-    folder shape alone cannot tell two such stores apart: a literal container or
-    bucket whose account is unknown, or a location whose store is named only on the
-    linked service (SFTP, FTP, a file share, HDFS, HTTP, a Fabric Lakehouse, ADLS
-    Gen1), when that linked service is not a plain, unparameterised name. A file
-    system that is itself parameterised names no store, so its signature stays
-    unqualified.
+    The signature mirrors the identity when there is one, else it is the store-qualified
+    path signature, else empty. It is never the bare dataset name, so two opaque
+    references cannot join by name; an empty signature joins nothing but still
+    records the read or write. With *location_overridden* neither key is derived.
+    A dataset that names its store but cannot prove it (see
+    :func:`_resolve_dataset_store`) gets no signature, because a folder shape alone
+    cannot tell two such stores apart.
     """
     if location_overridden:
         return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))
@@ -325,23 +265,14 @@ def resolve_dataset_identity(
     definitions: AdfDefinitions,
     context: TranslationContext | None = None,
 ) -> str | None:
-    """Deterministic physical identity for a dataset reference.
+    """Physical identity for a dataset reference, or ``None`` when it is not provable.
 
-    Returns ``"<store>/schema.table"`` when a table is resolvable, else a storage
-    path down to the literal file name, else ``None`` (never a guess). Used to join
-    producers to consumers on the same physical asset even when their ADF dataset
-    names differ.
-
-    A table name is only unique within the store that holds it, so the table is
-    prefixed with the backing linked service's server (and database, when given),
-    or with the linked service name when the server is hidden in a secret.
-    Otherwise a source ``dbo.Orders`` and a warehouse ``dbo.Orders`` would look like
-    one table.
-
-    Parameterised values (ADF expressions or DAB-ref placeholders), including a
-    parameterised linked service, are treated as unresolvable and return ``None``
-    -- they must never be used as identity keys because two unrelated pipelines
-    sharing a parameter name would collide on the same placeholder string.
+    A table is ``<store>/schema.table``, where the store is the linked service's
+    server (and database), or its name when the server is hidden in a secret, so a
+    source ``dbo.Orders`` and a warehouse ``dbo.Orders`` stay apart. A file is its
+    path down to the literal file name. Any ADF expression or DAB placeholder left
+    unresolved, a parameterised linked service included, gives ``None``: two
+    pipelines sharing a parameter name must never collide on the placeholder text.
     """
     resolution_context = context if context is not None else TranslationContext()
     properties = _dataset_props(dataset_ref, definitions)
@@ -386,7 +317,8 @@ def _resolve_param_value(
         return str(raw)
     text = raw
 
-    match = _DATASET_PARAM_RE.match(text.strip())
+    stripped = text.strip()
+    match = _DATASET_PARAMETER_RE.fullmatch(stripped[1:]) if stripped.startswith("@") else None
     if match:
         parameter_name = match.group(1)
         return _resolve_param_value(dataset_params.get(parameter_name, ""), dataset_params, context)
@@ -564,25 +496,19 @@ def _resolve_dataset_store(
     definitions: AdfDefinitions,
     context: TranslationContext,
 ) -> tuple[str | None, bool]:
-    """Name the store a dataset lives in, and say whether its file location names one at all.
+    """Return ``(store, location_names_store)`` for a dataset; the store is ``None`` unless provable.
 
-    Returns ``(store, location_names_store)``. A table dataset's store is the one
-    :func:`_resolve_table_store` names. A file dataset's store is
-    ``<file system>@<account>`` when both are literal. When the file system is literal
-    but the account cannot be read (a Key Vault or masked connection string, for
-    example), the linked service name stands in for the account, as long as the
-    linked service takes no parameters. A location whose server, share, lakehouse or
-    account lives on the linked service (SFTP, FTP, a file share, HDFS, HTTP, a Fabric
-    Lakehouse, ADLS Gen1) is named by that plain, unparameterised linked service name
-    alone. The location type is compared case-insensitively, since ADF documents both
-    ``LakeHouseLocation`` and ``LakehouseLocation``. The store is ``None`` whenever it
-    is not provable, so the caller never guesses one.
+    * A table's store is the one :func:`_resolve_table_store` names.
+    * A file's store is ``<file system>@<account>``. When the account is hidden (a Key
+      Vault or masked connection string), a plain, unparameterised linked service
+      name stands in for it.
+    * A location whose server, share, lakehouse or account lives on the linked
+      service (SFTP, FTP, a file share, HDFS, HTTP, a Fabric Lakehouse, ADLS Gen1;
+      type compared case-insensitively) is named by that linked service name alone.
 
-    ``location_names_store`` is ``True`` when the file location tells its store apart
-    from others, provable or not: a literal file system (ADLS file system, Blob
-    container, S3 / GCS bucket), or a location whose server, share, lakehouse or
-    account is set on the linked service. A file system that is itself parameterised
-    names no store.
+    ``location_names_store`` says whether the location tells its store apart at all,
+    provable or not: a literal file system, container or bucket, or one of those
+    linked-service locations. A parameterised file system names no store.
     """
     properties = _dataset_props(dataset_ref, definitions)
     if properties is None:
@@ -764,7 +690,7 @@ def _is_arm_expression(text: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Structural path signature (tier 2, #36's "expression" tier)
+# Structural path signature (tier 2)
 # --------------------------------------------------------------------------- #
 #
 # The rule: only provably literal text forms the path. Any other value, whatever

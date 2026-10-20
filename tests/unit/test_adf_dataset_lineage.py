@@ -313,13 +313,14 @@ def test_table_without_linked_service_has_no_identity() -> None:
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orphan"), definitions) is None
 
 
-def test_identity_resolves_dataset_param_from_call_site_literal() -> None:
-    """A ``@dataset().table`` expression resolves when the call site passes a literal."""
+@pytest.mark.parametrize("table", ["@dataset().tbl", "@dataset()?.tbl", " @dataset().tbl "])
+def test_identity_resolves_dataset_param_from_call_site_literal(table: str) -> None:
+    """A ``@dataset().tbl`` expression, also written with ``?.``, resolves when the call site passes a literal."""
     dataset = AdfDataset(
         name="ds_param",
         type="AzureSqlTable",
         properties={
-            "typeProperties": {"schema": "dbo", "table": "@dataset().tbl"},
+            "typeProperties": {"schema": "dbo", "table": table},
             "parameters": {"tbl": {"type": "String"}},
             "linkedServiceName": {"referenceName": "ls_sql"},
         },
