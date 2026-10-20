@@ -666,6 +666,8 @@ def test_a_bracket_quoted_table_name_with_parentheses_keeps_its_identity(table: 
         "[Parameters ('table')]",
         "[listKeys(resourceId('x'), '2021-01-01').keys[0].value]",
         "[contoso.tableName('orders')]",
+        "[distinct(createArray('Orders'))]",
+        "[someFutureFunction('orders')]",
     ],
 )
 def test_an_unevaluated_arm_expression_table_name_has_no_identity(table: str) -> None:
@@ -925,6 +927,29 @@ def test_an_empty_override_wrapped_in_an_expression_keeps_the_dataset_identity(e
     assert [asset.identity for asset in activity_data_assets(lake_read, _lake_definitions())[0]] == [
         "abfss://data@acct.dfs.core.windows.net/landing"
     ]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"type": "Expression", "value": "@concat('SELECT * FROM ', item().t)"},
+        {"type": "AzureKeyVaultSecret", "secretName": "orders-query"},
+        {"text": "SELECT * FROM elsewhere"},
+    ],
+)
+def test_a_non_empty_query_object_still_overrides(query: dict) -> None:
+    """Any query object that is not an empty Expression replaces what the Lookup reads, so the identity goes."""
+    definitions = _definitions(ds_orders=_table_dataset("ds_orders", schema="dbo", table="Orders"))
+    lookup = AdfActivity(
+        name="Lookup",
+        type="Lookup",
+        type_properties={
+            "source": {"type": "SqlSource", "sqlReaderQuery": query},
+            "dataset": {"referenceName": "ds_orders"},
+        },
+    )
+
+    assert [(asset.identity, asset.signature) for asset in activity_data_assets(lookup, definitions)[0]] == [(None, "")]
 
 
 def test_an_override_wrapped_in_an_expression_with_a_value_still_overrides() -> None:

@@ -15,12 +15,16 @@ from flowx.models.ir import TranslationContext
 from flowx.parser.expression_parser import resolve_expression, resolve_interpolated_string
 
 _ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
-_ARM_CALL_RE = re.compile(r"^\[\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\(.*\]$", re.DOTALL)
+_ARM_CALL_RE = re.compile(
+    r"^\[\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\((?P<arguments>.*)\]$", re.DOTALL
+)
+_NESTED_CALL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*\(")
 
 
-# ARM template functions (compared lower-cased, as ARM does). A bracketed value is an unevaluated ARM
-# expression only when it calls one of these, a ``list*`` function, or a ``namespace.function`` of the
-# template's own, so a bracket-quoted SQL name such as ``[Sales (2024)]`` stays a literal.
+# ARM template functions (compared lower-cased, as ARM does). A bracketed call is an unevaluated ARM
+# expression when it calls one of these, a ``list*`` function, or a ``namespace.function`` of the
+# template's own, or when its arguments hold a quoted string or another call, as only ARM's do. So a
+# bracket-quoted SQL name such as ``[Sales (2024)]`` stays a literal.
 _ARM_FUNCTIONS = frozenset(
     name.lower()
     for name in (
@@ -42,8 +46,15 @@ _DATASET_PARAMETER_RE = re.compile(r"dataset\(\)\??\.(\w+)")
 
 
 def _expression_value(value: Any) -> Any:
-    """*value* itself, or the ``value`` of an ADF Expression object (``None`` when it has none)."""
-    return value.get("value") if isinstance(value, dict) else value
+    """*value* itself, or the ``value`` of an ADF Expression-shaped object (``None`` when it has none).
+
+    Only an object typed ``Expression`` or carrying a ``value`` is unwrapped. Any other
+    object, such as a Key Vault secret reference, is returned whole, so a caller never
+    mistakes it for an empty value.
+    """
+    if isinstance(value, dict) and (value.get("type") == "Expression" or "value" in value):
+        return value.get("value")
+    return value
 
 
 def resolve_dataset_identity(
@@ -421,4 +432,7 @@ def _is_arm_expression(text: str) -> bool:
     if call is None:
         return False
     function = call.group(1).lower()
-    return "." in function or function.startswith("list") or function in _ARM_FUNCTIONS
+    if "." in function or function.startswith("list") or function in _ARM_FUNCTIONS:
+        return True
+    arguments = call.group("arguments")
+    return "'" in arguments or bool(_NESTED_CALL_RE.search(arguments))
