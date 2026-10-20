@@ -378,7 +378,37 @@ def _until_with_nested_gap(name: str, task_key: str) -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize("container", [_if_with_nested_gap, _until_with_nested_gap])
+def _foreach_with_nested_gap(name: str, task_key: str) -> dict[str, Any]:
+    """A ForEach whose loop body holds convert's own placeholder for an unsupported activity."""
+    return {
+        "name": name,
+        "task_key": task_key,
+        "type": "ForEachActivity",
+        "inner_activities": [{"name": "Nested Gap", "task_key": "nested_gap", "type": "PlaceholderActivity"}],
+    }
+
+
+def _switch_with_nested_gap(name: str, task_key: str) -> dict[str, Any]:
+    """A Switch whose one case holds convert's own placeholder for an unsupported activity."""
+    nested = {"name": "Nested Gap", "task_key": "nested_gap", "type": "PlaceholderActivity"}
+    return {
+        "name": name,
+        "task_key": task_key,
+        "type": "SwitchActivity",
+        "cases": [{"value": "orders", "activities": [nested]}],
+        "default_activities": [],
+    }
+
+
+_NESTED_GAP_CONTAINERS = [
+    _if_with_nested_gap,
+    _until_with_nested_gap,
+    _foreach_with_nested_gap,
+    _switch_with_nested_gap,
+]
+
+
+@pytest.mark.parametrize("container", _NESTED_GAP_CONTAINERS)
 def test_alter_report_supersedes_an_untagged_gap_nested_inside_a_routed_container(container: Any) -> None:
     report = {"pipelines": [{"name": "parent", "tasks": [container("Check", "check")]}]}
     nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
@@ -389,7 +419,7 @@ def test_alter_report_supersedes_an_untagged_gap_nested_inside_a_routed_containe
     assert [(gap["pipeline"], gap["activity_name"]) for gap in gaps] == [("parent", "Check")]
 
 
-@pytest.mark.parametrize("other_container", [_if_with_nested_gap, _until_with_nested_gap])
+@pytest.mark.parametrize("other_container", _NESTED_GAP_CONTAINERS)
 def test_alter_report_keeps_a_nested_gap_whose_name_a_non_routed_container_also_holds(other_container: Any) -> None:
     report = {
         "pipelines": [
@@ -404,7 +434,7 @@ def test_alter_report_keeps_a_nested_gap_whose_name_a_non_routed_container_also_
     assert nested in gaps
 
 
-@pytest.mark.parametrize("container", [_if_with_nested_gap, _until_with_nested_gap])
+@pytest.mark.parametrize("container", _NESTED_GAP_CONTAINERS)
 def test_a_filled_unit_with_a_nested_convert_gap_leaves_no_gaps(tmp_path: Path, container: Any) -> None:
     report = _report_two_pipelines()
     report["pipelines"][0]["tasks"] = [container("Check", "check")]
@@ -704,7 +734,7 @@ def _rebuilt_gaps(report: dict[str, Any], gaps: list[dict[str, Any]], filled: li
     return new_gaps
 
 
-@pytest.mark.parametrize("container", [_if_with_nested_gap, _until_with_nested_gap])
+@pytest.mark.parametrize("container", _NESTED_GAP_CONTAINERS)
 def test_a_gap_fill_of_a_container_also_drops_the_gaps_nested_in_it(container: Any) -> None:
     report = {"pipelines": [{"name": "child", "tasks": [container("Check", "check")]}]}
     nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
