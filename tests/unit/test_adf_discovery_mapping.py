@@ -686,35 +686,100 @@ def test_a_switch_inside_a_loop_keeps_its_cases_and_their_invocations(loop_type:
     ]
 
 
-def test_switch_cases_sharing_a_value_are_reported_not_dropped_silently(caplog: pytest.LogCaptureFixture) -> None:
-    """Two cases with one value can only keep one branch; the Switch records which activities lost out, and warns."""
-    activities = [
+def _switch_with_cases(cases: list[dict]) -> list[dict]:
+    """One Switch named ``Route`` declaring *cases* in order, with a one-activity default."""
+    return [
         {
             "name": "Route",
             "type": "Switch",
-            "typeProperties": {
-                "cases": [
-                    {"value": "full", "activities": [{"name": "CopyA", "type": "Copy"}]},
-                    {"value": "delta", "activities": [{"name": "CopyB", "type": "Copy"}]},
-                    {"value": "full", "activities": [{"name": "CopyC", "type": "Copy"}]},
-                ],
-                "defaultActivities": [{"name": "Wait1", "type": "Wait"}],
-            },
+            "typeProperties": {"cases": cases, "defaultActivities": [{"name": "Wait1", "type": "Wait"}]},
         }
     ]
+
+
+def _branch_names(container: SourceNode) -> dict[str, list[str]]:
+    assert isinstance(container, ContainerNode)
+    return {label: [child.name for child in children] for label, children in container.branches.items()}
+
+
+def test_switch_cases_sharing_a_value_each_keep_their_own_branch(caplog: pytest.LogCaptureFixture) -> None:
+    """Every declared case keeps its activities, as conversion does; a repeated value is reported, and warned about."""
+    activities = _switch_with_cases(
+        [
+            {"value": "full", "activities": [{"name": "CopyA", "type": "Copy"}]},
+            {"value": "delta", "activities": [{"name": "CopyB", "type": "Copy"}]},
+            {"value": "full", "activities": [{"name": "CopyC", "type": "Copy"}]},
+        ]
+    )
     with caplog.at_level("WARNING", logger="flowx.sources.adf.discovery_mapping"):
         graph = _pipeline(activities, name="routing")
 
     container = graph.tasks[0]
-    assert isinstance(container, ContainerNode)
-    assert list(container.branches.keys()) == ["full", "delta", "default"]
-    assert [child.name for child in container.branches["full"]] == ["CopyC"]
-    assert container.properties[DUPLICATE_SWITCH_CASES_PROPERTY] == [{"value": "full", "dropped_activities": ["CopyA"]}]
-    assert "routing" in caplog.text and "Route" in caplog.text and "CopyA" in caplog.text
+    assert _branch_names(container) == {
+        "full": ["CopyA"],
+        "delta": ["CopyB"],
+        "case:full": ["CopyC"],
+        "default": ["Wait1"],
+    }
+    assert container.properties[DUPLICATE_SWITCH_CASES_PROPERTY] == [
+        {"value": "full", "branches": ["full", "case:full"]}
+    ]
+    assert "routing" in caplog.text and "Route" in caplog.text
+    assert "'full'" in caplog.text and "'case:full'" in caplog.text
+    assert "dropping" not in caplog.text and "dropped" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [([{"name": "CopyA", "type": "Copy"}], []), ([], [{"name": "CopyC", "type": "Copy"}])],
+)
+def test_switch_duplicate_with_an_empty_case_keeps_both_branches(first: list[dict], second: list[dict]) -> None:
+    """An empty repeat of a value is still its own (empty) branch, and the finding names both labels."""
+    graph = _pipeline(
+        _switch_with_cases([{"value": "full", "activities": first}, {"value": "full", "activities": second}])
+    )
+
+    container = graph.tasks[0]
+    assert _branch_names(container) == {
+        "full": [activity["name"] for activity in first],
+        "case:full": [activity["name"] for activity in second],
+        "default": ["Wait1"],
+    }
+    assert container.properties[DUPLICATE_SWITCH_CASES_PROPERTY] == [
+        {"value": "full", "branches": ["full", "case:full"]}
+    ]
+
+
+def test_repeated_switch_values_get_labels_that_avoid_every_declared_value() -> None:
+    """A third repeat is ``case:case:full``, and no repeat takes a label another case declares as its value."""
+    graph = _pipeline(
+        _switch_with_cases(
+            [
+                {"value": "full", "activities": [{"name": "CopyA", "type": "Copy"}]},
+                {"value": "full", "activities": [{"name": "CopyB", "type": "Copy"}]},
+                {"value": "case:full", "activities": [{"name": "CopyC", "type": "Copy"}]},
+                {"value": "full", "activities": [{"name": "CopyD", "type": "Copy"}]},
+                {"value": "default", "activities": [{"name": "CopyE", "type": "Copy"}]},
+            ]
+        )
+    )
+
+    container = graph.tasks[0]
+    assert _branch_names(container) == {
+        "full": ["CopyA"],
+        "case:case:full": ["CopyB"],
+        "case:full": ["CopyC"],
+        "case:case:case:full": ["CopyD"],
+        "case:default": ["CopyE"],
+        "default": ["Wait1"],
+    }
+    assert container.properties[DUPLICATE_SWITCH_CASES_PROPERTY] == [
+        {"value": "full", "branches": ["full", "case:case:full", "case:case:case:full"]}
+    ]
 
 
 def test_switch_with_distinct_case_values_records_no_duplicate_finding() -> None:
-    """Distinct case values give no finding, so the property only appears when something was lost."""
+    """Distinct case values give no finding, so the property only appears when a value repeats."""
     graph = _pipeline(
         [
             {
