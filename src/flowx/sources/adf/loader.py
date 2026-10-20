@@ -1067,10 +1067,20 @@ def clear_stale_outputs(output_dir: Path) -> None:
     Args:
         output_dir: Migration output directory shared by all three phases.
 
+    Raises:
+        EnrichInProgressError: A running enrich holds ``metadata/.enrich.lock``; clearing its
+            files would let its old insights overwrite the new inventory. A lock left by an
+            enrich that is no longer running is cleared like any other output.
+
     Notes:
         Only flowx-managed entries are removed (never the directory itself or unrelated
         files), so pointing ``output_dir`` at a populated directory stays safe.
     """
+    from flowx.discovery_insights import EnrichInProgressError, enrich_in_progress
+
+    metadata_dir = output_dir / "metadata"
+    if enrich_in_progress(metadata_dir):
+        raise EnrichInProgressError(f"an enrich is writing to {metadata_dir}; run discover again once it finishes")
     for directory in _MANAGED_OUTPUT_DIRS:
         shutil.rmtree(output_dir / directory, ignore_errors=True)
     for filename in _MANAGED_OUTPUT_FILES:
@@ -1175,13 +1185,18 @@ def main(argv: list[str] | None = None) -> int:
     # Inventory JSON is projected from the discovery graph contract via the
     # source-agnostic emitter (so ADF and Airflow emit one shape); imported here
     # to avoid a module-level cycle (discovery_mapping imports this loader).
+    from flowx.discovery_insights import EnrichInProgressError
     from flowx.discovery_inventory import build_source_inventory
     from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, write_source_graphs
     from flowx.models.discovery import SOURCE_ADF
     from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
 
     output_dir: Path = args.output_dir.resolve()
-    clear_stale_outputs(output_dir)
+    try:
+        clear_stale_outputs(output_dir)
+    except EnrichInProgressError as error:
+        logger.error("%s", error)
+        return 1
     metadata_dir = output_dir / "metadata"
     metadata_dir.mkdir(parents=True, exist_ok=True)
 

@@ -121,7 +121,8 @@ Run the **`setup`** skill first if you haven't. Both paths run the same validate
   tool with `command="enrich"`. On the hosted server you cannot read `output_dir`, so first read the
   inventory with `action="prepare"`. It returns `metadata/inventory.json` inline as
   `bundle.files["inventory.json"]`, the same way `package` returns a bundle; pass `output_volume_path`
-  or `output_workspace_path` to have a large inventory uploaded there as `inventory.json` instead. Then
+  or `output_workspace_path` to have a large inventory uploaded there as `inventory.json` instead. An
+  inventory too large to return inline makes `prepare` fail with `ok: false`, naming those two options. Then
   record the insights (the default `action="apply"`) with either inline insights or a file:
 
   ```
@@ -157,7 +158,8 @@ with different insights replaces the block. A validation failure writes nothing.
 
 Only one `enrich` writes an output directory at a time: it holds `metadata/.enrich.lock` from reading
 the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
-writes nothing. The two files are replaced one right after the other. If replacing `inventory.json`
+writes nothing. `discover` refuses to run while an enrich holds the lock, so it cannot replace the files
+under it; a lock left by an enrich that is no longer running does not stop `discover`. The two files are replaced one right after the other. If replacing `inventory.json`
 fails, `agentic_insights.json` is put back to the insights the unchanged `inventory.json` holds (or
 removed when it holds none). A process killed or interrupted (Ctrl-C)
 between those two steps, or a failure while putting that file back, can leave

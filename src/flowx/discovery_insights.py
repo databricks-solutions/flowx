@@ -29,7 +29,8 @@ records the persisted ``source_graphs.json`` hash it was checked against
 ``source_graphs_sha256``, its deterministic part is projected again from ``source_graphs.json``
 (byte-identical to what discover writes), otherwise discover's deterministic part is reused; that
 same block is added under ``insights``, so the inventory is always built from those two pieces
-rather than patched. Only one enrich writes an output directory at a time, and the two files are
+rather than patched. Only one enrich writes an output directory at a time, discover refuses to clear
+``metadata/`` while one is running (see :func:`enrich_in_progress`), and the two files are
 replaced back to back (see ``_write_both_or_neither``). A process killed or interrupted between
 those two replaces, or a rollback that itself fails, can leave ``agentic_insights.json`` a write ahead of
 ``inventory.json``; the lock file then stays behind, so the next enrich refuses until the lock is
@@ -664,22 +665,57 @@ class _UnrecoveredWriteError(OSError):
     """The two files may disagree: putting the previous insights file back failed, or an interrupt hit a replace."""
 
 
+class EnrichInProgressError(RuntimeError):
+    """Discover was asked to clear ``metadata/`` while a running enrich holds its lock."""
+
+
+def enrich_in_progress(metadata_dir: Path) -> bool:
+    """Whether an enrich that is still running holds the lock in *metadata_dir*.
+
+    Discover checks this before it clears ``metadata/``: removing the files under a running enrich
+    would let that enrich's old insights overwrite the new inventory. The lock records its holder's
+    process id, so a lock left by a killed enrich, or one with no readable id, counts as stale and
+    discover still clears it.
+    """
+    try:
+        holder = int((metadata_dir / ENRICH_LOCK_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if holder <= 0:
+        return False
+    try:
+        os.kill(holder, 0)
+    except PermissionError:
+        return True
+    except (ProcessLookupError, OverflowError):
+        return False
+    return True
+
+
 @contextmanager
 def _enrich_lock(metadata_dir: Path) -> Iterator[bool]:
     """Hold the output directory's enrich lock, yielding ``False`` when another enrich already holds it.
 
-    The lock is a file created with ``O_EXCL`` (portable, unlike ``fcntl``) and removed when the
-    enrich finishes or raises. It is left behind only when the two files may disagree -- a killed
+    The lock is a file created with ``O_EXCL`` (portable, unlike ``fcntl``) holding this process's
+    id, so :func:`enrich_in_progress` can tell a running enrich from a stale lock. It is removed when
+    the enrich finishes or raises. It is left behind only when the two files may disagree -- a killed
     process, or an error that is or was raised from :class:`_UnrecoveredWriteError` (a failed
     rollback, or an interrupt between the two replaces) -- so the next enrich refuses until the lock
     is removed.
     """
     lock_path = metadata_dir / ENRICH_LOCK_FILENAME
     try:
-        os.close(os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         yield False
         return
+    try:
+        os.write(descriptor, f"{os.getpid()}\n".encode())
+    except OSError:
+        lock_path.unlink(missing_ok=True)
+        raise
+    finally:
+        os.close(descriptor)
     keep_lock = False
     try:
         yield True

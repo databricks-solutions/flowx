@@ -430,6 +430,61 @@ enrich_inventory(Path(sys.argv[1]), insights=json.loads(sys.argv[2]))
 """
 
 
+def test_discover_refuses_while_an_enrich_is_writing(tmp_path: Path, monkeypatch: Any) -> None:
+    """A discover that cleared metadata/ mid-enrich would let the old insights overwrite the new inventory."""
+    fixtures = Path(__file__).resolve().parents[1] / "resources" / "json"
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+    metadata = tmp_path / "metadata"
+    inventory = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+    authored = {"authored_against": inventory["source_graphs_sha256"], "overview": "The fixture factory."}
+    paused, resume = threading.Event(), threading.Event()
+    real_replace = os.replace
+
+    def pausing_replace(source: Any, destination: Any) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            paused.set()
+            resume.wait(timeout=10)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", pausing_replace)
+    results: list[dict[str, Any]] = []
+    enrich = threading.Thread(target=lambda: results.append(enrich_inventory(tmp_path, insights=authored)))
+    enrich.start()
+    assert paused.wait(timeout=10)
+    before = {path.name: path.read_bytes() for path in metadata.iterdir() if path.is_file()}
+
+    rediscovered = adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)])
+
+    after = {path.name: path.read_bytes() for path in metadata.iterdir() if path.is_file()}
+    resume.set()
+    enrich.join(timeout=10)
+    assert rediscovered == 1
+    assert after == before
+    assert results and results[0]["ok"] is True
+    enriched = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+    assert enriched[INSIGHTS_KEY] == json.loads((metadata / AGENTIC_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
+
+
+def test_discover_clears_the_lock_a_killed_enrich_left(tmp_path: Path) -> None:
+    """The lock names an enrich that is no longer running, so discover treats it as stale and starts fresh."""
+    fixtures = Path(__file__).resolve().parents[1] / "resources" / "json"
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+    metadata = tmp_path / "metadata"
+    inventory = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+    authored = {"authored_against": inventory["source_graphs_sha256"], "overview": "The fixture factory."}
+    environment = {**os.environ, "PYTHONPATH": str(Path(flowx.__file__).resolve().parents[1])}
+    killed = subprocess.run(
+        [sys.executable, "-c", _KILLED_ENRICH, str(tmp_path), json.dumps(authored)], env=environment, check=False
+    )
+    assert killed.returncode == 1
+    assert (metadata / ".enrich.lock").exists()
+
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+
+    assert not (metadata / ".enrich.lock").exists()
+    assert enrich_inventory(tmp_path, insights=authored)["ok"] is True
+
+
 def test_the_enrich_after_a_killed_one_clears_its_temp_files(tmp_path: Path) -> None:
     """Kill an enrich between its two replaces, clear the lock as instructed, and enrich again."""
     inventory_path = _discover(tmp_path)
