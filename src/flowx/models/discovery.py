@@ -1,40 +1,15 @@
 """Source-neutral discovery graph contract (``SourceGraph``), kept faithful to each source.
 
-The Databricks IR in :mod:`flowx.models.ir` is a *target* model: it keeps only
-what Databricks needs to run a workflow, so it is deliberately lossy about the
-source. The discovery layer needs the opposite -- a source-*faithful*,
-standardised model that both Azure Data Factory and Apache Airflow map onto
-without either being flattened to a lowest common denominator. This module
-defines that model. It is the contract the per-source mappers (#62 for ADF, #63
-for Airflow) align to. Each source keeps its own parser -- the ADF JSON AST, and
-Airflow's Python AST capture and claim pass -- and projects what it captured into
-this graph; the contract does not replace either parser.
+The Databricks IR in :mod:`flowx.models.ir` keeps only what Databricks needs to
+run a workflow. This model keeps what the source said, so ADF and Airflow can
+both map onto it without being flattened. Each source keeps its own parser and
+projects what it captured into this graph.
 
-Design shape: a small shared **core** of genuinely common concepts as typed
-fields, plus an explicit **extension seam** so nothing platform-specific is
-lost. Every graph and node carries:
-
-* ``raw`` -- the verbatim source dict (the ADF activity/pipeline JSON, the
-  Airflow capture), so a mapper can always fall back to the original; and
-* ``properties`` / ``extensions`` -- a free-form bag for platform-specific
-  attributes that have no shared typed field yet.
-
-The typed field set is intentionally minimal. Concepts get promoted to typed
-fields only once they are genuinely shared; everything else rides in
-``raw`` / ``extensions`` until a later PR promotes it. In particular there is
-**no typed Connection / linked-service field yet** -- connection and
-linked-service details ride in ``properties`` / ``extensions`` for now. That is
-a deliberate expansion point, not an oversight.
-
-The lineage primitives from #61 (:class:`~flowx.models.ir.DataAsset`) are
-reused here rather than duplicated: a node's reads and writes are lists of
-``DataAsset``, so the discovery graph and the lineage substrate share one
-vocabulary for describing data references. That description is general and
-best-effort, not physical-only -- ``identity`` is the strong physical id when
-resolvable (else ``None``, never guessed), ``signature`` is the always-present
-weak descriptor, and ``asset_type`` is an open kind that also covers
-non-physical / logical / value hand-offs (e.g. an Airflow XCom). Each source
-populates what it can; empty reads/writes are valid.
+Only genuinely shared concepts are typed fields; the rest stays reachable. A
+graph carries ``raw``, ``properties`` and ``extensions``, and a node carries
+``raw`` and ``properties``. There is no typed connection or linked-service field
+yet, so those details ride in ``properties``. A node's reads and writes use the
+shared lineage types in :mod:`flowx.models.lineage`.
 """
 
 from __future__ import annotations
@@ -42,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from flowx.models.ir import DataAsset, Lineage
+from flowx.models.lineage import DataAsset, Lineage
 
 # --------------------------------------------------------------------------- #
 # Well-known discriminators and concepts (open vocabularies).
@@ -197,7 +172,7 @@ class SourceNode:
         policy: Retry / timeout policy, when the source declares one on the
             node; falls back to :attr:`SourceGraph.default_policy` otherwise.
         data_reads: Best-effort description of what this node reads, as
-            :class:`~flowx.models.ir.DataAsset` values (reuses #61). Population
+            :class:`~flowx.models.lineage.DataAsset` values (reuses #61). Population
             is best-effort and open -- physical tables/files, logical datasets,
             or value hand-offs (an Airflow XCom) alike -- and an empty list is
             valid where the source records nothing.
@@ -286,7 +261,7 @@ class SourceGraph:
             :class:`ContainerNode`.
         lineage: Source-neutral lineage block (control/data edges) derived over
             this graph, or ``None`` when lineage has not been derived. Reuses the
-            #61 :class:`~flowx.models.ir.Lineage` type so the discovery graph and
+            #61 :class:`~flowx.models.lineage.Lineage` type so the discovery graph and
             the IR lineage substrate share one vocabulary; populated by
             :mod:`flowx.discovery_lineage` in the discover phase.
         properties: Free-form bag for graph-level platform-specific attributes.

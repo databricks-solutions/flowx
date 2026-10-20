@@ -1593,6 +1593,8 @@ def _collect_environments(workflow: PreparedWorkflow) -> list[dict[str, Any]]:
         for environment in current.environments:
             if environment not in environments:
                 environments.append(environment)
+    # TODO: a combined multi-DAG bundle renames authored files below src/<dag>/, but only task paths are
+    # rewritten, so a ``../src/<path>`` dependency in an environment spec keeps pointing at the old location.
     return environments
 
 

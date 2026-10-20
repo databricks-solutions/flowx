@@ -1328,3 +1328,76 @@ def test_merged_agentic_component_keeps_the_placeholder_source_metadata_it_leave
     assert task["email_notifications"] == {
         ("on_success" if agent_sets_notifications else "on_failure"): [expected_recipient]
     }
+
+
+def _inside_for_each_holding_an_if_condition(activity: AgenticComponentActivity) -> ForEachActivity:
+    return ForEachActivity(
+        name="Loop", task_key="loop", items_expression='["a"]', inner_activities=[_inside_if_condition(activity)]
+    )
+
+
+@pytest.mark.parametrize(
+    ("body_payload", "environments"),
+    [
+        (
+            {
+                "notebook_task": {
+                    "notebook_path": "/Workspace/Shared/etl/load_table",
+                    "base_parameters": {"table": "{{input.table_name}}", "env": "{{job.parameters.env}}"},
+                },
+                "existing_cluster_id": "0101-abc",
+            },
+            [],
+        ),
+        (
+            {
+                "spark_python_task": {
+                    "python_file": "/Workspace/Shared/etl/load_table.py",
+                    "parameters": ["--table", "{{input.table_name}}", "--env", "{{job.parameters.env}}"],
+                },
+                "environment_key": "serverless",
+            },
+            [SERVERLESS_ENVIRONMENT],
+        ),
+    ],
+    ids=["notebook_task", "spark_python_task"],
+)
+@pytest.mark.parametrize(
+    "wrap", [_inside_for_each, _inside_for_each_with_siblings, _inside_for_each_holding_an_if_condition]
+)
+def test_authored_loop_body_inside_a_for_each_job_keeps_its_own_input_references(
+    tmp_path, wrap, body_payload, environments
+):
+    """``{{input.x}}`` in an agent-written loop body names that loop's item, not the outer loop's job parameters.
+
+    The authored loop runs in its own job, since a loop cannot be the body of another loop, and the
+    outer job parameters its inputs and body name are forwarded into that job.
+    """
+    component = AgenticComponentActivity(
+        name="Load tables",
+        task_key="load_tables",
+        task={
+            "for_each_task": {"inputs": "{{job.parameters.tables}}", "task": {"task_key": "load_table", **body_payload}}
+        },
+        environments=environments,
+    )
+    pipeline_parameters = [{"name": "env", "default": "dev"}, {"name": "tables", "default": "[]"}]
+
+    write_bundle(
+        prepare_workflow(Pipeline(name="orders", parameters=pipeline_parameters, tasks=[wrap(component)])), tmp_path
+    )
+
+    jobs_by_task_key = _jobs_by_task_key(tmp_path)
+    inner_job = jobs_by_task_key["load_table"]
+    authored_loop = next(task for task in inner_job["tasks"] if task["task_key"] == "load_tables")
+    assert authored_loop["for_each_task"]["inputs"] == "{{job.parameters.tables}}"
+    assert authored_loop["for_each_task"]["task"] == {"task_key": "load_table", **body_payload}
+    inner_parameter_names = [parameter["name"] for parameter in inner_job.get("parameters") or []]
+    # Nor is the body's own item forwarded from the outer loop as a job parameter.
+    assert "table_name" not in inner_parameter_names
+    assert {"env", "tables"} <= set(inner_parameter_names)
+    outer_loop = next(task for task in jobs_by_task_key["loop"]["tasks"] if task["task_key"] == "loop")
+    forwarded = outer_loop["for_each_task"]["task"]["run_job_task"]["job_parameters"]
+    assert forwarded["env"] == "{{job.parameters.env}}"
+    assert forwarded["tables"] == "{{job.parameters.tables}}"
+    assert "table_name" not in forwarded

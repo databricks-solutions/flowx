@@ -293,3 +293,77 @@ def test_invocation_target_that_is_not_a_string_stays_unresolved() -> None:
     edges = build_graph_lineage(graph, known_workflows={"['child']", "7", "child"}).control_edges
     assert [(edge.target_workflow, edge.resolved) for edge in edges] == [("", False), ("", False), ("", False)]
     assert edges[0].wait_for_completion is None
+
+
+# --------------------------------------------------------------------------- #
+# Nested containers, identity-tier types and the control-edge dedupe key
+# --------------------------------------------------------------------------- #
+
+
+def _container(task_key: str, **branches: list[SourceNode]) -> ContainerNode:
+    return ContainerNode(source_id=task_key, task_key=task_key, concept="x", source=SOURCE_ADF, branches=dict(branches))
+
+
+def test_walk_nodes_descends_into_a_container_inside_a_container() -> None:
+    inner = _container("inner", body=[_node("deep")])
+    outer = _container("outer", true=[inner, _node("beside")], false=[_node("other")])
+    assert [node.task_key for node in walk_nodes([outer, _node("after")])] == [
+        "outer",
+        "inner",
+        "deep",
+        "beside",
+        "other",
+        "after",
+    ]
+
+
+def test_invoke_inside_a_container_inside_a_container_gives_a_control_edge() -> None:
+    """A call two containers deep (a ForEach inside an If) is still found and resolved."""
+    call = _node("run_child", invokes="child", wait=True)
+    graph = _graph(_container("if", true=[_container("loop", body=[call])], false=[]), name="parent")
+
+    edges = build_graph_lineage(graph, known_workflows={"parent", "child"}).control_edges
+
+    assert [(edge.target_workflow, edge.via_task_key, edge.resolved, edge.wait_for_completion) for edge in edges] == [
+        ("child", "run_child", True, True)
+    ]
+
+
+def test_data_edge_between_nodes_nested_in_different_containers() -> None:
+    """A writer inside a loop inside an If hands off to a reader inside a Switch inside another loop."""
+    writer = _node("writer", writes=[DataAsset(signature="ds", identity="x.y")])
+    reader = _node("reader", reads=[DataAsset(signature="ds", identity="x.y")])
+    graph = _graph(
+        _container("if", true=[_container("loop_a", body=[writer])]),
+        _container("loop_b", body=[_container("switch", caseA=[reader], default=[])]),
+    )
+
+    edges = build_graph_lineage(graph).data_edges
+
+    assert [(edge.source_task_key, edge.target_task_key, edge.match_kind) for edge in edges] == [
+        ("writer", "reader", "identity")
+    ]
+
+
+def test_identity_match_needs_the_same_asset_type_when_both_are_known() -> None:
+    """A table and a file that resolve to the same identity are still different things and never link."""
+    mismatched = _graph(
+        _node("writer", writes=[DataAsset(signature="w", identity="sales.orders", asset_type="table")]),
+        _node("reader", reads=[DataAsset(signature="r", identity="sales.orders", asset_type="file")]),
+    )
+    one_side_unknown = _graph(
+        _node("writer", writes=[DataAsset(signature="w", identity="sales.orders", asset_type="table")]),
+        _node("reader", reads=[DataAsset(signature="r", identity="sales.orders")]),
+    )
+    assert build_graph_lineage(mismatched).data_edges == []
+    assert [edge.match_kind for edge in build_graph_lineage(one_side_unknown).data_edges] == ["identity"]
+
+
+def test_calls_that_differ_only_in_wait_are_kept_apart() -> None:
+    """Two calls to the same callee from the same task that disagree on waiting are not merged into one."""
+    edges = control_edges_from_calls(
+        "parent",
+        [("child", True, "call"), ("child", False, "call"), ("child", True, "call")],
+        known_workflows={"child"},
+    )
+    assert [edge.wait_for_completion for edge in edges] == [True, False]

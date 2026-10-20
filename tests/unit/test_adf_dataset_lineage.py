@@ -313,13 +313,14 @@ def test_table_without_linked_service_has_no_identity() -> None:
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orphan"), definitions) is None
 
 
-def test_identity_resolves_dataset_param_from_call_site_literal() -> None:
-    """A ``@dataset().table`` expression resolves when the call site passes a literal."""
+@pytest.mark.parametrize("table", ["@dataset().tbl", "@dataset()?.tbl", " @dataset().tbl "])
+def test_identity_resolves_dataset_param_from_call_site_literal(table: str) -> None:
+    """A ``@dataset().tbl`` expression, also written with ``?.``, resolves when the call site passes a literal."""
     dataset = AdfDataset(
         name="ds_param",
         type="AzureSqlTable",
         properties={
-            "typeProperties": {"schema": "dbo", "table": "@dataset().tbl"},
+            "typeProperties": {"schema": "dbo", "table": table},
             "parameters": {"tbl": {"type": "String"}},
             "linkedServiceName": {"referenceName": "ls_sql"},
         },
@@ -646,6 +647,108 @@ def test_bracket_quoted_sql_names_keep_their_identity() -> None:
     )
 
 
+@pytest.mark.parametrize("table", ["[Sales (2024)]", "[Order Details]", "[Sales(2024)]", "[Q1 (draft) totals]"])
+def test_a_bracket_quoted_table_name_with_parentheses_keeps_its_identity(table: str) -> None:
+    """``[Sales (2024)]`` is a SQL name, not an ARM call: only ARM's own functions make an ARM expression."""
+    definitions = _definitions(ds_sales=_table_dataset("ds_sales", schema="dbo", table=table))
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_sales"), definitions) == (
+        f"ls_sql/dbo.{table}"
+    )
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "[parameters('table')]",
+        "[concat('orders_', parameters('region'))]",
+        "[ toLower(variables('table')) ]",
+        "[Parameters ('table')]",
+        "[listKeys(resourceId('x'), '2021-01-01').keys[0].value]",
+        "[contoso.tableName('orders')]",
+        "[distinct(createArray('Orders'))]",
+        "[someFutureFunction('orders')]",
+    ],
+)
+def test_an_unevaluated_arm_expression_table_name_has_no_identity(table: str) -> None:
+    """An ARM template function call, in any case or spacing, is still unresolved and gives no identity."""
+    definitions = _definitions(ds_sales=_table_dataset("ds_sales", schema="dbo", table=table))
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_sales"), definitions) is None
+
+
+def _azure_storage_dataset(name: str, *, connector: str, container: str, linked_service: str) -> AdfDataset:
+    """A ``landing/orders.csv`` dataset in *container*, through the Blob or the ADLS Gen2 connector."""
+    location_type, container_key = {
+        "blob": ("AzureBlobStorageLocation", "container"),
+        "adls": ("AzureBlobFSLocation", "fileSystem"),
+    }[connector]
+    return AdfDataset(
+        name=name,
+        type="DelimitedText",
+        properties={
+            "typeProperties": {
+                "location": {
+                    "type": location_type,
+                    container_key: container,
+                    "folderPath": "landing",
+                    "fileName": "orders.csv",
+                }
+            },
+            "linkedServiceName": {"referenceName": linked_service},
+        },
+    )
+
+
+def _azure_storage_linked_service(name: str, *, connector: str, account: str) -> AdfLinkedService:
+    linked_service_type, endpoint = {"blob": ("AzureBlobStorage", "blob"), "adls": ("AzureBlobFS", "dfs")}[connector]
+    return AdfLinkedService(
+        name=name,
+        type=linked_service_type,
+        properties={"typeProperties": {"url": f"https://{account}.{endpoint}.core.windows.net"}},
+    )
+
+
+@pytest.mark.parametrize(
+    ("reader_account", "reader_container", "links"),
+    [("acct", "sales", True), ("other", "sales", False), ("acct", "hr", False)],
+)
+def test_blob_and_adls_gen2_reach_the_same_files_on_the_same_account(
+    reader_account: str, reader_container: str, links: bool
+) -> None:
+    """A Copy writing through Blob and a reader using ADLS Gen2 on the same account and container touch the same file.
+
+    A storage account name is unique across Azure, and both connectors are endpoints onto that account, so one
+    canonical ``abfss://`` identity joins them. A different account or container is a different file.
+    """
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_blob": _azure_storage_dataset("ds_blob", connector="blob", container="sales", linked_service="ls_blob"),
+            "ds_adls": _azure_storage_dataset(
+                "ds_adls", connector="adls", container=reader_container, linked_service="ls_adls"
+            ),
+        },
+        linked_services={
+            "ls_blob": _azure_storage_linked_service("ls_blob", connector="blob", account="acct"),
+            "ls_adls": _azure_storage_linked_service("ls_adls", connector="adls", account=reader_account),
+        },
+    )
+    write = AdfActivity(name="WriteBlob", type="Copy", outputs=[AdfDatasetReference(reference_name="ds_blob")])
+    read = AdfActivity(name="ReadAdls", type="Copy", inputs=[AdfDatasetReference(reference_name="ds_adls")])
+    _, writes = activity_data_assets(write, definitions)
+    reads, _ = activity_data_assets(read, definitions)
+
+    assert writes[0].identity == "abfss://sales@acct.dfs.core.windows.net/landing/orders.csv"
+    assert reads[0].identity == f"abfss://{reader_container}@{reader_account}.dfs.core.windows.net/landing/orders.csv"
+    edges = data_edges_from_endpoints(
+        [("WriteBlob", asset) for asset in writes], [("ReadAdls", asset) for asset in reads]
+    )
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == (
+        [("identity", "abfss://sales@acct.dfs.core.windows.net/landing/orders.csv")] if links else []
+    )
+
+
 def test_arm_expression_storage_url_has_no_path_identity() -> None:
     """An unevaluated ARM ``url`` is checked whole, so a cut-off fragment never stands in for the account."""
     arm_lake = AdfLinkedService(
@@ -790,6 +893,81 @@ def test_stored_procedure_source_and_sink_get_no_identity() -> None:
     assert [asset.identity for asset in activity_data_assets(lookup, definitions)[0]] == [None]
     assert [asset.identity for asset in copy_writes] == [None]
     assert [asset.identity for asset in copy_reads] == ["ls_sql/dbo.Orders"]
+
+
+@pytest.mark.parametrize(
+    "empty_value", ["", {"type": "Expression", "value": ""}, {"value": None, "type": "Expression"}]
+)
+def test_an_empty_override_wrapped_in_an_expression_keeps_the_dataset_identity(empty_value: object) -> None:
+    """An Expression object with an empty value overrides nothing, exactly like a bare empty string."""
+    definitions = _definitions(ds_orders=_table_dataset("ds_orders", schema="dbo", table="Orders"))
+    lookup = AdfActivity(
+        name="Lookup",
+        type="Lookup",
+        type_properties={
+            "source": {"type": "SqlSource", "sqlReaderQuery": empty_value},
+            "dataset": {"referenceName": "ds_orders"},
+        },
+    )
+    copy = AdfActivity(
+        name="Copy",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_orders")],
+        type_properties={"sink": {"type": "SqlSink", "sqlWriterStoredProcedureName": empty_value}},
+    )
+    lake_read = AdfActivity(
+        name="ReadLake",
+        type="Copy",
+        inputs=[AdfDatasetReference(reference_name="ds_lake")],
+        type_properties={"source": {"type": "DelimitedTextSource", "storeSettings": {"wildcardFileName": empty_value}}},
+    )
+
+    assert [asset.identity for asset in activity_data_assets(lookup, definitions)[0]] == ["ls_sql/dbo.Orders"]
+    assert [asset.identity for asset in activity_data_assets(copy, definitions)[1]] == ["ls_sql/dbo.Orders"]
+    assert [asset.identity for asset in activity_data_assets(lake_read, _lake_definitions())[0]] == [
+        "abfss://data@acct.dfs.core.windows.net/landing"
+    ]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"type": "Expression", "value": "@concat('SELECT * FROM ', item().t)"},
+        {"type": "AzureKeyVaultSecret", "secretName": "orders-query"},
+        {"text": "SELECT * FROM elsewhere"},
+    ],
+)
+def test_a_non_empty_query_object_still_overrides(query: dict) -> None:
+    """Any query object that is not an empty Expression replaces what the Lookup reads, so the identity goes."""
+    definitions = _definitions(ds_orders=_table_dataset("ds_orders", schema="dbo", table="Orders"))
+    lookup = AdfActivity(
+        name="Lookup",
+        type="Lookup",
+        type_properties={
+            "source": {"type": "SqlSource", "sqlReaderQuery": query},
+            "dataset": {"referenceName": "ds_orders"},
+        },
+    )
+
+    assert [(asset.identity, asset.signature) for asset in activity_data_assets(lookup, definitions)[0]] == [(None, "")]
+
+
+def test_an_override_wrapped_in_an_expression_with_a_value_still_overrides() -> None:
+    """A non-empty Expression query still replaces what the activity reads."""
+    definitions = _definitions(ds_orders=_table_dataset("ds_orders", schema="dbo", table="Orders"))
+    lookup = AdfActivity(
+        name="Lookup",
+        type="Lookup",
+        type_properties={
+            "source": {
+                "type": "SqlSource",
+                "sqlReaderQuery": {"type": "Expression", "value": "@concat('SELECT * FROM ', item().t)"},
+            },
+            "dataset": {"referenceName": "ds_orders"},
+        },
+    )
+
+    assert [asset.identity for asset in activity_data_assets(lookup, definitions)[0]] == [None]
 
 
 def test_connector_specific_query_read_gets_no_identity_edge() -> None:

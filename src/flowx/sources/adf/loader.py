@@ -415,7 +415,7 @@ def parse_activity(data: dict[str, Any]) -> AdfActivity:
                 case_value = str(raw_case.get("value", ""))
                 case_activities = [parse_activity(raw_activity) for raw_activity in raw_case.get("activities", [])]
                 if case_activities:
-                    parsed_cases[case_value] = case_activities
+                    parsed_cases.setdefault(case_value, []).extend(case_activities)
             if parsed_cases:
                 switch_cases = parsed_cases
         raw_default = type_properties.get("defaultActivities")
