@@ -1,7 +1,7 @@
 """Source-neutral lineage-edge cores.
 
 Primitive-level building blocks for deriving lineage edges. They take only
-``task_key`` strings and :class:`~flowx.models.ir.DataAsset` values -- never a
+``task_key`` strings and :class:`~flowx.models.lineage.DataAsset` values -- never a
 ``Pipeline`` or any ``Activity`` -- so the tier-matching, self-edge drop, and
 dedup rules live in exactly one place. The discovery-graph derivation in
 :mod:`flowx.discovery_lineage` gathers those primitives from a
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable
 
-from flowx.models.ir import ControlEdge, DataAsset, DataEdge
+from flowx.models.lineage import ControlEdge, DataAsset, DataEdge
 
 
 def control_edges_from_calls(
@@ -47,15 +47,17 @@ def control_edges_from_calls(
     Returns:
         Deduplicated control edges in first-seen order. A call whose target equals
         ``source_workflow`` is dropped (no self-edge); an empty or unknown target is
-        kept with ``resolved=False`` rather than dropped.
+        kept with ``resolved=False`` rather than dropped. Two calls are duplicates
+        only when the target, the calling task and ``wait_for_completion`` all match,
+        so calls that differ only in waiting stay separate edges.
     """
     edges: list[ControlEdge] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, bool | None]] = set()
     for target, wait, via_task_key in calls:
         target_name = target or ""
         if target_name and target_name == source_workflow:
             continue
-        key = (source_workflow, target_name, via_task_key)
+        key = (source_workflow, target_name, via_task_key, wait)
         if key in seen:
             continue
         seen.add(key)
@@ -81,18 +83,19 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
       *not* fall through to a signature match; that is what manufactured the
       spurious edges #36 removed. An empty identity counts as unresolved.
     - **signature** -- when at least one identity is unresolved, fall back to the
-      neutral descriptor and match on equal, non-empty signatures. When both sides
-      name their ``asset_type`` and the types differ (compared exactly), they are
-      different things that happen to share a weak name, so they do not match.
+      neutral descriptor and match on equal, non-empty signatures.
+
+    In both tiers, when both sides name their ``asset_type`` and the types differ
+    (compared exactly), they are different things, so they do not match.
 
     Returns:
         ``(match_kind, match_key, identity)`` when the pair matches, else ``None``.
     """
+    if producer.asset_type and consumer.asset_type and producer.asset_type != consumer.asset_type:
+        return None
     if producer.identity and consumer.identity:
         if producer.identity == consumer.identity:
             return "identity", producer.identity, producer.identity
-        return None
-    if producer.asset_type and consumer.asset_type and producer.asset_type != consumer.asset_type:
         return None
     if producer.signature and producer.signature == consumer.signature:
         # A signature match proves nothing physical, so it never claims either side's identity.

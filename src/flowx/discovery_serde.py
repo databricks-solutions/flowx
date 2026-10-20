@@ -18,7 +18,7 @@ always-present ``signature``, and an open ``asset_type`` that also covers
 non-physical / logical / value hand-offs (e.g. an Airflow XCom). When a writer and
 a reader of one asset both set ``asset_type``, the signature tier matches them only
 if the two are exactly equal, so both sides must spell the type the same way. A
-graph's derived :class:`~flowx.models.ir.Lineage` block is serialised through ``ir_serde``'s
+graph's derived :class:`~flowx.models.lineage.Lineage` block is serialised through ``ir_serde``'s
 ``lineage_to_dict`` for the same reason; its inverse (:func:`_lineage_from_dict`)
 lives here because ``ir_serde`` ships only the forward direction.
 
@@ -46,7 +46,7 @@ from flowx.models.discovery import (
     SourceGraph,
     SourceNode,
 )
-from flowx.models.ir import ControlEdge, DataEdge, Lineage, MotifAnnotation
+from flowx.models.lineage import ControlEdge, DataEdge, Lineage, MotifAnnotation
 
 SOURCE_GRAPHS_FILENAME = "source_graphs.json"
 SOURCE_GRAPHS_CONTRACT_VERSION = "1"
