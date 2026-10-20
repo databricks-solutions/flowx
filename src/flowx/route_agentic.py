@@ -197,22 +197,32 @@ def routing_record_mismatches(record: dict[str, Any], plan: dict[str, Any]) -> l
     planned = routing_units(plan)
     mismatches: list[str] = []
     for unit_id in sorted(set(recorded) | set(planned)):
-        entry = recorded.get(unit_id)
-        decided = planned.get(unit_id)
-        if not isinstance(entry, dict):
-            mismatches.append(f"component {unit_id!r} is in the plan but not in the routing record")
-        elif decided is None:
+        if unit_id not in planned:
             mismatches.append(f"component {unit_id!r} is in the routing record but not in the plan")
-        elif sorted(entry.get("members") or []) != decided["members"]:
-            mismatches.append(f"component {unit_id!r} was routed with different members than the plan lists")
-        elif entry.get("decision") != decided["decision"]:
-            mismatches.append(
-                f"component {unit_id!r} was routed {entry.get('decision')!r} but the plan decides "
-                f"{decided['decision']!r}"
-            )
-        elif decided["decision"] != DECISION_AGENTIC and entry.get("outcome") != OUTCOME_DETERMINISTIC:
-            mismatches.append(f"a fill was applied to component {unit_id!r}, which the plan routes deterministic")
+            continue
+        mismatch = unit_record_mismatch(unit_id, recorded.get(unit_id), planned[unit_id])
+        if mismatch is not None:
+            mismatches.append(mismatch)
     return mismatches
+
+
+def unit_record_mismatch(unit_id: str, entry: Any, unit: dict[str, Any]) -> str | None:
+    """Why a unit's routing-record entry does not show route applied the plan's unit, or ``None`` when it does.
+
+    Args:
+        unit_id: The unit's id.
+        entry: The unit's entry in the routing record, or ``None`` when it has none.
+        unit: The unit as :func:`routing_units` reads it from the plan.
+    """
+    if not isinstance(entry, dict):
+        return f"component {unit_id!r} is in the plan but not in the routing record"
+    if sorted(entry.get("members") or []) != unit["members"]:
+        return f"component {unit_id!r} was routed with different members than the plan lists"
+    if entry.get("decision") != unit["decision"]:
+        return f"component {unit_id!r} was routed {entry.get('decision')!r} but the plan decides {unit['decision']!r}"
+    if unit["decision"] != DECISION_AGENTIC and entry.get("outcome") != OUTCOME_DETERMINISTIC:
+        return f"a fill was applied to component {unit_id!r}, which the plan routes deterministic"
+    return None
 
 
 def routed_agentic_pipelines(report: Any) -> set[str]:

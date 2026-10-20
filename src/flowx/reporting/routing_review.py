@@ -355,15 +355,22 @@ def _groupings(plan: ConversionPlan, dropped_groupings: list[dict[str, Any]]) ->
 
 
 def _conversion(units: dict[str, dict[str, Any]], outcomes: dict[str, Any]) -> str:
-    """What happens next: where conversion stands per unit, and whether the bundle can be packaged."""
-    from flowx.route_agentic import OUTCOME_AGENTIC_APPLIED
+    """What happens next: where conversion stands per unit, and whether the bundle can be packaged.
 
-    pending, automatic, waiting, ready = [], [], [], []
+    A unit decided since route last applied the plan (the routing record has no entry for it, or one
+    with other members or another decision) needs route again rather than the agent's build. With no
+    record at all, route has applied nothing agentic, so only a deterministic unit counts as applied.
+    """
+    from flowx.route_agentic import OUTCOME_AGENTIC_APPLIED, unit_record_mismatch
+
+    pending, not_applied, automatic, waiting, ready = [], [], [], [], []
     for unit_id, unit in units.items():
         recorded = outcomes.get(unit_id)
         outcome = recorded.get("outcome") if isinstance(recorded, dict) else None
         if unit["decision"] is None:
             pending.append(unit_id)
+        elif (outcomes or unit["decision"] == DECISION_AGENTIC) and unit_record_mismatch(unit_id, recorded, unit):
+            not_applied.append(unit_id)
         elif unit["decision"] == DECISION_DETERMINISTIC:
             automatic.append(unit_id)
         elif outcome == OUTCOME_AGENTIC_APPLIED:
@@ -372,6 +379,7 @@ def _conversion(units: dict[str, dict[str, Any]], outcomes: dict[str, Any]) -> s
             waiting.append(unit_id)
     states = [
         (pending, "Decision pending", "pend"),
+        (not_applied, "Decided, not applied yet", "pend"),
         (automatic, "Converts automatically", "det"),
         (waiting, "Waiting for the agent's build", "wait"),
         (ready, "Agent build ready", "agt"),
@@ -381,6 +389,8 @@ def _conversion(units: dict[str, dict[str, Any]], outcomes: dict[str, Any]) -> s
     )
     if pending:
         verdict = "The plan is not applied yet. Decide the pending groups, then run route again."
+    elif not_applied:
+        verdict = "Some decisions are not applied yet. Run route again to apply them."
     elif waiting:
         verdict = "Packaging is blocked until the agent builds every agentic unit."
     else:

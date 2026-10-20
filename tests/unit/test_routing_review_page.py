@@ -110,8 +110,19 @@ def test_a_deterministic_recommendation_with_gaps_is_not_called_automatic() -> N
     assert "2 activities can&#x27;t convert 1:1 (Until)." in components
 
 
+def _recorded(members: list[str], decision: str, outcome: str) -> dict[str, Any]:
+    """One unit's routing-record entry, as route writes it."""
+    return {"members": members, "decision": decision, "outcome": outcome}
+
+
 def test_what_happens_next_counts_each_state_and_says_what_blocks_packaging() -> None:
-    record = {"components": {"component-2": {"outcome": "agentic-applied", "output_sha256": "abc"}}}
+    record = {
+        "components": {
+            "component-1": _recorded(["extract"], "agentic", "agentic-not-viable"),
+            "component-2": {**_recorded(["mart"], "agentic", "agentic-applied"), "output_sha256": "abc"},
+            "component-3": _recorded(["solo"], "deterministic", "deterministic"),
+        }
+    }
     decided = _plan(
         components=[
             ComponentPlan(component_id="component-1", members=["extract"], decision="agentic"),
@@ -128,6 +139,34 @@ def test_what_happens_next_counts_each_state_and_says_what_blocks_packaging() ->
     assert "<strong>component-1</strong>: the agent builds extract with fill-agentic." in waiting
     assert '<span class="pill pill-agt">1</span><span>Agent build ready</span>' in waiting
     assert '<span class="pill pill-det">1</span><span>Converts automatically</span>' in waiting
+
+
+def test_a_decision_route_has_not_applied_says_to_run_route_again_not_to_wait_for_the_agent() -> None:
+    """A unit decided since the last route needs route, not the agent's build, so it gets its own state."""
+    decided = _plan(
+        components=[
+            ComponentPlan(component_id="component-1", members=["extract"], decision="agentic"),
+            ComponentPlan(component_id="component-2", members=["mart"], decision="agentic"),
+            ComponentPlan(component_id="component-3", members=["solo"], decision="deterministic"),
+        ]
+    )
+    record = {
+        "components": {
+            "component-1": _recorded(["extract"], "deterministic", "deterministic"),
+            "component-2": _recorded(["mart"], "agentic", "agentic-not-viable"),
+            "component-3": _recorded(["solo"], "agentic", "agentic-applied"),
+        }
+    }
+
+    conversion = _section(render_routing_review(decided, None, record), "conversion")
+    never_routed = _section(render_routing_review(decided, None, None), "conversion")
+
+    assert '<span class="pill pill-pend">2</span><span>Decided, not applied yet</span>' in conversion
+    assert "Some decisions are not applied yet. Run route again to apply them." in conversion
+    assert "<strong>component-2</strong>: the agent builds mart with fill-agentic." in conversion
+    assert "<strong>component-1</strong>" not in conversion
+    assert '<span class="pill pill-pend">2</span><span>Decided, not applied yet</span>' in never_routed
+    assert '<span class="pill pill-det">1</span><span>Converts automatically</span>' in never_routed
 
 
 def test_a_grouping_says_why_and_whether_it_is_accepted() -> None:
