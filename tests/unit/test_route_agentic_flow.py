@@ -21,6 +21,7 @@ The confirmed flow, built here:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -619,6 +620,96 @@ def test_an_untargeted_merge_is_checked_where_it_lands_after_earlier_merges(tmp_
     with pytest.raises(ValueError, match=re.escape(ROUTED_AGENTIC_MERGE_REFUSED)):
         merge_agentic_results(report_path, results_dir)
     assert report_path.read_bytes() == routed_report
+
+
+_LOAD_GAP = {"activity_name": "Load", "activity_type": "Script", "raw_definition": None}
+
+
+def _route_parent_agentic_over_a_child_gap(output_dir: Path) -> None:
+    """Route 'parent' agentic over convert's output, where 'child''s 'Load' is a gap in gaps.json too."""
+    _write_work(output_dir, _report_with_child_gap(), gaps=[_LOAD_GAP])
+    metadata = output_dir / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "inventory.json").write_text(json.dumps(_two_component_inventory(), indent=2), encoding="utf-8")
+    _route_two_components(output_dir, parent="agentic", child="deterministic")
+
+
+def _gap_keys(output_dir: Path) -> list[tuple[Any, Any]]:
+    gaps = json.loads((output_dir / WORK_DIRNAME / GAPS_FILENAME).read_text(encoding="utf-8"))
+    return [(gap.get("pipeline"), gap.get("activity_name")) for gap in gaps]
+
+
+def test_a_live_merge_takes_the_gap_it_filled_out_of_gaps_json(tmp_path: Path) -> None:
+    _route_parent_agentic_over_a_child_gap(tmp_path)
+    assert _gap_keys(tmp_path) == [(None, "Load"), ("parent", "Extract")]
+    _write_merge_result(tmp_path / "agentic_results", "child", "Load", "load")
+
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, tmp_path / "agentic_results") == (1, 0)
+
+    assert _gap_keys(tmp_path) == [("parent", "Extract")]
+
+
+def test_a_re_route_keeps_a_filled_gap_out_of_gaps_json(tmp_path: Path) -> None:
+    """Route rebuilds gaps.json from convert's saved gaps, so it drops a stored fill's gap just as the merge did."""
+    _route_parent_agentic_over_a_child_gap(tmp_path)
+    _write_merge_result(tmp_path / "agentic_results", "child", "Load", "load")
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, tmp_path / "agentic_results") == (1, 0)
+    gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
+    merged_gaps = gaps_path.read_bytes()
+
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    apply_plan(tmp_path, recorded)
+    assert gaps_path.read_bytes() == merged_gaps
+
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+    assert _gap_keys(tmp_path) == []
+
+
+def _rebuilt_gaps(report: dict[str, Any], gaps: list[dict[str, Any]], filled: list[tuple[str, str]]) -> list[Any]:
+    """The gaps route's rebuild writes for ``report`` once each ``(pipeline, activity)`` in ``filled`` is filled."""
+    report_bytes = json.dumps(report).encode("utf-8")
+    fills = [
+        {
+            "pipeline": pipeline,
+            "activity_name": activity_name,
+            "task": _notebook_task(activity_name, "filled"),
+            "baseline_report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+        }
+        for pipeline, activity_name in filled
+    ]
+    plan = _plan(parent="deterministic", child="deterministic")
+    _report, new_gaps, _record = rebuild(report, gaps, plan, None, fills, report_bytes, b"[]", inventory=None)
+    return new_gaps
+
+
+@pytest.mark.parametrize("container", [_if_with_nested_gap, _until_with_nested_gap])
+def test_a_gap_fill_of_a_container_also_drops_the_gaps_nested_in_it(container: Any) -> None:
+    report = {"pipelines": [{"name": "child", "tasks": [container("Check", "check")]}]}
+    nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
+
+    assert _rebuilt_gaps(report, [nested], [("child", "Check")]) == []
+
+
+@pytest.mark.parametrize(
+    ("other_task", "kept"),
+    [({"type": "PlaceholderActivity"}, True), ({"type": "NotebookActivity", "notebook_path": "/x"}, False)],
+    ids=["still-a-gap-elsewhere", "converted-elsewhere"],
+)
+def test_a_gap_fill_keeps_a_gap_whose_name_is_still_open_in_another_pipeline(
+    other_task: dict[str, Any], kept: bool
+) -> None:
+    """Convert's gaps carry no pipeline, so a same-named gap still open elsewhere may be that pipeline's own."""
+    report = {
+        "pipelines": [
+            {"name": "child", "tasks": [{"name": "Load", "task_key": "load", "type": "PlaceholderActivity"}]},
+            {"name": "other", "tasks": [{"name": "Load", "task_key": "load", **other_task}]},
+        ]
+    }
+
+    gaps = _rebuilt_gaps(report, [_LOAD_GAP], [("child", "Load")])
+
+    assert gaps == ([_LOAD_GAP] if kept else [])
 
 
 # --------------------------------------------------------------------------- #

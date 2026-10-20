@@ -151,7 +151,8 @@ Placeholders are replaced in place, status → `translated`. Exits non-zero if a
 matched. Add `--output <path>` to write a copy instead of overwriting. After routing, only an
 in-place merge into `.work/translation_report.json` is also stored as a gap fill in
 `metadata/agentic_conversion.json` (so a re-route keeps it, while route's saved deterministic baseline
-stays as convert wrote it); a merge written to an `--output` copy stores nothing.
+stays as convert wrote it), and its gap comes out of `.work/gaps.json`; a merge written to an `--output`
+copy stores nothing.
 
 ## Step 6.1 — Just-in-time translation configuration
 

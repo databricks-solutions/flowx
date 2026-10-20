@@ -14,6 +14,7 @@ the source-audit and graph-identity guarantees.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -703,9 +704,10 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     ``metadata/agentic_conversion.json``, so every later rebuild applies it on top of route's saved
     deterministic baseline, which is never changed. The report's routing record then carries the
     hash of the gap fills applied, so package sees that modify's configured copy predates the merge.
-    A merge written anywhere else (``output_path``, or
-    into a copy such as modify's configured report) stores nothing. Nothing is written until every
-    result has been applied.
+    Convert's gaps for the work the merge did come out of ``.work/gaps.json`` too, the same ones a
+    later route drops (see :func:`flowx.route_agentic.drop_filled_gaps`). A merge written anywhere
+    else (``output_path``, or into a copy such as modify's configured report) stores nothing and
+    leaves ``gaps.json`` alone. Nothing is written until every result has been applied.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
@@ -723,10 +725,12 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     """
     from flowx.discovery_serde import canonical_sha256
     from flowx.route_agentic import (
+        GAPS_FILENAME,
         REPORT_FILENAME,
         ROUTED_AGENTIC_MERGE_REFUSED,
         WORK_DIRNAME,
         applied_gap_fills,
+        drop_filled_gaps,
         load_agentic_output,
         load_routed_baseline,
         record_gap_fills,
@@ -746,11 +750,13 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     )
     baseline_by_name: dict[Any, dict[str, Any]] = {}
     baseline_report_sha256 = ""
+    convert_baseline: dict[str, Any] = {}
     gap_fills: list[dict[str, Any]] = []
     if updates_baseline:
         assert record is not None
         baseline_report, _, baseline_report_bytes, _ = load_routed_baseline(output_dir, record)
         baseline_report_sha256 = hashlib.sha256(baseline_report_bytes).hexdigest()
+        convert_baseline = copy.deepcopy(baseline_report)
         baseline_pipelines = baseline_report["pipelines"] if "pipelines" in baseline_report else [baseline_report]
         baseline_by_name = {pipeline.get("name"): pipeline for pipeline in baseline_pipelines}
 
@@ -803,8 +809,14 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
 
     if record is not None and gap_fills:
         record_gap_fills(output_dir, gap_fills, baseline_report_sha256)
-        stored_fills = load_agentic_output(output_dir).gap_fills
-        record["gap_fills_sha256"] = canonical_sha256(applied_gap_fills(stored_fills, baseline_report_sha256))
+        applied_fills = applied_gap_fills(load_agentic_output(output_dir).gap_fills, baseline_report_sha256)
+        record["gap_fills_sha256"] = canonical_sha256(applied_fills)
+        gaps_path = output_dir / WORK_DIRNAME / GAPS_FILENAME
+        gaps = json.loads(gaps_path.read_text(encoding="utf-8")) if gaps_path.exists() else None
+        if isinstance(gaps, list):
+            remaining = drop_filled_gaps(gaps, report, routed, convert_baseline, applied_fills)
+            if remaining != gaps:
+                gaps_path.write_text(json.dumps(remaining, indent=2, default=str), encoding="utf-8")
     destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote merged report to %s (%d merged, %d unmatched)", destination, merged, unmatched)
     return merged, unmatched

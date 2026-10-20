@@ -444,6 +444,52 @@ def applied_gap_fills(gap_fills: list[dict[str, Any]] | None, baseline_report_sh
     return [fill for fill in gap_fills or [] if fill.get("baseline_report_sha256") == baseline_report_sha256]
 
 
+def drop_filled_gaps(
+    gaps: list[Any],
+    report: dict[str, Any],
+    routed: set[str],
+    baseline_report: dict[str, Any],
+    fills: list[dict[str, Any]],
+) -> list[Any]:
+    """Take convert's gaps for the work the gap fills did out of ``gaps``, so the list shows only what's left.
+
+    A fill replaces one task, so convert's gap for it, and for every activity nested in it, is done.
+    Convert's gaps carry no pipeline, so one is dropped only when no pipeline of ``report`` outside
+    ``routed`` still has that name open: a placeholder, an activity in a placeholder's source definition,
+    or an activity a motif collapsed. A same-named gap still open in another pipeline may be that
+    pipeline's own, so it is kept. A routed pipeline's work is listed in its own pipeline-tagged gaps,
+    which are never dropped here.
+
+    Args:
+        gaps: The gaps list to filter.
+        report: The report the fills have been applied to.
+        routed: The pipelines routed agentic, or authored by fill-agentic.
+        baseline_report: Route's deterministic baseline, which holds each task as convert wrote it.
+        fills: The gap fills applied, each naming its ``pipeline`` and ``activity_name``.
+    """
+    baseline_pipelines = {pipeline.get("name"): pipeline for pipeline in _report_pipelines(baseline_report)}
+    filled: set[str] = set()
+    for fill in fills:
+        filled.add(str(fill["activity_name"]))
+        pipeline = baseline_pipelines.get(fill["pipeline"])
+        replaced = next(
+            (task for task in _walk_tasks((pipeline or {}).get("tasks")) if task.get("name") == fill["activity_name"]),
+            None,
+        )
+        if replaced is not None:
+            filled.update(_task_names([replaced]))
+    still_open: set[str] = set()
+    for pipeline in _report_pipelines(report):
+        if pipeline.get("name") not in routed:
+            still_open.update(_open_task_names(pipeline.get("tasks")))
+    done = filled - still_open
+    return [
+        gap
+        for gap in gaps
+        if not (isinstance(gap, dict) and gap.get("pipeline") is None and gap.get("activity_name") in done)
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # The pure rebuild step: deterministic, idempotent report transformation.
 # --------------------------------------------------------------------------- #
@@ -474,6 +520,9 @@ def rebuild(
       deterministic also holds that name. Outcome is ``agentic-applied``.
     * **agentic without a matching output:** placeholders and tagged gaps as ``alter_report`` does.
       Outcome is ``agentic-not-viable``, which package refuses.
+
+    Convert's gaps for the work the applied gap fills did are then dropped (see :func:`drop_filled_gaps`),
+    so the gaps list shows only what is left to convert.
 
     Each unit's record entry holds its members, decision, outcome, ``output_sha256`` (only while its
     stored output is applied, otherwise ``None``) and ``fingerprint``; the record also holds
@@ -534,6 +583,7 @@ def rebuild(
             {"members": unit["members"], "decision": unit["decision"], "output_sha256": output_sha256}
         )
         units[unit_id] = {**unit, "outcome": outcome, "output_sha256": output_sha256, "fingerprint": fingerprint}
+    new_gaps = drop_filled_gaps(new_gaps, new_report, agentic_names, baseline_report, applicable_fills)
     record = {
         "conversion_plan_sha256": canonical_sha256(plan),
         "baseline_report_sha256": baseline_report_sha256,
@@ -1010,6 +1060,22 @@ def _task_names(tasks: Any) -> set[str]:
     for task in _walk_tasks(tasks):
         names.add(str(task.get("name")))
         if task.get("type") == "PlaceholderActivity":
+            names.update(_adf_activity_names([task.get("raw_definition")]))
+        if task.get("type") == "MotifActivity":
+            names.update(str(name) for name in task.get("matched_activity_names") or [])
+    return names
+
+
+def _open_task_names(tasks: Any) -> set[str]:
+    """The names among ``tasks`` that still need converting, the only ones a convert gap can belong to.
+
+    That is each placeholder and the activities nested in its source definition, and the activities a
+    motif collapsed, looking inside containers too.
+    """
+    names: set[str] = set()
+    for task in _walk_tasks(tasks):
+        if task.get("type") == "PlaceholderActivity":
+            names.add(str(task.get("name")))
             names.update(_adf_activity_names([task.get("raw_definition")]))
         if task.get("type") == "MotifActivity":
             names.update(str(name) for name in task.get("matched_activity_names") or [])

@@ -258,6 +258,10 @@ of convert's own gaps, the plan, and the agent's outputs in `metadata/agentic_co
   the deterministic translation kept as its `raw_definition` (outcome `agentic-not-viable` — package
   refuses until it is filled).
 
+A stored fill of convert's own gap also takes that gap, and the gaps of anything nested in the filled
+task, out of `gaps.json`, so the list shows only what is left. Convert's gaps carry no pipeline name, so
+a gap is kept when another pipeline outside the routed units still has that name open.
+
 When nothing is routed agentic (and no gap fill is stored), route writes convert's report and gaps back
 byte for byte, with no record — the non-breaking guarantee. Otherwise it stamps a **routing record**
 onto the report (`_routing_record`): the plan's hash, the baseline report and gaps hashes, the hash
