@@ -1,62 +1,10 @@
-"""Source-agnostic projection of the discovery graph contract to ``inventory.json``.
+"""Project discovery graphs into the ``inventory.json`` document.
 
-The discover phase writes ``metadata/inventory.json`` and the reporting layer
-(:mod:`flowx.reporting.coverage`) and MCP surface (:mod:`flowx.mcp.runner`) read
-it back. Historically each source built that JSON straight from its own AST, so
-the shape drifted per source. This module is the single place that turns the
-discovery graph contract (:mod:`flowx.models.discovery`) into the inventory shape, so
-every source that maps onto :class:`~flowx.models.discovery.SourceGraph` emits the
-*same* top-level document -- ``{source, source_dir, pipelines, summary}`` -- from
-one code path.
-
-The projection is deliberately small and additive over the historical ADF shape:
-
-* top level gains a ``source`` discriminator (``"adf"`` / ``"airflow"``);
-* each activity keeps its byte-compatible ``name`` / ``type`` / ``strategy`` (and
-  ``depends_on`` names when present) and gains the standardised ``task_key``
-  (the node's unique key, which motif ``member_task_keys`` and source-specific
-  layers join on), ``original_type``, ``dependencies`` (upstream **with
-  conditions**), and the verbatim per-node ``raw``;
-* a node whose ``properties`` mark it ``inventory_visible: False`` (for example an
-  Airflow TaskGroup kept only for structure) is left out of the activity list and
-  the counts, while its children are still listed; any value other than exactly
-  ``False`` keeps the node listed and counted;
-* each pipeline entry gains an additive ``lineage`` block (control + data edges)
-  when its :class:`~flowx.models.discovery.SourceGraph` carries derived lineage;
-* each pipeline entry gains an additive ``motifs`` list -- the multi-activity
-  patterns a source *detects* at discover time and records on the graph itself
-  (``SourceGraph.lineage.motifs``, so they sit inside the hashed source graph),
-  surfaced here **without** collapsing the member activities. In the inventory
-  they stay **decoupled from the lineage block**: the inventory's
-  ``lineage.motifs`` is always empty, as it always has been; the key is omitted
-  when a pipeline has no detected motif. Collapse remains a *convert* decision
-  (:mod:`flowx.motifs.collapser`), never a discover one, so every member activity
-  still appears as its own entry in ``activities``;
-* the ``summary`` keeps the historical count block, and a top-level
-  ``source_graphs_sha256`` records which persisted ``source_graphs.json`` the
-  inventory was projected from, when the caller passes it.
-
-Lineage is placed per pipeline -- one block beside that pipeline's ``activities``
--- to mirror the shared discovery serde, where lineage is a per-graph field
-(:func:`flowx.discovery_serde.source_graph_to_dict`). The block is produced by the
-one shared serialiser (:func:`flowx.ir_serde.lineage_to_dict`, the same one the
-serde consumes), so its edges have the same shape as the serde's. Unlike the
-serde's block, its ``motifs`` is always empty: motifs appear only under the
-pipeline's own ``motifs`` key, so reading the inventory block back through
-:func:`flowx.discovery_serde.source_graph_from_dict` recovers the edges but not the
-motifs. It is a new key only: a graph with no derived lineage (``graph.lineage is None``) omits it
-entirely, so the historical consumer keys (``source`` / ``pipelines`` /
-``activities`` / ``summary``) are untouched.
-
-A node's translation ``strategy`` is a Databricks-*target* classification rather
-than a source concept, so it is not a typed field on the discovery graph. By
-convention a mapper stashes it under ``node.properties["strategy"]`` (see
-:data:`STRATEGY_PROPERTY`); this module reads it there. Detected motifs are
-different: they are deterministic facts about the source, so a source records
-them on the graph as :class:`~flowx.models.ir.MotifAnnotation` entries in
-``lineage.motifs`` and this module projects them. Anything else a source wants to layer on -- Airflow's
-audited-count block, findings, reconciliation status -- rides additively on top
-of this base and is out of scope here.
+Every source that maps onto :class:`~flowx.models.discovery.SourceGraph` gets the
+same ``{source, source_dir, pipelines, summary}`` document from this one code
+path, which the reporting layer and the MCP surface read back. It keeps the
+historical ADF activity keys and adds standardised ones; see
+:func:`build_source_inventory`.
 """
 
 from __future__ import annotations
@@ -66,7 +14,7 @@ from typing import Any
 from flowx.discovery_lineage import walk_nodes
 from flowx.ir_serde import lineage_to_dict
 from flowx.models.discovery import SourceGraph, SourceNode
-from flowx.models.ir import Lineage, MotifAnnotation
+from flowx.models.lineage import Lineage, MotifAnnotation
 
 # Well-known property key under which a mapper records a node's Databricks-target
 # translation strategy ("deterministic" / "agentic" / "unsupported"). Kept in the
@@ -107,10 +55,20 @@ def build_source_inventory(
             top-level key so later phases can tell which saved graph the
             inventory describes. Omitted when ``None``.
 
-    A graph whose ``lineage.motifs`` is non-empty gives its pipeline entry an
-    additive ``motifs`` list. Exact-duplicate detections (same ``motif_id`` and
-    same member set) collapse to one (see :func:`_dedupe_motif_entries`);
-    overlapping-but-distinct matches are all kept.
+    Each activity entry is built by :func:`_activity_entry`, with the strategy read
+    from ``node.properties["strategy"]`` (:data:`STRATEGY_PROPERTY`). Container
+    children are listed depth-first after their container. A node whose
+    ``inventory_visible`` property is exactly ``False`` (for example an Airflow
+    TaskGroup kept only for structure) is left out of the list and the counts,
+    while its children are still listed.
+
+    A graph with derived lineage gives its pipeline entry a ``lineage`` block with
+    its control and data edges, written by :func:`flowx.ir_serde.lineage_to_dict`.
+    That block's ``motifs`` is always empty. Detected motifs go in a separate
+    ``motifs`` list instead, and their member activities stay listed: collapsing a
+    motif is a convert decision, never a discover one. Exact-duplicate detections
+    (same ``motif_id`` and same member set) collapse to one (see
+    :func:`_dedupe_motif_entries`); overlapping-but-distinct matches are all kept.
 
     Returns:
         A JSON-friendly dict with ``source``, ``source_dir``, ``pipelines`` and

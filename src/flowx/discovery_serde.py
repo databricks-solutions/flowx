@@ -16,9 +16,9 @@ best-effort description of what a task reads/writes -- not physical-only: a
 resolvable physical ``identity`` when there is one (else ``None``), an
 always-present ``signature``, and an open ``asset_type`` that also covers
 non-physical / logical / value hand-offs (e.g. an Airflow XCom). When a writer and
-a reader of one asset both set ``asset_type``, the signature tier matches them only
-if the two are exactly equal, so both sides must spell the type the same way. A
-graph's derived :class:`~flowx.models.ir.Lineage` block goes through ``ir_serde``'s
+a reader of one asset both set ``asset_type``, lineage matches them (on identity or
+signature) only if the two are exactly equal, so both sides must spell the type the same way. A
+graph's derived :class:`~flowx.models.lineage.Lineage` block goes through ``ir_serde``'s
 ``lineage_to_dict`` / ``lineage_from_dict`` pair for the same reason.
 
 Every node dict carries a ``node_type`` discriminator (the dataclass name) so a
