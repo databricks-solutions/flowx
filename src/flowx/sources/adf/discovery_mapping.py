@@ -32,13 +32,15 @@ an ``IfCondition`` becomes ``{"true": [...], "false": [...]}``, a ``ForEach`` /
 ``Until`` becomes ``{"body": [...]}``, and a ``Switch`` becomes
 ``{"<case value>": [...], "default": [...]}``. Branch insertion order matches the
 order ADF declares the branches so a downstream flatten reproduces source order.
-A case whose value is literally ``"default"`` is keyed ``"case:default"`` (with extra
-``case:`` prefixes if another case already uses that value) so it never collides with
-the Switch's own default branch or another case.
+Every declared case is its own branch, as conversion converts every case. A case whose
+value is literally ``"default"``, or repeats an earlier case's value, is keyed with a
+``case:`` prefix (``"case:default"``, ``"case:full"``, adding more prefixes until the label
+is free) so it never collides with the Switch's own default branch or another case.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Collection
 from typing import Any
 
@@ -73,7 +75,14 @@ from flowx.models.discovery import (
     SourceNode,
 )
 from flowx.sources.adf.dataset_lineage import activity_data_assets
-from flowx.sources.adf.loader import classify_activity
+from flowx.sources.adf.loader import classify_activity, parse_activity
+
+logger = logging.getLogger(__name__)
+
+# Switch node property listing case values declared more than once: each entry is
+# ``{"value": ..., "branches": [...]}`` naming every branch label that carries the value.
+# Every case is kept, so this only flags a probably malformed Switch.
+DUPLICATE_SWITCH_CASES_PROPERTY = "duplicate_switch_cases"
 
 # Neutral trigger category for each ADF trigger type. Anything unrecognised maps
 # to ``""`` (unknown) with the ADF type preserved verbatim in the schedule
@@ -120,7 +129,7 @@ def adf_definitions_to_source_graphs(
     :attr:`SourceGraph.lineage` block is derived (control + data edges) once its
     nodes' reads / writes and invocation markers are populated -- data edges are
     joined within a single graph, matching the per-workflow scope of the shared
-    :class:`~flowx.models.ir.Lineage` model. An ``ExecutePipeline`` edge is resolved
+    :class:`~flowx.models.lineage.Lineage` model. An ``ExecutePipeline`` edge is resolved
     only when its child pipeline is one of the pipelines in this export.
 
     ``definitions`` is threaded down to the activity mapper so a node's data assets
@@ -245,7 +254,7 @@ def adf_pipeline_to_source_graph(pipeline: AdfPipeline, definitions: AdfDefiniti
     if pipeline.folder:
         properties["folder"] = pipeline.folder
 
-    return SourceGraph(
+    graph = SourceGraph(
         name=pipeline.name,
         source=SOURCE_ADF,
         parameters=_parameters_to_specs(pipeline.parameters),
@@ -255,6 +264,21 @@ def adf_pipeline_to_source_graph(pipeline: AdfPipeline, definitions: AdfDefiniti
         properties=properties,
         raw=pipeline.raw,
     )
+    _warn_duplicate_switch_cases(graph)
+    return graph
+
+
+def _warn_duplicate_switch_cases(graph: SourceGraph) -> None:
+    """Log each Switch case value that is declared more than once, naming the branches that carry it."""
+    for node in walk_nodes(graph.tasks):
+        for duplicate in node.properties.get(DUPLICATE_SWITCH_CASES_PROPERTY) or []:
+            logger.warning(
+                "Switch %r in pipeline %r declares case %r more than once; every case is kept, as branches %s",
+                node.name,
+                graph.name,
+                duplicate["value"],
+                duplicate["branches"],
+            )
 
 
 def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> SourceNode:
@@ -280,6 +304,7 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
 
     branches = _control_flow_branches(activity, definitions)
     if branches is not None:
+        _record_duplicate_switch_cases(activity, properties)
         return ContainerNode(
             source_id=activity.name,
             task_key=activity.name,
@@ -336,6 +361,8 @@ def _record_invocation(activity: AdfActivity, properties: dict[str, Any]) -> Non
     knowing anything about ADF. An empty / missing callee, or a reference that is
     neither a reference object nor a name (``null``, say), still records the marker
     with an empty target, so the edge is reported as unresolved rather than dropped.
+    Only a real boolean wait flag is recorded; ``null``, a string or a number leaves
+    the wait unset (unknown), as the shared control-edge reader expects.
     """
     if activity.type != "ExecutePipeline":
         return
@@ -345,7 +372,51 @@ def _record_invocation(activity: AdfActivity, properties: dict[str, Any]) -> Non
         reference = reference.get("referenceName")
     callee = reference if isinstance(reference, str) else ""
     properties[INVOKES_WORKFLOW_PROPERTY] = callee
-    properties[INVOKES_WAIT_PROPERTY] = bool(type_properties.get("waitOnCompletion", True))
+    wait = type_properties.get("waitOnCompletion", True)
+    if isinstance(wait, bool):
+        properties[INVOKES_WAIT_PROPERTY] = wait
+
+
+def _record_duplicate_switch_cases(activity: AdfActivity, properties: dict[str, Any]) -> None:
+    """Record, and warn about, Switch case values that more than one case declares.
+
+    Nothing is dropped: the parsed AST, the graph and conversion all keep every
+    case. A repeated value is still worth flagging, so this lists the branch labels
+    that carry it (:func:`_warn_duplicate_switch_cases` logs it once the pipeline
+    name is known).
+    """
+    if activity.type != "Switch":
+        return
+    labels_by_value: dict[str, list[str]] = {}
+    for value, label, _ in _switch_case_labels(activity):
+        labels_by_value.setdefault(value, []).append(label)
+    duplicates = [{"value": value, "branches": labels} for value, labels in labels_by_value.items() if len(labels) > 1]
+    if not duplicates:
+        return
+    properties[DUPLICATE_SWITCH_CASES_PROPERTY] = duplicates
+
+
+def _switch_case_labels(activity: AdfActivity) -> list[tuple[str, str, dict[str, Any]]]:
+    """Pair each declared Switch case with its value and a branch label no other branch uses.
+
+    A case keeps its own value as its label unless that label is taken (by the
+    default branch or an earlier case with the same value); then it gets ``case:``
+    prefixes until the label is neither taken nor any case's declared value.
+    """
+    declared_cases = (activity.type_properties or {}).get("cases") or []
+    declared_values = {str(case.get("value", "")) for case in declared_cases}
+    labels_in_use = {"default"}
+    labelled_cases: list[tuple[str, str, dict[str, Any]]] = []
+    for case in declared_cases:
+        value = str(case.get("value", ""))
+        label = value
+        if label in labels_in_use:
+            label = f"case:{label}"
+            while label in labels_in_use or label in declared_values:
+                label = f"case:{label}"
+        labels_in_use.add(label)
+        labelled_cases.append((value, label, case))
+    return labelled_cases
 
 
 def _control_flow_branches(activity: AdfActivity, definitions: AdfDefinitions) -> dict[str, list[SourceNode]] | None:
@@ -371,17 +442,12 @@ def _control_flow_branches(activity: AdfActivity, definitions: AdfDefinitions) -
         return {"body": [_activity_to_node(child, definitions) for child in (activity.activities or [])]}
     if activity.type == "Switch":
         branches: dict[str, list[SourceNode]] = {}
-        parsed_cases = activity.switch_cases or {}
-        # The parser drops a case whose activities list is empty, so the declared case labels come
-        # from the raw typeProperties; that keeps every named branch, empty ones included.
-        declared_cases = (activity.type_properties or {}).get("cases")
-        declared_values = [str(case.get("value", "")) for case in declared_cases or []]
-        default_case_label = "case:default"
-        while default_case_label in declared_values:
-            default_case_label = f"case:{default_case_label}"
-        for case_value in declared_values:
-            case_label = default_case_label if case_value == "default" else case_value
-            branches[case_label] = [_activity_to_node(child, definitions) for child in parsed_cases.get(case_value, [])]
+        # Built from the raw cases: the parsed AST merges cases that share a value and skips empty
+        # ones, while each declared case stays its own branch here.
+        for _, label, case in _switch_case_labels(activity):
+            branches[label] = [
+                _activity_to_node(parse_activity(child), definitions) for child in case.get("activities") or []
+            ]
         branches["default"] = [
             _activity_to_node(child, definitions) for child in (activity.switch_default_activities or [])
         ]

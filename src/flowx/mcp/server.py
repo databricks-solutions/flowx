@@ -327,8 +327,17 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
         if not inventory_path.is_file():
             return {"ok": False, "error": f"No inventory.json under {inventory_path.parent}; run discover first."}
         with tempfile.TemporaryDirectory(prefix="flowx-inventory-") as temporary:
-            shutil.copy(inventory_path, temporary)
-            return {"ok": True, "output_dir": str(output_dir), **_bundle_output(p, Path(temporary))}
+            copied_size = Path(shutil.copy(inventory_path, temporary)).stat().st_size
+            delivered = _bundle_output(p, Path(temporary))
+        if "bundle" in delivered and "inventory.json" not in delivered["bundle"]["files"]:
+            return {
+                "ok": False,
+                "error": (
+                    f"inventory.json ({copied_size} bytes) is too large to return inline; "
+                    "pass output_volume_path or output_workspace_path to have it uploaded there instead."
+                ),
+            }
+        return {"ok": True, "output_dir": str(output_dir), **delivered}
     if (insights is None) == (insights_path is None):
         return {"ok": False, "error": "provide exactly one of 'insights' (inline object) or 'insights_path'."}
 
@@ -604,10 +613,12 @@ def build_server() -> FastMCP:
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "enrich": action(prepare | apply, default apply). prepare: output_dir, output_volume_path,
           output_workspace_path — return metadata/inventory.json the same way package returns a
-          bundle, for the agent to author against when it cannot read output_dir. apply: output_dir(req),
+          bundle, for the agent to author against when it cannot read output_dir (ok is false when it is
+          too large to return inline; pass one of the upload paths). apply: output_dir(req),
           one of insights(inline object) | insights_path(req) — validate agent-authored discover insights
           against inventory.json, record them in agentic_insights.json, and rebuild inventory.json from
-          source_graphs.json plus that document (one enrich per output_dir at a time, idempotent). `ok`
+          source_graphs.json plus that document (one enrich per output_dir at a time absent a concurrent
+          discover, idempotent). `ok`
           reflects validation; `result.violations` lists any problems (including another enrich holding
           metadata/.enrich.lock) and both files are left untouched on failure. A lock a stopped enrich
           left behind is cleared locally by deleting it and running enrich again; on the hosted server,

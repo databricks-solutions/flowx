@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 import flowx
+from flowx import discovery_insights
 from flowx.discovery_insights import (
     AGENTIC_INSIGHTS_FILENAME,
     INSIGHTS_KEY,
@@ -428,6 +429,83 @@ def replace_then_die(source, destination):
 os.replace = replace_then_die
 enrich_inventory(Path(sys.argv[1]), insights=json.loads(sys.argv[2]))
 """
+
+
+def _pause_enrich_at(stage: str, monkeypatch: Any, paused: threading.Event, resume: threading.Event) -> None:
+    """Make a background enrich stop after reading the inventory, or after writing its temp files."""
+    if stage == "after_read":
+        real_render = discovery_insights.render_inventory
+
+        def pausing_render(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            paused.set()
+            resume.wait(timeout=10)
+            return real_render(*args, **kwargs)
+
+        monkeypatch.setattr(discovery_insights, "render_inventory", pausing_render)
+        return
+    real_write_text = Path.write_text
+
+    def pausing_write_text(self: Path, *args: Any, **kwargs: Any) -> int:
+        written = real_write_text(self, *args, **kwargs)
+        if threading.current_thread() is not threading.main_thread() and self.name == ".inventory.json.tmp":
+            paused.set()
+            resume.wait(timeout=10)
+        return written
+
+    monkeypatch.setattr(Path, "write_text", pausing_write_text)
+
+
+@pytest.mark.parametrize("stage", ["after_read", "after_temp_files"])
+def test_an_enrich_that_discover_ran_under_writes_nothing(tmp_path: Path, monkeypatch: Any, stage: str) -> None:
+    """Discover clears metadata/, the lock with it; the old insights must not overwrite the new inventory."""
+    fixtures = Path(__file__).resolve().parents[1] / "resources" / "json"
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+    metadata = tmp_path / "metadata"
+    inventory = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+    authored = {"authored_against": inventory["source_graphs_sha256"], "overview": "The fixture factory."}
+    paused, resume = threading.Event(), threading.Event()
+    _pause_enrich_at(stage, monkeypatch, paused, resume)
+    results: list[dict[str, Any]] = []
+    enrich = threading.Thread(target=lambda: results.append(enrich_inventory(tmp_path, insights=authored)))
+    enrich.start()
+    assert paused.wait(timeout=10)
+
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+    rediscovered = {path.name: path.read_bytes() for path in metadata.iterdir() if path.is_file()}
+    resume.set()
+    enrich.join(timeout=10)
+
+    assert results == [
+        {
+            "ok": False,
+            "violations": ["discover ran during this enrich; prepare and enrich again"],
+            "pipeline_insights": 0,
+            "relationships": 0,
+        }
+    ]
+    assert {path.name: path.read_bytes() for path in metadata.iterdir() if path.is_file()} == rediscovered
+    assert not (metadata / AGENTIC_INSIGHTS_FILENAME).exists()
+    assert enrich_inventory(tmp_path, insights=authored)["ok"] is True
+
+
+def test_an_enrich_whose_inventory_changed_under_it_writes_nothing(tmp_path: Path, monkeypatch: Any) -> None:
+    """With the lock still in place, a changed inventory.json alone stops the write."""
+    inventory_path = _discover(tmp_path)
+    paused, resume = threading.Event(), threading.Event()
+    _pause_enrich_at("after_read", monkeypatch, paused, resume)
+    results: list[dict[str, Any]] = []
+    enrich = threading.Thread(target=lambda: results.append(enrich_inventory(tmp_path, insights=_authored(tmp_path))))
+    enrich.start()
+    assert paused.wait(timeout=10)
+    edited = inventory_path.read_text(encoding="utf-8") + " "
+    inventory_path.write_text(edited, encoding="utf-8")
+    resume.set()
+    enrich.join(timeout=10)
+
+    assert results[0]["violations"] == ["discover ran during this enrich; prepare and enrich again"]
+    assert inventory_path.read_text(encoding="utf-8") == edited
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
+    assert not (tmp_path / "metadata" / ".enrich.lock").exists()
 
 
 def test_the_enrich_after_a_killed_one_clears_its_temp_files(tmp_path: Path) -> None:

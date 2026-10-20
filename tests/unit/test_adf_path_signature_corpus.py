@@ -1,4 +1,4 @@
-"""Corpus check of the ADF folder signature (:mod:`flowx.sources.adf.dataset_lineage`) over run-time pieces.
+"""Corpus check of the ADF folder signature (:mod:`flowx.sources.adf.path_signature`) over run-time pieces.
 
 Every run-time piece in a folder -- a parameter, a ForEach item, an activity output, a system value, or any function
 call -- must leave exactly one ``<P>`` slot where it sits: it never vanishes, and none of its argument text leaks into

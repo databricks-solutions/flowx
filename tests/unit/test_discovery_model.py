@@ -367,3 +367,14 @@ def test_non_physical_asset_type_and_empty_reads_writes_are_valid():
     # Empty reads/writes survive as empty lists, never None.
     assert reloaded.tasks[1].data_reads == []
     assert reloaded.tasks[1].data_writes == []
+
+
+def test_lineage_types_live_in_one_shared_module_and_ir_still_exports_them():
+    """Discovery and IR share one set of lineage types; the IR names stay importable for the stacked code."""
+    from flowx.models import discovery, ir
+    from flowx.models import lineage as shared
+
+    for name in ("DataAsset", "ControlEdge", "DataEdge", "MotifAnnotation", "Lineage"):
+        assert getattr(ir, name) is getattr(shared, name)
+    assert discovery.DataAsset is shared.DataAsset
+    assert discovery.Lineage is shared.Lineage

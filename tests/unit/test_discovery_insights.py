@@ -725,6 +725,21 @@ def test_mcp_enrich_prepare_returns_inventory_even_when_arm_provenance_fills_the
     assert prepared["bundle"]["files"]["inventory.json"] == inventory_path.read_text(encoding="utf-8")
 
 
+def test_mcp_enrich_prepare_fails_when_the_inventory_is_too_large_to_return_inline(tmp_path: Path) -> None:
+    """An inventory over the inline bound is dropped from the bundle, so prepare must not report success."""
+    server = pytest.importorskip("flowx.mcp.server")
+    inventory = _inventory()
+    inventory["pipelines"][0]["raw"] = {"description": "x" * 2_100_000}
+    _write_inventory(tmp_path, inventory)
+
+    prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+
+    assert prepared["ok"] is False
+    assert "bundle" not in prepared
+    assert "too large to return inline" in prepared["error"]
+    assert "output_volume_path" in prepared["error"] and "output_workspace_path" in prepared["error"]
+
+
 def test_mcp_enrich_prepare_uploads_only_the_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     server = pytest.importorskip("flowx.mcp.server")
     runner = pytest.importorskip("flowx.mcp.runner")

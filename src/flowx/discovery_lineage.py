@@ -1,6 +1,6 @@
 """Source-neutral lineage derivation over the discovery graph contract.
 
-Derives a :class:`~flowx.models.ir.Lineage` block over the source-neutral
+Derives a :class:`~flowx.models.lineage.Lineage` block over the source-neutral
 discovery graph (:mod:`flowx.models.discovery`), so the discover phase can attach
 lineage to a :class:`~flowx.models.discovery.SourceGraph` before any IR
 translation exists.
@@ -22,7 +22,7 @@ from collections.abc import Collection, Iterator
 
 from flowx.lineage import control_edges_from_calls, data_edges_from_endpoints
 from flowx.models.discovery import ContainerNode, SourceGraph, SourceNode
-from flowx.models.ir import ControlEdge, DataEdge, Lineage
+from flowx.models.lineage import ControlEdge, DataEdge, Lineage
 
 # Neutral node-property key under which a mapper records the workflow a node
 # invokes (an ADF ``ExecutePipeline`` callee, an Airflow triggered job). Kept in
