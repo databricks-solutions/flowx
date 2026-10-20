@@ -808,11 +808,14 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         logger.info("Merged agentic result for '%s' from %s", activity_name, result_file.name)
 
     if record is not None and gap_fills:
+        gaps_path = output_dir / WORK_DIRNAME / GAPS_FILENAME
+        try:
+            gaps = json.loads(gaps_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            gaps = None
         record_gap_fills(output_dir, gap_fills, baseline_report_sha256)
         applied_fills = applied_gap_fills(load_agentic_output(output_dir).gap_fills, baseline_report_sha256)
         record["gap_fills_sha256"] = canonical_sha256(applied_fills)
-        gaps_path = output_dir / WORK_DIRNAME / GAPS_FILENAME
-        gaps = json.loads(gaps_path.read_text(encoding="utf-8")) if gaps_path.exists() else None
         if isinstance(gaps, list):
             remaining = drop_filled_gaps(gaps, report, routed, convert_baseline, applied_fills)
             if remaining != gaps:

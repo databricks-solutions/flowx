@@ -700,6 +700,21 @@ def test_a_live_merge_takes_the_gap_it_filled_out_of_gaps_json(tmp_path: Path) -
     assert _gap_keys(tmp_path) == [("parent", "Extract")]
 
 
+def test_a_live_merge_leaves_an_unreadable_gaps_json_alone_and_still_merges(tmp_path: Path) -> None:
+    """gaps.json is only a to-do list, so a broken one never stops the merge half way through its writes."""
+    _route_parent_agentic_over_a_child_gap(tmp_path)
+    gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
+    gaps_path.write_text("{not json", encoding="utf-8")
+    _write_merge_result(tmp_path / "agentic_results", "child", "Load", "load")
+
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, tmp_path / "agentic_results") == (1, 0)
+
+    assert gaps_path.read_text(encoding="utf-8") == "{not json"
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    child = next(pipeline for pipeline in report["pipelines"] if pipeline["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+
+
 def test_a_re_route_keeps_a_filled_gap_out_of_gaps_json(tmp_path: Path) -> None:
     """Route rebuilds gaps.json from convert's saved gaps, so it drops a stored fill's gap just as the merge did."""
     _route_parent_agentic_over_a_child_gap(tmp_path)
