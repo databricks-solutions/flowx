@@ -17,7 +17,7 @@ import pytest
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import ControlEdge, Lineage
-from flowx.routing import build_components
+from flowx.routing import build_components, build_plan, carried_forward_plan, validate_plan
 
 
 def _node(task_key: str, native_type: str = "Notebook", *, strategy: str = "deterministic") -> SourceNode:
@@ -210,3 +210,24 @@ def test_an_edge_endpoint_that_is_not_a_string_is_unresolved() -> None:
 
     assert components == [["a"], ["b"]]
     assert findings and "['b']" not in findings[0]
+
+
+def test_carrying_a_plan_forward_moves_each_decision_to_its_components_current_id() -> None:
+    """A new pipeline shifts the ids; each carried row takes the id its members have now, so no two rows clash."""
+    before = _inventory([_graph("beta"), _graph("gamma")])
+    after = _inventory([_graph("alpha"), _graph("beta"), _graph("gamma")])
+    decided = [
+        {"component_id": "component-1", "members": ["beta"], "decision": "deterministic"},
+        {"component_id": "component-2", "members": ["gamma"], "decision": "agentic"},
+    ]
+    recorded = build_plan(before, {"components": decided}).to_dict()
+
+    carried, _dropped = carried_forward_plan(recorded, after)
+
+    rows = sorted((row["component_id"], row["members"], row["decision"]) for row in carried["components"])
+    assert rows == [
+        ("component-1", ["alpha"], None),
+        ("component-2", ["beta"], "deterministic"),
+        ("component-3", ["gamma"], "agentic"),
+    ]
+    assert validate_plan(carried, after) == []

@@ -768,9 +768,10 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
     This is how route writes its recommendation straight into ``conversion_plan.json`` and then picks
     up the agent's edits to it. The *previous* recorded plan is carried as written, without the keys
     the library recomputes, so :func:`validate_plan` refuses a typo or a wrong value in the edited file
-    exactly as it would in a passed plan. A component it does not list is added pending
-    (``decision: None``) and a suggested grouping it does not list is added not accepted, so decisions
-    survive a re-enrich or a re-route. A re-discover keeps nothing in use: discover moves ``metadata/`` and
+    exactly as it would in a passed plan. A row whose members still form a component takes that
+    component's current id, so a decision follows its pipelines when the ids shift. A component it does
+    not list is added pending (``decision: None``) and a suggested grouping it does not list is added
+    not accepted, so decisions survive a re-enrich or a re-route. A re-discover keeps nothing in use: discover moves ``metadata/`` and
     ``.work/`` into ``metadata/archive/<UTC time>/``, so this plan and the agent's outputs no longer
     apply and every component starts pending again.
 
@@ -830,6 +831,8 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
             if isinstance(members, list) and all(isinstance(member, str) for member in members):
                 component_id = id_by_members.get(frozenset(members))
                 listed_ids.add(component_id)
+                if component_id is not None:
+                    authored["component_id"] = component_id
                 if component_id in pending_again:
                     authored["decision"] = None
             components.append(authored)
