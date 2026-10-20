@@ -45,10 +45,10 @@ class DataAsset:
             ``"table"`` / ``"file"`` / ``"volume"`` as well as non-physical /
             logical ones like ``"value"`` (an XCom / TaskFlow return) or
             ``"logical"`` (a named logical dataset). The vocabulary is not
-            closed; ``None`` when unknown. The signature tier refuses a match
-            when both sides set ``asset_type`` and the two differ, compared
-            exactly, so the writer and reader of one asset must spell it the
-            same way.
+            closed; ``None`` when unknown. Both lineage tiers (identity and
+            signature) refuse a match when both sides set ``asset_type`` and
+            the two differ, compared exactly, so the writer and reader of one
+            asset must spell it the same way.
         properties: Free-form extra attributes carried through verbatim.
     """
 
@@ -143,7 +143,7 @@ class MotifAnnotation:
 
 @dataclass(slots=True, kw_only=True)
 class Lineage:
-    """Source-neutral lineage block attached to a translated pipeline.
+    """Source-neutral lineage block attached to a discovery graph or a translated pipeline.
 
     Edge lists are always concrete lists (empty, never ``None``) so serialised
     reports produce stable golden diffs.
