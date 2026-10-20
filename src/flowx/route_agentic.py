@@ -216,7 +216,10 @@ def unit_record_mismatch(unit_id: str, entry: Any, unit: dict[str, Any]) -> str 
     """
     if not isinstance(entry, dict):
         return f"component {unit_id!r} is in the plan but not in the routing record"
-    if sorted(entry.get("members") or []) != unit["members"]:
+    members = entry.get("members")
+    if not isinstance(members, list) or not all(isinstance(member, str) for member in members):
+        return f"component {unit_id!r} has no list of member names in the routing record"
+    if sorted(members) != unit["members"]:
         return f"component {unit_id!r} was routed with different members than the plan lists"
     if entry.get("decision") != unit["decision"]:
         return f"component {unit_id!r} was routed {entry.get('decision')!r} but the plan decides {unit['decision']!r}"
@@ -591,7 +594,13 @@ def rebuild(
             {"members": unit["members"], "decision": unit["decision"], "output_sha256": output_sha256}
         )
         units[unit_id] = {**unit, "outcome": outcome, "output_sha256": output_sha256, "fingerprint": fingerprint}
-    new_gaps = drop_filled_gaps(new_gaps, new_report, agentic_names, baseline_report, applicable_fills)
+    authored = {
+        str(pipeline.get("name"))
+        for output in applied.values()
+        for pipeline in output.get("pipelines", [])
+        if isinstance(pipeline, dict) and isinstance(pipeline.get("name"), str)
+    }
+    new_gaps = drop_filled_gaps(new_gaps, new_report, agentic_names | authored, baseline_report, applicable_fills)
     record = {
         "conversion_plan_sha256": canonical_sha256(plan),
         "baseline_report_sha256": baseline_report_sha256,

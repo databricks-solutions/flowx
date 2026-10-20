@@ -715,6 +715,18 @@ def test_a_live_merge_leaves_an_unreadable_gaps_json_alone_and_still_merges(tmp_
     assert child["tasks"][0]["type"] == "NotebookActivity"
 
 
+@pytest.mark.parametrize("to_a_copy", [False, True], ids=["in-place", "to-a-copy"])
+def test_a_merge_before_any_route_takes_its_gap_out_of_gaps_json_only_in_place(tmp_path: Path, to_a_copy: bool) -> None:
+    _write_work(tmp_path, _report_with_child_gap(), gaps=[_LOAD_GAP])
+    _write_merge_result(tmp_path / "agentic_results", "child", "Load", "load")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    copy_path = tmp_path / WORK_DIRNAME / "merged.json" if to_a_copy else None
+
+    assert merge_agentic_results(report_path, tmp_path / "agentic_results", copy_path) == (1, 0)
+
+    assert _gap_keys(tmp_path) == ([(None, "Load")] if to_a_copy else [])
+
+
 def test_a_re_route_keeps_a_filled_gap_out_of_gaps_json(tmp_path: Path) -> None:
     """Route rebuilds gaps.json from convert's saved gaps, so it drops a stored fill's gap just as the merge did."""
     _route_parent_agentic_over_a_child_gap(tmp_path)
@@ -755,6 +767,26 @@ def test_a_gap_fill_of_a_container_also_drops_the_gaps_nested_in_it(container: A
     nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
 
     assert _rebuilt_gaps(report, [nested], [("child", "Check")]) == []
+
+
+def test_a_rebuild_does_not_count_an_applied_outputs_pipelines_as_open_gaps() -> None:
+    """The merge leaves fill-agentic's pipelines out of the open names, so the rebuild must too."""
+    report = _report_with_child_gap()
+    report_bytes = json.dumps(report).encode("utf-8")
+    authored = _named_lfc_pipeline("parent_lfc")
+    authored["tasks"].append({"name": "Grouped", "task_key": "grouped", "type": "MotifActivity"})
+    authored["tasks"][-1]["matched_activity_names"] = ["Load"]
+    outputs = {"component-1": {"members": ["parent"], "pipelines": [authored], "output_sha256": "x"}}
+    fill = {
+        "pipeline": "child",
+        "activity_name": "Load",
+        "task": _notebook_task("Load", "load"),
+        "baseline_report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+    }
+
+    _report, gaps, _record = rebuild(report, [_LOAD_GAP], _plan(), outputs, [fill], report_bytes, b"[]", inventory=None)
+
+    assert gaps == []
 
 
 @pytest.mark.parametrize(

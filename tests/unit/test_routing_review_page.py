@@ -169,6 +169,16 @@ def test_a_decision_route_has_not_applied_says_to_run_route_again_not_to_wait_fo
     assert '<span class="pill pill-det">1</span><span>Converts automatically</span>' in never_routed
 
 
+@pytest.mark.parametrize("members", [7, "extract", [7]], ids=["number", "string", "list-of-numbers"])
+def test_a_hand_edited_record_entry_reads_as_not_applied(members: Any) -> None:
+    decided = _plan(components=[ComponentPlan(component_id="component-1", members=["extract"], decision="agentic")])
+    record = {"components": {"component-1": {"members": members, "decision": "agentic", "outcome": "agentic-applied"}}}
+
+    conversion = _section(render_routing_review(decided, None, record), "conversion")
+
+    assert '<span class="pill pill-pend">1</span><span>Decided, not applied yet</span>' in conversion
+
+
 def test_a_grouping_says_why_and_whether_it_is_accepted() -> None:
     grouping = SuggestedGrouping(
         grouping_id="grouping-1",
