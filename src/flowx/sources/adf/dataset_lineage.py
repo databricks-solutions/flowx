@@ -11,9 +11,9 @@ Two tiers, exactly as #36 established them:
 
 * **identity** -- the resolved physical location of the asset (a store-qualified
   ``<server>/schema.table`` or a concrete ``abfss://`` path down to the literal
-  file name). Present only when it resolves *deterministically*
-  from literals; a parameterised reference is never guessed at and leaves
-  ``identity`` unset. This is the strong join key.
+  file name, used for Blob and ADLS Gen2 alike since both reach the same account).
+  Present only when it resolves *deterministically* from literals; a parameterised
+  reference is never guessed at and leaves ``identity`` unset. This is the strong join key.
 * **signature** -- the *path-derived* weak key. For an asset with a resolved
   identity the signature mirrors that identity, so the weak tier can never join a
   resolved asset to an unresolved one on a coincidence. For an unresolved reference
@@ -662,6 +662,11 @@ def _resolve_dataset_path(
     names do, so a parameterised dataset bound to literals still gets its identity.
     Any part that stays parameterised or unresolved (file system, folder, file name,
     or storage account) yields ``None``.
+
+    Blob and ADLS Gen2 datasets share one ``abfss://<container>@<account>.dfs...``
+    form on purpose. A storage account name is unique across Azure and both
+    connectors are endpoints onto that one account, so a Blob writer and an ADLS
+    Gen2 reader of the same container and path touch the same file and should link.
     """
     type_props = dataset_props.get("typeProperties") or dataset_props
     location = type_props.get("location") or {}

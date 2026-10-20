@@ -674,6 +674,78 @@ def test_an_unevaluated_arm_expression_table_name_has_no_identity(table: str) ->
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_sales"), definitions) is None
 
 
+def _azure_storage_dataset(name: str, *, connector: str, container: str, linked_service: str) -> AdfDataset:
+    """A ``landing/orders.csv`` dataset in *container*, through the Blob or the ADLS Gen2 connector."""
+    location_type, container_key = {
+        "blob": ("AzureBlobStorageLocation", "container"),
+        "adls": ("AzureBlobFSLocation", "fileSystem"),
+    }[connector]
+    return AdfDataset(
+        name=name,
+        type="DelimitedText",
+        properties={
+            "typeProperties": {
+                "location": {
+                    "type": location_type,
+                    container_key: container,
+                    "folderPath": "landing",
+                    "fileName": "orders.csv",
+                }
+            },
+            "linkedServiceName": {"referenceName": linked_service},
+        },
+    )
+
+
+def _azure_storage_linked_service(name: str, *, connector: str, account: str) -> AdfLinkedService:
+    linked_service_type, endpoint = {"blob": ("AzureBlobStorage", "blob"), "adls": ("AzureBlobFS", "dfs")}[connector]
+    return AdfLinkedService(
+        name=name,
+        type=linked_service_type,
+        properties={"typeProperties": {"url": f"https://{account}.{endpoint}.core.windows.net"}},
+    )
+
+
+@pytest.mark.parametrize(
+    ("reader_account", "reader_container", "links"),
+    [("acct", "sales", True), ("other", "sales", False), ("acct", "hr", False)],
+)
+def test_blob_and_adls_gen2_reach_the_same_files_on_the_same_account(
+    reader_account: str, reader_container: str, links: bool
+) -> None:
+    """A Copy writing through Blob and a reader using ADLS Gen2 on the same account and container touch the same file.
+
+    A storage account name is unique across Azure, and both connectors are endpoints onto that account, so one
+    canonical ``abfss://`` identity joins them. A different account or container is a different file.
+    """
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_blob": _azure_storage_dataset("ds_blob", connector="blob", container="sales", linked_service="ls_blob"),
+            "ds_adls": _azure_storage_dataset(
+                "ds_adls", connector="adls", container=reader_container, linked_service="ls_adls"
+            ),
+        },
+        linked_services={
+            "ls_blob": _azure_storage_linked_service("ls_blob", connector="blob", account="acct"),
+            "ls_adls": _azure_storage_linked_service("ls_adls", connector="adls", account=reader_account),
+        },
+    )
+    write = AdfActivity(name="WriteBlob", type="Copy", outputs=[AdfDatasetReference(reference_name="ds_blob")])
+    read = AdfActivity(name="ReadAdls", type="Copy", inputs=[AdfDatasetReference(reference_name="ds_adls")])
+    _, writes = activity_data_assets(write, definitions)
+    reads, _ = activity_data_assets(read, definitions)
+
+    assert writes[0].identity == "abfss://sales@acct.dfs.core.windows.net/landing/orders.csv"
+    assert reads[0].identity == f"abfss://{reader_container}@{reader_account}.dfs.core.windows.net/landing/orders.csv"
+    edges = data_edges_from_endpoints(
+        [("WriteBlob", asset) for asset in writes], [("ReadAdls", asset) for asset in reads]
+    )
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == (
+        [("identity", "abfss://sales@acct.dfs.core.windows.net/landing/orders.csv")] if links else []
+    )
+
+
 def test_arm_expression_storage_url_has_no_path_identity() -> None:
     """An unevaluated ARM ``url`` is checked whole, so a cut-off fragment never stands in for the account."""
     arm_lake = AdfLinkedService(
