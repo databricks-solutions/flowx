@@ -2,8 +2,8 @@
 
 The plan is bound to what it was decided on: the deterministic inventory fingerprint, the saved
 source graphs hash the inventory records (H0) and the saved agentic insights hash (H1). Phase 1
-decides whole components; per-node assignments are reserved and must stay empty. A recorded plan
-must be complete and well formed to load.
+decides whole components, and a plan holds no per-node assignments. A recorded plan must be complete
+and well formed to load.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from flowx.discovery_insights import inventory_fingerprint
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.discovery_serde import canonical_sha256
 from flowx.ir_serde import pipeline_to_dict
-from flowx.models.conversion_plan import SCHEMA_VERSION, ComponentPlan, ConversionPlan, NodeAssignment
+from flowx.models.conversion_plan import SCHEMA_VERSION, ComponentPlan, ConversionPlan
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import NotebookActivity, Pipeline
 from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan
@@ -78,25 +78,20 @@ def _decide(decision: str, **extra: Any) -> dict[str, Any]:
     return {"components": [{"component_id": "component-1", "members": ["solo"], "decision": decision, **extra}]}
 
 
-def test_plan_round_trips_including_reserved_assignments(tmp_path: Path) -> None:
+def test_plan_round_trips(tmp_path: Path) -> None:
     plan = ConversionPlan(
         inventory_sha256="inv",
         source_graphs_sha256="h0",
         agentic_insights_sha256="h1",
-        components=[
-            ComponentPlan(
-                component_id="component-1",
-                members=["solo"],
-                decision="agentic",
-                assignments=[NodeAssignment(pipeline="solo", task_keys=["load"], route="agentic", pattern="lfc")],
-            )
-        ],
+        components=[ComponentPlan(component_id="component-1", members=["solo"], decision="agentic")],
     )
 
     plan.write(tmp_path)
 
     assert ConversionPlan.load(tmp_path) == plan
-    assert json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text())["schema_version"] == "3"
+    recorded = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text())
+    assert recorded["schema_version"] == "3"
+    assert "assignments" not in recorded["components"][0]
 
 
 def test_a_plan_from_another_schema_version_is_refused(tmp_path: Path) -> None:
@@ -122,13 +117,11 @@ def test_recorded_plan_is_bound_to_the_source_graphs_and_insights(tmp_path: Path
     assert result["source_graphs_sha256"] == "graphs-1"
 
 
-def test_per_node_assignments_are_reserved_for_phase_2() -> None:
-    inventory = _inventory()
-    assignment = {"pipeline": "solo", "task_keys": ["load"], "route": "agentic"}
+def test_a_plan_has_no_per_node_assignments() -> None:
+    """Phase 1 decides whole components, so an 'assignments' list is refused like any other unknown field."""
+    violations = routing.validate_plan(_decide("agentic", assignments=[]), _inventory())
 
-    assert routing.validate_plan(_decide("agentic", assignments=[]), inventory) == []
-    violations = routing.validate_plan(_decide("agentic", assignments=[assignment]), inventory)
-    assert any("reserved for Phase 2" in violation for violation in violations)
+    assert violations == ["components[0]: unknown field 'assignments'"]
 
 
 def test_an_edited_copy_of_the_recorded_plan_cannot_change_the_bound_hashes(tmp_path: Path) -> None:
@@ -225,9 +218,9 @@ def test_the_well_formed_recorded_plan_the_load_tests_start_from_loads(tmp_path:
         (_recorded_plan(desicion="deterministic"), "desicion"),
         ({**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "acepted": True}]}, "acepted"),
         ({**_recorded_plan(), "conversation": [{"question": "q", "answer": "a", "asked_by": "agent"}]}, "asked_by"),
-        (_recorded_plan(assignments=[{"pipeline": "solo", "route": "agentic", "note": "x"}]), "note"),
+        (_recorded_plan(assignments=[]), "assignments"),
     ],
-    ids=["top-level", "component", "grouping", "conversation", "assignment"],
+    ids=["top-level", "component", "grouping", "conversation", "assignments"],
 )
 def test_a_recorded_plan_with_an_unknown_key_is_refused_on_load(
     tmp_path: Path, document: dict[str, Any], key: str
@@ -303,28 +296,20 @@ def test_package_refuses_a_plan_whose_library_owned_facts_were_edited(
 @pytest.mark.parametrize(
     "document",
     [
-        _recorded_plan(assignments=[1]),
-        _recorded_plan(assignments="load"),
-        _recorded_plan(assignments=[{"pipeline": "solo", "route": "agentic", "task_keys": 5}]),
         _recorded_plan(options=["deterministic"]),
         {**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "members": 5}]},
         {**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "components": "component-1"}]},
         {**_recorded_plan(), "suggested_groupings": [{"grouping_id": "grouping-1", "basis": 5}]},
         {**_recorded_plan(), "findings": 5},
         {**_recorded_plan(), "findings": [None]},
-        _recorded_plan(assignments=[{"pipeline": "solo", "route": "agentc", "task_keys": []}]),
     ],
     ids=[
-        "assignment-not-an-object",
-        "assignments-not-a-list",
-        "assignment-task-keys-not-a-list",
         "options-not-an-object",
         "grouping-members-not-a-list",
         "grouping-components-not-a-list",
         "grouping-basis-not-a-list",
         "findings-not-a-list",
         "finding-not-a-string",
-        "assignment-route-unknown",
     ],
 )
 def test_a_malformed_nested_field_is_refused_on_load(tmp_path: Path, document: dict[str, Any]) -> None:
@@ -354,7 +339,7 @@ def test_package_fails_closed_on_a_malformed_nested_plan_field(
     assert routing.record_plan(tmp_path, plan=_decide("deterministic"))["ok"] is True
     plan_path = tmp_path / "metadata" / "conversion_plan.json"
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    plan["components"][0]["assignments"] = [1]
+    plan["components"][0]["options"] = ["deterministic"]
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
 
     code = package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"])

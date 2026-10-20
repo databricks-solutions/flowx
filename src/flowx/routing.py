@@ -630,12 +630,6 @@ def _validate_component_entry(
     if rationale is not None and (not isinstance(rationale, str) or not rationale.strip()):
         violations.append(f"{loc}: 'rationale' must be a non-empty string when present")
 
-    if component.get("assignments"):
-        violations.append(
-            f"{loc}: 'assignments' (per-node or subgraph routing) is reserved for Phase 2; "
-            "decide the whole component and leave it empty"
-        )
-
     component_id = component.get("component_id")
     if not isinstance(component_id, str) or not component_id:
         violations.append(f"{loc}: 'component_id' must be a non-empty string")

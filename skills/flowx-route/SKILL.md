@@ -402,8 +402,8 @@ applies when authoring recommended patterns.)
 Once every agentic unit is filled, continue with `flowx-convert`'s just-in-time configuration
 (`inspect`/`modify`) as usual, then `flowx-package`. The recorded `metadata/conversion_plan.json` is the
 library's typed `ConversionPlan` (schema 3), bound to the inventory fingerprint, the saved
-`source_graphs.json` and the saved `agentic_insights.json` it was decided on, with a reserved, empty
-`assignments` list per component for per-node routing later.
+`source_graphs.json` and the saved `agentic_insights.json` it was decided on. Phase 1 decides whole
+components, so a plan holds no per-node assignments.
 
 Package refuses, writing nothing, when:
 

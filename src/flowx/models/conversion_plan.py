@@ -19,9 +19,7 @@ was decided on: :attr:`ConversionPlan.inventory_sha256` (the deterministic inven
 :attr:`ConversionPlan.agentic_insights_sha256` (the saved ``agentic_insights.json``, when enrich ran).
 
 Phase 1 records one decision per component and applies it to the IR after convert. An accepted
-grouping joins whole components into one agentic unit. Each component also carries
-:attr:`ComponentPlan.assignments`, reserved for per-node or per-subgraph routing (deterministic,
-agentic with a named pattern, or mixed at a boundary); Phase 1 requires it empty.
+grouping joins whole components into one agentic unit.
 """
 
 from __future__ import annotations
@@ -45,11 +43,6 @@ DECISION_DETERMINISTIC = "deterministic"
 DECISION_AGENTIC = "agentic"
 DECISIONS: tuple[str, ...] = (DECISION_DETERMINISTIC, DECISION_AGENTIC)
 
-# Routes a reserved per-node assignment may name once Phase 2 uses them; "mixed" joins a
-# deterministic and an agentic part at explicit boundary edges.
-ROUTE_MIXED = "mixed"
-ASSIGNMENT_ROUTES: tuple[str, ...] = (DECISION_DETERMINISTIC, DECISION_AGENTIC, ROUTE_MIXED)
-
 # Recommended-pattern release states surfaced as a neutral disclosure label on the agentic option's
 # ``release_disclosures``. ``"ga"`` and ``"unknown"`` are deliberately **silent**
 # -- they contribute no entry, and ``"unknown"`` is treated exactly like ``"ga"`` (we do not surface
@@ -66,53 +59,11 @@ BASIS_SHARED_PATTERN = "shared_pattern"
 PLAN_AUTHORED_KEYS = frozenset({"components", "suggested_groupings", "conversation"})
 PLAN_BINDING_KEYS = ("inventory_sha256", "source_graphs_sha256", "agentic_insights_sha256")
 PLAN_LIBRARY_KEYS = frozenset({"schema_version", *PLAN_BINDING_KEYS, "findings"})
-COMPONENT_AUTHORED_KEYS = frozenset({"component_id", "members", "decision", "rationale", "assignments"})
+COMPONENT_AUTHORED_KEYS = frozenset({"component_id", "members", "decision", "rationale"})
 COMPONENT_LIBRARY_KEYS = frozenset({"recommended", "options"})
 GROUPING_AUTHORED_KEYS = frozenset({"grouping_id", "accepted"})
 GROUPING_LIBRARY_KEYS = frozenset({"components", "members", "basis"})
 CONVERSATION_KEYS = frozenset({"question", "answer"})
-ASSIGNMENT_KEYS = frozenset({"pipeline", "task_keys", "route", "pattern", "boundary"})
-
-
-@dataclass(slots=True, kw_only=True)
-class NodeAssignment:
-    """A routing choice for one node or a bounded subgraph inside a component (reserved for Phase 2).
-
-    Attributes:
-        pipeline: The pipeline the nodes belong to.
-        task_keys: The node, or the nodes of a bounded subgraph, this assignment covers.
-        route: One of :data:`ASSIGNMENT_ROUTES`.
-        pattern: The named pattern an agentic part is converted to, for example a recommended
-            pattern from the insights.
-        boundary: For ``"mixed"``, the edges where the deterministic and agentic parts meet.
-    """
-
-    pipeline: str
-    task_keys: list[str] = field(default_factory=list)
-    route: str
-    pattern: str | None = None
-    boundary: list[dict[str, Any]] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise to the recorded JSON shape."""
-        return {
-            "pipeline": self.pipeline,
-            "task_keys": list(self.task_keys),
-            "route": self.route,
-            "pattern": self.pattern,
-            "boundary": list(self.boundary),
-        }
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> NodeAssignment:
-        """Rehydrate from the recorded JSON shape."""
-        return cls(
-            pipeline=str(raw.get("pipeline", "")),
-            task_keys=[str(key) for key in raw.get("task_keys") or []],
-            route=str(raw.get("route", "")),
-            pattern=raw.get("pattern"),
-            boundary=list(raw.get("boundary") or []),
-        )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -130,7 +81,6 @@ class ComponentPlan:
             JSON shape :mod:`flowx.routing` builds. Optional so the authored input -- which carries
             only the decision -- can round-trip through this model.
         rationale: Optional author note on why this decision was chosen.
-        assignments: Reserved per-node or per-subgraph routing (Phase 2); empty in Phase 1.
     """
 
     component_id: str
@@ -139,7 +89,6 @@ class ComponentPlan:
     decision: str | None = None
     options: dict[str, Any] | None = None
     rationale: str | None = None
-    assignments: list[NodeAssignment] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to the recorded JSON shape (``rationale`` only when set)."""
@@ -152,7 +101,6 @@ class ComponentPlan:
         }
         if self.rationale is not None:
             result["rationale"] = self.rationale
-        result["assignments"] = [assignment.to_dict() for assignment in self.assignments]
         return result
 
     @classmethod
@@ -165,7 +113,6 @@ class ComponentPlan:
             decision=raw.get("decision"),
             options=raw.get("options"),
             rationale=raw.get("rationale"),
-            assignments=[NodeAssignment.from_dict(item) for item in raw.get("assignments") or []],
         )
 
 
@@ -372,7 +319,6 @@ def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
                 problems.append(f"components[{index}] has decision {component.get('decision')!r}")
             if component.get("options") is not None and not isinstance(component["options"], dict):
                 problems.append(f"components[{index}] 'options' must be an object")
-            problems.extend(_assignment_problems(component.get("assignments", []), f"components[{index}]"))
     groupings = raw.get("suggested_groupings", [])
     if not isinstance(groupings, list):
         problems.append("'suggested_groupings' must be a list")
@@ -405,24 +351,6 @@ def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
 def _unknown_key_problems(entry: dict[str, Any], known: frozenset[str], loc: str) -> list[str]:
     """One problem per key of ``entry`` outside ``known``, in sorted order."""
     return [f"{loc} has an unknown key {key!r}" for key in sorted(set(entry) - known)]
-
-
-def _assignment_problems(assignments: Any, loc: str) -> list[str]:
-    """What is malformed in one component's reserved ``assignments`` list."""
-    if not isinstance(assignments, list):
-        return [f"{loc} 'assignments' must be a list"]
-    problems: list[str] = []
-    for index, assignment in enumerate(assignments):
-        if not isinstance(assignment, dict):
-            problems.append(f"{loc} assignments[{index}] must be an object")
-            continue
-        problems.extend(_unknown_key_problems(assignment, ASSIGNMENT_KEYS, f"{loc} assignments[{index}]"))
-        if assignment.get("route") not in ASSIGNMENT_ROUTES:
-            problems.append(f"{loc} assignments[{index}] has route {assignment.get('route')!r}")
-        for key in ("task_keys", "boundary"):
-            if key in assignment and not isinstance(assignment[key], list):
-                problems.append(f"{loc} assignments[{index}] '{key}' must be a list")
-    return problems
 
 
 def _is_list_of(value: Any, kind: type) -> bool:

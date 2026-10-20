@@ -879,7 +879,7 @@ def apply_plan(output_dir: Path, plan: ConversionPlan) -> dict[str, Any]:
     then rebuilds the translation report from the deterministic baseline (see
     :func:`apply_plan_to_report`). Each routed-agentic unit is then filled only by ``fill-agentic``;
     ``convert --merge-agentic`` stays for convert's own gaps. Phase 1 decides whole components (or
-    accepted groupings of them), so the reserved per-node assignments are not read here.
+    accepted groupings of them).
 
     Raises:
         FileNotFoundError: The inventory or translation report is missing.
