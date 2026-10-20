@@ -156,7 +156,8 @@ document rather than patching it in place. The `insights` block is replaced whol
 and every deterministic inventory key stays byte-identical. Re-running with the same insights rewrites the same bytes; re-running
 with different insights replaces the block. A validation failure writes nothing.
 
-Only one `enrich` writes an output directory at a time: it holds `metadata/.enrich.lock` from reading
+Absent a concurrent `discover`, only one `enrich` writes an output directory at a time (see the races
+below): it holds `metadata/.enrich.lock` from reading
 the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
 writes nothing. `discover` does not wait for the lock: it clears `metadata/`, the lock with it. So right
 before writing, `enrich` checks that its lock and the `inventory.json` it read are both still there; if

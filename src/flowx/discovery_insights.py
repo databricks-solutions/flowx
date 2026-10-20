@@ -29,7 +29,8 @@ records the persisted ``source_graphs.json`` hash it was checked against
 ``source_graphs_sha256``, its deterministic part is projected again from ``source_graphs.json``
 (byte-identical to what discover writes), otherwise discover's deterministic part is reused; that
 same block is added under ``insights``, so the inventory is always built from those two pieces
-rather than patched. Only one enrich writes an output directory at a time; an enrich that finds
+rather than patched. Absent a concurrent discover, only one enrich writes an output directory at a
+time (the windows a discover opens are listed below); an enrich that finds
 discover ran while it was working writes nothing (see ``_enrich_locked``); and the two files are
 replaced back to back (see ``_write_both_or_neither``). A process killed or interrupted between
 those two replaces, or a rollback that itself fails, can leave ``agentic_insights.json`` a write ahead of
@@ -40,7 +41,8 @@ Sequential use is safe. A discover that runs during an enrich is detected around
 again right before the write, and that enrich then writes nothing. Some windows are not closed,
 each a few file operations wide: between the first check and writing the temp files, between the
 final check and the two replaces, and in releasing the lock. Hitting one needs a discover plus two
-enrich runs on one output folder within a few milliseconds. Such a race can end in an error, but it
+or more enrich runs on one output folder within a few milliseconds (the lock-release window needs
+three). Such a race can end in an error, but it
 can also overwrite silently. Every enrich uses the same temp file names, so one enrich can install
 another's files, leaving a stale ``inventory.json`` while it reports ``ok: True`` with
 ``inventory_sha256`` and ``agentic_insights_sha256`` values that do not match the files on disk. A
@@ -83,7 +85,8 @@ INSIGHTS_KEY = "insights"
 # The file enrich writes; inventory.json's insights block is always a copy of it.
 AGENTIC_INSIGHTS_FILENAME = "agentic_insights.json"
 
-# Held in metadata/ while one enrich reads, validates and writes, so two enrich calls never interleave.
+# Held in metadata/ while one enrich reads, validates and writes, so absent a concurrent discover two enrich
+# calls never interleave (the module docstring lists the windows a discover opens).
 ENRICH_LOCK_FILENAME = ".enrich.lock"
 
 # A hosted agent cannot delete files in output_dir, but discover clears metadata/ and the lock with it.
@@ -701,7 +704,9 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
 
     The lock is a file created with ``O_EXCL`` (portable, unlike ``fcntl``) holding a random token,
     so this enrich can tell its own lock from one a later enrich created after discover cleared
-    ``metadata/``. It is removed when the enrich finishes or raises, if it is still this enrich's.
+    ``metadata/``. It keeps other enrich runs out only absent a concurrent discover; the module
+    docstring lists the windows a discover opens. It is removed when the enrich finishes or raises,
+    if it is still this enrich's.
     It is left behind only when the two files may disagree -- a killed process, or an error that is
     or was raised from :class:`_UnrecoveredWriteError` (a failed rollback, or an interrupt between
     the two replaces) -- so the next enrich refuses until the lock is removed.
@@ -751,8 +756,10 @@ def _write_both_or_neither(
     the caller's lock stays behind. An interrupt (``KeyboardInterrupt``, ``SystemExit``) from the
     first replace on can arrive just after a rename succeeded, so nothing is rolled back: it is
     treated like a kill and re-raised from an :class:`_UnrecoveredWriteError`, keeping the lock.
-    Callers hold :func:`_enrich_lock`, so no other enrich writes between, and the fixed temp names
-    mean the next write overwrites and removes any left behind by a killed one. *still_current* is
+    Callers hold :func:`_enrich_lock`, so absent a concurrent discover no other enrich writes between,
+    and the fixed temp names mean the next write overwrites and removes any left behind by a killed
+    one; with a concurrent discover, another enrich can write or install these same temp files (the
+    module docstring lists those windows). *still_current* is
     asked before the temp files are written and again right before the first replace; when it says
     discover ran since the inventory was read, :class:`_DiscoverRanError` is raised and nothing is
     replaced.
