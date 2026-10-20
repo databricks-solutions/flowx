@@ -34,7 +34,17 @@ discover ran while it was working writes nothing (see ``_enrich_locked``); and t
 replaced back to back (see ``_write_both_or_neither``). A process killed or interrupted between
 those two replaces, or a rollback that itself fails, can leave ``agentic_insights.json`` a write ahead of
 ``inventory.json``; the lock file then stays behind, so the next enrich refuses until the lock is
-removed and enrich is run again. The record is **idempotent**: re-running with the same
+removed and enrich is run again.
+
+Sequential use is safe. A discover that runs during an enrich is detected around the read and
+again right before the write, and that enrich then writes nothing. The remaining windows are not
+closed: between the final check and the two replaces, and in releasing the lock, each a few file
+operations wide. Hitting one needs two or more enrich runs plus a discover on one output folder at
+once. The first two end in an error with nothing overwritten; a lock released at the wrong moment
+can let two enrich runs write together, so the two files may come from different runs, both
+checked against the current inventory.
+
+The record is **idempotent**: re-running with the same
 authored insights rewrites byte-identical bytes and never stacks. The library owns
 ``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and ``agentic_insights_sha256``;
 authored insights carrying any of them are rejected as unknown keys.
