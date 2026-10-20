@@ -266,7 +266,10 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
       ``condition_task`` operands are rewritten for that job: ``{{input.x}}`` becomes
       ``{{job.parameters.x}}``, ADF expressions become job-parameter references, and
       non-string values become strings; the body of an authored ``for_each_task`` is not
-      rewritten, so its ``{{input.x}}`` keeps naming that loop's item;
+      rewritten, so its ``{{input.x}}`` keeps naming that loop's item, and each
+      ``{{job.parameters.X}}`` its ``inputs`` or body names is forwarded from the enclosing
+      job. A ``for_each_task`` that is a ForEach's only child also runs as such a job, because
+      a loop cannot be another loop's body;
     - a ``run_job_task`` whose ``job_id`` is ``${resources.jobs.X.id}`` for a job outside
       this bundle is pointed at an ``X_job_id`` bundle variable instead.
 
@@ -275,10 +278,11 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     - the ForEach ``item`` parameter, only to a ``notebook_task`` (``base_parameters``) or
       ``run_job_task`` (``job_parameters``) that is the ForEach's only child; any other
       payload of an only child passes ``{{input}}`` itself. When the ForEach has several
-      children, or its only child is an IfCondition or Switch holding the component, the
-      children run as a ``<loop>_inner_tasks`` job where ``{{input}}`` does not resolve:
-      reference ``{{job.parameters.item}}`` in a notebook ``base_parameters``, a
-      ``run_job_task.job_parameters`` or a ``condition_task`` operand, which flowx forwards;
+      children, or its only child is an IfCondition or Switch holding the component or is a
+      ``for_each_task``, the children run as a ``<loop>_inner_tasks`` job where ``{{input}}``
+      does not resolve: reference ``{{job.parameters.item}}`` in a notebook ``base_parameters``,
+      a ``run_job_task.job_parameters``, a ``condition_task`` operand or an authored
+      ``for_each_task``'s ``inputs`` or body, which flowx forwards;
       other payloads are not scanned, so they cannot receive the item on their own;
     - the source activity's collapsed notifications, when the fragment sets neither
       ``email_notifications`` nor ``webhook_notifications``;

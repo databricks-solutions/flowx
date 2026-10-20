@@ -181,8 +181,9 @@ def prepare(
         environments.extend(inner_prepared.environments)
 
         # CF-001: a single child with extra_tasks (IfCondition/Switch branch bodies) can't inline as
-        # for_each_task.task (one task only); escalate to the sub-job path so the whole body survives.
-        if inner_prepared.extra_tasks:
+        # for_each_task.task (one task only), and a loop can't be another loop's body; escalate to the
+        # sub-job path so the whole body survives.
+        if inner_prepared.extra_tasks or "for_each_task" in inner_prepared.task:
             inner_job_name = f"{activity.task_key}_inner_tasks"
             inner_tasks: list[dict[str, Any]] = [
                 inner_prepared.task,
