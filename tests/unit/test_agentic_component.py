@@ -1337,9 +1337,37 @@ def _inside_for_each_holding_an_if_condition(activity: AgenticComponentActivity)
 
 
 @pytest.mark.parametrize(
+    ("body_payload", "environments"),
+    [
+        (
+            {
+                "notebook_task": {
+                    "notebook_path": "/Workspace/Shared/etl/load_table",
+                    "base_parameters": {"table": "{{input.table_name}}", "env": "{{job.parameters.env}}"},
+                },
+                "existing_cluster_id": "0101-abc",
+            },
+            [],
+        ),
+        (
+            {
+                "spark_python_task": {
+                    "python_file": "/Workspace/Shared/etl/load_table.py",
+                    "parameters": ["--table", "{{input.table_name}}", "--env", "{{job.parameters.env}}"],
+                },
+                "environment_key": "serverless",
+            },
+            [SERVERLESS_ENVIRONMENT],
+        ),
+    ],
+    ids=["notebook_task", "spark_python_task"],
+)
+@pytest.mark.parametrize(
     "wrap", [_inside_for_each, _inside_for_each_with_siblings, _inside_for_each_holding_an_if_condition]
 )
-def test_authored_loop_body_inside_a_for_each_job_keeps_its_own_input_references(tmp_path, wrap):
+def test_authored_loop_body_inside_a_for_each_job_keeps_its_own_input_references(
+    tmp_path, wrap, body_payload, environments
+):
     """``{{input.x}}`` in an agent-written loop body names that loop's item, not the outer loop's job parameters.
 
     The authored loop runs in its own job, since a loop cannot be the body of another loop, and the
@@ -1349,18 +1377,9 @@ def test_authored_loop_body_inside_a_for_each_job_keeps_its_own_input_references
         name="Load tables",
         task_key="load_tables",
         task={
-            "for_each_task": {
-                "inputs": "{{job.parameters.tables}}",
-                "task": {
-                    "task_key": "load_table",
-                    "notebook_task": {
-                        "notebook_path": "/Workspace/Shared/etl/load_table",
-                        "base_parameters": {"table": "{{input.table_name}}", "env": "{{job.parameters.env}}"},
-                    },
-                    "existing_cluster_id": "0101-abc",
-                },
-            }
+            "for_each_task": {"inputs": "{{job.parameters.tables}}", "task": {"task_key": "load_table", **body_payload}}
         },
+        environments=environments,
     )
     pipeline_parameters = [{"name": "env", "default": "dev"}, {"name": "tables", "default": "[]"}]
 
@@ -1372,11 +1391,7 @@ def test_authored_loop_body_inside_a_for_each_job_keeps_its_own_input_references
     inner_job = jobs_by_task_key["load_table"]
     authored_loop = next(task for task in inner_job["tasks"] if task["task_key"] == "load_tables")
     assert authored_loop["for_each_task"]["inputs"] == "{{job.parameters.tables}}"
-    body = authored_loop["for_each_task"]["task"]
-    assert body["notebook_task"]["base_parameters"] == {
-        "table": "{{input.table_name}}",
-        "env": "{{job.parameters.env}}",
-    }
+    assert authored_loop["for_each_task"]["task"] == {"task_key": "load_table", **body_payload}
     inner_parameter_names = [parameter["name"] for parameter in inner_job.get("parameters") or []]
     # Nor is the body's own item forwarded from the outer loop as a job parameter.
     assert "table_name" not in inner_parameter_names

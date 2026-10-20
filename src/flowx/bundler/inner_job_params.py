@@ -180,23 +180,19 @@ def _scan_tasks(
         if body and not body.get("_authored"):
             _scan_tasks([body], param_names, **field_name_kwargs)
         elif body:
-            _scan_authored_loop_job_parameters(for_each_task, param_names)
+            _scan_authored_loop_job_parameters([for_each_task.get("inputs"), body], param_names)
 
 
-def _scan_authored_loop_job_parameters(for_each_task: dict[str, Any], param_names: set[str]) -> None:
-    """Collects the enclosing job's parameters that an agent-written loop's inputs and body name."""
-    body = for_each_task["task"]
-    condition_task = body.get("condition_task", {})
-    values = [
-        for_each_task.get("inputs"),
-        *body.get("notebook_task", {}).get("base_parameters", {}).values(),
-        *body.get("run_job_task", {}).get("job_parameters", {}).values(),
-        condition_task.get("left"),
-        condition_task.get("right"),
-    ]
-    for value in values:
-        if isinstance(value, str):
-            param_names.update(_DAB_JOB_PARAM_RE.findall(value))
+def _scan_authored_loop_job_parameters(value: Any, param_names: set[str]) -> None:
+    """Collects the enclosing job's parameters named by any string inside an agent-written loop's inputs and body."""
+    if isinstance(value, str):
+        param_names.update(_DAB_JOB_PARAM_RE.findall(value))
+    elif isinstance(value, dict):
+        for nested_value in value.values():
+            _scan_authored_loop_job_parameters(nested_value, param_names)
+    elif isinstance(value, list):
+        for nested_value in value:
+            _scan_authored_loop_job_parameters(nested_value, param_names)
 
 
 def _scan_ir_tasks(
