@@ -153,6 +153,37 @@ def test_container_branches_are_flattened_in_source_order() -> None:
     assert inventory["summary"]["activity_count"] == 4
 
 
+def test_a_container_inside_a_container_is_flattened_in_source_order() -> None:
+    """A ForEach inside an If lists the If, the loop, the loop body, then the If's other branch."""
+    loop = ContainerNode(
+        source_id="loop",
+        task_key="loop",
+        concept=CONCEPT_GROUP,
+        source="unit",
+        name="loop",
+        native_type="ForEach",
+        properties={STRATEGY_PROPERTY: "deterministic"},
+        branches={"body": [_node("deep", "Notebook", "agentic")]},
+    )
+    container = ContainerNode(
+        source_id="if",
+        task_key="if",
+        concept=CONCEPT_BRANCH,
+        source="unit",
+        name="if",
+        native_type="IfCondition",
+        properties={STRATEGY_PROPERTY: "deterministic"},
+        branches={"true": [loop], "false": [_node("f", "Notebook", "deterministic")]},
+    )
+    graph = SourceGraph(name="g", source="unit", tasks=[container])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp/src")
+
+    assert [entry["name"] for entry in inventory["pipelines"][0]["activities"]] == ["if", "loop", "deep", "f"]
+    assert inventory["summary"]["activity_count"] == 4
+    assert inventory["summary"]["agentic_count"] == 1
+
+
 def test_include_empty_pipelines_toggle_preserves_membership_semantics() -> None:
     """Zero-activity graphs stay counted in summary but drop from the listing when asked.
 
