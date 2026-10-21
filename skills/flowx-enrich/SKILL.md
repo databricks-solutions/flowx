@@ -26,7 +26,7 @@ and recorded by the library in its own file, `metadata/agentic_insights.json`, b
 `metadata/inventory.json` from `source_graphs.json` plus that file, so it carries the same block under
 a single additive `insights` key; you never pass it anything for that step.
 
-This is the standard step **between discover and route** in the flowx workflow. `flowx-discover`
+This is the standard step **between discover and convert** in the flowx workflow. `flowx-discover`
 chains into this skill by default; the routing step (`flowx-route`) reads the `insights` block to
 present the agentic conversion option per connected component. The one-shot MCP `migrate` command
 runs discover, convert and package without it, so it records no insights.
@@ -53,7 +53,7 @@ deterministic structure alone (the agentic option simply shows no recommended pa
 when the caller asked for a headless/deterministic pass, or when no human reader needs a migration
 narrative.
 
-## How to author (three steps)
+## How to author (four steps)
 
 1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json` (on the hosted
    MCP server, through `enrich` with `action="prepare"`; see below). Note every
@@ -105,13 +105,66 @@ narrative.
    unilaterally refuse to suggest it (there is no `doNotSuggest` gate). This is disclosure, not a gate —
    and it does not relax the rule above: you still **verify the release state against the current public
    Databricks docs before recommending** (never "recommend now, verify later").
-3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
+
+3. **Tell the user what you found, then ask at most three open questions.** Some facts that decide
+   the target pattern aren't in the export, such as how long a list read at run time really is. Asking
+   now, before convert, brings scale up before anything is converted. See "Summarise and ask" below.
+4. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
    and the saved source graphs and, only when clean, writes `agentic_insights.json` and rebuilds the
    inventory. On any violation both files are left untouched and you get the full list of
    problems to fix in one pass.
 
 See **`insights.md`** in this skill directory for the exact insights shape, every field, and the
 validation rules the library enforces.
+
+## Summarise and ask (step 3)
+
+This works the same for every source. On a source where route records deterministic decisions only
+(Airflow today), the answers still shape the port and the per-gap fills.
+
+1. **Read** the raw source behind each loop, copy and query, and any worklist you can reach. A
+   worklist is a runtime list that drives a loop: a control table, a CSV, a Lookup result, an array
+   parameter or a mapped-task input. If the user can share the worklist, or you can query it, count it
+   rather than asking. The source guide (`flowx-discover`'s `sources/<source>.md`) says where to look.
+2. **Summarise it back** in about five lines:
+   - what the workflows do;
+   - their shape in plain words, for example "a list read at run time drives a loop that calls one
+     child per item; the child copies each table from the last saved version; hourly";
+   - what that tells you, naming the activity or task it comes from;
+   - which candidate patterns are still in play (`flowx-route` lists them, and the facts each needs);
+   - what the export can't tell.
+3. **Pick the questions.** For each fact a candidate pattern needs, decide whether the code shows it
+   (cite the code), whether it is data you can read (read it), or whether it is unknown. Ask about an
+   unknown only when a plausible answer would rule a candidate in or out, and ask first about the one
+   whose answer splits the candidates most. Ask at most three, in one turn.
+
+The facts, named for what the workload does:
+
+| Fact | What it means | What in the code raises it |
+|---|---|---|
+| Scale | How many sources and objects a loop covers, now and in a year or two | A loop over a worklist; one worklist inside another |
+| Repeat | Whether the same object names recur across sources | A per-item child that applies one object list to every item |
+| Fan-in | One target per source object, or one per logical object across all sources | Targets templated by source; a merge downstream |
+| Change | The share of sources that change per run; the change feed's kind and retention | A version or watermark read before copying; skip-if-unchanged; change functions in query text |
+| History | Current state only, or every change | Rarely visible in code |
+| Bar | Schedule, allowed run time, today's run time and cost | Triggers, schedules, concurrency and batch settings |
+| Policy | What may be enabled on the source and the workspace; which compute and network are allowed | Connections and runtimes |
+| Shaping | Whether transforms inside the extraction must stay at landing | Column lists, casts, joins or filters in extraction queries |
+
+Ask about the estate and the business, in the user's words, and name the code that raised each
+question. For example: *"`Orchestrator` loops over a list of databases it reads at run time. How many
+does that list hold in production, and does every database get the same table list?"* Don't ask in
+platform terms, such as *"do you need more than 250 tables per pipeline?"*
+
+Record each answer in the `conversion_notes` of the pipeline that raised it, as the question and its
+answer, then the fact on one line: `fact: value (source: code | data | user | assumed)`. A "don't
+know" is recorded as `fact: unknown` and isn't asked again. A count the user only estimates is
+`assumed`, not `user`. `flowx-route` carries these into the plan's `conversation` and asks only about
+facts still open.
+
+When the source guide's database-source signal is present, also record the source system and
+connector in that pipeline's `conversion_notes`, for example `source: SQL Server via AzureSqlSource`
+(or `SqlServerSource`, `SqlMISource`).
 
 ## Run enrich — MCP tool or venv CLI
 
@@ -171,7 +224,8 @@ next `enrich` refuses until the lock is cleared:
 
 - **Locally**, delete `metadata/.enrich.lock` and run `enrich` again; it rewrites both files.
 - **On the hosted MCP server** you cannot delete files in `output_dir`, so run `discover` again (it
-  clears `metadata/`, the lock with it), then `enrich` with `action="prepare"` and apply the insights again.
+  moves the earlier `metadata/`, the lock with it, into `metadata/archive/<UTC time>/`), then `enrich`
+  with `action="prepare"` and apply the insights again.
 
 Sequential use is safe. The checks above do not close every race, though: a `discover` plus two
 `enrich` runs on one output folder within a few milliseconds can slip past them. That can end in an
@@ -183,8 +237,9 @@ inventory. Do not run `enrich` while another `enrich` or a `discover` is working
 
 ## Next step
 
-After the inventory is enriched, continue with **`flowx-route`** to recommend and record a
-per-connected-component conversion route (deterministic vs. agentic), then convert and package.
+After the inventory is enriched, convert it (`flowx-convert` builds the deterministic baseline), then
+continue with **`flowx-route`** to recommend and record a per-connected-component conversion route
+(deterministic vs. agentic), then package.
 
 ## Reference
 

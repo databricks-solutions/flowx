@@ -355,14 +355,22 @@ _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
     MigrationInputOption(
         option_id=INPUT_CATALOG,
         prompt="Target Unity Catalog catalog?",
-        description="Default ``catalog`` bundle variable used by emitted notebooks and pipelines.",
+        description=(
+            "Ask it together with the schema as one free-text answer, ``catalog.schema`` (default "
+            "``main.default``); the catalog is the name before the dot. Sets the default ``catalog`` "
+            "bundle variable used by emitted notebooks and pipelines."
+        ),
         default="main",
         required=False,
     ),
     MigrationInputOption(
         option_id=INPUT_SCHEMA,
         prompt="Target Unity Catalog schema?",
-        description="Default ``schema`` bundle variable used by emitted notebooks and pipelines.",
+        description=(
+            "Ask it together with the catalog as one free-text answer, ``catalog.schema`` (default "
+            "``main.default``); the schema is the name after the dot. Sets the default ``schema`` "
+            "bundle variable used by emitted notebooks and pipelines."
+        ),
         default="default",
         required=False,
     ),
