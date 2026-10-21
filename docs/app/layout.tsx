@@ -13,7 +13,7 @@ export const metadata = {
     template: '%s | flowx',
   },
   description:
-    'Translate Azure Data Factory pipelines to Databricks Lakeflow Jobs.',
+    'Translate data pipelines (e.g. Airflow and ADF) to Databricks Lakeflow Jobs.',
 };
 
 export default function Layout({ children }: { children: ReactNode }) {

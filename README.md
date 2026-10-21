@@ -96,6 +96,7 @@ Run the end-to-end migration:
 Or run individual phases:
 
 ```
+/flowx:flowx-extract-metadata  # (ADF) Get the factory's definitions: ADF Studio export, Git, or live Azure API
 /flowx:flowx-discover    # Parse the source (ADF JSON / Airflow DAGs), produce inventory + complexity report
 /flowx:flowx-enrich      # Validate and record agent-authored insights on the inventory
 /flowx:flowx-convert     # Deterministic + agentic translation
@@ -297,7 +298,7 @@ for deployment (SDK notebook or CLI script) and Genie Code registration.
 make dev               # Install dependencies (uses uv)
 make test              # Run unit tests
 make integration       # Run integration tests (excludes the live-Azure suite; gates CI)
-make integration-live  # Also run tests needing live ADF access (az login + factory access)
+make integration-live  # Also run tests marked integration (live Azure; none today)
 make fmt               # Format + lint (ruff + mypy)
 make clean             # Remove build artifacts
 ```

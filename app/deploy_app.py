@@ -34,7 +34,7 @@ dbutils.widgets.text("source_code_path", "", "Workspace source path (blank = /Wo
 repo_root = dbutils.widgets.get("repo_root").strip()
 app_name = dbutils.widgets.get("app_name").strip()
 source_code_path = dbutils.widgets.get("source_code_path").strip() or f"/Workspace/Shared/{app_name}"
-app_description = "flowx MCP server — ADF to Databricks Lakeflow migration tools"
+app_description = "flowx MCP server — Lakeflow jobs migration tools"
 
 # COMMAND ----------
 

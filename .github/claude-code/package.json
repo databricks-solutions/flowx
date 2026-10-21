@@ -1,0 +1,8 @@
+{
+  "name": "flowx-ci-claude-code",
+  "private": true,
+  "description": "Pins the Claude Code CLI used by the live integration workflow.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.296"
+  }
+}

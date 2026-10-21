@@ -1,0 +1,1 @@
+{"name":"azure-function-parameterized","properties":{"type":"AzureFunction","parameters":{"functionAppUrl":{"type":"String","defaultValue":"https://example.invalid"}},"typeProperties":{"functionAppUrl":"@{linkedService().functionAppUrl}","authentication":"Anonymous"}}}

@@ -32,7 +32,7 @@ All skills and the bootstrap script are designed to run on **Databricks serverle
 
 - **venv:** `bootstrap.sh` creates the venv at `/Workspace/Users/<current user>/.migration-skills`
   on Databricks and `<plugin_dir>/.venv` locally, writing the interpreter path to
-  `<plugin_dir>/.migration-venv`. It falls back to `--without-pip` + `get-pip.py` when `ensurepip`
+  `<plugin_dir>/.migration-venv`. It falls back to `--without-pip` plus a pinned, hash-checked pip wheel when `ensurepip`
   is unavailable (standard on serverless images).
 - **Auth:** `workspace_downloader.py` auto-detects `DATABRICKS_RUNTIME_VERSION` and writes
   `~/.databrickscfg` from `dbruntime.databricks_repl_context` so the SDK can authenticate.
@@ -62,6 +62,14 @@ intermediates under `.work/` (pruned by `package`).
    `--packaging-mode` flag (`per-pipeline` default / `single` / `per-group`) controls how a
    multi-pipeline factory is laid out into bundles; a top-level `DEPLOY.md` records the suggested
    callees-first deploy order for every mode.
+
+An optional **Extract** step (`python -m flowx.adapter extract --source adf`, ADF only) runs before
+Discover when the user has no export: it pulls one factory's definitions live from Azure Resource
+Manager (one paginated list call per resource type, throttling-aware retries) into the native layout
+plus `_manifest.json`, `--validate-path` checks any export/ARM template/Git clone and prints the exact
+path for discover, and `--emit-notebook` writes a notebook the user runs themselves. It needs the
+optional `azure` extra (`azure-identity`, `requests`). The `flowx-extract-metadata` skill drives it;
+the MCP tool has no `extract` command yet.
 
 ### Key Patterns
 - `@dataclass(slots=True, kw_only=True)` for all models
@@ -96,6 +104,7 @@ intermediates under `.work/` (pruned by `package`).
 | `routing.py` | Groups pipelines into connected components over control lineage; recommends deterministic/agentic per component (both options) and suggests groupings from the insights; writes the recommendation into `metadata/conversion_plan.json` with decisions pending and records the user's edits (additive; convert untouched). Agentic decisions are ADF-only; also the reader-side check that `agentic_insights.json` agrees with the inventory |
 | `route_agentic.py` | Applies a routing decision after convert: rebuilds the report from the never-rewritten baseline (`.work/route_baseline/`), the plan, and the agent's output in `metadata/agentic_conversion.json` (per-unit pipelines + fills of convert's own gaps); `fill-agentic` is the only fill for routed-agentic units |
 | `models/conversion_plan.py` | Typed `ConversionPlan` (schema 3): the library's load/validate/record API for `conversion_plan.json`, one decision per component (pending until made), suggested groupings, the routing conversation, bound to the inventory, `source_graphs.json` and `agentic_insights.json` hashes; package fails closed on a mismatch, a pending decision, or an unfilled agentic unit |
+| `sources/adf/extract/` | Live ADF extraction (`core.py`, self-contained and inlined into the generated notebook), export/path checks (`layout.py`), notebook rendering (`notebook.py`) |
 
 ## Activity Types
 
@@ -112,6 +121,76 @@ ExecuteDataFlow, SqlServerStoredProcedure, AzureFunction, WebHook, Custom, Execu
 - Test fixtures in `tests/resources/json/`
 - Run `make test` for unit tests, `make integration` for integration tests
 - All translators must have corresponding test coverage
+
+## Adding integration tests
+
+Each integration test case is a folder in `tests/integration/azure/adf/cases/<case>/`. It names one or more ADF
+pipelines, runs them through discover, convert, and package, and compares the output with the checked-in files in
+`expected/`.
+
+### Integration test conventions
+
+- Never modify, remove, delete, or destroy resources that are not described in existing
+  `tests/integration/azure/terraform/` definitions.
+- Order integration test modules as imports, constants, public `test_*` functions, then private helpers.
+- Put shared pytest fixtures in `tests/integration/conftest.py`.
+- Put workflow shell logic in `.github/scripts/`, not in workflow YAML. Put any Python it needs in a `.py` file there, not a heredoc.
+- Run `make setup-integration ARGS="setup"` once for Azure and GitHub setup, and `ARGS="verify"` to check it.
+
+See `tests/integration/azure/README.md` for details.
+
+### Adding a new case
+
+Follow the steps below to add a new integration test case.
+
+#### 1. Add a new pipeline definition
+
+If the case needs a new pipeline, add its ARM JSON under `tests/integration/azure/adf/pipelines/`. Add ARM JSON
+for any new datasets, linked services, data flows, or triggers under the matching folder in
+`tests/integration/azure/adf/`.
+
+#### 2. Add terraform for new Azure resources
+
+If a fixture needs a new Azure resource not deployed in `tests/integration/azure/terraform/`:
+
+1. Add a new resource to `tests/integration/azure/terraform/main.tf` with `tags = local.tags`. Use free or
+   stopped resources if possible.
+2. When fixtures need a resource name, ID, or URL, add a new `<PLACEHOLDER>` token and reference it in:
+   1. A `replace()` in `main.tf`
+   2. An output in `outputs.tf` (mark it `sensitive` if it identifies the environment)
+   3. An `ADF_CASE_*` line in `.github/scripts/export-adf.sh`
+   4. The placeholder map in `tests/integration/test_adf_cases.py`.
+3. Add any new resource provider to `REQUIRED_PROVIDERS` and any new permission to `REQUIRED_ROLE_ACTIONS` in
+   `.github/scripts/setup-integration.sh`. Scope permissions to only the needed actions. Include actions on
+   related resources. For example, Blob Events triggers need `Microsoft.EventGrid/eventSubscriptions/write`
+   on the related storage account.
+4. Re-apply setup with `make setup-integration ARGS="providers"`, then `ARGS="role"`, wait a few minutes, then
+   run `ARGS="verify"`.
+
+#### 3. Create a test case
+
+Create a new test case in `tests/integration/azure/adf/cases/<case>/case.json`:
+```json
+{"description": "What this case covers", "pipelines": ["pipeline-a", "pipeline-b"]}
+```
+
+#### 4. Generate the expected output
+
+Generate the expected output offline by running:
+```shell
+PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py --update-expected
+```
+
+#### 5. Review the expected output
+
+Review the results in `expected/` as you would any code change. The output shows what flowx produces today. Check
+that it's correct. Do not accept the output without verifying.
+
+#### 6. Run offline checks
+
+Run offline checks with `make integration`. If you added a new pipeline, also add it to
+`cases/full-factory/case.json` (and `cases/motifs/case.json` for a `motif-*` pipeline). If it changes the
+activity totals, update `test_strategy_counts_are_broad_and_stable`.
 
 ## Code Style Rules
 

@@ -1,0 +1,13 @@
+resources:
+  jobs:
+    motif_rest_api_pagination:
+      name: motif-rest-api-pagination
+      tasks:
+      - task_key: motif_rest_api_pagination
+        description: 'Collapsed motif: REST API Pagination. Replaces 2 ADF activities
+          with python_rest_ingestion.'
+        notebook_task:
+          notebook_path: ../src/notebooks/motif_rest_api_pagination.py
+          base_parameters:
+            api_url: ''
+            target_table: ''

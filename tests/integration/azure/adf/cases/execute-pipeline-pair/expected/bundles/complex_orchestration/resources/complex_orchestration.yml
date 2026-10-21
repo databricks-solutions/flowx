@@ -1,0 +1,32 @@
+resources:
+  jobs:
+    complex_orchestration:
+      name: complex-orchestration
+      tasks:
+      - task_key: _init_state
+        notebook_task:
+          notebook_path: ../src/notebooks/init_state.py
+          base_parameters:
+            variable_name: state
+            value: start
+      - task_key: launch-child
+        run_job_task:
+          job_id: ${var.child_pipeline_job_id}
+      - task_key: mixed-script
+        depends_on:
+        - task_key: launch-child
+        notebook_task:
+          notebook_path: ../src/notebooks/mixed-script.py
+          base_parameters: {}
+      - task_key: complete
+        depends_on:
+        - task_key: mixed-script
+        notebook_task:
+          notebook_path: ../src/notebooks/complete.py
+          base_parameters:
+            variable_name: state
+            value: complete
+      schedule:
+        quartz_cron_expression: 0 0 0 * * ?
+        timezone_id: UTC
+        pause_status: PAUSED

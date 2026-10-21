@@ -1,4 +1,4 @@
-.PHONY: clean dev ci test integration integration-live fmt help docs-install docs-clean docs-build docs-serve lock-dependencies requirements precommit
+.PHONY: clean dev ci test integration integration-live setup-integration fmt help docs-install docs-clean docs-build docs-serve lock-dependencies requirements precommit lint-skills
 
 clean:
 	rm -rf .venv .pytest_cache .ruff_cache .mypy_cache __pycache__
@@ -20,10 +20,16 @@ integration:
 integration-live:
 	PYTHONPATH=src uv run pytest tests/integration -v -m "not slow"
 
+setup-integration:
+	.github/scripts/setup-integration.sh $(ARGS)
+
 fmt:
 	uv run ruff format src/ tests/
 	uv run ruff check src/ tests/ --fix
 	uv run mypy src/flowx/
+
+check-skills:
+	cd .github && python3 scripts/check_plugin_skills.py
 
 docs-install:
 	cd docs && bun install --frozen-lockfile
@@ -58,7 +64,10 @@ help:
 	@echo "  ci           		Install dependencies (frozen lockfile)"
 	@echo "  test         		Run unit tests"
 	@echo "  integration  		Run integration tests"
+	@echo "  integration-live\tRun integration tests including any marked integration (live Azure)"
+	@echo "  setup-integration\tRun one-time Azure/GitHub integration setup (ARGS=...)"
 	@echo "  fmt          		Format and lint code"
+	@echo "  lint-skills  		Check plugin.json lists every skill folder"
 	@echo "  precommit    		Format, lint, and refresh requirements.txt (run before committing)"
 	@echo "  clean        		Remove build artifacts"
 	@echo "  docs-install 		Install docs dependencies (bun)"

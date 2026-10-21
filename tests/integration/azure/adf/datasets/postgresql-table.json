@@ -1,0 +1,1 @@
+{"name":"postgresql-table","properties":{"type":"AzurePostgreSqlTable","linkedServiceName":{"referenceName":"postgresql-parameterized","type":"LinkedServiceReference"},"typeProperties":{"schema":"public","table":"flowx_integration"}}}

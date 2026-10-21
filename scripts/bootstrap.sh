@@ -12,7 +12,7 @@
 # warning telling the user what to install and exits non-zero without making changes.
 #
 # On Databricks serverless compute (where ensurepip is unavailable), the script
-# falls back to --without-pip + get-pip.py automatically.
+# falls back to --without-pip and installs a pinned, hash-checked pip wheel.
 #
 # After bootstrapping, run the plugin's Python code with the venv interpreter and
 # src/ on PYTHONPATH, e.g.:
@@ -36,6 +36,11 @@ PLUGIN_ROOT="$(cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
 
 VENV_DIR="$PLUGIN_ROOT/.venv"
 REQUIREMENTS="$PLUGIN_ROOT/requirements.txt"
+PIP_REQUIREMENT="pip==26.2.1 --hash=sha256:71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"
+PIP_REQUIREMENT_FILE="$(mktemp)"
+PIP_WHEEL_DIR="$(mktemp -d)"
+trap 'rm -rf "$PIP_REQUIREMENT_FILE" "$PIP_WHEEL_DIR"' EXIT
+echo "$PIP_REQUIREMENT" > "$PIP_REQUIREMENT_FILE"
 
 # Verify python3 is available
 if ! command -v python3 >/dev/null 2>&1; then
@@ -131,15 +136,17 @@ if [ ! -x "$VENV_DIR/bin/python" ]; then
     : # standard venv creation succeeded
   else
     # Fallback for environments where ensurepip is unavailable (e.g. Databricks
-    # serverless compute).  Create the venv without pip, then bootstrap pip
-    # via get-pip.py.
+    # serverless compute).  Create the venv without pip, download the pinned pip
+    # wheel with the system pip (which checks its hash), then run pip from that
+    # wheel to install itself into the venv.
     echo "Standard venv failed (ensurepip likely missing); trying --without-pip ..."
     rm -rf "$VENV_DIR"
     "$PYTHON_BIN" -m venv --without-pip "$VENV_DIR"
-    echo "Bootstrapping pip via get-pip.py ..."
-    curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/_flowx_get_pip.py
-    "$VENV_DIR/bin/python" /tmp/_flowx_get_pip.py --quiet
-    rm -f /tmp/_flowx_get_pip.py
+    echo "Installing pinned pip into the venv ..."
+    "$PYTHON_BIN" -m pip download --quiet --no-deps --require-hashes \
+      -r "$PIP_REQUIREMENT_FILE" -d "$PIP_WHEEL_DIR"
+    PIP_WHEEL="$(ls "$PIP_WHEEL_DIR"/pip-*.whl)"
+    "$VENV_DIR/bin/python" "$PIP_WHEEL/pip" install --quiet --no-index "$PIP_WHEEL"
   fi
 else
   echo "Using existing virtual environment at $VENV_DIR ..."
@@ -153,8 +160,8 @@ if [ ! -f "$REQUIREMENTS" ]; then
   exit 1
 fi
 
-echo "Upgrading pip ..."
-"$VENV_PYTHON" -m pip install --quiet --upgrade pip
+echo "Installing pinned pip ..."
+"$VENV_PYTHON" -m pip install --quiet --require-hashes -r "$PIP_REQUIREMENT_FILE"
 
 echo "Installing dependencies from requirements.txt ..."
 "$VENV_PYTHON" -m pip install -r "$REQUIREMENTS"
