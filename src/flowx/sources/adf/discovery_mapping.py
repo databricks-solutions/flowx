@@ -245,8 +245,10 @@ def _trigger_pipeline_names(trigger: AdfTrigger) -> list[str]:
 
 
 # Fields an ADF REST GET adds that carry no meaning, the same set main's ADF corpus
-# allows from a live export: the pipeline's publish time, and these keys only when
-# they hold the empty value shown. Everything else is kept as written.
+# allows from a live export: the REST envelope's id, type and etag (a new etag on every
+# publish), the pipeline's publish time, and these keys only when they hold the empty
+# value shown. Everything else is kept as written.
+_REST_ENVELOPE_FIELDS = frozenset({"id", "type", "etag"})
 _READ_ONLY_PIPELINE_FIELDS = frozenset({"lastPublishTime"})
 _PIPELINE_GET_DEFAULTS: dict[str, Any] = {"annotations": [], "parameters": {}, "variables": {}}
 _ACTIVITY_GET_DEFAULTS: dict[str, Any] = {"dependsOn": [], "userProperties": []}
@@ -283,7 +285,11 @@ def _activity_without_get_defaults(activity: Any) -> Any:
 
 
 def _pipeline_without_get_defaults(raw: Any) -> Any:
-    """A pipeline's raw dict without its publish time and its empty GET defaults, activities cleaned too."""
+    """A pipeline's raw dict without its REST envelope fields, publish time and empty GET defaults.
+
+    The envelope's ``id``, ``type`` and ``etag`` go; ``name`` and ``properties`` stay,
+    with the activities cleaned too.
+    """
     if not isinstance(raw, dict) or not isinstance(raw.get("properties"), dict):
         return raw
     properties = {
@@ -293,7 +299,8 @@ def _pipeline_without_get_defaults(raw: Any) -> Any:
     }
     if isinstance(properties.get("activities"), list):
         properties["activities"] = [_activity_without_get_defaults(child) for child in properties["activities"]]
-    return {**raw, "properties": properties}
+    envelope = {key: item for key, item in raw.items() if key not in _REST_ENVELOPE_FIELDS}
+    return {**envelope, "properties": properties}
 
 
 def adf_pipeline_to_source_graph(pipeline: AdfPipeline, definitions: AdfDefinitions | None = None) -> SourceGraph:
