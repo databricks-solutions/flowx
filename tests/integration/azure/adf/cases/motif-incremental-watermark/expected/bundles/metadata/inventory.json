@@ -3,36 +3,184 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "old-watermark",
+          "original_type": "Lookup",
+          "raw": {
+            "name": "old-watermark",
+            "type": "Lookup",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              },
+              "firstRowOnly": true,
+              "source": {
+                "sqlReaderQuery": "SELECT watermark FROM dbo.control",
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "old-watermark",
           "type": "Lookup"
         },
         {
+          "dependencies": [],
           "name": "new-watermark",
+          "original_type": "Lookup",
+          "raw": {
+            "name": "new-watermark",
+            "type": "Lookup",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              },
+              "firstRowOnly": true,
+              "source": {
+                "sqlReaderQuery": "SELECT MAX(updated_at) AS watermark FROM dbo.source",
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "new-watermark",
           "type": "Lookup"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "old-watermark"
+            },
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "new-watermark"
+            }
+          ],
           "depends_on": [
             "old-watermark",
             "new-watermark"
           ],
           "name": "incremental-copy",
+          "original_type": "Copy",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "old-watermark",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "new-watermark",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "inputs": [
+              {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              }
+            ],
+            "name": "incremental-copy",
+            "outputs": [
+              {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              }
+            ],
+            "type": "Copy",
+            "typeProperties": {
+              "sink": {
+                "type": "DelimitedTextSink"
+              },
+              "source": {
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "incremental-copy",
           "type": "Copy"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "incremental-copy"
+            }
+          ],
           "depends_on": [
             "incremental-copy"
           ],
           "name": "update-watermark",
+          "original_type": "SqlServerStoredProcedure",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "incremental-copy",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "update-watermark",
+            "type": "SqlServerStoredProcedure",
+            "typeProperties": {
+              "storedProcedureName": "dbo.update_watermark"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "update-watermark",
           "type": "SqlServerStoredProcedure"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Lookup 'old-watermark' contains watermark-style query",
+            "Lookup 'new-watermark' contains watermark-style query",
+            "StoredProcedure 'update-watermark' updates watermark after Copy"
+          ],
+          "databricks_replacement": "auto_loader",
+          "display_name": "Incremental Load (Watermark)",
+          "member_task_keys": [
+            "old-watermark",
+            "new-watermark",
+            "incremental-copy",
+            "update-watermark"
+          ],
+          "motif_id": "incremental_load_watermark",
+          "source_type_hint": "database"
         }
       ],
       "name": "motif-incremental-watermark"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "c7edc678e3b77622ea13f46f2a07aee63de2f130c096d5ccd03519d80f08ad6d",
   "summary": {
     "activity_count": 4,
     "agentic_count": 1,

@@ -1,0 +1,959 @@
+{
+  "contract_version": "1",
+  "source": "adf",
+  "graphs": [
+    {
+      "name": "motif-activity-and-notify",
+      "source": "adf",
+      "parameters": {},
+      "variables": {},
+      "tags": [],
+      "tasks": [
+        {
+          "node_type": "SourceNode",
+          "source_id": "work",
+          "task_key": "work",
+          "concept": "wait",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "work",
+          "native_type": "Wait",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "name": "work",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "notify",
+          "task_key": "notify",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [
+            {
+              "upstream": "work",
+              "conditions": [
+                "Completed"
+              ],
+              "resolved": true
+            }
+          ],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "notify",
+          "native_type": "WebActivity",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "work",
+                "dependencyConditions": [
+                  "Completed"
+                ]
+              }
+            ],
+            "name": "notify",
+            "type": "WebActivity",
+            "typeProperties": {
+              "body": {
+                "status": "complete"
+              },
+              "method": "POST",
+              "url": "https://example.invalid/notify"
+            }
+          }
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": [
+          {
+            "motif_id": "activity_and_notify",
+            "member_task_keys": [
+              "work",
+              "notify"
+            ],
+            "display_name": "Activity and Notify",
+            "databricks_replacement": "task_with_notification",
+            "notes": [
+              "WebActivity 'notify' appears to be a notification call"
+            ]
+          }
+        ]
+      },
+      "raw": {
+        "name": "motif-activity-and-notify",
+        "properties": {
+          "activities": [
+            {
+              "name": "work",
+              "type": "Wait",
+              "typeProperties": {
+                "waitTimeInSeconds": 1
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "work",
+                  "dependencyConditions": [
+                    "Completed"
+                  ]
+                }
+              ],
+              "name": "notify",
+              "type": "WebActivity",
+              "typeProperties": {
+                "body": {
+                  "status": "complete"
+                },
+                "method": "POST",
+                "url": "https://example.invalid/notify"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "motif-incremental-watermark",
+      "source": "adf",
+      "parameters": {},
+      "variables": {},
+      "tags": [],
+      "tasks": [
+        {
+          "node_type": "SourceNode",
+          "source_id": "old-watermark",
+          "task_key": "old-watermark",
+          "concept": "query",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [
+            {
+              "signature": "",
+              "asset_type": "table"
+            }
+          ],
+          "data_writes": [],
+          "name": "old-watermark",
+          "native_type": "Lookup",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "name": "old-watermark",
+            "type": "Lookup",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              },
+              "firstRowOnly": true,
+              "source": {
+                "sqlReaderQuery": "SELECT watermark FROM dbo.control",
+                "type": "AzureSqlSource"
+              }
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "new-watermark",
+          "task_key": "new-watermark",
+          "concept": "query",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [
+            {
+              "signature": "",
+              "asset_type": "table"
+            }
+          ],
+          "data_writes": [],
+          "name": "new-watermark",
+          "native_type": "Lookup",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "name": "new-watermark",
+            "type": "Lookup",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              },
+              "firstRowOnly": true,
+              "source": {
+                "sqlReaderQuery": "SELECT MAX(updated_at) AS watermark FROM dbo.source",
+                "type": "AzureSqlSource"
+              }
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "incremental-copy",
+          "task_key": "incremental-copy",
+          "concept": "copy_data",
+          "source": "adf",
+          "dependencies": [
+            {
+              "upstream": "old-watermark",
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true
+            },
+            {
+              "upstream": "new-watermark",
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true
+            }
+          ],
+          "data_reads": [
+            {
+              "signature": "azure-sql/dbo.flowx_integration",
+              "identity": "azure-sql/dbo.flowx_integration",
+              "asset_type": "table"
+            }
+          ],
+          "data_writes": [
+            {
+              "signature": "",
+              "asset_type": "file"
+            }
+          ],
+          "name": "incremental-copy",
+          "native_type": "Copy",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "old-watermark",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "new-watermark",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "inputs": [
+              {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              }
+            ],
+            "name": "incremental-copy",
+            "outputs": [
+              {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              }
+            ],
+            "type": "Copy",
+            "typeProperties": {
+              "sink": {
+                "type": "DelimitedTextSink"
+              },
+              "source": {
+                "type": "AzureSqlSource"
+              }
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "update-watermark",
+          "task_key": "update-watermark",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [
+            {
+              "upstream": "incremental-copy",
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true
+            }
+          ],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "update-watermark",
+          "native_type": "SqlServerStoredProcedure",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "incremental-copy",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "update-watermark",
+            "type": "SqlServerStoredProcedure",
+            "typeProperties": {
+              "storedProcedureName": "dbo.update_watermark"
+            }
+          }
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": [
+          {
+            "motif_id": "incremental_load_watermark",
+            "member_task_keys": [
+              "old-watermark",
+              "new-watermark",
+              "incremental-copy",
+              "update-watermark"
+            ],
+            "display_name": "Incremental Load (Watermark)",
+            "databricks_replacement": "auto_loader",
+            "notes": [
+              "Lookup 'old-watermark' contains watermark-style query",
+              "Lookup 'new-watermark' contains watermark-style query",
+              "StoredProcedure 'update-watermark' updates watermark after Copy"
+            ],
+            "source_type_hint": "database"
+          }
+        ]
+      },
+      "raw": {
+        "name": "motif-incremental-watermark",
+        "properties": {
+          "activities": [
+            {
+              "name": "old-watermark",
+              "type": "Lookup",
+              "typeProperties": {
+                "dataset": {
+                  "referenceName": "azure-sql-table",
+                  "type": "DatasetReference"
+                },
+                "firstRowOnly": true,
+                "source": {
+                  "sqlReaderQuery": "SELECT watermark FROM dbo.control",
+                  "type": "AzureSqlSource"
+                }
+              }
+            },
+            {
+              "name": "new-watermark",
+              "type": "Lookup",
+              "typeProperties": {
+                "dataset": {
+                  "referenceName": "azure-sql-table",
+                  "type": "DatasetReference"
+                },
+                "firstRowOnly": true,
+                "source": {
+                  "sqlReaderQuery": "SELECT MAX(updated_at) AS watermark FROM dbo.source",
+                  "type": "AzureSqlSource"
+                }
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "old-watermark",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                },
+                {
+                  "activity": "new-watermark",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "inputs": [
+                {
+                  "referenceName": "azure-sql-table",
+                  "type": "DatasetReference"
+                }
+              ],
+              "name": "incremental-copy",
+              "outputs": [
+                {
+                  "referenceName": "csv-adls",
+                  "type": "DatasetReference"
+                }
+              ],
+              "type": "Copy",
+              "typeProperties": {
+                "sink": {
+                  "type": "DelimitedTextSink"
+                },
+                "source": {
+                  "type": "AzureSqlSource"
+                }
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "incremental-copy",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "linkedServiceName": {
+                "referenceName": "azure-sql",
+                "type": "LinkedServiceReference"
+              },
+              "name": "update-watermark",
+              "type": "SqlServerStoredProcedure",
+              "typeProperties": {
+                "storedProcedureName": "dbo.update_watermark"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "motif-metadata-bulk-copy",
+      "source": "adf",
+      "parameters": {},
+      "variables": {},
+      "tags": [],
+      "tasks": [
+        {
+          "node_type": "SourceNode",
+          "source_id": "lookup-metadata",
+          "task_key": "lookup-metadata",
+          "concept": "query",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [
+            {
+              "signature": "",
+              "asset_type": "table"
+            }
+          ],
+          "data_writes": [],
+          "name": "lookup-metadata",
+          "native_type": "Lookup",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "name": "lookup-metadata",
+            "type": "Lookup",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              },
+              "firstRowOnly": false,
+              "source": {
+                "sqlReaderQuery": "SELECT schema_name, table_name FROM dbo.copy_config",
+                "type": "AzureSqlSource"
+              }
+            }
+          }
+        },
+        {
+          "node_type": "ContainerNode",
+          "source_id": "copy-each-table",
+          "task_key": "copy-each-table",
+          "concept": "loop",
+          "source": "adf",
+          "dependencies": [
+            {
+              "upstream": "lookup-metadata",
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true
+            }
+          ],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "copy-each-table",
+          "native_type": "ForEach",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "lookup-metadata",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "copy-each-table",
+            "type": "ForEach",
+            "typeProperties": {
+              "activities": [
+                {
+                  "inputs": [
+                    {
+                      "referenceName": "azure-sql-table",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "name": "dynamic-copy",
+                  "outputs": [
+                    {
+                      "referenceName": "parquet-adls",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "type": "Copy",
+                  "typeProperties": {
+                    "sink": {
+                      "type": "ParquetSink"
+                    },
+                    "source": {
+                      "type": "AzureSqlSource"
+                    }
+                  }
+                }
+              ],
+              "items": {
+                "type": "Expression",
+                "value": "@activity('lookup-metadata').output.value"
+              }
+            }
+          },
+          "branches": {
+            "body": [
+              {
+                "node_type": "SourceNode",
+                "source_id": "dynamic-copy",
+                "task_key": "dynamic-copy",
+                "concept": "copy_data",
+                "source": "adf",
+                "dependencies": [],
+                "data_reads": [
+                  {
+                    "signature": "azure-sql/dbo.flowx_integration",
+                    "identity": "azure-sql/dbo.flowx_integration",
+                    "asset_type": "table"
+                  }
+                ],
+                "data_writes": [
+                  {
+                    "signature": "",
+                    "asset_type": "file"
+                  }
+                ],
+                "name": "dynamic-copy",
+                "native_type": "Copy",
+                "properties": {
+                  "strategy": "deterministic"
+                },
+                "raw": {
+                  "inputs": [
+                    {
+                      "referenceName": "azure-sql-table",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "name": "dynamic-copy",
+                  "outputs": [
+                    {
+                      "referenceName": "parquet-adls",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "type": "Copy",
+                  "typeProperties": {
+                    "sink": {
+                      "type": "ParquetSink"
+                    },
+                    "source": {
+                      "type": "AzureSqlSource"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": [
+          {
+            "motif_id": "metadata_driven_bulk_copy",
+            "member_task_keys": [
+              "lookup-metadata",
+              "copy-each-table"
+            ],
+            "display_name": "Metadata-Driven Bulk Copy",
+            "databricks_replacement": "for_each_ingestion",
+            "notes": [
+              "Lookup 'lookup-metadata' appears to read a control/metadata table"
+            ],
+            "source_type_hint": "database"
+          }
+        ]
+      },
+      "raw": {
+        "name": "motif-metadata-bulk-copy",
+        "properties": {
+          "activities": [
+            {
+              "name": "lookup-metadata",
+              "type": "Lookup",
+              "typeProperties": {
+                "dataset": {
+                  "referenceName": "azure-sql-table",
+                  "type": "DatasetReference"
+                },
+                "firstRowOnly": false,
+                "source": {
+                  "sqlReaderQuery": "SELECT schema_name, table_name FROM dbo.copy_config",
+                  "type": "AzureSqlSource"
+                }
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "lookup-metadata",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "name": "copy-each-table",
+              "type": "ForEach",
+              "typeProperties": {
+                "activities": [
+                  {
+                    "inputs": [
+                      {
+                        "referenceName": "azure-sql-table",
+                        "type": "DatasetReference"
+                      }
+                    ],
+                    "name": "dynamic-copy",
+                    "outputs": [
+                      {
+                        "referenceName": "parquet-adls",
+                        "type": "DatasetReference"
+                      }
+                    ],
+                    "type": "Copy",
+                    "typeProperties": {
+                      "sink": {
+                        "type": "ParquetSink"
+                      },
+                      "source": {
+                        "type": "AzureSqlSource"
+                      }
+                    }
+                  }
+                ],
+                "items": {
+                  "type": "Expression",
+                  "value": "@activity('lookup-metadata').output.value"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "motif-rest-api-pagination",
+      "source": "adf",
+      "parameters": {},
+      "variables": {
+        "continuation": {
+          "type": "String"
+        }
+      },
+      "tags": [],
+      "tasks": [
+        {
+          "node_type": "SourceNode",
+          "source_id": "initial-request",
+          "task_key": "initial-request",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "initial-request",
+          "native_type": "WebActivity",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "name": "initial-request",
+            "type": "WebActivity",
+            "typeProperties": {
+              "method": "GET",
+              "url": "https://example.invalid/api/items"
+            }
+          }
+        },
+        {
+          "node_type": "ContainerNode",
+          "source_id": "paginate",
+          "task_key": "paginate",
+          "concept": "loop",
+          "source": "adf",
+          "dependencies": [
+            {
+              "upstream": "initial-request",
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true
+            }
+          ],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "paginate",
+          "native_type": "Until",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "initial-request",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "paginate",
+            "type": "Until",
+            "typeProperties": {
+              "activities": [
+                {
+                  "name": "page-request",
+                  "type": "WebActivity",
+                  "typeProperties": {
+                    "method": "GET",
+                    "url": "https://example.invalid/api/items?page=next"
+                  }
+                },
+                {
+                  "dependsOn": [
+                    {
+                      "activity": "page-request",
+                      "dependencyConditions": [
+                        "Succeeded"
+                      ]
+                    }
+                  ],
+                  "name": "set-continuation",
+                  "type": "SetVariable",
+                  "typeProperties": {
+                    "value": "done",
+                    "variableName": "continuation"
+                  }
+                }
+              ],
+              "expression": {
+                "type": "Expression",
+                "value": "@empty(variables('continuation'))"
+              },
+              "timeout": "0.00:05:00"
+            }
+          },
+          "branches": {
+            "body": [
+              {
+                "node_type": "SourceNode",
+                "source_id": "page-request",
+                "task_key": "page-request",
+                "concept": "gap",
+                "source": "adf",
+                "dependencies": [],
+                "data_reads": [],
+                "data_writes": [],
+                "name": "page-request",
+                "native_type": "WebActivity",
+                "properties": {
+                  "strategy": "deterministic"
+                },
+                "raw": {
+                  "name": "page-request",
+                  "type": "WebActivity",
+                  "typeProperties": {
+                    "method": "GET",
+                    "url": "https://example.invalid/api/items?page=next"
+                  }
+                }
+              },
+              {
+                "node_type": "SourceNode",
+                "source_id": "set-continuation",
+                "task_key": "set-continuation",
+                "concept": "set_variable",
+                "source": "adf",
+                "dependencies": [
+                  {
+                    "upstream": "page-request",
+                    "conditions": [
+                      "Succeeded"
+                    ],
+                    "resolved": true
+                  }
+                ],
+                "data_reads": [],
+                "data_writes": [],
+                "name": "set-continuation",
+                "native_type": "SetVariable",
+                "properties": {
+                  "strategy": "deterministic"
+                },
+                "raw": {
+                  "dependsOn": [
+                    {
+                      "activity": "page-request",
+                      "dependencyConditions": [
+                        "Succeeded"
+                      ]
+                    }
+                  ],
+                  "name": "set-continuation",
+                  "type": "SetVariable",
+                  "typeProperties": {
+                    "value": "done",
+                    "variableName": "continuation"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": [
+          {
+            "motif_id": "rest_api_pagination",
+            "member_task_keys": [
+              "initial-request",
+              "paginate"
+            ],
+            "display_name": "REST API Pagination",
+            "databricks_replacement": "python_rest_ingestion",
+            "notes": [
+              "Until child 'page-request' uses pagination",
+              "Until child 'set-continuation' uses pagination"
+            ],
+            "source_type_hint": "rest_api"
+          }
+        ]
+      },
+      "raw": {
+        "name": "motif-rest-api-pagination",
+        "properties": {
+          "activities": [
+            {
+              "name": "initial-request",
+              "type": "WebActivity",
+              "typeProperties": {
+                "method": "GET",
+                "url": "https://example.invalid/api/items"
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "initial-request",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "name": "paginate",
+              "type": "Until",
+              "typeProperties": {
+                "activities": [
+                  {
+                    "name": "page-request",
+                    "type": "WebActivity",
+                    "typeProperties": {
+                      "method": "GET",
+                      "url": "https://example.invalid/api/items?page=next"
+                    }
+                  },
+                  {
+                    "dependsOn": [
+                      {
+                        "activity": "page-request",
+                        "dependencyConditions": [
+                          "Succeeded"
+                        ]
+                      }
+                    ],
+                    "name": "set-continuation",
+                    "type": "SetVariable",
+                    "typeProperties": {
+                      "value": "done",
+                      "variableName": "continuation"
+                    }
+                  }
+                ],
+                "expression": {
+                  "type": "Expression",
+                  "value": "@empty(variables('continuation'))"
+                },
+                "timeout": "0.00:05:00"
+              }
+            }
+          ],
+          "variables": {
+            "continuation": {
+              "type": "String"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "graph_sha256": [
+    "86e862e857b71ef4b8e0dbd3a0aa5a4a3981b391900dd66265b2bf0c4ab09357",
+    "c1009705ed2f1f474d6c84844cebe2448b3f2bc88a96d874afe7f118513e63db",
+    "9ff32eb44fb560ca95665fc98bc95e0d3c3228a37643c5fcd54b11b876aab9d6",
+    "ed7415cc7656f5061218900137631be2fb553e67bdcb8bed7cc0331bdf40f107"
+  ],
+  "document_sha256": "6d7bc1f731ddf29972aab8a44ef7a5801abdea67860bc4c9129e22d30af3e06e"
+}

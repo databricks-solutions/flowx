@@ -3,27 +3,149 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "lookup-metadata",
+          "original_type": "Lookup",
+          "raw": {
+            "name": "lookup-metadata",
+            "type": "Lookup",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              },
+              "firstRowOnly": false,
+              "source": {
+                "sqlReaderQuery": "SELECT schema_name, table_name FROM dbo.copy_config",
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "lookup-metadata",
           "type": "Lookup"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "lookup-metadata"
+            }
+          ],
           "depends_on": [
             "lookup-metadata"
           ],
           "name": "copy-each-table",
+          "original_type": "ForEach",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "lookup-metadata",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "copy-each-table",
+            "type": "ForEach",
+            "typeProperties": {
+              "activities": [
+                {
+                  "inputs": [
+                    {
+                      "referenceName": "azure-sql-table",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "name": "dynamic-copy",
+                  "outputs": [
+                    {
+                      "referenceName": "parquet-adls",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "type": "Copy",
+                  "typeProperties": {
+                    "sink": {
+                      "type": "ParquetSink"
+                    },
+                    "source": {
+                      "type": "AzureSqlSource"
+                    }
+                  }
+                }
+              ],
+              "items": {
+                "type": "Expression",
+                "value": "@activity('lookup-metadata').output.value"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "copy-each-table",
           "type": "ForEach"
         },
         {
+          "dependencies": [],
           "name": "dynamic-copy",
+          "original_type": "Copy",
+          "raw": {
+            "inputs": [
+              {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              }
+            ],
+            "name": "dynamic-copy",
+            "outputs": [
+              {
+                "referenceName": "parquet-adls",
+                "type": "DatasetReference"
+              }
+            ],
+            "type": "Copy",
+            "typeProperties": {
+              "sink": {
+                "type": "ParquetSink"
+              },
+              "source": {
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "dynamic-copy",
           "type": "Copy"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Lookup 'lookup-metadata' appears to read a control/metadata table"
+          ],
+          "databricks_replacement": "for_each_ingestion",
+          "display_name": "Metadata-Driven Bulk Copy",
+          "member_task_keys": [
+            "lookup-metadata",
+            "copy-each-table"
+          ],
+          "motif_id": "metadata_driven_bulk_copy",
+          "source_type_hint": "database"
         }
       ],
       "name": "motif-metadata-bulk-copy"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "adbc0c8365268d0a8b55c59f70a15461070c532d75e4f3a1024b9cf363fce120",
   "summary": {
     "activity_count": 3,
     "agentic_count": 0,

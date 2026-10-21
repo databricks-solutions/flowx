@@ -3,22 +3,84 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "work",
+          "original_type": "Wait",
+          "raw": {
+            "name": "work",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "work",
           "type": "Wait"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Completed"
+              ],
+              "resolved": true,
+              "upstream": "work"
+            }
+          ],
           "depends_on": [
             "work"
           ],
           "name": "notify",
+          "original_type": "WebActivity",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "work",
+                "dependencyConditions": [
+                  "Completed"
+                ]
+              }
+            ],
+            "name": "notify",
+            "type": "WebActivity",
+            "typeProperties": {
+              "body": {
+                "status": "complete"
+              },
+              "method": "POST",
+              "url": "https://example.invalid/notify"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "notify",
           "type": "WebActivity"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "WebActivity 'notify' appears to be a notification call"
+          ],
+          "databricks_replacement": "task_with_notification",
+          "display_name": "Activity and Notify",
+          "member_task_keys": [
+            "work",
+            "notify"
+          ],
+          "motif_id": "activity_and_notify",
+          "source_type_hint": null
         }
       ],
       "name": "motif-activity-and-notify"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "e48d0d363dbdef22971d78dcf54fc0d6ce624ee045d73f42d922ae8cec28f555",
   "summary": {
     "activity_count": 2,
     "agentic_count": 0,

@@ -1,0 +1,265 @@
+{
+  "contract_version": "1",
+  "source": "adf",
+  "graphs": [
+    {
+      "name": "motif-rest-api-pagination",
+      "source": "adf",
+      "parameters": {},
+      "variables": {
+        "continuation": {
+          "type": "String"
+        }
+      },
+      "tags": [],
+      "tasks": [
+        {
+          "node_type": "SourceNode",
+          "source_id": "initial-request",
+          "task_key": "initial-request",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "initial-request",
+          "native_type": "WebActivity",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "name": "initial-request",
+            "type": "WebActivity",
+            "typeProperties": {
+              "method": "GET",
+              "url": "https://example.invalid/api/items"
+            }
+          }
+        },
+        {
+          "node_type": "ContainerNode",
+          "source_id": "paginate",
+          "task_key": "paginate",
+          "concept": "loop",
+          "source": "adf",
+          "dependencies": [
+            {
+              "upstream": "initial-request",
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true
+            }
+          ],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "paginate",
+          "native_type": "Until",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "initial-request",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "paginate",
+            "type": "Until",
+            "typeProperties": {
+              "activities": [
+                {
+                  "name": "page-request",
+                  "type": "WebActivity",
+                  "typeProperties": {
+                    "method": "GET",
+                    "url": "https://example.invalid/api/items?page=next"
+                  }
+                },
+                {
+                  "dependsOn": [
+                    {
+                      "activity": "page-request",
+                      "dependencyConditions": [
+                        "Succeeded"
+                      ]
+                    }
+                  ],
+                  "name": "set-continuation",
+                  "type": "SetVariable",
+                  "typeProperties": {
+                    "value": "done",
+                    "variableName": "continuation"
+                  }
+                }
+              ],
+              "expression": {
+                "type": "Expression",
+                "value": "@empty(variables('continuation'))"
+              },
+              "timeout": "0.00:05:00"
+            }
+          },
+          "branches": {
+            "body": [
+              {
+                "node_type": "SourceNode",
+                "source_id": "page-request",
+                "task_key": "page-request",
+                "concept": "gap",
+                "source": "adf",
+                "dependencies": [],
+                "data_reads": [],
+                "data_writes": [],
+                "name": "page-request",
+                "native_type": "WebActivity",
+                "properties": {
+                  "strategy": "deterministic"
+                },
+                "raw": {
+                  "name": "page-request",
+                  "type": "WebActivity",
+                  "typeProperties": {
+                    "method": "GET",
+                    "url": "https://example.invalid/api/items?page=next"
+                  }
+                }
+              },
+              {
+                "node_type": "SourceNode",
+                "source_id": "set-continuation",
+                "task_key": "set-continuation",
+                "concept": "set_variable",
+                "source": "adf",
+                "dependencies": [
+                  {
+                    "upstream": "page-request",
+                    "conditions": [
+                      "Succeeded"
+                    ],
+                    "resolved": true
+                  }
+                ],
+                "data_reads": [],
+                "data_writes": [],
+                "name": "set-continuation",
+                "native_type": "SetVariable",
+                "properties": {
+                  "strategy": "deterministic"
+                },
+                "raw": {
+                  "dependsOn": [
+                    {
+                      "activity": "page-request",
+                      "dependencyConditions": [
+                        "Succeeded"
+                      ]
+                    }
+                  ],
+                  "name": "set-continuation",
+                  "type": "SetVariable",
+                  "typeProperties": {
+                    "value": "done",
+                    "variableName": "continuation"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": [
+          {
+            "motif_id": "rest_api_pagination",
+            "member_task_keys": [
+              "initial-request",
+              "paginate"
+            ],
+            "display_name": "REST API Pagination",
+            "databricks_replacement": "python_rest_ingestion",
+            "notes": [
+              "Until child 'page-request' uses pagination",
+              "Until child 'set-continuation' uses pagination"
+            ],
+            "source_type_hint": "rest_api"
+          }
+        ]
+      },
+      "raw": {
+        "name": "motif-rest-api-pagination",
+        "properties": {
+          "activities": [
+            {
+              "name": "initial-request",
+              "type": "WebActivity",
+              "typeProperties": {
+                "method": "GET",
+                "url": "https://example.invalid/api/items"
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "initial-request",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "name": "paginate",
+              "type": "Until",
+              "typeProperties": {
+                "activities": [
+                  {
+                    "name": "page-request",
+                    "type": "WebActivity",
+                    "typeProperties": {
+                      "method": "GET",
+                      "url": "https://example.invalid/api/items?page=next"
+                    }
+                  },
+                  {
+                    "dependsOn": [
+                      {
+                        "activity": "page-request",
+                        "dependencyConditions": [
+                          "Succeeded"
+                        ]
+                      }
+                    ],
+                    "name": "set-continuation",
+                    "type": "SetVariable",
+                    "typeProperties": {
+                      "value": "done",
+                      "variableName": "continuation"
+                    }
+                  }
+                ],
+                "expression": {
+                  "type": "Expression",
+                  "value": "@empty(variables('continuation'))"
+                },
+                "timeout": "0.00:05:00"
+              }
+            }
+          ],
+          "variables": {
+            "continuation": {
+              "type": "String"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "graph_sha256": [
+    "ed7415cc7656f5061218900137631be2fb553e67bdcb8bed7cc0331bdf40f107"
+  ],
+  "document_sha256": "70ed04d8f5e705e613d91a1e111692c3600bde0a17c7dad68ad8a2b1f46517b1"
+}

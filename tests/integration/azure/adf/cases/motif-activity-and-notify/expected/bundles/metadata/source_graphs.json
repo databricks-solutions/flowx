@@ -1,0 +1,134 @@
+{
+  "contract_version": "1",
+  "source": "adf",
+  "graphs": [
+    {
+      "name": "motif-activity-and-notify",
+      "source": "adf",
+      "parameters": {},
+      "variables": {},
+      "tags": [],
+      "tasks": [
+        {
+          "node_type": "SourceNode",
+          "source_id": "work",
+          "task_key": "work",
+          "concept": "wait",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "work",
+          "native_type": "Wait",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "name": "work",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "notify",
+          "task_key": "notify",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [
+            {
+              "upstream": "work",
+              "conditions": [
+                "Completed"
+              ],
+              "resolved": true
+            }
+          ],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "notify",
+          "native_type": "WebActivity",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "work",
+                "dependencyConditions": [
+                  "Completed"
+                ]
+              }
+            ],
+            "name": "notify",
+            "type": "WebActivity",
+            "typeProperties": {
+              "body": {
+                "status": "complete"
+              },
+              "method": "POST",
+              "url": "https://example.invalid/notify"
+            }
+          }
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": [
+          {
+            "motif_id": "activity_and_notify",
+            "member_task_keys": [
+              "work",
+              "notify"
+            ],
+            "display_name": "Activity and Notify",
+            "databricks_replacement": "task_with_notification",
+            "notes": [
+              "WebActivity 'notify' appears to be a notification call"
+            ]
+          }
+        ]
+      },
+      "raw": {
+        "name": "motif-activity-and-notify",
+        "properties": {
+          "activities": [
+            {
+              "name": "work",
+              "type": "Wait",
+              "typeProperties": {
+                "waitTimeInSeconds": 1
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "work",
+                  "dependencyConditions": [
+                    "Completed"
+                  ]
+                }
+              ],
+              "name": "notify",
+              "type": "WebActivity",
+              "typeProperties": {
+                "body": {
+                  "status": "complete"
+                },
+                "method": "POST",
+                "url": "https://example.invalid/notify"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "graph_sha256": [
+    "86e862e857b71ef4b8e0dbd3a0aa5a4a3981b391900dd66265b2bf0c4ab09357"
+  ],
+  "document_sha256": "e48d0d363dbdef22971d78dcf54fc0d6ce624ee045d73f42d922ae8cec28f555"
+}

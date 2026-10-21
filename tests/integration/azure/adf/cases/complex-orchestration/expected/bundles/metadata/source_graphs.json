@@ -1,0 +1,249 @@
+{
+  "contract_version": "1",
+  "source": "adf",
+  "graphs": [
+    {
+      "name": "complex-orchestration",
+      "source": "adf",
+      "parameters": {},
+      "variables": {
+        "state": {
+          "type": "String",
+          "default": "start"
+        }
+      },
+      "tags": [],
+      "tasks": [
+        {
+          "node_type": "SourceNode",
+          "source_id": "launch-child",
+          "task_key": "launch-child",
+          "concept": "run_workflow",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "launch-child",
+          "native_type": "ExecutePipeline",
+          "properties": {
+            "strategy": "deterministic",
+            "invokes_workflow": "child-pipeline",
+            "invokes_wait": true
+          },
+          "raw": {
+            "name": "launch-child",
+            "type": "ExecutePipeline",
+            "typeProperties": {
+              "pipeline": {
+                "referenceName": "child-pipeline",
+                "type": "PipelineReference"
+              },
+              "waitOnCompletion": true
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "mixed-script",
+          "task_key": "mixed-script",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [
+            {
+              "upstream": "launch-child",
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true
+            }
+          ],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "mixed-script",
+          "native_type": "Script",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "launch-child",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "mixed-script",
+            "type": "Script",
+            "typeProperties": {
+              "scripts": [
+                {
+                  "text": "SELECT 1",
+                  "type": "Query"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "complete",
+          "task_key": "complete",
+          "concept": "set_variable",
+          "source": "adf",
+          "dependencies": [
+            {
+              "upstream": "mixed-script",
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true
+            }
+          ],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "complete",
+          "native_type": "SetVariable",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "mixed-script",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "complete",
+            "type": "SetVariable",
+            "typeProperties": {
+              "value": "complete",
+              "variableName": "state"
+            }
+          }
+        }
+      ],
+      "schedule": {
+        "kind": "schedule",
+        "expression": {
+          "frequency": "Day",
+          "interval": 1,
+          "startTime": "2026-01-01T00:00:00Z",
+          "timeZone": "UTC"
+        },
+        "timezone": "UTC",
+        "extensions": {
+          "trigger_name": "schedule",
+          "trigger_type": "ScheduleTrigger",
+          "properties": {
+            "pipelines": [
+              {
+                "pipelineReference": {
+                  "referenceName": "complex-orchestration",
+                  "type": "PipelineReference"
+                }
+              }
+            ],
+            "runtimeState": "Stopped",
+            "type": "ScheduleTrigger",
+            "typeProperties": {
+              "recurrence": {
+                "frequency": "Day",
+                "interval": 1,
+                "startTime": "2026-01-01T00:00:00Z",
+                "timeZone": "UTC"
+              }
+            }
+          }
+        }
+      },
+      "lineage": {
+        "control_edges": [
+          {
+            "source_workflow": "complex-orchestration",
+            "target_workflow": "child-pipeline",
+            "via_task_key": "launch-child",
+            "wait_for_completion": true,
+            "resolved": false
+          }
+        ],
+        "data_edges": [],
+        "motifs": []
+      },
+      "raw": {
+        "name": "complex-orchestration",
+        "properties": {
+          "activities": [
+            {
+              "name": "launch-child",
+              "type": "ExecutePipeline",
+              "typeProperties": {
+                "pipeline": {
+                  "referenceName": "child-pipeline",
+                  "type": "PipelineReference"
+                },
+                "waitOnCompletion": true
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "launch-child",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "linkedServiceName": {
+                "referenceName": "azure-sql",
+                "type": "LinkedServiceReference"
+              },
+              "name": "mixed-script",
+              "type": "Script",
+              "typeProperties": {
+                "scripts": [
+                  {
+                    "text": "SELECT 1",
+                    "type": "Query"
+                  }
+                ]
+              }
+            },
+            {
+              "dependsOn": [
+                {
+                  "activity": "mixed-script",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "name": "complete",
+              "type": "SetVariable",
+              "typeProperties": {
+                "value": "complete",
+                "variableName": "state"
+              }
+            }
+          ],
+          "variables": {
+            "state": {
+              "defaultValue": "start",
+              "type": "String"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "graph_sha256": [
+    "137cea771ecd7e094db16e2163e1bc586e21b78a0ea845703a2866fcf2262222"
+  ],
+  "document_sha256": "ef87f978c5e7ffeaf3506ba4882fecf9035d640291bdf6c3be6f23c6a593090c"
+}

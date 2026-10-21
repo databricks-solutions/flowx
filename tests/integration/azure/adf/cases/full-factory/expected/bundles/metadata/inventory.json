@@ -3,233 +3,946 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "data-flow",
+          "original_type": "ExecuteDataFlow",
+          "raw": {
+            "name": "data-flow",
+            "type": "ExecuteDataFlow",
+            "typeProperties": {
+              "compute": {
+                "computeType": "General",
+                "coreCount": 8
+              },
+              "dataFlow": {
+                "referenceName": "placeholder-data-flow",
+                "type": "DataFlowReference"
+              }
+            }
+          },
           "strategy": "agentic",
+          "task_key": "data-flow",
           "type": "ExecuteDataFlow"
         },
         {
+          "dependencies": [],
           "name": "until",
+          "original_type": "Until",
+          "raw": {
+            "name": "until",
+            "type": "Until",
+            "typeProperties": {
+              "activities": [
+                {
+                  "name": "until-wait",
+                  "type": "Wait",
+                  "typeProperties": {
+                    "waitTimeInSeconds": 1
+                  }
+                }
+              ],
+              "expression": {
+                "type": "Expression",
+                "value": "@equals(1,1)"
+              },
+              "timeout": "0.00:01:00"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "until",
           "type": "Until"
         },
         {
+          "dependencies": [],
           "name": "until-wait",
+          "original_type": "Wait",
+          "raw": {
+            "name": "until-wait",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "until-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "stored-procedure",
+          "original_type": "SqlServerStoredProcedure",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "stored-procedure",
+            "type": "SqlServerStoredProcedure",
+            "typeProperties": {
+              "storedProcedureName": "dbo.flowx_integration"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "stored-procedure",
           "type": "SqlServerStoredProcedure"
         },
         {
+          "dependencies": [],
           "name": "azure-function",
+          "original_type": "AzureFunction",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "azure-function-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "azure-function",
+            "type": "AzureFunction",
+            "typeProperties": {
+              "functionName": "flowx",
+              "method": "GET"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "azure-function",
           "type": "AzureFunction"
         },
         {
+          "dependencies": [],
           "name": "webhook",
+          "original_type": "WebHook",
+          "raw": {
+            "name": "webhook",
+            "type": "WebHook",
+            "typeProperties": {
+              "method": "POST",
+              "timeout": "00:01:00",
+              "url": "https://example.invalid/webhook"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "webhook",
           "type": "WebHook"
         },
         {
+          "dependencies": [],
           "name": "custom",
+          "original_type": "Custom",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "batch-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "custom",
+            "type": "Custom",
+            "typeProperties": {
+              "command": "echo flowx",
+              "folderPath": "integration",
+              "resourceLinkedService": {
+                "referenceName": "blob",
+                "type": "LinkedServiceReference"
+              }
+            }
+          },
           "strategy": "agentic",
+          "task_key": "custom",
           "type": "Custom"
         },
         {
+          "dependencies": [],
           "name": "ssis",
+          "original_type": "ExecuteSSISPackage",
+          "raw": {
+            "name": "ssis",
+            "type": "ExecuteSSISPackage",
+            "typeProperties": {
+              "connectVia": {
+                "referenceName": "azure-ssis-placeholder",
+                "type": "IntegrationRuntimeReference"
+              },
+              "packageLocation": {
+                "packagePath": "flowx/package.dtsx",
+                "type": "SSISDB"
+              }
+            }
+          },
           "strategy": "agentic",
+          "task_key": "ssis",
           "type": "ExecuteSSISPackage"
         },
         {
+          "dependencies": [],
           "name": "azure-ml",
+          "original_type": "AzureMLExecutePipeline",
+          "raw": {
+            "name": "azure-ml",
+            "type": "AzureMLExecutePipeline",
+            "typeProperties": {
+              "mlPipelineId": "<AZURE_ML_PIPELINE_ID>",
+              "version": "1"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "azure-ml",
           "type": "AzureMLExecutePipeline"
         },
         {
+          "dependencies": [],
           "name": "get-metadata",
+          "original_type": "GetMetadata",
+          "raw": {
+            "name": "get-metadata",
+            "type": "GetMetadata",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              },
+              "fieldList": [
+                "exists"
+              ]
+            }
+          },
           "strategy": "agentic",
+          "task_key": "get-metadata",
           "type": "GetMetadata"
         },
         {
+          "dependencies": [],
           "name": "validation",
+          "original_type": "Validation",
+          "raw": {
+            "name": "validation",
+            "type": "Validation",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              },
+              "minimumSize": 0,
+              "sleep": 1,
+              "timeout": "0.00:01:00"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "validation",
           "type": "Validation"
         },
         {
+          "dependencies": [],
           "name": "script",
+          "original_type": "Script",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "script",
+            "type": "Script",
+            "typeProperties": {
+              "scripts": [
+                {
+                  "text": "SELECT 1",
+                  "type": "Query"
+                }
+              ]
+            }
+          },
           "strategy": "agentic",
+          "task_key": "script",
           "type": "Script"
         },
         {
+          "dependencies": [],
           "name": "fail",
+          "original_type": "Fail",
+          "raw": {
+            "name": "fail",
+            "type": "Fail",
+            "typeProperties": {
+              "errorCode": "FLOWX_TEST",
+              "message": "intentional integration fixture"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "fail",
           "type": "Fail"
         }
       ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
       "name": "agentic-activities"
     },
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "copy",
+          "original_type": "Copy",
+          "raw": {
+            "inputs": [
+              {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              }
+            ],
+            "name": "copy",
+            "outputs": [
+              {
+                "referenceName": "parquet-adls",
+                "type": "DatasetReference"
+              }
+            ],
+            "type": "Copy",
+            "typeProperties": {
+              "sink": {
+                "type": "ParquetSink"
+              },
+              "source": {
+                "type": "DelimitedTextSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "copy",
           "type": "Copy"
         },
         {
+          "dependencies": [],
           "name": "notebook",
+          "original_type": "DatabricksNotebook",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "databricks-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "notebook",
+            "type": "DatabricksNotebook",
+            "typeProperties": {
+              "notebookPath": "/Shared/flowx/integration"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "notebook",
           "type": "DatabricksNotebook"
         },
         {
+          "dependencies": [],
           "name": "spark-jar",
+          "original_type": "DatabricksSparkJar",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "databricks-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "spark-jar",
+            "type": "DatabricksSparkJar",
+            "typeProperties": {
+              "mainClassName": "com.example.Integration",
+              "parameters": []
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "spark-jar",
           "type": "DatabricksSparkJar"
         },
         {
+          "dependencies": [],
           "name": "spark-python",
+          "original_type": "DatabricksSparkPython",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "databricks-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "spark-python",
+            "type": "DatabricksSparkPython",
+            "typeProperties": {
+              "parameters": [],
+              "pythonFile": "dbfs:/flowx/integration.py"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "spark-python",
           "type": "DatabricksSparkPython"
         },
         {
+          "dependencies": [],
           "name": "databricks-job",
+          "original_type": "DatabricksJob",
+          "raw": {
+            "name": "databricks-job",
+            "type": "DatabricksJob",
+            "typeProperties": {
+              "jobId": "1",
+              "jobParameters": {}
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "databricks-job",
           "type": "DatabricksJob"
         },
         {
+          "dependencies": [],
           "name": "lookup",
+          "original_type": "Lookup",
+          "raw": {
+            "name": "lookup",
+            "type": "Lookup",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              },
+              "firstRowOnly": true,
+              "source": {
+                "sqlReaderQuery": "SELECT 1 AS value",
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "lookup",
           "type": "Lookup"
         },
         {
+          "dependencies": [],
           "name": "web",
+          "original_type": "WebActivity",
+          "raw": {
+            "name": "web",
+            "type": "WebActivity",
+            "typeProperties": {
+              "method": "GET",
+              "url": "https://example.invalid/flowx"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "web",
           "type": "WebActivity"
         },
         {
+          "dependencies": [],
           "name": "delete",
+          "original_type": "Delete",
+          "raw": {
+            "name": "delete",
+            "type": "Delete",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "json-adls",
+                "type": "DatasetReference"
+              },
+              "enableLogging": false
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "delete",
           "type": "Delete"
         },
         {
+          "dependencies": [],
           "name": "execute-child",
+          "original_type": "ExecutePipeline",
+          "raw": {
+            "name": "execute-child",
+            "type": "ExecutePipeline",
+            "typeProperties": {
+              "pipeline": {
+                "referenceName": "child-pipeline",
+                "type": "PipelineReference"
+              },
+              "waitOnCompletion": true
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "execute-child",
           "type": "ExecutePipeline"
         },
         {
+          "dependencies": [],
           "name": "wait",
+          "original_type": "Wait",
+          "raw": {
+            "name": "wait",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "set-variable",
+          "original_type": "SetVariable",
+          "raw": {
+            "name": "set-variable",
+            "type": "SetVariable",
+            "typeProperties": {
+              "value": "running",
+              "variableName": "status"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "set-variable",
           "type": "SetVariable"
         },
         {
+          "dependencies": [],
           "name": "append-variable",
+          "original_type": "AppendVariable",
+          "raw": {
+            "name": "append-variable",
+            "type": "AppendVariable",
+            "typeProperties": {
+              "value": "ok",
+              "variableName": "results"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "append-variable",
           "type": "AppendVariable"
         },
         {
+          "dependencies": [],
           "name": "filter",
+          "original_type": "Filter",
+          "raw": {
+            "name": "filter",
+            "type": "Filter",
+            "typeProperties": {
+              "condition": {
+                "type": "Expression",
+                "value": "@not(empty(item()))"
+              },
+              "items": {
+                "type": "Expression",
+                "value": "@pipeline().parameters.items"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "filter",
           "type": "Filter"
         },
         {
+          "dependencies": [],
           "name": "foreach",
+          "original_type": "ForEach",
+          "raw": {
+            "name": "foreach",
+            "type": "ForEach",
+            "typeProperties": {
+              "activities": [
+                {
+                  "name": "foreach-wait",
+                  "type": "Wait",
+                  "typeProperties": {
+                    "waitTimeInSeconds": 1
+                  }
+                }
+              ],
+              "items": {
+                "type": "Expression",
+                "value": "@pipeline().parameters.items"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "foreach",
           "type": "ForEach"
         },
         {
+          "dependencies": [],
           "name": "foreach-wait",
+          "original_type": "Wait",
+          "raw": {
+            "name": "foreach-wait",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "foreach-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "if-condition",
+          "original_type": "IfCondition",
+          "raw": {
+            "name": "if-condition",
+            "type": "IfCondition",
+            "typeProperties": {
+              "expression": {
+                "type": "Expression",
+                "value": "@equals(1,1)"
+              },
+              "ifFalseActivities": [
+                {
+                  "name": "false-wait",
+                  "type": "Wait",
+                  "typeProperties": {
+                    "waitTimeInSeconds": 1
+                  }
+                }
+              ],
+              "ifTrueActivities": [
+                {
+                  "name": "true-wait",
+                  "type": "Wait",
+                  "typeProperties": {
+                    "waitTimeInSeconds": 1
+                  }
+                }
+              ]
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "if-condition",
           "type": "IfCondition"
         },
         {
+          "dependencies": [],
           "name": "true-wait",
+          "original_type": "Wait",
+          "raw": {
+            "name": "true-wait",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "true-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "false-wait",
+          "original_type": "Wait",
+          "raw": {
+            "name": "false-wait",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "false-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "switch",
+          "original_type": "Switch",
+          "raw": {
+            "name": "switch",
+            "type": "Switch",
+            "typeProperties": {
+              "cases": [
+                {
+                  "activities": [
+                    {
+                      "name": "case-wait",
+                      "type": "Wait",
+                      "typeProperties": {
+                        "waitTimeInSeconds": 1
+                      }
+                    }
+                  ],
+                  "value": "running"
+                }
+              ],
+              "defaultActivities": [
+                {
+                  "name": "default-wait",
+                  "type": "Wait",
+                  "typeProperties": {
+                    "waitTimeInSeconds": 1
+                  }
+                }
+              ],
+              "on": {
+                "type": "Expression",
+                "value": "@variables('status')"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "switch",
           "type": "Switch"
         },
         {
+          "dependencies": [],
           "name": "case-wait",
+          "original_type": "Wait",
+          "raw": {
+            "name": "case-wait",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "case-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "default-wait",
+          "original_type": "Wait",
+          "raw": {
+            "name": "default-wait",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "default-wait",
           "type": "Wait"
         }
       ],
+      "lineage": {
+        "control_edges": [
+          {
+            "resolved": true,
+            "source_workflow": "all-activity-types",
+            "target_workflow": "child-pipeline",
+            "via_task_key": "execute-child",
+            "wait_for_completion": true
+          }
+        ],
+        "data_edges": [],
+        "motifs": []
+      },
       "name": "all-activity-types"
     },
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "child-notebook",
+          "original_type": "DatabricksNotebook",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "databricks-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "child-notebook",
+            "type": "DatabricksNotebook",
+            "typeProperties": {
+              "notebookPath": "/Shared/flowx/child"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "child-notebook",
           "type": "DatabricksNotebook"
         }
       ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
       "name": "child-pipeline"
     },
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "launch-child",
+          "original_type": "ExecutePipeline",
+          "raw": {
+            "name": "launch-child",
+            "type": "ExecutePipeline",
+            "typeProperties": {
+              "pipeline": {
+                "referenceName": "child-pipeline",
+                "type": "PipelineReference"
+              },
+              "waitOnCompletion": true
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "launch-child",
           "type": "ExecutePipeline"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "launch-child"
+            }
+          ],
           "depends_on": [
             "launch-child"
           ],
           "name": "mixed-script",
+          "original_type": "Script",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "launch-child",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "mixed-script",
+            "type": "Script",
+            "typeProperties": {
+              "scripts": [
+                {
+                  "text": "SELECT 1",
+                  "type": "Query"
+                }
+              ]
+            }
+          },
           "strategy": "agentic",
+          "task_key": "mixed-script",
           "type": "Script"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "mixed-script"
+            }
+          ],
           "depends_on": [
             "mixed-script"
           ],
           "name": "complete",
+          "original_type": "SetVariable",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "mixed-script",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "complete",
+            "type": "SetVariable",
+            "typeProperties": {
+              "value": "complete",
+              "variableName": "state"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "complete",
           "type": "SetVariable"
         }
       ],
+      "lineage": {
+        "control_edges": [
+          {
+            "resolved": true,
+            "source_workflow": "complex-orchestration",
+            "target_workflow": "child-pipeline",
+            "via_task_key": "launch-child",
+            "wait_for_completion": true
+          }
+        ],
+        "data_edges": [],
+        "motifs": []
+      },
       "name": "complex-orchestration"
     },
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "work",
+          "original_type": "Wait",
+          "raw": {
+            "name": "work",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "work",
           "type": "Wait"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Completed"
+              ],
+              "resolved": true,
+              "upstream": "work"
+            }
+          ],
           "depends_on": [
             "work"
           ],
           "name": "notify",
+          "original_type": "WebActivity",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "work",
+                "dependencyConditions": [
+                  "Completed"
+                ]
+              }
+            ],
+            "name": "notify",
+            "type": "WebActivity",
+            "typeProperties": {
+              "body": {
+                "status": "complete"
+              },
+              "method": "POST",
+              "url": "https://example.invalid/notify"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "notify",
           "type": "WebActivity"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "WebActivity 'notify' appears to be a notification call"
+          ],
+          "databricks_replacement": "task_with_notification",
+          "display_name": "Activity and Notify",
+          "member_task_keys": [
+            "work",
+            "notify"
+          ],
+          "motif_id": "activity_and_notify",
+          "source_type_hint": null
         }
       ],
       "name": "motif-activity-and-notify"
@@ -237,31 +950,177 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "old-watermark",
+          "original_type": "Lookup",
+          "raw": {
+            "name": "old-watermark",
+            "type": "Lookup",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              },
+              "firstRowOnly": true,
+              "source": {
+                "sqlReaderQuery": "SELECT watermark FROM dbo.control",
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "old-watermark",
           "type": "Lookup"
         },
         {
+          "dependencies": [],
           "name": "new-watermark",
+          "original_type": "Lookup",
+          "raw": {
+            "name": "new-watermark",
+            "type": "Lookup",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              },
+              "firstRowOnly": true,
+              "source": {
+                "sqlReaderQuery": "SELECT MAX(updated_at) AS watermark FROM dbo.source",
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "new-watermark",
           "type": "Lookup"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "old-watermark"
+            },
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "new-watermark"
+            }
+          ],
           "depends_on": [
             "old-watermark",
             "new-watermark"
           ],
           "name": "incremental-copy",
+          "original_type": "Copy",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "old-watermark",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "new-watermark",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "inputs": [
+              {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              }
+            ],
+            "name": "incremental-copy",
+            "outputs": [
+              {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              }
+            ],
+            "type": "Copy",
+            "typeProperties": {
+              "sink": {
+                "type": "DelimitedTextSink"
+              },
+              "source": {
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "incremental-copy",
           "type": "Copy"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "incremental-copy"
+            }
+          ],
           "depends_on": [
             "incremental-copy"
           ],
           "name": "update-watermark",
+          "original_type": "SqlServerStoredProcedure",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "incremental-copy",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "update-watermark",
+            "type": "SqlServerStoredProcedure",
+            "typeProperties": {
+              "storedProcedureName": "dbo.update_watermark"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "update-watermark",
           "type": "SqlServerStoredProcedure"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Lookup 'old-watermark' contains watermark-style query",
+            "Lookup 'new-watermark' contains watermark-style query",
+            "StoredProcedure 'update-watermark' updates watermark after Copy"
+          ],
+          "databricks_replacement": "auto_loader",
+          "display_name": "Incremental Load (Watermark)",
+          "member_task_keys": [
+            "old-watermark",
+            "new-watermark",
+            "incremental-copy",
+            "update-watermark"
+          ],
+          "motif_id": "incremental_load_watermark",
+          "source_type_hint": "database"
         }
       ],
       "name": "motif-incremental-watermark"
@@ -269,22 +1128,142 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "lookup-metadata",
+          "original_type": "Lookup",
+          "raw": {
+            "name": "lookup-metadata",
+            "type": "Lookup",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              },
+              "firstRowOnly": false,
+              "source": {
+                "sqlReaderQuery": "SELECT schema_name, table_name FROM dbo.copy_config",
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "lookup-metadata",
           "type": "Lookup"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "lookup-metadata"
+            }
+          ],
           "depends_on": [
             "lookup-metadata"
           ],
           "name": "copy-each-table",
+          "original_type": "ForEach",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "lookup-metadata",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "copy-each-table",
+            "type": "ForEach",
+            "typeProperties": {
+              "activities": [
+                {
+                  "inputs": [
+                    {
+                      "referenceName": "azure-sql-table",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "name": "dynamic-copy",
+                  "outputs": [
+                    {
+                      "referenceName": "parquet-adls",
+                      "type": "DatasetReference"
+                    }
+                  ],
+                  "type": "Copy",
+                  "typeProperties": {
+                    "sink": {
+                      "type": "ParquetSink"
+                    },
+                    "source": {
+                      "type": "AzureSqlSource"
+                    }
+                  }
+                }
+              ],
+              "items": {
+                "type": "Expression",
+                "value": "@activity('lookup-metadata').output.value"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "copy-each-table",
           "type": "ForEach"
         },
         {
+          "dependencies": [],
           "name": "dynamic-copy",
+          "original_type": "Copy",
+          "raw": {
+            "inputs": [
+              {
+                "referenceName": "azure-sql-table",
+                "type": "DatasetReference"
+              }
+            ],
+            "name": "dynamic-copy",
+            "outputs": [
+              {
+                "referenceName": "parquet-adls",
+                "type": "DatasetReference"
+              }
+            ],
+            "type": "Copy",
+            "typeProperties": {
+              "sink": {
+                "type": "ParquetSink"
+              },
+              "source": {
+                "type": "AzureSqlSource"
+              }
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "dynamic-copy",
           "type": "Copy"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Lookup 'lookup-metadata' appears to read a control/metadata table"
+          ],
+          "databricks_replacement": "for_each_ingestion",
+          "display_name": "Metadata-Driven Bulk Copy",
+          "member_task_keys": [
+            "lookup-metadata",
+            "copy-each-table"
+          ],
+          "motif_id": "metadata_driven_bulk_copy",
+          "source_type_hint": "database"
         }
       ],
       "name": "motif-metadata-bulk-copy"
@@ -292,35 +1271,163 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "initial-request",
+          "original_type": "WebActivity",
+          "raw": {
+            "name": "initial-request",
+            "type": "WebActivity",
+            "typeProperties": {
+              "method": "GET",
+              "url": "https://example.invalid/api/items"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "initial-request",
           "type": "WebActivity"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "initial-request"
+            }
+          ],
           "depends_on": [
             "initial-request"
           ],
           "name": "paginate",
+          "original_type": "Until",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "initial-request",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "paginate",
+            "type": "Until",
+            "typeProperties": {
+              "activities": [
+                {
+                  "name": "page-request",
+                  "type": "WebActivity",
+                  "typeProperties": {
+                    "method": "GET",
+                    "url": "https://example.invalid/api/items?page=next"
+                  }
+                },
+                {
+                  "dependsOn": [
+                    {
+                      "activity": "page-request",
+                      "dependencyConditions": [
+                        "Succeeded"
+                      ]
+                    }
+                  ],
+                  "name": "set-continuation",
+                  "type": "SetVariable",
+                  "typeProperties": {
+                    "value": "done",
+                    "variableName": "continuation"
+                  }
+                }
+              ],
+              "expression": {
+                "type": "Expression",
+                "value": "@empty(variables('continuation'))"
+              },
+              "timeout": "0.00:05:00"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "paginate",
           "type": "Until"
         },
         {
+          "dependencies": [],
           "name": "page-request",
+          "original_type": "WebActivity",
+          "raw": {
+            "name": "page-request",
+            "type": "WebActivity",
+            "typeProperties": {
+              "method": "GET",
+              "url": "https://example.invalid/api/items?page=next"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "page-request",
           "type": "WebActivity"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "page-request"
+            }
+          ],
           "depends_on": [
             "page-request"
           ],
           "name": "set-continuation",
+          "original_type": "SetVariable",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "page-request",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "set-continuation",
+            "type": "SetVariable",
+            "typeProperties": {
+              "value": "done",
+              "variableName": "continuation"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "set-continuation",
           "type": "SetVariable"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Until child 'page-request' uses pagination",
+            "Until child 'set-continuation' uses pagination"
+          ],
+          "databricks_replacement": "python_rest_ingestion",
+          "display_name": "REST API Pagination",
+          "member_task_keys": [
+            "initial-request",
+            "paginate"
+          ],
+          "motif_id": "rest_api_pagination",
+          "source_type_hint": "rest_api"
         }
       ],
       "name": "motif-rest-api-pagination"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "d8aa11fb11a9c811344af4a611f54457a19c4e56c9670d4ed31440e958c629a4",
   "summary": {
     "activity_count": 51,
     "agentic_count": 15,

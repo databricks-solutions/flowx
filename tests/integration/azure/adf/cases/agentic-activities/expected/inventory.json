@@ -3,74 +3,281 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "data-flow",
+          "original_type": "ExecuteDataFlow",
+          "raw": {
+            "name": "data-flow",
+            "type": "ExecuteDataFlow",
+            "typeProperties": {
+              "compute": {
+                "computeType": "General",
+                "coreCount": 8
+              },
+              "dataFlow": {
+                "referenceName": "placeholder-data-flow",
+                "type": "DataFlowReference"
+              }
+            }
+          },
           "strategy": "agentic",
+          "task_key": "data-flow",
           "type": "ExecuteDataFlow"
         },
         {
+          "dependencies": [],
           "name": "until",
+          "original_type": "Until",
+          "raw": {
+            "name": "until",
+            "type": "Until",
+            "typeProperties": {
+              "activities": [
+                {
+                  "name": "until-wait",
+                  "type": "Wait",
+                  "typeProperties": {
+                    "waitTimeInSeconds": 1
+                  }
+                }
+              ],
+              "expression": {
+                "type": "Expression",
+                "value": "@equals(1,1)"
+              },
+              "timeout": "0.00:01:00"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "until",
           "type": "Until"
         },
         {
+          "dependencies": [],
           "name": "until-wait",
+          "original_type": "Wait",
+          "raw": {
+            "name": "until-wait",
+            "type": "Wait",
+            "typeProperties": {
+              "waitTimeInSeconds": 1
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "until-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "stored-procedure",
+          "original_type": "SqlServerStoredProcedure",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "stored-procedure",
+            "type": "SqlServerStoredProcedure",
+            "typeProperties": {
+              "storedProcedureName": "dbo.flowx_integration"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "stored-procedure",
           "type": "SqlServerStoredProcedure"
         },
         {
+          "dependencies": [],
           "name": "azure-function",
+          "original_type": "AzureFunction",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "azure-function-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "azure-function",
+            "type": "AzureFunction",
+            "typeProperties": {
+              "functionName": "flowx",
+              "method": "GET"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "azure-function",
           "type": "AzureFunction"
         },
         {
+          "dependencies": [],
           "name": "webhook",
+          "original_type": "WebHook",
+          "raw": {
+            "name": "webhook",
+            "type": "WebHook",
+            "typeProperties": {
+              "method": "POST",
+              "timeout": "00:01:00",
+              "url": "https://example.invalid/webhook"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "webhook",
           "type": "WebHook"
         },
         {
+          "dependencies": [],
           "name": "custom",
+          "original_type": "Custom",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "batch-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "custom",
+            "type": "Custom",
+            "typeProperties": {
+              "command": "echo flowx",
+              "folderPath": "integration",
+              "resourceLinkedService": {
+                "referenceName": "blob",
+                "type": "LinkedServiceReference"
+              }
+            }
+          },
           "strategy": "agentic",
+          "task_key": "custom",
           "type": "Custom"
         },
         {
+          "dependencies": [],
           "name": "ssis",
+          "original_type": "ExecuteSSISPackage",
+          "raw": {
+            "name": "ssis",
+            "type": "ExecuteSSISPackage",
+            "typeProperties": {
+              "connectVia": {
+                "referenceName": "azure-ssis-placeholder",
+                "type": "IntegrationRuntimeReference"
+              },
+              "packageLocation": {
+                "packagePath": "flowx/package.dtsx",
+                "type": "SSISDB"
+              }
+            }
+          },
           "strategy": "agentic",
+          "task_key": "ssis",
           "type": "ExecuteSSISPackage"
         },
         {
+          "dependencies": [],
           "name": "azure-ml",
+          "original_type": "AzureMLExecutePipeline",
+          "raw": {
+            "name": "azure-ml",
+            "type": "AzureMLExecutePipeline",
+            "typeProperties": {
+              "mlPipelineId": "<AZURE_ML_PIPELINE_ID>",
+              "version": "1"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "azure-ml",
           "type": "AzureMLExecutePipeline"
         },
         {
+          "dependencies": [],
           "name": "get-metadata",
+          "original_type": "GetMetadata",
+          "raw": {
+            "name": "get-metadata",
+            "type": "GetMetadata",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              },
+              "fieldList": [
+                "exists"
+              ]
+            }
+          },
           "strategy": "agentic",
+          "task_key": "get-metadata",
           "type": "GetMetadata"
         },
         {
+          "dependencies": [],
           "name": "validation",
+          "original_type": "Validation",
+          "raw": {
+            "name": "validation",
+            "type": "Validation",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              },
+              "minimumSize": 0,
+              "sleep": 1,
+              "timeout": "0.00:01:00"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "validation",
           "type": "Validation"
         },
         {
+          "dependencies": [],
           "name": "script",
+          "original_type": "Script",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "script",
+            "type": "Script",
+            "typeProperties": {
+              "scripts": [
+                {
+                  "text": "SELECT 1",
+                  "type": "Query"
+                }
+              ]
+            }
+          },
           "strategy": "agentic",
+          "task_key": "script",
           "type": "Script"
         },
         {
+          "dependencies": [],
           "name": "fail",
+          "original_type": "Fail",
+          "raw": {
+            "name": "fail",
+            "type": "Fail",
+            "typeProperties": {
+              "errorCode": "FLOWX_TEST",
+              "message": "intentional integration fixture"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "fail",
           "type": "Fail"
         }
       ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
       "name": "agentic-activities"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "ec62e9c084f71eef4e2dec68e94fa2b3d316d20da965ef86056359b2c934742e",
   "summary": {
     "activity_count": 13,
     "agentic_count": 12,

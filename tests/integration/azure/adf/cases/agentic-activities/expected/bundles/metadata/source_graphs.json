@@ -1,0 +1,555 @@
+{
+  "contract_version": "1",
+  "source": "adf",
+  "graphs": [
+    {
+      "name": "agentic-activities",
+      "source": "adf",
+      "parameters": {},
+      "variables": {},
+      "tags": [],
+      "tasks": [
+        {
+          "node_type": "SourceNode",
+          "source_id": "data-flow",
+          "task_key": "data-flow",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "data-flow",
+          "native_type": "ExecuteDataFlow",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "name": "data-flow",
+            "type": "ExecuteDataFlow",
+            "typeProperties": {
+              "compute": {
+                "computeType": "General",
+                "coreCount": 8
+              },
+              "dataFlow": {
+                "referenceName": "placeholder-data-flow",
+                "type": "DataFlowReference"
+              }
+            }
+          }
+        },
+        {
+          "node_type": "ContainerNode",
+          "source_id": "until",
+          "task_key": "until",
+          "concept": "loop",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "until",
+          "native_type": "Until",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "name": "until",
+            "type": "Until",
+            "typeProperties": {
+              "activities": [
+                {
+                  "name": "until-wait",
+                  "type": "Wait",
+                  "typeProperties": {
+                    "waitTimeInSeconds": 1
+                  }
+                }
+              ],
+              "expression": {
+                "type": "Expression",
+                "value": "@equals(1,1)"
+              },
+              "timeout": "0.00:01:00"
+            }
+          },
+          "branches": {
+            "body": [
+              {
+                "node_type": "SourceNode",
+                "source_id": "until-wait",
+                "task_key": "until-wait",
+                "concept": "wait",
+                "source": "adf",
+                "dependencies": [],
+                "data_reads": [],
+                "data_writes": [],
+                "name": "until-wait",
+                "native_type": "Wait",
+                "properties": {
+                  "strategy": "deterministic"
+                },
+                "raw": {
+                  "name": "until-wait",
+                  "type": "Wait",
+                  "typeProperties": {
+                    "waitTimeInSeconds": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "stored-procedure",
+          "task_key": "stored-procedure",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "stored-procedure",
+          "native_type": "SqlServerStoredProcedure",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "stored-procedure",
+            "type": "SqlServerStoredProcedure",
+            "typeProperties": {
+              "storedProcedureName": "dbo.flowx_integration"
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "azure-function",
+          "task_key": "azure-function",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "azure-function",
+          "native_type": "AzureFunction",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "azure-function-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "azure-function",
+            "type": "AzureFunction",
+            "typeProperties": {
+              "functionName": "flowx",
+              "method": "GET"
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "webhook",
+          "task_key": "webhook",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "webhook",
+          "native_type": "WebHook",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "name": "webhook",
+            "type": "WebHook",
+            "typeProperties": {
+              "method": "POST",
+              "timeout": "00:01:00",
+              "url": "https://example.invalid/webhook"
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "custom",
+          "task_key": "custom",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "custom",
+          "native_type": "Custom",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "batch-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "custom",
+            "type": "Custom",
+            "typeProperties": {
+              "command": "echo flowx",
+              "folderPath": "integration",
+              "resourceLinkedService": {
+                "referenceName": "blob",
+                "type": "LinkedServiceReference"
+              }
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "ssis",
+          "task_key": "ssis",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "ssis",
+          "native_type": "ExecuteSSISPackage",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "name": "ssis",
+            "type": "ExecuteSSISPackage",
+            "typeProperties": {
+              "connectVia": {
+                "referenceName": "azure-ssis-placeholder",
+                "type": "IntegrationRuntimeReference"
+              },
+              "packageLocation": {
+                "packagePath": "flowx/package.dtsx",
+                "type": "SSISDB"
+              }
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "azure-ml",
+          "task_key": "azure-ml",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "azure-ml",
+          "native_type": "AzureMLExecutePipeline",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "name": "azure-ml",
+            "type": "AzureMLExecutePipeline",
+            "typeProperties": {
+              "mlPipelineId": "<AZURE_ML_PIPELINE_ID>",
+              "version": "1"
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "get-metadata",
+          "task_key": "get-metadata",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [
+            {
+              "signature": "",
+              "asset_type": "file"
+            }
+          ],
+          "data_writes": [],
+          "name": "get-metadata",
+          "native_type": "GetMetadata",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "name": "get-metadata",
+            "type": "GetMetadata",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              },
+              "fieldList": [
+                "exists"
+              ]
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "validation",
+          "task_key": "validation",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [
+            {
+              "signature": "",
+              "asset_type": "file"
+            }
+          ],
+          "data_writes": [],
+          "name": "validation",
+          "native_type": "Validation",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "name": "validation",
+            "type": "Validation",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              },
+              "minimumSize": 0,
+              "sleep": 1,
+              "timeout": "0.00:01:00"
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "script",
+          "task_key": "script",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "script",
+          "native_type": "Script",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "script",
+            "type": "Script",
+            "typeProperties": {
+              "scripts": [
+                {
+                  "text": "SELECT 1",
+                  "type": "Query"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "node_type": "SourceNode",
+          "source_id": "fail",
+          "task_key": "fail",
+          "concept": "gap",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "fail",
+          "native_type": "Fail",
+          "properties": {
+            "strategy": "agentic"
+          },
+          "raw": {
+            "name": "fail",
+            "type": "Fail",
+            "typeProperties": {
+              "errorCode": "FLOWX_TEST",
+              "message": "intentional integration fixture"
+            }
+          }
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
+      "raw": {
+        "name": "agentic-activities",
+        "properties": {
+          "activities": [
+            {
+              "name": "data-flow",
+              "type": "ExecuteDataFlow",
+              "typeProperties": {
+                "compute": {
+                  "computeType": "General",
+                  "coreCount": 8
+                },
+                "dataFlow": {
+                  "referenceName": "placeholder-data-flow",
+                  "type": "DataFlowReference"
+                }
+              }
+            },
+            {
+              "name": "until",
+              "type": "Until",
+              "typeProperties": {
+                "activities": [
+                  {
+                    "name": "until-wait",
+                    "type": "Wait",
+                    "typeProperties": {
+                      "waitTimeInSeconds": 1
+                    }
+                  }
+                ],
+                "expression": {
+                  "type": "Expression",
+                  "value": "@equals(1,1)"
+                },
+                "timeout": "0.00:01:00"
+              }
+            },
+            {
+              "linkedServiceName": {
+                "referenceName": "azure-sql",
+                "type": "LinkedServiceReference"
+              },
+              "name": "stored-procedure",
+              "type": "SqlServerStoredProcedure",
+              "typeProperties": {
+                "storedProcedureName": "dbo.flowx_integration"
+              }
+            },
+            {
+              "linkedServiceName": {
+                "referenceName": "azure-function-parameterized",
+                "type": "LinkedServiceReference"
+              },
+              "name": "azure-function",
+              "type": "AzureFunction",
+              "typeProperties": {
+                "functionName": "flowx",
+                "method": "GET"
+              }
+            },
+            {
+              "name": "webhook",
+              "type": "WebHook",
+              "typeProperties": {
+                "method": "POST",
+                "timeout": "00:01:00",
+                "url": "https://example.invalid/webhook"
+              }
+            },
+            {
+              "linkedServiceName": {
+                "referenceName": "batch-parameterized",
+                "type": "LinkedServiceReference"
+              },
+              "name": "custom",
+              "type": "Custom",
+              "typeProperties": {
+                "command": "echo flowx",
+                "folderPath": "integration",
+                "resourceLinkedService": {
+                  "referenceName": "blob",
+                  "type": "LinkedServiceReference"
+                }
+              }
+            },
+            {
+              "name": "ssis",
+              "type": "ExecuteSSISPackage",
+              "typeProperties": {
+                "connectVia": {
+                  "referenceName": "azure-ssis-placeholder",
+                  "type": "IntegrationRuntimeReference"
+                },
+                "packageLocation": {
+                  "packagePath": "flowx/package.dtsx",
+                  "type": "SSISDB"
+                }
+              }
+            },
+            {
+              "name": "azure-ml",
+              "type": "AzureMLExecutePipeline",
+              "typeProperties": {
+                "mlPipelineId": "<AZURE_ML_PIPELINE_ID>",
+                "version": "1"
+              }
+            },
+            {
+              "name": "get-metadata",
+              "type": "GetMetadata",
+              "typeProperties": {
+                "dataset": {
+                  "referenceName": "csv-adls",
+                  "type": "DatasetReference"
+                },
+                "fieldList": [
+                  "exists"
+                ]
+              }
+            },
+            {
+              "name": "validation",
+              "type": "Validation",
+              "typeProperties": {
+                "dataset": {
+                  "referenceName": "csv-adls",
+                  "type": "DatasetReference"
+                },
+                "minimumSize": 0,
+                "sleep": 1,
+                "timeout": "0.00:01:00"
+              }
+            },
+            {
+              "linkedServiceName": {
+                "referenceName": "azure-sql",
+                "type": "LinkedServiceReference"
+              },
+              "name": "script",
+              "type": "Script",
+              "typeProperties": {
+                "scripts": [
+                  {
+                    "text": "SELECT 1",
+                    "type": "Query"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "fail",
+              "type": "Fail",
+              "typeProperties": {
+                "errorCode": "FLOWX_TEST",
+                "message": "intentional integration fixture"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "graph_sha256": [
+    "42746023803d32bd6b060f8149dcc6143afdcac0491fb97dfc0f65eda42104f5"
+  ],
+  "document_sha256": "ec62e9c084f71eef4e2dec68e94fa2b3d316d20da965ef86056359b2c934742e"
+}

@@ -3,14 +3,35 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "child-notebook",
+          "original_type": "DatabricksNotebook",
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "databricks-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "child-notebook",
+            "type": "DatabricksNotebook",
+            "typeProperties": {
+              "notebookPath": "/Shared/flowx/child"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "child-notebook",
           "type": "DatabricksNotebook"
         }
       ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
       "name": "child-pipeline"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "9826b4463d6d791c0d9a1c10725ecc547ed4e2b739a8860975480b916ed237a4",
   "summary": {
     "activity_count": 1,
     "agentic_count": 0,

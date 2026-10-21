@@ -1,0 +1,68 @@
+{
+  "contract_version": "1",
+  "source": "adf",
+  "graphs": [
+    {
+      "name": "child-pipeline",
+      "source": "adf",
+      "parameters": {},
+      "variables": {},
+      "tags": [],
+      "tasks": [
+        {
+          "node_type": "SourceNode",
+          "source_id": "child-notebook",
+          "task_key": "child-notebook",
+          "concept": "notebook",
+          "source": "adf",
+          "dependencies": [],
+          "data_reads": [],
+          "data_writes": [],
+          "name": "child-notebook",
+          "native_type": "DatabricksNotebook",
+          "properties": {
+            "strategy": "deterministic"
+          },
+          "raw": {
+            "linkedServiceName": {
+              "referenceName": "databricks-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "child-notebook",
+            "type": "DatabricksNotebook",
+            "typeProperties": {
+              "notebookPath": "/Shared/flowx/child"
+            }
+          }
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
+      "raw": {
+        "name": "child-pipeline",
+        "properties": {
+          "activities": [
+            {
+              "linkedServiceName": {
+                "referenceName": "databricks-parameterized",
+                "type": "LinkedServiceReference"
+              },
+              "name": "child-notebook",
+              "type": "DatabricksNotebook",
+              "typeProperties": {
+                "notebookPath": "/Shared/flowx/child"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "graph_sha256": [
+    "4c747a234efa9cf9fdaf2f0e99d55e8bb87e24158578924a0fbfda1c6c43befa"
+  ],
+  "document_sha256": "9826b4463d6d791c0d9a1c10725ecc547ed4e2b739a8860975480b916ed237a4"
+}

@@ -3,35 +3,163 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "initial-request",
+          "original_type": "WebActivity",
+          "raw": {
+            "name": "initial-request",
+            "type": "WebActivity",
+            "typeProperties": {
+              "method": "GET",
+              "url": "https://example.invalid/api/items"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "initial-request",
           "type": "WebActivity"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "initial-request"
+            }
+          ],
           "depends_on": [
             "initial-request"
           ],
           "name": "paginate",
+          "original_type": "Until",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "initial-request",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "paginate",
+            "type": "Until",
+            "typeProperties": {
+              "activities": [
+                {
+                  "name": "page-request",
+                  "type": "WebActivity",
+                  "typeProperties": {
+                    "method": "GET",
+                    "url": "https://example.invalid/api/items?page=next"
+                  }
+                },
+                {
+                  "dependsOn": [
+                    {
+                      "activity": "page-request",
+                      "dependencyConditions": [
+                        "Succeeded"
+                      ]
+                    }
+                  ],
+                  "name": "set-continuation",
+                  "type": "SetVariable",
+                  "typeProperties": {
+                    "value": "done",
+                    "variableName": "continuation"
+                  }
+                }
+              ],
+              "expression": {
+                "type": "Expression",
+                "value": "@empty(variables('continuation'))"
+              },
+              "timeout": "0.00:05:00"
+            }
+          },
           "strategy": "agentic",
+          "task_key": "paginate",
           "type": "Until"
         },
         {
+          "dependencies": [],
           "name": "page-request",
+          "original_type": "WebActivity",
+          "raw": {
+            "name": "page-request",
+            "type": "WebActivity",
+            "typeProperties": {
+              "method": "GET",
+              "url": "https://example.invalid/api/items?page=next"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "page-request",
           "type": "WebActivity"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "page-request"
+            }
+          ],
           "depends_on": [
             "page-request"
           ],
           "name": "set-continuation",
+          "original_type": "SetVariable",
+          "raw": {
+            "dependsOn": [
+              {
+                "activity": "page-request",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "set-continuation",
+            "type": "SetVariable",
+            "typeProperties": {
+              "value": "done",
+              "variableName": "continuation"
+            }
+          },
           "strategy": "deterministic",
+          "task_key": "set-continuation",
           "type": "SetVariable"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": [],
+        "motifs": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Until child 'page-request' uses pagination",
+            "Until child 'set-continuation' uses pagination"
+          ],
+          "databricks_replacement": "python_rest_ingestion",
+          "display_name": "REST API Pagination",
+          "member_task_keys": [
+            "initial-request",
+            "paginate"
+          ],
+          "motif_id": "rest_api_pagination",
+          "source_type_hint": "rest_api"
         }
       ],
       "name": "motif-rest-api-pagination"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "70ed04d8f5e705e613d91a1e111692c3600bde0a17c7dad68ad8a2b1f46517b1",
   "summary": {
     "activity_count": 4,
     "agentic_count": 1,
