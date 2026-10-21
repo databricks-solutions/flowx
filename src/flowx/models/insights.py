@@ -198,7 +198,7 @@ class PipelineInsight:
 
 @dataclass(slots=True, kw_only=True)
 class PipelineRelationship:
-    """Cross-pipeline judgment; both endpoints are real inventory pipeline names.
+    """Cross-pipeline judgment; both endpoints are listed inventory pipelines or ends of a resolved control edge.
 
     Either annotates one deterministic control edge (``lineage_edge.edge_type == "control"``)
     or records an agent-inferred coupling the deterministic layer could not see

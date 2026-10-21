@@ -441,6 +441,59 @@ def test_enrich_reports_a_non_string_pipeline_reference_instead_of_raising(tmp_p
     assert path.read_bytes() == original_bytes
 
 
+def test_a_non_string_inventory_name_is_not_a_pipeline_an_insight_can_name() -> None:
+    """A numeric name in the inventory is not stringified into the foreign key "7"."""
+    inventory = {"pipelines": [{"name": 7, "activities": []}]}
+
+    violations = validate_insights({"pipeline_insights": [{"pipeline": "7"}]}, inventory)
+
+    assert violations == ["pipeline_insights[0]: pipeline '7' not in inventory"]
+
+
+def test_a_non_string_control_edge_field_is_not_an_edge_a_relationship_can_name() -> None:
+    inventory = _inventory()
+    edge = inventory["pipelines"][0]["lineage"]["control_edges"][0]
+    edge["via_task_key"] = ["call_child"]
+    raw = {"pipeline_relationships": [_valid_insights()["pipeline_relationships"][0]]}
+    raw["pipeline_relationships"][0]["lineage_edge"]["edge_identity"] = "['call_child']"
+
+    violations = validate_insights(raw, inventory)
+
+    assert violations == [
+        "pipeline_relationships[0].lineage_edge: control edge \"['call_child']\" does not resolve to a lineage "
+        "edge from 'parent' to 'child'"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("pipelines", "expected"),
+    [
+        (None, ["pipeline_insights[0]: pipeline 'a' not in inventory"]),
+        (5, ["pipeline_insights[0]: pipeline 'a' not in inventory"]),
+        ([{"name": "a", "lineage": "x"}], []),
+        ([{"name": "a", "lineage": {"control_edges": None}}], []),
+    ],
+)
+def test_a_malformed_inventory_shape_is_treated_as_unknown_not_a_crash(pipelines: Any, expected: list[str]) -> None:
+    violations = validate_insights({"pipeline_insights": [{"pipeline": "a"}]}, {"pipelines": pipelines})
+
+    assert violations == expected
+
+
+def test_an_unresolved_control_edge_cannot_be_annotated() -> None:
+    """An edge discover marked unresolved is not proven lineage, even when both pipelines are listed."""
+    inventory = _inventory()
+    inventory["pipelines"][0]["lineage"]["control_edges"][0]["resolved"] = False
+    raw = {"pipeline_relationships": [_valid_insights()["pipeline_relationships"][0]]}
+
+    violations = validate_insights(raw, inventory)
+
+    assert violations == [
+        "pipeline_relationships[0].lineage_edge: control edge 'call_child' does not resolve to a lineage "
+        "edge from 'parent' to 'child'"
+    ]
+
+
 @pytest.mark.parametrize("field_name", ["pattern_name", "intent", "databricks_pattern", "risk_if_ignored"])
 def test_pipeline_insight_text_fields_must_be_strings(field_name: str) -> None:
     raw = _valid_insights()
@@ -670,6 +723,21 @@ def test_mcp_enrich_prepare_returns_inventory_even_when_arm_provenance_fills_the
     assert "truncated" not in prepared["bundle"]
     assert list(prepared["bundle"]["files"]) == ["inventory.json"]
     assert prepared["bundle"]["files"]["inventory.json"] == inventory_path.read_text(encoding="utf-8")
+
+
+def test_mcp_enrich_prepare_fails_when_the_inventory_is_too_large_to_return_inline(tmp_path: Path) -> None:
+    """An inventory over the inline bound is dropped from the bundle, so prepare must not report success."""
+    server = pytest.importorskip("flowx.mcp.server")
+    inventory = _inventory()
+    inventory["pipelines"][0]["raw"] = {"description": "x" * 2_100_000}
+    _write_inventory(tmp_path, inventory)
+
+    prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+
+    assert prepared["ok"] is False
+    assert "bundle" not in prepared
+    assert "too large to return inline" in prepared["error"]
+    assert "output_volume_path" in prepared["error"] and "output_workspace_path" in prepared["error"]
 
 
 def test_mcp_enrich_prepare_uploads_only_the_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

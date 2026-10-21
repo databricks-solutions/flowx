@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 import flowx
+from flowx import discovery_insights
 from flowx.discovery_insights import (
     AGENTIC_INSIGHTS_FILENAME,
     INSIGHTS_KEY,
@@ -296,6 +297,51 @@ def test_unhashed_source_graphs_with_malformed_entries_are_a_violation_not_a_cra
     assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
 
 
+def test_deleting_the_graph_hash_from_the_inventory_does_not_skip_the_check(tmp_path: Path) -> None:
+    """With source_graphs.json saved, an inventory missing its hash was edited, so its pipelines are not trusted."""
+    inventory_path = _discover(tmp_path)
+    edited = json.loads(inventory_path.read_text(encoding="utf-8"))
+    del edited["source_graphs_sha256"]
+    edited["pipelines"].append({"name": "ghost", "activities": []})
+    inventory_path.write_text(json.dumps(edited, indent=2), encoding="utf-8")
+    inventory_bytes = inventory_path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights={"pipeline_insights": [{"pipeline": "ghost"}]})
+
+    assert result["ok"] is False
+    assert any(
+        f"records no source_graphs_sha256 but {SOURCE_GRAPHS_FILENAME} exists" in violation
+        for violation in result["violations"]
+    )
+    assert inventory_path.read_bytes() == inventory_bytes
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("source", "airflow", "inventory.json source 'airflow' does not match source_graphs.json source 'adf'"),
+        ("source_dir", None, "inventory.json source_dir must be a string, got NoneType"),
+    ],
+)
+def test_the_unhashed_inventory_settings_must_agree_with_the_saved_graphs(
+    tmp_path: Path, key: str, value: Any, message: str
+) -> None:
+    """The source label decides which pipelines are listed, so it must be the graphs' own source."""
+    inventory_path = _discover(tmp_path)
+    edited = json.loads(inventory_path.read_text(encoding="utf-8"))
+    edited[key] = value
+    inventory_path.write_text(json.dumps(edited, indent=2), encoding="utf-8")
+    inventory_bytes = inventory_path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights=_authored(tmp_path))
+
+    assert result["ok"] is False
+    assert message in result["violations"]
+    assert inventory_path.read_bytes() == inventory_bytes
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
+
+
 def test_a_second_enrich_cannot_interleave_with_one_already_writing(tmp_path: Path, monkeypatch: Any) -> None:
     """Pause one enrich between its two replaces and run another: the two files must still agree."""
     inventory_path = _discover(tmp_path)
@@ -385,6 +431,83 @@ enrich_inventory(Path(sys.argv[1]), insights=json.loads(sys.argv[2]))
 """
 
 
+def _pause_enrich_at(stage: str, monkeypatch: Any, paused: threading.Event, resume: threading.Event) -> None:
+    """Make a background enrich stop after reading the inventory, or after writing its temp files."""
+    if stage == "after_read":
+        real_render = discovery_insights.render_inventory
+
+        def pausing_render(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            paused.set()
+            resume.wait(timeout=10)
+            return real_render(*args, **kwargs)
+
+        monkeypatch.setattr(discovery_insights, "render_inventory", pausing_render)
+        return
+    real_write_text = Path.write_text
+
+    def pausing_write_text(self: Path, *args: Any, **kwargs: Any) -> int:
+        written = real_write_text(self, *args, **kwargs)
+        if threading.current_thread() is not threading.main_thread() and self.name == ".inventory.json.tmp":
+            paused.set()
+            resume.wait(timeout=10)
+        return written
+
+    monkeypatch.setattr(Path, "write_text", pausing_write_text)
+
+
+@pytest.mark.parametrize("stage", ["after_read", "after_temp_files"])
+def test_an_enrich_that_discover_ran_under_writes_nothing(tmp_path: Path, monkeypatch: Any, stage: str) -> None:
+    """Discover clears metadata/, the lock with it; the old insights must not overwrite the new inventory."""
+    fixtures = Path(__file__).resolve().parents[1] / "resources" / "json"
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+    metadata = tmp_path / "metadata"
+    inventory = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
+    authored = {"authored_against": inventory["source_graphs_sha256"], "overview": "The fixture factory."}
+    paused, resume = threading.Event(), threading.Event()
+    _pause_enrich_at(stage, monkeypatch, paused, resume)
+    results: list[dict[str, Any]] = []
+    enrich = threading.Thread(target=lambda: results.append(enrich_inventory(tmp_path, insights=authored)))
+    enrich.start()
+    assert paused.wait(timeout=10)
+
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(tmp_path)]) == 0
+    rediscovered = {path.name: path.read_bytes() for path in metadata.iterdir() if path.is_file()}
+    resume.set()
+    enrich.join(timeout=10)
+
+    assert results == [
+        {
+            "ok": False,
+            "violations": ["discover ran during this enrich; prepare and enrich again"],
+            "pipeline_insights": 0,
+            "relationships": 0,
+        }
+    ]
+    assert {path.name: path.read_bytes() for path in metadata.iterdir() if path.is_file()} == rediscovered
+    assert not (metadata / AGENTIC_INSIGHTS_FILENAME).exists()
+    assert enrich_inventory(tmp_path, insights=authored)["ok"] is True
+
+
+def test_an_enrich_whose_inventory_changed_under_it_writes_nothing(tmp_path: Path, monkeypatch: Any) -> None:
+    """With the lock still in place, a changed inventory.json alone stops the write."""
+    inventory_path = _discover(tmp_path)
+    paused, resume = threading.Event(), threading.Event()
+    _pause_enrich_at("after_read", monkeypatch, paused, resume)
+    results: list[dict[str, Any]] = []
+    enrich = threading.Thread(target=lambda: results.append(enrich_inventory(tmp_path, insights=_authored(tmp_path))))
+    enrich.start()
+    assert paused.wait(timeout=10)
+    edited = inventory_path.read_text(encoding="utf-8") + " "
+    inventory_path.write_text(edited, encoding="utf-8")
+    resume.set()
+    enrich.join(timeout=10)
+
+    assert results[0]["violations"] == ["discover ran during this enrich; prepare and enrich again"]
+    assert inventory_path.read_text(encoding="utf-8") == edited
+    assert not (tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).exists()
+    assert not (tmp_path / "metadata" / ".enrich.lock").exists()
+
+
 def test_the_enrich_after_a_killed_one_clears_its_temp_files(tmp_path: Path) -> None:
     """Kill an enrich between its two replaces, clear the lock as instructed, and enrich again."""
     inventory_path = _discover(tmp_path)
@@ -463,6 +586,106 @@ def test_projected_inventory_matches_adf_discover_for_an_empty_pipeline(tmp_path
     assert enrich_inventory(output_dir, insights=authored)["ok"] is True
     enriched = json.loads((metadata / "inventory.json").read_text(encoding="utf-8"))
     assert json.dumps({key: value for key, value in enriched.items() if key != INSIGHTS_KEY}, indent=2) == discovered
+
+
+_WAIT = {"name": "pause", "type": "Wait", "dependsOn": [], "typeProperties": {"waitTimeInSeconds": 1}}
+
+
+def _run_pipeline(child: str) -> dict[str, Any]:
+    reference = {"referenceName": child, "type": "PipelineReference"}
+    return {"name": "run_child", "type": "ExecutePipeline", "dependsOn": [], "typeProperties": {"pipeline": reference}}
+
+
+def _discover_adf_export(
+    tmp_path: Path, activities_by_pipeline: dict[str, list[dict[str, Any]]], *options: str
+) -> dict[str, Any]:
+    """Run the real ADF discover on a small export written under *tmp_path* and return its inventory."""
+    pipelines = tmp_path / "export" / "pipelines"
+    pipelines.mkdir(parents=True)
+    for name, activities in activities_by_pipeline.items():
+        document = {"name": name, "properties": {"activities": activities}}
+        (pipelines / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+    arguments = ["--source-dir", str(tmp_path / "export"), "--output-dir", str(tmp_path / "out"), *options]
+    assert adf_discover_main(arguments) == 0
+    return json.loads((tmp_path / "out" / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+
+
+def _control_relationship(from_pipeline: str, to_pipeline: str) -> dict[str, Any]:
+    return {
+        "from_pipeline": from_pipeline,
+        "to_pipeline": to_pipeline,
+        "lineage_edge": {"edge_type": "control", "edge_identity": "run_child"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("child_activities", "options"),
+    [([_WAIT], ("--pipeline", "Orchestrator")), ([], ())],
+    ids=["child-filtered-out-of-discover", "empty-child"],
+)
+def test_a_resolved_control_edge_into_an_unlisted_pipeline_can_be_annotated(
+    tmp_path: Path, child_activities: list[dict[str, Any]], options: tuple[str, ...]
+) -> None:
+    """Discover lists only Orchestrator yet resolves its edge to Child, so the skill's promise must hold."""
+    export = {"Orchestrator": [_run_pipeline("Child")], "Child": child_activities}
+    inventory = _discover_adf_export(tmp_path, export, *options)
+    assert [pipeline["name"] for pipeline in inventory["pipelines"]] == ["Orchestrator"]
+    [edge] = inventory["pipelines"][0]["lineage"]["control_edges"]
+    assert (edge["target_workflow"], edge["via_task_key"], edge["resolved"]) == ("Child", "run_child", True)
+    relationship = _control_relationship("Orchestrator", "Child")
+
+    result = enrich_inventory(tmp_path / "out", insights={"pipeline_relationships": [relationship]})
+
+    assert result["ok"] is True, result["violations"]
+    enriched = json.loads((tmp_path / "out" / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+    assert enriched[INSIGHTS_KEY]["pipeline_relationships"] == [relationship]
+
+
+def test_an_unresolved_control_edge_into_an_unlisted_pipeline_is_still_refused(tmp_path: Path) -> None:
+    inventory = _discover_adf_export(tmp_path, {"Orchestrator": [_run_pipeline("Missing")]})
+    [edge] = inventory["pipelines"][0]["lineage"]["control_edges"]
+    assert (edge["target_workflow"], edge["via_task_key"], edge["resolved"]) == ("Missing", "run_child", False)
+
+    result = enrich_inventory(
+        tmp_path / "out", insights={"pipeline_relationships": [_control_relationship("Orchestrator", "Missing")]}
+    )
+
+    assert result["ok"] is False
+    assert "pipeline_relationships[0]: to_pipeline 'Missing' not in inventory" in result["violations"]
+
+
+def test_only_a_resolved_control_edge_lets_an_unlisted_pipeline_through(tmp_path: Path) -> None:
+    """A made-up name, an inferred edge, a reversed edge and a pipeline insight still need a listed pipeline."""
+    export = {"Orchestrator": [_run_pipeline("Child")], "Child": [_WAIT]}
+    _discover_adf_export(tmp_path, export, "--pipeline", "Orchestrator")
+    inferred = {
+        "from_pipeline": "Orchestrator",
+        "to_pipeline": "Child",
+        "lineage_edge": {
+            "edge_type": "inferred",
+            "edge_identity": "shared table sales.orders",
+            "evidence": "Both read sales.orders",
+            "confidence": "low",
+        },
+    }
+    authored = {
+        "pipeline_insights": [{"pipeline": "Child", "intent": "Pause."}],
+        "pipeline_relationships": [
+            _control_relationship("Orchestrator", "Ghost"),
+            inferred,
+            _control_relationship("Child", "Orchestrator"),
+        ],
+    }
+
+    result = enrich_inventory(tmp_path / "out", insights=authored)
+
+    assert result["ok"] is False
+    assert {
+        "pipeline_insights[0]: pipeline 'Child' not in inventory",
+        "pipeline_relationships[0]: to_pipeline 'Ghost' not in inventory",
+        "pipeline_relationships[1]: to_pipeline 'Child' not in inventory",
+        "pipeline_relationships[2]: from_pipeline 'Child' not in inventory",
+    } <= set(result["violations"])
 
 
 def test_a_failed_rollback_never_truncates_the_insights_file_and_keeps_the_lock(

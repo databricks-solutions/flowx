@@ -28,7 +28,8 @@ a single additive `insights` key; you never pass it anything for that step.
 
 This is the standard step **between discover and convert** in the flowx workflow. `flowx-discover`
 chains into this skill by default; the routing step (`flowx-route`) reads the `insights` block to
-present the agentic conversion option per connected component.
+present the agentic conversion option per connected component. The one-shot MCP `migrate` command
+runs discover, convert and package without it, so it records no insights.
 
 ## No LLM inside flowx: you author, the library validates and records
 
@@ -56,9 +57,13 @@ narrative.
 
 1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json` (on the hosted
    MCP server, through `enrich` with `action="prepare"`; see below). Note every
-   pipeline `name` (these are the only valid foreign keys), and each pipeline's `lineage` block — in
+   pipeline `name` (these are the valid foreign keys), and each pipeline's `lineage` block — in
    particular `lineage.control_edges`, each `{source_workflow, target_workflow, via_task_key}`. A
-   deterministic **control** relationship you annotate must match one of these exactly. When the
+   deterministic **control** relationship you annotate must match one of these exactly, and only an
+   edge marked `"resolved": true` can be annotated. Such an edge can be annotated even when its
+   `target_workflow` is not a listed pipeline (discover ran with `--pipeline`, or the called pipeline
+   has no activities); every other relationship endpoint, and every `pipeline_insights[].pipeline`,
+   must be a listed pipeline. When the
    inventory records a top-level `source_graphs_sha256` (ADF discover does), copy it into
    `authored_against` by default, so enrich can refuse your insights if discover runs again before
    you submit them; when it records none, leave `authored_against` out.
@@ -124,7 +129,8 @@ Run the **`setup`** skill first if you haven't. Both paths run the same validate
   tool with `command="enrich"`. On the hosted server you cannot read `output_dir`, so first read the
   inventory with `action="prepare"`. It returns `metadata/inventory.json` inline as
   `bundle.files["inventory.json"]`, the same way `package` returns a bundle; pass `output_volume_path`
-  or `output_workspace_path` to have a large inventory uploaded there as `inventory.json` instead. Then
+  or `output_workspace_path` to have a large inventory uploaded there as `inventory.json` instead. An
+  inventory too large to return inline makes `prepare` fail with `ok: false`, naming those two options. Then
   record the insights (the default `action="apply"`) with either inline insights or a file:
 
   ```
@@ -158,9 +164,13 @@ document rather than patching it in place. The `insights` block is replaced whol
 and every deterministic inventory key stays byte-identical. Re-running with the same insights rewrites the same bytes; re-running
 with different insights replaces the block. A validation failure writes nothing.
 
-Only one `enrich` writes an output directory at a time: it holds `metadata/.enrich.lock` from reading
+Absent a concurrent `discover`, only one `enrich` writes an output directory at a time (see the races
+below): it holds `metadata/.enrich.lock` from reading
 the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
-writes nothing. The two files are replaced one right after the other. If replacing `inventory.json`
+writes nothing. `discover` does not wait for the lock: it clears `metadata/`, the lock with it. So right
+before writing, `enrich` checks that its lock and the `inventory.json` it read are both still there; if
+`discover` ran in between, it writes nothing and reports "discover ran during this enrich; prepare and
+enrich again". The two files are replaced one right after the other. If replacing `inventory.json`
 fails, `agentic_insights.json` is put back to the insights the unchanged `inventory.json` holds (or
 removed when it holds none). A process killed or interrupted (Ctrl-C)
 between those two steps, or a failure while putting that file back, can leave
@@ -170,6 +180,14 @@ next `enrich` refuses until the lock is cleared:
 - **Locally**, delete `metadata/.enrich.lock` and run `enrich` again; it rewrites both files.
 - **On the hosted MCP server** you cannot delete files in `output_dir`, so run `discover` again (it
   clears `metadata/`, the lock with it), then `enrich` with `action="prepare"` and apply the insights again.
+
+Sequential use is safe. The checks above do not close every race, though: a `discover` plus two
+`enrich` runs on one output folder within a few milliseconds can slip past them. That can end in an
+error, but it can also overwrite silently. Every `enrich` uses the same temp file names, so one run can
+install another's files, leaving a stale `inventory.json` while it reports `ok: True` with
+`inventory_sha256` and `agentic_insights_sha256` values that do not match the files on disk. Two runs
+can also write together, so the two files may come from different runs and need not match the current
+inventory. Do not run `enrich` while another `enrich` or a `discover` is working on the same output folder.
 
 ## Next step
 
