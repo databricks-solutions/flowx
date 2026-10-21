@@ -796,3 +796,160 @@ def test_switch_with_distinct_case_values_records_no_duplicate_finding() -> None
     )
 
     assert DUPLICATE_SWITCH_CASES_PROPERTY not in graph.tasks[0].properties
+
+
+# ---------------------------------------------------------------------------
+# Fields an ADF REST GET adds without meaning (live export vs Git / ARM export)
+# ---------------------------------------------------------------------------
+
+
+def _exported_factory() -> tuple[dict, list[dict]]:
+    """One pipeline with nested control flow and two triggers, as a Git or ARM export writes them."""
+    copy = {"name": "CopyOrders", "type": "Copy", "typeProperties": {"source": {}, "sink": {}}}
+    switch = {
+        "name": "Route",
+        "type": "Switch",
+        "typeProperties": {
+            "on": {"value": "@item().kind", "type": "Expression"},
+            "cases": [{"value": "full", "activities": [copy]}],
+            "defaultActivities": [{"name": "Idle", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}],
+        },
+    }
+    branch = {
+        "name": "Check",
+        "type": "IfCondition",
+        "typeProperties": {
+            "expression": {"value": "@true", "type": "Expression"},
+            "ifTrueActivities": [switch],
+            "ifFalseActivities": [{"name": "Skip", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}],
+        },
+    }
+    loop = {
+        "name": "Loop",
+        "type": "ForEach",
+        "typeProperties": {"items": {"value": "@x", "type": "Expression"}, "activities": [branch]},
+    }
+    pipeline = {"name": "pl_orders", "properties": {"activities": [loop]}}
+
+    def _trigger(name: str) -> dict:
+        return {
+            "name": name,
+            "properties": {
+                "type": "ScheduleTrigger",
+                "typeProperties": {"recurrence": {"frequency": "Day", "interval": 1}},
+                "pipelines": [{"pipelineReference": {"referenceName": "pl_orders", "type": "PipelineReference"}}],
+            },
+        }
+
+    return pipeline, [_trigger("tr_first"), _trigger("tr_second")]
+
+
+def _as_live_get(pipeline: dict, triggers: list[dict]) -> tuple[dict, list[dict]]:
+    """The same factory as an ADF REST GET returns it: publish time and empty defaults added everywhere."""
+    import copy as copy_module
+
+    def _with_activity_defaults(activity: dict) -> None:
+        activity.setdefault("dependsOn", [])
+        activity.setdefault("userProperties", [])
+        type_properties = activity.get("typeProperties") or {}
+        for key in ("ifTrueActivities", "ifFalseActivities", "activities", "defaultActivities"):
+            for child in type_properties.get(key) or []:
+                _with_activity_defaults(child)
+        for case in type_properties.get("cases") or []:
+            for child in case.get("activities") or []:
+                _with_activity_defaults(child)
+
+    live_pipeline = copy_module.deepcopy(pipeline)
+    live_pipeline["properties"].update(
+        {"lastPublishTime": "2026-10-21T09:00:00Z", "annotations": [], "parameters": {}, "variables": {}}
+    )
+    for activity in live_pipeline["properties"]["activities"]:
+        _with_activity_defaults(activity)
+    live_triggers = copy_module.deepcopy(triggers)
+    for trigger in live_triggers:
+        trigger["properties"]["annotations"] = []
+    return live_pipeline, live_triggers
+
+
+def _graph_documents(pipeline: dict, triggers: list[dict]) -> dict:
+    from flowx.discovery_serde import source_graphs_document
+
+    definitions = AdfDefinitions(
+        pipelines=[_parse_pipeline_json(pipeline)], triggers=[_parse_trigger_json(trigger) for trigger in triggers]
+    )
+    return source_graphs_document(adf_definitions_to_source_graphs(definitions), source=SOURCE_ADF)
+
+
+def test_a_live_get_export_gives_the_same_source_graphs_and_hash_as_a_git_export() -> None:
+    """Publish time and empty GET defaults carry no meaning, so they never change the graphs or their hash."""
+    exported = _graph_documents(*_exported_factory())
+    live = _graph_documents(*_as_live_get(*_exported_factory()))
+
+    assert live["graphs"] == exported["graphs"]
+    assert live["document_sha256"] == exported["document_sha256"]
+
+
+def test_non_empty_values_of_those_fields_are_kept() -> None:
+    """Only the meaningless forms are dropped: real annotations, parameters, dependencies and user properties stay."""
+    pipeline, triggers = _exported_factory()
+    pipeline["properties"].update(
+        {"annotations": ["sales"], "parameters": {"run": {"type": "String"}}, "variables": {"v": {"type": "String"}}}
+    )
+    loop = pipeline["properties"]["activities"][0]
+    loop["userProperties"] = [{"name": "owner", "value": "data-eng"}]
+    loop["description"] = "kept as written"
+    first_child = loop["typeProperties"]["activities"][0]
+    first_child["dependsOn"] = [{"activity": "Earlier", "dependencyConditions": ["Succeeded"]}]
+    triggers[0]["properties"]["annotations"] = ["nightly"]
+
+    graph = _graph_documents(pipeline, triggers)["graphs"][0]
+
+    assert {key: graph["raw"]["properties"][key] for key in ("annotations", "parameters", "variables")} == {
+        "annotations": ["sales"],
+        "parameters": {"run": {"type": "String"}},
+        "variables": {"v": {"type": "String"}},
+    }
+    [loop_node] = graph["tasks"]
+    assert loop_node["raw"]["userProperties"] == [{"name": "owner", "value": "data-eng"}]
+    assert loop_node["raw"]["description"] == "kept as written"
+    assert loop_node["branches"]["body"][0]["raw"]["dependsOn"] == [
+        {"activity": "Earlier", "dependencyConditions": ["Succeeded"]}
+    ]
+    assert graph["schedule"]["extensions"]["properties"]["annotations"] == ["nightly"]
+
+
+def _as_rest_envelope(pipeline: dict, *, etag: str) -> dict:
+    """The pipeline as an ADF REST GET returns it: ``id``, ``type`` and ``etag`` around name and properties."""
+    import copy as copy_module
+
+    name = pipeline["name"]
+    return {
+        "id": f"/subscriptions/0000/resourceGroups/rg/providers/Microsoft.DataFactory/factories/df/pipelines/{name}",
+        "name": pipeline["name"],
+        "type": "Microsoft.DataFactory/factories/pipelines",
+        "etag": etag,
+        "properties": copy_module.deepcopy(pipeline["properties"]),
+    }
+
+
+def test_a_rest_get_envelope_gives_the_same_source_graphs_and_hash_as_a_git_export() -> None:
+    """The REST envelope's ``id``, ``type`` and ``etag`` say nothing about the pipeline, so the graph drops them."""
+    pipeline, triggers = _exported_factory()
+    exported = _graph_documents(pipeline, triggers)
+    live_pipeline, live_triggers = _as_live_get(pipeline, triggers)
+    live = _graph_documents(
+        _as_rest_envelope(live_pipeline, etag='"0a00b1c2-0000-0100-0000-000000000000"'), live_triggers
+    )
+
+    assert live["graphs"] == exported["graphs"]
+    assert live["document_sha256"] == exported["document_sha256"]
+
+
+def test_a_republish_that_only_changes_the_etag_keeps_the_hash() -> None:
+    """ADF issues a new ``etag`` on every publish; an otherwise unchanged pipeline keeps its source graphs hash."""
+    pipeline, triggers = _exported_factory()
+    first = _graph_documents(_as_rest_envelope(pipeline, etag='"first"'), triggers)
+    republished = _graph_documents(_as_rest_envelope(pipeline, etag='"second"'), triggers)
+
+    assert republished["document_sha256"] == first["document_sha256"]
+    assert republished["graphs"][0]["raw"] == {"name": "pl_orders", "properties": pipeline["properties"]}
