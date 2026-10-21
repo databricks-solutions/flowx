@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from flowx.discovery_serde import _node_from_dict, _node_to_dict, source_graph_from_dict, source_graph_to_dict
 from flowx.models.discovery import (
     CONCEPT_COPY_DATA,
@@ -68,6 +70,37 @@ def test_partial_source_node_dict_falls_back_to_model_defaults():
     assert node.data_writes == []
     assert node.properties == {}
     assert node.raw is None
+
+
+def test_unknown_node_type_is_rejected():
+    """A node_type outside the three known kinds raises instead of quietly becoming a SourceNode."""
+    unknown = {
+        "node_type": "LoopNode",
+        "source_id": "n1",
+        "task_key": "run",
+        "concept": CONCEPT_NOTEBOOK,
+        "source": SOURCE_AIRFLOW,
+        "branches": {"body": []},
+    }
+
+    with pytest.raises(ValueError, match="LoopNode"):
+        _node_from_dict(unknown)
+
+
+@pytest.mark.parametrize(
+    ("node_type", "extra_field"),
+    [(None, "branches"), ("SourceNode", "branches"), ("GapNode", "branches"), ("ContainerNode", "reason")],
+)
+def test_node_dict_with_a_field_its_type_cannot_hold_is_rejected(node_type, extra_field):
+    """Container branches or a gap reason on the wrong kind of node raise instead of being dropped."""
+    raw = {"source_id": "n1", "task_key": "run", "concept": CONCEPT_NOTEBOOK, "source": SOURCE_AIRFLOW}
+    if node_type is not None:
+        raw["node_type"] = node_type
+    child = {"node_type": "SourceNode", "task_key": "child"}
+    raw[extra_field] = {"body": [child]} if extra_field == "branches" else "x"
+
+    with pytest.raises(ValueError, match=extra_field):
+        _node_from_dict(raw)
 
 
 def test_container_node_holds_labelled_branches():
@@ -334,3 +367,14 @@ def test_non_physical_asset_type_and_empty_reads_writes_are_valid():
     # Empty reads/writes survive as empty lists, never None.
     assert reloaded.tasks[1].data_reads == []
     assert reloaded.tasks[1].data_writes == []
+
+
+def test_lineage_types_live_in_one_shared_module_and_ir_still_exports_them():
+    """Discovery and IR share one set of lineage types; the IR names stay importable for the stacked code."""
+    from flowx.models import discovery, ir
+    from flowx.models import lineage as shared
+
+    for name in ("DataAsset", "ControlEdge", "DataEdge", "MotifAnnotation", "Lineage"):
+        assert getattr(ir, name) is getattr(shared, name)
+    assert discovery.DataAsset is shared.DataAsset
+    assert discovery.Lineage is shared.Lineage

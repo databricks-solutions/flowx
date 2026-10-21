@@ -1,11 +1,9 @@
 """Source-neutral lineage derivation over the discovery graph contract.
 
-The parallel of :mod:`flowx.lineage`, which derives a
-:class:`~flowx.models.ir.Lineage` block over the Databricks IR. This module
-derives the same block over the source-neutral discovery graph
-(:mod:`flowx.models.discovery`) instead, so the discover phase can attach lineage
-to a :class:`~flowx.models.discovery.SourceGraph` before any IR translation
-exists.
+Derives a :class:`~flowx.models.lineage.Lineage` block over the source-neutral
+discovery graph (:mod:`flowx.models.discovery`), so the discover phase can attach
+lineage to a :class:`~flowx.models.discovery.SourceGraph` before any IR
+translation exists.
 
 It reuses :mod:`flowx.lineage`'s primitive cores -- :func:`control_edges_from_calls`
 and :func:`data_edges_from_endpoints` -- so the two-tier match, the self-edge drop,
@@ -20,11 +18,11 @@ Airflow graph derives lineage through this one code path once its nodes carry
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 
 from flowx.lineage import control_edges_from_calls, data_edges_from_endpoints
 from flowx.models.discovery import ContainerNode, SourceGraph, SourceNode
-from flowx.models.ir import ControlEdge, DataEdge, Lineage
+from flowx.models.lineage import ControlEdge, DataEdge, Lineage
 
 # Neutral node-property key under which a mapper records the workflow a node
 # invokes (an ADF ``ExecutePipeline`` callee, an Airflow triggered job). Kept in
@@ -58,16 +56,22 @@ def walk_nodes(nodes: list[SourceNode]) -> Iterator[SourceNode]:
                 yield from walk_nodes(children)
 
 
-def build_graph_control_edges(graph: SourceGraph) -> list[ControlEdge]:
+def build_graph_control_edges(
+    graph: SourceGraph, *, known_workflows: Collection[str] | None = None
+) -> list[ControlEdge]:
     """Derive cross-workflow invocation edges for a discovery graph.
 
     One edge per node that carries the :data:`INVOKES_WORKFLOW_PROPERTY` marker,
     found anywhere in the graph (fan-out inside ForEach / If / Switch preserved).
+    A marker that is not a string gives an empty, unresolved target rather than a
+    made-up name, and a wait flag that is not a boolean is recorded as unknown.
     Delegates the self-edge drop, dedup, and unresolved-callee recording to the
     shared :func:`~flowx.lineage.control_edges_from_calls`.
 
     Args:
         graph: The source graph to derive control edges for.
+        known_workflows: Names of the workflows present in this export; see
+            :func:`~flowx.lineage.control_edges_from_calls`.
 
     Returns:
         Deduplicated control edges, in first-seen order.
@@ -77,11 +81,15 @@ def build_graph_control_edges(graph: SourceGraph) -> list[ControlEdge]:
         for node in walk_nodes(graph.tasks):
             if INVOKES_WORKFLOW_PROPERTY not in node.properties:
                 continue
-            target = node.properties.get(INVOKES_WORKFLOW_PROPERTY) or ""
+            target = node.properties.get(INVOKES_WORKFLOW_PROPERTY)
             wait = node.properties.get(INVOKES_WAIT_PROPERTY)
-            yield str(target), wait, node.task_key
+            yield (
+                target if isinstance(target, str) else "",
+                wait if isinstance(wait, bool) else None,
+                node.task_key,
+            )
 
-    return control_edges_from_calls(graph.name, _calls())
+    return control_edges_from_calls(graph.name, _calls(), known_workflows=known_workflows)
 
 
 def build_graph_data_edges(graph: SourceGraph) -> list[DataEdge]:
@@ -104,7 +112,7 @@ def build_graph_data_edges(graph: SourceGraph) -> list[DataEdge]:
     return data_edges_from_endpoints(producers, consumers)
 
 
-def build_graph_lineage(graph: SourceGraph) -> Lineage:
+def build_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] | None = None) -> Lineage:
     """Compose the source-neutral lineage block for a discovery graph.
 
     Edges are derived here from the graph alone. Motifs come from a source's own
@@ -114,26 +122,36 @@ def build_graph_lineage(graph: SourceGraph) -> Lineage:
 
     Args:
         graph: The source graph to derive lineage for.
+        known_workflows: Names of the workflows present in this export; an
+            invocation edge is resolved only when its target is one of them, and
+            never when this is ``None``. See
+            :func:`~flowx.lineage.control_edges_from_calls`.
 
     Returns:
         A :class:`Lineage` with control edges and data edges (motifs empty).
     """
     return Lineage(
-        control_edges=build_graph_control_edges(graph),
+        control_edges=build_graph_control_edges(graph, known_workflows=known_workflows),
         data_edges=build_graph_data_edges(graph),
     )
 
 
-def with_graph_lineage(graph: SourceGraph) -> SourceGraph:
+def with_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] | None = None) -> SourceGraph:
     """Return a *new* graph carrying its derived lineage, leaving the input untouched.
 
     Pure: builds the lineage block and attaches it via :func:`dataclasses.replace`
-    rather than mutating the input graph.
+    rather than mutating the input graph. Motifs already recorded on the graph are
+    kept, since :func:`build_graph_lineage` derives edges only.
 
     Args:
         graph: The source graph to copy.
+        known_workflows: Names of the workflows present in this export, passed
+            straight to :func:`build_graph_lineage`. Without it, every invocation
+            edge is unresolved.
 
     Returns:
         A shallow copy of *graph* with :attr:`SourceGraph.lineage` populated.
     """
-    return dataclasses.replace(graph, lineage=build_graph_lineage(graph))
+    motifs = list(graph.lineage.motifs) if graph.lineage else []
+    lineage = dataclasses.replace(build_graph_lineage(graph, known_workflows=known_workflows), motifs=motifs)
+    return dataclasses.replace(graph, lineage=lineage)

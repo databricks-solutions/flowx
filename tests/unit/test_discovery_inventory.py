@@ -8,6 +8,8 @@ any particular front-end.
 
 from __future__ import annotations
 
+import pytest
+
 from flowx.discovery_inventory import INVENTORY_VISIBLE_PROPERTY, STRATEGY_PROPERTY, build_source_inventory
 from flowx.discovery_serde import source_graph_from_dict, source_graph_to_dict
 from flowx.models.discovery import (
@@ -149,6 +151,37 @@ def test_container_branches_are_flattened_in_source_order() -> None:
 
     assert names == ["if", "t", "f", "after"]
     assert inventory["summary"]["activity_count"] == 4
+
+
+def test_a_container_inside_a_container_is_flattened_in_source_order() -> None:
+    """A ForEach inside an If lists the If, the loop, the loop body, then the If's other branch."""
+    loop = ContainerNode(
+        source_id="loop",
+        task_key="loop",
+        concept=CONCEPT_GROUP,
+        source="unit",
+        name="loop",
+        native_type="ForEach",
+        properties={STRATEGY_PROPERTY: "deterministic"},
+        branches={"body": [_node("deep", "Notebook", "agentic")]},
+    )
+    container = ContainerNode(
+        source_id="if",
+        task_key="if",
+        concept=CONCEPT_BRANCH,
+        source="unit",
+        name="if",
+        native_type="IfCondition",
+        properties={STRATEGY_PROPERTY: "deterministic"},
+        branches={"true": [loop], "false": [_node("f", "Notebook", "deterministic")]},
+    )
+    graph = SourceGraph(name="g", source="unit", tasks=[container])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/tmp/src")
+
+    assert [entry["name"] for entry in inventory["pipelines"][0]["activities"]] == ["if", "loop", "deep", "f"]
+    assert inventory["summary"]["activity_count"] == 4
+    assert inventory["summary"]["agentic_count"] == 1
 
 
 def test_include_empty_pipelines_toggle_preserves_membership_semantics() -> None:
@@ -415,3 +448,38 @@ def test_inventory_records_the_source_graphs_hash_only_when_given() -> None:
     assert "source_graphs_sha256" not in without
     assert with_hash["source_graphs_sha256"] == "abc"
     assert {key: value for key, value in with_hash.items() if key != "source_graphs_sha256"} == without
+
+
+def test_missing_or_unknown_strategy_is_listed_as_unsupported() -> None:
+    """A node counted as unsupported says ``unsupported`` in its activity entry too."""
+    no_strategy = _node("n1", "Notebook", "deterministic")
+    no_strategy.properties = {}
+    graph = SourceGraph(
+        name="g1",
+        source="unit",
+        tasks=[no_strategy, _node("n2", "Notebook", "experimental"), _node("n3", "Notebook", "agentic")],
+    )
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/src")
+
+    assert [activity["strategy"] for activity in inventory["pipelines"][0]["activities"]] == [
+        "unsupported",
+        "unsupported",
+        "agentic",
+    ]
+    assert inventory["summary"]["unsupported_count"] == 2
+
+
+@pytest.mark.parametrize("marker", [None, 0, ""])
+def test_only_an_explicit_false_visibility_marker_hides_a_node(marker) -> None:
+    """A falsy but non-boolean ``inventory_visible`` keeps the node listed and counted."""
+    marked = _visible_node("marked", "unsupported")
+    marked.properties[INVENTORY_VISIBLE_PROPERTY] = marker
+    graph = SourceGraph(name="g1", source="unit", tasks=[_visible_node("plain", "deterministic"), marked])
+
+    inventory = build_source_inventory([graph], source="unit", source_dir="/src")
+
+    assert [activity["task_key"] for activity in inventory["pipelines"][0]["activities"]] == ["plain", "marked"]
+    assert inventory["summary"]["activity_count"] == 2
+    assert inventory["summary"]["unsupported_count"] == 1
+    assert inventory["summary"]["coverage_pct"] == 50.0
