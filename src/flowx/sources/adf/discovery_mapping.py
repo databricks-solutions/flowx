@@ -169,8 +169,9 @@ def _attach_schedules(graphs: list[SourceGraph], triggers: list[AdfTrigger]) -> 
     A trigger can drive several pipelines and a pipeline can be driven by several
     triggers. The first trigger to reference a pipeline becomes its typed
     :attr:`SourceGraph.schedule`; any further triggers for the same pipeline are
-    preserved verbatim under ``schedule.extensions["additional_triggers"]`` so
-    nothing is lost. Pipeline references are matched case-insensitively, mirroring
+    kept as written under ``schedule.extensions["additional_triggers"]``, except
+    for an empty ``annotations`` list (see :data:`_TRIGGER_GET_DEFAULTS`), so
+    nothing meaningful is lost. Pipeline references are matched case-insensitively, mirroring
     ADF's case-insensitive identifier semantics.
 
     A **fresh** :class:`ScheduleSpec` is built for each pipeline assignment rather
@@ -206,9 +207,10 @@ def _trigger_to_schedule(trigger: AdfTrigger) -> ScheduleSpec:
     The recurrence payload is kept as-given: schedule triggers nest it under
     ``typeProperties.recurrence`` while tumbling-window / event triggers put their
     detail directly in ``typeProperties``, so whichever is present becomes the
-    verbatim ``expression``. The full trigger ``properties`` block also rides in
-    ``extensions`` so the mapping is lossless even for trigger detail with no typed
-    home yet (pipeline parameters, runtime state, annotations).
+    verbatim ``expression``. The trigger ``properties`` block also rides in
+    ``extensions``, kept as written except for an empty ``annotations`` list (see
+    :data:`_TRIGGER_GET_DEFAULTS`), so trigger detail with no typed home yet
+    (pipeline parameters, runtime state, non-empty annotations) is not lost.
     """
     type_properties = trigger.properties.get("typeProperties") or {}
     recurrence = type_properties.get("recurrence") if isinstance(type_properties, dict) else None
