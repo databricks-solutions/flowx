@@ -12,10 +12,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import ControlEdge, Lineage
-from flowx.routing import build_components
+from flowx.routing import build_components, build_plan, carried_forward_plan, validate_plan
 
 
 def _node(task_key: str, native_type: str = "Notebook", *, strategy: str = "deterministic") -> SourceNode:
@@ -150,3 +152,94 @@ def test_component_membership_and_ordering_are_deterministic() -> None:
     second, _ = build_components(_inventory(graphs))
     assert first == second
     assert first == [["a", "m"], ["z"]]
+
+
+def _hand_edited(inventory: dict[str, Any], pipeline: str, **fields: Any) -> dict[str, Any]:
+    """The inventory with one pipeline's entry overwritten, as a hand edit would leave it."""
+    for entry in inventory["pipelines"]:
+        if entry["name"] == pipeline:
+            entry.update(fields)
+    return inventory
+
+
+@pytest.mark.parametrize(
+    "edge",
+    [
+        {"source_workflow": "a", "target_workflow": "b", "via_task_key": "call_b"},
+        {"source_workflow": "a", "target_workflow": "b", "via_task_key": "call_b", "resolved": "false"},
+        {"source_workflow": "a", "target_workflow": "b", "via_task_key": "call_b", "resolved": None},
+    ],
+    ids=["missing", "the-string-false", "null"],
+)
+def test_an_edge_not_recorded_as_resolved_never_joins_two_pipelines(edge: dict[str, Any]) -> None:
+    inventory = _hand_edited(_inventory([_graph("a"), _graph("b")]), "a", lineage={"control_edges": [edge]})
+
+    components, findings = build_components(inventory)
+
+    assert components == [["a"], ["b"]]
+    assert len(findings) == 1 and "call_b" in findings[0]
+
+
+@pytest.mark.parametrize(
+    "lineage", [[1], {"control_edges": {"a": "b"}}, {"control_edges": "b"}, "a->b"], ids=["list", "dict", "str", "text"]
+)
+def test_a_malformed_lineage_block_is_read_as_no_edges(lineage: Any) -> None:
+    inventory = _hand_edited(_inventory([_graph("a"), _graph("b")]), "a", lineage=lineage)
+
+    assert build_components(inventory) == ([["a"], ["b"]], [])
+
+
+def test_a_pipeline_name_that_is_not_a_string_is_not_a_pipeline_identity() -> None:
+    """A number would become the string "7" and join an edge to a real pipeline named "7"."""
+    edge = {"source_workflow": "a", "target_workflow": "7", "via_task_key": "call_7", "resolved": True}
+    inventory = _inventory([_graph("a"), _graph("7"), _graph("b")])
+    _hand_edited(inventory, "7", name=7)
+    _hand_edited(inventory, "a", lineage={"control_edges": [edge]})
+
+    components, findings = build_components(inventory)
+
+    assert components == [["a"], ["b"]]
+    assert len(findings) == 1 and "call_7" in findings[0]
+
+
+def test_an_edge_endpoint_that_is_not_a_string_is_unresolved() -> None:
+    edge = {"source_workflow": "a", "target_workflow": ["b"], "via_task_key": "call_b", "resolved": True}
+    inventory = _hand_edited(_inventory([_graph("a"), _graph("b")]), "a", lineage={"control_edges": [edge]})
+
+    components, findings = build_components(inventory)
+
+    assert components == [["a"], ["b"]]
+    assert findings and "['b']" not in findings[0]
+
+
+@pytest.mark.parametrize("source", ["", "ghost", 5], ids=["empty", "not-in-the-inventory", "not-a-string"])
+def test_a_resolved_edge_whose_source_is_not_a_pipeline_is_a_finding(source: Any) -> None:
+    """Both ends are checked, so an edge from an unknown caller is reported, never dropped quietly."""
+    edge = {"source_workflow": source, "target_workflow": "b", "via_task_key": "call_b", "resolved": True}
+    inventory = _hand_edited(_inventory([_graph("a"), _graph("b")]), "a", lineage={"control_edges": [edge]})
+
+    components, findings = build_components(inventory)
+
+    assert components == [["a"], ["b"]]
+    assert len(findings) == 1 and "call_b" in findings[0] and "source" in findings[0]
+
+
+def test_carrying_a_plan_forward_moves_each_decision_to_its_components_current_id() -> None:
+    """A new pipeline shifts the ids; each carried row takes the id its members have now, so no two rows clash."""
+    before = _inventory([_graph("beta"), _graph("gamma")])
+    after = _inventory([_graph("alpha"), _graph("beta"), _graph("gamma")])
+    decided = [
+        {"component_id": "component-1", "members": ["beta"], "decision": "deterministic"},
+        {"component_id": "component-2", "members": ["gamma"], "decision": "agentic"},
+    ]
+    recorded = build_plan(before, {"components": decided}).to_dict()
+
+    carried, _dropped = carried_forward_plan(recorded, after)
+
+    rows = sorted((row["component_id"], row["members"], row["decision"]) for row in carried["components"])
+    assert rows == [
+        ("component-1", ["alpha"], None),
+        ("component-2", ["beta"], "deterministic"),
+        ("component-3", ["gamma"], "agentic"),
+    ]
+    assert validate_plan(carried, after) == []

@@ -88,7 +88,15 @@ def _insights_edited_in_both(output_dir: Path) -> None:
     (output_dir / "metadata" / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
 
 
+def _inventory_edited_by_hand(output_dir: Path) -> None:
+    """A deterministic inventory field is edited by hand and the copied insights block left as it was."""
+    inventory = _read(output_dir / "metadata" / "inventory.json")
+    inventory["source_dir"] = "/edited-by-hand"
+    (output_dir / "metadata" / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+
+
 _BREAKS = {
+    "inventory-edited": (_inventory_edited_by_hand, "was written for a different inventory.json"),
     "insights-ahead": (_insights_ahead_of_the_inventory, "disagree"),
     "insights-missing": (_insights_missing, "is missing"),
     "self-hash-broken": (_insights_edited_in_both, "does not match its recorded agentic_insights_sha256"),
@@ -127,7 +135,10 @@ def test_route_refuses_and_says_how_to_recover(tmp_path: Path, case: str, capsys
     (violation,) = json.loads(capsys.readouterr().out)["violations"]
     assert expected in violation
     assert "run enrich again with the same insights" in violation and ".enrich.lock" in violation
-    assert "running discover again also clears conversion_plan.json and agentic_conversion.json" in violation
+    assert (
+        "running discover again moves conversion_plan.json and agentic_conversion.json into metadata/archive/"
+        in violation
+    )
     assert not (tmp_path / "metadata" / "conversion_plan.json").exists()
 
 

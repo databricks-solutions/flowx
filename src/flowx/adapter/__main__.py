@@ -191,7 +191,7 @@ def _run_route(args: argparse.Namespace) -> int:
     from flowx import routing
     from flowx.models.conversion_plan import PLAN_FILENAME, ConversionPlan
     from flowx.reporting.routing_review import write_routing_review
-    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan
+    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan, missing_report_message
 
     inventory_path = args.output_dir / "metadata" / "inventory.json"
     if not inventory_path.exists():
@@ -255,7 +255,7 @@ def _run_route(args: argparse.Namespace) -> int:
 
     report_path = args.output_dir / WORK_DIRNAME / REPORT_FILENAME
     if not report_path.exists():
-        print(f"No {REPORT_FILENAME} under {report_path.parent}; run the convert phase first.", file=sys.stderr)
+        print(missing_report_message(args.output_dir), file=sys.stderr)
         return 1
     try:
         recorded = ConversionPlan.load(args.output_dir)

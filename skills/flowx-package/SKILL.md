@@ -209,6 +209,24 @@ Where:
 - After a successful build, `package` **prunes the transient `<output_dir>/.work/`** so the
   final tree contains only the bundle and the kept `metadata/` files. Pass `--keep-intermediates`
   to retain `.work/` for debugging.
+- **To change the conversion after a package**, run convert (same source and options), route,
+  fill-agentic for a unit whose output changes, modify if it was used, then package. The decisions,
+  conversation, stored fills and modify's answers are kept in `metadata/`; hand edits to generated
+  bundle files and `resources/*.yml` are not. See "After package" in the `flowx-route` skill.
+- A `resources/*.yml` that this package does not write again (one an earlier package wrote, or one
+  added by hand) is moved into `metadata/archive/<UTC time>/` with an `archive.json`, so it no longer
+  deploys and is kept for audit. The files package does write again are overwritten.
+- Package records the bundle folders it wrote in `metadata/packaged_bundles.json` (`"."` for one bundle
+  at the top of the output folder, otherwise one folder per bundle: per pipeline or per group, by
+  packaging mode). Once its preflight passes and before it writes anything, the next package moves every
+  recorded folder it will not write into `metadata/archive/<UTC time>/`: a pipeline an agentic unit
+  replaced under a new name, the per-pipeline folders when a convert narrows to one pipeline or the
+  packaging mode changes to `single`, or the top-level bundle when it widens again. So a new
+  bundle never lands on top of an old one that shares its folder name. A folder package never recorded
+  stays where it is. A malformed record stops package before it writes anything; discover archives it
+  with the rest of `metadata/`.
+- `metadata/archive/` sits inside the bundle folder, so `databricks bundle deploy` uploads it with
+  the rest unless it is git-ignored; nothing in it is a job or pipeline the bundle deploys.
 
 **Workspace artifact downloading (default: enabled).** When the report references workspace-resident notebooks (`/Shared/...`), DBFS Spark JARs (`dbfs:/...`), or Spark Python files, the preparer downloads them via the Databricks CLI auth so the resulting bundle is self-contained and deployable across environments. Downloaded notebooks are downloaded under `src/notebooks/` and bound to the default `job_cluster` (since they may rely on classic-compute features). The original `notebook_path` in the resource YAML is rewritten to the bundle-relative path `../src/notebooks/<file>.py`.
 
@@ -367,7 +385,7 @@ All under the shared `<output_dir>`:
 | File | Description |
 |---|---|
 | `databricks.yml` | Root bundle configuration |
-| `resources/*.yml` | Job and pipeline YAML definitions; each package clears the folder first, so a resource an earlier package wrote doesn't linger |
+| `resources/*.yml` | Job and pipeline YAML definitions; a file this package doesn't write again moves into `metadata/archive/<UTC time>/`, so a resource an earlier package wrote doesn't linger |
 | `src/notebooks/*.py` | Generated notebooks |
 | `src/setup/*.py` | Infrastructure setup scripts |
 | `SETUP.md` | Human-readable setup instructions (one per bundle) |
@@ -377,5 +395,6 @@ All under the shared `<output_dir>`:
 | `metadata/<pipeline>.arm.json` | Verbatim original ADF/ARM source (from discover) |
 | `metadata/configuration.json` | Collected configuration answers (from modify) |
 | `metadata/route_audit.json` | What each routing unit was converted to; written only when a routing plan is recorded (see `flowx-route`) |
+| `metadata/packaged_bundles.json` | The bundle folders the latest package wrote, so the next one archives those it no longer writes |
 
 > **Notification destinations.** When a `activity_and_notify` motif was opted into a Slack/Teams/PagerDuty/Generic-Webhook destination, the destination is created (or reused by display name) via the SDK at **prompt time** (the `modify` phase), and its resolved id is carried in the report; package simply wires that id into the task's `webhook_notifications`. If the report has no pre-resolved id (creation was deferred or failed earlier), package retries the create; failing that — e.g. no workspace auth — a `notification_destination` setup task is emitted in SETUP.md instead and the task ships without notifications. Email destinations use raw `email_notifications` and never create an SDK destination.

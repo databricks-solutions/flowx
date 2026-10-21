@@ -104,6 +104,19 @@ from the activity's ARM JSON (no built-in deterministic translator exists), e.g.
 For `unsupported` activities, warn clearly, e.g. `ExecuteSSISPackage` — recommend manual conversion
 to a PySpark notebook.
 
+## Where to look for the facts enrich asks about
+
+`flowx-enrich` reads the raw activity JSON in `inventory.json` (and `metadata/<pipeline>.arm.json`) to
+find the facts that narrow the target pattern. In ADF they sit in:
+
+- a Lookup feeding `ForEach.items`, and an `ExecutePipeline` called once per item (scale, repeat);
+- dataset parameters and sink paths templated by item (fan-in);
+- query text, such as a version or watermark read before the copy, or change functions (change,
+  shaping);
+- `ForEach.batchCount` and trigger schedules (bar);
+- a Copy or Lookup `typeProperties.source.type` of `SqlServerSource`, `AzureSqlSource` or
+  `SqlMISource`, which marks a SQL Server source.
+
 ## Step 8 — Confirm output location
 
 Tell the user where the metadata files were written (`<output_dir>/metadata/`), summarise the

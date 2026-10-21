@@ -263,6 +263,11 @@ LLM — you author the insights JSON and `enrich` validates + merges it additive
 deterministic inventory key byte-identical. The routing step consumes this block to present the
 agentic conversion option per group.
 
+Before recording the insights, tell the user in a few lines what the analysis found and ask at most
+three open questions about the facts that would rule a target pattern in or out, such as how many
+sources a runtime list really holds (the skill's "Summarise and ask"). Record the answers in the
+insights so route doesn't ask them again.
+
 **Skip only for a deterministic-only pass.** When the user chose a deterministic-only pass in Step 1
 (no agent/LLM authoring), skip enrich and the routing review (Steps 7–8) — the deterministic
 `inventory.json` is complete. Otherwise enrich by default.
@@ -282,6 +287,7 @@ Run this deterministic convert **before routing.** If you re-run it after routin
 different options), re-run `route` straight after: a fresh report carries no routing record, so route
 takes it as the new deterministic baseline and re-applies the plan and the agent's stored outputs.
 Merges of convert's own gaps made against the earlier report are dropped and must be merged again.
+After a package, this is also how you change the conversion (Step 15).
 
 Wait for the translation to complete and present the summary:
 
@@ -322,7 +328,9 @@ Routing reads the deterministic baseline report `.work/translation_report.json` 
 edits it. Invoke the **`flowx:flowx-route`** skill: route first writes its per-component
 recommendation and the suggested groupings into `<output_dir>/metadata/conversion_plan.json` with every
 decision pending, and draws them as `<output_dir>/metadata/routing_review.html`. Present the page, ask
-the customer what they want the conversion to achieve (record it as the plan's `conversation`), take
+the customer what they want the conversion to achieve (record it as the plan's `conversation`),
+qualify the target pattern for any ingestion component with at most three follow-up questions on facts
+still open (the skill's "Qualify the target pattern"), take
 the **customer's** decisions (the agent presents the options and records only the approved decisions),
 and route again. Once nothing is pending, route applies the plan: every routed-**agentic** unit's tasks
 become placeholder gaps; deterministic units (and a no-agentic-route plan) leave the report untouched —
@@ -550,7 +558,12 @@ Ask if the user wants to:
 2. Deploy to dev (`databricks bundle deploy --target dev`)
 3. Review specific generated files
 4. Re-translate any failed activities
-5. Export a migration report for documentation
+5. Change a decision, an answer or an agent output. Package pruned `.work/`, so run convert (same
+   source and options), route, fill-agentic for a unit whose output changes, modify if it was used
+   (Step 9), then package. The plan, the stored fills and modify's answers carry over from
+   `metadata/`; hand edits to generated bundle files don't. See "After package" in the `flowx-route`
+   skill.
+6. Export a migration report for documentation
 
 ## Reference
 

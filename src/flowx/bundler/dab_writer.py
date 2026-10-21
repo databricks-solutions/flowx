@@ -493,10 +493,6 @@ def write_bundle_group(
     manual_parameters: list[ManualParameter] = []
     resources_dir = output_dir / "resources"
     resources_dir.mkdir(parents=True, exist_ok=True)
-    # databricks.yml includes every resources/*.yml, so a resource an earlier package wrote (say, an
-    # agentic unit the user has since routed deterministic) would still deploy unless it is cleared.
-    for stale_resource_path in resources_dir.glob("*.yml"):
-        stale_resource_path.unlink()
     for index, workflow in enumerate(workflows):
         resource_key = to_lowercase_key(workflow.name)
         # Each job resource (parent + its inner ForEach jobs) gets only this workflow's hoisted globals,
@@ -810,13 +806,14 @@ def _live_report_failures(
     from flowx.models.conversion_plan import DECISION_AGENTIC
     from flowx.route_agentic import (
         AGENTIC_OUTPUT_FILENAME,
+        BASELINE_CHANGED,
         OUTCOME_AGENTIC_NOT_VIABLE,
         REPORT_FILENAME,
         ROUTING_RECORD_KEY,
         agentic_pipeline_names,
         baseline_pipeline_mismatch,
         load_agentic_output,
-        load_baseline,
+        load_routed_baseline,
         rebuild,
         routing_record,
         routing_record_mismatches,
@@ -837,15 +834,11 @@ def _live_report_failures(
         return failures
 
     try:
-        baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_baseline(
-            output_dir, fresh=False
+        baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_routed_baseline(
+            output_dir, record
         )
     except (OSError, ValueError):
-        return ["the deterministic baseline is missing or changed; re-run convert, then route"]
-    recorded_hashes = (record.get("baseline_report_sha256"), record.get("baseline_gaps_sha256"))
-    actual_hashes = (hashlib.sha256(baseline_report_bytes).hexdigest(), hashlib.sha256(baseline_gaps_bytes).hexdigest())
-    if recorded_hashes != actual_hashes:
-        return ["the deterministic baseline is missing or changed; re-run convert, then route"]
+        return [BASELINE_CHANGED]
     mismatch = baseline_pipeline_mismatch(baseline_report, inventory)
     if mismatch and agentic_pipeline_names(plan_document):
         return [mismatch]
@@ -868,6 +861,7 @@ def _live_report_failures(
         stored.gap_fills,
         baseline_report_bytes,
         baseline_gaps_bytes,
+        inventory=inventory,
     )
     report_without_record = {key: value for key, value in report.items() if key != ROUTING_RECORD_KEY}
     if rebuilt_record != record or report_without_record != rebuilt_report:
@@ -879,6 +873,109 @@ def _live_report_failures(
         for unit_id, entry in record["components"].items()
         if entry.get("outcome") == OUTCOME_AGENTIC_NOT_VIABLE
     ]
+
+
+# The bundle folders the latest package wrote, kept under metadata/: "." for one bundle at the top of the
+# output folder, otherwise one folder per bundle (per pipeline or per group, by packaging mode) named by
+# to_lowercase_key.
+PACKAGED_BUNDLES_FILENAME = "packaged_bundles.json"
+# What a bundle at the top of the output folder holds besides metadata/ (pyproject.toml only with PyDABs hooks).
+_TOP_LEVEL_BUNDLE_ENTRIES = ("databricks.yml", "SETUP.md", "WARNINGS.md", "pyproject.toml", "resources", "src")
+
+
+def read_packaged_bundles(output_dir: Path) -> list[str]:
+    """The bundle folders the latest package recorded in ``metadata/packaged_bundles.json``; empty when none.
+
+    The record is ``{"bundles": [...]}``, each entry ``"."`` for a bundle at the top of the output folder
+    or the folder name package gives a pipeline's or group's bundle. Anything else (a path, a non-string, another
+    key) is refused, so the record can never point package or discover at a folder outside the bundles
+    package wrote.
+
+    Raises:
+        ValueError: The record is not valid JSON or not that shape.
+    """
+    path = Path(output_dir) / "metadata" / PACKAGED_BUNDLES_FILENAME
+    if not path.is_file():
+        return []
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"metadata/{PACKAGED_BUNDLES_FILENAME} is unreadable: {error}") from error
+    bundles = document.get("bundles") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"bundles"}
+        or not isinstance(bundles, list)
+        or not all(_is_bundle_folder_name(name) for name in bundles)
+    ):
+        raise ValueError(
+            f'metadata/{PACKAGED_BUNDLES_FILENAME} must be {{"bundles": [...]}} listing "." or bundle folder names'
+        )
+    return list(bundles)
+
+
+def _is_bundle_folder_name(name: Any) -> bool:
+    """Whether ``name`` is "." or a folder name package gives a pipeline's or group's bundle."""
+    return isinstance(name, str) and (name == "." or (bool(name) and to_lowercase_key(name) == name))
+
+
+def _archive_stale_bundles(output_dir: Path, bundle_dirs: list[Path], previous_bundles: list[str]) -> Path | None:
+    """Move every bundle folder the previous package recorded and this one will not write into the archive.
+
+    A bundle folder an earlier package wrote that this one no longer writes (an agentic unit's pipelines
+    replaced under new names, a narrower convert, or another packaging mode or grouping) would otherwise
+    stay beside the new bundles, complete and deployable. For ``"."`` that is the top-level bundle's own
+    entries. Package runs this once its staging preflight passes and before it writes anything into the
+    output folder, so a name the old and new layouts share (a pipeline named Src and the top-level
+    bundle's ``src/``) is cleared before the new bundle lands there instead of being mixed into it. The
+    folders move into ``metadata/archive/<UTC time>/`` with an ``archive.json`` rather than being
+    deleted. A folder package never recorded, and ``metadata/`` itself, are left alone. Returns the
+    archive record, or ``None`` when nothing moved.
+    """
+    from flowx.sources.adf.loader import archive_outputs
+
+    output_dir = Path(output_dir)
+    current = {bundle_dir.relative_to(output_dir).as_posix() for bundle_dir in bundle_dirs}
+    entries = sorted(
+        {
+            output_dir / entry
+            for name in previous_bundles
+            if name not in current and name != "metadata"
+            for entry in (_TOP_LEVEL_BUNDLE_ENTRIES if name == "." else [name])
+        }
+    )
+    return archive_outputs(output_dir, entries, reason="package no longer writes these bundle folders")
+
+
+def _archive_stale_outputs(output_dir: Path, bundle_dirs: list[Path], written: list[Path]) -> Path | None:
+    """Move the resource files this package did not write into the archive, then record its bundle folders.
+
+    ``databricks.yml`` includes every ``resources/*.yml``, so a resource an earlier package wrote (say, an
+    agentic unit the user has since routed deterministic) would still deploy. Package overwrites the files
+    it writes again; after writing, any other ``resources/*.yml`` in a bundle it wrote, a file added by
+    hand included, moves into ``metadata/archive/<UTC time>/`` with an ``archive.json`` rather than being
+    deleted. Then ``metadata/packaged_bundles.json`` records the bundle folders this package wrote, so the
+    next package and discover's reset know which ones to move. Returns the archive record, or ``None``
+    when nothing moved.
+    """
+    from flowx.sources.adf.loader import archive_outputs
+
+    output_dir = Path(output_dir)
+    written_paths = {Path(path).resolve() for path in written}
+    entries = [
+        path
+        for bundle_dir in bundle_dirs
+        for path in sorted((bundle_dir / "resources").glob("*.yml"))
+        if path.resolve() not in written_paths
+    ]
+    record_path = archive_outputs(output_dir, entries, reason="package no longer writes these resource files")
+    metadata_dir = output_dir / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    current = sorted(bundle_dir.relative_to(output_dir).as_posix() for bundle_dir in bundle_dirs)
+    (metadata_dir / PACKAGED_BUNDLES_FILENAME).write_text(
+        json.dumps({"bundles": current}, indent=2) + "\n", encoding="utf-8"
+    )
+    return record_path
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -1274,6 +1371,15 @@ def main(argv: list[str] | None = None) -> int:
         for failure in plan_failures:
             print(f"  - {failure}", file=sys.stderr)
         return 1
+    try:
+        previous_bundles = read_packaged_bundles(args.output_dir)
+    except ValueError as error:
+        print(
+            f"Error: {error}; fix or delete it, or run discover again, which archives it. "
+            "No bundle files were written.",
+            file=sys.stderr,
+        )
+        return 1
 
     if args.profile:
         set_profile(args.profile)
@@ -1343,6 +1449,7 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
+        _archive_stale_bundles(args.output_dir, [args.output_dir], previous_bundles)
         all_created.extend(
             write_bundle_group(
                 [_combine_airflow_workflows(workflows)],
@@ -1436,6 +1543,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 1
 
+        planned_dirs = [args.output_dir] if single_bundle else [args.output_dir / name for name, _ in groups]
+        _archive_stale_bundles(args.output_dir, planned_dirs, previous_bundles)
         group_created, bundle_dirs = _write_groups(args.output_dir, announce=True)
         all_created.extend(group_created)
 
@@ -1450,6 +1559,8 @@ def main(argv: list[str] | None = None) -> int:
         deploy_path.write_text(deploy_md, encoding="utf-8")
         all_created.append(deploy_path.resolve())
         print(f"  DEPLOY.md: deploy order for {len(groups)} bundle(s)")
+
+    _archive_stale_outputs(args.output_dir, bundle_dirs, all_created)
 
     # Tier-0 structural check over the emitted bundle(s): duplicate task keys / job params,
     # dangling depends_on, undeclared {{job.parameters.X}}, leaked YAML anchors. Source-agnostic.

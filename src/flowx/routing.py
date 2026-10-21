@@ -35,8 +35,10 @@ control lineage, per-activity strategy, motifs); insights are advisory evidence 
 option, not part of the binding. The write is atomic (temp file + ``os.replace``) and idempotent, so
 re-recording the same decision against the same inventory rewrites byte-identical bytes.
 
-This is additive, opt-in routing metadata only: with no recorded plan, ``convert`` and ``package``
-behave exactly as today. Component computation reads ``lineage.control_edges``, so the artifact's
+This is additive, opt-in routing metadata: with no recorded plan, ``convert`` and ``package`` build the
+same output as before. Package still checks two things without a plan: when enrich ran, that
+``agentic_insights.json`` agrees with the inventory, and that a report route has edited still has its
+plan. Component computation reads ``lineage.control_edges``, so the artifact's
 shape is source-neutral, but agentic decisions are accepted only for ADF inventories in Phase 1 (see
 :data:`AGENTIC_ROUTING_SOURCES`). Airflow gaps stay with the fingerprint-bound per-gap resolver, so
 for an Airflow inventory route recommends and records deterministic decisions only.
@@ -61,10 +63,17 @@ from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import (
     BASIS_INFERRED_RELATIONSHIP,
     BASIS_SHARED_PATTERN,
+    COMPONENT_AUTHORED_KEYS,
+    COMPONENT_LIBRARY_KEYS,
+    CONVERSATION_KEYS,
     DECISION_AGENTIC,
     DECISION_DETERMINISTIC,
     DECISIONS,
+    GROUPING_AUTHORED_KEYS,
+    GROUPING_LIBRARY_KEYS,
+    PLAN_AUTHORED_KEYS,
     PLAN_FILENAME,
+    PLAN_LIBRARY_KEYS,
     SCHEMA_VERSION,
     ComponentPlan,
     ConversationEntry,
@@ -82,29 +91,12 @@ _DETERMINISTIC_STRATEGY = "deterministic"
 # top-level ``source`` is not one of them.
 AGENTIC_ROUTING_SOURCES = frozenset({"adf"})
 
-# Each level of the plan holds authored keys and library-owned keys. The library recomputes its own
-# keys on every record, so an edited copy of the recorded plan can be handed straight back; any key
-# that is neither is refused.
-_PLAN_AUTHORED_KEYS = {"components", "suggested_groupings", "conversation"}
-_PLAN_LIBRARY_KEYS = {
-    "schema_version",
-    "inventory_sha256",
-    "source_graphs_sha256",
-    "agentic_insights_sha256",
-    "findings",
-}
-_COMPONENT_AUTHORED_KEYS = {"component_id", "members", "decision", "rationale", "assignments"}
-_COMPONENT_LIBRARY_KEYS = {"recommended", "options"}
-_GROUPING_AUTHORED_KEYS = {"grouping_id", "accepted"}
-_GROUPING_LIBRARY_KEYS = {"components", "members", "basis"}
-_CONVERSATION_KEYS = {"question", "answer"}
-
 # How to bring agentic_insights.json and inventory.json back in step, mirroring enrich's own advice.
 _INSIGHTS_RECOVERY = (
     "enrich may have stopped between its two writes, or one of the files was edited. To recover, run enrich "
     f"again with the same insights (locally, first delete metadata/{ENRICH_LOCK_FILENAME} if it is still there; "
-    "on the hosted MCP server, run discover again, then enrich prepare and apply; running discover again also "
-    "clears conversion_plan.json and agentic_conversion.json, so route and fill again afterwards)"
+    "on the hosted MCP server, run discover again, then enrich prepare and apply; running discover again moves "
+    "conversion_plan.json and agentic_conversion.json into metadata/archive/, so route and fill again afterwards)"
 )
 
 
@@ -132,13 +124,13 @@ def agentic_routing_unsupported_note(inventory: dict[str, Any]) -> str:
 def _pipeline_names(inventory: dict[str, Any]) -> set[str]:
     """The set of real pipeline names in the inventory (the foreign-key domain).
 
-    A local copy of the same projection :mod:`flowx.discovery_insights` uses, kept here so routing
-    does not depend on that module's private helpers.
+    Only a non-empty string names a pipeline: a number or a null is never turned into one, so it can't
+    join an edge that names a real pipeline spelt the same way.
     """
     return {
-        str(pipeline["name"])
+        pipeline["name"]
         for pipeline in inventory.get("pipelines", [])
-        if isinstance(pipeline, dict) and pipeline.get("name") is not None
+        if isinstance(pipeline, dict) and isinstance(pipeline.get("name"), str) and pipeline["name"]
     }
 
 
@@ -146,21 +138,28 @@ def _control_edges(inventory: dict[str, Any]) -> Iterable[tuple[str, str, str, b
     """Yield ``(source_workflow, target_workflow, via_task_key, resolved)`` for every control edge.
 
     Lineage is placed per pipeline (one block beside each pipeline's ``activities``), so every
-    pipeline's ``lineage.control_edges`` are gathered into one stream, preserving inventory order.
+    pipeline's ``lineage.control_edges`` are gathered into one stream, preserving inventory order. An
+    edge is resolved only when it says so with ``true``; a missing or other value, a lineage block or
+    edge list of the wrong shape, and an endpoint that is not a string all read as unresolved or as no
+    edge, never as a link.
     """
     for pipeline in inventory.get("pipelines", []):
-        if not isinstance(pipeline, dict):
-            continue
-        lineage = pipeline.get("lineage") or {}
-        for edge in lineage.get("control_edges", []):
+        lineage = pipeline.get("lineage") if isinstance(pipeline, dict) else None
+        edges = lineage.get("control_edges") if isinstance(lineage, dict) else None
+        for edge in edges if isinstance(edges, list) else []:
             if not isinstance(edge, dict):
                 continue
             yield (
-                str(edge.get("source_workflow") or ""),
-                str(edge.get("target_workflow") or ""),
-                str(edge.get("via_task_key") or ""),
-                bool(edge.get("resolved", True)),
+                _edge_text(edge.get("source_workflow")),
+                _edge_text(edge.get("target_workflow")),
+                _edge_text(edge.get("via_task_key")),
+                edge.get("resolved") is True,
             )
+
+
+def _edge_text(value: Any) -> str:
+    """An edge field as recorded when it is a string, else empty."""
+    return value if isinstance(value, str) else ""
 
 
 def build_components(inventory: dict[str, Any]) -> tuple[list[list[str]], list[str]]:
@@ -168,10 +167,9 @@ def build_components(inventory: dict[str, Any]) -> tuple[list[list[str]], list[s
 
     Two pipelines share a component when a **resolved** control edge joins them in either direction
     and both endpoints are real inventory pipelines. Isolated pipelines each form their own
-    singleton component. An edge whose callee is unresolved (``resolved`` is False) or names a
-    pipeline absent from the inventory is **not** used to join anything and is **not** silently
-    severed -- it is recorded as a finding so a partial export never quietly collapses two
-    components into one or drops a coupling.
+    singleton component. An edge that is not resolved, or whose caller or callee is not an inventory
+    pipeline, is **not** used to join anything and is **not** silently severed -- it is recorded as a
+    finding so a partial export never quietly collapses two components into one or drops a coupling.
 
     Args:
         inventory: The discover ``inventory.json`` document (deterministic or enriched).
@@ -202,6 +200,12 @@ def build_components(inventory: dict[str, Any]) -> tuple[list[list[str]], list[s
 
     findings: set[str] = set()
     for source, target, via, resolved in _control_edges(inventory):
+        if not source or source not in names:
+            findings.add(
+                f"control edge from {source or '<unknown>'!r} -> {target or '<unresolved>'!r} (via {via!r}) "
+                "names a source that is not an inventory pipeline; kept as a finding, not severed, and joins nothing"
+            )
+            continue
         if not resolved or not target or target not in names:
             shown_target = target or "<unresolved>"
             findings.add(
@@ -209,8 +213,7 @@ def build_components(inventory: dict[str, Any]) -> tuple[list[list[str]], list[s
                 f"kept as a finding, not severed; {source!r} is routed within its own component"
             )
             continue
-        if source in names:
-            union(source, target)
+        union(source, target)
 
     groups: dict[str, list[str]] = {}
     for name in names:
@@ -291,7 +294,7 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
                         "pipeline": pipeline,
                         "activity": name,
                         "type": activity.get("type"),
-                        "strategy": strategy,
+                        "strategy": bucket,
                     }
                 )
     return {
@@ -558,7 +561,7 @@ def validate_plan(raw: Any, inventory: dict[str, Any]) -> list[str]:
         return [f"conversion plan must be a JSON object, got {type(raw).__name__}"]
 
     violations: list[str] = []
-    for key in sorted(set(raw) - _PLAN_AUTHORED_KEYS - _PLAN_LIBRARY_KEYS):
+    for key in sorted(set(raw) - PLAN_AUTHORED_KEYS - PLAN_LIBRARY_KEYS):
         violations.append(f"unknown top-level key: {key!r}")
 
     components = raw.get("components")
@@ -615,7 +618,7 @@ def _validate_component_entry(
         violations.append(f"{loc} must be an object")
         return None
 
-    for key in sorted(set(component) - _COMPONENT_AUTHORED_KEYS - _COMPONENT_LIBRARY_KEYS):
+    for key in sorted(set(component) - COMPONENT_AUTHORED_KEYS - COMPONENT_LIBRARY_KEYS):
         violations.append(f"{loc}: unknown field {key!r}")
 
     decision = component.get("decision")
@@ -626,12 +629,6 @@ def _validate_component_entry(
     rationale = component.get("rationale")
     if rationale is not None and (not isinstance(rationale, str) or not rationale.strip()):
         violations.append(f"{loc}: 'rationale' must be a non-empty string when present")
-
-    if component.get("assignments"):
-        violations.append(
-            f"{loc}: 'assignments' (per-node or subgraph routing) is reserved for Phase 2; "
-            "decide the whole component and leave it empty"
-        )
 
     component_id = component.get("component_id")
     if not isinstance(component_id, str) or not component_id:
@@ -681,7 +678,7 @@ def _grouping_violations(groupings: Any, inventory: dict[str, Any], decision_by_
         if not isinstance(entry, dict):
             violations.append(f"{loc} must be an object")
             continue
-        for key in sorted(set(entry) - _GROUPING_AUTHORED_KEYS - _GROUPING_LIBRARY_KEYS):
+        for key in sorted(set(entry) - GROUPING_AUTHORED_KEYS - GROUPING_LIBRARY_KEYS):
             violations.append(f"{loc}: unknown field {key!r}")
         grouping_id = entry.get("grouping_id")
         suggestion = suggestions.get(grouping_id) if isinstance(grouping_id, str) else None
@@ -735,9 +732,9 @@ def _conversation_violations(conversation: Any) -> list[str]:
         if not isinstance(entry, dict):
             violations.append(f"{loc} must be an object")
             continue
-        for key in sorted(set(entry) - _CONVERSATION_KEYS):
+        for key in sorted(set(entry) - CONVERSATION_KEYS):
             violations.append(f"{loc}: unknown field {key!r}")
-        for key in sorted(_CONVERSATION_KEYS):
+        for key in sorted(CONVERSATION_KEYS):
             value = entry.get(key)
             if not isinstance(value, str) or not value.strip():
                 violations.append(f"{loc}: {key!r} must be a non-empty string")
@@ -769,11 +766,12 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
     This is how route writes its recommendation straight into ``conversion_plan.json`` and then picks
     up the agent's edits to it. The *previous* recorded plan is carried as written, without the keys
     the library recomputes, so :func:`validate_plan` refuses a typo or a wrong value in the edited file
-    exactly as it would in a passed plan. A component it does not list is added pending
-    (``decision: None``) and a suggested grouping it does not list is added not accepted, so decisions
-    survive a re-enrich or a re-route. A re-discover keeps nothing: discover clears ``metadata/`` and
-    ``.work/``, so this plan and the agent's outputs go with them and every component starts pending
-    again.
+    exactly as it would in a passed plan. A row whose members still form a component takes that
+    component's current id, so a decision follows its pipelines when the ids shift. A component it does
+    not list is added pending (``decision: None``) and a suggested grouping it does not list is added
+    not accepted, so decisions survive a re-enrich or a re-route. A re-discover keeps nothing in use:
+    discover moves ``metadata/`` and ``.work/`` into ``metadata/archive/<UTC time>/``, so this plan and
+    the agent's outputs no longer apply and every component starts pending again.
 
     A recorded grouping that route no longer suggests (enrich changed its members, and with them its
     id) is dropped. When it was accepted, its components are set back to pending, so route applies
@@ -794,7 +792,7 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
         return previous, []
     recommendation = build_recommendation(inventory)
     suggestions = {grouping["grouping_id"]: grouping for grouping in recommendation["suggested_groupings"]}
-    plan = _without_library_keys(previous, _PLAN_LIBRARY_KEYS)
+    plan = _without_library_keys(previous, PLAN_LIBRARY_KEYS)
 
     dropped: list[dict[str, Any]] = []
     previous_groupings = previous.get("suggested_groupings", [])
@@ -808,7 +806,7 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
                 and ("members" in entry or "components" in entry)
             )
             if not no_longer_suggested:
-                groupings.append(_without_library_keys(entry, _GROUPING_LIBRARY_KEYS))
+                groupings.append(_without_library_keys(entry, GROUPING_LIBRARY_KEYS))
             elif entry.get("accepted", False) is not False:
                 dropped.append(_dropped_grouping(entry, recommendation["components"], suggestions))
         listed = [entry.get("grouping_id") for entry in groupings if isinstance(entry, dict)]
@@ -826,11 +824,13 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
         components: list[Any] = []
         listed_ids: set[str | None] = set()
         for entry in previous_components:
-            authored = _without_library_keys(entry, _COMPONENT_LIBRARY_KEYS)
+            authored = _without_library_keys(entry, COMPONENT_LIBRARY_KEYS)
             members = entry.get("members") if isinstance(entry, dict) else None
             if isinstance(members, list) and all(isinstance(member, str) for member in members):
                 component_id = id_by_members.get(frozenset(members))
                 listed_ids.add(component_id)
+                if component_id is not None:
+                    authored["component_id"] = component_id
                 if component_id in pending_again:
                     authored["decision"] = None
             components.append(authored)
@@ -843,7 +843,7 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
     return plan, dropped
 
 
-def _without_library_keys(entry: Any, library_keys: set[str]) -> Any:
+def _without_library_keys(entry: Any, library_keys: frozenset[str]) -> Any:
     """A plan entry without the keys the library recomputes; anything that is not an object, unchanged."""
     if not isinstance(entry, dict):
         return entry
@@ -960,9 +960,18 @@ def recorded_plan_violations(plan: ConversionPlan, inventory: dict[str, Any]) ->
 
     Runs the same rules :func:`validate_plan` applies on record, so a recorded file that lost a
     component, gained one, or holds an invalid grouping is refused rather than packaged as if every
-    component had been decided.
+    component had been decided. The library-owned facts must then be the ones route records for these
+    decisions from this inventory, so a hand edit to a recommendation, an option or a finding is
+    refused too.
     """
-    return validate_plan(plan.to_dict(), inventory)
+    recorded = plan.to_dict()
+    violations = validate_plan(recorded, inventory)
+    if not violations and build_plan(inventory, recorded).to_dict() != recorded:
+        violations.append(
+            "its library-owned facts (members, recommendations, options, groupings, findings or hashes) no longer "
+            "match what route records from the inventory"
+        )
+    return violations
 
 
 def insights_file_violations(output_dir: Path, inventory: dict[str, Any] | None) -> list[str]:
@@ -971,7 +980,9 @@ def insights_file_violations(output_dir: Path, inventory: dict[str, Any] | None)
     Enrich writes ``metadata/agentic_insights.json`` and then ``inventory.json``; a run stopped between
     the two, or a hand edit, leaves them out of step. This refuses when the inventory carries insights
     but the file is missing, the file exists but the inventory's block differs from it (or there is no
-    inventory to compare with), or the file no longer matches its own ``agentic_insights_sha256``.
+    inventory to compare with), the file no longer matches its own ``agentic_insights_sha256``, or its
+    recorded ``inventory_sha256`` no longer matches the deterministic inventory (a hand edit to
+    ``inventory.json`` that left the copied block as it was).
     Returns one message saying how to recover; an empty list when they agree or enrich never ran.
     """
     path = Path(output_dir) / "metadata" / AGENTIC_INSIGHTS_FILENAME
@@ -995,6 +1006,12 @@ def insights_file_violations(output_dir: Path, inventory: dict[str, Any] | None)
             problem = f"metadata/{AGENTIC_INSIGHTS_FILENAME} is present but metadata/inventory.json is missing"
         elif problem is None and inventory_insights != document:
             problem = f"metadata/{AGENTIC_INSIGHTS_FILENAME} and metadata/inventory.json disagree"
+        elif problem is None and isinstance(document, dict) and isinstance(inventory, dict):
+            if document.get("inventory_sha256") != inventory_fingerprint(inventory):
+                problem = (
+                    f"metadata/{AGENTIC_INSIGHTS_FILENAME} was written for a different inventory.json "
+                    "(its inventory_sha256 no longer matches the inventory)"
+                )
     if problem is None:
         return []
     return [f"{problem}; {_INSIGHTS_RECOVERY}"]

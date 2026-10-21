@@ -56,6 +56,16 @@ For `agentic` tasks, name the operator that has no deterministic mapping yet (e.
 provider operator) and note it will be emitted as a placeholder notebook for the convert phase to
 fill via LLM-assisted translation.
 
+## Where to look for the facts enrich asks about
+
+`flowx-enrich` reads the DAG source to find the facts that narrow the target pattern. In Airflow they
+sit in:
+
+- dynamic task mapping (`expand`) and task groups, and the list a mapped task is given (scale,
+  repeat);
+- operator SQL, such as a watermark read before the load (change, shaping);
+- the DAG's `schedule` and `max_active_tasks` (bar).
+
 ## Coverage notes
 
 Current deterministic coverage: `PythonOperator` (callable body → generated PySpark notebook) and

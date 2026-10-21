@@ -14,6 +14,8 @@ the source-audit and graph-identity guarantees.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -706,9 +708,12 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     ``metadata/agentic_conversion.json``, so every later rebuild applies it on top of route's saved
     deterministic baseline, which is never changed. The report's routing record then carries the
     hash of the gap fills applied, so package sees that modify's configured copy predates the merge.
-    A merge written anywhere else (``output_path``, or
-    into a copy such as modify's configured report) stores nothing. Nothing is written until every
-    result has been applied.
+    A merge written in place into the live report, routed or not, also takes convert's gaps for the
+    work it did out of ``.work/gaps.json``, the same ones a later route drops (see
+    :func:`flowx.route_agentic.drop_filled_gaps`); an unreadable ``gaps.json`` is left as it is. A
+    merge written anywhere else (``output_path``, or into a copy such as modify's configured report)
+    stores nothing and leaves ``gaps.json`` alone. Nothing is written until every result has been
+    applied.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
@@ -721,16 +726,19 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
 
     Raises:
         ValueError: A result would land in a pipeline the routing record routes agentic, or the
-            routing baseline is missing or lacks the task a merge replaced.
+            routing baseline is missing, no longer has the hashes the record names, or lacks the task a
+            merge replaced.
     """
     from flowx.discovery_serde import canonical_sha256
     from flowx.route_agentic import (
+        GAPS_FILENAME,
         REPORT_FILENAME,
         ROUTED_AGENTIC_MERGE_REFUSED,
         WORK_DIRNAME,
         applied_gap_fills,
+        drop_filled_gaps,
         load_agentic_output,
-        load_baseline,
+        load_routed_baseline,
         record_gap_fills,
         routed_agentic_pipelines,
         routing_record,
@@ -743,13 +751,19 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     output_dir = report_path.parent.parent
     destination = output_path or report_path
     live_report_path = output_dir / WORK_DIRNAME / REPORT_FILENAME
-    updates_baseline = (
-        record is not None and destination.resolve() == report_path.resolve() == live_report_path.resolve()
-    )
+    in_place = destination.resolve() == report_path.resolve() == live_report_path.resolve()
+    updates_baseline = record is not None and in_place
     baseline_by_name: dict[Any, dict[str, Any]] = {}
+    baseline_report_sha256 = ""
+    # Each task as convert wrote it, before any merge: route's saved baseline once routed, else this report.
+    convert_baseline: dict[str, Any] = copy.deepcopy(report) if in_place else {}
+    merged_tasks: list[dict[str, Any]] = []
     gap_fills: list[dict[str, Any]] = []
     if updates_baseline:
-        baseline_report = load_baseline(output_dir, fresh=False)[0]
+        assert record is not None
+        baseline_report, _, baseline_report_bytes, _ = load_routed_baseline(output_dir, record)
+        baseline_report_sha256 = hashlib.sha256(baseline_report_bytes).hexdigest()
+        convert_baseline = copy.deepcopy(baseline_report)
         baseline_pipelines = baseline_report["pipelines"] if "pipelines" in baseline_report else [baseline_report]
         baseline_by_name = {pipeline.get("name"): pipeline for pipeline in baseline_pipelines}
 
@@ -764,6 +778,12 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
             unmatched += 1
             continue
         wanted = data.get("pipeline")
+        if wanted is not None and not isinstance(wanted, str):
+            logger.warning(
+                "Result %s names its pipeline with a %s, not a name", result_file.name, type(wanted).__name__
+            )
+            unmatched += 1
+            continue
         target = next(
             (
                 pipeline
@@ -791,14 +811,26 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
                     "re-run route, then merge again"
                 )
             gap_fills.append({"pipeline": str(target.get("name")), "activity_name": activity_name, "task": task})
+        merged_tasks.append({"pipeline": str(target.get("name")), "activity_name": activity_name})
         merged += 1
         logger.info("Merged agentic result for '%s' from %s", activity_name, result_file.name)
 
+    gaps_path = output_dir / WORK_DIRNAME / GAPS_FILENAME
+    gaps: Any = None
+    if in_place and merged_tasks:
+        try:
+            gaps = json.loads(gaps_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            gaps = None
+    filled = merged_tasks
     if record is not None and gap_fills:
-        baseline_report_sha256 = str(record.get("baseline_report_sha256"))
         record_gap_fills(output_dir, gap_fills, baseline_report_sha256)
-        stored_fills = load_agentic_output(output_dir).gap_fills
-        record["gap_fills_sha256"] = canonical_sha256(applied_gap_fills(stored_fills, baseline_report_sha256))
+        filled = applied_gap_fills(load_agentic_output(output_dir).gap_fills, baseline_report_sha256)
+        record["gap_fills_sha256"] = canonical_sha256(filled)
+    if isinstance(gaps, list):
+        remaining = drop_filled_gaps(gaps, report, routed, convert_baseline, filled)
+        if remaining != gaps:
+            gaps_path.write_text(json.dumps(remaining, indent=2, default=str), encoding="utf-8")
     destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote merged report to %s (%d merged, %d unmatched)", destination, merged, unmatched)
     return merged, unmatched

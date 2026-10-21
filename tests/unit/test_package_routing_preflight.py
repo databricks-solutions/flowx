@@ -86,7 +86,7 @@ def test_package_refuses_a_routing_record_that_does_not_match_the_plan(
     report_path = _setup(tmp_path, _inventory("agentic"))
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
     # The decision is recorded again as deterministic without re-converting, so the report still
     # carries the agentic edit.
     _record(tmp_path, "deterministic")
@@ -115,7 +115,7 @@ def test_package_with_a_deterministic_plan_and_no_record_passes(tmp_path: Path) 
     before = report_path.read_bytes()
     _record(tmp_path, "deterministic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
     assert report_path.read_bytes() == before
 
     assert _package(tmp_path) == 0
@@ -249,7 +249,7 @@ def test_package_refuses_an_agentic_component_with_no_agent_output(
     report_path = _setup(tmp_path, _inventory("agentic"))
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
     assert routing_record(json.loads(report_path.read_text(encoding="utf-8"))) is not None
 
     assert _package(tmp_path) == 1
@@ -267,7 +267,7 @@ def test_package_with_a_current_plan_writes_an_audit_with_hashes(tmp_path: Path)
     baseline_sha256 = hashlib.sha256(report_path.read_bytes()).hexdigest()
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
     _fill_solo(tmp_path)
     record = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
     assert record is not None
@@ -295,7 +295,7 @@ def test_package_refuses_tampered_baseline(tmp_path: Path, capsys: pytest.Captur
     _setup(tmp_path, _inventory("agentic"))
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
 
     baseline_path = tmp_path / "metadata" / ".work" / "route_baseline" / "translation_report.json"
     if not baseline_path.exists():
@@ -312,7 +312,7 @@ def test_package_refuses_stale_unstamped_report(tmp_path: Path, capsys: pytest.C
     report_path = _setup(tmp_path, _inventory("agentic"))
     _record(tmp_path, "agentic")
     plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
-    apply_plan_to_report(tmp_path, plan)
+    apply_plan_to_report(tmp_path, plan, inventory=None)
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     report["pipelines"][0]["name"] = "tampered"
@@ -457,6 +457,99 @@ def _fill_solo(output_dir: Path) -> None:
     assert adapter_main([*fill, str(authored_path)]) == 0
 
 
+_MANAGED_ROOTS = (
+    "metadata",
+    WORK_DIRNAME,
+    "resources",
+    "src",
+    "setup",
+    "databricks.yml",
+    "SETUP.md",
+    "WARNINGS.md",
+    "DEPLOY.md",
+    "pyproject.toml",
+)
+
+
+def _managed_files(output_dir: Path) -> dict[str, bytes]:
+    """Every file discover's reset would take out of the output folder, by relative path."""
+    files: dict[str, bytes] = {}
+    for root in _MANAGED_ROOTS:
+        path = output_dir / root
+        for file in [path] if path.is_file() else sorted(path.rglob("*")) if path.is_dir() else []:
+            if file.is_file():
+                files[file.relative_to(output_dir).as_posix()] = file.read_bytes()
+    return files
+
+
+def test_discover_over_a_routed_filled_folder_archives_every_file_it_replaces(
+    tmp_path: Path, fixtures_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    _route_solo_agentic_and_modify(tmp_path, report_path)
+    assert _package(tmp_path) == 0
+    before = _managed_files(tmp_path)
+    for kept in ("metadata/conversion_plan.json", "metadata/routing_review.html", "metadata/agentic_conversion.json"):
+        assert kept in before
+    assert any(path.startswith(f"{WORK_DIRNAME}/route_baseline/") for path in before)
+
+    with caplog.at_level("INFO"):
+        assert (
+            adapter_main(
+                ["discover", "--source", "adf", "--source-path", str(fixtures_dir), "--output-dir", str(tmp_path)]
+            )
+            == 0
+        )
+
+    records = sorted((tmp_path / "metadata" / "archive").glob("*/archive.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text(encoding="utf-8"))
+    assert {entry["from"] for entry in record["moved"]} == set(before)
+    for entry in record["moved"]:
+        archived = (tmp_path / entry["to"]).read_bytes()
+        assert archived == before[entry["from"]]
+        assert entry["sha256"] == hashlib.sha256(archived).hexdigest()
+    assert not (tmp_path / "metadata" / "conversion_plan.json").exists()
+    assert (tmp_path / "metadata" / "inventory.json").is_file()
+    assert (tmp_path / "authored.json").is_file()
+    assert f"Moved {len(before)} file(s) from the earlier run" in caplog.text
+
+
+def test_discover_into_a_fresh_folder_archives_nothing(
+    tmp_path: Path, fixtures_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("INFO"):
+        assert (
+            adapter_main(
+                ["discover", "--source", "adf", "--source-path", str(fixtures_dir), "--output-dir", str(tmp_path)]
+            )
+            == 0
+        )
+
+    assert not (tmp_path / "metadata" / "archive").exists()
+    assert "from the earlier run" not in caplog.text
+
+
+def test_route_and_fill_agentic_after_a_package_say_package_pruned_work_and_what_to_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report_path = _setup(tmp_path, _inventory("agentic"))
+    route = _route_solo_agentic_and_modify(tmp_path, report_path)
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files"]) == 0
+    assert not (tmp_path / WORK_DIRNAME).exists()
+    capsys.readouterr()
+
+    assert adapter_main(route) == 1
+    route_error = capsys.readouterr().err
+    fill = ["fill-agentic", "--output-dir", str(tmp_path), "--members", "solo", "--pipelines-path"]
+    assert adapter_main([*fill, str(tmp_path / "authored.json")]) == 1
+    fill_error = capsys.readouterr().err
+
+    for error in (route_error, fill_error):
+        assert "package pruned .work/ when it built the bundle" in error
+        assert "Re-run convert with the same source, then route" in error
+
+
 def test_package_asks_to_re_run_modify_after_a_re_convert_and_re_route(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -574,3 +667,42 @@ def test_re_packaging_after_reversing_an_agentic_decision_drops_the_agentic_reso
     assert sorted(path.name for path in (tmp_path / "resources").glob("*.yml")) == ["solo.yml"]
     audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
     assert audit["components"][0]["outcome"] == "deterministic"
+    (archived,) = _archived(tmp_path)
+    assert [entry["from"] for entry in archived["moved"]] == ["resources/solo_agentic.yml"]
+
+
+def _archived(output_dir: Path) -> list[dict[str, Any]]:
+    """Every archive record under metadata/archive/, oldest first."""
+    records = sorted((output_dir / "metadata" / "archive").glob("*/archive.json"))
+    return [json.loads(record.read_text(encoding="utf-8")) for record in records]
+
+
+def test_re_packaging_moves_a_resource_file_it_no_longer_writes_into_the_archive(tmp_path: Path) -> None:
+    """A resource package does not write again, hand-added ones included, is moved aside, never deleted."""
+    _setup(tmp_path, _inventory())
+    assert _package(tmp_path) == 0
+    hand_added = tmp_path / "resources" / "team_alerts.yml"
+    hand_added.write_text("resources:\n  jobs: {}\n", encoding="utf-8")
+    content = hand_added.read_bytes()
+
+    assert _package(tmp_path) == 0
+
+    assert sorted(path.name for path in (tmp_path / "resources").glob("*.yml")) == ["solo.yml"]
+    (record,) = _archived(tmp_path)
+    (moved,) = record["moved"]
+    assert moved["from"] == "resources/team_alerts.yml"
+    assert (tmp_path / moved["to"]).read_bytes() == content
+    assert moved["sha256"] == hashlib.sha256(content).hexdigest()
+    assert record["reason"].startswith("package")
+
+
+def test_re_packaging_the_same_bundle_archives_nothing(tmp_path: Path) -> None:
+    """Package overwrites the files it writes again; only what it would remove goes to the archive."""
+    _setup(tmp_path, _inventory())
+    assert _package(tmp_path) == 0
+    written = (tmp_path / "resources" / "solo.yml").read_bytes()
+
+    assert _package(tmp_path) == 0
+
+    assert (tmp_path / "resources" / "solo.yml").read_bytes() == written
+    assert not (tmp_path / "metadata" / "archive").exists()

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import re
 import shutil
 import sys
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -1051,30 +1053,126 @@ def write_pipeline_arm(definitions: AdfDefinitions, metadata_dir: Path) -> list[
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-# flowx-managed entries under the shared output_dir, cleared at the start of each fresh run.
+# flowx-managed entries under the shared output_dir, cleared at the start of each fresh run. Package writes
+# DEPLOY.md at the top for every packaging mode, and pyproject.toml beside a top-level bundle's PyDABs hooks.
 _MANAGED_OUTPUT_DIRS: tuple[str, ...] = ("metadata", ".work", "resources", "src", "setup")
-_MANAGED_OUTPUT_FILES: tuple[str, ...] = ("databricks.yml", "SETUP.md", "WARNINGS.md")
+_MANAGED_OUTPUT_FILES: tuple[str, ...] = ("databricks.yml", "SETUP.md", "WARNINGS.md", "DEPLOY.md", "pyproject.toml")
+# Earlier runs' outputs are moved here (under metadata/, which package keeps) instead of deleted.
+ARCHIVE_DIRNAME = "archive"
+ARCHIVE_RECORD_FILENAME = "archive.json"
 
 
-def clear_stale_outputs(output_dir: Path) -> None:
-    """Removes a prior run's artifacts from a reused ``output_dir``.
+def clear_stale_outputs(output_dir: Path) -> Path | None:
+    """Moves a prior run's artifacts out of a reused ``output_dir`` into an archive folder.
 
     Discover begins a fresh migration, so a previous run's per-pipeline metadata, transient
     intermediates, and generated bundle must not survive into this run. Without this, a
     single-pipeline migration into a reused output directory ships the earlier run's other
     pipelines' source ARM and generated notebooks in the packaged bundle.
 
+    Nothing is deleted: everything this run would remove (the plan, the review page, the insights,
+    the route baseline, the agent's fills, the bundle, and the per-pipeline bundle folders package
+    recorded in ``metadata/packaged_bundles.json``) moves into
+    ``metadata/archive/<UTC time>/`` under its own relative path, with an ``archive.json`` that
+    records what moved, from where and when, so an earlier run can still be audited. Earlier
+    archives stay where they are, and package keeps ``metadata/``, so the archive survives later
+    phases. Discover from the CLI and from the MCP server both come through here.
+
     Args:
         output_dir: Migration output directory shared by all three phases.
 
+    Returns:
+        The path of the archive record, or ``None`` when there was nothing to move.
+
     Notes:
-        Only flowx-managed entries are removed (never the directory itself or unrelated
-        files), so pointing ``output_dir`` at a populated directory stays safe.
+        Only flowx-managed entries are touched (never the directory itself or unrelated
+        files), so pointing ``output_dir`` at a populated directory stays safe. A record that is
+        malformed is archived with the rest of ``metadata/`` and its folders are left where they are:
+        discover is how the hosted server gets out of a stuck output folder, so it never refuses here.
     """
-    for directory in _MANAGED_OUTPUT_DIRS:
-        shutil.rmtree(output_dir / directory, ignore_errors=True)
-    for filename in _MANAGED_OUTPUT_FILES:
-        (output_dir / filename).unlink(missing_ok=True)
+    from flowx.bundler.dab_writer import read_packaged_bundles
+
+    archive_parent = output_dir / "metadata" / ARCHIVE_DIRNAME
+    entries = [output_dir / name for name in _MANAGED_OUTPUT_DIRS if name != "metadata"]
+    entries += [output_dir / name for name in _MANAGED_OUTPUT_FILES]
+    try:
+        recorded_bundles = read_packaged_bundles(output_dir)
+    except ValueError as error:
+        logger.warning("Leaving earlier bundle folders in place: %s", error)
+        recorded_bundles = []
+    entries += [output_dir / name for name in recorded_bundles if name != "." and name not in _MANAGED_OUTPUT_DIRS]
+    if (output_dir / "metadata").is_dir():
+        entries += [child for child in (output_dir / "metadata").iterdir() if child != archive_parent]
+    entries = [entry for entry in entries if entry.exists()]
+    record_path = archive_outputs(output_dir, entries, reason="discover started a fresh run in this output folder")
+    if record_path is None:
+        for entry in entries:
+            shutil.rmtree(entry, ignore_errors=True)
+    return record_path
+
+
+def archive_outputs(output_dir: Path, entries: list[Path], *, reason: str) -> Path | None:
+    """Moves ``entries`` (files or folders inside ``output_dir``) into a new ``metadata/archive/<UTC time>/``.
+
+    Each entry keeps its path relative to ``output_dir``, and an ``archive.json`` beside them records
+    when and why they moved and, per file, where it came from, where it went and its SHA-256, so what
+    a re-run replaced can still be audited. Discover uses it for a whole earlier run and package for
+    the bundle folders and resource files it no longer writes.
+
+    Args:
+        output_dir: Migration output directory the entries live in.
+        entries: The files or folders to move; ones that no longer exist are skipped.
+        reason: Why they moved, recorded in ``archive.json``.
+
+    Returns:
+        The path of the archive record, or ``None`` when the entries hold no file (nothing moves).
+    """
+    archive_parent = output_dir / "metadata" / ARCHIVE_DIRNAME
+    entries = [entry for entry in entries if entry.exists()]
+    moved_files = sorted(
+        path.relative_to(output_dir).as_posix()
+        for entry in entries
+        for path in ([entry] if entry.is_file() else entry.rglob("*"))
+        if path.is_file()
+    )
+    if not moved_files:
+        return None
+
+    archived_at = datetime.now(UTC)
+    archive_root = archive_parent / archived_at.strftime("%Y%m%dT%H%M%SZ")
+    suffix = 2
+    while archive_root.exists():
+        archive_root = archive_parent / f"{archived_at.strftime('%Y%m%dT%H%M%SZ')}-{suffix}"
+        suffix += 1
+    for entry in entries:
+        destination = archive_root / entry.relative_to(output_dir)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(entry), str(destination))
+
+    archive_relative = archive_root.relative_to(output_dir).as_posix()
+    record = {
+        "archived_at": archived_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "reason": reason,
+        "moved": [
+            {
+                "from": relative,
+                "to": f"{archive_relative}/{relative}",
+                "sha256": hashlib.sha256((archive_root / relative).read_bytes()).hexdigest(),
+            }
+            for relative in moved_files
+        ],
+    }
+    record_path = archive_root / ARCHIVE_RECORD_FILENAME
+    record_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    logger.info(
+        "Moved %d file(s) from the earlier run in %s to %s (%s); %s lists them",
+        len(moved_files),
+        output_dir,
+        archive_root,
+        reason,
+        ARCHIVE_RECORD_FILENAME,
+    )
+    return record_path
 
 
 def _warn_no_pipelines_found(source_dir: Path) -> None:

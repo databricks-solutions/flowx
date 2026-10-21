@@ -10,11 +10,15 @@ structural validation, and provenance all still apply:
 
 * A report without a routing record is a fresh convert. When route first routes from one, it saves an
   exact copy of ``.work/translation_report.json`` and ``.work/gaps.json`` to ``.work/route_baseline/``
-  and records their hashes; that copy is never written again, and later routes rebuild from it.
+  and records their hashes; that copy is never written again, and later routes, fills and merges
+  rebuild from it only while it still has those hashes.
 * The agent's conversion output lives in ``metadata/agentic_conversion.json``: one entry per agentic
   routing unit (the authored pipelines, their canonical hash and the history of earlier outputs it
-  replaced), plus the fills of convert's own gaps merged after routing. Filling a unit again with the
-  same pipelines is a no-op; different pipelines replace the stored entry and add to its history.
+  replaced), plus the fills of convert's own gaps merged after routing. Each entry and each fill also
+  carries a hash over every one of its fields (an entry's with its unit id), so an entry moved to
+  another unit, a fill pointed at another activity, or an edited history is never applied. Filling a
+  unit again with the same pipelines is a no-op; different pipelines replace the stored entry and add
+  to its history.
   Switching every unit back to deterministic writes the baseline back byte for byte (unless fills of
   convert's own gaps are stored). Route and the fill never write modify's configured copy.
 * :func:`rebuild` is a pure function: baseline, then the stored gap fills, then the plan's agentic
@@ -74,6 +78,14 @@ OUTCOME_DETERMINISTIC = "deterministic"
 OUTCOME_AGENTIC_APPLIED = "agentic-applied"
 OUTCOME_AGENTIC_NOT_VIABLE = "agentic-not-viable"
 
+BASELINE_CHANGED = "the deterministic baseline is missing or changed; re-run convert, then route"
+
+# Every field a stored unit output and a stored gap fill hold; any other key means it was edited.
+_OUTPUT_KEYS = frozenset({"members", "pipelines", "output_sha256", "replaced", "entry_sha256"})
+_GAP_FILL_KEYS = frozenset(
+    {"pipeline", "activity_name", "task", "task_sha256", "baseline_report_sha256", "fill_sha256"}
+)
+
 ROUTED_AGENTIC_MERGE_REFUSED = (
     "this pipeline is routed agentic; fill its component with fill-agentic "
     "(run fill-agentic again with new pipelines to change the approach)"
@@ -96,16 +108,18 @@ _ADF_NESTED_ACTIVITY_KEYS = ("activities", "ifTrueActivities", "ifFalseActivitie
 
 
 def agentic_pipeline_names(plan: dict[str, Any]) -> set[str]:
-    """Return the member pipelines of every component the plan decides ``"agentic"``.
+    """Return the member pipelines of every routing unit the plan routes ``"agentic"``.
 
-    Reads either an authored plan (the agent-supplied ``{"components": [...]}``) or the recorded
-    ``conversion_plan.json`` -- both carry ``members`` and ``decision`` per component.
+    Read from :func:`routing_units`, so an accepted grouping's members count, and this always agrees
+    with the units the record, the fill and package work from. Takes either an authored plan (the
+    agent-supplied ``{"components": [...]}``) or the recorded ``conversion_plan.json``.
     """
-    names: set[str] = set()
-    for component in plan.get("components", []):
-        if isinstance(component, dict) and component.get("decision") == DECISION_AGENTIC:
-            names.update(str(member) for member in component.get("members", []) if isinstance(member, str))
-    return names
+    return {
+        member
+        for unit in routing_units(plan).values()
+        if unit["decision"] == DECISION_AGENTIC
+        for member in unit["members"]
+    }
 
 
 def routing_units(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -143,6 +157,23 @@ def routing_units(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return units
 
 
+def missing_report_message(output_dir: Path) -> str:
+    """Say why convert's report is missing and what to run, for route and fill-agentic.
+
+    Package prunes ``.work/`` once it has built the bundle, so after a package the report is gone even
+    though convert ran. A ``databricks.yml`` at the top or one folder down shows a package has run.
+    """
+    root = Path(output_dir)
+    work = root / WORK_DIRNAME
+    if (root / "databricks.yml").is_file() or any(root.glob("*/databricks.yml")):
+        return (
+            f"No {REPORT_FILENAME} under {work}: package pruned .work/ when it built the bundle. Re-run convert "
+            "with the same source, then route, which re-applies the plan and the stored fills; then run "
+            "fill-agentic, modify and package as needed."
+        )
+    return f"No {REPORT_FILENAME} under {work}; run the convert phase first."
+
+
 # --------------------------------------------------------------------------- #
 # The routing record stamped onto the report.
 # --------------------------------------------------------------------------- #
@@ -166,22 +197,35 @@ def routing_record_mismatches(record: dict[str, Any], plan: dict[str, Any]) -> l
     planned = routing_units(plan)
     mismatches: list[str] = []
     for unit_id in sorted(set(recorded) | set(planned)):
-        entry = recorded.get(unit_id)
-        decided = planned.get(unit_id)
-        if not isinstance(entry, dict):
-            mismatches.append(f"component {unit_id!r} is in the plan but not in the routing record")
-        elif decided is None:
+        if unit_id not in planned:
             mismatches.append(f"component {unit_id!r} is in the routing record but not in the plan")
-        elif sorted(entry.get("members") or []) != decided["members"]:
-            mismatches.append(f"component {unit_id!r} was routed with different members than the plan lists")
-        elif entry.get("decision") != decided["decision"]:
-            mismatches.append(
-                f"component {unit_id!r} was routed {entry.get('decision')!r} but the plan decides "
-                f"{decided['decision']!r}"
-            )
-        elif decided["decision"] != DECISION_AGENTIC and entry.get("outcome") != OUTCOME_DETERMINISTIC:
-            mismatches.append(f"a fill was applied to component {unit_id!r}, which the plan routes deterministic")
+            continue
+        mismatch = unit_record_mismatch(unit_id, recorded.get(unit_id), planned[unit_id])
+        if mismatch is not None:
+            mismatches.append(mismatch)
     return mismatches
+
+
+def unit_record_mismatch(unit_id: str, entry: Any, unit: dict[str, Any]) -> str | None:
+    """Why a unit's routing-record entry does not show route applied the plan's unit, or ``None`` when it does.
+
+    Args:
+        unit_id: The unit's id.
+        entry: The unit's entry in the routing record, or ``None`` when it has none.
+        unit: The unit as :func:`routing_units` reads it from the plan.
+    """
+    if not isinstance(entry, dict):
+        return f"component {unit_id!r} is in the plan but not in the routing record"
+    members = entry.get("members")
+    if not isinstance(members, list) or not all(isinstance(member, str) for member in members):
+        return f"component {unit_id!r} has no list of member names in the routing record"
+    if sorted(members) != unit["members"]:
+        return f"component {unit_id!r} was routed with different members than the plan lists"
+    if entry.get("decision") != unit["decision"]:
+        return f"component {unit_id!r} was routed {entry.get('decision')!r} but the plan decides {unit['decision']!r}"
+    if unit["decision"] != DECISION_AGENTIC and entry.get("outcome") != OUTCOME_DETERMINISTIC:
+        return f"a fill was applied to component {unit_id!r}, which the plan routes deterministic"
+    return None
 
 
 def routed_agentic_pipelines(report: Any) -> set[str]:
@@ -240,6 +284,25 @@ def load_baseline(output_dir: Path, *, fresh: bool) -> tuple[dict[str, Any], lis
     return report, gaps if isinstance(gaps, list) else [], report_bytes, gaps_bytes
 
 
+def load_routed_baseline(
+    output_dir: Path, record: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]], bytes, bytes]:
+    """Read the saved baseline a routed report was rebuilt from, as :func:`load_baseline` returns it.
+
+    The routing record names the hashes of the baseline files route saved. A copy whose bytes no
+    longer have those hashes was changed after route saved it, so it is refused rather than rebuilt
+    from, which would stamp a fresh record over the change.
+
+    Raises:
+        ValueError: The saved baseline is missing, is not valid JSON, or no longer has the record's hashes.
+    """
+    baseline = load_baseline(output_dir, fresh=False)
+    recorded = (record.get("baseline_report_sha256"), record.get("baseline_gaps_sha256"))
+    if recorded != (hashlib.sha256(baseline[2]).hexdigest(), hashlib.sha256(baseline[3]).hexdigest()):
+        raise ValueError(BASELINE_CHANGED)
+    return baseline
+
+
 def _save_baseline_bytes(output_dir: Path, report_bytes: bytes, gaps_bytes: bytes) -> None:
     """Save an immutable copy of the baseline files as exact bytes (byte-for-byte)."""
     baseline_dir = Path(output_dir) / WORK_DIRNAME / BASELINE_DIRNAME
@@ -254,9 +317,11 @@ class AgenticOutput:
 
     Attributes:
         document: The file's content as stored: ``{"components": {<unit id>: entry}, "gap_fills": [...]}``.
-        outputs: The unit entries that check out (sorted members, a hash matching their pipelines),
-            keyed by unit id. Only these are ever applied.
-        gap_fills: The fills of convert's own gaps that check out, in stored order.
+        outputs: The unit entries that check out (sorted members, a hash matching their pipelines, and
+            an entry hash matching their unit id and every field), keyed by unit id. Only these are
+            ever applied.
+        gap_fills: The fills of convert's own gaps that check out (a task hash and a fill hash matching
+            every field), in stored order.
         edited: A label for every entry that no longer checks out because it was edited by hand.
     """
 
@@ -266,33 +331,57 @@ class AgenticOutput:
     edited: list[str] = field(default_factory=list)
 
 
-def _output_checks_out(entry: Any) -> bool:
-    """Whether a stored unit output is as fill-agentic wrote it: sorted members, a hash matching its pipelines."""
-    if not isinstance(entry, dict):
+def _entry_sha256(unit_id: str, entry: dict[str, Any]) -> str:
+    """The hash of a stored unit output: its unit id and every field but this hash."""
+    return canonical_sha256(
+        {"unit_id": unit_id, **{key: value for key, value in entry.items() if key != "entry_sha256"}}
+    )
+
+
+def _fill_sha256(fill: dict[str, Any]) -> str:
+    """The hash of a stored gap fill: every field but this hash."""
+    return canonical_sha256({key: value for key, value in fill.items() if key != "fill_sha256"})
+
+
+def _output_checks_out(unit_id: str, entry: Any) -> bool:
+    """Whether a stored unit output is as fill-agentic wrote it for this unit.
+
+    That is: exactly the fields it writes, sorted members, a hash matching its pipelines, a history of
+    ``{"from", "to"}`` hashes, and an entry hash matching the unit id and every field.
+    """
+    if not isinstance(entry, dict) or set(entry) != _OUTPUT_KEYS:
         return False
-    members = entry.get("members")
-    pipelines = entry.get("pipelines")
+    members = entry["members"]
+    pipelines = entry["pipelines"]
+    replaced = entry["replaced"]
     return (
         isinstance(members, list)
         and all(isinstance(member, str) for member in members)
         and members == sorted(set(members))
         and isinstance(pipelines, list)
         and bool(pipelines)
-        and entry.get("output_sha256") == canonical_sha256(pipelines)
-        and isinstance(entry.get("replaced", []), list)
+        and entry["output_sha256"] == canonical_sha256(pipelines)
+        and isinstance(replaced, list)
+        and all(
+            isinstance(item, dict) and set(item) == {"from", "to"} and all(isinstance(v, str) for v in item.values())
+            for item in replaced
+        )
+        and entry["entry_sha256"] == _entry_sha256(unit_id, entry)
     )
 
 
 def _gap_fill_checks_out(entry: Any) -> bool:
-    """Whether a stored gap fill is as the merge wrote it: a task whose hash matches, bound to a baseline."""
+    """Whether a stored gap fill is as the merge wrote it: its fields, a matching task hash and fill hash."""
     return (
         isinstance(entry, dict)
-        and isinstance(entry.get("pipeline"), str)
-        and isinstance(entry.get("activity_name"), str)
+        and set(entry) == _GAP_FILL_KEYS
+        and isinstance(entry["pipeline"], str)
+        and isinstance(entry["activity_name"], str)
         and bool(entry["activity_name"])
-        and isinstance(entry.get("task"), dict)
-        and entry.get("task_sha256") == canonical_sha256(entry["task"])
-        and isinstance(entry.get("baseline_report_sha256"), str)
+        and isinstance(entry["task"], dict)
+        and entry["task_sha256"] == canonical_sha256(entry["task"])
+        and isinstance(entry["baseline_report_sha256"], str)
+        and entry["fill_sha256"] == _fill_sha256(entry)
     )
 
 
@@ -317,7 +406,7 @@ def load_agentic_output(output_dir: Path) -> AgenticOutput:
     gap_fills = document.get("gap_fills", []) if isinstance(document, dict) else None
     if not isinstance(components, dict) or not isinstance(gap_fills, list):
         raise ValueError(f"{AGENTIC_OUTPUT_FILENAME} must hold a 'components' object and a 'gap_fills' list")
-    outputs = {unit_id: entry for unit_id, entry in components.items() if _output_checks_out(entry)}
+    outputs = {unit_id: entry for unit_id, entry in components.items() if _output_checks_out(unit_id, entry)}
     edited = sorted(set(components) - set(outputs))
     checked_fills: list[dict[str, Any]] = []
     for index, fill in enumerate(gap_fills):
@@ -342,9 +431,9 @@ def save_agentic_output(output_dir: Path, document: dict[str, Any]) -> None:
 def record_gap_fills(output_dir: Path, fills: list[dict[str, Any]], baseline_report_sha256: str) -> None:
     """Store fills of convert's own gaps, merged after routing, so every rebuild applies them.
 
-    Each fill is ``{"pipeline", "activity_name", "task"}``; it is stored with its task's hash and the
-    baseline it was merged against, replacing an earlier fill of the same pipeline and activity. The
-    baseline itself is never changed.
+    Each fill is ``{"pipeline", "activity_name", "task"}``; it is stored with its task's hash, the
+    baseline it was merged against and a hash over all of those, replacing an earlier fill of the same
+    pipeline and activity. The baseline itself is never changed.
     """
     stored = load_agentic_output(output_dir).document or {"components": {}, "gap_fills": []}
     by_key = {
@@ -354,19 +443,66 @@ def record_gap_fills(output_dir: Path, fills: list[dict[str, Any]], baseline_rep
     }
     for fill in fills:
         task = copy.deepcopy(fill["task"])
-        by_key[(fill["pipeline"], fill["activity_name"])] = {
+        stored_fill = {
             "pipeline": fill["pipeline"],
             "activity_name": fill["activity_name"],
             "task": task,
             "task_sha256": canonical_sha256(task),
             "baseline_report_sha256": baseline_report_sha256,
         }
+        by_key[(fill["pipeline"], fill["activity_name"])] = {**stored_fill, "fill_sha256": _fill_sha256(stored_fill)}
     save_agentic_output(output_dir, {"components": stored.get("components", {}), "gap_fills": list(by_key.values())})
 
 
 def applied_gap_fills(gap_fills: list[dict[str, Any]] | None, baseline_report_sha256: str) -> list[dict[str, Any]]:
     """The stored gap fills a rebuild from this baseline applies, in stored order."""
     return [fill for fill in gap_fills or [] if fill.get("baseline_report_sha256") == baseline_report_sha256]
+
+
+def drop_filled_gaps(
+    gaps: list[Any],
+    report: dict[str, Any],
+    routed: set[str],
+    baseline_report: dict[str, Any],
+    fills: list[dict[str, Any]],
+) -> list[Any]:
+    """Take convert's gaps for the work the gap fills did out of ``gaps``, so the list shows only what's left.
+
+    A fill replaces one task, so convert's gap for it, and for every activity nested in it, is done.
+    Convert's gaps carry no pipeline, so one is dropped only when no pipeline of ``report`` outside
+    ``routed`` still has that name open: a placeholder, an activity in a placeholder's source definition,
+    or an activity a motif collapsed. A same-named gap still open in another pipeline may be that
+    pipeline's own, so it is kept. A routed pipeline's work is listed in its own pipeline-tagged gaps,
+    which are never dropped here.
+
+    Args:
+        gaps: The gaps list to filter.
+        report: The report the fills have been applied to.
+        routed: The pipelines routed agentic, or authored by fill-agentic.
+        baseline_report: Route's deterministic baseline, which holds each task as convert wrote it.
+        fills: The gap fills applied, each naming its ``pipeline`` and ``activity_name``.
+    """
+    baseline_pipelines = {pipeline.get("name"): pipeline for pipeline in _report_pipelines(baseline_report)}
+    filled: set[str] = set()
+    for fill in fills:
+        filled.add(str(fill["activity_name"]))
+        pipeline = baseline_pipelines.get(fill["pipeline"])
+        replaced = next(
+            (task for task in _walk_tasks((pipeline or {}).get("tasks")) if task.get("name") == fill["activity_name"]),
+            None,
+        )
+        if replaced is not None:
+            filled.update(_task_names([replaced]))
+    still_open: set[str] = set()
+    for pipeline in _report_pipelines(report):
+        if pipeline.get("name") not in routed:
+            still_open.update(_open_task_names(pipeline.get("tasks")))
+    done = filled - still_open
+    return [
+        gap
+        for gap in gaps
+        if not (isinstance(gap, dict) and gap.get("pipeline") is None and gap.get("activity_name") in done)
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -383,7 +519,7 @@ def rebuild(
     baseline_report_bytes: bytes,
     baseline_gaps_bytes: bytes,
     *,
-    inventory: dict[str, Any] | None = None,
+    inventory: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """Pure rebuild: derive the routed report, gaps, and record from the baseline, fills and plan.
 
@@ -400,6 +536,9 @@ def rebuild(
     * **agentic without a matching output:** placeholders and tagged gaps as ``alter_report`` does.
       Outcome is ``agentic-not-viable``, which package refuses.
 
+    Convert's gaps for the work the applied gap fills did are then dropped (see :func:`drop_filled_gaps`),
+    so the gaps list shows only what is left to convert.
+
     Each unit's record entry holds its members, decision, outcome, ``output_sha256`` (only while its
     stored output is applied, otherwise ``None``) and ``fingerprint``; the record also holds
     ``gap_fills_sha256``, the hash of the gap fills applied, so a later merge shows in it. A plan with
@@ -415,7 +554,8 @@ def rebuild(
         baseline_report_bytes: Raw bytes of the baseline report file, hashed into the record.
         baseline_gaps_bytes: Raw bytes of the baseline gaps file, hashed into the record.
         inventory: The discover ``inventory.json``, whose per-pipeline activities a filled unit also
-            owns; without it a filled unit owns only what the report shows.
+            owns. Required, so no caller drops it by accident; ``None`` (no inventory to read) means a
+            filled unit owns only what the report shows.
     """
     from flowx.ir_serde import replace_task_by_name
 
@@ -435,15 +575,11 @@ def rebuild(
     if not isinstance(new_report.get("pipelines"), list):
         new_report = {"pipelines": [new_report]}
 
+    applied = _applied_outputs(plan, outputs)
     units: dict[str, dict[str, Any]] = {}
     for unit_id, unit in routing_units(plan).items():
         members = set(unit["members"])
-        stored = (outputs or {}).get(unit_id)
-        output = (
-            stored
-            if unit["decision"] == DECISION_AGENTIC and stored and set(stored.get("members", [])) == members
-            else None
-        )
+        output = applied.get(unit_id)
         output_sha256 = output.get("output_sha256") if output else None
         if output:
             outcome = OUTCOME_AGENTIC_APPLIED
@@ -458,6 +594,13 @@ def rebuild(
             {"members": unit["members"], "decision": unit["decision"], "output_sha256": output_sha256}
         )
         units[unit_id] = {**unit, "outcome": outcome, "output_sha256": output_sha256, "fingerprint": fingerprint}
+    authored = {
+        str(pipeline.get("name"))
+        for output in applied.values()
+        for pipeline in output.get("pipelines", [])
+        if isinstance(pipeline, dict) and isinstance(pipeline.get("name"), str)
+    }
+    new_gaps = drop_filled_gaps(new_gaps, new_report, agentic_names | authored, baseline_report, applicable_fills)
     record = {
         "conversion_plan_sha256": canonical_sha256(plan),
         "baseline_report_sha256": baseline_report_sha256,
@@ -466,6 +609,16 @@ def rebuild(
         "components": units,
     }
     return new_report, new_gaps, record
+
+
+def _applied_outputs(plan: dict[str, Any], outputs: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    """The stored unit outputs a rebuild under ``plan`` applies: each agentic unit's, while its members match."""
+    applied: dict[str, dict[str, Any]] = {}
+    for unit_id, unit in routing_units(plan).items():
+        stored = (outputs or {}).get(unit_id)
+        if unit["decision"] == DECISION_AGENTIC and stored and set(stored.get("members", [])) == set(unit["members"]):
+            applied[unit_id] = stored
+    return applied
 
 
 # --------------------------------------------------------------------------- #
@@ -659,51 +812,42 @@ def baseline_pipeline_mismatch(baseline_report: dict[str, Any], inventory: dict[
     )
 
 
-def _read_inventory(output_dir: Path) -> dict[str, Any] | None:
-    """The discover ``inventory.json`` under ``output_dir``, or ``None`` when it is missing or unreadable."""
-    try:
-        inventory = json.loads((Path(output_dir) / METADATA_DIRNAME / INVENTORY_FILENAME).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return inventory if isinstance(inventory, dict) else None
-
-
-def apply_plan_to_report(
-    output_dir: Path, plan: dict[str, Any], *, inventory: dict[str, Any] | None = None
-) -> dict[str, Any]:
+def apply_plan_to_report(output_dir: Path, plan: dict[str, Any], *, inventory: dict[str, Any] | None) -> dict[str, Any]:
     """Apply a routing decision to the report on disk by rebuilding it from the deterministic baseline.
 
     A report without a routing record is a fresh convert, so it becomes the baseline: the first time
     the rebuild changes anything, route saves it and its gaps to ``.work/route_baseline/``; gap fills
     merged against an earlier baseline are then dropped (merge them again). A routed report is rebuilt
-    from the saved copy. The rebuild applies the stored gap fills, the plan and the stored unit outputs
-    from ``metadata/agentic_conversion.json``, and the report + gaps are written atomically. When the
-    rebuild changes nothing the baseline bytes are written back, so switching back to deterministic
-    restores convert's output exactly and a never-routed report is left untouched. Route never writes
-    modify's configured copy; package asks for ``modify`` again when it is out of date.
+    from the saved copy, refused when it no longer has the hashes the record names. The rebuild applies
+    the stored gap fills, the plan and the stored unit outputs from ``metadata/agentic_conversion.json``,
+    and the report + gaps are written atomically. When the rebuild changes nothing the baseline bytes
+    are written back, so switching back to deterministic restores convert's output exactly and a
+    never-routed report is left untouched. Route never writes modify's configured copy; package asks
+    for ``modify`` again when it is out of date.
 
-    With ``inventory`` given and an agentic unit in the plan, the baseline's pipelines must be the
-    inventory's (see :func:`baseline_pipeline_mismatch`), and a filled unit also owns the convert gaps
-    of the activities the inventory lists for its pipelines (see :func:`rebuild`).
+    ``inventory`` is required so no caller skips it by accident. With an inventory and an agentic unit
+    in the plan, the baseline's pipelines must be the inventory's (see :func:`baseline_pipeline_mismatch`),
+    and a filled unit also owns the convert gaps of the activities the inventory lists for its pipelines
+    (see :func:`rebuild`); ``None`` is only for a caller with no inventory to check against.
 
     Returns a summary dict with the altered pipeline names, the resulting gap count, each unit's
     outcome and how many stale gap fills were dropped.
 
     Raises:
         FileNotFoundError: when the translation report is missing (run convert first).
-        ValueError: when a routed report's saved baseline or the agent's output cannot be read, or the
-            baseline no longer matches the inventory.
+        ValueError: when a routed report's saved baseline or the agent's output cannot be read, the
+            saved baseline no longer has the record's hashes, or it no longer matches the inventory.
     """
     work = Path(output_dir) / WORK_DIRNAME
     report_path = work / REPORT_FILENAME
     gaps_path = work / GAPS_FILENAME
     if not report_path.exists():
-        raise FileNotFoundError(f"No {REPORT_FILENAME} under {work}; run the convert phase first.")
+        raise FileNotFoundError(missing_report_message(Path(output_dir)))
 
     report = json.loads(report_path.read_bytes())
     record = routing_record(report)
-    baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_baseline(
-        output_dir, fresh=record is None
+    baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = (
+        load_baseline(output_dir, fresh=True) if record is None else load_routed_baseline(output_dir, record)
     )
     agentic = agentic_pipeline_names(plan)
     if inventory is not None and agentic:
@@ -756,7 +900,7 @@ def apply_plan(output_dir: Path, plan: ConversionPlan) -> dict[str, Any]:
     then rebuilds the translation report from the deterministic baseline (see
     :func:`apply_plan_to_report`). Each routed-agentic unit is then filled only by ``fill-agentic``;
     ``convert --merge-agentic`` stays for convert's own gaps. Phase 1 decides whole components (or
-    accepted groupings of them), so the reserved per-node assignments are not read here.
+    accepted groupings of them).
 
     Raises:
         FileNotFoundError: The inventory or translation report is missing.
@@ -805,12 +949,13 @@ def replace_unit_pipelines(
 
 def _resolve_agentic_unit(
     output_dir: Path, members: set[str]
-) -> tuple[str | None, dict[str, Any] | None, str | None, str | None]:
+) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None, str | None]:
     """Bind ``members`` to a routed-**agentic** unit in the recorded, fingerprint-bound plan.
 
     Reads ``metadata/conversion_plan.json`` and ``metadata/inventory.json`` and returns
-    ``(unit_id, plan, source, error)``, where ``plan`` is the recorded plan document and ``source``
-    the inventory's source, which every authored pipeline must carry. The error is set (and the other
+    ``(unit_id, plan, inventory, error)``, where ``plan`` is the recorded plan document and
+    ``inventory`` the inventory it was checked against, read once so the fill rebuilds against that
+    same one; every authored pipeline must carry its source. The error is set (and the other
     three are ``None``) when: the inventory's source cannot be routed agentic
     (:data:`flowx.routing.AGENTIC_ROUTING_SOURCES`); the plan or inventory is missing; the plan no
     longer matches the current inventory, source graphs or insights, or the insights files disagree;
@@ -824,7 +969,6 @@ def _resolve_agentic_unit(
         agentic_routing_supported,
         agentic_routing_unsupported_note,
         insights_file_violations,
-        inventory_source,
         plan_binding_violations,
     )
 
@@ -862,7 +1006,7 @@ def _resolve_agentic_unit(
         if set(unit["members"]) != members:
             continue
         if unit["decision"] == DECISION_AGENTIC:
-            return unit_id, plan, inventory_source(inventory), None
+            return unit_id, plan, inventory, None
         return (
             None,
             None,
@@ -949,6 +1093,22 @@ def _task_names(tasks: Any) -> set[str]:
     return names
 
 
+def _open_task_names(tasks: Any) -> set[str]:
+    """The names among ``tasks`` that still need converting, the only ones a convert gap can belong to.
+
+    That is each placeholder and the activities nested in its source definition, and the activities a
+    motif collapsed, looking inside containers too.
+    """
+    names: set[str] = set()
+    for task in _walk_tasks(tasks):
+        if task.get("type") == "PlaceholderActivity":
+            names.add(str(task.get("name")))
+            names.update(_adf_activity_names([task.get("raw_definition")]))
+        if task.get("type") == "MotifActivity":
+            names.update(str(name) for name in task.get("matched_activity_names") or [])
+    return names
+
+
 def _placeholder_task_names(tasks: Any) -> list[str]:
     """The names of every ``PlaceholderActivity`` among ``tasks``, looking inside containers too."""
     return [str(task.get("name")) for task in _walk_tasks(tasks) if task.get("type") == "PlaceholderActivity"]
@@ -958,13 +1118,46 @@ def _authored_placeholder_violations(authored_pipelines: list[dict[str, Any]]) -
     """Reports each authored pipeline that still holds a placeholder task, which would ship as a stub."""
     violations: list[str] = []
     for index, pipeline in enumerate(authored_pipelines):
-        if not isinstance(pipeline, dict):
+        if not isinstance(pipeline, dict) or not isinstance(pipeline.get("tasks"), list):
             continue
         placeholders = _placeholder_task_names(pipeline.get("tasks"))
         if placeholders:
             label = pipeline.get("name") or f"pipeline[{index}]"
             violations.append(
                 f"{label}: still has placeholder tasks {placeholders}; convert every task before filling the unit"
+            )
+    return violations
+
+
+def _authored_name_violations(authored_pipelines: list[dict[str, Any]]) -> list[str]:
+    """Reports each authored pipeline whose name isn't a non-empty string, before any name is compared."""
+    violations: list[str] = []
+    for index, pipeline in enumerate(authored_pipelines):
+        if not isinstance(pipeline, dict):
+            continue
+        name = pipeline.get("name")
+        if not isinstance(name, str) or not name.strip():
+            violations.append(
+                f"pipeline[{index}]: authored pipeline name {name!r} is not a non-empty string; "
+                "give every pipeline a name"
+            )
+    return violations
+
+
+def _authored_buildable_violations(authored_pipelines: list[dict[str, Any]]) -> list[str]:
+    """Reports each authored pipeline package wouldn't build: no tasks list to run, or marked excluded."""
+    violations: list[str] = []
+    for index, pipeline in enumerate(authored_pipelines):
+        if not isinstance(pipeline, dict):
+            continue
+        label = pipeline.get("name") if isinstance(pipeline.get("name"), str) else f"pipeline[{index}]"
+        tasks = pipeline.get("tasks")
+        if not isinstance(tasks, list) or not tasks or not all(isinstance(task, dict) for task in tasks):
+            violations.append(f"{label}: authored pipeline needs a non-empty 'tasks' list; give it the tasks to run")
+        if pipeline.get("migration_status") == "excluded":
+            violations.append(
+                f"{label}: authored pipeline is marked migration_status 'excluded', which package skips; "
+                "leave it out of the fill or drop the status"
             )
     return violations
 
@@ -1007,15 +1200,18 @@ def apply_agentic_output(
     Validates the unit's membership against the recorded plan, stores the authored pipelines in
     ``metadata/agentic_conversion.json``, and rebuilds (applying them deterministically). The
     membership must exactly match a routed-agentic unit (a component, or an accepted grouping) in the
-    plan, and every authored pipeline must carry the correct source tag, hold no placeholder task, and
-    have a name of its own: no repeat within the list, no member of another unit, no pipeline another
-    unit's output authored, and no bundle folder shared with another pipeline once normalised. A name
-    may reuse a member of this unit, since the fill replaces it, or a pipeline the output of a unit
-    sharing members with this one authored (a grouping and its own components never apply together).
+    plan, and every authored pipeline must carry the correct source tag, hold a non-empty ``tasks`` list
+    of task objects with no placeholder task, not be marked ``migration_status`` ``excluded``, and have a
+    non-empty string name of its own: no repeat within the list, no member of another unit, no pipeline
+    another unit's applied output authored, and no bundle folder shared with another pipeline once
+    normalised. A name may reuse a member of this unit, since the fill replaces it. A stored output the
+    rebuild no longer applies (its unit routed deterministic since, or joined into a grouping) holds no
+    name.
 
     Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_applied", "message"}``.
     ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation, a
-    placeholder left in, a name clash, structural validation failure, or any other error. Empty
+    placeholder left in, a missing tasks list, an excluded pipeline, a bad or clashing name, structural
+    validation failure, or any other error. Empty
     ``authored_pipelines`` is refused.
 
     The stored entry carries the canonical hash of the complete authored pipelines. When that hash
@@ -1030,12 +1226,18 @@ def apply_agentic_output(
     if not authored_pipelines:
         return {"ok": False, "error": "pipelines list cannot be empty", "violations": [], "pipelines": 0}
 
-    unit_id, plan, source, error = _resolve_agentic_unit(output_dir, members)
+    from flowx.routing import inventory_source
+
+    unit_id, plan, inventory, error = _resolve_agentic_unit(output_dir, members)
     if error is not None:
         return {"ok": False, "error": error, "violations": [], "pipelines": 0}
-    assert unit_id is not None and plan is not None and source is not None
+    assert unit_id is not None and plan is not None and inventory is not None
+    source = inventory_source(inventory)
+    assert source is not None
 
-    authoring_violations = _authored_source_tag_violations(authored_pipelines, source)
+    authoring_violations = _authored_name_violations(authored_pipelines)
+    authoring_violations += _authored_buildable_violations(authored_pipelines)
+    authoring_violations += _authored_source_tag_violations(authored_pipelines, source)
     authoring_violations += _authored_placeholder_violations(authored_pipelines)
     if authoring_violations:
         return {"ok": False, "error": None, "violations": authoring_violations, "pipelines": 0}
@@ -1043,7 +1245,7 @@ def apply_agentic_output(
     work = Path(output_dir) / WORK_DIRNAME
     report_path = work / REPORT_FILENAME
     if not report_path.exists():
-        raise FileNotFoundError(f"No {REPORT_FILENAME} under {work}; run the convert phase first.")
+        raise FileNotFoundError(missing_report_message(Path(output_dir)))
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     record = routing_record(report)
@@ -1053,6 +1255,12 @@ def apply_agentic_output(
     if routing_record_mismatches(record, plan):
         error = "the report was routed under a different plan; re-run route, then fill-agentic again"
         return {"ok": False, "error": error, "violations": [], "pipelines": 0}
+    try:
+        baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_routed_baseline(
+            output_dir, record
+        )
+    except ValueError as baseline_error:
+        return {"ok": False, "error": str(baseline_error), "violations": [], "pipelines": 0}
 
     output_sha256 = canonical_sha256(authored_pipelines)
     stored = load_agentic_output(output_dir)
@@ -1061,8 +1269,8 @@ def apply_agentic_output(
         member for other_id, unit in routing_units(plan).items() if other_id != unit_id for member in unit["members"]
     } | {
         pipeline.get("name")
-        for other_id, entry in stored.outputs.items()
-        if other_id != unit_id and members.isdisjoint(entry["members"])
+        for other_id, entry in _applied_outputs(plan, stored.outputs).items()
+        if other_id != unit_id
         for pipeline in entry["pipelines"]
         if isinstance(pipeline, dict)
     }
@@ -1088,17 +1296,17 @@ def apply_agentic_output(
             "message": "already applied, unchanged",
         }
 
-    raw_previous = stored.document.get("components", {}).get(unit_id)
-    replaced = list(raw_previous.get("replaced") or []) if isinstance(raw_previous, dict) else []
+    # Only an entry that still checks out carries its history on; an edited one's history can't be trusted.
+    replaced = list(previous["replaced"]) if previous is not None else []
     if previous is not None and previous["output_sha256"] != output_sha256:
         replaced.append({"from": previous["output_sha256"], "to": output_sha256})
-    entry = {
+    entry: dict[str, Any] = {
         "members": sorted(members),
         "pipelines": authored_pipelines,
         "output_sha256": output_sha256,
         "replaced": replaced,
     }
-    baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_baseline(output_dir, fresh=False)
+    entry["entry_sha256"] = _entry_sha256(unit_id, entry)
     new_report, new_gaps, new_record = rebuild(
         baseline_report,
         baseline_gaps,
@@ -1107,7 +1315,7 @@ def apply_agentic_output(
         stored.gap_fills,
         baseline_report_bytes,
         baseline_gaps_bytes,
-        inventory=_read_inventory(output_dir),
+        inventory=inventory,
     )
     folder_clashes = _bundle_folder_clashes(new_report, authored_names)
     if folder_clashes:
