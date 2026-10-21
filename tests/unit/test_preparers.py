@@ -1087,6 +1087,36 @@ class TestSwitchPreparer:
         # Default hangs off the last case's outcome=false.
         assert extra_by_key["default_wait"]["depends_on"] == [{"task_key": "route_case_prod", "outcome": "false"}]
 
+    def test_prepare_switch_repeated_case_values_get_distinct_task_keys(self):
+        """Every declared case is kept, so a repeated value needs its own condition task key."""
+        wait_a = WaitActivity(**_make_base("WaitA", "wait_a"), wait_time_seconds=1)
+        wait_b = WaitActivity(**_make_base("WaitB", "wait_b"), wait_time_seconds=2)
+        wait_c = WaitActivity(**_make_base("WaitC", "wait_c"), wait_time_seconds=3)
+        wait_d = WaitActivity(**_make_base("WaitD", "wait_d"), wait_time_seconds=4)
+        activity = SwitchActivity(
+            **_make_base("Route", "route"),
+            on_expression="@pipeline().parameters.mode",
+            cases=[
+                SwitchCase(value="full", activities=[wait_a]),
+                SwitchCase(value="full_2", activities=[wait_b]),
+                SwitchCase(value="full", activities=[wait_c]),
+                SwitchCase(value="full", activities=[wait_d]),
+            ],
+        )
+        prepared = prepare_activity(activity)
+        all_tasks = [prepared.task, *prepared.extra_tasks]
+        task_keys = [task["task_key"] for task in all_tasks]
+        assert len(task_keys) == len(set(task_keys))
+
+        condition_keys = [task["task_key"] for task in all_tasks if "condition_task" in task]
+        assert condition_keys[:2] == ["route_case_full", "route_case_full_2"]
+        assert len(set(condition_keys)) == 4
+        by_key = {task["task_key"]: task for task in all_tasks}
+        for previous_key, case_key in zip(condition_keys, condition_keys[1:], strict=False):
+            assert by_key[case_key]["depends_on"] == [{"task_key": previous_key, "outcome": "false"}]
+        for case_key, body_key in zip(condition_keys, ["wait_a", "wait_b", "wait_c", "wait_d"], strict=True):
+            assert by_key[body_key]["depends_on"] == [{"task_key": case_key, "outcome": "true"}]
+
     def test_resolve_switch_on_expression_is_idempotent_for_dab_refs(self):
         """C-13 (CF-iter2-004): an already-resolved {{tasks.X.values.Y}} ref
         passes through resolve_switch_on_expression unchanged rather than

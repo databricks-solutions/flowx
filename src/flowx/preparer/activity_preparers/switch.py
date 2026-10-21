@@ -134,10 +134,16 @@ def prepare(activity: SwitchActivity, *, scope: str = "") -> PreparedActivity:
     # One condition task per case, chained via outcome="false" deps. Every case is named
     # <activity>_case_<value>; the first carries the Switch's depends_on edges and prepare_workflow
     # rewrites downstream refs from the bare <activity> key to the renamed first case.
+    # ADF lets a value repeat and every case is kept, so a repeat gets a numbered key.
     case_keys: list[str] = []
     for index, case in enumerate(activity.cases):
         is_first = index == 0
-        case_key = f"{activity.task_key}_case_{sanitize_case_key(case.value)}"
+        base_case_key = f"{activity.task_key}_case_{sanitize_case_key(case.value)}"
+        case_key = base_case_key
+        repeat_number = 1
+        while case_key in case_keys:
+            repeat_number += 1
+            case_key = f"{base_case_key}_{repeat_number}"
         case_keys.append(case_key)
 
         condition_task: dict[str, Any] = {
