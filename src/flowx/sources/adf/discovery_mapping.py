@@ -8,7 +8,10 @@ align to. The mapping is deliberately **1:1 and lossless**:
 * every ADF activity becomes exactly one discovery node -- no motif collapse,
   no merging;
 * the activity's own type string is kept verbatim as ``native_type``;
-* the verbatim source dict is preserved on every node (``raw``) and on the graph;
+* the source dict is preserved on every node (``raw``) and on the graph, verbatim
+  apart from the fields an ADF REST GET adds without meaning (see
+  :func:`_pipeline_without_get_defaults`), so a live export and a Git or ARM export
+  of the same factory give the same graphs and hash;
 * dependency edges keep **all** of their outcome conditions (a ``dependsOn`` with
   ``["Succeeded", "Skipped"]`` stays a two-condition edge);
 * anything without a shared typed home -- the ADF folder, retry policy detail,
@@ -192,7 +195,7 @@ def _attach_schedules(graphs: list[SourceGraph], triggers: list[AdfTrigger]) -> 
                     {
                         "trigger_name": trigger.name,
                         "trigger_type": trigger.type,
-                        "properties": trigger.properties,
+                        "properties": _without_defaults(trigger.properties, _TRIGGER_GET_DEFAULTS),
                     }
                 )
 
@@ -223,7 +226,7 @@ def _trigger_to_schedule(trigger: AdfTrigger) -> ScheduleSpec:
         extensions={
             "trigger_name": trigger.name,
             "trigger_type": trigger.type,
-            "properties": trigger.properties,
+            "properties": _without_defaults(trigger.properties, _TRIGGER_GET_DEFAULTS),
         },
     )
 
@@ -237,6 +240,58 @@ def _trigger_pipeline_names(trigger: AdfTrigger) -> list[str]:
         if name:
             names.append(name)
     return names
+
+
+# Fields an ADF REST GET adds that carry no meaning, the same set main's ADF corpus
+# allows from a live export: the pipeline's publish time, and these keys only when
+# they hold the empty value shown. Everything else is kept as written.
+_READ_ONLY_PIPELINE_FIELDS = frozenset({"lastPublishTime"})
+_PIPELINE_GET_DEFAULTS: dict[str, Any] = {"annotations": [], "parameters": {}, "variables": {}}
+_ACTIVITY_GET_DEFAULTS: dict[str, Any] = {"dependsOn": [], "userProperties": []}
+_TRIGGER_GET_DEFAULTS: dict[str, Any] = {"annotations": []}
+_NESTED_ACTIVITY_LISTS = ("ifTrueActivities", "ifFalseActivities", "activities", "defaultActivities")
+_ABSENT = object()
+
+
+def _without_defaults(value: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    """*value* without each key in *defaults* whose value equals the default given there."""
+    return {key: item for key, item in value.items() if defaults.get(key, _ABSENT) != item}
+
+
+def _activity_without_get_defaults(activity: Any) -> Any:
+    """An activity's raw dict without empty ``dependsOn`` / ``userProperties``, nested activities included."""
+    if not isinstance(activity, dict):
+        return activity
+    cleaned = _without_defaults(activity, _ACTIVITY_GET_DEFAULTS)
+    type_properties = cleaned.get("typeProperties")
+    if isinstance(type_properties, dict):
+        type_properties = dict(type_properties)
+        for key in _NESTED_ACTIVITY_LISTS:
+            if isinstance(type_properties.get(key), list):
+                type_properties[key] = [_activity_without_get_defaults(child) for child in type_properties[key]]
+        if isinstance(type_properties.get("cases"), list):
+            type_properties["cases"] = [
+                {**case, "activities": [_activity_without_get_defaults(child) for child in case["activities"]]}
+                if isinstance(case, dict) and isinstance(case.get("activities"), list)
+                else case
+                for case in type_properties["cases"]
+            ]
+        cleaned["typeProperties"] = type_properties
+    return cleaned
+
+
+def _pipeline_without_get_defaults(raw: Any) -> Any:
+    """A pipeline's raw dict without its publish time and its empty GET defaults, activities cleaned too."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("properties"), dict):
+        return raw
+    properties = {
+        key: item
+        for key, item in _without_defaults(raw["properties"], _PIPELINE_GET_DEFAULTS).items()
+        if key not in _READ_ONLY_PIPELINE_FIELDS
+    }
+    if isinstance(properties.get("activities"), list):
+        properties["activities"] = [_activity_without_get_defaults(child) for child in properties["activities"]]
+    return {**raw, "properties": properties}
 
 
 def adf_pipeline_to_source_graph(pipeline: AdfPipeline, definitions: AdfDefinitions | None = None) -> SourceGraph:
@@ -262,7 +317,7 @@ def adf_pipeline_to_source_graph(pipeline: AdfPipeline, definitions: AdfDefiniti
         tags=list(pipeline.annotations) if pipeline.annotations else [],
         tasks=[_activity_to_node(activity, resolved_definitions) for activity in pipeline.activities],
         properties=properties,
-        raw=pipeline.raw,
+        raw=_pipeline_without_get_defaults(pipeline.raw),
     )
     _warn_duplicate_switch_cases(graph)
     return graph
@@ -317,7 +372,7 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
             data_reads=data_reads,
             data_writes=data_writes,
             properties=properties,
-            raw=activity.raw,
+            raw=_activity_without_get_defaults(activity.raw),
             branches=branches,
         )
     if strategy.value == "unsupported":
@@ -332,7 +387,7 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
             data_reads=data_reads,
             data_writes=data_writes,
             properties=properties,
-            raw=activity.raw,
+            raw=_activity_without_get_defaults(activity.raw),
             reason=f"unsupported ADF activity type {activity.type!r}",
         )
     return SourceNode(
@@ -347,7 +402,7 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
         data_reads=data_reads,
         data_writes=data_writes,
         properties=properties,
-        raw=activity.raw,
+        raw=_activity_without_get_defaults(activity.raw),
     )
 
 
