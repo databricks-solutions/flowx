@@ -916,3 +916,40 @@ def test_non_empty_values_of_those_fields_are_kept() -> None:
         {"activity": "Earlier", "dependencyConditions": ["Succeeded"]}
     ]
     assert graph["schedule"]["extensions"]["properties"]["annotations"] == ["nightly"]
+
+
+def _as_rest_envelope(pipeline: dict, *, etag: str) -> dict:
+    """The pipeline as an ADF REST GET returns it: ``id``, ``type`` and ``etag`` around name and properties."""
+    import copy as copy_module
+
+    name = pipeline["name"]
+    return {
+        "id": f"/subscriptions/0000/resourceGroups/rg/providers/Microsoft.DataFactory/factories/df/pipelines/{name}",
+        "name": pipeline["name"],
+        "type": "Microsoft.DataFactory/factories/pipelines",
+        "etag": etag,
+        "properties": copy_module.deepcopy(pipeline["properties"]),
+    }
+
+
+def test_a_rest_get_envelope_gives_the_same_source_graphs_and_hash_as_a_git_export() -> None:
+    """The REST envelope's ``id``, ``type`` and ``etag`` say nothing about the pipeline, so the graph drops them."""
+    pipeline, triggers = _exported_factory()
+    exported = _graph_documents(pipeline, triggers)
+    live_pipeline, live_triggers = _as_live_get(pipeline, triggers)
+    live = _graph_documents(
+        _as_rest_envelope(live_pipeline, etag='"0a00b1c2-0000-0100-0000-000000000000"'), live_triggers
+    )
+
+    assert live["graphs"] == exported["graphs"]
+    assert live["document_sha256"] == exported["document_sha256"]
+
+
+def test_a_republish_that_only_changes_the_etag_keeps_the_hash() -> None:
+    """ADF issues a new ``etag`` on every publish; an otherwise unchanged pipeline keeps its source graphs hash."""
+    pipeline, triggers = _exported_factory()
+    first = _graph_documents(_as_rest_envelope(pipeline, etag='"first"'), triggers)
+    republished = _graph_documents(_as_rest_envelope(pipeline, etag='"second"'), triggers)
+
+    assert republished["document_sha256"] == first["document_sha256"]
+    assert republished["graphs"][0]["raw"] == {"name": "pl_orders", "properties": pipeline["properties"]}
