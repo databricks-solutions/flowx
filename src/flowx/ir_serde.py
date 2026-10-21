@@ -602,6 +602,19 @@ _PLACEHOLDER_OWNED_COMPONENT_FIELDS = (
     "min_retry_interval_millis",
 )
 
+# Source metadata a merged component keeps from its placeholder unless the agent sets its own.
+_PLACEHOLDER_INHERITED_COMPONENT_FIELDS = (
+    "description",
+    "cluster",
+    "compute_mode",
+    "notifications",
+    "parameter_approximations",
+    "motif_id",
+    "data_reads",
+    "data_writes",
+    "raw_definition",
+)
+
 
 def _locate_task(tasks: list[dict[str, Any]], activity_name: str) -> tuple[list[dict[str, Any]], int] | None:
     """Find the first task named *activity_name*, recursing into containers.
@@ -634,7 +647,10 @@ def replace_task_by_name(tasks: list[dict[str, Any]], activity_name: str, replac
     downstream dependency edges stay intact.  An ``AgenticComponentActivity`` replacement instead
     always takes its identity, dependencies, timeout, and retries from the placeholder, dropping any
     value the agent set (or the placeholder lacks), because flowx owns those for an authored
-    component.  Returns True when a match was replaced.
+    component.  It also keeps the placeholder's source metadata (notifications, compute mode,
+    description, lineage, source definition and the like) for each field the agent leaves out,
+    except its cluster id and libraries, which a component only takes from its task fragment; a
+    value the agent sets wins.  Returns True when a match was replaced.
     """
     found = _locate_task(tasks, activity_name)
     if found is None:
@@ -647,6 +663,9 @@ def replace_task_by_name(tasks: list[dict[str, Any]], activity_name: str, replac
                 replacement[field_name] = task[field_name]
             else:
                 replacement.pop(field_name, None)
+        for field_name in _PLACEHOLDER_INHERITED_COMPONENT_FIELDS:
+            if field_name not in replacement and field_name in task:
+                replacement[field_name] = task[field_name]
     else:
         replacement.setdefault("task_key", task.get("task_key"))
         replacement.setdefault("name", activity_name)
@@ -672,7 +691,10 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     ``NotebookActivity`` whose ``notebook_path`` points at a notebook the agent
     wrote to the workspace; the prepare phase then references it directly.  An
     ``AgenticComponentActivity`` keeps the placeholder's name, task key,
-    dependencies, timeout, and retries whatever the agent wrote.
+    dependencies, timeout, and retries whatever the agent wrote, and the
+    placeholder's source metadata wherever the agent leaves a field out, except
+    its cluster id and libraries, which a component only takes from its task
+    fragment.
 
     This fills convert's own agentic gaps. A pipeline the routing record routes agentic is filled
     only by ``fill-agentic``, so a result that names one, or an untargeted result that would

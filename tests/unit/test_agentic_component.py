@@ -10,9 +10,10 @@ import yaml
 
 from flowx.bundler.dab_writer import _combine_airflow_workflows, pipeline_dict_to_ir, write_bundle
 from flowx.ir_serde import activity_to_dict, merge_agentic_results, pipeline_to_dict
-from flowx.models.dab import SetupTask
+from flowx.models.dab import DabNotebook, SetupTask
 from flowx.models.ir import (
     AgenticComponentActivity,
+    DataAsset,
     Dependency,
     ForEachActivity,
     IfConditionActivity,
@@ -356,28 +357,37 @@ def test_agentic_components_declaring_an_identical_pipeline_resource_write_it_on
     assert check_bundle_dir(tmp_path).ok
 
 
-def test_agentic_components_declaring_one_pipeline_definition_with_different_extra_fields_write_it_once(tmp_path):
-    first = AgenticComponentActivity(
-        name="First",
-        task_key="first",
-        resources=[{**RESOURCES[0], "comment": "for first"}],
+@pytest.mark.parametrize(
+    "extra_fields",
+    [{"comment": "for orders"}, {"permissions": [{"level": "CAN_MANAGE", "group_name": "data-eng"}]}],
+    ids=["comment", "permissions"],
+)
+def test_agentic_component_resource_entry_with_an_unknown_field_fails(tmp_path, extra_fields):
+    """Only the definition is written, so a field such as permissions would be dropped without notice."""
+    activity = AgenticComponentActivity(
+        name="Ingest orders",
+        task_key="ingest_orders",
+        resources=[{**RESOURCES[0], **extra_fields}],
         task=TASK,
     )
-    second = AgenticComponentActivity(
-        name="Second",
-        task_key="second",
-        resources=[{**RESOURCES[0], "comment": "for second"}],
-        task=TASK,
-    )
-    serialized_pipeline = json.loads(json.dumps(pipeline_to_dict(Pipeline(name="orders", tasks=[first, second]))))
-    restored_pipeline, _ = pipeline_dict_to_ir(serialized_pipeline)
 
-    created_files = write_bundle(prepare_workflow(restored_pipeline), tmp_path)
+    with pytest.raises(
+        ValueError,
+        match=f"'ingest_orders' resource 'orders_ingestion' has unknown field\\(s\\) {next(iter(extra_fields))};",
+    ):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[activity])), tmp_path)
+    assert not (tmp_path / "resources").exists()
 
-    resource_path = (tmp_path / "resources" / "orders_ingestion.yml").resolve()
-    assert created_files.count(resource_path) == 1
-    pipeline_resource = yaml.safe_load(resource_path.read_text(encoding="utf-8"))
-    assert pipeline_resource == {"resources": {"pipelines": {"orders_ingestion": PIPELINE_DEFINITION}}}
+
+def test_serialized_agentic_component_with_an_unknown_field_fails():
+    """A typo such as ``file`` for ``files`` would otherwise drop the authored file without notice."""
+    serialized = {
+        **activity_to_dict(_activity()),
+        "file": [{"path": "notebooks/extra.py", "content": "print('extra')\n"}],
+    }
+
+    with pytest.raises(ValueError, match="Agentic component 'ingest_orders' has unknown field\\(s\\) file"):
+        pipeline_dict_to_ir({"name": "orders", "tasks": [serialized]})
 
 
 def test_agentic_components_sharing_a_resource_key_with_different_definitions_fail(tmp_path):
@@ -419,12 +429,11 @@ def test_agentic_component_rejects_malformed_authored_payloads(files, resources,
 
 
 def test_agentic_component_task_fragment_keeps_its_own_description_and_compute(tmp_path):
-    """Only the flowx-owned fields come from the activity; the fragment's compute is not overridden."""
+    """Only the flowx-owned fields come from the activity, so its description does not reach the task."""
     activity = AgenticComponentActivity(
         name="Run job",
         task_key="run_job",
         description="Copied from the source activity",
-        existing_cluster_id="0101-123456-abcdefgh",
         files=[{"path": "jobs/run.py", "content": "print('run')\n"}],
         task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "job_cluster_key": "default_cluster"},
     )
@@ -439,6 +448,40 @@ def test_agentic_component_task_fragment_keeps_its_own_description_and_compute(t
             "job_cluster_key": "default_cluster",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("activity_fields", "named_fields"),
+    [
+        ({"libraries": [{"pypi": {"package": "great-expectations"}}]}, "libraries"),
+        ({"existing_cluster_id": "0101-abc"}, "existing_cluster_id"),
+        (
+            {"libraries": [{"pypi": {"package": "great-expectations"}}], "existing_cluster_id": "0101-abc"},
+            "existing_cluster_id, libraries",
+        ),
+    ],
+    ids=["libraries", "existing_cluster_id", "both"],
+)
+def test_agentic_component_setting_libraries_or_a_cluster_on_the_activity_fails(activity_fields, named_fields):
+    """The bundle never reads these on a component, so the task would run on serverless without the package."""
+    serialized = {
+        "type": "AgenticComponentActivity",
+        "name": "Run",
+        "task_key": "run",
+        **activity_fields,
+        "files": [{"path": "notebooks/run.py", "content": "print('run')\n"}],
+        "task": {"notebook_task": {"notebook_path": "../src/notebooks/run.py"}},
+    }
+    pipeline, _ = pipeline_dict_to_ir({"name": "orders", "tasks": [serialized]})
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            f"Agentic component 'run' sets {named_fields} on the activity, where the bundle "
+            "never reads them; set them in the task fragment instead"
+        ),
+    ):
+        prepare_workflow(pipeline)
 
 
 def test_agentic_component_rejects_binary_content_that_is_not_plain_base64():
@@ -467,6 +510,20 @@ def test_agentic_component_rejects_windows_rooted_or_drive_relative_paths(path):
 
     with pytest.raises(ValueError, match="relative to the bundle src directory"):
         prepare_workflow(Pipeline(name="unsafe", tasks=[activity]))
+
+
+@pytest.mark.parametrize("path", ["notebooks\\run.py", "notebooks/sub\\run.py"])
+def test_agentic_component_rejects_backslash_separated_file_paths(path):
+    """On POSIX hosts a backslash is part of the file name, so the file the task runs would not exist."""
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[{"path": path, "content": "print('run')\n"}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/run.py"}},
+    )
+
+    with pytest.raises(ValueError, match="must be a forward-slash path relative to the bundle src directory"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
 
 
 @pytest.mark.parametrize(
@@ -1002,3 +1059,345 @@ def test_agentic_component_text_file_is_written_byte_for_byte(tmp_path, content)
     write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[activity])), tmp_path)
 
     assert (tmp_path / "src" / "notebooks" / "run.py").read_bytes() == content.encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "compute",
+    [
+        {"existing_cluster_id": None},
+        {"existing_cluster_id": ""},
+        {"new_cluster": None},
+        {"new_cluster": {}},
+        {"environment_key": ""},
+        {"environment_key": ["serverless"]},
+        {"job_cluster_key": None},
+    ],
+)
+def test_agentic_component_compute_key_without_a_usable_value_fails(compute):
+    """A compute key set to null or empty names no compute, so the task would package and fail at deploy."""
+    activity = AgenticComponentActivity(
+        name="Run", task_key="run", task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, **compute}
+    )
+
+    with pytest.raises(ValueError, match=f"'run' {next(iter(compute))} must be a non-empty"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+def test_agentic_component_with_two_compute_bindings_fails():
+    """A task runs on one compute, so naming two leaves which one undefined."""
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        task={
+            "spark_python_task": {"python_file": "../src/jobs/run.py"},
+            "existing_cluster_id": "0101-abc",
+            "job_cluster_key": "default_cluster",
+        },
+    )
+
+    with pytest.raises(
+        ValueError, match="'run' task names more than one compute: existing_cluster_id, job_cluster_key"
+    ):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+@pytest.mark.parametrize(
+    "for_each_task",
+    [
+        {"inputs": "[1, 2]"},
+        {"inputs": "[1, 2]", "task": []},
+        {"inputs": "[1, 2]", "task": {"notebook_task": {"notebook_path": "../src/notebooks/item.py"}}},
+        {"inputs": "[1, 2]", "task": {"task_key": "", "notebook_task": {"notebook_path": "../src/notebooks/item.py"}}},
+    ],
+)
+def test_agentic_component_for_each_task_without_a_keyed_task_body_fails(for_each_task):
+    activity = AgenticComponentActivity(name="Run", task_key="run", task={"for_each_task": for_each_task})
+
+    with pytest.raises(ValueError, match="'run' for_each_task must carry its task as a mapping with a task_key"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+def test_agentic_component_for_each_body_setting_flowx_owned_fields_fails():
+    """The loop body's wiring and run policy are flowx's too; only the body's own task_key is authored."""
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        task={
+            "for_each_task": {
+                "inputs": "[1, 2]",
+                "task": {
+                    "task_key": "run_item",
+                    "depends_on": [{"task_key": "ghost"}],
+                    "run_if": "ALL_DONE",
+                    "max_retries": 9,
+                    "timeout_seconds": 5,
+                    "retry_on_timeout": True,
+                    "notebook_task": {"notebook_path": "../src/notebooks/item.py"},
+                },
+            }
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "'run' task wiring sets flowx-owned field\\(s\\) "
+            "depends_on, max_retries, retry_on_timeout, run_if, timeout_seconds;"
+        ),
+    ):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+@pytest.mark.parametrize(
+    ("task", "message"),
+    [
+        ({"notebook_task": {}}, "notebook_task.notebook_path must be a non-empty string"),
+        ({"notebook_task": {"notebook_path": None}}, "notebook_task.notebook_path must be a non-empty string"),
+        ({"notebook_task": {"notebook_path": ""}}, "notebook_task.notebook_path must be a non-empty string"),
+        (
+            {"notebook_task": {"notebook_path": "../src/notebooks/run.py", "base_parameters": ["a"]}},
+            "notebook_task.base_parameters must be a mapping",
+        ),
+        (
+            {"notebook_task": {"notebook_path": "../src/notebooks/run.py", "base_parameters": None}},
+            "notebook_task.base_parameters must be a mapping",
+        ),
+        ({"run_job_task": {"job_id": 123, "job_parameters": None}}, "run_job_task.job_parameters must be a mapping"),
+        ({"run_job_task": {"job_id": 123, "job_parameters": ["a"]}}, "run_job_task.job_parameters must be a mapping"),
+        (
+            {
+                "for_each_task": {
+                    "inputs": "[1, 2]",
+                    "task": {"task_key": "run_item", "notebook_task": {"notebook_path": None}},
+                }
+            },
+            "notebook_task.notebook_path must be a non-empty string",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "wrap",
+    [lambda activity: activity, _inside_for_each, _inside_for_each_with_siblings],
+    ids=["top_level", "for_each", "for_each_with_siblings"],
+)
+def test_agentic_component_task_fields_flowx_wiring_reads_must_have_their_shape(tmp_path, task, message, wrap):
+    """flowx's wiring passes read these fields, so a null or list value would crash packaging instead."""
+    activity = AgenticComponentActivity(name="Run", task_key="run", task=task)
+
+    with pytest.raises(ValueError, match=f"Agentic component 'run' {message}"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[wrap(activity)])), tmp_path)
+
+
+def test_agentic_component_for_each_body_parameters_that_look_dynamic_are_written_as_given(tmp_path):
+    """The loop body is authored too, so the clean-up meant for generated tasks must not drop its parameters."""
+    activity = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        task={
+            "for_each_task": {
+                "inputs": "[1, 2]",
+                "task": {
+                    "task_key": "run_item",
+                    "notebook_task": {
+                        "notebook_path": "/Workspace/Shared/etl/item",
+                        "base_parameters": {"total": "@concat(1, 2)"},
+                    },
+                    "existing_cluster_id": "0101-abc",
+                },
+            }
+        },
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[activity])), tmp_path)
+
+    job = _jobs_by_task_key(tmp_path)["run"]
+    body = job["tasks"][0]["for_each_task"]["task"]
+    assert body["notebook_task"]["base_parameters"] == {"total": "@concat(1, 2)"}
+    assert "_authored" not in body
+
+
+def test_agentic_component_file_matching_a_generated_file_except_the_added_newline_fails(tmp_path):
+    """A generated file gains a trailing newline when written, so the authored bytes would not be kept."""
+    custom = AgenticComponentActivity(
+        name="Custom",
+        task_key="custom",
+        files=[{"path": "notebooks/run.py", "content": "print('run')"}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/run.py"}},
+    )
+    workflow = prepare_workflow(Pipeline(name="orders", tasks=[custom]))
+    workflow.notebooks.append(DabNotebook(relative_path="notebooks/run.py", content="print('run')"))
+
+    with pytest.raises(ValueError, match="'notebooks/run.py' shares its path"):
+        write_bundle(workflow, tmp_path)
+
+
+def test_agentic_component_file_entry_with_an_unknown_field_fails():
+    """An unknown field such as an encoding flag would be dropped and the file written as plain text."""
+    activity = AgenticComponentActivity(
+        name="Wheel",
+        task_key="wheel",
+        files=[{"path": "libraries/orders.whl", "content": "UEsDBAoAAAAA", "encoding": "base64"}],
+        task={"notebook_task": {"notebook_path": "../src/notebooks/orders.py"}},
+    )
+
+    with pytest.raises(ValueError, match="'wheel' file 'libraries/orders.whl' has unknown field\\(s\\) encoding"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+@pytest.mark.parametrize(
+    ("first_path", "second_path"),
+    [("jobs/Run.py", "jobs/run.py"), ("jobs", "jobs/run.py"), ("Jobs", "jobs/run.py"), ("jobs/run.py", "jobs")],
+)
+def test_agentic_component_file_paths_that_clash_on_disk_fail(tmp_path, first_path, second_path):
+    """Paths that differ only in case are one file on macOS and Windows, and a file cannot also be a directory."""
+    first = AgenticComponentActivity(
+        name="First",
+        task_key="first",
+        files=[{"path": first_path, "content": "print('first')\n"}],
+        task={"spark_python_task": {"python_file": f"../src/{first_path}"}, "existing_cluster_id": "0101-abc"},
+    )
+    second = AgenticComponentActivity(
+        name="Second",
+        task_key="second",
+        files=[{"path": second_path, "content": "print('second')\n"}],
+        task={"spark_python_task": {"python_file": f"../src/{second_path}"}, "existing_cluster_id": "0101-abc"},
+    )
+
+    with pytest.raises(ValueError, match="clashes on disk with"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[first, second])), tmp_path)
+    assert not (tmp_path / "src").exists()
+
+
+@pytest.mark.parametrize("agent_sets_notifications", [False, True])
+def test_merged_agentic_component_keeps_the_placeholder_source_metadata_it_leaves_out(
+    tmp_path, agent_sets_notifications
+):
+    """Notifications, compute mode, description, lineage and the source definition survive the merge.
+
+    The placeholder's cluster id and libraries do not, because a component only takes them from its fragment.
+    """
+    collapsed = {"destination": "email", "events": ["on_failure"], "args": {"addresses": ["flowx@example.com"]}}
+    authored = {"destination": "email", "events": ["on_success"], "args": {"addresses": ["owner@example.com"]}}
+    orders = DataAsset(signature="table:sales.orders", identity="sales.orders", asset_type="table")
+    report = tmp_path / "translation_report.json"
+    placeholders = Pipeline(
+        name="orders",
+        tasks=[
+            PlaceholderActivity(
+                name="Transform",
+                task_key="transform",
+                original_type="ExecuteDataFlow",
+                description="Transform orders",
+                compute_mode="serverless",
+                notifications=collapsed,
+                existing_cluster_id="0101-abc",
+                libraries=[{"pypi": {"package": "great-expectations"}}],
+                data_reads=[orders],
+                data_writes=[orders],
+                raw_definition=SOURCE_DEFINITION,
+            )
+        ],
+    )
+    report.write_text(json.dumps(pipeline_to_dict(placeholders)), encoding="utf-8")
+    results = tmp_path / "agentic_results"
+    results.mkdir()
+    component = {"type": "AgenticComponentActivity", "resources": RESOURCES, "task": TASK}
+    if agent_sets_notifications:
+        component["notifications"] = authored
+    (results / "transform.json").write_text(
+        json.dumps({"activity_name": "Transform", "task": component}), encoding="utf-8"
+    )
+
+    assert merge_agentic_results(report, results) == (1, 0)
+    merged_pipeline, _ = pipeline_dict_to_ir(json.loads(report.read_text(encoding="utf-8")))
+    merged = merged_pipeline.tasks[0]
+    assert isinstance(merged, AgenticComponentActivity)
+    assert merged.notifications == (authored if agent_sets_notifications else collapsed)
+    assert merged.compute_mode == "serverless"
+    assert merged.description == "Transform orders"
+    assert merged.data_reads == [orders]
+    assert merged.data_writes == [orders]
+    assert merged.raw_definition == SOURCE_DEFINITION
+    assert merged.existing_cluster_id is None
+    assert merged.libraries is None
+
+    write_bundle(prepare_workflow(merged_pipeline), tmp_path / "bundle")
+    job_resource = yaml.safe_load((tmp_path / "bundle" / "resources" / "orders.yml").read_text(encoding="utf-8"))
+    expected_recipient = "owner@example.com" if agent_sets_notifications else "flowx@example.com"
+    task = job_resource["resources"]["jobs"]["orders"]["tasks"][0]
+    assert task["email_notifications"] == {
+        ("on_success" if agent_sets_notifications else "on_failure"): [expected_recipient]
+    }
+
+
+def _inside_for_each_holding_an_if_condition(activity: AgenticComponentActivity) -> ForEachActivity:
+    return ForEachActivity(
+        name="Loop", task_key="loop", items_expression='["a"]', inner_activities=[_inside_if_condition(activity)]
+    )
+
+
+@pytest.mark.parametrize(
+    ("body_payload", "environments"),
+    [
+        (
+            {
+                "notebook_task": {
+                    "notebook_path": "/Workspace/Shared/etl/load_table",
+                    "base_parameters": {"table": "{{input.table_name}}", "env": "{{job.parameters.env}}"},
+                },
+                "existing_cluster_id": "0101-abc",
+            },
+            [],
+        ),
+        (
+            {
+                "spark_python_task": {
+                    "python_file": "/Workspace/Shared/etl/load_table.py",
+                    "parameters": ["--table", "{{input.table_name}}", "--env", "{{job.parameters.env}}"],
+                },
+                "environment_key": "serverless",
+            },
+            [SERVERLESS_ENVIRONMENT],
+        ),
+    ],
+    ids=["notebook_task", "spark_python_task"],
+)
+@pytest.mark.parametrize(
+    "wrap", [_inside_for_each, _inside_for_each_with_siblings, _inside_for_each_holding_an_if_condition]
+)
+def test_authored_loop_body_inside_a_for_each_job_keeps_its_own_input_references(
+    tmp_path, wrap, body_payload, environments
+):
+    """``{{input.x}}`` in an agent-written loop body names that loop's item, not the outer loop's job parameters.
+
+    The authored loop runs in its own job, since a loop cannot be the body of another loop, and the
+    outer job parameters its inputs and body name are forwarded into that job.
+    """
+    component = AgenticComponentActivity(
+        name="Load tables",
+        task_key="load_tables",
+        task={
+            "for_each_task": {"inputs": "{{job.parameters.tables}}", "task": {"task_key": "load_table", **body_payload}}
+        },
+        environments=environments,
+    )
+    pipeline_parameters = [{"name": "env", "default": "dev"}, {"name": "tables", "default": "[]"}]
+
+    write_bundle(
+        prepare_workflow(Pipeline(name="orders", parameters=pipeline_parameters, tasks=[wrap(component)])), tmp_path
+    )
+
+    jobs_by_task_key = _jobs_by_task_key(tmp_path)
+    inner_job = jobs_by_task_key["load_table"]
+    authored_loop = next(task for task in inner_job["tasks"] if task["task_key"] == "load_tables")
+    assert authored_loop["for_each_task"]["inputs"] == "{{job.parameters.tables}}"
+    assert authored_loop["for_each_task"]["task"] == {"task_key": "load_table", **body_payload}
+    inner_parameter_names = [parameter["name"] for parameter in inner_job.get("parameters") or []]
+    # Nor is the body's own item forwarded from the outer loop as a job parameter.
+    assert "table_name" not in inner_parameter_names
+    assert {"env", "tables"} <= set(inner_parameter_names)
+    outer_loop = next(task for task in jobs_by_task_key["loop"]["tasks"] if task["task_key"] == "loop")
+    forwarded = outer_loop["for_each_task"]["task"]["run_job_task"]["job_parameters"]
+    assert forwarded["env"] == "{{job.parameters.env}}"
+    assert forwarded["tables"] == "{{job.parameters.tables}}"
+    assert "table_name" not in forwarded

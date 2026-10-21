@@ -11,10 +11,16 @@ logger = logging.getLogger(__name__)
 
 
 def content_signature(notebook: DabNotebook) -> object:
-    """Return a value suitable for comparing two notebooks for byte-equivalence."""
+    """Return a value suitable for comparing two notebooks for byte-equivalence.
+
+    Generated text gains a trailing newline when written and authored text does not, so the
+    signature compares the text that actually lands on disk.
+    """
     if notebook.binary_content is not None:
         return ("binary", notebook.binary_content)
-    return ("text", notebook.content)
+    if notebook.authored or notebook.content.endswith("\n"):
+        return ("text", notebook.content)
+    return ("text", notebook.content + "\n")
 
 
 def _disambiguate(relative_path: str, taken: set[str]) -> str:
