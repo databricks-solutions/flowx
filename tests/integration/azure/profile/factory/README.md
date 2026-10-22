@@ -72,7 +72,7 @@ secret is stored anywhere.
 If the workspace has an IP access list, it must allow the factory's outbound addresses:
 
 - **Azure IR:** calls come from the region's `DataFactory.<Region>` service tag (for West Europe,
-  `40.74.26.0/23`, one entry). On shared Databricks Field Engineering workspaces, a custom entry like
+  `40.74.26.0/23`, one entry). On shared internal Databricks workspaces, a custom entry like
   this is removed automatically by the workspace cleanup automation (it happened to this factory's entry
   on 2026-10-17, about 15 minutes after it was added), unless an exception is granted.
 - **Managed-VNet IR:** the outbound address isn't fixed and isn't in any published range (several

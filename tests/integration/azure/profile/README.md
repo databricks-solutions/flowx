@@ -71,5 +71,9 @@ PYTHONPATH=src uv run --frozen pytest tests/integration/test_adf_profile_golden.
 `redact.py` gives every distinct GUID its own alias (`<SUBSCRIPTION_1>`, `<ID_0001>`, ...) in URLs and
 bodies alike, so replayed run URLs stay distinct. It also replaces emails, Databricks hosts, numeric
 workspace/job/run IDs (with fake numbers of the same length), IP addresses, and the subscription's name,
-and drops Cost Management rows for other resource groups. `test_capture_is_redacted` fails on any GUID left
-behind; check the rest of the diff by eye before committing.
+and drops Cost Management rows for other resource groups. It keeps only the response fields the profile
+code reads and only the scanned subscription, so tags, descriptions and other subscriptions are dropped,
+then fails if `find_leaks` still finds a GUID, email address, tags object, authorization-like key, SAS query
+parameter or another subscription. `tests/unit/test_adf_profile_capture.py` runs the same check on the
+committed capture, and `test_capture_is_redacted` fails on any GUID left behind; check the rest of the diff
+by eye before committing.

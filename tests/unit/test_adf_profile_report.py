@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import pytest
+
 from flowx.sources.adf.profile import report
 from flowx.sources.adf.profile.models import ActualCost, PipelineCost, ProfileResult
 
@@ -205,3 +207,23 @@ def test_warnings_do_not_change_the_csv(tmp_path):
     report.write_reports(_result(warnings=["westeurope: couldn't fetch live Azure prices"]), tmp_path / "warned")
     csv_path = Path("metadata") / "tco" / "cost_comparison.csv"
     assert (tmp_path / "warned" / csv_path).read_text() == (tmp_path / "plain" / csv_path).read_text()
+
+
+@pytest.mark.parametrize("name", ["=cmd", "+cmd", "-cmd", "@cmd", "\tcmd", "\rcmd"])
+def test_csv_quotes_names_a_spreadsheet_would_read_as_formulas(tmp_path, name):
+    result = _result(
+        pipeline_costs=[_pipeline(name, factory=name, orchestration_cost=0.5)],
+        actual_costs=[ActualCost(factory_name=name, meter_subcategory="", cost=-1.0, currency="USD")],
+        factory_subscriptions={name: name},
+    )
+    report.write_reports(result, tmp_path)
+    tco = tmp_path / "metadata" / "tco"
+    with (tco / "cost_comparison.csv").open(newline="") as handle:
+        factory_row, pipeline_row = csv.DictReader(handle)
+    assert (factory_row["subscription"], factory_row["factory"]) == ("'" + name, "'" + name)
+    assert (pipeline_row["factory"], pipeline_row["pipeline"]) == ("'" + name, "'" + name)
+    assert (factory_row["est_orchestration"], factory_row["actual_total"]) == ("0.5000", "-1.0000")
+    with (tco / "cost_comparison.md").open(newline="") as handle:
+        md = handle.read()
+    assert f"| {name} | {name} | {name} |" in md
+    assert "'" + name not in md

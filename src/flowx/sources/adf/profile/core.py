@@ -21,6 +21,7 @@ from flowx.sources.adf.profile.azure_client import (
     ProfileAuthenticationError,
     Transport,
     TransportHttpError,
+    UntrustedUrlError,
 )
 from flowx.sources.adf.profile.models import ActualCost, PipelineCost, ProfileResult
 from flowx.sources.adf.profile.pricing import RateCards
@@ -240,16 +241,15 @@ class AdfScanner:
         seen_urls: set[str] = set()
         try:
             while next_url and next_url not in seen_urls:
-                if not next_url.startswith(f"{AZURE_MANAGEMENT_URL}/"):
-                    result.warnings.append(
-                        _COST_MANAGEMENT_OFF_HOST.format(subscription=subscription_id[:8], host=AZURE_MANAGEMENT_URL)
-                    )
-                    break
                 seen_urls.add(next_url)
                 properties = self._transport.post_json(next_url, body).get("properties", {})
                 columns = [column["name"] for column in properties.get("columns", [])]
                 records.extend(dict(zip(columns, row)) for row in properties.get("rows", []))
                 next_url = properties.get("nextLink")
+        except UntrustedUrlError:
+            result.warnings.append(
+                _COST_MANAGEMENT_OFF_HOST.format(subscription=subscription_id[:8], host=AZURE_MANAGEMENT_URL)
+            )
         except ProfileAuthenticationError:
             raise
         except TransportHttpError as error:

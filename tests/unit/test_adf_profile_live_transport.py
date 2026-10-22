@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from flowx.sources.adf.profile import azure_client, core, pricing
+from flowx.sources.adf.profile import azure_client, core, discovery, pricing
 
 
 class FakeResponse:
@@ -23,13 +23,16 @@ class FakeSession:
     def __init__(self, response: FakeResponse):
         self.response = response
         self.requests: list[tuple[str, str, dict]] = []
+        self.allow_redirects: list[bool] = []
 
-    def get(self, url, headers, timeout):
+    def get(self, url, headers, timeout, allow_redirects):
         self.requests.append(("GET", url, headers))
+        self.allow_redirects.append(allow_redirects)
         return self.response
 
-    def post(self, url, headers, json, timeout):
+    def post(self, url, headers, json, timeout, allow_redirects):
         self.requests.append(("POST", url, headers))
+        self.allow_redirects.append(allow_redirects)
         return self.response
 
 
@@ -100,12 +103,12 @@ class SequencedSession:
         self._responses = list(responses)
         self.headers_seen: list[str] = []
 
-    def get(self, url, headers, timeout):
+    def get(self, url, headers, timeout, allow_redirects):
         self.headers_seen.append(headers["Authorization"])
         return self._responses.pop(0)
 
-    def post(self, url, headers, json, timeout):
-        return self.get(url, headers, timeout)
+    def post(self, url, headers, json, timeout, allow_redirects):
+        return self.get(url, headers, timeout, allow_redirects)
 
 
 class CountingCredential:
@@ -158,10 +161,10 @@ class RoutingSession:
         self.requests.append((url, headers))
         return FakeResponse(200, self.responses[max((key for key in self.responses if key in url), key=len)])
 
-    def get(self, url, headers, timeout):
+    def get(self, url, headers, timeout, allow_redirects):
         return self._respond(url, headers)
 
-    def post(self, url, headers, json, timeout):
+    def post(self, url, headers, json, timeout, allow_redirects):
         return self._respond(url, headers)
 
 
@@ -188,3 +191,80 @@ def test_bearer_token_never_follows_an_off_host_next_link(monkeypatch):
     assert all(url.startswith("https://management.azure.com/") for url, _ in session.requests)
     assert [actual.cost for actual in result.actual_costs] == [1.0]
     assert any("outside https://management.azure.com" in warning for warning in result.warnings)
+
+
+UNTRUSTED_URLS = [
+    "https://evil.example.com/subscriptions?page=2",
+    "https://management.azure.com.evil.com/subscriptions?page=2",
+    "http://management.azure.com/subscriptions?page=2",
+    "https://management.azure.com@evil.com/subscriptions?page=2",
+    "https://user@management.azure.com/subscriptions?page=2",
+    "https://user:secret@management.azure.com/subscriptions?page=2",
+    "https://management.azure.com:444/subscriptions?page=2",
+    "https://management.azure.com:443/subscriptions?page=2",
+    "https://management.azure.com./subscriptions?page=2",
+    "https://manag\u0435ment.azure.com/subscriptions?page=2",
+    "https://xn--managment-k0h.azure.com/subscriptions?page=2",
+]
+
+
+@pytest.mark.parametrize("url", UNTRUSTED_URLS)
+def test_untrusted_url_is_refused_before_a_token_is_fetched(url):
+    credential = CountingCredential(lifetime_seconds=3600)
+    session = FakeSession(FakeResponse(200, {}))
+    transport = azure_client.LiveTransport(credential, session=session)
+    with pytest.raises(azure_client.UntrustedUrlError):
+        transport.post_json(url, {})
+    assert session.requests == []
+    assert credential.issued == 0
+
+
+@pytest.mark.parametrize("next_link", UNTRUSTED_URLS)
+def test_discovery_refuses_a_next_link_off_management_azure_com(next_link):
+    first_page = {"value": [{"subscriptionId": "SUB", "displayName": "Demo"}], "nextLink": next_link}
+    session = RoutingSession({"/subscriptions?api-version": first_page})
+    transport = azure_client.LiveTransport(TokenCredential(), session=session)
+    with pytest.raises(azure_client.UntrustedUrlError):
+        discovery.list_subscriptions(transport)
+    assert [url for url, _ in session.requests] == ["https://management.azure.com/subscriptions?api-version=2022-12-01"]
+
+
+def test_redirects_are_not_followed():
+    session = FakeSession(FakeResponse(200, {}))
+    transport = azure_client.LiveTransport(TokenCredential(), session=session)
+    transport.get_json("https://management.azure.com/a")
+    transport.post_json("https://management.azure.com/b", {})
+    assert session.allow_redirects == [False, False]
+
+
+def test_the_real_host_in_upper_case_is_allowed():
+    session = FakeSession(FakeResponse(200, {"ok": True}))
+    transport = azure_client.LiveTransport(TokenCredential(), session=session)
+    assert transport.get_json("https://MANAGEMENT.AZURE.COM/subscriptions") == {"ok": True}
+    assert session.requests == [("GET", "https://MANAGEMENT.AZURE.COM/subscriptions", session.requests[0][2])]
+    assert session.requests[0][2]["Authorization"] == "Bearer abc"
+
+
+FACTORY = {"name": "demo-factory", "subscription_id": "SUB", "resource_group": "RG"}
+
+
+def test_factory_listing_refuses_an_off_host_next_link_and_logs(caplog):
+    page = {"value": [{"name": "demo-factory", "location": "westeurope"}], "nextLink": "https://evil.example.com/next"}
+    session = RoutingSession({"/factories?": page})
+    transport = azure_client.LiveTransport(TokenCredential(), session=session)
+    with caplog.at_level("ERROR", logger=discovery.logger.name):
+        assert discovery.list_adf_factories(transport, subscription_id="SUB") == []
+    assert len(session.requests) == 1
+    assert "Error discovering ADF factories in SUB" in caplog.text
+    assert "Refusing to send the Azure token to https://evil.example.com/next" in caplog.text
+
+
+def test_runtime_listing_refuses_an_off_host_next_link_and_logs(caplog):
+    page = {"value": [{"name": "ir", "properties": {"type": "Managed"}}], "nextLink": "https://evil.example.com/next"}
+    session = RoutingSession({"/integrationRuntimes?": page})
+    transport = azure_client.LiveTransport(TokenCredential(), session=session)
+    with caplog.at_level("WARNING", logger=discovery.logger.name):
+        assert discovery.integration_runtime_types(transport, FACTORY) == {}
+    assert len(session.requests) == 1
+    assert "Cannot list integration runtimes for demo-factory" in caplog.text
+    assert "Refusing to send the Azure token to https://evil.example.com/next" in caplog.text

@@ -40,6 +40,8 @@ _COST_COLUMNS = [
     "actual_total",
 ]
 _CSV_COLUMNS = ["level", "subscription", "factory", "pipeline", "runs", *_COST_COLUMNS]
+_TEXT_COLUMNS = ("subscription", "factory", "pipeline")
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
 def _factory_rows(result: ProfileResult) -> list[dict[str, Any]]:
@@ -117,8 +119,13 @@ def _render_csv(factory_rows: list[dict[str, Any]], pipeline_rows: list[dict[str
     for level, rows in (("factory", factory_rows), ("pipeline", pipeline_rows)):
         for row in rows:
             costs = {column: f"{row[column]:.4f}" for column in _COST_COLUMNS if column in row}
-            writer.writerow({**row, **costs, "level": level})
+            texts = {column: _csv_text(str(row[column])) for column in _TEXT_COLUMNS if column in row}
+            writer.writerow({**row, **costs, **texts, "level": level})
     return buffer.getvalue()
+
+
+def _csv_text(value: str) -> str:
+    return f"'{value}" if value.startswith(_FORMULA_PREFIXES) else value
 
 
 def _render_markdown(

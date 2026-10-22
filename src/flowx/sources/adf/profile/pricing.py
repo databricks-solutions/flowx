@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from flowx.sources.adf.profile.azure_client import is_https_on
+
 RateCards = dict[str, dict[str, float]]
 
 DEFAULT_PRICING: RateCards = {
@@ -99,6 +101,8 @@ def fetch_live_pricing(region: str) -> RateCards:
         }
         seen_urls: set[str] = set()
         while next_url and next_url not in seen_urls:
+            if not is_https_on(next_url, "prices.azure.com"):
+                break
             seen_urls.add(next_url)
             response = requests.get(next_url, params=params, timeout=5)
             if response.status_code != 200:

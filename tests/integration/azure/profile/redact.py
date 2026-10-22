@@ -29,6 +29,16 @@ IP_ADDRESS = re.compile(r"(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])")
 
 GOLDEN_FILES = ["orchestration/details/pipeline_runs_by_pipeline.csv"]
 
+LEAK_PATTERNS = {
+    "a GUID": GUID,
+    "an email address": EMAIL,
+    "a tags object": re.compile(r'"tags"\s*:\s*\{'),
+    "an authorization-like key": re.compile(
+        r'"[^"]*(?:authorization|password|secret|access_?token|api_?key|connection_?string)[^"]*"\s*:', re.IGNORECASE
+    ),
+    "a SAS query parameter": re.compile(r"[?&](?:sig|sv|se)="),
+}
+
 
 class Redactor:
     """Replaces identifiers with stable aliases: the same value always maps to the same alias."""
@@ -81,6 +91,111 @@ def _drop_other_resource_groups(exchange: dict, resource_group: str) -> dict:
     return exchange
 
 
+def _pick(values: dict, *names: str) -> dict:
+    return {name: values[name] for name in names if name in values}
+
+
+def _activity_output(output: dict) -> dict:
+    kept = _pick(output, "effectiveIntegrationRuntime", "usedDataIntegrationUnits", "usedCloudDataMovementUnits")
+    reference = output.get("billingReference")
+    if isinstance(reference, dict):
+        kept["billingReference"] = {
+            **_pick(reference, "activityType"),
+            "billableDuration": [_pick(entry, "duration", "unit") for entry in reference.get("billableDuration") or []],
+        }
+    elif "billingReference" in output:
+        kept["billingReference"] = reference
+    return kept
+
+
+def _runtime(runtime: dict) -> dict:
+    properties = runtime.get("properties", {})
+    kept = _pick(properties, "type")
+    if properties.get("managedVirtualNetwork"):
+        kept["managedVirtualNetwork"] = _pick(properties["managedVirtualNetwork"], "referenceName", "type")
+    return {"name": runtime["name"], "properties": kept}
+
+
+def _page(response: dict, values: list) -> dict:
+    return {"value": values, **_pick(response, "nextLink", "continuationToken")}
+
+
+def _cost_query(response: dict, subscription_id: str) -> dict:
+    properties = response.get("properties", {})
+    columns = [_pick(column, "name") for column in properties.get("columns", [])]
+    return {"properties": {"columns": columns, **_pick(properties, "rows", "nextLink")}}
+
+
+def _subscriptions(response: dict, subscription_id: str) -> dict:
+    values = response.get("value", [])
+    scanned = [item for item in values if str(item.get("subscriptionId", "")).lower() == subscription_id.lower()]
+    return _page(response, [_pick(item, "subscriptionId", "displayName") for item in scanned])
+
+
+def _activity_runs(response: dict, subscription_id: str) -> dict:
+    values = response.get("value", [])
+    return _page(
+        response,
+        [
+            {
+                **_pick(activity, "activityType", "durationInMs"),
+                "output": _activity_output(activity.get("output") or {}),
+            }
+            for activity in values
+        ],
+    )
+
+
+def _pipeline_runs(response: dict, subscription_id: str) -> dict:
+    return _page(response, [_pick(run, "runId", "pipelineName") for run in response.get("value", [])])
+
+
+def _runtimes(response: dict, subscription_id: str) -> dict:
+    return _page(response, [_runtime(runtime) for runtime in response.get("value", [])])
+
+
+def _factories(response: dict, subscription_id: str) -> dict:
+    if "value" not in response:
+        return _pick(response, "id", "name", "location")
+    return _page(response, [_pick(factory, "id", "name", "location") for factory in response["value"]])
+
+
+READ_FIELDS = {
+    "Microsoft.CostManagement/query": _cost_query,
+    "/subscriptions?": _subscriptions,
+    "/queryActivityruns": _activity_runs,
+    "/queryPipelineRuns": _pipeline_runs,
+    "/integrationRuntimes": _runtimes,
+    "/providers/Microsoft.DataFactory/factories": _factories,
+}
+SUBSCRIPTION_PLACEHOLDER = re.compile(r"<SUBSCRIPTION_\d+>")
+
+
+def keep_read_fields(exchange: dict, subscription_id: str) -> dict:
+    url = exchange["url"]
+    marker = next((marker for marker in READ_FIELDS if marker in url), None)
+    if marker is None:
+        raise ValueError(f"no list of read fields for {url}")
+    response = exchange.get("response")
+    if not response:
+        return exchange
+    return {**exchange, "response": READ_FIELDS[marker](response, subscription_id)}
+
+
+def find_leaks(capture_dir: Path) -> list[str]:
+    subscription_id = json.loads((capture_dir / "capture.json").read_text())["subscription_id"]
+    leaks = []
+    for path in sorted(capture_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        text = path.read_text()
+        name = path.relative_to(capture_dir)
+        leaks += [f"{name} contains {kind}" for kind, pattern in LEAK_PATTERNS.items() if pattern.search(text)]
+        others = sorted(set(SUBSCRIPTION_PLACEHOLDER.findall(text)) - {subscription_id})
+        leaks += [f"{name} mentions {other}, not the scanned subscription" for other in others]
+    return leaks
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw", type=Path, required=True, help="record.py output directory")
@@ -100,7 +215,7 @@ def main() -> None:
     (args.out / "golden").mkdir(parents=True)
 
     exchanges = [
-        _drop_other_resource_groups(json.loads(line), resource_group)
+        keep_read_fields(_drop_other_resource_groups(json.loads(line), resource_group), capture["subscription_id"])
         for line in (args.raw / "exchanges.jsonl").read_text().splitlines()
     ]
     (args.out / "exchanges.jsonl").write_text(
@@ -111,6 +226,9 @@ def main() -> None:
     for relative in GOLDEN_FILES:
         source = args.original / relative
         (args.out / "golden" / source.name).write_text(redactor.text(source.read_text()))
+    leaks = find_leaks(args.out)
+    if leaks:
+        raise SystemExit("the redacted capture still leaks:\n" + "\n".join(leaks))
     print(f"wrote {len(exchanges)} exchanges to {args.out}")
 
 

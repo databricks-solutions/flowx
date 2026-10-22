@@ -117,3 +117,56 @@ def test_fetch_live_pricing_rejects_a_response_with_no_usable_prices(monkeypatch
     _fake_requests(monkeypatch, lambda url, params=None, timeout=None: empty)
     with pytest.raises(pricing.LivePricingUnavailable, match="no usable prices"):
         pricing.fetch_live_pricing("westeurope")
+
+
+@pytest.mark.parametrize(
+    "next_page_link",
+    [
+        "https://evil.example.com/api/retail/prices?$skip=100",
+        "https://prices.azure.com.evil.com/api/retail/prices?$skip=100",
+        "http://prices.azure.com/api/retail/prices?$skip=100",
+        "https://prices.azure.com@evil.com/api/retail/prices?$skip=100",
+        "https://user@prices.azure.com/api/retail/prices?$skip=100",
+        "https://prices.azure.com:444/api/retail/prices?$skip=100",
+        "https://prices.azure.com:443/api/retail/prices?$skip=100",
+        "https://prices.azure.com./api/retail/prices?$skip=100",
+        "https://pri\u0441es.azure.com/api/retail/prices?$skip=100",
+        "https://xn--pries-3ye.azure.com/api/retail/prices?$skip=100",
+    ],
+)
+def test_fetch_live_pricing_stops_at_a_next_page_link_off_prices_azure_com(monkeypatch, next_page_link):
+    page = {
+        "Items": [{"meterName": "Cloud Orchestration Activity Run", "retailPrice": 0.8}],
+        "NextPageLink": next_page_link,
+    }
+    requested: list[str] = []
+
+    def fake_get(url, params=None, timeout=None):
+        requested.append(url)
+        return types.SimpleNamespace(status_code=200, json=lambda: page)
+
+    _fake_requests(monkeypatch, fake_get)
+    rates = pricing.fetch_live_pricing("westeurope")
+    assert rates["azure_ir"]["orchestration_per_1000"] == 0.8
+    assert requested == [pricing.RETAIL_PRICES_URL]
+
+
+def test_fetch_live_pricing_follows_the_real_host_in_upper_case(monkeypatch):
+    second_page_url = "https://PRICES.AZURE.COM/api/retail/prices?$skip=100"
+    pages = {
+        pricing.RETAIL_PRICES_URL: {
+            "Items": [{"meterName": "Cloud Orchestration Activity Run", "retailPrice": 0.8}],
+            "NextPageLink": second_page_url,
+        },
+        second_page_url: {"Items": [{"meterName": "Cloud Data Movement", "retailPrice": 0.3}]},
+    }
+    requested: list[str] = []
+
+    def fake_get(url, params=None, timeout=None):
+        requested.append(url)
+        return types.SimpleNamespace(status_code=200, json=lambda: pages[url])
+
+    _fake_requests(monkeypatch, fake_get)
+    rates = pricing.fetch_live_pricing("westeurope")
+    assert rates["azure_ir"]["data_movement_per_diu_hour"] == 0.3
+    assert requested == [pricing.RETAIL_PRICES_URL, second_page_url]

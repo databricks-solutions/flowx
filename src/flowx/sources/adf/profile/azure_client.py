@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import time
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 AZURE_MANAGEMENT_URL = "https://management.azure.com"
+_MANAGEMENT_HOST = "management.azure.com"
 _MANAGEMENT_SCOPE = "https://management.azure.com/.default"
 _REQUEST_TIMEOUT_SECONDS = 30
 # Refresh a little before expiry so a token can't lapse between the check and the request.
@@ -71,6 +73,17 @@ class TransportHttpError(Exception):
         self.url = url
 
 
+def is_https_on(url: str, host: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and parsed.netloc.lower() == host
+
+
+class UntrustedUrlError(Exception):
+    def __init__(self, url: str):
+        super().__init__(f"Refusing to send the Azure token to {url}: only https://{_MANAGEMENT_HOST} is allowed")
+        self.url = url
+
+
 class Transport(Protocol):
     """The only way the profiler talks to Azure, so tests can replay recorded responses."""
 
@@ -118,12 +131,18 @@ class LiveTransport:
         return self._session
 
     def _send(self, method: str, url: str, body: dict[str, Any] | None) -> dict[str, Any]:
+        if not is_https_on(url, _MANAGEMENT_HOST):
+            raise UntrustedUrlError(url)
         for attempt in range(2):
             headers = self._authorized_headers()
             if method == "GET":
-                response = self._http().get(url, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS)
+                response = self._http().get(
+                    url, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS, allow_redirects=False
+                )
             else:
-                response = self._http().post(url, headers=headers, json=body, timeout=_REQUEST_TIMEOUT_SECONDS)
+                response = self._http().post(
+                    url, headers=headers, json=body, timeout=_REQUEST_TIMEOUT_SECONDS, allow_redirects=False
+                )
             if response.status_code == 401 and attempt == 0:
                 self._headers = None
                 continue
