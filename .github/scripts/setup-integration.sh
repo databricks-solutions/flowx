@@ -83,6 +83,8 @@ REQUIRED_ROLE_ACTIONS='[
   "Microsoft.DataFactory/factories/pipelines/read",
   "Microsoft.DataFactory/factories/pipelines/write",
   "Microsoft.DataFactory/factories/pipelines/delete",
+  "Microsoft.DataFactory/factories/querypipelineruns/action",
+  "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action",
   "Microsoft.DataFactory/factories/triggers/read",
   "Microsoft.DataFactory/factories/triggers/write",
   "Microsoft.DataFactory/factories/triggers/delete",

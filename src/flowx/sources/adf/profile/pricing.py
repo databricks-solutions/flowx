@@ -39,46 +39,45 @@ class LivePricingUnavailable(Exception):
     """Raised when live Retail Prices can't be used; the message is a short, plain reason."""
 
 
+METER_NAMES: dict[str, dict[str, str]] = {
+    "azure_ir": {
+        "orchestration_per_1000": "Cloud Orchestration Activity Run",
+        "data_movement_per_diu_hour": "Cloud Data Movement",
+        "pipeline_activity_per_hour": "Cloud Pipeline Activity",
+        "external_activity_per_hour": "Cloud External Pipeline Activity",
+    },
+    "shir": {
+        "orchestration_per_1000": "Self Hosted Orchestration Activity Run",
+        "data_movement_per_hour": "Self Hosted Data Movement",
+        "pipeline_activity_per_hour": "Self Hosted Pipeline Activity",
+        "external_activity_per_hour": "Self Hosted External Pipeline Activity",
+    },
+    "managed_vnet_ir": {
+        "orchestration_per_1000": "Azure Managed VNET Orchestration Activity Run",
+        "data_movement_per_diu_hour": "Azure Managed VNET Data Movement",
+        "pipeline_activity_per_hour": "Azure Managed VNET Pipeline Activity",
+        "external_activity_per_hour": "Azure Managed VNET External Pipeline Activity",
+    },
+}
+PRODUCT_NAME = "Azure Data Factory v2"
+
+
 def parse_retail_prices(items: list[dict[str, Any]]) -> RateCards | None:
     """Map Azure Retail Prices API `Items` to rate cards, or None if nothing usable came back.
 
-    Meters are matched by keyword (e.g. "cloud" + "orchestration"); any meter the API didn't
-    return keeps its list-price fallback.
+    Each rate is the price of the `Azure Data Factory v2` meter named exactly as in METER_NAMES;
+    any meter the API didn't return keeps its list-price fallback.
     """
-    prices_by_meter: dict[str, float] = {}
-    for item in items:
-        meter = item.get("meterName", "").lower()
-        price = item.get("retailPrice", 0)
-        if price > 0:
-            prices_by_meter[meter] = price
+    prices_by_meter = {
+        item.get("meterName", ""): item["retailPrice"]
+        for item in items
+        if item.get("retailPrice", 0) > 0 and item.get("productName") == PRODUCT_NAME
+    }
     if not prices_by_meter:
         return None
-
-    def find_price(keywords: list[str], fallback: float) -> float:
-        for meter, price in prices_by_meter.items():
-            if all(keyword in meter for keyword in keywords):
-                return price
-        return fallback
-
     return {
-        "azure_ir": {
-            "orchestration_per_1000": find_price(["cloud", "orchestration"], 1.00),
-            "data_movement_per_diu_hour": find_price(["cloud", "data movement"], 0.25),
-            "pipeline_activity_per_hour": find_price(["cloud", "pipeline"], 0.005),
-            "external_activity_per_hour": find_price(["cloud", "external"], 0.00025),
-        },
-        "shir": {
-            "orchestration_per_1000": find_price(["on premises", "orchestration"], 1.50),
-            "data_movement_per_hour": find_price(["on premises", "data movement"], 0.10),
-            "pipeline_activity_per_hour": find_price(["on premises", "pipeline"], 0.005),
-            "external_activity_per_hour": find_price(["on premises", "external"], 0.00025),
-        },
-        "managed_vnet_ir": {
-            "orchestration_per_1000": find_price(["managed vnet", "orchestration"], 1.00),
-            "data_movement_per_diu_hour": find_price(["managed vnet", "data movement"], 0.25),
-            "pipeline_activity_per_hour": find_price(["managed vnet", "pipeline"], 1.00),
-            "external_activity_per_hour": find_price(["managed vnet", "external"], 1.00),
-        },
+        card: {rate: prices_by_meter.get(meter, DEFAULT_PRICING[card][rate]) for rate, meter in meters.items()}
+        for card, meters in METER_NAMES.items()
     }
 
 

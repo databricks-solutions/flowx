@@ -47,7 +47,9 @@ For each activity run in the window:
   - External activities (Databricks notebook/job, stored procedure, Web, …): the external-activity rate.
   - Mapping Data Flow: 8 vCores × $0.274 per vCore-hour.
 
-Rates come from the public Azure Retail Prices API for the first factory's region. If that call
+Rates come from the public Azure Retail Prices API for each factory's region. Each rate is the price of
+the `Azure Data Factory v2` meter with the exact name Azure uses (for example `Cloud Pipeline Activity` or
+`Self Hosted Data Movement`); a meter the API doesn't return keeps its built-in list rate. If the call
 fails, the built-in list rates are used, and the report's "Pricing Source" line says which applied.
 
 ## Known limitations (carried over from the original profiler, tracked as follow-ups)

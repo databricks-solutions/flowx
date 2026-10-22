@@ -23,6 +23,7 @@ done
 {
   echo "ADF_EXPORT_DIR=${export_dir}"
   echo "ADF_CASE_SOURCE_DIR=${export_dir}"
+  echo "ADF_FACTORY_NAME=${factory_name}"
   printf 'ADF_CASE_STORAGE_ACCOUNT_ID=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw storage_account_id)"
   printf 'ADF_CASE_KEY_VAULT_URI=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw key_vault_uri)"
   printf 'ADF_CASE_ADLS_DFS_ENDPOINT=%s\n' "$(terraform -chdir=tests/integration/azure/terraform output -raw adls_dfs_endpoint)"

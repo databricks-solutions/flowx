@@ -88,7 +88,7 @@ addopts = "--no-header"
 cache_dir = ".venv/pytest-cache"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
-    "integration: marks tests that need live Azure access; make integration skips them (none use it today)",
+    "integration: marks tests that need live Azure or network access (the live profile tests); make integration skips them",
     "slow: marks tests that are slow to run",
 ]
 

@@ -17,9 +17,24 @@ def test_default_pricing_has_three_rate_cards():
 
 def test_parse_retail_prices_maps_meters():
     items = [
-        {"meterName": "Cloud Orchestration Activity Run", "retailPrice": 1.0, "unitOfMeasure": "1K"},
-        {"meterName": "Cloud Data Movement", "retailPrice": 0.25, "unitOfMeasure": "1 Hour"},
-        {"meterName": "Cloud Pipeline Activity", "retailPrice": 0.005, "unitOfMeasure": "1 Hour"},
+        {
+            "productName": "Azure Data Factory v2",
+            "meterName": "Cloud Orchestration Activity Run",
+            "retailPrice": 1.0,
+            "unitOfMeasure": "1K",
+        },
+        {
+            "productName": "Azure Data Factory v2",
+            "meterName": "Cloud Data Movement",
+            "retailPrice": 0.25,
+            "unitOfMeasure": "1 Hour",
+        },
+        {
+            "productName": "Azure Data Factory v2",
+            "meterName": "Cloud Pipeline Activity",
+            "retailPrice": 0.005,
+            "unitOfMeasure": "1 Hour",
+        },
     ]
     parsed = pricing.parse_retail_prices(items)
     assert parsed is not None
@@ -28,7 +43,14 @@ def test_parse_retail_prices_maps_meters():
 
 
 def test_parse_retail_prices_falls_back_per_meter():
-    items = [{"meterName": "Cloud Orchestration Activity Run", "retailPrice": 0.8, "unitOfMeasure": "1K"}]
+    items = [
+        {
+            "productName": "Azure Data Factory v2",
+            "meterName": "Cloud Orchestration Activity Run",
+            "retailPrice": 0.8,
+            "unitOfMeasure": "1K",
+        }
+    ]
     parsed = pricing.parse_retail_prices(items)
     assert parsed is not None
     assert parsed["azure_ir"]["orchestration_per_1000"] == 0.8
@@ -40,17 +62,28 @@ def test_parse_retail_prices_returns_none_on_empty():
 
 
 def test_parse_retail_prices_ignores_zero_prices():
-    assert pricing.parse_retail_prices([{"meterName": "Cloud Data Movement", "retailPrice": 0}]) is None
+    assert (
+        pricing.parse_retail_prices(
+            [{"productName": "Azure Data Factory v2", "meterName": "Cloud Data Movement", "retailPrice": 0}]
+        )
+        is None
+    )
 
 
 def test_fetch_live_pricing_follows_next_page_link(monkeypatch):
     pages = {
         pricing.RETAIL_PRICES_URL: {
-            "Items": [{"meterName": "Cloud Orchestration Activity Run", "retailPrice": 0.8}],
+            "Items": [
+                {
+                    "productName": "Azure Data Factory v2",
+                    "meterName": "Cloud Orchestration Activity Run",
+                    "retailPrice": 0.8,
+                }
+            ],
             "NextPageLink": "https://prices.azure.com/api/retail/prices?$skip=100",
         },
         "https://prices.azure.com/api/retail/prices?$skip=100": {
-            "Items": [{"meterName": "Cloud Data Movement", "retailPrice": 0.3}],
+            "Items": [{"productName": "Azure Data Factory v2", "meterName": "Cloud Data Movement", "retailPrice": 0.3}],
             "NextPageLink": None,
         },
     }
@@ -73,7 +106,13 @@ def test_fetch_live_pricing_follows_next_page_link(monkeypatch):
 
 def test_fetch_live_pricing_stops_on_a_repeated_next_page_link(monkeypatch):
     page = {
-        "Items": [{"meterName": "Cloud Orchestration Activity Run", "retailPrice": 0.8}],
+        "Items": [
+            {
+                "productName": "Azure Data Factory v2",
+                "meterName": "Cloud Orchestration Activity Run",
+                "retailPrice": 0.8,
+            }
+        ],
         "NextPageLink": "https://prices.azure.com/api/retail/prices?$skip=100",
     }
     requested: list[str] = []
@@ -136,7 +175,13 @@ def test_fetch_live_pricing_rejects_a_response_with_no_usable_prices(monkeypatch
 )
 def test_fetch_live_pricing_stops_at_a_next_page_link_off_prices_azure_com(monkeypatch, next_page_link):
     page = {
-        "Items": [{"meterName": "Cloud Orchestration Activity Run", "retailPrice": 0.8}],
+        "Items": [
+            {
+                "productName": "Azure Data Factory v2",
+                "meterName": "Cloud Orchestration Activity Run",
+                "retailPrice": 0.8,
+            }
+        ],
         "NextPageLink": next_page_link,
     }
     requested: list[str] = []
@@ -155,10 +200,18 @@ def test_fetch_live_pricing_follows_the_real_host_in_upper_case(monkeypatch):
     second_page_url = "https://PRICES.AZURE.COM/api/retail/prices?$skip=100"
     pages = {
         pricing.RETAIL_PRICES_URL: {
-            "Items": [{"meterName": "Cloud Orchestration Activity Run", "retailPrice": 0.8}],
+            "Items": [
+                {
+                    "productName": "Azure Data Factory v2",
+                    "meterName": "Cloud Orchestration Activity Run",
+                    "retailPrice": 0.8,
+                }
+            ],
             "NextPageLink": second_page_url,
         },
-        second_page_url: {"Items": [{"meterName": "Cloud Data Movement", "retailPrice": 0.3}]},
+        second_page_url: {
+            "Items": [{"productName": "Azure Data Factory v2", "meterName": "Cloud Data Movement", "retailPrice": 0.3}]
+        },
     }
     requested: list[str] = []
 
@@ -170,3 +223,44 @@ def test_fetch_live_pricing_follows_the_real_host_in_upper_case(monkeypatch):
     rates = pricing.fetch_live_pricing("westeurope")
     assert rates["azure_ir"]["data_movement_per_diu_hour"] == 0.3
     assert requested == [pricing.RETAIL_PRICES_URL, second_page_url]
+
+
+def _adf_meter(name: str, price: float, product: str = "Azure Data Factory v2") -> dict:
+    return {"productName": product, "meterName": name, "retailPrice": price, "unitOfMeasure": "1 Hour"}
+
+
+def test_pipeline_activity_is_not_taken_from_the_external_pipeline_meter():
+    parsed = pricing.parse_retail_prices(
+        [
+            _adf_meter("Cloud Pipeline Activity", 9.0, product="Azure Data Factory v2 - Managed Airflow"),
+            _adf_meter("Cloud External Pipeline Activity", 0.00025),
+            _adf_meter("Cloud Pipeline Activity", 0.005),
+            _adf_meter("Azure Managed VNET External Pipeline Activity", 2.0),
+            _adf_meter("Azure Managed VNET Pipeline Activity", 3.0),
+        ]
+    )
+    assert parsed is not None
+    assert parsed["azure_ir"]["pipeline_activity_per_hour"] == 0.005
+    assert parsed["azure_ir"]["external_activity_per_hour"] == 0.00025
+    assert parsed["managed_vnet_ir"]["pipeline_activity_per_hour"] == 3.0
+    assert parsed["managed_vnet_ir"]["external_activity_per_hour"] == 2.0
+
+
+def test_self_hosted_rates_come_from_the_self_hosted_meters():
+    parsed = pricing.parse_retail_prices(
+        [
+            _adf_meter("Self Hosted Monitoring Operations", 0.25),
+            _adf_meter("Self Hosted Read Write Operations", 0.5),
+            _adf_meter("Self Hosted External Pipeline Activity", 0.0001),
+            _adf_meter("Self Hosted Pipeline Activity", 0.002),
+            _adf_meter("Self Hosted Data Movement", 0.2),
+            _adf_meter("Self Hosted Orchestration Activity Run", 1.75),
+        ]
+    )
+    assert parsed is not None
+    assert parsed["shir"] == {
+        "orchestration_per_1000": 1.75,
+        "data_movement_per_hour": 0.2,
+        "pipeline_activity_per_hour": 0.002,
+        "external_activity_per_hour": 0.0001,
+    }

@@ -45,7 +45,7 @@ _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
 def _factory_rows(result: ProfileResult) -> list[dict[str, Any]]:
-    """One row per factory: estimate (rolled up from pipelines) next to billed compute."""
+    """One row per scanned factory, even at $0, and per other factory with an estimate or billed compute."""
     estimates: dict[str, dict[str, Any]] = {}
     for pipeline in result.pipeline_costs:
         bucket = estimates.setdefault(pipeline.factory_name, dict.fromkeys(_ESTIMATE_BUCKETS, 0.0))
@@ -62,11 +62,11 @@ def _factory_rows(result: ProfileResult) -> list[dict[str, Any]]:
             actual_compute[actual.factory_name] = actual_compute.get(actual.factory_name, 0.0) + actual.cost
 
     rows = []
-    for factory in sorted(set(estimates) | set(actual_compute)):
+    for factory in sorted(set(estimates) | set(actual_compute) | set(result.factory_subscriptions)):
         estimate = estimates.get(factory, dict.fromkeys(_ESTIMATE_BUCKETS, 0.0))
         estimate_total = sum(estimate.values())
         compute = actual_compute.get(factory, 0.0)
-        if estimate_total == 0 and compute == 0:
+        if estimate_total == 0 and compute == 0 and factory not in result.factory_subscriptions:
             continue
         rows.append(
             {

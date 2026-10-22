@@ -200,6 +200,10 @@ def test_role_is_scoped_to_one_resource_group_with_specific_actions(
         for action in role["Actions"]
     )
     assert "Microsoft.EventGrid/eventSubscriptions/write" in role["Actions"]
+    assert {
+        "Microsoft.DataFactory/factories/querypipelineruns/action",
+        "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action",
+    } <= set(role["Actions"])
     assert set(role["NotActions"]) == {
         "Microsoft.Storage/storageAccounts/listKeys/action",
         "Microsoft.Storage/storageAccounts/listAccountSas/action",
@@ -641,6 +645,7 @@ esac
     for directory in ("datasets", "linked_services", "dataflows", "integration_runtimes", "triggers"):
         assert [path.name for path in (tmp_path / "adf-export" / directory).iterdir()] == ["only.json"], directory
     assert az_log.read_text().count("account show") == 1
+    assert "ADF_FACTORY_NAME=factory_name" in (tmp_path / "github-env").read_text().splitlines()
 
 
 @pytest.mark.parametrize("script", sorted(SCRIPT.parent.glob("*.sh")), ids=lambda path: path.name)

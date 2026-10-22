@@ -14,6 +14,7 @@ on:
       - "tests/integration/azure/**"
       - "tests/integration/test_azure_fixture_coverage.py"
       - "tests/integration/test_adf_cases.py"
+      - "tests/integration/test_adf_profile_live.py"
       - "!tests/integration/azure/README.md"
       - "src/flowx/sources/adf/**"
   pull_request:
@@ -27,6 +28,7 @@ on:
       - "tests/integration/azure/**"
       - "tests/integration/test_azure_fixture_coverage.py"
       - "tests/integration/test_adf_cases.py"
+      - "tests/integration/test_adf_profile_live.py"
       - "!tests/integration/azure/README.md"
       - "src/flowx/sources/adf/**"
 
@@ -108,7 +110,7 @@ jobs:
         run: sed -i -E 's#https://[a-zA-Z0-9._-]+/simple#https://pypi.org/simple#g' uv.lock
 
       - name: Install flowx from the lock file
-        run: uv sync --frozen
+        run: uv sync --frozen --extra azure
 
       - name: Install Terraform
         run: '"${CI_SCRIPTS}/install-pinned-tool.sh" terraform'
@@ -163,6 +165,14 @@ jobs:
       - name: Export deployed ADF definitions
         shell: bash
         run: '"${CI_SCRIPTS}/export-adf.sh"'
+
+      - name: Profile the live factory
+        id: profile-live
+        continue-on-error: true
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+        run: PYTHONPATH=src uv run pytest -m integration tests/integration/test_adf_profile_live.py -v --tb=short
 
       - name: Sign out of Azure CLI before Claude runs
         if: always()
@@ -222,6 +232,7 @@ jobs:
         if: always()
         env:
           ADF_CASES_OUTCOME: ${{ steps.adf-cases.outcome }}
+          PROFILE_LIVE_OUTCOME: ${{ steps.profile-live.outcome }}
           AGENTIC_CONFIGURED: ${{ steps.agentic.outputs.configured }}
           AGENTIC_OUTCOME: ${{ steps.agentic.outcome }}
           AGENTIC_RESOLVED: ${{ steps.agentic.outputs.resolved }}

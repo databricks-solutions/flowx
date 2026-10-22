@@ -390,7 +390,7 @@ def test_installs_happen_before_azure_login_from_pinned_sources() -> None:
         _step_index(steps, "Install Databricks CLI"),
     ]
     assert max(installs) < login
-    assert steps[installs[0]]["run"] == "uv sync --frozen"
+    assert steps[installs[0]]["run"] == "uv sync --frozen --extra azure"
     assert not any(str(step.get("uses", "")).startswith(("hashicorp/", "databricks/")) for step in steps)
     for step in steps:
         assert not re.search(r"bootstrap\.sh|pip install|npm install", step.get("run", ""))
@@ -410,6 +410,21 @@ def test_azure_cli_is_signed_out_before_claude_and_teardown_always_runs() -> Non
     teardown = steps[_step_index(steps, "Destroy ephemeral Azure resources")]
     assert teardown["if"] == "always()"
     assert teardown is steps[-1]
+
+
+def test_live_profile_tests_run_while_the_azure_cli_is_signed_in_and_gate_the_job() -> None:
+    steps = _live_steps()
+    export = _step_index(steps, "Export deployed ADF definitions")
+    profile = _step_index(steps, "Profile the live factory")
+    sign_out = _step_index(steps, "Sign out of Azure CLI before Claude runs")
+    assert export < profile < sign_out
+    assert steps[profile]["run"] == (
+        "PYTHONPATH=src uv run pytest -m integration tests/integration/test_adf_profile_live.py -v --tb=short"
+    )
+    assert steps[profile]["continue-on-error"] is True
+    enforce = steps[_step_index(steps, "Enforce live integration results")]
+    assert enforce["env"]["PROFILE_LIVE_OUTCOME"] == "${{ steps.profile-live.outcome }}"
+    assert 'PROFILE_LIVE_OUTCOME}" != success' in (SCRIPTS / "enforce-integration-results.sh").read_text()
 
 
 def test_workflow_script_references_are_executable() -> None:

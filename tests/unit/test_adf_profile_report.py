@@ -91,11 +91,21 @@ def test_factory_with_only_actuals_has_zero_estimates(tmp_path):
     assert lines[1] == "factory,Unknown,billed-only,,,0.0000,0.0000,0.0000,0.0000,0.0000,5.0000,5.0000"
 
 
-def test_zero_cost_pipelines_and_factories_are_omitted(tmp_path):
+def test_zero_cost_pipelines_and_unscanned_factories_are_omitted(tmp_path):
     result = _result(pipeline_costs=[_pipeline("idle", factory="idle-factory")], actual_costs=[])
     report.write_reports(result, tmp_path)
     csv_text = (tmp_path / "metadata" / "tco" / "cost_comparison.csv").read_text()
     assert "idle" not in csv_text
+
+
+def test_a_scanned_factory_with_no_runs_or_billing_still_gets_a_row(tmp_path):
+    result = _result(total_pipeline_runs=0, pipeline_costs=[], actual_costs=[])
+    report.write_reports(result, tmp_path)
+    tco = tmp_path / "metadata" / "tco"
+    assert (tco / "cost_comparison.csv").read_text().splitlines()[1:] == [
+        "factory,Demo Subscription,demo-factory,,,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000"
+    ]
+    assert "| Demo Subscription | demo-factory | $0.0000 |" in (tco / "cost_comparison.md").read_text()
 
 
 def test_rows_sorted_by_cost_descending(tmp_path):

@@ -3,7 +3,10 @@
 This suite deploys an ephemeral Azure Data Factory and supporting resources into one shared resource group, exports the factory
 through the Azure REST API, and runs flowx against that live export. Expected-output cases under
 `adf/cases/` exercise discover, convert, and package offline and against the live export. The workflow
-validates translation and Databricks bundle structure; it never deploys a bundle.
+validates translation and Databricks bundle structure; it never deploys a bundle. Before the Azure CLI
+signs out, it also runs the `integration`-marked tests in `test_adf_profile_live.py`: one fetches the public
+Azure price list, and one runs `flowx profile` against the ephemeral factory through `DefaultAzureCredential`,
+which picks up the CLI's OIDC sign-in. It never starts a pipeline run.
 
 ## GitHub environment and secrets
 
@@ -81,7 +84,7 @@ scripts are copied the same way so Claude can't change scripts that run after it
 Claude: the scripts still come from the pull request.
 
 Every tool is installed before the Azure sign-in, from a lock file with hashes or a pinned checksum: Python
-packages with `uv sync --frozen`, Claude Code from its npm lock file, and Terraform and the Databricks CLI by
+packages with `uv sync --frozen --extra azure` (the extra is what the profile tests need), Claude Code from its npm lock file, and Terraform and the Databricks CLI by
 `install-pinned-tool.sh`, which checks each download against a SHA-256 pinned in the script. Each pin was copied
 from that release's `SHA256SUMS` file, and keeping it in the repo means a changed release asset fails the check.
 Terraform providers come from the committed `.terraform.lock.hcl` (`terraform init -lockfile=readonly`).
@@ -113,13 +116,21 @@ The custom role is assignable and assigned only on that resource group. It lists
 Terraform needs (`REQUIRED_ROLE_ACTIONS` in `.github/scripts/setup-integration.sh`): read the resource group;
 read, write, and delete the storage account, its blob containers, the Key Vault, the data factory and its
 child resources, and the Event Grid subscription the Blob Events trigger uses; and read the storage
-account's blob, file, queue, and table service settings. It can't create or delete resource groups. Its
+account's blob, file, queue, and table service settings. It also allows the two read-only run queries the
+profile phase makes, `Microsoft.DataFactory/factories/querypipelineruns/action` and
+`Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action`. It doesn't grant Cost Management:
+the profile phase reads billing at subscription scope, which a resource-group role can't reach, so the live
+profile test expects the "Cost Management access denied" warning. It can't create or delete resource groups. Its
 `NotActions` also block storage-key listing, account SAS, key regeneration, and Key Vault access-policy writes
 (shared-key access is disabled in `main.tf`).
 
 This role is narrower than before but isn't a full sandbox. A dedicated sandbox subscription is still
 recommended. If a live run fails with an authorization error for an action not listed, add that exact action
 to `REQUIRED_ROLE_ACTIONS` and rerun `role`.
+
+The profile phase's two run-query actions were added after the first setup, so an admin must rerun
+`make setup-integration ARGS="role"` once; until then `verify` reports the role as mismatched and the live
+profile test fails on the "Cannot query pipeline runs" warning.
 
 Existing installations must rerun `make setup-integration ARGS="role"` (or the full
 `make setup-integration ARGS="setup"`), then `ARGS="secrets"` to add `AZURE_RESOURCE_GROUP`, and

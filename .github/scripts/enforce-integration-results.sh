@@ -4,6 +4,10 @@ if [[ "${ADF_CASES_OUTCOME}" != success ]]; then
   echo "::error::Live ADF expected-output case validation failed."
   exit 1
 fi
+if [[ "${PROFILE_LIVE_OUTCOME}" != success ]]; then
+  echo "::error::The live profile tests failed."
+  exit 1
+fi
 if [[ "${AGENTIC_CONFIGURED}" != true ]]; then
   exit 0
 fi
