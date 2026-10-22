@@ -1,8 +1,8 @@
 """Golden-reference tests for `flowx profile`, replayed offline from one live capture.
 
-`tests/integration/azure/profiler/capture/` holds every Azure REST exchange from one live scan of the
+`tests/integration/azure/profile/capture/` holds every Azure REST exchange from one live scan of the
 profiler test factories, plus the original standalone script's per-pipeline costs from a scan run
-seconds earlier over the same runs. See `tests/integration/azure/profiler/README.md` for how it was
+seconds earlier over the same runs. See `tests/integration/azure/profile/README.md` for how it was
 captured and how to recapture.
 
 Two checks:
@@ -25,11 +25,13 @@ from typing import Any
 
 import pytest
 
-from flowx.sources.adf.profiler import pricing
-from flowx.sources.adf.profiler.azure_client import AdfScanner, ProfileResult, TransportHttpError
-from flowx.sources.adf.profiler.report import write_reports
+from flowx.sources.adf.profile import pricing
+from flowx.sources.adf.profile.azure_client import TransportHttpError
+from flowx.sources.adf.profile.core import AdfScanner
+from flowx.sources.adf.profile.models import ProfileResult
+from flowx.sources.adf.profile.report import write_reports
 
-PROFILER_ROOT = Path(__file__).parent / "azure" / "profiler"
+PROFILER_ROOT = Path(__file__).parent / "azure" / "profile"
 CAPTURE = PROFILER_ROOT / "capture"
 EXPECTED = CAPTURE / "expected"
 AZURE_IR_FACTORY = "flowx-profiler-test-adf"

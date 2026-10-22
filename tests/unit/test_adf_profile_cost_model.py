@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from flowx.sources.adf.profiler import cost_model as cm
+from flowx.sources.adf.profile import cost_model as cm
 
 AZURE_IR = {
     "orchestration_per_1000": 1.00,

@@ -86,29 +86,29 @@ estimates current ADF spend from a live Azure scan and writes `metadata/tco/cost
 
 ## Module Descriptions
 
-| Module | Purpose |
-|--------|---------|
-| `models/adf_ast.py` | Typed AST nodes for ADF definitions |
-| `models/ir.py` | Databricks intermediate representation |
-| `models/dab.py` | DAB output schema types |
-| `parser/adf_loader.py` | Parses ADF exports, produces `metadata/inventory.json` + `metadata/profile_report.csv` |
-| `parser/expression_parser.py` | Translates ADF expressions (@activity, @pipeline, @variables) |
-| `translator/engine.py` | Registry dispatch, topological sort, context threading |
-| `translator/activity_translators/` | One module per deterministic activity type (16 total) |
-| `preparer/workflow_preparer.py` | Orchestrates activity preparers |
-| `preparer/code_generator.py` | Notebook code generation for activity types |
-| `preparer/activity_preparers/` | One module per activity type |
-| `bundler/dab_writer.py` | Generates databricks.yml, job YAML, resources; groups pipelines into bundles per `--packaging-mode` |
-| `bundler/pipeline_graph.py` | Run Pipeline (ExecutePipeline) dependency graph: grouping (connected components) + deploy order (topo sort) |
-| `bundler/deploy_writer.py` | Renders the top-level `DEPLOY.md` (bundle layout + suggested deploy order) |
-| `bundler/deployer.py` | Ordered multi-bundle deploy: discovers bundles, deploys callees first, wires cross-bundle job ids |
-| `bundler/notebook_writer.py` | Writes generated notebooks to bundle |
-| `bundler/setup_generator.py` | Setup scripts for UC volumes, secrets, connections |
-| `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/` |
-| `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK |
-| `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table |
+| Module | Purpose                                                                                                                                                       |
+|--------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `models/adf_ast.py` | Typed AST nodes for ADF definitions                                                                                                                           |
+| `models/ir.py` | Databricks intermediate representation                                                                                                                        |
+| `models/dab.py` | DAB output schema types                                                                                                                                       |
+| `parser/adf_loader.py` | Parses ADF exports, produces `metadata/inventory.json` + `metadata/profile_report.csv`                                                                        |
+| `parser/expression_parser.py` | Translates ADF expressions (@activity, @pipeline, @variables)                                                                                                 |
+| `translator/engine.py` | Registry dispatch, topological sort, context threading                                                                                                        |
+| `translator/activity_translators/` | One module per deterministic activity type (16 total)                                                                                                         |
+| `preparer/workflow_preparer.py` | Orchestrates activity preparers                                                                                                                               |
+| `preparer/code_generator.py` | Notebook code generation for activity types                                                                                                                   |
+| `preparer/activity_preparers/` | One module per activity type                                                                                                                                  |
+| `bundler/dab_writer.py` | Generates databricks.yml, job YAML, resources; groups pipelines into bundles per `--packaging-mode`                                                           |
+| `bundler/pipeline_graph.py` | Run Pipeline (ExecutePipeline) dependency graph: grouping (connected components) + deploy order (topo sort)                                                   |
+| `bundler/deploy_writer.py` | Renders the top-level `DEPLOY.md` (bundle layout + suggested deploy order)                                                                                    |
+| `bundler/deployer.py` | Ordered multi-bundle deploy: discovers bundles, deploys callees first, wires cross-bundle job ids                                                             |
+| `bundler/notebook_writer.py` | Writes generated notebooks to bundle                                                                                                                          |
+| `bundler/setup_generator.py` | Setup scripts for UC volumes, secrets, connections                                                                                                            |
+| `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/`                                                                                                            |
+| `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK                                                                                    |
+| `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table                                                                                       |
 | `sources/adf/extract/` | Live ADF extraction (`core.py`, self-contained and inlined into the generated notebook), export/path checks (`layout.py`), notebook rendering (`notebook.py`) |
-| `sources/adf/profiler/` | Live ADF scan + cost estimation for the `profile` phase (optional `azure` extra; Azure deps imported lazily) |
+| `sources/adf/profile/` | Live ADF scanning and cost estimation for the `profile` phase (requires optional `azure` extra; Azure deps imported lazily)                                   |
 
 ## Activity Types
 

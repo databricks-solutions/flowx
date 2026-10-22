@@ -7,13 +7,13 @@ from __future__ import annotations
 import argparse
 import sys
 
-from flowx.sources.adf.profiler.azure_client import (
-    AdfScanner,
+from flowx.sources.adf.profile.azure_client import (
     MissingProfileDependencyError,
     ProfileAuthenticationError,
     get_credential,
 )
-from flowx.sources.adf.profiler.report import write_reports
+from flowx.sources.adf.profile.core import AdfScanner
+from flowx.sources.adf.profile.report import write_reports
 
 _UNREACHABLE_HINT = (
     "If this machine can't reach management.azure.com or prices.azure.com (for example, serverless "

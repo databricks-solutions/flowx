@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from flowx.sources.adf.profiler import runner
-from flowx.sources.adf.profiler.models import PipelineCost, ProfileResult
+from flowx.sources.adf.profile import runner
+from flowx.sources.adf.profile.models import PipelineCost, ProfileResult
 
 
 def _scanner_returning(result: ProfileResult, seen: dict | None = None):

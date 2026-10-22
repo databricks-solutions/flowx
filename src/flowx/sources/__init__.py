@@ -51,7 +51,7 @@ _REGISTRY: dict[str, Source] = {
         convert_module="flowx.sources.adf.translate",
         source_path_flag="--adf-source-path",
         extract_module="flowx.sources.adf.extract.runner",
-        profile_module="flowx.sources.adf.profiler.runner",
+        profile_module="flowx.sources.adf.profile.runner",
     ),
     "airflow": Source(
         name="airflow",

@@ -8,7 +8,7 @@ import types
 
 import pytest
 
-from flowx.sources.adf.profiler import azure_client
+from flowx.sources.adf.profile import azure_client
 
 
 def test_require_azure_raises_actionable_error_when_missing(monkeypatch):

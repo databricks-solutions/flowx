@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from flowx.sources.adf.profiler import pricing
+from flowx.sources.adf.profile import pricing
 
 
 def test_default_pricing_has_three_rate_cards():

@@ -8,20 +8,6 @@ from dataclasses import dataclass, field
 
 
 @dataclass(slots=True, kw_only=True)
-class ActivityRunCost:
-    """The estimated cost of one activity run inside one pipeline run."""
-
-    factory_name: str
-    pipeline_name: str
-    activity_name: str
-    activity_type: str
-    ir_type: str
-    orchestration_cost: float
-    execution_cost: float
-    total_cost: float
-
-
-@dataclass(slots=True, kw_only=True)
 class PipelineCost:
     """Estimated cost of one pipeline, summed over every run in the profiling window."""
 
@@ -62,7 +48,6 @@ class ProfileResult:
     total_pipeline_runs: int
     pipeline_costs: list[PipelineCost] = field(default_factory=list)
     actual_costs: list[ActualCost] = field(default_factory=list)
-    activity_runs: list[ActivityRunCost] = field(default_factory=list)
     factory_subscriptions: dict[str, str] = field(default_factory=dict)
     subscription_names: dict[str, str] = field(default_factory=dict)
     cost_management_denied: list[str] = field(default_factory=list)

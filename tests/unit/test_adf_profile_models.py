@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from flowx.sources.adf.profiler import models
+from flowx.sources.adf.profile import models
 
 
 def test_pipeline_cost_is_slotted_and_kw_only():
@@ -28,7 +28,6 @@ def test_profile_result_defaults_to_empty_collections():
     result = models.ProfileResult(region="eastus", pricing_source="default list rates", days=90, total_pipeline_runs=0)
     assert result.pipeline_costs == []
     assert result.actual_costs == []
-    assert result.activity_runs == []
     assert result.factory_subscriptions == {}
     assert result.cost_management_denied == []
     assert result.warnings == []

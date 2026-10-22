@@ -1,8 +1,8 @@
 """Turn a raw `record.py` capture into a committable, redacted capture directory.
 
 Usage:
-    python tests/integration/azure/profiler/redact.py --raw /tmp/flowx-golden/port \
-        --original /tmp/flowx-golden/original/out/<timestamp> --out tests/integration/azure/profiler/capture
+    python tests/integration/azure/profile/redact.py --raw /tmp/flowx-golden/port \
+        --original /tmp/flowx-golden/original/out/<timestamp> --out tests/integration/azure/profile/capture
 
 Every distinct GUID gets its own stable alias (`<SUBSCRIPTION_1>`, `<ID_0001>`, ...), applied the same
 way in URLs and bodies, so replayed `/pipelineruns/<runId>/queryActivityruns` URLs stay distinct.

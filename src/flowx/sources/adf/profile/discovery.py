@@ -11,7 +11,7 @@ import logging
 import re
 from typing import Any
 
-from flowx.sources.adf.profiler.azure_client import AZURE_MANAGEMENT_URL, ProfileAuthenticationError, Transport
+from flowx.sources.adf.profile.azure_client import AZURE_MANAGEMENT_URL, ProfileAuthenticationError, Transport
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +22,12 @@ _REGION_SUFFIX = re.compile(r"\s+\([^()]*\)$")
 
 
 def _list_all(transport: Transport, url: str) -> list[dict[str, Any]]:
-    """GET a Resource Manager list, following `nextLink` pages until the last one."""
+    """GET a Resource Manager list, following `nextLink` pages until there is none or one repeats."""
     items: list[dict[str, Any]] = []
     next_url: str | None = url
-    while next_url:
+    seen_urls: set[str] = set()
+    while next_url and next_url not in seen_urls:
+        seen_urls.add(next_url)
         page = transport.get_json(next_url)
         items.extend(page.get("value", []))
         next_url = page.get("nextLink")

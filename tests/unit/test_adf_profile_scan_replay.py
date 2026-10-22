@@ -7,10 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from flowx.sources.adf.profiler import cost_model, pricing
-from flowx.sources.adf.profiler.azure_client import AdfScanner
-
-from .profiler_replay import ReplayTransport
+from flowx.sources.adf.profile import cost_model, pricing
+from flowx.sources.adf.profile.core import AdfScanner
 
 FIXTURES = Path(__file__).parents[1] / "resources" / "azure" / "handauthored"
 DEMO = "/factories/demo-factory"
@@ -29,7 +27,7 @@ def _mapping(**overrides) -> dict:
         "/integrationRuntimes?": _load("integration_runtimes.json"),
         f"{DEMO}/queryPipelineRuns": [_load("pipeline_runs_page1.json"), _load("pipeline_runs_page2.json")],
         f"{SECOND}/queryPipelineRuns": {"value": []},
-        "/queryActivityruns": _load("activity_runs.json"),
+        "/queryActivityruns": _load("activity_run_query.json"),
         "Microsoft.CostManagement/query": {"properties": {"columns": [], "rows": []}},
     }
     mapping.update(overrides)
@@ -48,14 +46,18 @@ def offline_pricing(monkeypatch):
     return regions
 
 
-def _scan(mapping: dict, **scanner_kwargs):
-    transport = ReplayTransport(mapping)
-    scanner = AdfScanner(credential=None, days=90, transport=transport, **scanner_kwargs)
-    return scanner.scan(), transport
+@pytest.fixture
+def scan(replay_transport):
+    def run(mapping: dict, **scanner_kwargs):
+        transport = replay_transport(mapping)
+        scanner = AdfScanner(credential=None, days=90, transport=transport, **scanner_kwargs)
+        return scanner.scan(), transport
+
+    return run
 
 
-def test_scan_builds_pipeline_costs_from_recordings():
-    result, _ = _scan(_mapping())
+def test_scan_builds_pipeline_costs_from_recordings(scan):
+    result, _ = scan(_mapping())
     assert result.total_pipeline_runs == 2
     copy_pipeline = next(cost for cost in result.pipeline_costs if cost.pipeline_name == "copy_pipeline")
     assert copy_pipeline.factory_name == "demo-factory"
@@ -67,16 +69,14 @@ def test_scan_builds_pipeline_costs_from_recordings():
     assert result.factory_subscriptions == {"demo-factory": "Demo Subscription", "second-factory": "Demo Subscription"}
 
 
-def test_activity_duration_comes_from_run_record():
-    result, _ = _scan(_mapping())
-    copy_run = result.activity_runs[0]
-    # The record says 180 s (3 billable minutes); output's 60 s must be ignored.
-    assert copy_run.execution_cost == pytest.approx((3 / 60) * 4 * 0.25)
-    assert copy_run.ir_type == "azure_ir"
+def test_activity_duration_comes_from_run_record(scan):
+    result, _ = scan(_mapping())
+    copy_pipeline = next(cost for cost in result.pipeline_costs if cost.pipeline_name == "copy_pipeline")
+    assert copy_pipeline.data_movement_cost == pytest.approx(2 * (3 / 60) * 4 * 0.25)
 
 
-def test_pipeline_runs_follow_continuation_token():
-    result, transport = _scan(_mapping())
+def test_pipeline_runs_follow_continuation_token(scan):
+    result, transport = scan(_mapping())
     run_queries = [body for method, url, body in transport.calls if url.find(f"{DEMO}/queryPipelineRuns") >= 0]
     assert len(run_queries) == 2
     assert "continuationToken" not in run_queries[0]
@@ -84,49 +84,48 @@ def test_pipeline_runs_follow_continuation_token():
     assert result.total_pipeline_runs == 2
 
 
-def test_empty_run_page_with_token_keeps_paging():
+def test_empty_run_page_with_token_keeps_paging(scan):
     run = {"runId": "r1", "pipelineName": "copy_pipeline"}
     pages = [{"value": [], "continuationToken": "a"}, {"value": [run]}]
-    result, _ = _scan(_mapping(**{f"{DEMO}/queryPipelineRuns": pages}))
+    result, _ = scan(_mapping(**{f"{DEMO}/queryPipelineRuns": pages}))
     assert result.total_pipeline_runs == 1
 
 
-def test_repeated_continuation_token_stops_paging():
+def test_repeated_continuation_token_stops_paging(scan):
     run = {"runId": "r1", "pipelineName": "copy_pipeline"}
     page = {"value": [run], "continuationToken": "same"}
     unexpected = AssertionError("paged past a repeated continuation token")
-    result, transport = _scan(_mapping(**{f"{DEMO}/queryPipelineRuns": [page, page, unexpected]}))
+    result, transport = scan(_mapping(**{f"{DEMO}/queryPipelineRuns": [page, page, unexpected]}))
     assert len([url for method, url, body in transport.calls if f"{DEMO}/queryPipelineRuns" in url]) == 2
     assert result.total_pipeline_runs == 2
 
 
-def test_scan_with_no_runs_is_empty_but_valid():
-    result, _ = _scan(_mapping(**{f"{DEMO}/queryPipelineRuns": {"value": []}}))
+def test_scan_with_no_runs_is_empty_but_valid(scan):
+    result, _ = scan(_mapping(**{f"{DEMO}/queryPipelineRuns": {"value": []}}))
     assert result.total_pipeline_runs == 0
     assert result.pipeline_costs == []
-    assert result.activity_runs == []
 
 
-def test_each_factory_region_is_priced(offline_pricing):
-    result, _ = _scan(_mapping())
+def test_each_factory_region_is_priced(scan, offline_pricing):
+    result, _ = scan(_mapping())
     assert offline_pricing == ["eastus", "westeurope"]
     assert result.region == "eastus, westeurope"
     assert result.pricing_source == "default list rates"
 
 
-def test_live_pricing_is_labelled_with_region(monkeypatch):
+def test_live_pricing_is_labelled_with_region(scan, monkeypatch):
     monkeypatch.setattr(pricing, "fetch_live_pricing", lambda region: pricing.DEFAULT_PRICING)
-    result, _ = _scan(_mapping())
+    result, _ = scan(_mapping())
     assert result.pricing_source == "eastus: Azure Retail Prices API; westeurope: Azure Retail Prices API"
 
 
-def test_pricing_source_names_the_region_that_fell_back(monkeypatch):
+def test_pricing_source_names_the_region_that_fell_back(scan, monkeypatch):
     monkeypatch.setattr(pricing, "fetch_live_pricing", _live_only({"eastus": pricing.DEFAULT_PRICING}))
-    result, _ = _scan(_mapping())
+    result, _ = scan(_mapping())
     assert result.pricing_source == "eastus: Azure Retail Prices API; westeurope: default list rates"
 
 
-def test_list_rate_fallback_warns_once_per_region(monkeypatch):
+def test_list_rate_fallback_warns_once_per_region(scan, monkeypatch):
     monkeypatch.setattr(pricing, "fetch_live_pricing", _live_only({"eastus": pricing.DEFAULT_PRICING}))
     factories = {
         "value": [
@@ -135,7 +134,7 @@ def test_list_rate_fallback_warns_once_per_region(monkeypatch):
             {"name": "us-one", "location": "East US", "id": FACTORY_ID + "us-one"},
         ]
     }
-    result, _ = _scan(
+    result, _ = scan(
         _mapping(
             **{
                 "/subscriptions/SUB/providers/Microsoft.DataFactory/factories?": factories,
@@ -148,14 +147,14 @@ def test_list_rate_fallback_warns_once_per_region(monkeypatch):
     ]
 
 
-def test_live_pricing_adds_no_warning(monkeypatch):
+def test_live_pricing_adds_no_warning(scan, monkeypatch):
     monkeypatch.setattr(pricing, "fetch_live_pricing", lambda region: pricing.DEFAULT_PRICING)
-    result, _ = _scan(_mapping())
+    result, _ = scan(_mapping())
     assert result.warnings == []
 
 
-def test_custom_pricing_adds_no_warning(offline_pricing):
-    result, _ = _scan(_mapping(), pricing=pricing.DEFAULT_PRICING)
+def test_custom_pricing_adds_no_warning(scan, offline_pricing):
+    result, _ = scan(_mapping(), pricing=pricing.DEFAULT_PRICING)
     assert result.warnings == []
 
 
@@ -168,35 +167,33 @@ def _live_only(rates_by_region: dict):
     return fetch
 
 
-def test_each_factory_is_priced_with_its_own_regions_rates(monkeypatch):
+def test_each_factory_is_priced_with_its_own_regions_rates(scan, monkeypatch):
     west_europe = {card: dict(rates) for card, rates in pricing.DEFAULT_PRICING.items()}
     west_europe["azure_ir"]["data_movement_per_diu_hour"] = 0.5
     rates_by_region = {"eastus": pricing.DEFAULT_PRICING, "westeurope": west_europe}
     monkeypatch.setattr(pricing, "fetch_live_pricing", rates_by_region.get)
     eu_run = {"value": [{"runId": "r3", "pipelineName": "eu_pipeline"}]}
-    result, _ = _scan(_mapping(**{f"{SECOND}/queryPipelineRuns": eu_run}))
+    result, _ = scan(_mapping(**{f"{SECOND}/queryPipelineRuns": eu_run}))
     data_movement = {cost.pipeline_name: cost.data_movement_cost for cost in result.pipeline_costs}
     assert data_movement == {"copy_pipeline": pytest.approx(0.1), "eu_pipeline": pytest.approx(0.1)}
-    eu_activity = next(run for run in result.activity_runs if run.factory_name == "second-factory")
-    assert eu_activity.execution_cost == pytest.approx(0.1)
 
 
-def test_explicit_pricing_is_labelled_custom(offline_pricing):
-    result, _ = _scan(_mapping(), pricing=pricing.DEFAULT_PRICING)
+def test_explicit_pricing_is_labelled_custom(scan, offline_pricing):
+    result, _ = scan(_mapping(), pricing=pricing.DEFAULT_PRICING)
     assert result.pricing_source == "custom"
     assert offline_pricing == []
 
 
-def test_run_query_forbidden_degrades_gracefully():
-    result, _ = _scan(_mapping(**{f"{DEMO}/queryPipelineRuns": 403}))
+def test_run_query_forbidden_degrades_gracefully(scan):
+    result, _ = scan(_mapping(**{f"{DEMO}/queryPipelineRuns": 403}))
     assert result.total_pipeline_runs == 0
     assert any("Data Factory Contributor" in warning for warning in result.warnings)
 
 
-def test_activity_runs_follow_continuation_token():
-    first_page = {**_load("activity_runs.json"), "continuationToken": "next"}
-    second_page = {"value": [{**_load("activity_runs.json")["value"][0], "activityName": "copy2"}]}
-    result, transport = _scan(
+def test_activity_run_query_follows_continuation_token(scan):
+    first_page = {**_load("activity_run_query.json"), "continuationToken": "next"}
+    second_page = {"value": [{**_load("activity_run_query.json")["value"][0], "activityName": "copy2"}]}
+    result, transport = scan(
         _mapping(
             **{
                 "/pipelineruns/r1/queryActivityruns": [first_page, second_page],
@@ -206,31 +203,32 @@ def test_activity_runs_follow_continuation_token():
     )
     bodies = [body for method, url, body in transport.calls if "/pipelineruns/r1/queryActivityruns" in url]
     assert [body.get("continuationToken") for body in bodies] == [None, "next"]
-    assert [run.activity_name for run in result.activity_runs] == ["copy1", "copy2"]
+    copy_pipeline = next(cost for cost in result.pipeline_costs if cost.pipeline_name == "copy_pipeline")
+    assert copy_pipeline.data_movement_cost == pytest.approx(2 * (3 / 60) * 4 * 0.25)
 
 
-def test_activity_query_forbidden_warns_once_about_the_role():
-    result, _ = _scan(_mapping(**{"/queryActivityruns": 403}))
+def test_activity_query_forbidden_warns_once_about_the_role(scan):
+    result, _ = scan(_mapping(**{"/queryActivityruns": 403}))
     assert result.pipeline_costs == []
     denied = [warning for warning in result.warnings if "Cannot query activity runs" in warning]
     assert denied == ["demo-factory: Cannot query activity runs (need Data Factory Contributor)"]
     assert any("2 of 2 pipeline runs could not be costed" in warning for warning in result.warnings)
 
 
-def test_failed_activity_query_skips_that_run_but_counts_it():
-    result, _ = _scan(_mapping(**{"/queryActivityruns": 500}))
+def test_failed_activity_query_skips_that_run_but_counts_it(scan):
+    result, _ = scan(_mapping(**{"/queryActivityruns": 500}))
     assert result.total_pipeline_runs == 2
     assert result.pipeline_costs == []
 
 
-def test_no_factories_yields_empty_result():
-    result, _ = _scan(_mapping(**{"/subscriptions/SUB/providers/Microsoft.DataFactory/factories?": {"value": []}}))
+def test_no_factories_yields_empty_result(scan):
+    result, _ = scan(_mapping(**{"/subscriptions/SUB/providers/Microsoft.DataFactory/factories?": {"value": []}}))
     assert result.total_pipeline_runs == 0
     assert result.region == ""
 
 
-def test_no_factories_skips_the_price_lookup(offline_pricing):
-    result, _ = _scan(_mapping(**{"/subscriptions/SUB/providers/Microsoft.DataFactory/factories?": {"value": []}}))
+def test_no_factories_skips_the_price_lookup(scan, offline_pricing):
+    result, _ = scan(_mapping(**{"/subscriptions/SUB/providers/Microsoft.DataFactory/factories?": {"value": []}}))
     assert offline_pricing == []
     assert len(result.warnings) == 1
     assert "No Data Factory factories found" in result.warnings[0]
@@ -239,8 +237,8 @@ def test_no_factories_skips_the_price_lookup(offline_pricing):
 COST_QUERY = "/subscriptions/SUB/providers/Microsoft.CostManagement/query"
 
 
-def test_actuals_matched_from_cost_management():
-    result, transport = _scan(_mapping(**{COST_QUERY: _load("cost_management.json")}))
+def test_actuals_matched_from_cost_management(scan):
+    result, transport = scan(_mapping(**{COST_QUERY: _load("cost_management.json")}))
     demo_actuals = [actual for actual in result.actual_costs if actual.factory_name == "demo-factory"]
     assert [(actual.cost, actual.meter_subcategory, actual.currency) for actual in demo_actuals] == [
         (12.34, "", "USD"),
@@ -253,30 +251,30 @@ def test_actuals_matched_from_cost_management():
     assert cost_bodies[0]["type"] == "ActualCost"
 
 
-def test_actuals_follow_next_link_pages():
+def test_actuals_follow_next_link_pages(scan):
     next_link = "https://management.azure.com/subscriptions/SUB/providers/Microsoft.CostManagement/query?skiptoken=2"
     first_page = _cost_rows((1.0, FACTORY_ID + "demo-factory"))
     first_page["properties"]["nextLink"] = next_link
     second_page = _cost_rows((2.0, FACTORY_ID + "demo-factory"))
-    result, transport = _scan(_mapping(**{COST_QUERY: [first_page, second_page]}))
+    result, transport = scan(_mapping(**{COST_QUERY: [first_page, second_page]}))
     assert [actual.cost for actual in result.actual_costs] == [1.0, 2.0]
     cost_calls = [(url, body) for method, url, body in transport.calls if COST_QUERY in url]
     assert cost_calls[1][0] == next_link
     assert cost_calls[1][1] == cost_calls[0][1]
 
 
-def test_repeated_next_link_stops_paging():
+def test_repeated_next_link_stops_paging(scan):
     page = _cost_rows((1.0, FACTORY_ID + "demo-factory"))
     page["properties"]["nextLink"] = (
         "https://management.azure.com/subscriptions/SUB/providers/Microsoft.CostManagement/query?skiptoken=2"
     )
     unexpected = AssertionError("paged past a repeated nextLink")
-    result, transport = _scan(_mapping(**{COST_QUERY: [page, page, unexpected]}))
+    result, transport = scan(_mapping(**{COST_QUERY: [page, page, unexpected]}))
     assert len([url for method, url, body in transport.calls if COST_QUERY in url]) == 2
     assert [actual.cost for actual in result.actual_costs] == [1.0, 1.0]
 
 
-def test_each_cost_page_is_decoded_with_its_own_columns():
+def test_each_cost_page_is_decoded_with_its_own_columns(scan):
     first_page = _cost_rows((1.0, FACTORY_ID + "demo-factory"))
     first_page["properties"]["nextLink"] = (
         "https://management.azure.com/subscriptions/SUB/providers/Microsoft.CostManagement/query?skiptoken=2"
@@ -287,30 +285,30 @@ def test_each_cost_page_is_decoded_with_its_own_columns():
             "rows": [[FACTORY_ID + "demo-factory", "", 2.0]],
         }
     }
-    result, _ = _scan(_mapping(**{COST_QUERY: [first_page, second_page]}))
+    result, _ = scan(_mapping(**{COST_QUERY: [first_page, second_page]}))
     assert [(actual.factory_name, actual.cost) for actual in result.actual_costs] == [
         ("demo-factory", 1.0),
         ("demo-factory", 2.0),
     ]
 
 
-def test_actuals_survive_a_window_with_no_runs():
-    result, _ = _scan(
+def test_actuals_survive_a_window_with_no_runs(scan):
+    result, _ = scan(
         _mapping(**{COST_QUERY: _load("cost_management.json"), f"{DEMO}/queryPipelineRuns": {"value": []}})
     )
     assert result.total_pipeline_runs == 0
     assert result.actual_costs
 
 
-def test_cost_management_forbidden_yields_empty_actuals():
-    result, _ = _scan(_mapping(**{COST_QUERY: 403}))
+def test_cost_management_forbidden_yields_empty_actuals(scan):
+    result, _ = scan(_mapping(**{COST_QUERY: 403}))
     assert result.actual_costs == []
     assert result.cost_management_denied == ["SUB"]
     assert any("Cost Management Reader" in warning for warning in result.warnings)
 
 
-def test_empty_cost_management_is_valid():
-    result, _ = _scan(_mapping(**{COST_QUERY: {"properties": {"columns": [], "rows": []}}}))
+def test_empty_cost_management_is_valid(scan):
+    result, _ = scan(_mapping(**{COST_QUERY: {"properties": {"columns": [], "rows": []}}}))
     assert result.actual_costs == []
     assert result.cost_management_denied == []
 
@@ -328,13 +326,13 @@ def _cost_rows(*rows: tuple[float, str]) -> dict:
 FACTORY_ID = "/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.DataFactory/factories/"
 
 
-def test_factory_name_that_prefixes_another_does_not_claim_its_billing():
+def test_factory_name_that_prefixes_another_does_not_claim_its_billing(scan):
     # The original matched by substring, so "demo-factory" also took "demo-factory-old"'s billing.
-    result, _ = _scan(_mapping(**{COST_QUERY: _cost_rows((1.0, FACTORY_ID + "demo-factory-old"))}))
+    result, _ = scan(_mapping(**{COST_QUERY: _cost_rows((1.0, FACTORY_ID + "demo-factory-old"))}))
     assert result.actual_costs == []
 
 
-def test_factories_whose_names_prefix_each_other_each_get_their_own_billing():
+def test_factories_whose_names_prefix_each_other_each_get_their_own_billing(scan):
     # Live case: "flowx-profiler-test-adf" and "flowx-profiler-test-adf-vnet" in one resource group.
     factories = {
         "value": [
@@ -344,7 +342,7 @@ def test_factories_whose_names_prefix_each_other_each_get_their_own_billing():
     }
     # Cost Management lowercases resource IDs.
     rows = _cost_rows((1.0, FACTORY_ID.lower() + "test-adf-vnet"), (2.0, FACTORY_ID.lower() + "test-adf"))
-    result, _ = _scan(
+    result, _ = scan(
         _mapping(
             **{
                 "/subscriptions/SUB/providers/Microsoft.DataFactory/factories?": factories,
@@ -359,20 +357,20 @@ def test_factories_whose_names_prefix_each_other_each_get_their_own_billing():
     ]
 
 
-def test_subscription_names_recorded_for_the_report():
-    result, _ = _scan(_mapping())
+def test_subscription_names_recorded_for_the_report(scan):
+    result, _ = scan(_mapping())
     assert result.subscription_names == {"SUB": "Demo Subscription", "OTHER": "Other Subscription"}
 
 
-def test_uncostable_runs_are_reported_not_silently_dropped():
-    result, _ = _scan(_mapping(**{"/queryActivityruns": 500}))
+def test_uncostable_runs_are_reported_not_silently_dropped(scan):
+    result, _ = scan(_mapping(**{"/queryActivityruns": 500}))
     assert any("2 of 2 pipeline runs could not be costed" in warning for warning in result.warnings)
 
 
-def test_bad_activity_output_drops_only_that_run():
+def test_bad_activity_output_drops_only_that_run(scan):
     bad = {"value": [{"activityType": "Copy", "durationInMs": 60000, "output": {"usedDataIntegrationUnits": None}}]}
-    good = _load("activity_runs.json")
-    result, _ = _scan(
+    good = _load("activity_run_query.json")
+    result, _ = scan(
         _mapping(**{"/pipelineruns/r1/queryActivityruns": bad, "/pipelineruns/r2/queryActivityruns": good})
     )
     copy_pipeline = next(cost for cost in result.pipeline_costs if cost.pipeline_name == "copy_pipeline")
@@ -380,45 +378,42 @@ def test_bad_activity_output_drops_only_that_run():
     assert any("1 of 2 pipeline runs could not be costed" in warning for warning in result.warnings)
 
 
-def test_no_subscriptions_warns_about_identity():
-    result, _ = _scan(_mapping(**{"/subscriptions?": {"value": []}}))
+def test_no_subscriptions_warns_about_identity(scan):
+    result, _ = scan(_mapping(**{"/subscriptions?": {"value": []}}))
     assert any("No accessible subscriptions" in warning and "tenant" in warning for warning in result.warnings)
 
 
-def test_no_factories_warns():
+def test_no_factories_warns(scan):
     empty = {"value": []}
-    result, _ = _scan(_mapping(**{"/subscriptions/SUB/providers/Microsoft.DataFactory/factories?": empty}))
+    result, _ = scan(_mapping(**{"/subscriptions/SUB/providers/Microsoft.DataFactory/factories?": empty}))
     assert any("No Data Factory factories found" in warning for warning in result.warnings)
 
 
-def test_managed_vnet_notebook_is_priced_at_the_vnet_external_rate():
+def test_managed_vnet_notebook_is_priced_at_the_vnet_external_rate(scan):
     # Shapes from a live factory: the run names its IR "managedvnetir (West US)" and billingReference is null.
-    result, _ = _scan(
+    result, _ = scan(
         _mapping(
             **{
                 "/integrationRuntimes?": _load("integration_runtimes_managed_vnet.json"),
-                "/queryActivityruns": _load("activity_runs_managed_vnet.json"),
+                "/queryActivityruns": _load("activity_run_query_managed_vnet.json"),
             }
         )
     )
-    notebook_run = result.activity_runs[0]
-    assert notebook_run.ir_type == "managed_vnet_ir"
-    # 118.6 s bills as 2 minutes at the managed-VNet external rate ($1.00/h list); rounded to 6 dp.
-    assert notebook_run.execution_cost == pytest.approx(
-        (2 / 60) * pricing.DEFAULT_PRICING["managed_vnet_ir"]["external_activity_per_hour"], abs=1e-6
-    )
+    pipeline = next(cost for cost in result.pipeline_costs if cost.pipeline_name == "copy_pipeline")
+    vnet_rate = pricing.DEFAULT_PRICING["managed_vnet_ir"]["external_activity_per_hour"]
+    assert pipeline.external_cost == pytest.approx(2 * (2 / 60) * vnet_rate, abs=1e-4)
 
 
-def test_billed_quantities_from_azure_take_precedence_over_duration():
-    # Azure IR runs report what Azure billed. Here a 3-minute Lookup is billed as 1 minute of pipeline
+def test_billed_quantities_from_azure_take_precedence_over_duration(scan):
+    # Azure IR runs report what Azure billed. Here a 3-hour Lookup is billed as 1 hour of pipeline
     # activity, and a data flow is billed for the 0.354 vCore-hours its cluster used; the duration
-    # estimate would be 3 minutes, and 8 vCores x 3 minutes = 0.4 vCore-hours.
+    # estimate would be 3 hours for the Lookup, and 8 vCores x 3 minutes = 0.4 vCore-hours for the data flow.
     activities = {
         "value": [
             _activity(
                 "Lookup",
-                180_000,
-                _reference("PipelineActivity", [{"duration": 1 / 60, "meterType": "AzureIR", "unit": "Hours"}]),
+                10_800_000,
+                _reference("PipelineActivity", [{"duration": 1, "meterType": "AzureIR", "unit": "Hours"}]),
             ),
             _activity(
                 "ExecuteDataFlow",
@@ -427,22 +422,22 @@ def test_billed_quantities_from_azure_take_precedence_over_duration():
             ),
         ]
     }
-    result, _ = _scan(_mapping(**{"/queryActivityruns": activities}))
-    lookup_run, data_flow_run = result.activity_runs[:2]
+    result, _ = scan(_mapping(**{"/queryActivityruns": activities}))
+    pipeline = next(cost for cost in result.pipeline_costs if cost.pipeline_name == "copy_pipeline")
     lookup_rate = pricing.DEFAULT_PRICING["azure_ir"]["pipeline_activity_per_hour"]
-    assert lookup_run.execution_cost == pytest.approx((1 / 60) * lookup_rate, abs=1e-6)
-    assert data_flow_run.execution_cost == pytest.approx(0.354 * cost_model.DATAFLOW_VCORE_RATE, abs=1e-6)
+    assert pipeline.pipeline_activity_cost == pytest.approx(2 * 1 * lookup_rate, abs=1e-4)
+    assert pipeline.external_cost == pytest.approx(2 * 0.354 * cost_model.DATAFLOW_VCORE_RATE, abs=1e-4)
 
 
-def test_billed_bucket_comes_from_azure_not_the_activity_type():
+def test_billed_bucket_comes_from_azure_not_the_activity_type(scan):
     # An activity type the duration fallback doesn't know would land in the pipeline-activity bucket;
     # Azure says it bills as ExternalActivity, so it lands there.
-    reference = _reference("ExternalActivity", [{"duration": 2 / 60, "meterType": "AzureIR", "unit": "Hours"}])
-    result, _ = _scan(_mapping(**{"/queryActivityruns": {"value": [_activity("SomeNewActivity", 110_713, reference)]}}))
+    reference = _reference("ExternalActivity", [{"duration": 100, "meterType": "AzureIR", "unit": "Hours"}])
+    result, _ = scan(_mapping(**{"/queryActivityruns": {"value": [_activity("SomeNewActivity", 110_713, reference)]}}))
     pipeline = next(cost for cost in result.pipeline_costs if cost.pipeline_name == "copy_pipeline")
     assert pipeline.pipeline_activity_cost == 0
     external_rate = pricing.DEFAULT_PRICING["azure_ir"]["external_activity_per_hour"]
-    assert pipeline.external_cost == pytest.approx(2 * (2 / 60) * external_rate, abs=1e-4)
+    assert pipeline.external_cost == pytest.approx(2 * 100 * external_rate, abs=1e-4)
 
 
 def _reference(activity_type: str, billable_duration: list[dict]) -> dict:

@@ -7,7 +7,7 @@ from flowx.sources import get_source
 
 
 def test_adf_source_declares_a_profile_module():
-    assert get_source("adf").profile_module == "flowx.sources.adf.profiler.runner"
+    assert get_source("adf").profile_module == "flowx.sources.adf.profile.runner"
 
 
 def test_airflow_source_has_no_profile_module():
@@ -21,7 +21,7 @@ def test_profile_routes_to_runner(monkeypatch):
         captured["argv"] = argv
         return 0
 
-    import flowx.sources.adf.profiler.runner as runner
+    import flowx.sources.adf.profile.runner as runner
 
     monkeypatch.setattr(runner, "main", fake_main)
     code = adapter_main.main(["profile", "--source", "adf", "--output-dir", "out"])
@@ -31,7 +31,7 @@ def test_profile_routes_to_runner(monkeypatch):
 
 def test_profile_aliases_source_path_to_source_dir(monkeypatch):
     captured = {}
-    import flowx.sources.adf.profiler.runner as runner
+    import flowx.sources.adf.profile.runner as runner
 
     monkeypatch.setattr(runner, "main", lambda argv: captured.setdefault("argv", argv) and 0)
     adapter_main.main(["profile", "--source", "adf", "--source-path", "ignored"])

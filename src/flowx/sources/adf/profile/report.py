@@ -12,7 +12,7 @@ import io
 from pathlib import Path
 from typing import Any
 
-from flowx.sources.adf.profiler.models import ProfileResult
+from flowx.sources.adf.profile.models import ProfileResult
 
 # Meter subcategories Cost Management uses for the ADF compute/orchestration the estimate prices. Live
 # data tags it "Azure Data Factory v2", and Mapping Data Flow vCores get one subcategory per compute tier;

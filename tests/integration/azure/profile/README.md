@@ -3,7 +3,7 @@
 `flowx profile` scans Azure live: it reads pipeline and activity run history and Cost Management billing.
 Neither exists for a factory that was just deployed, so unlike the translation suite in `../adf/`, this suite
 can't deploy fixtures and test live in CI. Instead it replays one live capture offline, in
-`tests/integration/test_profiler_golden.py`, as part of `make integration`.
+`tests/integration/test_adf_profile_golden.py`, as part of `make integration`.
 
 ## What's in `capture/`
 
@@ -59,13 +59,13 @@ python extract_pipelines.py --subscription-id <SUBSCRIPTION_ID> --resource-group
   --days <DAYS> --no-synapse --no-fabric --output-dir /tmp/flowx-golden/original/out
 
 # 2. Immediately after: the port, recording every exchange (unredacted; keep it outside the repo).
-PYTHONPATH=src python tests/integration/azure/profiler/record.py --subscription-id <SUBSCRIPTION_ID> \
+PYTHONPATH=src python tests/integration/azure/profile/record.py --subscription-id <SUBSCRIPTION_ID> \
   --resource-group flowx-profiler-test-rg --days <DAYS> --out /tmp/flowx-golden/port
 
 # 3. Redact into capture/, then regenerate expected/ and review both diffs.
-python tests/integration/azure/profiler/redact.py --raw /tmp/flowx-golden/port \
-  --original /tmp/flowx-golden/original/out/<timestamp> --out tests/integration/azure/profiler/capture
-PYTHONPATH=src uv run --frozen pytest tests/integration/test_profiler_golden.py --update-expected
+python tests/integration/azure/profile/redact.py --raw /tmp/flowx-golden/port \
+  --original /tmp/flowx-golden/original/out/<timestamp> --out tests/integration/azure/profile/capture
+PYTHONPATH=src uv run --frozen pytest tests/integration/test_adf_profile_golden.py --update-expected
 ```
 
 `redact.py` gives every distinct GUID its own alias (`<SUBSCRIPTION_1>`, `<ID_0001>`, ...) in URLs and

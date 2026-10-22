@@ -5,8 +5,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from flowx.sources.adf.profiler import report
-from flowx.sources.adf.profiler.models import ActualCost, PipelineCost, ProfileResult
+from flowx.sources.adf.profile import report
+from flowx.sources.adf.profile.models import ActualCost, PipelineCost, ProfileResult
 
 
 def _pipeline(name: str, factory: str = "demo-factory", **costs: float) -> PipelineCost:

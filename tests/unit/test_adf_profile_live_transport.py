@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from flowx.sources.adf.profiler import azure_client, pricing
+from flowx.sources.adf.profile import azure_client, core, pricing
 
 
 class FakeResponse:
@@ -184,7 +184,7 @@ def test_bearer_token_never_follows_an_off_host_next_link(monkeypatch):
         }
     )
     transport = azure_client.LiveTransport(TokenCredential(), session=session)
-    result = azure_client.AdfScanner(credential=None, days=45, transport=transport).scan()
+    result = core.AdfScanner(credential=None, days=45, transport=transport).scan()
     assert all(url.startswith("https://management.azure.com/") for url, _ in session.requests)
     assert [actual.cost for actual in result.actual_costs] == [1.0]
     assert any("outside https://management.azure.com" in warning for warning in result.warnings)
