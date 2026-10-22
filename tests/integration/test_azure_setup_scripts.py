@@ -202,7 +202,9 @@ def test_role_is_scoped_to_one_resource_group_with_specific_actions(
     assert "Microsoft.EventGrid/eventSubscriptions/write" in role["Actions"]
     assert {
         "Microsoft.DataFactory/factories/querypipelineruns/action",
+        "Microsoft.DataFactory/factories/querypipelineruns/read",
         "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action",
+        "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/read",
     } <= set(role["Actions"])
     assert set(role["NotActions"]) == {
         "Microsoft.Storage/storageAccounts/listKeys/action",

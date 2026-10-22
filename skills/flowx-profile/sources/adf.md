@@ -11,7 +11,7 @@ on the subscription or the resource group being profiled:
 | Role | Unlocks | If missing |
 |---|---|---|
 | **Reader** | Listing subscriptions, factories, and integration runtimes | No factories found, so the report is empty |
-| **Data Factory Contributor** (or a custom role with `Microsoft.DataFactory/factories/querypipelineruns/action` and `.../pipelineruns/queryactivityruns/action`) | Querying pipeline runs and activity runs (needed for the estimate) | A warning per factory naming the HTTP status, Azure's error code, and the missing permission; that factory has no estimate |
+| **Data Factory Contributor** (or a custom role with `Microsoft.DataFactory/factories/querypipelineruns/action` and `/read`, and `Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action` and `/read`) | Querying pipeline runs and activity runs (needed for the estimate) | A warning per factory naming the HTTP status, Azure's error code, and the permissions it needs; that factory has no estimate |
 | **Cost Management Reader** (or Billing Reader) | Azure-billed actuals | A warning with the HTTP status and Azure's error code, and the report's "Cost Management Access Issues" section lists the subscription; estimates still appear |
 
 Each of these denials also logs one line to stderr with the failed call's URL and its `x-ms-request-id` /

@@ -215,7 +215,8 @@ def test_activity_query_forbidden_warns_once_about_the_role(scan):
     denied = [warning for warning in result.warnings if "Cannot query activity runs" in warning]
     assert denied == [
         "demo-factory: Cannot query activity runs (HTTP 403); needs "
-        "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action, included in Data Factory Contributor"
+        "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action and "
+        "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/read, included in Data Factory Contributor"
     ]
     assert any("2 of 2 pipeline runs could not be costed" in warning for warning in result.warnings)
 
@@ -480,12 +481,14 @@ def test_denials_name_the_status_code_and_permission_and_log_the_request_ids(sca
         "Subscription SUB...: Cost Management access denied "
         "(HTTP 403 RBACAccessDenied; need Billing Reader or Cost Management Reader on this subscription)",
         "demo-factory: Cannot query pipeline runs (HTTP 403 AuthorizationFailed); needs "
-        "Microsoft.DataFactory/factories/querypipelineruns/action, included in Data Factory Contributor",
+        "Microsoft.DataFactory/factories/querypipelineruns/action and "
+        "Microsoft.DataFactory/factories/querypipelineruns/read, included in Data Factory Contributor",
     ]
     assert sorted(record.getMessage() for record in caplog.records) == [
         "Azure answered HTTP 403 AuthorizationFailed for pipeline-runs-url "
         "(x-ms-request-id req-1, x-ms-correlation-request-id corr-1)",
-        "Azure answered HTTP 403 RBACAccessDenied for cost-url (x-ms-request-id req-1, x-ms-correlation-request-id corr-1)",
+        "Azure answered HTTP 403 RBACAccessDenied for cost-url "
+        "(x-ms-request-id req-1, x-ms-correlation-request-id corr-1)",
     ]
     write_reports(result, tmp_path)
     reports = [path.read_text() for path in (tmp_path / "metadata" / "tco").iterdir()]
@@ -498,8 +501,10 @@ def test_activity_run_denials_warn_and_log_once_per_factory_whatever_the_code(sc
         result, _ = scan(_mapping(**{"/queryActivityruns": denials}))
     assert [warning for warning in result.warnings if "Cannot query activity runs" in warning] == [
         "demo-factory: Cannot query activity runs (HTTP 403 AuthorizationFailed); needs "
-        "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action, included in Data Factory Contributor"
+        "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action and "
+        "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/read, included in Data Factory Contributor"
     ]
     assert [record.getMessage() for record in caplog.records] == [
-        "Azure answered HTTP 403 AuthorizationFailed for r1-url (x-ms-request-id req-1, x-ms-correlation-request-id corr-1)"
+        "Azure answered HTTP 403 AuthorizationFailed for r1-url "
+        "(x-ms-request-id req-1, x-ms-correlation-request-id corr-1)"
     ]

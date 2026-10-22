@@ -32,12 +32,14 @@ _LIVE_PRICING = "Azure Retail Prices API"
 
 _PIPELINE_RUNS_DENIED = (
     "{factory}: Cannot query pipeline runs ({reason}); "
-    "needs Microsoft.DataFactory/factories/querypipelineruns/action, included in Data Factory Contributor"
+    "needs Microsoft.DataFactory/factories/querypipelineruns/action and "
+    "Microsoft.DataFactory/factories/querypipelineruns/read, included in Data Factory Contributor"
 )
 _ACTIVITY_RUNS_DENIED_PREFIX = "{factory}: Cannot query activity runs ("
 _ACTIVITY_RUNS_DENIED = (
     _ACTIVITY_RUNS_DENIED_PREFIX + "{reason}); "
-    "needs Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action, included in Data Factory Contributor"
+    "needs Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action and "
+    "Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/read, included in Data Factory Contributor"
 )
 _NO_SUBSCRIPTIONS = (
     "No accessible subscriptions found. The signed-in identity may belong to the wrong tenant "

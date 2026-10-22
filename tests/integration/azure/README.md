@@ -117,10 +117,12 @@ Terraform needs (`REQUIRED_ROLE_ACTIONS` in `.github/scripts/setup-integration.s
 read, write, and delete the storage account, its blob containers, the Key Vault, the data factory and its
 child resources, and the Event Grid subscription the Blob Events trigger uses; and read the storage
 account's blob, file, queue, and table service settings. It also allows the two read-only run queries the
-profile phase makes, `Microsoft.DataFactory/factories/querypipelineruns/action` and
-`Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action`. It doesn't grant Cost Management:
-the profile phase reads billing at subscription scope, which a resource-group role can't reach, so the live
-profile test expects the "Cost Management access denied" warning. It can't create or delete resource groups. Its
+profile phase makes, each with its paired result read: `Microsoft.DataFactory/factories/querypipelineruns/action`
+and `.../querypipelineruns/read`, and `Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action` and
+`.../pipelineruns/queryactivityruns/read`. With only the `/action` entries, a live run got `403 AuthorizationFailed`
+on `queryPipelineRuns`. It doesn't grant Cost Management: the profile phase reads billing at subscription scope,
+which a resource-group role can't reach, so the live profile test expects the "Cost Management access denied"
+warning. It can't create or delete resource groups. Its
 `NotActions` also block storage-key listing, account SAS, key regeneration, and Key Vault access-policy writes
 (shared-key access is disabled in `main.tf`).
 
@@ -128,9 +130,9 @@ This role is narrower than before but isn't a full sandbox. A dedicated sandbox 
 recommended. If a live run fails with an authorization error for an action not listed, add that exact action
 to `REQUIRED_ROLE_ACTIONS` and rerun `role`.
 
-The profile phase's two run-query actions were added after the first setup, so an admin must rerun
-`make setup-integration ARGS="role"` once; until then `verify` reports the role as mismatched and the live
-profile test fails on the "Cannot query pipeline runs" warning.
+The profile phase's run-query actions, and later their two `/read` pairs, were added after the first setup, so an
+admin must rerun `make setup-integration ARGS="role"` once; until then `verify` reports the role as mismatched and
+the live profile test fails on the "Cannot query pipeline runs" warning.
 
 Existing installations must rerun `make setup-integration ARGS="role"` (or the full
 `make setup-integration ARGS="setup"`), then `ARGS="secrets"` to add `AZURE_RESOURCE_GROUP`, and
