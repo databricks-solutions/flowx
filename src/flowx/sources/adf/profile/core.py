@@ -30,8 +30,15 @@ logger = logging.getLogger(__name__)
 
 _LIVE_PRICING = "Azure Retail Prices API"
 
-_PIPELINE_RUNS_DENIED = "{factory}: Cannot query pipeline runs (need Data Factory Contributor)"
-_ACTIVITY_RUNS_DENIED = "{factory}: Cannot query activity runs (need Data Factory Contributor)"
+_PIPELINE_RUNS_DENIED = (
+    "{factory}: Cannot query pipeline runs ({reason}); "
+    "needs Microsoft.DataFactory/factories/querypipelineruns/action, included in Data Factory Contributor"
+)
+_ACTIVITY_RUNS_DENIED_PREFIX = "{factory}: Cannot query activity runs ("
+_ACTIVITY_RUNS_DENIED = (
+    _ACTIVITY_RUNS_DENIED_PREFIX + "{reason}); "
+    "needs Microsoft.DataFactory/factories/pipelineruns/queryactivityruns/action, included in Data Factory Contributor"
+)
 _NO_SUBSCRIPTIONS = (
     "No accessible subscriptions found. The signed-in identity may belong to the wrong tenant "
     "(on Databricks, the workspace's own identity is in Databricks' tenant, not yours).\n" + AUTH_HINT
@@ -53,7 +60,7 @@ _COST_MANAGEMENT_OFF_HOST = (
 )
 _COST_MANAGEMENT_DENIED = (
     "Subscription {subscription}...: Cost Management access denied "
-    "(need Billing Reader or Cost Management Reader on this subscription)"
+    "({reason}; need Billing Reader or Cost Management Reader on this subscription)"
 )
 
 
@@ -254,8 +261,11 @@ class AdfScanner:
             raise
         except TransportHttpError as error:
             if error.status in (401, 403):
-                result.warnings.append(_COST_MANAGEMENT_DENIED.format(subscription=subscription_id[:8]))
+                result.warnings.append(
+                    _COST_MANAGEMENT_DENIED.format(subscription=subscription_id[:8], reason=error.reason)
+                )
                 result.cost_management_denied.append(subscription_id)
+                _log_denied(error)
             else:
                 logger.warning(
                     "Cost Management query for sub %s... returned HTTP %s", subscription_id[:8], error.status
@@ -292,7 +302,8 @@ class AdfScanner:
             raise
         except TransportHttpError as error:
             if error.status in (401, 403):
-                result.warnings.append(_PIPELINE_RUNS_DENIED.format(factory=factory["name"]))
+                result.warnings.append(_PIPELINE_RUNS_DENIED.format(factory=factory["name"], reason=error.reason))
+                _log_denied(error)
             else:
                 logger.error("[%s] Pipeline runs: HTTP %s", factory["name"], error.status)
         except Exception as error:
@@ -338,9 +349,10 @@ class AdfScanner:
         except ProfileAuthenticationError:
             raise
         except TransportHttpError as error:
-            denied = _ACTIVITY_RUNS_DENIED.format(factory=factory["name"])
-            if error.status in (401, 403) and denied not in result.warnings:
-                result.warnings.append(denied)
+            prefix = _ACTIVITY_RUNS_DENIED_PREFIX.format(factory=factory["name"])
+            if error.status in (401, 403) and not any(warning.startswith(prefix) for warning in result.warnings):
+                result.warnings.append(_ACTIVITY_RUNS_DENIED.format(factory=factory["name"], reason=error.reason))
+                _log_denied(error)
             return None
         except Exception:
             return None
@@ -399,3 +411,13 @@ def _pricing_label(source_by_region: dict[str, str]) -> str:
         [(region, source)] = source_by_region.items()
         return f"{source} ({region})"
     return "; ".join(f"{region}: {source}" for region, source in source_by_region.items())
+
+
+def _log_denied(error: TransportHttpError) -> None:
+    logger.warning(
+        "Azure answered %s for %s (x-ms-request-id %s, x-ms-correlation-request-id %s)",
+        error.reason,
+        error.url,
+        error.request_id or "none",
+        error.correlation_id or "none",
+    )

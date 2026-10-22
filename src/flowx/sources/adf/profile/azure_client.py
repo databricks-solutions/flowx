@@ -5,6 +5,7 @@ until the profile phase actually runs.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -67,10 +68,30 @@ def get_credential() -> Any:
 class TransportHttpError(Exception):
     """A non-200 answer from Azure. `status` lets callers turn 401/403 into "missing role" notes."""
 
-    def __init__(self, status: int, url: str):
-        super().__init__(f"HTTP {status} from {url}")
+    def __init__(
+        self,
+        status: int,
+        url: str,
+        *,
+        code: str = "",
+        request_id: str = "",
+        correlation_id: str = "",
+    ):
         self.status = status
         self.url = url
+        self.code = code
+        self.request_id = request_id
+        self.correlation_id = correlation_id
+        self.reason = f"HTTP {status} {code}" if code else f"HTTP {status}"
+        super().__init__(f"{self.reason} from {url}")
+
+
+def _azure_error_code(response: Any) -> str:
+    try:
+        code = str(response.json()["error"]["code"])
+    except Exception:
+        return ""
+    return code if re.fullmatch(r"[A-Za-z0-9]{1,64}", code) else ""
 
 
 def is_https_on(url: str, host: str) -> bool:
@@ -147,7 +168,13 @@ class LiveTransport:
                 self._headers = None
                 continue
             if response.status_code != 200:
-                raise TransportHttpError(response.status_code, url)
+                raise TransportHttpError(
+                    response.status_code,
+                    url,
+                    code=_azure_error_code(response),
+                    request_id=response.headers.get("x-ms-request-id", ""),
+                    correlation_id=response.headers.get("x-ms-correlation-request-id", ""),
+                )
             payload: dict[str, Any] = response.json()
             return payload
         raise AssertionError("unreachable")

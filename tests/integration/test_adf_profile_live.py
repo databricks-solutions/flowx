@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -127,8 +128,8 @@ def test_profile_scans_the_ephemeral_factory(tmp_path):
     warnings = [
         line.removeprefix("warning: ") for line in completed.stderr.splitlines() if line.startswith("warning: ")
     ]
-    cost_management_denied = (
-        f"Subscription {subscription_id[:8]}...: Cost Management access denied "
-        "(need Billing Reader or Cost Management Reader on this subscription)"
+    cost_management_denied = re.compile(
+        rf"Subscription {re.escape(subscription_id[:8])}\.\.\.: Cost Management access denied "
+        r"\(HTTP 40[13] [A-Za-z0-9]+; need Billing Reader or Cost Management Reader on this subscription\)"
     )
-    assert warnings == [cost_management_denied], completed.stderr
+    assert len(warnings) == 1 and cost_management_denied.fullmatch(warnings[0]), completed.stderr

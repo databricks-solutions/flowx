@@ -11,12 +11,18 @@ from flowx.sources.adf.profile import azure_client, core, discovery, pricing
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, payload: dict):
+    def __init__(self, status_code: int, payload: dict, headers: dict | None = None):
         self.status_code = status_code
         self._payload = payload
+        self.headers = headers or {}
 
     def json(self) -> dict:
         return self._payload
+
+
+class HtmlResponse(FakeResponse):
+    def json(self) -> dict:
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
 
 
 class FakeSession:
@@ -83,6 +89,44 @@ def test_non_200_raises_transport_http_error():
     with pytest.raises(azure_client.TransportHttpError) as exc:
         transport.post_json("https://management.azure.com/x", {})
     assert exc.value.status == 403
+
+
+def test_an_azure_error_code_and_request_ids_are_kept_on_the_error():
+    body = {"error": {"code": "AuthorizationFailed", "message": "The client 'abc' does not have authorization"}}
+    headers = {"x-ms-request-id": "req-1", "x-ms-correlation-request-id": "corr-1", "Set-Cookie": "secret"}
+    session = FakeSession(FakeResponse(403, body, headers))
+    transport = azure_client.LiveTransport(TokenCredential(), session=session)
+    with pytest.raises(azure_client.TransportHttpError) as exc:
+        transport.post_json("https://management.azure.com/x", {})
+    error = exc.value
+    assert (error.status, error.code, error.request_id, error.correlation_id) == (
+        403,
+        "AuthorizationFailed",
+        "req-1",
+        "corr-1",
+    )
+    assert error.reason == "HTTP 403 AuthorizationFailed"
+    assert str(error) == "HTTP 403 AuthorizationFailed from https://management.azure.com/x"
+    assert "abc" not in repr(vars(error))
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        HtmlResponse(502, {}),
+        FakeResponse(403, {"error": "denied"}),
+        FakeResponse(403, []),
+        FakeResponse(403, {"error": {"code": "A" * 65}}),
+        FakeResponse(403, {"error": {"code": "Authorization Failed; see https://evil.example.com"}}),
+        FakeResponse(403, {"error": {"code": ["AuthorizationFailed"]}}),
+    ],
+)
+def test_an_error_body_without_a_short_azure_code_leaves_the_code_empty(response):
+    transport = azure_client.LiveTransport(TokenCredential(), session=FakeSession(response))
+    with pytest.raises(azure_client.TransportHttpError) as exc:
+        transport.get_json("https://management.azure.com/x")
+    assert (exc.value.code, exc.value.request_id) == ("", "")
+    assert exc.value.reason == f"HTTP {response.status_code}"
 
 
 def test_credential_failure_becomes_profile_authentication_error():

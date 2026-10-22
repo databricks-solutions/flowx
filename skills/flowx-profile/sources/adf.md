@@ -11,8 +11,12 @@ on the subscription or the resource group being profiled:
 | Role | Unlocks | If missing |
 |---|---|---|
 | **Reader** | Listing subscriptions, factories, and integration runtimes | No factories found, so the report is empty |
-| **Data Factory Contributor** | Querying pipeline runs and activity runs (needed for the estimate) | A warning per factory ("need Data Factory Contributor"); that factory has no estimate |
-| **Cost Management Reader** (or Billing Reader) | Azure-billed actuals | A warning, and the report's "Cost Management Access Issues" section lists the subscription; estimates still appear |
+| **Data Factory Contributor** (or a custom role with `Microsoft.DataFactory/factories/querypipelineruns/action` and `.../pipelineruns/queryactivityruns/action`) | Querying pipeline runs and activity runs (needed for the estimate) | A warning per factory naming the HTTP status, Azure's error code, and the missing permission; that factory has no estimate |
+| **Cost Management Reader** (or Billing Reader) | Azure-billed actuals | A warning with the HTTP status and Azure's error code, and the report's "Cost Management Access Issues" section lists the subscription; estimates still appear |
+
+Each of these denials also logs one line to stderr with the failed call's URL and its `x-ms-request-id` /
+`x-ms-correlation-request-id`, so Azure support can find it. Azure's error message isn't kept: it can name the
+signed-in identity and the scope.
 
 A missing role never stops the run. The phase degrades and says which role to add.
 
