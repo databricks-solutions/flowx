@@ -52,7 +52,7 @@ class ProfileResult:
     `factory_subscriptions` maps each factory to the subscription label the report shows, and
     `subscription_names` maps subscription IDs to display names;
     `cost_management_denied` lists subscriptions whose actuals couldn't be read; and
-    `permission_warnings` collects warnings gathered during the scan (missing roles, nothing found,
+    `warnings` collects warnings gathered during the scan (missing roles, nothing found,
     runs that couldn't be costed).
     """
 
@@ -66,4 +66,4 @@ class ProfileResult:
     factory_subscriptions: dict[str, str] = field(default_factory=dict)
     subscription_names: dict[str, str] = field(default_factory=dict)
     cost_management_denied: list[str] = field(default_factory=list)
-    permission_warnings: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)

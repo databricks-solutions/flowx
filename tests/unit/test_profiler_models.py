@@ -31,11 +31,11 @@ def test_profile_result_defaults_to_empty_collections():
     assert result.activity_runs == []
     assert result.factory_subscriptions == {}
     assert result.cost_management_denied == []
-    assert result.permission_warnings == []
+    assert result.warnings == []
 
 
 def test_profile_result_collections_are_not_shared_between_instances():
     first = models.ProfileResult(region="eastus", pricing_source="x", days=1, total_pipeline_runs=0)
     second = models.ProfileResult(region="eastus", pricing_source="x", days=1, total_pipeline_runs=0)
-    first.permission_warnings.append("denied")
-    assert second.permission_warnings == []
+    first.warnings.append("denied")
+    assert second.warnings == []

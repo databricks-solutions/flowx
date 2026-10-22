@@ -28,6 +28,15 @@ def test_require_azure_raises_actionable_error_when_missing(monkeypatch):
     assert "service principal" in message.lower()
 
 
+def test_require_azure_also_checks_requests(monkeypatch):
+    monkeypatch.setitem(sys.modules, "azure", types.ModuleType("azure"))
+    monkeypatch.setitem(sys.modules, "azure.identity", types.ModuleType("azure.identity"))
+    monkeypatch.setitem(sys.modules, "requests", None)
+    with pytest.raises(azure_client.MissingProfileDependencyError) as exc:
+        azure_client.require_azure()
+    assert "requests" in str(exc.value)
+
+
 def test_authentication_error_carries_setup_guidance():
     message = str(azure_client.ProfileAuthenticationError("DefaultAzureCredential failed"))
     assert "DefaultAzureCredential failed" in message
@@ -35,47 +44,15 @@ def test_authentication_error_carries_setup_guidance():
     assert "service principal" in message.lower()
 
 
-@pytest.fixture
-def fake_azure(monkeypatch):
-    """Install a stand-in azure.identity so credential selection is testable."""
-
-    class ClientSecretCredential:
-        def __init__(self, *, tenant_id, client_id, client_secret):
-            self.tenant_id = tenant_id
-
+def test_credential_is_the_default_chain_allowing_any_tenant(monkeypatch):
     class DefaultAzureCredential:
-        pass
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
 
     identity = types.ModuleType("azure.identity")
-    identity.ClientSecretCredential = ClientSecretCredential  # type: ignore[attr-defined]
     identity.DefaultAzureCredential = DefaultAzureCredential  # type: ignore[attr-defined]
-    for name, module in {
-        "azure": types.ModuleType("azure"),
-        "azure.identity": identity,
-        "azure.mgmt": types.ModuleType("azure.mgmt"),
-        "azure.mgmt.resource": types.ModuleType("azure.mgmt.resource"),
-    }.items():
-        monkeypatch.setitem(sys.modules, name, module)
-    return identity
-
-
-def test_explicit_service_principal_wins(fake_azure):
-    credential = azure_client.get_credential(tenant_id="t", client_id="c", client_secret="s")
-    assert isinstance(credential, fake_azure.ClientSecretCredential)
-    assert credential.tenant_id == "t"
-
-
-def test_partial_service_principal_falls_back_to_default_chain(fake_azure):
-    credential = azure_client.get_credential(tenant_id="t", client_id="c")
-    assert isinstance(credential, fake_azure.DefaultAzureCredential)
-
-
-def test_only_azure_identity_is_required(monkeypatch):
-    identity = types.ModuleType("azure.identity")
-    identity.DefaultAzureCredential = type("DefaultAzureCredential", (), {})  # type: ignore[attr-defined]
-    identity.ClientSecretCredential = type("ClientSecretCredential", (), {})  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "azure", types.ModuleType("azure"))
     monkeypatch.setitem(sys.modules, "azure.identity", identity)
-    monkeypatch.delitem(sys.modules, "azure.mgmt", raising=False)
-    monkeypatch.delitem(sys.modules, "azure.mgmt.resource", raising=False)
-    assert isinstance(azure_client.get_credential(), identity.DefaultAzureCredential)
+    credential = azure_client.get_credential()
+    assert isinstance(credential, DefaultAzureCredential)
+    assert credential.kwargs == {"additionally_allowed_tenants": ["*"]}

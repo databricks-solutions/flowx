@@ -33,21 +33,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--subscription-id", help="Only scan this subscription.")
     parser.add_argument("--resource-group", help="Only scan this resource group.")
-    parser.add_argument("--factory-name", help="Only scan this factory (takes effect together with --resource-group).")
-    parser.add_argument("--tenant-id", help="Service principal tenant ID (overrides DefaultAzureCredential).")
-    parser.add_argument("--client-id", help="Service principal client ID.")
-    parser.add_argument("--client-secret", help="Service principal client secret.")
+    parser.add_argument("--factory-name", help="Only scan this factory (needs --resource-group).")
+    parser.add_argument("--tenant-id", help="Microsoft Entra tenant that owns the subscription.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run one profile and return an exit code: 0 on success, 2 on setup/auth problems."""
+    """Run one profile and return an exit code: 0 on success, 2 on bad flags or setup/auth problems."""
     args = _build_parser().parse_args(argv)
+    if args.factory_name and not args.resource_group:
+        print("--factory-name needs --resource-group", file=sys.stderr)
+        return 2
     try:
-        credential = get_credential(
-            tenant_id=args.tenant_id, client_id=args.client_id, client_secret=args.client_secret
-        )
-        scanner = AdfScanner(credential=credential, days=args.days)
+        credential = get_credential()
+        scanner = AdfScanner(credential=credential, days=args.days, tenant_id=args.tenant_id)
         result = scanner.scan(
             subscription_id=args.subscription_id,
             resource_group=args.resource_group,
@@ -63,10 +62,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"flowx profile failed: {type(error).__name__}: {error}\n{_UNREACHABLE_HINT}", file=sys.stderr)
         return 1
 
-    for warning in result.permission_warnings:
+    for warning in result.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     paths = write_reports(result, args.output_dir)
-    print(f"Profiled {result.total_pipeline_runs} pipeline runs over {result.days} days ({result.pricing_source}).")
+    source = f" ({result.pricing_source})" if result.pricing_source else ""
+    print(f"Profiled {result.total_pipeline_runs} pipeline runs over {result.days} days{source}.")
     for path in paths.values():
         print(f"Wrote {path}")
     return 0

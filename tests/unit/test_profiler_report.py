@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import csv
+from pathlib import Path
+
 from flowx.sources.adf.profiler import report
 from flowx.sources.adf.profiler.models import ActualCost, PipelineCost, ProfileResult
 
@@ -50,25 +53,32 @@ def test_write_reports_overwrites_not_timestamps(tmp_path):
     assert sorted(path.name for path in tco.iterdir()) == ["cost_comparison.csv", "cost_comparison.md"]
 
 
-def test_csv_matches_original_layout(tmp_path):
+def test_csv_is_one_table_with_a_level_column(tmp_path):
     report.write_reports(_result(), tmp_path)
     csv_text = (tmp_path / "metadata" / "tco" / "cost_comparison.csv").read_text()
     assert csv_text == (
-        "## Factory-Level Costs (Estimated vs Actual)\n"
-        "subscription,factory,est_orchestration,est_data_movement,est_pipeline_activity,est_external,est_total,"
-        "actual_compute,actual_total\n"
-        # Only empty-MeterSubcategory rows count as actual compute; the $99 infra row is excluded.
-        "Demo Subscription,demo-factory,$0.0050,$0.0800,$0.0000,$0.0000,$0.0850,$12.3400,$12.3400\n"
-        "\n"
-        "## Pipeline-Level Costs (Estimates Only)\n"
-        "subscription,factory,pipeline,runs,est_orchestration,est_data_movement,est_pipeline_activity,est_external,"
-        "est_total\n"
-        "Demo Subscription,demo-factory,copy_pipeline,5,$0.0050,$0.0800,$0.0000,$0.0000,$0.0850\n"
+        "level,subscription,factory,pipeline,runs,est_orchestration,est_data_movement,est_pipeline_activity,"
+        "est_external,est_total,actual_compute,actual_total\n"
+        "factory,Demo Subscription,demo-factory,,,0.0050,0.0800,0.0000,0.0000,0.0850,12.3400,12.3400\n"
+        "pipeline,Demo Subscription,demo-factory,copy_pipeline,5,0.0050,0.0800,0.0000,0.0000,0.0850,,\n"
     )
 
 
-def test_factory_with_only_actuals_prints_integer_estimates(tmp_path):
-    # Ported quirk: missing estimates default to int 0, which the original prints without "$".
+def test_csv_quotes_values_that_contain_commas(tmp_path):
+    result = _result(
+        pipeline_costs=[_pipeline('copy, "daily"', orchestration_cost=0.5)],
+        factory_subscriptions={"demo-factory": "Sub, Prod"},
+    )
+    report.write_reports(result, tmp_path)
+    with (tmp_path / "metadata" / "tco" / "cost_comparison.csv").open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(row["level"], row["subscription"], row["pipeline"]) for row in rows] == [
+        ("factory", "Sub, Prod", ""),
+        ("pipeline", "Sub, Prod", 'copy, "daily"'),
+    ]
+
+
+def test_factory_with_only_actuals_has_zero_estimates(tmp_path):
     result = _result(
         pipeline_costs=[],
         actual_costs=[ActualCost(factory_name="billed-only", meter_subcategory="", cost=5.0, currency="USD")],
@@ -76,7 +86,7 @@ def test_factory_with_only_actuals_prints_integer_estimates(tmp_path):
     )
     report.write_reports(result, tmp_path)
     lines = (tmp_path / "metadata" / "tco" / "cost_comparison.csv").read_text().splitlines()
-    assert lines[2] == "Unknown,billed-only,0,0,0,0,0,$5.0000,$5.0000"
+    assert lines[1] == "factory,Unknown,billed-only,,,0.0000,0.0000,0.0000,0.0000,0.0000,5.0000,5.0000"
 
 
 def test_zero_cost_pipelines_and_factories_are_omitted(tmp_path):
@@ -127,7 +137,7 @@ def test_whole_number_actuals_still_print_as_dollars(tmp_path):
     )
     report.write_reports(result, tmp_path)
     lines = (tmp_path / "metadata" / "tco" / "cost_comparison.csv").read_text().splitlines()
-    assert lines[2].endswith(",$12.0000,$12.0000")
+    assert lines[1].endswith(",12.0000,12.0000")
 
 
 def test_live_compute_meter_counts_as_actual_compute(tmp_path):
@@ -151,7 +161,7 @@ def test_live_compute_meter_counts_as_actual_compute(tmp_path):
     )
     report.write_reports(result, tmp_path)
     lines = (tmp_path / "metadata" / "tco" / "cost_comparison.csv").read_text().splitlines()
-    assert lines[2].endswith(",$26.8000,$26.8000")
+    assert lines[1].endswith(",26.8000,26.8000")
 
 
 def test_mapping_data_flow_meters_count_as_actual_compute(tmp_path):
@@ -172,4 +182,26 @@ def test_mapping_data_flow_meters_count_as_actual_compute(tmp_path):
     )
     report.write_reports(result, tmp_path)
     lines = (tmp_path / "metadata" / "tco" / "cost_comparison.csv").read_text().splitlines()
-    assert lines[2].endswith(",$3.7500,$3.7500")
+    assert lines[1].endswith(",3.7500,3.7500")
+
+
+def test_markdown_ends_with_every_warning(tmp_path):
+    warnings = ["f: Cannot query pipeline runs (need Data Factory Contributor)", "first line\nsecond line"]
+    report.write_reports(_result(warnings=warnings), tmp_path)
+    md = (tmp_path / "metadata" / "tco" / "cost_comparison.md").read_text()
+    assert md.endswith(
+        "## Warnings\n\n- f: Cannot query pipeline runs (need Data Factory Contributor)\n- first line\n  second line\n"
+    )
+
+
+def test_markdown_has_no_warnings_section_without_warnings(tmp_path):
+    report.write_reports(_result(), tmp_path)
+    md = (tmp_path / "metadata" / "tco" / "cost_comparison.md").read_text()
+    assert "## Warnings" not in md
+
+
+def test_warnings_do_not_change_the_csv(tmp_path):
+    report.write_reports(_result(), tmp_path / "plain")
+    report.write_reports(_result(warnings=["westeurope: couldn't fetch live Azure prices"]), tmp_path / "warned")
+    csv_path = Path("metadata") / "tco" / "cost_comparison.csv"
+    assert (tmp_path / "warned" / csv_path).read_text() == (tmp_path / "plain" / csv_path).read_text()

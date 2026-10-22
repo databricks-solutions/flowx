@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -17,6 +18,8 @@ from flowx.sources.adf.profiler.models import ActivityRunCost, ActualCost, Pipel
 from flowx.sources.adf.profiler.pricing import RateCards
 
 logger = logging.getLogger(__name__)
+
+_LIVE_PRICING = "Azure Retail Prices API"
 
 AZURE_MANAGEMENT_URL = "https://management.azure.com"
 _MANAGEMENT_SCOPE = "https://management.azure.com/.default"
@@ -33,8 +36,8 @@ _AUTH_HINT = (
 )
 _INSTALL_HINT = (
     "The `flowx profile` phase needs the Azure stack, which is an optional extra.\n"
-    "Install it with:  pip install 'azure-identity>=1.17'   (from a source checkout: pip install -e '.[azure]')\n"
-    + _AUTH_HINT
+    "Install it with:  pip install 'azure-identity>=1.17' 'requests>=2.31'   "
+    "(from a source checkout: pip install -e '.[azure]')\n" + _AUTH_HINT
 )
 
 
@@ -50,30 +53,26 @@ class ProfileAuthenticationError(RuntimeError):
 
 
 def require_azure() -> None:
-    """Verify the Azure stack is importable; otherwise raise with setup guidance."""
+    """Verify every module of the `azure` extra is importable; otherwise raise with setup guidance."""
     try:
         import azure.identity  # noqa: F401
+        import requests  # noqa: F401
     except ModuleNotFoundError as error:
         raise MissingProfileDependencyError(_INSTALL_HINT) from error
 
 
-def get_credential(
-    tenant_id: str | None = None,
-    client_id: str | None = None,
-    client_secret: str | None = None,
-) -> Any:
-    """Return an Azure credential.
+def get_credential() -> Any:
+    """Return a DefaultAzureCredential.
 
-    Explicit service-principal values win (CI / headless). Otherwise DefaultAzureCredential
-    walks env-var service principal -> managed identity -> `az` CLI token -> shared cache, so the
-    same code works whether the user ran `az login` locally or set env vars on serverless.
+    It walks env-var service principal (AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET)
+    -> managed identity -> `az` CLI token -> shared cache, so the same code works whether the user
+    ran `az login` locally or set env vars on serverless. Any tenant is allowed so `--tenant-id`
+    can pick one per token request.
     """
     require_azure()
-    from azure.identity import ClientSecretCredential, DefaultAzureCredential
+    from azure.identity import DefaultAzureCredential
 
-    if tenant_id and client_id and client_secret:
-        return ClientSecretCredential(tenant_id=tenant_id, client_id=client_id, client_secret=client_secret)
-    return DefaultAzureCredential()
+    return DefaultAzureCredential(additionally_allowed_tenants=["*"])
 
 
 class TransportHttpError(Exception):
@@ -96,13 +95,15 @@ class Transport(Protocol):
 class LiveTransport:
     """Calls Azure Resource Manager over HTTPS with a bearer token from `credential`.
 
-    A long scan can outlive one token (they last about an hour), so the token is refreshed shortly
-    before it expires, and a 401 is retried once with a fresh one. A credential that can't produce
-    a token raises ProfileAuthenticationError with setup guidance instead of a raw SDK traceback.
+    Tokens are requested from `tenant_id` when one is given. A long scan can outlive one token
+    (they last about an hour), so the token is refreshed shortly before it expires, and a 401 is
+    retried once with a fresh one. A credential that can't produce a token raises
+    ProfileAuthenticationError with setup guidance instead of a raw SDK traceback.
     """
 
-    def __init__(self, credential: Any, *, session: Any = None):
+    def __init__(self, credential: Any, *, tenant_id: str | None = None, session: Any = None):
         self._credential = credential
+        self._tenant_id = tenant_id
         self._session = session
         self._headers: dict[str, str] | None = None
         self._token_expires_on = 0.0
@@ -112,7 +113,10 @@ class LiveTransport:
             from azure.core.exceptions import ClientAuthenticationError
 
             try:
-                access_token = self._credential.get_token(_MANAGEMENT_SCOPE)
+                if self._tenant_id:
+                    access_token = self._credential.get_token(_MANAGEMENT_SCOPE, tenant_id=self._tenant_id)
+                else:
+                    access_token = self._credential.get_token(_MANAGEMENT_SCOPE)
             except ClientAuthenticationError as error:
                 raise ProfileAuthenticationError(str(error)) from error
             self._token_expires_on = float(getattr(access_token, "expires_on", float("inf")))
@@ -150,6 +154,7 @@ class LiveTransport:
 
 
 _PIPELINE_RUNS_DENIED = "{factory}: Cannot query pipeline runs (need Data Factory Contributor)"
+_ACTIVITY_RUNS_DENIED = "{factory}: Cannot query activity runs (need Data Factory Contributor)"
 _NO_SUBSCRIPTIONS = (
     "No accessible subscriptions found. The signed-in identity may belong to the wrong tenant "
     "(on Databricks, the workspace's own identity is in Databricks' tenant, not yours).\n" + _AUTH_HINT
@@ -161,6 +166,13 @@ _NO_FACTORIES = (
 _UNCOSTED_RUNS = (
     "{skipped} of {total} pipeline runs could not be costed (their activity runs couldn't be read or "
     "had unexpected data); the estimates leave them out."
+)
+_LIST_RATES_FALLBACK = (
+    "{region}: couldn't fetch live Azure prices ({reason}); used built-in list rates, so estimates may be off"
+)
+_COST_MANAGEMENT_OFF_HOST = (
+    "Subscription {subscription}...: Cost Management sent a next-page link outside {host}; it wasn't "
+    "followed, so actuals may be incomplete"
 )
 _COST_MANAGEMENT_DENIED = (
     "Subscription {subscription}...: Cost Management access denied "
@@ -186,8 +198,8 @@ class AdfScanner:
 
     Ported from the standalone script's RuntimeProfiler, ADF only. Every Azure call goes through
     `transport` (live by default), so a recorded scan can be replayed in tests. Passing `pricing`
-    pins the rate cards ("custom"); otherwise they come from the Retail Prices API for the first
-    factory's region, falling back to list rates.
+    pins the rate cards ("custom"); otherwise each factory is priced from the Retail Prices API for
+    its own region, falling back to list rates.
     """
 
     def __init__(
@@ -195,11 +207,14 @@ class AdfScanner:
         *,
         credential: Any,
         days: int,
+        tenant_id: str | None = None,
         transport: Transport | None = None,
         pricing: RateCards | None = None,
         now: datetime | None = None,
     ):
-        self._transport: Transport = transport if transport is not None else LiveTransport(credential)
+        self._transport: Transport = (
+            transport if transport is not None else LiveTransport(credential, tenant_id=tenant_id)
+        )
         self._days = days
         self._custom_pricing = pricing
         window_end = now or datetime.now(timezone.utc)
@@ -231,14 +246,12 @@ class AdfScanner:
             )
         ]
         subscription_names = {sub["subscription_id"]: sub["display_name"] for sub in subscriptions}
-        region = next(
-            (factory["location"].lower().replace(" ", "") for factory in factories if factory.get("location")),
-            "eastus",
-        )
-        rates, pricing_source = self._resolve_pricing(region)
+        regions = list(dict.fromkeys(_region(factory) for factory in factories))
+        pricing_warnings: list[str] = []
+        pricing_by_region = {region: self._resolve_pricing(region, pricing_warnings) for region in regions}
         result = ProfileResult(
-            region=region,
-            pricing_source=pricing_source,
+            region=", ".join(regions),
+            pricing_source=_pricing_label({region: source for region, (_, source) in pricing_by_region.items()}),
             days=self._days,
             total_pipeline_runs=0,
             subscription_names=subscription_names,
@@ -246,11 +259,12 @@ class AdfScanner:
                 factory["name"]: subscription_names.get(factory["subscription_id"], "") or factory["subscription_id"]
                 for factory in factories
             },
+            warnings=pricing_warnings,
         )
         if not subscriptions:
-            result.permission_warnings.append(_NO_SUBSCRIPTIONS)
+            result.warnings.append(_NO_SUBSCRIPTIONS)
         elif not factories:
-            result.permission_warnings.append(_NO_FACTORIES)
+            result.warnings.append(_NO_FACTORIES)
         if not factories:
             return result
 
@@ -270,6 +284,7 @@ class AdfScanner:
         totals_by_pipeline: dict[tuple[str, str], _PipelineTotals] = {}
         skipped_runs = 0
         for factory, run, ir_type_map in runs_to_cost:
+            rates = pricing_by_region[_region(factory)][0]
             run_costs = self._cost_pipeline_run(factory, run, ir_type_map, rates, result)
             if run_costs is None:
                 skipped_runs += 1
@@ -296,24 +311,28 @@ class AdfScanner:
             for (factory_name_key, pipeline_name), totals in totals_by_pipeline.items()
         ]
         if skipped_runs:
-            result.permission_warnings.append(_UNCOSTED_RUNS.format(skipped=skipped_runs, total=len(runs_to_cost)))
+            result.warnings.append(_UNCOSTED_RUNS.format(skipped=skipped_runs, total=len(runs_to_cost)))
         return result
 
-    def _resolve_pricing(self, region: str) -> tuple[RateCards, str]:
+    def _resolve_pricing(self, region: str, warnings: list[str]) -> tuple[RateCards, str]:
+        """Rates for `region`: custom, else live, else list rates with a warning saying why."""
         if self._custom_pricing:
             return self._custom_pricing, "custom"
-        live = pricing_module.fetch_live_pricing(region)
-        if live:
-            return live, f"Azure Retail Prices API ({region})"
-        return pricing_module.DEFAULT_PRICING, "default list rates"
+        try:
+            return pricing_module.fetch_live_pricing(region), _LIVE_PRICING
+        except pricing_module.LivePricingUnavailable as error:
+            warnings.append(_LIST_RATES_FALLBACK.format(region=region, reason=error))
+            return pricing_module.DEFAULT_PRICING, "default list rates"
 
     def _query_actual_costs(self, subscription_id: str, factory_names: list[str], result: ProfileResult) -> None:
         """Billed ADF cost for one subscription from Cost Management, attributed to factories.
 
-        One query per subscription, grouped by meter subcategory and resource ID. A row belongs to
-        the factory whose name is the ID's `/factories/<name>` segment, compared case-insensitively
-        because Cost Management lowercases resource IDs. (The original matched by substring, so a
-        factory also took the billing of any factory whose name contained its own.)
+        One query per subscription, grouped by meter subcategory and resource ID. `nextLink` pages are
+        followed only on management.azure.com, so the bearer token never goes to another host, and a
+        repeated link ends paging. A row belongs to the factory whose name is the ID's `/factories/<name>` segment,
+        compared case-insensitively because Cost Management lowercases resource IDs. (The original
+        matched by substring, so a factory also took the billing of any factory whose name contained
+        its own.)
         """
         url = (
             f"{AZURE_MANAGEMENT_URL}/subscriptions/{subscription_id}"
@@ -343,13 +362,26 @@ class AdfScanner:
                 },
             },
         }
+        records: list[dict[str, Any]] = []
+        next_url: str | None = url
+        seen_urls: set[str] = set()
         try:
-            data = self._transport.post_json(url, body)
+            while next_url and next_url not in seen_urls:
+                if not next_url.startswith(f"{AZURE_MANAGEMENT_URL}/"):
+                    result.warnings.append(
+                        _COST_MANAGEMENT_OFF_HOST.format(subscription=subscription_id[:8], host=AZURE_MANAGEMENT_URL)
+                    )
+                    break
+                seen_urls.add(next_url)
+                properties = self._transport.post_json(next_url, body).get("properties", {})
+                columns = [column["name"] for column in properties.get("columns", [])]
+                records.extend(dict(zip(columns, row)) for row in properties.get("rows", []))
+                next_url = properties.get("nextLink")
         except ProfileAuthenticationError:
             raise
         except TransportHttpError as error:
             if error.status in (401, 403):
-                result.permission_warnings.append(_COST_MANAGEMENT_DENIED.format(subscription=subscription_id[:8]))
+                result.warnings.append(_COST_MANAGEMENT_DENIED.format(subscription=subscription_id[:8]))
                 result.cost_management_denied.append(subscription_id)
             else:
                 logger.warning(
@@ -360,11 +392,8 @@ class AdfScanner:
             logger.warning("Cost Management query error for sub %s...: %s", subscription_id[:8], error)
             return
 
-        properties = data.get("properties", {})
-        columns = [column["name"] for column in properties.get("columns", [])]
         lowered_names = list(dict.fromkeys(name.lower() for name in factory_names))
-        for row in properties.get("rows", []):
-            record = dict(zip(columns, row))
+        for record in records:
             resource_id = record.get("ResourceId", "").lower()
             _, _, after_factories = resource_id.rpartition("/factories/")
             matched = after_factories.split("/")[0]
@@ -385,29 +414,37 @@ class AdfScanner:
 
         url = f"{factory_base_url(factory)}/queryPipelineRuns?api-version=2018-06-01"
         runs: list[dict[str, Any]] = []
+        try:
+            for page in self._query_pages(url):
+                runs.extend(page)
+        except ProfileAuthenticationError:
+            raise
+        except TransportHttpError as error:
+            if error.status in (401, 403):
+                result.warnings.append(_PIPELINE_RUNS_DENIED.format(factory=factory["name"]))
+            else:
+                logger.error("[%s] Pipeline runs: HTTP %s", factory["name"], error.status)
+        except Exception as error:
+            logger.error("[%s] Pipeline runs error: %s", factory["name"], error)
+        return runs
+
+    def _query_pages(self, url: str) -> Iterator[list[dict[str, Any]]]:
+        """POST a run query over the window and yield each page's runs.
+
+        Follows continuation tokens, even past an empty page, until there is none or one repeats.
+        """
         continuation: str | None = None
+        seen_tokens: set[str] = set()
         while True:
             body = dict(self._window)
             if continuation:
                 body["continuationToken"] = continuation
-            try:
-                page = self._transport.post_json(url, body)
-            except ProfileAuthenticationError:
-                raise
-            except TransportHttpError as error:
-                if error.status in (401, 403):
-                    result.permission_warnings.append(_PIPELINE_RUNS_DENIED.format(factory=factory["name"]))
-                else:
-                    logger.error("[%s] Pipeline runs: HTTP %s", factory["name"], error.status)
-                return runs
-            except Exception as error:
-                logger.error("[%s] Pipeline runs error: %s", factory["name"], error)
-                return runs
-            page_runs = page.get("value", [])
-            runs.extend(page_runs)
+            page = self._transport.post_json(url, body)
+            yield page.get("value", [])
             continuation = page.get("continuationToken")
-            if not continuation or not page_runs:
-                return runs
+            if not continuation or continuation in seen_tokens:
+                return
+            seen_tokens.add(continuation)
 
     def _cost_pipeline_run(
         self,
@@ -420,7 +457,8 @@ class AdfScanner:
         """Cost every activity in one pipeline run.
 
         Returns None when the run's activity runs can't be read or contain data the cost math can't
-        use (e.g. a null DIU count); like the original, only that run is dropped, not the scan.
+        use (e.g. a null DIU count); like the original, only that run is dropped, not the scan. A
+        401/403 also adds one missing-role warning per factory.
         """
         from flowx.sources.adf.profiler.discovery import factory_base_url
 
@@ -428,9 +466,14 @@ class AdfScanner:
             f"{factory_base_url(factory)}/pipelineruns/{run.get('runId', '')}/queryActivityruns?api-version=2018-06-01"
         )
         try:
-            activities = self._transport.post_json(url, dict(self._window)).get("value", [])
+            activities = [activity for page in self._query_pages(url) for activity in page]
         except ProfileAuthenticationError:
             raise
+        except TransportHttpError as error:
+            denied = _ACTIVITY_RUNS_DENIED.format(factory=factory["name"])
+            if error.status in (401, 403) and denied not in result.warnings:
+                result.warnings.append(denied)
+            return None
         except Exception:
             return None
 
@@ -486,3 +529,22 @@ class AdfScanner:
         # Each pipeline run also pays one trigger orchestration at the Azure IR rate.
         run_costs.orchestration_cost += cost_model.orchestration_cost(rates["azure_ir"])
         return run_costs, activity_costs
+
+
+def _region(factory: dict[str, Any]) -> str:
+    """The factory's Azure region in Retail Prices form (e.g. "West Europe" -> "westeurope")."""
+    return str(factory.get("location") or "eastus").lower().replace(" ", "")
+
+
+def _pricing_label(source_by_region: dict[str, str]) -> str:
+    """Where the rates came from, naming the region of each live fetch.
+
+    Several regions read `region: source; ...` unless they all used the same fixed rates.
+    """
+    sources = set(source_by_region.values())
+    if len(sources) == 1 and _LIVE_PRICING not in sources:
+        return sources.pop()
+    if len(source_by_region) == 1:
+        [(region, source)] = source_by_region.items()
+        return f"{source} ({region})"
+    return "; ".join(f"{region}: {source}" for region, source in source_by_region.items())

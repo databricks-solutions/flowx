@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from flowx.sources.adf.profiler import azure_client
+from flowx.sources.adf.profiler import azure_client, pricing
 
 
 class FakeResponse:
@@ -50,6 +50,22 @@ def fake_azure_core(monkeypatch):
 class TokenCredential:
     def get_token(self, scope):
         return types.SimpleNamespace(token="abc")
+
+
+def test_tokens_are_requested_from_the_given_tenant():
+    class TenantCredential:
+        def __init__(self):
+            self.requests: list[tuple[str, dict]] = []
+
+        def get_token(self, scope, **kwargs):
+            self.requests.append((scope, kwargs))
+            return types.SimpleNamespace(token="abc")
+
+    credential = TenantCredential()
+    session = FakeSession(FakeResponse(200, {}))
+    azure_client.LiveTransport(credential, tenant_id="t", session=session).get_json("https://management.azure.com/x")
+    azure_client.LiveTransport(credential, session=session).get_json("https://management.azure.com/x")
+    assert [kwargs for _, kwargs in credential.requests] == [{"tenant_id": "t"}, {}]
 
 
 def test_get_json_sends_bearer_token():
@@ -131,3 +147,44 @@ def test_unauthorized_response_retries_once_with_a_fresh_token():
     transport = azure_client.LiveTransport(credential, session=session)
     assert transport.get_json("https://management.azure.com/a") == {"ok": True}
     assert session.headers_seen == ["Bearer token-1", "Bearer token-2"]
+
+
+class RoutingSession:
+    def __init__(self, responses: dict[str, dict]):
+        self.responses = responses
+        self.requests: list[tuple[str, dict]] = []
+
+    def _respond(self, url, headers):
+        self.requests.append((url, headers))
+        return FakeResponse(200, self.responses[max((key for key in self.responses if key in url), key=len)])
+
+    def get(self, url, headers, timeout):
+        return self._respond(url, headers)
+
+    def post(self, url, headers, json, timeout):
+        return self._respond(url, headers)
+
+
+def test_bearer_token_never_follows_an_off_host_next_link(monkeypatch):
+    monkeypatch.setattr(pricing, "fetch_live_pricing", lambda region: pricing.DEFAULT_PRICING)
+    factory_id = "/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.DataFactory/factories/demo-factory"
+    session = RoutingSession(
+        {
+            "/subscriptions?": {"value": [{"subscriptionId": "SUB", "displayName": "Demo"}]},
+            "/factories?": {"value": [{"name": "demo-factory", "location": "East US", "id": factory_id}]},
+            "/integrationRuntimes?": {"value": []},
+            "/queryPipelineRuns": {"value": []},
+            "Microsoft.CostManagement/query": {
+                "properties": {
+                    "columns": [{"name": "PreTaxCost"}, {"name": "MeterSubcategory"}, {"name": "ResourceId"}],
+                    "rows": [[1.0, "", factory_id]],
+                    "nextLink": "https://attacker.example.com/subscriptions/SUB/providers/Microsoft.CostManagement/query",
+                }
+            },
+        }
+    )
+    transport = azure_client.LiveTransport(TokenCredential(), session=session)
+    result = azure_client.AdfScanner(credential=None, days=45, transport=transport).scan()
+    assert all(url.startswith("https://management.azure.com/") for url, _ in session.requests)
+    assert [actual.cost for actual in result.actual_costs] == [1.0]
+    assert any("outside https://management.azure.com" in warning for warning in result.warnings)

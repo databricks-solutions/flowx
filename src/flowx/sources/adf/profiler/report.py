@@ -7,6 +7,8 @@ every run (no timestamped folders), so the skill and MCP tools always find the c
 
 from __future__ import annotations
 
+import csv
+import io
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +30,7 @@ _COMPUTE_METER_SUBCATEGORIES = frozenset(
 )
 
 _ESTIMATE_BUCKETS = ("orchestration", "data_movement", "pipeline_activity", "external")
-_FACTORY_COLUMNS = [
-    "subscription",
-    "factory",
+_COST_COLUMNS = [
     "est_orchestration",
     "est_data_movement",
     "est_pipeline_activity",
@@ -39,25 +39,14 @@ _FACTORY_COLUMNS = [
     "actual_compute",
     "actual_total",
 ]
-_PIPELINE_COLUMNS = [
-    "subscription",
-    "factory",
-    "pipeline",
-    "runs",
-    "est_orchestration",
-    "est_data_movement",
-    "est_pipeline_activity",
-    "est_external",
-    "est_total",
-]
+_CSV_COLUMNS = ["level", "subscription", "factory", "pipeline", "runs", *_COST_COLUMNS]
 
 
 def _factory_rows(result: ProfileResult) -> list[dict[str, Any]]:
     """One row per factory: estimate (rolled up from pipelines) next to billed compute."""
-    # Defaults stay int 0 rather than 0.0: the original prints ints without "$", and so do we.
     estimates: dict[str, dict[str, Any]] = {}
     for pipeline in result.pipeline_costs:
-        bucket = estimates.setdefault(pipeline.factory_name, dict.fromkeys(_ESTIMATE_BUCKETS, 0))
+        bucket = estimates.setdefault(pipeline.factory_name, dict.fromkeys(_ESTIMATE_BUCKETS, 0.0))
         bucket["orchestration"] += pipeline.orchestration_cost
         bucket["data_movement"] += pipeline.data_movement_cost
         bucket["pipeline_activity"] += pipeline.pipeline_activity_cost
@@ -72,9 +61,9 @@ def _factory_rows(result: ProfileResult) -> list[dict[str, Any]]:
 
     rows = []
     for factory in sorted(set(estimates) | set(actual_compute)):
-        estimate = estimates.get(factory, dict.fromkeys(_ESTIMATE_BUCKETS, 0))
+        estimate = estimates.get(factory, dict.fromkeys(_ESTIMATE_BUCKETS, 0.0))
         estimate_total = sum(estimate.values())
-        compute = actual_compute.get(factory, 0)
+        compute = actual_compute.get(factory, 0.0)
         if estimate_total == 0 and compute == 0:
             continue
         rows.append(
@@ -116,21 +105,20 @@ def _pipeline_rows(result: ProfileResult) -> list[dict[str, Any]]:
     return rows
 
 
-def _csv_line(row: dict[str, Any], columns: list[str]) -> str:
-    return ",".join(f"${row[column]:.4f}" if isinstance(row[column], float) else str(row[column]) for column in columns)
-
-
 def _render_csv(factory_rows: list[dict[str, Any]], pipeline_rows: list[dict[str, Any]]) -> str:
-    lines = ["## Factory-Level Costs (Estimated vs Actual)\n"]
-    if factory_rows:
-        lines.append(",".join(_FACTORY_COLUMNS) + "\n")
-        lines.extend(_csv_line(row, _FACTORY_COLUMNS) + "\n" for row in factory_rows)
-    lines.append("\n")
-    lines.append("## Pipeline-Level Costs (Estimates Only)\n")
-    if pipeline_rows:
-        lines.append(",".join(_PIPELINE_COLUMNS) + "\n")
-        lines.extend(_csv_line(row, _PIPELINE_COLUMNS) + "\n" for row in pipeline_rows)
-    return "".join(lines)
+    """One CSV table: factory rows then pipeline rows, told apart by the `level` column.
+
+    Pipeline rows leave the actual-cost columns empty (billing isn't broken down per pipeline), and
+    factory rows leave `pipeline` and `runs` empty. Costs are plain numbers with 4 decimals.
+    """
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=_CSV_COLUMNS, restval="", lineterminator="\n")
+    writer.writeheader()
+    for level, rows in (("factory", factory_rows), ("pipeline", pipeline_rows)):
+        for row in rows:
+            costs = {column: f"{row[column]:.4f}" for column in _COST_COLUMNS if column in row}
+            writer.writerow({**row, **costs, "level": level})
+    return buffer.getvalue()
 
 
 def _render_markdown(
@@ -217,6 +205,11 @@ def _render_markdown(
                 f"| ${row['est_pipeline_activity']:.4f} | ${row['est_external']:.4f} "
                 f"| ${row['est_total']:.4f} |"
             )
+        lines.append("")
+
+    if result.warnings:
+        lines.append("## Warnings\n")
+        lines.extend("- " + warning.replace("\n", "\n  ") for warning in result.warnings)
         lines.append("")
 
     return "\n".join(lines)

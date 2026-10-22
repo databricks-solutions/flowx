@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import sys
+import types
+
+import pytest
+
 from flowx.sources.adf.profiler import pricing
 
 
@@ -36,3 +41,79 @@ def test_parse_retail_prices_returns_none_on_empty():
 
 def test_parse_retail_prices_ignores_zero_prices():
     assert pricing.parse_retail_prices([{"meterName": "Cloud Data Movement", "retailPrice": 0}]) is None
+
+
+def test_fetch_live_pricing_follows_next_page_link(monkeypatch):
+    pages = {
+        pricing.RETAIL_PRICES_URL: {
+            "Items": [{"meterName": "Cloud Orchestration Activity Run", "retailPrice": 0.8}],
+            "NextPageLink": "https://prices.azure.com/api/retail/prices?$skip=100",
+        },
+        "https://prices.azure.com/api/retail/prices?$skip=100": {
+            "Items": [{"meterName": "Cloud Data Movement", "retailPrice": 0.3}],
+            "NextPageLink": None,
+        },
+    }
+    requested: list[tuple[str, object]] = []
+
+    def fake_get(url, params=None, timeout=None):
+        requested.append((url, params))
+        return types.SimpleNamespace(status_code=200, json=lambda: pages[url])
+
+    requests = types.ModuleType("requests")
+    requests.get = fake_get  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "requests", requests)
+    rates = pricing.fetch_live_pricing("westeurope")
+    assert rates is not None
+    assert rates["azure_ir"]["orchestration_per_1000"] == 0.8
+    assert rates["azure_ir"]["data_movement_per_diu_hour"] == 0.3
+    assert requested[1] == ("https://prices.azure.com/api/retail/prices?$skip=100", None)
+    assert "westeurope" in requested[0][1]["$filter"]  # type: ignore[index]
+
+
+def test_fetch_live_pricing_stops_on_a_repeated_next_page_link(monkeypatch):
+    page = {
+        "Items": [{"meterName": "Cloud Orchestration Activity Run", "retailPrice": 0.8}],
+        "NextPageLink": "https://prices.azure.com/api/retail/prices?$skip=100",
+    }
+    requested: list[str] = []
+
+    def fake_get(url, params=None, timeout=None):
+        requested.append(url)
+        if len(requested) > 2:
+            raise AssertionError("paged past a repeated NextPageLink")
+        return types.SimpleNamespace(status_code=200, json=lambda: page)
+
+    requests = types.ModuleType("requests")
+    requests.get = fake_get  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "requests", requests)
+    assert pricing.fetch_live_pricing("westeurope") is not None
+    assert requested == [pricing.RETAIL_PRICES_URL, "https://prices.azure.com/api/retail/prices?$skip=100"]
+
+
+def _fake_requests(monkeypatch, get) -> None:
+    requests = types.ModuleType("requests")
+    requests.get = get  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "requests", requests)
+
+
+def test_fetch_live_pricing_names_an_http_failure(monkeypatch):
+    _fake_requests(monkeypatch, lambda url, params=None, timeout=None: types.SimpleNamespace(status_code=503))
+    with pytest.raises(pricing.LivePricingUnavailable, match="^HTTP 503$"):
+        pricing.fetch_live_pricing("westeurope")
+
+
+def test_fetch_live_pricing_names_a_network_failure(monkeypatch):
+    def unreachable(url, params=None, timeout=None):
+        raise ConnectionError("no route to host")
+
+    _fake_requests(monkeypatch, unreachable)
+    with pytest.raises(pricing.LivePricingUnavailable, match="^ConnectionError$"):
+        pricing.fetch_live_pricing("westeurope")
+
+
+def test_fetch_live_pricing_rejects_a_response_with_no_usable_prices(monkeypatch):
+    empty = types.SimpleNamespace(status_code=200, json=lambda: {"Items": []})
+    _fake_requests(monkeypatch, lambda url, params=None, timeout=None: empty)
+    with pytest.raises(pricing.LivePricingUnavailable, match="no usable prices"):
+        pricing.fetch_live_pricing("westeurope")

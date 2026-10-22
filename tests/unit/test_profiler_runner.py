@@ -69,10 +69,11 @@ def test_main_forwards_filters_and_credentials(tmp_path, monkeypatch, fake_crede
     empty = ProfileResult(region="eastus", pricing_source="test", days=7, total_pipeline_runs=0)
     monkeypatch.setattr(runner, "AdfScanner", _scanner_returning(empty, seen))
     argv = ["--output-dir", str(tmp_path), "--days", "7", "--subscription-id", "SUB", "--resource-group", "RG"]
-    argv += ["--factory-name", "f", "--tenant-id", "t", "--client-id", "c", "--client-secret", "s"]
+    argv += ["--factory-name", "f", "--tenant-id", "t"]
     assert runner.main(argv) == 0
-    assert fake_credential == [{"tenant_id": "t", "client_id": "c", "client_secret": "s"}]
+    assert fake_credential == [{}]
     assert seen["init"]["days"] == 7
+    assert seen["init"]["tenant_id"] == "t"
     assert seen["scan"] == {"subscription_id": "SUB", "resource_group": "RG", "factory_name": "f"}
 
 
@@ -100,13 +101,13 @@ def test_main_does_not_pass_pricing_to_scanner(tmp_path, monkeypatch):
     assert seen["init"].get("pricing") is None
 
 
-def test_main_prints_permission_warnings(tmp_path, monkeypatch, capsys):
+def test_main_prints_warnings(tmp_path, monkeypatch, capsys):
     result = ProfileResult(
         region="eastus",
         pricing_source="test",
         days=90,
         total_pipeline_runs=0,
-        permission_warnings=["f: Cannot query pipeline runs (need Data Factory Contributor)"],
+        warnings=["f: Cannot query pipeline runs (need Data Factory Contributor)"],
     )
     monkeypatch.setattr(runner, "AdfScanner", _scanner_returning(result))
     assert runner.main(["--output-dir", str(tmp_path)]) == 0
@@ -153,3 +154,24 @@ def test_main_turns_unexpected_errors_into_one_line_guidance(tmp_path, monkeypat
     assert "management.azure.com" in message
     assert "run the profile locally" in message
     assert "Traceback" not in message
+
+
+def test_factory_name_without_resource_group_is_rejected_before_signing_in(
+    tmp_path, monkeypatch, fake_credential, capsys
+):
+    seen: dict = {}
+    empty = ProfileResult(region="eastus", pricing_source="test", days=45, total_pipeline_runs=0)
+    monkeypatch.setattr(runner, "AdfScanner", _scanner_returning(empty, seen))
+    assert runner.main(["--output-dir", str(tmp_path), "--factory-name", "f"]) == 2
+    assert "--factory-name needs --resource-group" in capsys.readouterr().err
+    assert fake_credential == []
+    assert seen == {}
+
+
+def test_no_factories_summary_has_no_empty_pricing_source(tmp_path, monkeypatch, capsys):
+    empty = ProfileResult(region="", pricing_source="", days=45, total_pipeline_runs=0)
+    monkeypatch.setattr(runner, "AdfScanner", _scanner_returning(empty))
+    assert runner.main(["--output-dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "Profiled 0 pipeline runs over 45 days." in out
+    assert "()" not in out

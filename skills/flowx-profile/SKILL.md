@@ -47,7 +47,7 @@ setup differs. Pick the row that matches where you are running:
 |---|---|
 | Claude Code / local laptop | `az login` (a browser opens), or `az login --use-device-code`. A service principal via env vars also works. |
 | Genie Code / Databricks serverless notebook | A **service principal** from the customer's Azure tenant, stored in a Databricks **secret scope** and exported as env vars (recipe below). There is no browser or `az` CLI there, and the workspace's own identity belongs to the wrong tenant. |
-| Headless / CI | Service principal env vars, or the `--tenant-id` / `--client-id` / `--client-secret` flags. |
+| Headless / CI | Set the `AZURE_*` service principal env vars below (or, in a notebook, read them from a secret scope, as `extract` does). |
 
 Service principal env vars: `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`.
 
@@ -87,9 +87,8 @@ Scope flags:
 
 - `--subscription-id` limits the scan to one subscription.
 - `--resource-group` limits it to one resource group.
-- `--factory-name` narrows to one factory **only together with `--resource-group`**. On its own it
-  is ignored and the whole subscription is scanned (behavior carried over from the original
-  profiler).
+- `--factory-name` narrows to one factory and **needs `--resource-group`**; on its own the
+  command exits with code 2 before signing in.
 - `--days` sets the window (default 45). ADF keeps pipeline runs for only 45 days, so a longer
   window adds no runs to the estimate while Cost Management still returns actuals for all of it,
   which makes the actuals look too high.
@@ -104,8 +103,8 @@ exactly one current report:
 
 | File | Contents |
 |---|---|
-| `metadata/tco/cost_comparison.csv` | Factory-level estimate vs actual, then pipeline-level estimates |
-| `metadata/tco/cost_comparison.md` | The same, plus profiling context (window, region, pricing source), a per-subscription summary, and any Cost Management access issues |
+| `metadata/tco/cost_comparison.csv` | One CSV table: a `level` column says whether a row is a `factory` (estimate vs actual) or a `pipeline` (estimate only); costs are plain numbers |
+| `metadata/tco/cost_comparison.md` | The same, plus profiling context (window, region, pricing source), a per-subscription summary, any Cost Management access issues, and a Warnings section listing every scan warning (missing roles, price fallback, incomplete billing) when there are any |
 
 How to read it:
 

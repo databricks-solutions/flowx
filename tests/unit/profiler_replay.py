@@ -11,7 +11,8 @@ class ReplayTransport:
     """Serves recorded JSON for any URL containing a mapping key (the longest key wins).
 
     A value may be a dict (served every time), a list (served in order on successive calls,
-    for pagination), or an int (raised as `TransportHttpError` with that status). An unrecorded
+    for pagination), an int (raised as `TransportHttpError` with that status), or an exception
+    (raised as is, e.g. to fail a call a test doesn't expect). An unrecorded
     URL raises AssertionError so a missing fixture is loud. Every request is kept in `calls`.
     """
 
@@ -32,6 +33,8 @@ class ReplayTransport:
             value = value[min(index, len(value) - 1)]
         if isinstance(value, int):
             raise TransportHttpError(value, url)
+        if isinstance(value, BaseException):
+            raise value
         return value
 
     def get_json(self, url: str) -> dict[str, Any]:

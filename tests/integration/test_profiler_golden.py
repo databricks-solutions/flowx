@@ -85,7 +85,7 @@ def replayed() -> ProfileResult:
 
 def test_replay_sees_every_captured_run(replayed):
     assert replayed.total_pipeline_runs == 96
-    assert replayed.permission_warnings == []
+    assert replayed.warnings == []
 
 
 def test_estimates_match_the_original_script(replayed):

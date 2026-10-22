@@ -33,6 +33,10 @@ DEFAULT_PRICING: RateCards = {
 RETAIL_PRICES_URL = "https://prices.azure.com/api/retail/prices"
 
 
+class LivePricingUnavailable(Exception):
+    """Raised when live Retail Prices can't be used; the message is a short, plain reason."""
+
+
 def parse_retail_prices(items: list[dict[str, Any]]) -> RateCards | None:
     """Map Azure Retail Prices API `Items` to rate cards, or None if nothing usable came back.
 
@@ -76,24 +80,38 @@ def parse_retail_prices(items: list[dict[str, Any]]) -> RateCards | None:
     }
 
 
-def fetch_live_pricing(region: str) -> RateCards | None:
-    """Best-effort live rates for `region`; returns None on any failure so the caller falls back."""
+def fetch_live_pricing(region: str) -> RateCards:
+    """Live rates for `region`, following `NextPageLink` pages until none or one repeats.
+
+    Raises LivePricingUnavailable with a short reason on any failure, so the caller can fall back
+    to list rates and say why.
+    """
     try:
         import requests
 
-        response = requests.get(
-            RETAIL_PRICES_URL,
-            params={
-                "api-version": "2023-01-01-preview",
-                "$filter": (
-                    "serviceName eq 'Azure Data Factory v2' "
-                    f"and armRegionName eq '{region}' and priceType eq 'Consumption'"
-                ),
-            },
-            timeout=5,
-        )
-        if response.status_code != 200:
-            return None
-        return parse_retail_prices(response.json().get("Items", []))
-    except Exception:
-        return None
+        items: list[dict[str, Any]] = []
+        next_url: str | None = RETAIL_PRICES_URL
+        params: dict[str, str] | None = {
+            "api-version": "2023-01-01-preview",
+            "$filter": (
+                f"serviceName eq 'Azure Data Factory v2' and armRegionName eq '{region}' and priceType eq 'Consumption'"
+            ),
+        }
+        seen_urls: set[str] = set()
+        while next_url and next_url not in seen_urls:
+            seen_urls.add(next_url)
+            response = requests.get(next_url, params=params, timeout=5)
+            if response.status_code != 200:
+                raise LivePricingUnavailable(f"HTTP {response.status_code}")
+            page = response.json()
+            items.extend(page.get("Items", []))
+            next_url = page.get("NextPageLink")
+            params = None
+    except LivePricingUnavailable:
+        raise
+    except Exception as error:
+        raise LivePricingUnavailable(type(error).__name__) from error
+    rates = parse_retail_prices(items)
+    if rates is None:
+        raise LivePricingUnavailable("no usable prices returned")
+    return rates
