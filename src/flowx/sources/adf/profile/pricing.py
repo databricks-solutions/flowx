@@ -5,9 +5,10 @@ lazy-imports requests so importing this module needs no network stack.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from flowx.sources.adf.profile.azure_client import is_https_on
+from flowx.sources.adf.profile.azure_client import REQUEST_TIMEOUT_SECONDS, is_https_on
 
 RateCards = dict[str, dict[str, float]]
 
@@ -33,6 +34,7 @@ DEFAULT_PRICING: RateCards = {
 }
 
 RETAIL_PRICES_URL = "https://prices.azure.com/api/retail/prices"
+RETRY_PAUSE_SECONDS = 2.0
 
 
 class LivePricingUnavailable(Exception):
@@ -81,6 +83,14 @@ def parse_retail_prices(items: list[dict[str, Any]]) -> RateCards | None:
     }
 
 
+def _get_once_more_on_network_error(requests: Any, url: str, params: dict[str, str] | None) -> Any:
+    try:
+        return requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+    except (requests.Timeout, requests.ConnectionError):
+        time.sleep(RETRY_PAUSE_SECONDS)
+        return requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+
+
 def fetch_live_pricing(region: str) -> RateCards:
     """Live rates for `region`, following `NextPageLink` pages until none or one repeats.
 
@@ -103,7 +113,7 @@ def fetch_live_pricing(region: str) -> RateCards:
             if not is_https_on(next_url, "prices.azure.com"):
                 break
             seen_urls.add(next_url)
-            response = requests.get(next_url, params=params, timeout=5)
+            response = _get_once_more_on_network_error(requests, next_url, params)
             if response.status_code != 200:
                 raise LivePricingUnavailable(f"HTTP {response.status_code}")
             page = response.json()

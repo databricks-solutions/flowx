@@ -43,8 +43,9 @@ def test_live_retail_prices_cover_every_meter_and_price_a_scan(replay_transport,
         pages.append(response.json())
         return response
 
+    region = (os.environ.get("ADF_CASE_LOCATION") or "eastus").lower().replace(" ", "")
     monkeypatch.setattr(requests, "get", recording_get)
-    rates = pricing.fetch_live_pricing("eastus")
+    rates = pricing.fetch_live_pricing(region)
 
     assert {(card, rate) for card, meters in rates.items() for rate in meters} == set(EXPECTED_METERS)
     items = [item for page in pages for item in page.get("Items", [])]
@@ -69,14 +70,14 @@ def test_live_retail_prices_cover_every_meter_and_price_a_scan(replay_transport,
     transport = replay_transport(
         {
             "/subscriptions?": {"value": [{"subscriptionId": SUBSCRIPTION_ID, "displayName": "live-prices"}]},
-            "/factories?": {"value": [{"id": factory_id, "name": "f", "location": "East US"}]},
+            "/factories?": {"value": [{"id": factory_id, "name": "f", "location": region}]},
             "/integrationRuntimes?": {"value": []},
             "/queryPipelineRuns": {"value": []},
             "Microsoft.CostManagement/query": {"properties": {"columns": [], "rows": []}},
         }
     )
     result = AdfScanner(credential=None, days=1, transport=transport).scan()
-    assert result.pricing_source == "Azure Retail Prices API (eastus)"
+    assert result.pricing_source == f"Azure Retail Prices API ({region})"
     assert result.warnings == []
 
 

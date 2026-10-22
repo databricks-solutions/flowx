@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 AZURE_MANAGEMENT_URL = "https://management.azure.com"
 _MANAGEMENT_HOST = "management.azure.com"
 _MANAGEMENT_SCOPE = "https://management.azure.com/.default"
-_REQUEST_TIMEOUT_SECONDS = 30
+REQUEST_TIMEOUT_SECONDS = 30
 # Refresh a little before expiry so a token can't lapse between the check and the request.
 _TOKEN_REFRESH_MARGIN_SECONDS = 300
 
@@ -137,11 +137,11 @@ class LiveTransport:
             headers = self._authorized_headers()
             if method == "GET":
                 response = self._http().get(
-                    url, headers=headers, timeout=_REQUEST_TIMEOUT_SECONDS, allow_redirects=False
+                    url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False
                 )
             else:
                 response = self._http().post(
-                    url, headers=headers, json=body, timeout=_REQUEST_TIMEOUT_SECONDS, allow_redirects=False
+                    url, headers=headers, json=body, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False
                 )
             if response.status_code == 401 and attempt == 0:
                 self._headers = None

@@ -49,8 +49,9 @@ For each activity run in the window:
 
 Rates come from the public Azure Retail Prices API for each factory's region. Each rate is the price of
 the `Azure Data Factory v2` meter with the exact name Azure uses (for example `Cloud Pipeline Activity` or
-`Self Hosted Data Movement`); a meter the API doesn't return keeps its built-in list rate. If the call
-fails, the built-in list rates are used, and the report's "Pricing Source" line says which applied.
+`Self Hosted Data Movement`); a meter the API doesn't return keeps its built-in list rate. A request
+that times out or can't connect is tried once more; if the call still fails, the built-in list rates are
+used, and the report's "Pricing Source" line says which applied.
 
 ## Known limitations (carried over from the original profiler, tracked as follow-ups)
 

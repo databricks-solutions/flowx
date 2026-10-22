@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from flowx.sources.adf.profile import pricing
+from flowx.sources.adf.profile import azure_client, pricing
 
 
 def test_default_pricing_has_three_rate_cards():
@@ -130,10 +130,62 @@ def test_fetch_live_pricing_stops_on_a_repeated_next_page_link(monkeypatch):
     assert requested == [pricing.RETAIL_PRICES_URL, "https://prices.azure.com/api/retail/prices?$skip=100"]
 
 
+class ReadTimeout(Exception):
+    pass
+
+
 def _fake_requests(monkeypatch, get) -> None:
     requests = types.ModuleType("requests")
     requests.get = get  # type: ignore[attr-defined]
+    requests.Timeout = ReadTimeout  # type: ignore[attr-defined]
+    requests.ConnectionError = ConnectionError  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "requests", requests)
+    monkeypatch.setattr(pricing, "RETRY_PAUSE_SECONDS", 0)
+
+
+def _answers(*outcomes):
+    calls: list[float] = []
+
+    def get(url, params=None, timeout=None):
+        calls.append(timeout)
+        outcome = outcomes[len(calls) - 1]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    return get, calls
+
+
+LIVE_PAGE = types.SimpleNamespace(
+    status_code=200,
+    json=lambda: {
+        "Items": [{"productName": "Azure Data Factory v2", "meterName": "Cloud Data Movement", "retailPrice": 0.3}]
+    },
+)
+
+
+def test_a_timeout_is_retried_once_with_the_shared_azure_timeout(monkeypatch):
+    get, calls = _answers(ReadTimeout(), LIVE_PAGE)
+    _fake_requests(monkeypatch, get)
+    rates = pricing.fetch_live_pricing("eastus2")
+    assert rates["azure_ir"]["data_movement_per_diu_hour"] == 0.3
+    assert calls == [azure_client.REQUEST_TIMEOUT_SECONDS, azure_client.REQUEST_TIMEOUT_SECONDS]
+
+
+def test_a_second_timeout_gives_up_with_its_name(monkeypatch):
+    get, calls = _answers(ReadTimeout(), ReadTimeout(), LIVE_PAGE)
+    _fake_requests(monkeypatch, get)
+    with pytest.raises(pricing.LivePricingUnavailable, match="^ReadTimeout$"):
+        pricing.fetch_live_pricing("eastus2")
+    assert len(calls) == 2
+
+
+def test_an_http_error_is_not_retried(monkeypatch):
+    get, calls = _answers(types.SimpleNamespace(status_code=404), LIVE_PAGE)
+    _fake_requests(monkeypatch, get)
+    with pytest.raises(pricing.LivePricingUnavailable, match="^HTTP 404$"):
+        pricing.fetch_live_pricing("eastus2")
+    assert len(calls) == 1
 
 
 def test_fetch_live_pricing_names_an_http_failure(monkeypatch):
