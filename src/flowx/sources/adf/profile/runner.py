@@ -28,8 +28,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--days",
         type=int,
-        default=45,
-        help="How many days of run history to profile (default 45: ADF keeps pipeline runs for only 45 days).",
+        default=30,
+        help="How many days of run history to profile (default 30 days).",
     )
     parser.add_argument("--subscription-id", help="Only scan this subscription.")
     parser.add_argument("--resource-group", help="Only scan this resource group.")

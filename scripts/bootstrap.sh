@@ -22,7 +22,39 @@
 # The resolved interpreter path is also written to <plugin_root>/.migration-venv
 # so the skills can discover it without re-deriving the location.
 #
+# Options:
+#   --source-deps <source>  Also installs flowx with the deps needed to extract and profile
+#                           that source system live. Only `azure` is supported
+#                           (e.g. --source-deps azure or --source-deps=azure).
+#
 set -euo pipefail
+
+usage() {
+  echo "Usage: bootstrap.sh [--source-deps azure]" >&2
+  exit 2
+}
+
+SOURCE_DEPS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source-deps=*)
+      SOURCE_DEPS="${1#*=}"
+      [ -n "$SOURCE_DEPS" ] || usage
+      ;;
+    --source-deps)
+      [ $# -ge 2 ] && [ -n "$2" ] || usage
+      SOURCE_DEPS="$2"
+      shift
+      ;;
+    *) usage ;;
+  esac
+  shift
+done
+SOURCE_DEPS="$(printf '%s' "$SOURCE_DEPS" | tr '[:upper:]' '[:lower:]')"
+case "$SOURCE_DEPS" in
+  "" | azure) ;;
+  *) usage ;;
+esac
 
 # Resolve the plugin root
 SOURCE="${BASH_SOURCE[0]}"
@@ -165,6 +197,11 @@ echo "Installing pinned pip ..."
 
 echo "Installing dependencies from requirements.txt ..."
 "$VENV_PYTHON" -m pip install -r "$REQUIREMENTS"
+
+if [ -n "$SOURCE_DEPS" ]; then
+  echo "Installing flowx from $PLUGIN_ROOT with the $SOURCE_DEPS extra ..."
+  "$VENV_PYTHON" -m pip install -e "${PLUGIN_ROOT}[${SOURCE_DEPS}]"
+fi
 
 # ---------------------------------------------------------------------------
 # Databricks runtime: pre-configure workspace auth from the notebook context

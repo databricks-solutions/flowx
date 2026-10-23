@@ -17,7 +17,7 @@ triggers:
 # Profile Current ADF Spend
 
 Scan Azure Data Factory **live** and estimate its current spend: every pipeline run and activity
-run in the last N days (default 45, ADF's run-history limit) is priced with the Azure Retail Prices list rates for the
+run in the last N days (default 30) is priced with the Azure Retail Prices list rates for the
 factory's region, then compared with what Azure actually billed (Cost Management). The result is
 the source-side "what does ADF cost today" number for a migration evaluation.
 
@@ -28,7 +28,9 @@ and does not require `discover` to have run first. Only the `adf` source has a p
 ## Step 1 — Install the optional Azure dependencies
 
 The Azure SDK stack is an optional extra so the other phases never need it. Run the **`setup`**
-skill first if there is no venv yet, then add the extra to it:
+skill first if there is no venv yet (answering **yes** to its live Azure features question runs
+`bootstrap.sh --source-deps azure`, which installs the extra for you), or add the extra to an
+existing venv:
 
 ```bash
 PY="$(cat <plugin_dir>/.migration-venv)"
@@ -80,21 +82,30 @@ The roles the identity needs are in `sources/adf.md`.
 ```bash
 export PYTHONPATH="<plugin_dir>/src"
 "$PY" -m flowx.adapter profile --source adf --output-dir <output_dir> \
-  [--days 45] [--subscription-id <id>] [--resource-group <rg> [--factory-name <name>]]
+  [--days 30] [--subscription-id <id>] [--resource-group <rg> [--factory-name <name>]]
 ```
 
 Scope flags:
 
 - `--subscription-id` limits the scan to one subscription.
 - `--resource-group` limits it to one resource group.
-- `--factory-name` narrows to one factory and **needs `--resource-group`**; on its own the
-  command exits with code 2 before signing in.
-- `--days` sets the window (default 45). ADF keeps pipeline runs for only 45 days, so a longer
-  window adds no runs to the estimate while Cost Management still returns actuals for all of it,
-  which makes the actuals look too high.
+- `--factory-name` narrows to one factory and requires `--resource-group`; using it alone exits with code 2.
+- `--days` sets the window (default 30). ADF keeps pipeline runs for only 45 days. A longer window
+  adds no ADF run history but adds Cost Management data. This over-estimates per-run costs.
 
-The phase is not exposed as an MCP `flowx` command yet. In Genie Code, run it from a serverless
-notebook as above.
+Over MCP (Genie Code), call `flowx(command="profile", parameters={"source": "adf", "output_dir":
+"...", "days": 30, ...})` with the same scope keys (`subscription_id`, `resource_group`,
+`factory_name`). The app needs the Azure deps (deploy it with `source_deps=azure` or
+`SOURCE_DEPS=azure`; see the `setup` skill) and the service principal env vars above; on success the
+result carries the report as `report_md` and `report_csv`.
+
+MCP `profile` is for scoped scans: set `resource_group` and/or `factory_name` and keep `days` small.
+The scan makes about one REST call per pipeline run, so a subscription-wide scan can take hours,
+longer than an MCP call can wait. Run subscription-wide scans from a notebook with
+`python -m flowx.adapter profile ...` (Step 3) instead.
+
+If the MCP call runs past `FLOWX_MCP_TIMEOUT` (default 1800 s), it returns `ok: false` with no
+report and a message in `process.stderr` saying how to narrow the scan.
 
 ## Output
 
@@ -103,7 +114,7 @@ exactly one current report:
 
 | File | Contents |
 |---|---|
-| `metadata/tco/cost_comparison.csv` | One CSV table: a `level` column says whether a row is a `factory` (estimate vs actual) or a `pipeline` (estimate only); costs are plain numbers |
+| `metadata/tco/cost_comparison.csv` | One table with a level column: factory estimates and actuals, and pipeline estimates |
 | `metadata/tco/cost_comparison.md` | The same, plus profiling context (window, region, pricing source), a per-subscription summary, any Cost Management access issues, and a Warnings section listing every scan warning (missing roles, price fallback, incomplete billing) when there are any |
 
 How to read it:
@@ -116,8 +127,12 @@ How to read it:
 - **Pipeline rows** are estimates only. Azure bills per factory unless per-pipeline billing is
   enabled in Factory Settings.
 
-Nothing outside `metadata/tco/` is touched. `discover`'s `metadata/profile_report.csv` is a
-different report (pipeline complexity) and is left alone.
+**Notes:**
+
+- ADF Datasets are intentionally not scanned: they are definitions only and have no runtime meter, so
+  they add no cost.
+- Nothing outside `metadata/tco/` is touched. `discover`'s `metadata/profile_report.csv` is a
+  different report (pipeline complexity) and is left alone.
 
 ## Reference
 

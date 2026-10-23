@@ -110,7 +110,7 @@ jobs:
         run: sed -i -E 's#https://[a-zA-Z0-9._-]+/simple#https://pypi.org/simple#g' uv.lock
 
       - name: Install flowx from the lock file
-        run: uv sync --frozen --extra azure
+        run: uv sync --frozen --extra azure --extra mcp
 
       - name: Install Terraform
         run: '"${CI_SCRIPTS}/install-pinned-tool.sh" terraform'

@@ -390,7 +390,7 @@ def test_installs_happen_before_azure_login_from_pinned_sources() -> None:
         _step_index(steps, "Install Databricks CLI"),
     ]
     assert max(installs) < login
-    assert steps[installs[0]]["run"] == "uv sync --frozen --extra azure"
+    assert steps[installs[0]]["run"] == "uv sync --frozen --extra azure --extra mcp"
     assert not any(str(step.get("uses", "")).startswith(("hashicorp/", "databricks/")) for step in steps)
     for step in steps:
         assert not re.search(r"bootstrap\.sh|pip install|npm install", step.get("run", ""))
