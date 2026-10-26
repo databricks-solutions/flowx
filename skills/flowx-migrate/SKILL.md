@@ -60,8 +60,14 @@ phase:
 flowx(command="migrate", parameters={
   "source": "adf",
   "adf_definitions": {"pipeline/Foo.json": {...}, "linkedService/Bar.json": {...}, ...},
-  "output_dir": ..., "catalog": ..., "schema": ..., "pipeline": "<optional>"})
+  "output_dir": ..., "catalog": ..., "schema": ..., "pipeline": "<optional>",
+  "packaging_mode": "<optional, ADF only: per-pipeline|single|per-group>",
+  "group_by": "<optional inferred|spec, per-group only>", "group_spec": "<optional path, per-group only>"})
 ```
+
+The packaging keys work as they do for `package` (see the `flowx-package` skill); leave them out for
+the default per-pipeline layout. `group_spec` must be a path the server itself can read, so on the
+hosted server use `"packaging_mode": "per-group"` with `"group_by": "inferred"`, or a server-local path.
 
 **`migrate` is interactive when configuration options exist.** After translating, if the pipeline
 raises any configuration options (e.g. how to handle an `activity_and_notify` motif, metadata-driven
@@ -80,6 +86,8 @@ bulk-copy consolidation, non-Databricks task compute), it **does not package** â
    `metadata_driven_lookup_tool=have`).
 3. When **every applicable option** is answered, call `migrate` **once** with the same parameters plus
    `"answers": ["option_id=value", â€¦]`. It applies them and packages (`"status": "completed"`).
+   Repeat any `packaging_mode`, `group_by` and `group_spec` from the first call: the packaging step
+   reads them from this call, so leaving them out packages per-pipeline.
 
 To accept all defaults and skip the prompts, pass `"interactive": false`. (Re-calling `migrate` with
 `answers` reuses the existing report and skips re-running discover/convert.)
