@@ -242,10 +242,12 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
 
     Uses the literal ``server`` (plus ``database`` when given) from the backing
     linked service's properties or plaintext connection string, exactly as written.
-    When the server is hidden (a Key Vault reference or a masked secret) the linked
-    service name stands in for it. A parameterised server, database, or connection
-    string, or a linked service that takes parameters, gives ``None``: each binding
-    may point at a different store, so no single name identifies it.
+    A ``server`` or ``database`` wrapped in an Expression object is read from its
+    ``value`` and checked like a plain string. When the connection string is hidden
+    (a Key Vault reference or a masked secret) the linked service name stands in for
+    the server. A parameterised or masked server or database, a parameterised
+    connection string, or a linked service that takes parameters, gives ``None``:
+    each binding may point at a different store, so no single name identifies it.
     """
     linked_service_name, _ = _linked_service_reference(dataset_props)
     if not linked_service_name:
@@ -258,12 +260,21 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
         return None
     connection_fields = _connection_string_fields(connection_string) if isinstance(connection_string, str) else {}
 
-    server = type_props.get("server") or connection_fields.get("server") or connection_fields.get("data source")
+    server = (
+        _expression_value(type_props.get("server"))
+        or connection_fields.get("server")
+        or connection_fields.get("data source")
+    )
     database = (
-        type_props.get("database") or connection_fields.get("database") or connection_fields.get("initial catalog")
+        _expression_value(type_props.get("database"))
+        or connection_fields.get("database")
+        or connection_fields.get("initial catalog")
     )
     store_parts = [part for part in (server, database) if part]
-    if not all(isinstance(part, str) and part.strip() and _is_physical(part) for part in store_parts):
+    if not all(
+        isinstance(part, str) and part.strip() and _is_physical(part) and not _is_masked_secret(part)
+        for part in store_parts
+    ):
         return None
     if server:
         return "/".join(part.strip() for part in store_parts)
@@ -368,15 +379,17 @@ def _resolve_dataset_path(
 def _resolve_storage_account(linked_service: Any) -> str | None:
     """Pull a storage account name out of a linked service, if present.
 
-    The whole ``url``, ``sasUri`` or connection string must be physical before the
-    account is cut out of it: cutting first would drop the closing ``]`` of an ARM
-    expression or the tail of an ``@{...}`` and leave a fragment that looks literal.
+    Each of ``url``, ``sasUri`` and the connection string is read from its ``value``
+    when wrapped in an Expression or SecureString object. The whole of it must be
+    physical before the account is cut out of it: cutting first would drop the
+    closing ``]`` of an ARM expression or the tail of an ``@{...}`` and leave a
+    fragment that looks literal.
     """
     if linked_service is None:
         return None
     type_props = linked_service.properties.get("typeProperties") or linked_service.properties
 
-    url = type_props.get("url") or ""
+    url = _expression_value(type_props.get("url")) or ""
     if isinstance(url, str) and url:
         if not _is_physical(url):
             return None
@@ -385,7 +398,7 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
         if "." in host_no_port:
             return host_no_port.split(".", 1)[0]
 
-    sas_uri = type_props.get("sasUri") or ""
+    sas_uri = _expression_value(type_props.get("sasUri")) or ""
     if isinstance(sas_uri, str) and sas_uri:
         if not _is_physical(sas_uri):
             return None
@@ -394,9 +407,7 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
             return host.split(".", 1)[0]
 
     # Plaintext connection string (rare in az exports -- usually masked).
-    connection_string = type_props.get("connectionString")
-    if isinstance(connection_string, dict):
-        connection_string = connection_string.get("value", "")
+    connection_string = _expression_value(type_props.get("connectionString"))
     if isinstance(connection_string, str):
         if not _is_physical(connection_string):
             return None
@@ -424,6 +435,12 @@ def _is_physical(value: str) -> bool:
     if "{{" in value or "@{" in value or stripped.startswith("@"):
         return False
     return not _is_arm_expression(stripped)
+
+
+def _is_masked_secret(value: str) -> bool:
+    """``True`` for the ``**********`` an ADF export writes in place of a SecureString's value."""
+    stripped = value.strip()
+    return bool(stripped) and set(stripped) == {"*"}
 
 
 def _is_arm_expression(text: str) -> bool:

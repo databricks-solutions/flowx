@@ -770,6 +770,95 @@ def test_arm_expression_storage_url_has_no_path_identity() -> None:
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orders"), definitions) is None
 
 
+def _expression(value: object) -> dict:
+    return {"type": "Expression", "value": value}
+
+
+def _sql_store_identity(type_properties: dict) -> str | None:
+    """The identity of ``dbo.Orders`` behind a SQL linked service with *type_properties*."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_orders": _table_dataset("ds_orders", schema="dbo", table="Orders", linked_service="ls_sql")},
+        linked_services={
+            "ls_sql": AdfLinkedService(name="ls_sql", type="SqlServer", properties={"typeProperties": type_properties})
+        },
+    )
+    return resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orders"), definitions)
+
+
+def _storage_account_identity(type_properties: dict) -> str | None:
+    """The identity of ``raw/in/orders.csv`` behind a storage linked service with *type_properties*."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_orders": _adls_dataset(
+                "ds_orders", file_system="raw", folder_path="in", linked_service="ls_lake", file_name="orders.csv"
+            )
+        },
+        linked_services={
+            "ls_lake": AdfLinkedService(
+                name="ls_lake", type="AzureBlobFS", properties={"typeProperties": type_properties}
+            )
+        },
+    )
+    return resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orders"), definitions)
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"server": _expression("sql.contoso.net"), "database": "Sales"},
+        {"server": "sql.contoso.net", "database": _expression("Sales")},
+        {"server": _expression("sql.contoso.net"), "database": _expression("Sales")},
+    ],
+)
+def test_expression_wrapped_literal_server_and_database_give_a_table_identity(type_properties: dict) -> None:
+    """A literal ``server`` or ``database`` inside an Expression object names the store as a plain string does."""
+    assert _sql_store_identity(type_properties) == "sql.contoso.net/Sales/dbo.Orders"
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"server": _expression("@linkedService().serverName"), "database": "Sales"},
+        {"server": _expression("[parameters('sqlServer')]"), "database": "Sales"},
+        {"server": "sql.contoso.net", "database": _expression("@{linkedService().databaseName}")},
+        {"server": {"type": "SecureString", "value": "**********"}, "database": "Sales"},
+        {"server": "sql.contoso.net", "database": {"type": "SecureString", "value": "**********"}},
+    ],
+)
+def test_expression_wrapped_unprovable_server_or_database_gives_no_table_identity(type_properties: dict) -> None:
+    """Unwrapping never trusts what is inside: a parameter reference or a masked secret still names no store."""
+    assert _sql_store_identity(type_properties) is None
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"url": _expression("https://acct.dfs.core.windows.net")},
+        {"sasUri": _expression("https://acct.blob.core.windows.net/?sv=2022-11-02&sig=x")},
+        {"sasUri": {"type": "SecureString", "value": "https://acct.blob.core.windows.net/?sv=2022-11-02&sig=x"}},
+    ],
+)
+def test_expression_wrapped_literal_url_or_sas_uri_gives_a_path_identity(type_properties: dict) -> None:
+    """A literal ``url`` or ``sasUri`` inside an Expression or SecureString object names the account."""
+    assert _storage_account_identity(type_properties) == "abfss://raw@acct.dfs.core.windows.net/in/orders.csv"
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"url": _expression("https://@{linkedService().accountName}.dfs.core.windows.net")},
+        {"url": _expression("[concat('https://', parameters('account'), '.dfs.core.windows.net')]")},
+        {"sasUri": _expression("@linkedService().sasUri")},
+        {"sasUri": {"type": "SecureString", "value": "**********"}},
+    ],
+)
+def test_expression_wrapped_unprovable_url_or_sas_uri_gives_no_path_identity(type_properties: dict) -> None:
+    """A parameterised or masked ``url`` or ``sasUri`` stays unknown after unwrapping, so no account is named."""
+    assert _storage_account_identity(type_properties) is None
+
+
 def _lake_definitions() -> AdfDefinitions:
     return AdfDefinitions(
         pipelines=[],
