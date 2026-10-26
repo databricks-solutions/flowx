@@ -86,7 +86,7 @@ def test_route_fails_when_the_plan_or_review_page_is_too_large_to_return_inline(
 
     assert out["ok"] is False
     assert "bundle" not in out
-    assert f"{oversized} (2100000 bytes)" in out["error"]
+    assert f"{oversized} (2100000 bytes) is too large to return inline" in out["error"]
     assert "output_volume_path" in out["error"] and "output_workspace_path" in out["error"]
     assert out["result"]["ok"] is True
 
@@ -188,8 +188,43 @@ def test_route_reports_why_a_file_could_not_be_copied(captured, tmp_path: Path, 
     out = server._cmd_route({"output_dir": str(tmp_path)})
 
     assert out["ok"] is False
-    assert "conversion_plan.json could not be read (permission denied)" in out["error"]
+    assert "conversion_plan.json could not be copied (permission denied)" in out["error"]
     assert "missing" not in out["error"]
+
+
+@pytest.mark.parametrize("upload_key", ["output_volume_path", "output_workspace_path"])
+@pytest.mark.parametrize("broken", ["missing_page", "plan_not_text"])
+def test_a_successful_route_uploads_nothing_unless_both_files_are_sound(
+    captured, tmp_path: Path, monkeypatch, upload_key: str, broken: str
+) -> None:
+    """An upload of a new plan beside a stale page, or of a plan that is not text, would look like a good delivery."""
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    if broken == "plan_not_text":
+        (metadata / "conversion_plan.json").write_bytes(b"\xff")
+    uploaded: list[str] = []
+
+    def fake_upload(local_root: Path, destination: str) -> dict[str, Any]:
+        uploaded.extend(path.name for path in local_root.rglob("*"))
+        return {upload_key: destination, "files": uploaded, "count": len(uploaded)}
+
+    monkeypatch.setattr(runner, "upload_tree_to_volume", fake_upload)
+    monkeypatch.setattr(runner, "upload_tree_to_workspace", fake_upload)
+    real_run = runner.run_adapter
+
+    def route_that_leaves_no_page(args, **kwargs):
+        result = real_run(args, **kwargs)
+        if broken == "missing_page":
+            (metadata / "routing_review.html").unlink()
+        return result
+
+    monkeypatch.setattr(runner, "run_adapter", route_that_leaves_no_page)
+
+    out = server._cmd_route({"output_dir": str(tmp_path), upload_key: "/Volumes/main/default/flowx"})
+
+    assert out["ok"] is False
+    assert uploaded == []
+    assert "bundle_uploaded" not in out
 
 
 def test_route_uploads_an_oversized_plan_and_review_page(captured, tmp_path: Path, monkeypatch) -> None:

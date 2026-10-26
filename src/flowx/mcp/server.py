@@ -412,9 +412,9 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
     inventory: inline under ``bundle``, or uploaded to
     ``output_volume_path`` / ``output_workspace_path``, because a hosted agent cannot read the server's
     ``output_dir``; edit the plan and call route again with it as ``plan``. The returned ``ok``
-    reflects the CLI's success, and is False with an ``error`` when the CLI succeeded but either file
-    is missing (run route again) or too large to return inline (pass one of the upload paths);
-    ``result`` carries the CLI's JSON.
+    reflects the CLI's success, and is False with an ``error``, and nothing uploaded, when the CLI
+    succeeded but either file is missing or unreadable (run route again) or too large to return
+    inline (pass one of the upload paths); ``result`` carries the CLI's JSON.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     plan = p.get("plan")
@@ -443,9 +443,10 @@ def _route_files(p: dict[str, Any], output_dir: Path, *, route_ok: bool) -> dict
     """Deliver the recorded plan and the routing review page, when route wrote them.
 
     The agent needs both to edit the plan and show the page, so after a successful route a file that
-    is missing, unreadable, or left out of the size-bounded inline bundle returns an ``error`` instead
-    of the bundle. After a failed route, whichever of the two exist are delivered as they are. Each
-    file is copied before it is checked, so one a discover moves away meanwhile counts as missing.
+    is missing, cannot be copied or read as UTF-8 text, or is left out of the size-bounded inline
+    bundle returns an ``error`` instead of the bundle, and nothing is uploaded unless both are sound.
+    After a failed route, whichever of the two exist are delivered as they are. Each file is copied
+    before it is checked, so one a discover moves away meanwhile counts as missing.
     """
     metadata = output_dir / "metadata"
     problems: list[str] = []
@@ -453,25 +454,32 @@ def _route_files(p: dict[str, Any], output_dir: Path, *, route_ok: bool) -> dict
         copies: list[Path] = []
         for name in ("conversion_plan.json", "routing_review.html"):
             try:
-                copies.append(Path(shutil.copy(metadata / name, temporary)))
+                copy = Path(shutil.copy(metadata / name, temporary))
             except FileNotFoundError:
                 problems.append(f"{name} is missing, so run route again")
+                continue
+            except OSError as error:
+                problems.append(f"{name} could not be copied ({error})")
+                continue
+            copies.append(copy)
+            try:
+                copy.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                problems.append(f"{name} is not UTF-8 text, so run route again")
             except OSError as error:
                 problems.append(f"{name} could not be read ({error})")
+        if route_ok and problems:
+            return {"error": f"Route succeeded, but under {metadata}: {'; '.join(problems)}."}
         delivered = _bundle_output(p, Path(temporary)) if copies else {}
-        bundle = delivered.get("bundle")
-        if route_ok and bundle is not None:
-            truncated = set(bundle.get("truncated", []))
-            for copy in copies:
-                if copy.name in truncated:
-                    problems.append(
-                        f"{copy.name} ({copy.stat().st_size} bytes) is too large to return inline, so call route "
-                        "again with output_volume_path or output_workspace_path to have it uploaded there"
-                    )
-                elif copy.name not in bundle["files"]:
-                    problems.append(f"{copy.name} is not UTF-8 text, so it cannot be returned inline")
-    if route_ok and problems:
-        return {"error": f"Route succeeded, but under {metadata}: {'; '.join(problems)}."}
+        truncated = set(delivered.get("bundle", {}).get("truncated", []))
+        too_large = [
+            f"{copy.name} ({copy.stat().st_size} bytes) is too large to return inline, so call route again with "
+            "output_volume_path or output_workspace_path to have it uploaded there"
+            for copy in copies
+            if copy.name in truncated
+        ]
+    if route_ok and too_large:
+        return {"error": f"Route succeeded, but under {metadata}: {'; '.join(too_large)}."}
     return delivered
 
 
@@ -811,9 +819,9 @@ def build_server() -> FastMCP:
           longer suggests, which go back to pending and are listed under `dropped_groupings`; with a
           plan (the decisions, or an edited copy of the recorded plan) it records those. It also
           writes metadata/routing_review.html, the standard
-          review page. The plan and the page come back under `bundle` (or are uploaded; ok is false
-          when either is missing, so run route again, or too large to return inline, so pass one of
-          the upload paths). While a
+          review page. The plan and the page come back under `bundle` (or are uploaded; ok is false,
+          with nothing uploaded, when either is missing or unreadable, so run route again, or too
+          large to return inline, so pass one of the upload paths). While a
           decision is pending nothing is applied; once every component is decided route rebuilds the
           translation report from the unchanged baseline, the stored gap fills, the plan, and the
           agent's outputs in metadata/agentic_conversion.json: deterministic units stay as-is, agentic
