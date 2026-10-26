@@ -2102,19 +2102,38 @@ def test_a_fill_that_raises_releases_the_route_lock(tmp_path: Path) -> None:
     assert not (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).exists()
 
 
-@pytest.mark.parametrize("extra", [{"notes": "kept by hand"}, {"components_v2": {}}], ids=["notes", "lookalike"])
-def test_the_agent_output_store_refuses_a_top_level_key_it_does_not_write(tmp_path: Path, extra: Any) -> None:
-    """The next save rebuilds the store from its two keys, so any other key would be dropped without a word."""
-    _route_parent_agentic(tmp_path, _report_two_pipelines())
+@pytest.mark.parametrize(
+    ("edit", "named"),
+    [
+        (lambda store: store.update({"notes": "kept by hand"}), "unknown top-level key(s) ['notes']"),
+        (lambda store: store.update({"components_v2": {}}), "unknown top-level key(s) ['components_v2']"),
+        (lambda store: store.pop("gap_fills"), "missing ['gap_fills']"),
+        (lambda store: store.pop("components"), "missing ['components']"),
+    ],
+    ids=["notes", "lookalike", "no-gap-fills", "no-components"],
+)
+def test_the_agent_output_store_must_hold_exactly_its_two_keys(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], edit: Any, named: str
+) -> None:
+    """Every save writes both keys and only those: an added key would be dropped, a deleted one lose its entries."""
+    report = _report_two_pipelines()
+    for pipeline in report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, report)
     assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
-    _edit_store(tmp_path, lambda store: store.update(extra))
+    _edit_store(tmp_path, edit)
     store_path = tmp_path / "metadata" / "agentic_conversion.json"
     store_before = store_path.read_bytes()
+    capsys.readouterr()
 
-    with pytest.raises(ValueError, match=re.escape(f"unknown top-level key(s) {sorted(extra)}")):
+    with pytest.raises(ValueError, match=re.escape(named)):
         load_agentic_output(tmp_path)
-    with pytest.raises(ValueError, match="unknown top-level key"):
+    with pytest.raises(ValueError, match=re.escape(named)):
         apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc_v2")])
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 1
+    assert named in capsys.readouterr().err
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 1
+    assert named in capsys.readouterr().err
 
     assert store_path.read_bytes() == store_before
 

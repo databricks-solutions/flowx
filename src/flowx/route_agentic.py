@@ -457,8 +457,9 @@ def load_agentic_output(output_dir: Path) -> AgenticOutput:
     and filling (or merging) that entry again replaces it.
 
     Raises:
-        ValueError: The file is not valid JSON or not shaped as ``{"components": {...}, "gap_fills": [...]}``,
-            with no other top-level key (every save writes only those two, so another would be dropped).
+        ValueError: The file is not valid JSON or not shaped as ``{"components": {...}, "gap_fills": [...]}``
+            with exactly those two top-level keys (every save writes both and only those, so another key
+            would be dropped and a deleted one would silently drop what it held).
     """
     path = Path(output_dir) / METADATA_DIRNAME / AGENTIC_OUTPUT_FILENAME
     if not path.exists():
@@ -467,9 +468,13 @@ def load_agentic_output(output_dir: Path) -> AgenticOutput:
         document = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise ValueError(f"{AGENTIC_OUTPUT_FILENAME} is not valid JSON: {error}") from error
-    unknown = sorted(set(document) - _STORE_KEYS) if isinstance(document, dict) else []
-    if unknown:
-        raise ValueError(f"{AGENTIC_OUTPUT_FILENAME} has unknown top-level key(s) {unknown}; remove them")
+    if isinstance(document, dict) and set(document) != _STORE_KEYS:
+        unknown, missing = sorted(set(document) - _STORE_KEYS), sorted(_STORE_KEYS - set(document))
+        raise ValueError(
+            f"{AGENTIC_OUTPUT_FILENAME} must hold exactly 'components' and 'gap_fills'"
+            + (f"; unknown top-level key(s) {unknown}" if unknown else "")
+            + (f"; missing {missing}" if missing else "")
+        )
     components = document.get("components", {}) if isinstance(document, dict) else None
     gap_fills = document.get("gap_fills", []) if isinstance(document, dict) else None
     if not isinstance(components, dict) or not isinstance(gap_fills, list):
