@@ -143,6 +143,55 @@ def test_route_that_failed_still_returns_the_plan_already_recorded(tmp_path: Pat
     assert list(out["bundle"]["files"]) == ["conversion_plan.json"]
 
 
+@pytest.mark.parametrize("oversized", ["conversion_plan.json", "routing_review.html"])
+def test_route_that_failed_returns_both_files_as_they_are_even_when_one_is_too_large(
+    tmp_path: Path, monkeypatch, oversized: str
+) -> None:
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "conversion_plan.json").write_text('{"components": []}', encoding="utf-8")
+    (metadata / "routing_review.html").write_text("<html></html>", encoding="utf-8")
+    (metadata / oversized).write_text("x" * 2_100_000, encoding="utf-8")
+    monkeypatch.setattr(
+        runner, "run_adapter", lambda args, **_: _Result(json.dumps({"ok": False, "violations": ["x"]}))
+    )
+
+    out = server._cmd_route({"output_dir": str(tmp_path)})
+
+    assert out["ok"] is False
+    assert "error" not in out
+    assert out["bundle"]["truncated"] == [oversized]
+
+
+def test_route_says_a_file_it_cannot_read_as_text_is_unreadable_not_too_large(captured, tmp_path: Path) -> None:
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "conversion_plan.json").write_bytes(b"\xff")
+
+    out = server._cmd_route({"output_dir": str(tmp_path)})
+
+    assert out["ok"] is False
+    assert "conversion_plan.json is not UTF-8 text" in out["error"]
+    assert "too large" not in out["error"]
+
+
+def test_route_reports_why_a_file_could_not_be_copied(captured, tmp_path: Path, monkeypatch) -> None:
+    real_copy = server.shutil.copy
+
+    def copy_without_permission(source, destination):
+        if Path(source).name == "conversion_plan.json":
+            raise PermissionError("permission denied")
+        return real_copy(source, destination)
+
+    monkeypatch.setattr(server.shutil, "copy", copy_without_permission)
+
+    out = server._cmd_route({"output_dir": str(tmp_path)})
+
+    assert out["ok"] is False
+    assert "conversion_plan.json could not be read (permission denied)" in out["error"]
+    assert "missing" not in out["error"]
+
+
 def test_route_uploads_an_oversized_plan_and_review_page(captured, tmp_path: Path, monkeypatch) -> None:
     metadata = tmp_path / "metadata"
     metadata.mkdir()

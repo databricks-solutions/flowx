@@ -443,40 +443,36 @@ def _route_files(p: dict[str, Any], output_dir: Path, *, route_ok: bool) -> dict
     """Deliver the recorded plan and the routing review page, when route wrote them.
 
     The agent needs both to edit the plan and show the page, so after a successful route a file that
-    is missing, or that the size-bounded inline bundle had to leave out, returns an ``error``
-    instead of the bundle. After a failed route, whichever of the two exist are delivered as they are.
-    Each file is copied before it is checked, so one a discover moves away meanwhile counts as missing.
+    is missing, unreadable, or left out of the size-bounded inline bundle returns an ``error`` instead
+    of the bundle. After a failed route, whichever of the two exist are delivered as they are. Each
+    file is copied before it is checked, so one a discover moves away meanwhile counts as missing.
     """
     metadata = output_dir / "metadata"
+    problems: list[str] = []
     with tempfile.TemporaryDirectory(prefix="flowx-route-") as temporary:
         copies: list[Path] = []
-        missing: list[str] = []
         for name in ("conversion_plan.json", "routing_review.html"):
             try:
                 copies.append(Path(shutil.copy(metadata / name, temporary)))
-            except OSError:
-                missing.append(name)
-        if route_ok and missing:
-            return {
-                "error": (
-                    f"Route reported success but {' and '.join(missing)} is missing under {metadata}; run route again."
-                )
-            }
-        if not copies:
-            return {}
-        delivered = _bundle_output(p, Path(temporary))
-        if "bundle" in delivered:
-            returned = delivered["bundle"]["files"]
-            left_out = [f"{copy.name} ({copy.stat().st_size} bytes)" for copy in copies if copy.name not in returned]
-            if left_out:
-                return {
-                    "error": (
-                        f"Too large to return inline: {', '.join(left_out)}. Route has written its files under "
-                        f"{metadata}; call route again with output_volume_path or output_workspace_path to have "
-                        "them uploaded there."
+            except FileNotFoundError:
+                problems.append(f"{name} is missing, so run route again")
+            except OSError as error:
+                problems.append(f"{name} could not be read ({error})")
+        delivered = _bundle_output(p, Path(temporary)) if copies else {}
+        bundle = delivered.get("bundle")
+        if route_ok and bundle is not None:
+            truncated = set(bundle.get("truncated", []))
+            for copy in copies:
+                if copy.name in truncated:
+                    problems.append(
+                        f"{copy.name} ({copy.stat().st_size} bytes) is too large to return inline, so call route "
+                        "again with output_volume_path or output_workspace_path to have it uploaded there"
                     )
-                }
-        return delivered
+                elif copy.name not in bundle["files"]:
+                    problems.append(f"{copy.name} is not UTF-8 text, so it cannot be returned inline")
+    if route_ok and problems:
+        return {"error": f"Route succeeded, but under {metadata}: {'; '.join(problems)}."}
+    return delivered
 
 
 def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
