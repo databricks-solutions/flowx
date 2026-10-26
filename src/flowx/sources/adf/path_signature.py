@@ -53,8 +53,9 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
        ``folderPath`` is used instead.
 
     The file name is read the same way; one with no literal text gives ``FN[]``. A
-    location folder or file name the code cannot read (a list, or an object that is not
-    an Expression) is unknown, so it gives ``None`` rather than borrowing the call site's.
+    location folder or file name the code cannot read (a list, or an object of a type
+    other than Expression or SecureString) is unknown, so it gives ``None`` rather than
+    borrowing the call site's. An untyped object is read by its ``value``.
     """
     call_site = _call_site_parameters(dataset_ref)
     passed_folder = _path_shape(call_site.get("folderPath"), {}, require_physical=True)

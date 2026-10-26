@@ -320,13 +320,18 @@ def _resolve_file_store(
     path identity and the signature's store qualifier both read the store here, so
     they always agree on what counts as a known file system and account.
     """
-    file_system = _resolve_param_value(
-        location.get("fileSystem") or location.get("container") or location.get("bucketName"), dataset_params, context
-    )
+    file_system = _written_file_system(location, dataset_params, context)
     account = _resolve_storage_account(linked_service)
     return (
         file_system if file_system and _is_physical(file_system) and "*" not in file_system else None,
         account if account and _is_physical(account) else None,
+    )
+
+
+def _written_file_system(location: dict[str, Any], dataset_params: dict[str, Any], context: TranslationContext) -> str:
+    """The location's file system, container or bucket as it resolves, before any check (``""`` when unset)."""
+    return _resolve_param_value(
+        location.get("fileSystem") or location.get("container") or location.get("bucketName"), dataset_params, context
     )
 
 

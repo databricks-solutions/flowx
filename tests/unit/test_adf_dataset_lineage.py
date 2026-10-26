@@ -962,6 +962,23 @@ def test_file_system_holding_a_mask_names_no_store(location_key: str) -> None:
     assert "*" not in (writes[0].signature or "")
 
 
+@pytest.mark.parametrize("location_key", ["fileSystem", "container", "bucketName"])
+def test_masked_file_systems_on_different_accounts_with_the_same_folder_shape_do_not_join(location_key: str) -> None:
+    """A masked file system names a store that cannot be proven, so the folder shape alone never joins."""
+    definitions = _landing_definitions(ds_a=("**********", "accta"), ds_b=("**********", "acctb"))
+    for name in ("ds_a", "ds_b"):
+        location = definitions.datasets[name].properties["typeProperties"]["location"]
+        location[location_key] = location.pop("fileSystem")
+    _, writes = activity_data_assets(_landing_copy("WriteA", dataset="ds_a", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("ReadB", dataset="ds_b", produced=False), definitions)
+
+    assert writes[0].signature == ""
+    assert reads[0].signature == ""
+    assert (
+        data_edges_from_endpoints([("WriteA", asset) for asset in writes], [("ReadB", asset) for asset in reads]) == []
+    )
+
+
 def test_two_masked_storage_accounts_with_the_same_folder_shape_do_not_join_by_signature() -> None:
     """Two lakes whose ``url`` hides the account behind ``*`` are not provably one store, so no edge joins them."""
     masked_url = {"type": "SecureString", "value": "https://**********.dfs.core.windows.net"}
