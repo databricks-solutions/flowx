@@ -394,6 +394,12 @@ def _edit_inventory(output_dir: Path, edit: Any) -> None:
     inventory_path.write_text(json.dumps(edit(inventory), indent=2), encoding="utf-8")
 
 
+def _drop_child_key(inventory: dict[str, Any], key: str) -> dict[str, Any]:
+    child = next(pipeline for pipeline in inventory["pipelines"] if pipeline.get("name") == "child")
+    del child[key]
+    return inventory
+
+
 def _set_on_child(key: str, value: Any) -> Any:
     def edit(inventory: dict[str, Any]) -> dict[str, Any]:
         child = next(pipeline for pipeline in inventory["pipelines"] if pipeline["name"] == "child")
@@ -415,11 +421,25 @@ def _set_on_child(key: str, value: Any) -> Any:
         ),
         (_set_on_child("motifs", 1), "pipeline 'child' 'motifs' must be a list of objects"),
         (
+            lambda inventory: _drop_child_key(inventory, "activities"),
+            "pipeline 'child' 'activities' must be a list of objects",
+        ),
+        (_set_on_child("name", ""), "must have a non-empty string 'name'"),
+        (
             _set_on_child("motifs", [{"motif_id": "m", "member_task_keys": "copy_orders"}]),
             "pipeline 'child' motif 'm' 'member_task_keys' must be a list of activity names",
         ),
     ],
-    ids=["root-list", "pipelines-int", "pipeline-int", "activities-dict", "motifs-int", "member-keys-str"],
+    ids=[
+        "root-list",
+        "pipelines-int",
+        "pipeline-int",
+        "activities-dict",
+        "motifs-int",
+        "no-activities",
+        "empty-name",
+        "member-keys-str",
+    ],
 )
 def test_route_refuses_an_inventory_not_shaped_as_discover_writes_it(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], edit: Any, named: str
@@ -433,4 +453,18 @@ def test_route_refuses_an_inventory_not_shaped_as_discover_writes_it(
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert any(named in violation and "run discover again" in violation for violation in payload["violations"])
+    assert not (tmp_path / "metadata" / "conversion_plan.json").exists()
+
+
+def test_record_plan_refuses_an_inventory_route_cannot_read(tmp_path: Path) -> None:
+    """The library's record step checks the shape too, so no caller records a plan over a malformed inventory."""
+    from flowx.routing import record_plan
+
+    _setup(tmp_path)
+    _edit_inventory(tmp_path, lambda inventory: {**inventory, "pipelines": 1})
+
+    result = record_plan(tmp_path, plan={"components": []})
+
+    assert result["ok"] is False
+    assert any("'pipelines' must be a list of objects" in violation for violation in result["violations"])
     assert not (tmp_path / "metadata" / "conversion_plan.json").exists()

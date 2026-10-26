@@ -988,10 +988,11 @@ def inventory_shape_violations(inventory: Any) -> list[str]:
     """What keeps route from reading ``inventory.json`` the way discover writes it; empty when nothing does.
 
     Route decides from each pipeline's activities and motifs. Read as none, a ``pipelines``,
-    ``activities`` or ``motifs`` value that is not a list of objects, or a motif's
-    ``member_task_keys`` that is not a list of names, would make a pipeline look fully deterministic,
-    so route refuses it instead. Discover always writes those shapes, so any other means the file was
-    edited; running discover again rewrites it.
+    ``activities`` or ``motifs`` value that is not a list of objects, a pipeline with no
+    ``activities`` or no name, or a motif's ``member_task_keys`` that is not a list of names, would
+    make a pipeline look fully deterministic or drop it, so route refuses it instead. Discover always
+    writes each pipeline's name and activities (motifs only when it found some), so any other shape
+    means the file was edited; running discover again rewrites it.
     """
     if not isinstance(inventory, dict):
         return [
@@ -1002,10 +1003,14 @@ def inventory_shape_violations(inventory: Any) -> list[str]:
         return ["metadata/inventory.json 'pipelines' must be a list of objects; run discover again"]
     violations: list[str] = []
     for index, pipeline in enumerate(pipelines):
-        label = pipeline.get("name") if isinstance(pipeline.get("name"), str) else f"pipelines[{index}]"
-        for key in ("activities", "motifs"):
-            if not _is_list_of(pipeline.get(key, []), dict):
-                violations.append(f"metadata/inventory.json pipeline {label!r} '{key}' must be a list of objects")
+        name = pipeline.get("name")
+        label = name if isinstance(name, str) and name else f"pipelines[{index}]"
+        if not isinstance(name, str) or not name:
+            violations.append(f"metadata/inventory.json {label} must have a non-empty string 'name'")
+        if not _is_list_of(pipeline.get("activities"), dict):
+            violations.append(f"metadata/inventory.json pipeline {label!r} 'activities' must be a list of objects")
+        if not _is_list_of(pipeline.get("motifs", []), dict):
+            violations.append(f"metadata/inventory.json pipeline {label!r} 'motifs' must be a list of objects")
         for motif in pipeline.get("motifs", []) if _is_list_of(pipeline.get("motifs", []), dict) else []:
             if not _is_list_of(motif.get("member_task_keys", []), str):
                 violations.append(
@@ -1091,6 +1096,9 @@ def record_plan(
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     if not isinstance(inventory, dict):
         raise ValueError(f"inventory.json must contain a JSON object, got {type(inventory).__name__}")
+    malformed = inventory_shape_violations(inventory)
+    if malformed:
+        return {"ok": False, "violations": malformed, "components": 0}
 
     raw = load_plan(plan=plan, plan_path=plan_path)
     violations = validate_plan(raw, inventory)
