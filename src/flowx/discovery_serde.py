@@ -53,7 +53,8 @@ SOURCE_GRAPHS_CONTRACT_VERSION = "1"
 
 _HASHED_DOCUMENT_KEYS = ("contract_version", "source", "graphs")
 _DOCUMENT_KEYS = frozenset({*_HASHED_DOCUMENT_KEYS, "graph_sha256", "document_sha256"})
-_NODE_TYPES = frozenset({"SourceNode", "ContainerNode", "GapNode"})
+_NODE_CLASSES = (SourceNode, ContainerNode, GapNode)
+_NODE_TYPES = frozenset(node_class.__name__ for node_class in _NODE_CLASSES)
 
 
 def source_graph_to_dict(graph: SourceGraph) -> dict[str, Any]:
@@ -127,8 +128,9 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
         The JSON-friendly document, ready to write.
 
     Raises:
-        ValueError: A graph's ``source`` differs from *source*, so the reader would
-            refuse the document.
+        ValueError: A graph's ``source`` differs from *source*, or a node is not
+            exactly one of the three node classes, so the reader would refuse the
+            document.
     """
     document: dict[str, Any] = {
         "contract_version": SOURCE_GRAPHS_CONTRACT_VERSION,
@@ -145,7 +147,8 @@ def write_source_graphs(path: Path, graphs: list[SourceGraph], *, source: str) -
     """Write the persisted source-graph document to *path* and return what was written.
 
     Builds the document with :func:`source_graphs_document`, so a graph from another
-    source raises before anything is written.
+    source or a node the reader has no ``node_type`` for raises before anything is
+    written.
     """
     document = source_graphs_document(graphs, source=source)
     path.write_text(json.dumps(document, indent=2), encoding="utf-8")
@@ -350,8 +353,13 @@ def _node_to_dict(node: SourceNode) -> dict[str, Any]:
     """Serialise any SourceNode (including Container/Gap subclasses) to a dict.
 
     The ``node_type`` discriminator is the dataclass name so the matching
-    subclass is rebuilt on the way back.
+    subclass is rebuilt on the way back. Any other class, including a further
+    subclass, raises, because the reader would refuse its ``node_type``.
     """
+    if type(node) not in _NODE_CLASSES:
+        raise ValueError(
+            f"Cannot write discovery node of type {type(node).__name__!r}; expected one of {sorted(_NODE_TYPES)}"
+        )
     result: dict[str, Any] = {
         "node_type": type(node).__name__,
         "source_id": node.source_id,
