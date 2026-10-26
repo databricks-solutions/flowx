@@ -1401,3 +1401,228 @@ def test_authored_loop_body_inside_a_for_each_job_keeps_its_own_input_references
     assert forwarded["env"] == "{{job.parameters.env}}"
     assert forwarded["tables"] == "{{job.parameters.tables}}"
     assert "table_name" not in forwarded
+
+
+@pytest.mark.parametrize("wrap", [lambda activity: activity, _inside_for_each_with_siblings])
+def test_agentic_component_task_and_environment_variables_are_declared(tmp_path, wrap):
+    """Each ``${var.X}`` an authored task or environment names is declared, as for authored pipeline resources."""
+    component = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[{"path": "jobs/run.py", "content": "print('run')\n"}],
+        environments=[
+            {
+                "environment_key": "serverless",
+                "spec": {"environment_version": "2", "dependencies": ["orders==${var.orders_version}"]},
+            }
+        ],
+        task={
+            "spark_python_task": {
+                "python_file": "../src/jobs/run.py",
+                "parameters": ["${var.run_date}", "${var.run-id}", "${var.foo-}", "${var.-foo}"],
+            },
+            "environment_key": "serverless",
+        },
+    )
+    loop = AgenticComponentActivity(
+        name="Loop",
+        task_key="loop_tables",
+        task={
+            "for_each_task": {
+                "inputs": "${var.tables}",
+                "task": {"task_key": "load_table", "existing_cluster_id": "${var.cluster_id}", "sql_task": {}},
+            }
+        },
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[wrap(component), loop])), tmp_path)
+
+    variables = yaml.safe_load((tmp_path / "databricks.yml").read_text(encoding="utf-8"))["variables"]
+    assert {"orders_version", "run_date", "run-id", "tables", "cluster_id"} <= variables.keys()
+    assert not {"foo-", "-foo"} & variables.keys()
+    assert "default" not in variables["run_date"]
+    assert check_bundle_dir(tmp_path).ok
+
+
+@pytest.mark.parametrize(
+    ("task", "environments"),
+    [
+        ({"notebook_task": {"notebook_path": "../src/missing.py"}}, []),
+        ({"notebook_task": {"notebook_path": "../../missing.py"}}, []),
+        ({"spark_python_task": {"python_file": "../src/missing.py"}, "environment_key": "serverless"}, None),
+        ({"sql_task": {"file": {"path": "../src/missing.sql"}, "warehouse_id": "${var.warehouse_id}"}}, []),
+        (
+            {
+                "spark_python_task": {"python_file": "../src/jobs/run.py"},
+                "existing_cluster_id": "0101-abc",
+                "libraries": [{"whl": "../src/libraries/missing.whl"}],
+            },
+            [],
+        ),
+        *(
+            (
+                {"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "serverless"},
+                [{"environment_key": "serverless", "spec": spec}],
+            )
+            for spec in (
+                {"environment_version": "2", "dependencies": ["../src/libraries/missing.whl"]},
+                {"environment_version": "2", "java_dependencies": ["../src/libraries/missing.jar"]},
+                {"environment_version": "2", "java_dependencies": ["missing.jar"]},
+                {"project_environment": "../src/missing/pyproject.toml"},
+                {"project_environment": "missing/pyproject.toml"},
+                {"base_environment": "./missing-env.yaml"},
+                {"base_environment": "missing-env.yaml"},
+            )
+        ),
+    ],
+)
+def test_agentic_component_bundle_file_no_packaged_file_provides_fails(tmp_path, task, environments):
+    """A bundle-relative path in an authored task or environment must name a file the bundle writes."""
+    component = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[{"path": "jobs/run.py", "content": "print('run')\n"}],
+        environments=[SERVERLESS_ENVIRONMENT] if environments is None else environments,
+        task=task,
+    )
+
+    with pytest.raises(ValueError, match="names '[^']*missing[^']*', which no file in the bundle provides"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[component])), tmp_path)
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_agentic_component_file_references_outside_the_bundle_or_matching_a_glob_still_package(tmp_path):
+    """Workspace, repository, URI and pip references are not bundle files; a glob needs one match."""
+    component = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[
+            {"path": "jobs/run.py", "content": "print('run')\n"},
+            {"path": "dist/orders-1.0-py3-none-any.whl", "binary_content": "UEsDBAoAAAAA"},
+        ],
+        environments=[
+            {
+                "environment_key": "serverless",
+                "spec": {"environment_version": "2", "dependencies": ["requests==2.32.3", "../src/dist/*.whl"]},
+            }
+        ],
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "serverless"},
+    )
+    project = AgenticComponentActivity(
+        name="Project",
+        task_key="project",
+        files=[{"path": "project/pyproject.toml", "content": "[project]\nname = 'orders'\n"}],
+        environments=[
+            {"environment_key": "project", "spec": {"project_environment": "../src/project/pyproject.toml"}},
+            {"environment_key": "base", "spec": {"base_environment": "workspace-base-environments/orders"}},
+        ],
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "project"},
+    )
+    base = AgenticComponentActivity(
+        name="Base",
+        task_key="base",
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "base"},
+    )
+    repository = AgenticComponentActivity(
+        name="Repository",
+        task_key="repository",
+        task={
+            "notebook_task": {"notebook_path": "notebooks/run", "source": "GIT"},
+            "libraries": [{"jar": "dbfs:/jars/orders.jar"}, {"whl": "/Workspace/Shared/orders.whl"}],
+        },
+    )
+    workspace = AgenticComponentActivity(
+        name="Workspace",
+        task_key="workspace",
+        task={"notebook_task": {"notebook_path": "/Workspace/Shared/run"}},
+    )
+
+    write_bundle(
+        prepare_workflow(Pipeline(name="orders", tasks=[component, project, base, repository, workspace])), tmp_path
+    )
+
+    assert (tmp_path / "databricks.yml").exists()
+    assert check_bundle_dir(tmp_path).ok
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("task", [["notebook_task", {"notebook_path": "../src/run.py"}]], "task must be a mapping"),
+        ("task", None, "task must be a mapping"),
+        ("files", {"path": "pipelines/orders.py", "content": ""}, "files must be a list"),
+        ("resources", "", "resources must be a list"),
+        ("environments", 0, "environments must be a list"),
+    ],
+)
+def test_serialized_agentic_component_with_a_field_of_the_wrong_shape_fails(field_name, value, message):
+    """A reload refuses a field of the wrong shape instead of coercing it into a valid-looking one."""
+    serialized = {**activity_to_dict(_activity()), field_name: value}
+
+    with pytest.raises(ValueError, match=f"Agentic component 'ingest_orders' {message}"):
+        pipeline_dict_to_ir({"name": "orders", "tasks": [serialized]})
+
+
+@pytest.mark.parametrize("agent_sets_approximations", [False, True])
+def test_merged_agentic_component_parameter_approximations_reach_setup_md(tmp_path, agent_sets_approximations):
+    """Approximations the component carries, its own or kept from the placeholder, are listed in SETUP.md."""
+    inherited = {
+        "widget_name": "run_date",
+        "raw_expression": "@utcnow()",
+        "replacement": "{{job.start_time.iso_datetime}}",
+        "note": "Job start time, not the activity's own start time.",
+    }
+    authored = {**inherited, "widget_name": "load_date", "raw_expression": "@pipeline().TriggerTime"}
+    report = tmp_path / "translation_report.json"
+    placeholders = Pipeline(
+        name="orders",
+        tasks=[
+            PlaceholderActivity(
+                name="Transform",
+                task_key="transform",
+                original_type="ExecuteDataFlow",
+                parameter_approximations=[inherited],
+            )
+        ],
+    )
+    report.write_text(json.dumps(pipeline_to_dict(placeholders)), encoding="utf-8")
+    results = tmp_path / "agentic_results"
+    results.mkdir()
+    component = {"type": "AgenticComponentActivity", "resources": RESOURCES, "task": TASK}
+    if agent_sets_approximations:
+        component["parameter_approximations"] = [authored]
+    (results / "transform.json").write_text(
+        json.dumps({"activity_name": "Transform", "task": component}), encoding="utf-8"
+    )
+
+    assert merge_agentic_results(report, results) == (1, 0)
+    merged_pipeline, _ = pipeline_dict_to_ir(json.loads(report.read_text(encoding="utf-8")))
+    write_bundle(prepare_workflow(merged_pipeline), tmp_path / "bundle")
+
+    setup_md = (tmp_path / "bundle" / "SETUP.md").read_text(encoding="utf-8")
+    expected = authored if agent_sets_approximations else inherited
+    assert (
+        f"| `transform` | `{expected['widget_name']}` | `{expected['raw_expression']}` "
+        f"| `{expected['replacement']}` | {expected['note']} |"
+    ) in setup_md
+
+
+@pytest.mark.parametrize(
+    "approximation",
+    [
+        "run_date",
+        {"widget_name": "run_date", "raw_expression": "@utcnow()", "replacement": "{{job.start_time.iso_datetime}}"},
+        {"widget_name": "run_date", "raw_expression": "@utcnow()", "replacement": None, "note": "Job start time."},
+    ],
+)
+def test_agentic_component_rejects_malformed_parameter_approximations(approximation):
+    activity = AgenticComponentActivity(
+        name="Ingest orders",
+        task_key="ingest_orders",
+        resources=RESOURCES,
+        task=TASK,
+        parameter_approximations=[approximation],
+    )
+
+    with pytest.raises(ValueError, match="Agentic component 'ingest_orders' parameter approximation"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))

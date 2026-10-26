@@ -7,7 +7,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY, MULTI_NODE_JOB_CLUSTER_KEY, SINGLE_NODE_JOB_CLUSTER_KEY
-from flowx.models.dab import DabNotebook
+from flowx.models.dab import DabNotebook, ParameterApproximation
 from flowx.models.ir import AgenticComponentActivity
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
 from flowx.utils import normalize_task_key
@@ -191,6 +191,27 @@ def _check_environment(task_key: str, environment: object) -> None:
         )
 
 
+_APPROXIMATION_FIELDS = frozenset({"widget_name", "raw_expression", "replacement", "note"})
+
+
+def _parameter_approximation(task_key: str, entry: object) -> ParameterApproximation:
+    """Turn one ``parameter_approximations`` entry into the SETUP.md row it describes.
+
+    An agent can write these on a component as well as keep the placeholder's, so an entry that is
+    not exactly the four string fields is refused here rather than crashing or dropping a field.
+    """
+    if (
+        not isinstance(entry, dict)
+        or entry.keys() != _APPROXIMATION_FIELDS
+        or not all(isinstance(value, str) for value in entry.values())
+    ):
+        raise ValueError(
+            f"Agentic component {task_key!r} parameter approximation {entry!r} must be a mapping of exactly "
+            f"{', '.join(sorted(_APPROXIMATION_FIELDS))} strings"
+        )
+    return ParameterApproximation(task_key=task_key, **entry)
+
+
 def _authored_file(task_key: str, file: object) -> DabNotebook:
     """Turn one authored ``files`` entry into a file the bundle writer keeps below ``src``.
 
@@ -250,7 +271,8 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
     key, dependencies, timeout, and retries are taken from that placeholder, and so is any
     source metadata the component leaves out, such as its notifications and lineage. Of that
     source metadata, only ``notifications`` and ``compute_mode`` change the task flowx
-    writes. Libraries and compute belong in the fragment, so a component that sets
+    writes, and ``parameter_approximations`` are listed in SETUP.md as for a notebook
+    task. Libraries and compute belong in the fragment, so a component that sets
     ``libraries`` or ``existing_cluster_id`` on the activity is rejected, and a merge never
     copies them from the placeholder.
 
@@ -302,8 +324,8 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
             than ``path``, ``content`` and ``binary_content``, or its path uses a backslash or
             escapes the bundle's ``src`` directory, a resource is malformed, has a field other than
             ``resource_key`` and ``definition``, or its key is not a plain identifier, an
-            environment is malformed, a binary file is not valid base64, the task does not carry
-            exactly one executable payload mapping, a ``notebook_task`` has no non-empty
+            environment or parameter approximation is malformed, a binary file is not valid
+            base64, the task does not carry exactly one executable payload mapping, a ``notebook_task`` has no non-empty
             ``notebook_path`` string, a notebook ``base_parameters`` or ``run_job_task``
             ``job_parameters`` is set to something other than a mapping, a ``for_each_task``
             carries no task mapping with a ``task_key``, the task names more
@@ -335,4 +357,7 @@ def prepare(activity: AgenticComponentActivity, *, scope: str = "") -> PreparedA
         notebooks=notebooks,
         pipeline_resources=list(activity.resources),
         environments=list(activity.environments),
+        parameter_approximations=[
+            _parameter_approximation(activity.task_key, entry) for entry in activity.parameter_approximations
+        ],
     )

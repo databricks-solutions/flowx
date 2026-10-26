@@ -576,7 +576,9 @@ class AgenticComponentActivity(Activity):
             once.
         task: Raw Databricks task fragment carrying exactly one executable
             payload (a ``<kind>_task`` key such as ``pipeline_task`` or
-            ``notebook_task``) wired to an authored resource or file.
+            ``notebook_task``) wired to an authored resource or file. A
+            bundle-relative file path it or an environment names must be one
+            the bundle writes, and each ``${var.X}`` they use is declared.
         raw_definition: Original source definition retained for auditing.
     """
 
