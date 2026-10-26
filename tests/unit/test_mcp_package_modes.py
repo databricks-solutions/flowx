@@ -423,8 +423,12 @@ def migrate_with_options(adapter_calls, monkeypatch) -> list[list[str]]:
     return adapter_calls
 
 
-def _first_migrate_call(output_dir: Path, packaging: dict[str, Any]) -> dict[str, Any]:
-    """The first, answerless migrate call with a non-default layout; it stops at needs_input."""
+def _first_migrate_call(calls: list[list[str]], output_dir: Path, packaging: dict[str, Any]) -> dict[str, Any]:
+    """The first, answerless migrate call with a non-default layout; it stops at needs_input.
+
+    A report is already on disk, so checking that discover and convert still ran proves an answerless
+    call never resumes from it. *calls* is cleared afterwards so the caller sees only the next call's runs.
+    """
     _write_converted_state(output_dir)
     first = _call_flowx(
         "migrate",
@@ -436,30 +440,40 @@ def _first_migrate_call(output_dir: Path, packaging: dict[str, Any]) -> dict[str
         },
     )
     assert first["status"] == "needs_input", first
+    assert [argv[0] for argv in calls] == ["discover", "convert", "inspect"]
+    calls.clear()
     return first
 
 
+_LAYOUTS_SENT_FIRST = [("single", None, None), ("per-group", "inferred", None), (None, None, _GROUP_SPEC)]
+
+
 @pytest.mark.parametrize(
-    ("repeated", "expected_flags"),
-    [({}, []), ({"packaging_mode": "single"}, ["--packaging-mode", "single"])],
+    ("first_layout", "re_call_layout"),
+    list(itertools.product(_LAYOUTS_SENT_FIRST, [(None, None, None), *_LAYOUTS_SENT_FIRST])),
     ids=str,
 )
 def test_a_migrate_answers_re_call_packages_with_its_own_layout(
-    migrate_with_options, tmp_path: Path, repeated, expected_flags
+    migrate_with_options, tmp_path: Path, first_layout, re_call_layout
 ):
     """The layout sent on the first call is not remembered: only the answers re-call's own keys set it."""
     output_dir = tmp_path / "out"
-    _first_migrate_call(output_dir, {"packaging_mode": "single"})
-    migrate_with_options.clear()
+    _first_migrate_call(migrate_with_options, output_dir, _layout_parameters(first_layout))
 
     result = _call_flowx(
-        "migrate", {"source": "adf", "output_dir": str(output_dir), "answers": ["option=value"], **repeated}
+        "migrate",
+        {
+            "source": "adf",
+            "output_dir": str(output_dir),
+            "answers": ["option=value"],
+            **_layout_parameters(re_call_layout),
+        },
     )
 
     assert result["ok"], result
     assert [argv[0] for argv in migrate_with_options] == ["modify", "package"]
     package_argv = migrate_with_options[-1]
-    assert package_argv[package_argv.index("--schema") + 2 :] == expected_flags
+    assert package_argv[package_argv.index("--schema") + 2 :] == _FORWARDED_LAYOUTS[re_call_layout]
 
 
 def test_a_later_interactive_false_call_is_a_fresh_run_that_needs_the_source_again(
@@ -468,8 +482,7 @@ def test_a_later_interactive_false_call_is_a_fresh_run_that_needs_the_source_aga
     """Only an answers re-call reuses the report; interactive=false after needs_input starts over from discover."""
     output_dir = tmp_path / "out"
     packaging = {"packaging_mode": "single"}
-    _first_migrate_call(output_dir, packaging)
-    migrate_with_options.clear()
+    _first_migrate_call(migrate_with_options, output_dir, packaging)
 
     without_source = _call_flowx(
         "migrate", {"source": "adf", "output_dir": str(output_dir), "interactive": False, **packaging}

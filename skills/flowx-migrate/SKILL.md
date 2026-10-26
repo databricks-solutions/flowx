@@ -86,8 +86,9 @@ bulk-copy consolidation, non-Databricks task compute), it **does not package** â
    `metadata_driven_lookup_tool=have`).
 3. When **every applicable option** is answered, call `migrate` **once** with the same parameters plus
    `"answers": ["option_id=value", â€¦]`. It applies them and packages (`"status": "completed"`).
-   Repeat any `packaging_mode`, `group_by` and `group_spec` from the first call: the packaging step
-   reads them from this call, so leaving them out packages with the default layout.
+   Repeat any `packaging_mode`, `group_by` and `group_spec` from the first call: they aren't
+   remembered between calls and only shape the package step of the call that packages, so leaving
+   them out packages with the default layout.
 
 To accept all defaults and skip the prompts, pass `"interactive": false` on the first call. Only a
 re-call with `answers` reuses the existing report and skips re-running discover/convert; an

@@ -420,7 +420,8 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
     (``status="completed"``). No per-follow-up round trip. Pass ``interactive=False`` to skip the
     prompt and package with defaults; only an ``answers`` re-call reuses the report, so a later
     ``interactive=False`` call starts over from discover and needs the source again. The packaging
-    keys are read only from the call that packages, so a re-call has to repeat them.
+    keys aren't remembered between calls: every call checks its own before anything runs, but only
+    the call that packages lays the bundles out by them, so a re-call has to repeat them.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     source_name = _source_name(p)
@@ -489,11 +490,11 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                         "collected so far, validating each answer against its `choices`. When the user "
                         "has answered every applicable option, call migrate again with the full "
                         "`answers` list (['option_id=value', ...]) to apply and package in one shot, "
-                        "repeating any packaging_mode, group_by and group_spec from this call: the "
-                        "package step reads them only from the call that packages, so leaving them out "
-                        "packages with the default layout. To accept defaults instead, call migrate with "
-                        "interactive=false and all of this call's parameters, source included; that "
-                        "call reruns discover and convert."
+                        "repeating any packaging_mode, group_by and group_spec from this call: they "
+                        "aren't remembered between calls and only shape the package step of the call "
+                        "that packages, so leaving them out packages with the default layout. To accept "
+                        "defaults instead, call migrate with interactive=false and all of this call's "
+                        "parameters, source included; that call reruns discover and convert."
                     ),
                 }
 
@@ -678,9 +679,10 @@ def build_server() -> FastMCP:
           ``answers`` (applies + packages), or standalone "apply_answers" → "package". The server still
           validates every answer at apply time. ``interactive=false`` on the first "migrate" call
           skips prompting; sent after "needs_input" it starts over, so it needs the source again and
-          reruns discover and convert. Only the call that packages reads ``packaging_mode``,
-          ``group_by`` and ``group_spec``, so repeat them on the "migrate" re-call or pass them to
-          "package"; left out, it packages with the default layout.
+          reruns discover and convert. ``packaging_mode``, ``group_by`` and ``group_spec`` aren't
+          remembered between calls: every call checks its own, but only the package step of the call
+          that packages uses them, so repeat them on the "migrate" re-call or pass them to "package";
+          left out, it packages with the default layout.
 
         Returns a dict ``{"ok": bool, ...}`` with per-command summaries (inventory / translation /
         bundle_files / questions / result) and a "process" block (stdout/stderr/returncode). An unknown
