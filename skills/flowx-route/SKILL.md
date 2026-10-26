@@ -334,7 +334,8 @@ Its guarantees:
   `metadata/.route.lock` while they work, and refuse with a violation, writing nothing, while another
   holds it. Run fills one after another, never in parallel. A lock is left behind only when a run is
   stopped mid-write; then delete it and run route again (on the hosted server, run discover again,
-  which moves `metadata/` and the lock into `metadata/archive/`, then route and fill again).
+  which moves `metadata/`, `.work/` and the lock into `metadata/archive/`, then enrich if you used it,
+  convert, route and fill again).
 
 ### Authoring an `AgenticComponentActivity` (the escape hatch)
 

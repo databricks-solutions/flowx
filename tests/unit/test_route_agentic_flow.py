@@ -40,6 +40,7 @@ from flowx.route_agentic import (
     GAPS_FILENAME,
     REPORT_FILENAME,
     ROUTE_LOCK_FILENAME,
+    ROUTE_LOCK_HELD,
     ROUTED_AGENTIC_MERGE_REFUSED,
     ROUTING_RECORD_KEY,
     WORK_DIRNAME,
@@ -52,6 +53,7 @@ from flowx.route_agentic import (
     load_agentic_output,
     rebuild,
     replace_unit_pipelines,
+    route_lock,
     routing_record,
     routing_units,
     validate_report_structurally,
@@ -2030,6 +2032,41 @@ def test_an_in_place_merge_refuses_while_another_command_holds_the_route_lock(tm
 
     assert report_path.read_bytes() == report_before
     assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+def test_a_merge_from_a_copy_into_the_live_report_refuses_while_the_route_lock_is_held(tmp_path: Path) -> None:
+    """Writing the live report from another file is still a write of the live report."""
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    copy_path = tmp_path / WORK_DIRNAME / "copy.json"
+    copy_path.write_bytes(report_path.read_bytes())
+    report_before = report_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    _hold_route_lock(tmp_path)
+
+    with pytest.raises(ValueError, match="another route, fill-agentic or merge"):
+        merge_agentic_results(copy_path, results_dir, report_path)
+
+    assert report_path.read_bytes() == report_before
+
+
+def test_the_route_lock_holds_an_output_folder_with_no_metadata_folder_yet(tmp_path: Path) -> None:
+    """Two merges into a convert-only folder must not both run unheld."""
+    (tmp_path / WORK_DIRNAME).mkdir()
+
+    with route_lock(tmp_path) as first:
+        assert first is True
+        assert (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).is_file()
+        with route_lock(tmp_path) as second:
+            assert second is False
+    assert not (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).exists()
+
+
+def test_the_route_lock_message_says_to_convert_again_after_a_hosted_discover() -> None:
+    """Discover moves .work/ too, so route and fill need a convert before they can run."""
+    hosted = ROUTE_LOCK_HELD.split("on the hosted MCP server", 1)[1]
+    assert hosted.index("convert") < hosted.index("route")
 
 
 def test_a_merge_into_a_separate_copy_takes_no_route_lock(tmp_path: Path) -> None:

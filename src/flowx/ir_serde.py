@@ -709,9 +709,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     :func:`flowx.route_agentic.drop_filled_gaps`); an unreadable ``gaps.json`` is left as it is. A
     merge written anywhere else (``output_path``, or into a copy such as modify's configured report)
     stores nothing and leaves ``gaps.json`` alone. Nothing is written until every result has been
-    applied. A merge into the live report holds the output folder's route lock (see
-    :func:`flowx.route_agentic.route_lock`), so it refuses while a route, fill-agentic or another merge
-    is writing there.
+    applied. A merge written to a live report (in place, or from a copy) holds that output folder's
+    route lock (see :func:`flowx.route_agentic.route_lock`), so it refuses while a route, fill-agentic
+    or another merge is writing there.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
@@ -733,12 +733,13 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     destination = output_path or report_path
     live_report_path = output_dir / WORK_DIRNAME / REPORT_FILENAME
     in_place = destination.resolve() == report_path.resolve() == live_report_path.resolve()
-    if not in_place:
-        return _merge_agentic_results(report_path, results_dir, destination, in_place=False)
-    with route_lock(output_dir) as held:
+    written = destination.resolve()
+    if written.name != REPORT_FILENAME or written.parent.name != WORK_DIRNAME:
+        return _merge_agentic_results(report_path, results_dir, destination, in_place=in_place)
+    with route_lock(written.parent.parent) as held:
         if not held:
             raise ValueError(ROUTE_LOCK_HELD)
-        return _merge_agentic_results(report_path, results_dir, destination, in_place=True)
+        return _merge_agentic_results(report_path, results_dir, destination, in_place=in_place)
 
 
 def _merge_agentic_results(

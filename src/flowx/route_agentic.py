@@ -79,7 +79,8 @@ ROUTE_LOCK_HELD = (
     f"another route, fill-agentic or merge is writing to this output folder (metadata/{ROUTE_LOCK_FILENAME} "
     "exists); run this again once it finishes. If none is running, one was stopped mid-write: locally, delete "
     f"metadata/{ROUTE_LOCK_FILENAME} and run route again; on the hosted MCP server, run discover again (it moves "
-    "metadata/, the lock with it, into metadata/archive/), then route and fill again"
+    "metadata/ and .work/, the lock with them, into metadata/archive/), then enrich if you used it, convert, "
+    "route and fill again"
 )
 
 # Top-level report key holding the routing record. It lives in the report, so a fresh convert (which
@@ -418,13 +419,15 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
     :data:`ROUTE_LOCK_HELD` while another holds it. Like enrich's lock it is a file created with
     ``O_EXCL`` holding a random token, so a command never removes a lock a later one created after
     discover moved ``metadata/`` away. It is removed when the command finishes or raises; only a killed
-    process leaves it behind. Discover takes no lock. With no ``metadata/`` folder there is no plan or
-    inventory, so no route or fill can be running, and nothing is held.
+    process leaves it behind. Discover and convert take no lock. An output folder with no ``metadata/``
+    yet gets one, so a merge there is still held; a folder that does not exist holds no files to
+    guard, and the command then reports what it is missing.
     """
-    metadata_dir = Path(output_dir) / METADATA_DIRNAME
-    if not metadata_dir.is_dir():
+    if not Path(output_dir).is_dir():
         yield True
         return
+    metadata_dir = Path(output_dir) / METADATA_DIRNAME
+    metadata_dir.mkdir(exist_ok=True)
     lock_path = metadata_dir / ROUTE_LOCK_FILENAME
     token = secrets.token_hex(16)
     try:
