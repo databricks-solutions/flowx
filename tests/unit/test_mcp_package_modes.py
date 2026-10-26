@@ -262,9 +262,6 @@ def test_mcp_package_still_refuses_a_bad_value_for_a_multi_dag_airflow_report(no
         ({"packaging_mode": "per-group", "group_by": "bogus"}, "bogus"),
         ({"packaging_mode": ""}, ""),
         ({"packaging_mode": "per-group", "group_by": ""}, ""),
-        ({"packaging_mode": 0}, "0"),
-        ({"packaging_mode": False}, "False"),
-        ({"packaging_mode": "per-group", "group_by": False}, "False"),
     ],
 )
 def test_mcp_package_refuses_a_bad_value_like_the_cli(no_bundle_upload, tmp_path: Path, capsys, parameters, bad_value):
@@ -290,7 +287,6 @@ _MISSING_SPEC_PATH = "/nonexistent/flowx/groups.json"
     ("parameters", "message"),
     [
         ({"group_spec": _MISSING_SPEC_PATH}, f"group spec file not found: {_MISSING_SPEC_PATH}"),
-        ({"packaging_mode": "per-group", "group_spec": {"team_a": ["caller"]}}, "group spec file not found"),
     ],
 )
 def test_mcp_package_refuses_an_unusable_group_spec_like_the_cli(
@@ -420,6 +416,30 @@ def test_a_layout_that_does_not_fit_is_refused_before_anything_runs(adapter_call
     assert result["ok"] is False
     for key, value in packaging.items():
         assert f"{key} {value!r}" in result["error"]
+    assert adapter_calls == []
+
+
+@pytest.mark.parametrize("command", ["package", "migrate"])
+@pytest.mark.parametrize(
+    ("key", "packaging"),
+    [
+        ("packaging_mode", {"packaging_mode": 0}),
+        ("packaging_mode", {"packaging_mode": False}),
+        ("group_by", {"packaging_mode": "per-group", "group_by": False}),
+        ("group_spec", {"group_spec": False}),
+        ("group_spec", {"group_spec": 0}),
+        ("group_spec", {"packaging_mode": "per-group", "group_spec": {"team_a": ["caller"]}}),
+    ],
+    ids=str,
+)
+def test_a_packaging_value_that_is_not_a_string_is_refused_before_anything_runs(
+    adapter_calls, tmp_path: Path, command, key, packaging
+):
+    """A non-string value would reach the CLI stringified (``False`` as the spec path ``"False"``), so it is refused."""
+    result = _call_flowx(command, _parameters_for(command, tmp_path / "out", packaging))
+
+    assert result["ok"] is False
+    assert f"{key} must be a string, got {packaging[key]!r}" in result["error"]
     assert adapter_calls == []
 
 
