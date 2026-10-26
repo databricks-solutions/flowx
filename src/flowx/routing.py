@@ -284,8 +284,8 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
     covered_activities: set[tuple[str, str]] = set()
     for pipeline in members:
         for motif in motifs_by_pipeline.get(pipeline, []):
-            if motif.get("motif_id") is not None:
-                motif_ids.append(str(motif["motif_id"]))
+            if isinstance(motif.get("motif_id"), str):
+                motif_ids.append(motif["motif_id"])
             keys = motif.get("member_task_keys")
             if isinstance(keys, list):
                 covered_activities.update((pipeline, key) for key in keys if isinstance(key, str))
@@ -989,10 +989,10 @@ def inventory_shape_violations(inventory: Any) -> list[str]:
 
     Route decides from each pipeline's activities and motifs. Read as none, a ``pipelines``,
     ``activities`` or ``motifs`` value that is not a list of objects, a pipeline with no
-    ``activities`` or no name, or a motif whose ``member_task_keys`` is missing or not a list of names, would
-    make a pipeline look fully deterministic or drop it, so route refuses it instead. Discover always
-    writes each pipeline's name and activities (motifs only when it found some), so any other shape
-    means the file was edited; running discover again rewrites it.
+    ``activities`` or no name, or a motif with no id or whose ``member_task_keys`` is missing or not a
+    list of names, would make a pipeline look fully deterministic or drop it, so route refuses it
+    instead. Discover always writes each pipeline's name and activities (motifs only when it found
+    some), so any other shape means the file was edited; running discover again rewrites it.
     """
     if not isinstance(inventory, dict):
         return [
@@ -1012,6 +1012,8 @@ def inventory_shape_violations(inventory: Any) -> list[str]:
         if not _is_list_of(pipeline.get("motifs", []), dict):
             violations.append(f"metadata/inventory.json pipeline {label!r} 'motifs' must be a list of objects")
         for motif in pipeline.get("motifs", []) if _is_list_of(pipeline.get("motifs", []), dict) else []:
+            if not isinstance(motif.get("motif_id"), str) or not motif["motif_id"]:
+                violations.append(f"metadata/inventory.json pipeline {label!r} has a motif with no 'motif_id'")
             if not _is_list_of(motif.get("member_task_keys"), str):
                 violations.append(
                     f"metadata/inventory.json pipeline {label!r} motif {motif.get('motif_id')!r} "
@@ -1090,13 +1092,13 @@ def record_plan(
         ValueError: when neither or both plan sources are provided, or the inventory is not a JSON
             object.
     """
+    raw = load_plan(plan=plan, plan_path=plan_path)
     inventory_path = Path(output_dir) / "metadata" / "inventory.json"
     if not inventory_path.exists():
         raise FileNotFoundError(f"No inventory.json under {inventory_path.parent}; run the discover phase first.")
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     if not isinstance(inventory, dict):
         raise ValueError(f"inventory.json must contain a JSON object, got {type(inventory).__name__}")
-    raw = load_plan(plan=plan, plan_path=plan_path)
     malformed = inventory_shape_violations(inventory)
     if malformed:
         return {"ok": False, "violations": malformed, "components": 0}

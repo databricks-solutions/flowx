@@ -433,6 +433,10 @@ def _set_on_child(key: str, value: Any) -> Any:
             _set_on_child("motifs", [{"motif_id": "m"}]),
             "pipeline 'child' motif 'm' 'member_task_keys' must be a list of activity names",
         ),
+        (
+            _set_on_child("motifs", [{"motif_id": 7, "member_task_keys": ["copy_orders"]}]),
+            "pipeline 'child' has a motif with no 'motif_id'",
+        ),
     ],
     ids=[
         "root-list",
@@ -444,6 +448,7 @@ def _set_on_child(key: str, value: Any) -> Any:
         "empty-name",
         "member-keys-str",
         "member-keys-missing",
+        "motif-id-number",
     ],
 )
 def test_route_refuses_an_inventory_not_shaped_as_discover_writes_it(
@@ -481,5 +486,8 @@ def test_record_plan_checks_its_arguments_before_the_inventory(tmp_path: Path) -
     _setup(tmp_path)
     _edit_inventory(tmp_path, lambda inventory: {**inventory, "pipelines": 1})
 
+    with pytest.raises(ValueError, match="exactly one"):
+        record_plan(tmp_path)
+    _edit_inventory(tmp_path, lambda inventory: [])
     with pytest.raises(ValueError, match="exactly one"):
         record_plan(tmp_path)
