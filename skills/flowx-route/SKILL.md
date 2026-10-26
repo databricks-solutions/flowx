@@ -425,9 +425,10 @@ Package refuses, writing nothing, when:
   fill-agentic and merge refuse it too), or a stored output or gap fill was edited, moved to another
   unit or pointed at another activity ("re-run fill-agentic", or merge that gap again). Every stored
   entry carries a hash over all its fields, so any edit to it shows;
-- the report carries no routing record while the plan routes a unit agentic or
-  `agentic_conversion.json` stores a gap fill, as after a re-convert ("re-run route", which applies
-  the fill, or drops it when it was merged against an earlier convert);
+- a plan is recorded and the report carries no routing record while the plan routes a unit agentic
+  or `agentic_conversion.json` stores a gap fill, as after a re-convert ("re-run route", which applies
+  the fill, or drops it when it was merged against an earlier convert). With no plan recorded the
+  folder is not routed, so package ignores the stored outputs and fills;
 - the live `.work/translation_report.json` does not match a fresh rebuild ("re-run route"), or any
   other packaged report — modify's configured `.work/translation_report.stamped.json`, or a
   `modify --out` copy — does not carry the live report's routing record ("the configured report is
