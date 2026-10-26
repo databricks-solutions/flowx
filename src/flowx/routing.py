@@ -989,7 +989,7 @@ def inventory_shape_violations(inventory: Any) -> list[str]:
 
     Route decides from each pipeline's activities and motifs. Read as none, a ``pipelines``,
     ``activities`` or ``motifs`` value that is not a list of objects, a pipeline with no
-    ``activities`` or no name, or a motif's ``member_task_keys`` that is not a list of names, would
+    ``activities`` or no name, or a motif whose ``member_task_keys`` is missing or not a list of names, would
     make a pipeline look fully deterministic or drop it, so route refuses it instead. Discover always
     writes each pipeline's name and activities (motifs only when it found some), so any other shape
     means the file was edited; running discover again rewrites it.
@@ -1012,7 +1012,7 @@ def inventory_shape_violations(inventory: Any) -> list[str]:
         if not _is_list_of(pipeline.get("motifs", []), dict):
             violations.append(f"metadata/inventory.json pipeline {label!r} 'motifs' must be a list of objects")
         for motif in pipeline.get("motifs", []) if _is_list_of(pipeline.get("motifs", []), dict) else []:
-            if not _is_list_of(motif.get("member_task_keys", []), str):
+            if not _is_list_of(motif.get("member_task_keys"), str):
                 violations.append(
                     f"metadata/inventory.json pipeline {label!r} motif {motif.get('motif_id')!r} "
                     "'member_task_keys' must be a list of activity names"
@@ -1096,11 +1096,10 @@ def record_plan(
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     if not isinstance(inventory, dict):
         raise ValueError(f"inventory.json must contain a JSON object, got {type(inventory).__name__}")
+    raw = load_plan(plan=plan, plan_path=plan_path)
     malformed = inventory_shape_violations(inventory)
     if malformed:
         return {"ok": False, "violations": malformed, "components": 0}
-
-    raw = load_plan(plan=plan, plan_path=plan_path)
     violations = validate_plan(raw, inventory)
     if violations:
         return {"ok": False, "violations": violations, "components": 0}
