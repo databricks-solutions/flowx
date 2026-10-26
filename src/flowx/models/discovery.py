@@ -182,7 +182,8 @@ class SourceNode:
             shared typed field yet. Connection / linked-service details live
             here for now -- a typed connection field is a deliberate future
             expansion point.
-        raw: Verbatim source dict for this node, for lossless fallback.
+        raw: The source dict for this node, kept for fallback. A source may
+            clean it of fields that carry no meaning, such as export metadata.
     """
 
     source_id: str
@@ -267,7 +268,8 @@ class SourceGraph:
         properties: Free-form bag for graph-level platform-specific attributes.
         extensions: Alias-free overflow for anything else source-specific
             (e.g. ADF ``folder``, Airflow global Variables).
-        raw: Verbatim source dict for the whole workflow.
+        raw: The source dict for the whole workflow, which a source may clean
+            of fields that carry no meaning, such as export metadata.
     """
 
     name: str
