@@ -718,9 +718,10 @@ def _unit_owned_activity_names(
         elif name not in agentic_names:
             elsewhere.update(_task_names(pipeline.get("tasks")))
     for pipeline in _inventory_pipelines(inventory or {}):
+        activities = pipeline.get("activities")
         names = {
             str(activity.get("name"))
-            for activity in pipeline.get("activities") or []
+            for activity in (activities if isinstance(activities, list) else [])
             if isinstance(activity, dict) and activity.get("name") is not None
         }
         if pipeline.get("name") in members:

@@ -198,6 +198,25 @@ def test_an_inventory_whose_pipelines_is_not_a_list_lists_no_pipelines(pipelines
     assert build_recommendation(inventory)["components"] == []
 
 
+@pytest.mark.parametrize("key", ["activities", "motifs"])
+def test_a_pipeline_list_that_is_not_a_list_reads_as_none_without_crashing(key: str) -> None:
+    inventory = _inventory([_graph("a")])
+    inventory["pipelines"][0][key] = 1
+
+    assert [component["members"] for component in build_recommendation(inventory)["components"]] == [["a"]]
+
+
+def test_a_motif_names_only_the_activities_it_lists_by_name() -> None:
+    """A string is not a list of names: its characters must never cover a same-lettered activity."""
+    inventory = _inventory([_graph("p", nodes=[_node("a", "Custom", strategy="agentic")])])
+    inventory["pipelines"][0]["motifs"] = [{"motif_id": "m", "member_task_keys": "a"}]
+
+    deterministic = build_recommendation(inventory)["components"][0]["options"]["deterministic"]
+
+    assert deterministic["capable"] is False
+    assert [entry["activity"] for entry in deterministic["uncovered"]] == ["a"]
+
+
 def test_a_pipeline_name_that_is_not_a_string_is_not_a_pipeline_identity() -> None:
     """A number would become the string "7" and join an edge to a real pipeline named "7"."""
     edge = {"source_workflow": "a", "target_workflow": "7", "via_task_key": "call_7", "resolved": True}

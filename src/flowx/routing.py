@@ -228,8 +228,9 @@ def _activities_by_pipeline(inventory: dict[str, Any]) -> dict[str, list[dict[st
     result: dict[str, list[dict[str, Any]]] = {}
     for pipeline in _inventory_pipelines(inventory):
         if pipeline.get("name") is not None:
-            activities = pipeline.get("activities") or []
-            result[str(pipeline["name"])] = [entry for entry in activities if isinstance(entry, dict)]
+            activities = pipeline.get("activities")
+            listed = activities if isinstance(activities, list) else []
+            result[str(pipeline["name"])] = [entry for entry in listed if isinstance(entry, dict)]
     return result
 
 
@@ -238,8 +239,9 @@ def _motifs_by_pipeline(inventory: dict[str, Any]) -> dict[str, list[dict[str, A
     result: dict[str, list[dict[str, Any]]] = {}
     for pipeline in _inventory_pipelines(inventory):
         if pipeline.get("name") is not None:
-            motifs = pipeline.get("motifs") or []
-            result[str(pipeline["name"])] = [entry for entry in motifs if isinstance(entry, dict)]
+            motifs = pipeline.get("motifs")
+            listed = motifs if isinstance(motifs, list) else []
+            result[str(pipeline["name"])] = [entry for entry in listed if isinstance(entry, dict)]
     return result
 
 
@@ -279,7 +281,9 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
         for motif in motifs_by_pipeline.get(pipeline, []):
             if motif.get("motif_id") is not None:
                 motif_ids.append(str(motif["motif_id"]))
-            covered_activities.update((pipeline, str(key)) for key in motif.get("member_task_keys") or [])
+            keys = motif.get("member_task_keys")
+            if isinstance(keys, list):
+                covered_activities.update((pipeline, key) for key in keys if isinstance(key, str))
 
     counts = {"deterministic": 0, "agentic": 0, "unsupported": 0}
     uncovered: list[dict[str, Any]] = []
@@ -973,6 +977,42 @@ def recorded_plan_violations(plan: ConversionPlan, inventory: dict[str, Any]) ->
             "match what route records from the inventory"
         )
     return violations
+
+
+def inventory_shape_violations(inventory: Any) -> list[str]:
+    """What keeps route from reading ``inventory.json`` the way discover writes it; empty when nothing does.
+
+    Route decides from each pipeline's activities and motifs. Read as none, a ``pipelines``,
+    ``activities`` or ``motifs`` value that is not a list of objects, or a motif's
+    ``member_task_keys`` that is not a list of names, would make a pipeline look fully deterministic,
+    so route refuses it instead. Discover always writes those shapes, so any other means the file was
+    edited; running discover again rewrites it.
+    """
+    if not isinstance(inventory, dict):
+        return [
+            f"metadata/inventory.json must contain a JSON object, not {type(inventory).__name__}; run discover again"
+        ]
+    pipelines = inventory.get("pipelines")
+    if not isinstance(pipelines, list) or not _is_list_of(pipelines, dict):
+        return ["metadata/inventory.json 'pipelines' must be a list of objects; run discover again"]
+    violations: list[str] = []
+    for index, pipeline in enumerate(pipelines):
+        label = pipeline.get("name") if isinstance(pipeline.get("name"), str) else f"pipelines[{index}]"
+        for key in ("activities", "motifs"):
+            if not _is_list_of(pipeline.get(key, []), dict):
+                violations.append(f"metadata/inventory.json pipeline {label!r} '{key}' must be a list of objects")
+        for motif in pipeline.get("motifs", []) if _is_list_of(pipeline.get("motifs", []), dict) else []:
+            if not _is_list_of(motif.get("member_task_keys", []), str):
+                violations.append(
+                    f"metadata/inventory.json pipeline {label!r} motif {motif.get('motif_id')!r} "
+                    "'member_task_keys' must be a list of activity names"
+                )
+    return [f"{violation}; run discover again" for violation in violations]
+
+
+def _is_list_of(value: Any, kind: type) -> bool:
+    """Whether ``value`` is a list whose every entry is a ``kind``."""
+    return isinstance(value, list) and all(isinstance(entry, kind) for entry in value)
 
 
 def insights_file_violations(output_dir: Path, inventory: dict[str, Any] | None) -> list[str]:
