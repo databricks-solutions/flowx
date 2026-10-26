@@ -52,7 +52,10 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
        the location sets no folder, or the dataset is not in the export, the call-site
        ``folderPath`` is used instead.
 
-    The file name is read the same way; one with no literal text gives ``FN[]``.
+    The file name is read the same way; one with no literal text gives ``FN[]``. A
+    location folder or file name the code cannot read (a list, or an object of a type
+    other than Expression or SecureString) is unknown, so it gives ``None`` rather than
+    borrowing the call site's. An untyped object is read by its ``value``.
     """
     call_site = _call_site_parameters(dataset_ref)
     passed_folder = _path_shape(call_site.get("folderPath"), {}, require_physical=True)
@@ -62,6 +65,9 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
     type_props = properties.get("typeProperties") or properties
     written_location = type_props.get("location")
     location: dict[str, Any] = written_location if isinstance(written_location, dict) else {}
+    written_values = {key: _expression_value(location.get(key)) for key in ("folderPath", "fileName")}
+    if any(value is not None and not isinstance(value, str) for value in written_values.values()):
+        return None
     bindings = {
         name: value
         for name, value in _effective_dataset_params(dataset_ref, properties).items()
@@ -69,7 +75,7 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
     }
 
     def _shape_of(key: str, *, require_physical: bool) -> str | None:
-        written = _expression_value(location.get(key))
+        written = written_values[key]
         if isinstance(written, str) and written.strip():
             return _path_shape(written, bindings, require_physical=require_physical)
         return _path_shape(call_site.get(key), {}, require_physical=require_physical)
@@ -85,9 +91,10 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
 def _reads_as_text(value: Any) -> bool:
     """``True`` when a bound parameter *value* is text ADF can splice into a path, even ``""``.
 
-    That is a string, number or boolean, given bare or as an Expression's ``value``. A
-    ``null``, a list, or an Expression with no ``value`` says nothing about the path,
-    so it is no more known than a parameter the call site never bound.
+    That is a string, number or boolean, given bare or as the ``value`` of an
+    Expression or SecureString object (or of an untyped one). A ``null``, a list, or
+    an Expression with no ``value`` says nothing about the path, so it is no more
+    known than a parameter the call site never bound.
     """
     return isinstance(_expression_value(value), (str, bool, int, float))
 

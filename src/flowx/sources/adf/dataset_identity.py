@@ -14,7 +14,10 @@ from flowx.models.adf_ast import AdfDatasetReference, AdfDefinitions
 from flowx.models.ir import TranslationContext
 from flowx.parser.expression_parser import resolve_expression, resolve_interpolated_string
 
-_ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
+_ACCOUNT_NAME_RE = re.compile(r"AccountName=([^;]*)", re.IGNORECASE)
+_STORAGE_ACCOUNT_RE = re.compile(r"[A-Za-z0-9]+")
+# The object types whose ``value`` is the field's own value; any other typed object is left whole.
+_VALUE_OBJECT_TYPES = frozenset({"Expression", "SecureString"})
 _ARM_CALL_RE = re.compile(
     r"^\[\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\((?P<arguments>.*)\]$", re.DOTALL
 )
@@ -48,11 +51,14 @@ _DATASET_PARAMETER_RE = re.compile(r"dataset\(\)\??\.(\w+)")
 def _expression_value(value: Any) -> Any:
     """*value* itself, or the ``value`` of an ADF Expression-shaped object (``None`` when it has none).
 
-    Only an object typed ``Expression`` or carrying a ``value`` is unwrapped. Any other
-    object, such as a Key Vault secret reference, is returned whole, so a caller never
-    mistakes it for an empty value.
+    Only an object typed ``Expression`` or ``SecureString``, or an untyped one carrying a
+    ``value``, is unwrapped. Any other object, such as a Key Vault secret reference or a
+    type ADF does not define, is returned whole, so a caller never mistakes it for an
+    empty value or reads a value it cannot vouch for.
     """
-    if isinstance(value, dict) and (value.get("type") == "Expression" or "value" in value):
+    if isinstance(value, dict) and (
+        value.get("type") in _VALUE_OBJECT_TYPES or ("type" not in value and "value" in value)
+    ):
         return value.get("value")
     return value
 
@@ -242,10 +248,15 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
 
     Uses the literal ``server`` (plus ``database`` when given) from the backing
     linked service's properties or plaintext connection string, exactly as written.
-    When the server is hidden (a Key Vault reference or a masked secret) the linked
-    service name stands in for it. A parameterised server, database, or connection
-    string, or a linked service that takes parameters, gives ``None``: each binding
-    may point at a different store, so no single name identifies it.
+    A ``server`` or ``database`` wrapped in an Expression or SecureString object (or
+    an untyped one with a ``value``) is read from its ``value`` and checked like a
+    plain string. Neither name can hold ``*``, so one that does is a masked secret
+    (an export writes ``**********``). A parameterised or masked server or database,
+    or a parameterised connection string, gives ``None``. When no server can be read
+    (the connection string is hidden in a Key Vault reference or a masked secret),
+    the linked service name stands in for it, but only when that linked service
+    takes no parameters: each binding of one that does may point at a different
+    store, so no single name identifies it.
     """
     linked_service_name, _ = _linked_service_reference(dataset_props)
     if not linked_service_name:
@@ -258,12 +269,20 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
         return None
     connection_fields = _connection_string_fields(connection_string) if isinstance(connection_string, str) else {}
 
-    server = type_props.get("server") or connection_fields.get("server") or connection_fields.get("data source")
+    server = (
+        _expression_value(type_props.get("server"))
+        or connection_fields.get("server")
+        or connection_fields.get("data source")
+    )
     database = (
-        type_props.get("database") or connection_fields.get("database") or connection_fields.get("initial catalog")
+        _expression_value(type_props.get("database"))
+        or connection_fields.get("database")
+        or connection_fields.get("initial catalog")
     )
     store_parts = [part for part in (server, database) if part]
-    if not all(isinstance(part, str) and part.strip() and _is_physical(part) for part in store_parts):
+    if not all(
+        isinstance(part, str) and part.strip() and _is_physical(part) and "*" not in part for part in store_parts
+    ):
         return None
     if server:
         return "/".join(part.strip() for part in store_parts)
@@ -297,17 +316,23 @@ def _resolve_file_store(
     """Resolve a file dataset's ``(file system, storage account)``.
 
     The file system is the ADLS ``fileSystem``, the Blob ``container``, or the S3 /
-    GCS ``bucketName``. Each part is ``None`` unless it resolves to a literal. The
+    GCS ``bucketName``. Each part is ``None`` unless it resolves to a literal. No
+    file system name can hold ``*``, so one that does is masked and unknown. The
     path identity and the signature's store qualifier both read the store here, so
     they always agree on what counts as a known file system and account.
     """
-    file_system = _resolve_param_value(
-        location.get("fileSystem") or location.get("container") or location.get("bucketName"), dataset_params, context
-    )
+    file_system = _written_file_system(location, dataset_params, context)
     account = _resolve_storage_account(linked_service)
     return (
-        file_system if file_system and _is_physical(file_system) else None,
+        file_system if file_system and _is_physical(file_system) and "*" not in file_system else None,
         account if account and _is_physical(account) else None,
+    )
+
+
+def _written_file_system(location: dict[str, Any], dataset_params: dict[str, Any], context: TranslationContext) -> str:
+    """The location's file system, container or bucket as it resolves, before any check (``""`` when unset)."""
+    return _resolve_param_value(
+        location.get("fileSystem") or location.get("container") or location.get("bucketName"), dataset_params, context
     )
 
 
@@ -368,45 +393,52 @@ def _resolve_dataset_path(
 def _resolve_storage_account(linked_service: Any) -> str | None:
     """Pull a storage account name out of a linked service, if present.
 
-    The whole ``url``, ``sasUri`` or connection string must be physical before the
-    account is cut out of it: cutting first would drop the closing ``]`` of an ARM
-    expression or the tail of an ``@{...}`` and leave a fragment that looks literal.
+    Each of ``url``, ``sasUri`` and the connection string is read from its ``value``
+    when wrapped in an Expression or SecureString object (or an untyped one). The
+    whole value must be physical before the account is cut out of it: cutting first
+    would drop the closing ``]`` of an ARM expression or the tail of an ``@{...}``
+    and leave a fragment that looks literal. A storage account name is only letters
+    and digits, so a cut that holds anything else (a masked ``*``, a ``-``) names no
+    account.
     """
     if linked_service is None:
         return None
     type_props = linked_service.properties.get("typeProperties") or linked_service.properties
 
-    url = type_props.get("url") or ""
+    url = _expression_value(type_props.get("url")) or ""
     if isinstance(url, str) and url:
         if not _is_physical(url):
             return None
         host = url.replace("https://", "").split("/", 1)[0]
         host_no_port = host.split(":", 1)[0]
         if "." in host_no_port:
-            return host_no_port.split(".", 1)[0]
+            return _storage_account_name(host_no_port.split(".", 1)[0])
 
-    sas_uri = type_props.get("sasUri") or ""
+    sas_uri = _expression_value(type_props.get("sasUri")) or ""
     if isinstance(sas_uri, str) and sas_uri:
         if not _is_physical(sas_uri):
             return None
         host = sas_uri.split("?", 1)[0].replace("https://", "").split("/", 1)[0]
         if "." in host:
-            return host.split(".", 1)[0]
+            return _storage_account_name(host.split(".", 1)[0])
 
     # Plaintext connection string (rare in az exports -- usually masked).
-    connection_string = type_props.get("connectionString")
-    if isinstance(connection_string, dict):
-        connection_string = connection_string.get("value", "")
+    connection_string = _expression_value(type_props.get("connectionString"))
     if isinstance(connection_string, str):
         if not _is_physical(connection_string):
             return None
         match = _ACCOUNT_NAME_RE.search(connection_string)
         if match:
-            return match.group(1)
+            return _storage_account_name(match.group(1).strip())
 
     # AWS -- bucket name lives on the dataset, account is implicit; nothing useful
     # to return at the linked-service level for S3 / GCS.
     return None
+
+
+def _storage_account_name(text: str) -> str | None:
+    """*text* when it can be a storage account name (letters and digits only), else ``None``."""
+    return text if _STORAGE_ACCOUNT_RE.fullmatch(text) else None
 
 
 def _is_physical(value: str) -> bool:

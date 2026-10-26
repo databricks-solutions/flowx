@@ -16,6 +16,7 @@ from flowx.sources.adf.dataset_identity import (
     _resolve_table_reference,
     _resolve_table_store,
     _unparameterised_linked_service_name,
+    _written_file_system,
 )
 
 # Location types (lower-cased) that name no store of their own: the server, share, lakehouse or
@@ -51,7 +52,8 @@ def _resolve_dataset_store(
 
     ``location_names_store`` says whether the location tells its store apart at all,
     provable or not: a literal file system, container or bucket, or one of those
-    linked-service locations. A parameterised file system names no store.
+    linked-service locations. A parameterised file system names no store. A masked
+    one (holding ``*``) names a store that cannot be proven, so it gives ``(None, True)``.
     """
     properties = _dataset_props(dataset_ref, definitions)
     if properties is None:
@@ -67,12 +69,12 @@ def _resolve_dataset_store(
             isinstance(location_type, str) and location_type.lower() in _LINKED_SERVICE_STORE_LOCATIONS
         )
         if not location_names_store:
+            dataset_params = _effective_dataset_params(dataset_ref, properties)
             file_system, account = _resolve_file_store(
-                location,
-                _backing_linked_service(properties, definitions),
-                _effective_dataset_params(dataset_ref, properties),
-                context,
+                location, _backing_linked_service(properties, definitions), dataset_params, context
             )
+            if file_system is None and "*" in _written_file_system(location, dataset_params, context):
+                return None, True
             location_names_store = file_system is not None
     _, table = _resolve_table_reference(dataset_ref, properties, context)
     if table:
