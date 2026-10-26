@@ -87,10 +87,11 @@ bulk-copy consolidation, non-Databricks task compute), it **does not package** �
 3. When **every applicable option** is answered, call `migrate` **once** with the same parameters plus
    `"answers": ["option_id=value", …]`. It applies them and packages (`"status": "completed"`).
    Repeat any `packaging_mode`, `group_by` and `group_spec` from the first call: the packaging step
-   reads them from this call, so leaving them out packages per-pipeline.
+   reads them from this call, so leaving them out packages with the default layout.
 
-To accept all defaults and skip the prompts, pass `"interactive": false`. (Re-calling `migrate` with
-`answers` reuses the existing report and skips re-running discover/convert.)
+To accept all defaults and skip the prompts, pass `"interactive": false`; when that is a re-call after
+`needs_input`, repeat the packaging keys there too. (Re-calling `migrate` with `answers` reuses the
+existing report and skips re-running discover/convert.)
 
 > **Large factories (hundreds–thousands of pipelines): do not inline.** Inline `adf_definitions`
 > passes through your context window and is capped (~5 MB). Instead point the server at the source by

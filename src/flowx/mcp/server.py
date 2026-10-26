@@ -418,7 +418,8 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
     is satisfied, performing any data lookups), then re-calls ``migrate`` a single time with the
     complete ``answers`` (``["option_id=value", ...]``), which applies them and packages
     (``status="completed"``). No per-follow-up round trip. Pass ``interactive=False`` to skip the
-    prompt and package with defaults.
+    prompt and package with defaults. The packaging keys are read only from the call that packages,
+    so a re-call has to repeat them.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     source_name = _source_name(p)
@@ -487,7 +488,10 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                         "collected so far, validating each answer against its `choices`. When the user "
                         "has answered every applicable option, call migrate again with the full "
                         "`answers` list (['option_id=value', ...]) to apply and package in one shot. To "
-                        "accept defaults and skip prompting, call migrate with interactive=false."
+                        "accept defaults and skip prompting, call migrate with interactive=false. Either "
+                        "way, repeat any packaging_mode, group_by and group_spec from this call: the "
+                        "package step reads them only from the call that packages, so leaving them out "
+                        "packages with the default layout."
                     ),
                 }
 
@@ -628,7 +632,8 @@ def build_server() -> FastMCP:
           discover runs),
           answers(list of "ID=VALUE"), interactive(bool, default true), lookup_csv — runs
           discover→convert→package, returning the full option schema once (status "needs_input") when
-          configuration is available; re-call once with the complete answers to apply (see below).
+          configuration is available; re-call once with the complete answers to apply, repeating any
+          packaging_mode, group_by and group_spec (see below).
         - "record_results": output_dir(req), results_table(req: catalog.schema.table), warehouse_id.
         - "install_dashboard": results_table(req), warehouse_id, dashboard_name, parent_path.
 
@@ -670,6 +675,9 @@ def build_server() -> FastMCP:
         - When every applicable option is answered, submit **once**: "migrate" re-called with the full
           ``answers`` (applies + packages), or standalone "apply_answers" → "package". The server still
           validates every answer at apply time. ``interactive=false`` on "migrate" skips prompting.
+          Only the call that packages reads ``packaging_mode``, ``group_by`` and ``group_spec``, so
+          repeat them on the "migrate" re-call (with ``answers`` or ``interactive=false``) or pass
+          them to "package"; left out, it packages with the default layout.
 
         Returns a dict ``{"ok": bool, ...}`` with per-command summaries (inventory / translation /
         bundle_files / questions / result) and a "process" block (stdout/stderr/returncode). An unknown

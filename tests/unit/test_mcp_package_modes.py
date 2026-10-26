@@ -406,6 +406,28 @@ def test_a_layout_that_fits_is_forwarded_verbatim(adapter_calls, tmp_path: Path,
     assert package_argv[package_argv.index("--schema") + 2 :] == expected_flags
 
 
+@pytest.mark.parametrize(
+    ("packaging", "expected_flags"),
+    [({}, []), ({"packaging_mode": "single"}, ["--packaging-mode", "single"])],
+    ids=str,
+)
+def test_a_migrate_answers_re_call_packages_with_its_own_layout(
+    adapter_calls, tmp_path: Path, packaging, expected_flags
+):
+    """The answers re-call reuses the report and skips discover and convert, so only its own keys set the layout."""
+    output_dir = tmp_path / "out"
+    _write_converted_state(output_dir)
+
+    result = _call_flowx(
+        "migrate", {"source": "adf", "output_dir": str(output_dir), "answers": ["option=value"], **packaging}
+    )
+
+    assert result["ok"], result
+    assert [argv[0] for argv in adapter_calls] == ["modify", "package"]
+    package_argv = adapter_calls[-1]
+    assert package_argv[package_argv.index("--schema") + 2 :] == expected_flags
+
+
 @pytest.mark.parametrize("command", ["package", "migrate"])
 @pytest.mark.parametrize("layout", _REFUSED_LAYOUTS, ids=str)
 def test_a_layout_that_does_not_fit_is_refused_before_anything_runs(adapter_calls, tmp_path: Path, command, layout):
