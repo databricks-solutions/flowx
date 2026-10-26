@@ -406,26 +406,82 @@ def test_a_layout_that_fits_is_forwarded_verbatim(adapter_calls, tmp_path: Path,
     assert package_argv[package_argv.index("--schema") + 2 :] == expected_flags
 
 
+@pytest.fixture
+def migrate_with_options(adapter_calls, monkeypatch) -> list[list[str]]:
+    """Like ``adapter_calls``, but ``inspect`` reports one unanswered option so a first migrate returns needs_input."""
+    recording_run_adapter = runner.run_adapter
+    pending = {"pipelines": [{"pipeline_name": "caller", "options": [{"option_id": "option", "show_when": []}]}]}
+
+    def run_adapter(args, **kwargs):
+        result = recording_run_adapter(args, **kwargs)
+        if args[0] == "inspect":
+            result = _FakeResult()
+            result.stdout = json.dumps(pending)
+        return result
+
+    monkeypatch.setattr(runner, "run_adapter", run_adapter)
+    return adapter_calls
+
+
+def _first_migrate_call(output_dir: Path, packaging: dict[str, Any]) -> dict[str, Any]:
+    """The first, answerless migrate call with a non-default layout; it stops at needs_input."""
+    _write_converted_state(output_dir)
+    first = _call_flowx(
+        "migrate",
+        {
+            "source": "adf",
+            "adf_source_path": str(output_dir.parent / "adf"),
+            "output_dir": str(output_dir),
+            **packaging,
+        },
+    )
+    assert first["status"] == "needs_input", first
+    return first
+
+
 @pytest.mark.parametrize(
-    ("packaging", "expected_flags"),
+    ("repeated", "expected_flags"),
     [({}, []), ({"packaging_mode": "single"}, ["--packaging-mode", "single"])],
     ids=str,
 )
 def test_a_migrate_answers_re_call_packages_with_its_own_layout(
-    adapter_calls, tmp_path: Path, packaging, expected_flags
+    migrate_with_options, tmp_path: Path, repeated, expected_flags
 ):
-    """The answers re-call reuses the report and skips discover and convert, so only its own keys set the layout."""
+    """The layout sent on the first call is not remembered: only the answers re-call's own keys set it."""
     output_dir = tmp_path / "out"
-    _write_converted_state(output_dir)
+    _first_migrate_call(output_dir, {"packaging_mode": "single"})
+    migrate_with_options.clear()
 
     result = _call_flowx(
-        "migrate", {"source": "adf", "output_dir": str(output_dir), "answers": ["option=value"], **packaging}
+        "migrate", {"source": "adf", "output_dir": str(output_dir), "answers": ["option=value"], **repeated}
     )
 
     assert result["ok"], result
-    assert [argv[0] for argv in adapter_calls] == ["modify", "package"]
-    package_argv = adapter_calls[-1]
+    assert [argv[0] for argv in migrate_with_options] == ["modify", "package"]
+    package_argv = migrate_with_options[-1]
     assert package_argv[package_argv.index("--schema") + 2 :] == expected_flags
+
+
+def test_a_later_interactive_false_call_is_a_fresh_run_that_needs_the_source_again(
+    migrate_with_options, tmp_path: Path
+):
+    """Only an answers re-call reuses the report; interactive=false after needs_input starts over from discover."""
+    output_dir = tmp_path / "out"
+    packaging = {"packaging_mode": "single"}
+    _first_migrate_call(output_dir, packaging)
+    migrate_with_options.clear()
+
+    without_source = _call_flowx(
+        "migrate", {"source": "adf", "output_dir": str(output_dir), "interactive": False, **packaging}
+    )
+    assert without_source["ok"] is False
+    assert "Provide a source path" in without_source["error"]
+    assert migrate_with_options == []
+
+    with_source = _call_flowx("migrate", _parameters_for("migrate", output_dir, packaging))
+    assert with_source["ok"], with_source
+    assert [argv[0] for argv in migrate_with_options] == ["discover", "convert", "package"]
+    assert migrate_with_options[-1][-2:] == ["--packaging-mode", "single"]
 
 
 @pytest.mark.parametrize("command", ["package", "migrate"])
