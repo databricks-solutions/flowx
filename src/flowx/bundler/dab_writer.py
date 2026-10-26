@@ -757,6 +757,11 @@ def _task_bundle_file_references(task: dict[str, Any]) -> list[str]:
     return [reference for reference in references if _is_bundle_relative_path(reference)]
 
 
+def _is_dot_relative(reference: Any) -> bool:
+    """Return whether *reference* is a string path that starts with ``./`` or ``../``."""
+    return isinstance(reference, str) and reference.startswith(("./", "../"))
+
+
 def _is_bundle_relative_path(reference: Any) -> bool:
     """Return whether *reference* is a path the bundle resolves against its resource file."""
     return (
@@ -775,10 +780,11 @@ def _check_authored_file_references(
 
     A component's task fragment and environments are written as given, and every job YAML sits in
     ``resources/``, so a relative path such as ``../src/x.py`` must name a file this bundle writes or
-    deploy fails. An environment's ``dependencies``, ``java_dependencies``, ``base_environment`` and
-    ``project_environment`` count as paths only when they start with ``./`` or ``../``; anything
-    else there is a pip requirement or a workspace or volume path. A glob such as ``../src/dist/*.whl`` must
-    match at least one file.
+    deploy fails. Every relative ``java_dependencies`` and ``project_environment`` entry is such a
+    path. A ``dependencies`` entry counts only when it starts with ``./`` or ``../``, since anything
+    else there is a pip requirement, and a ``base_environment`` only when it starts that way or names
+    a ``.yaml`` or ``.yml`` file, since anything else is a workspace base environment. A glob such
+    as ``../src/dist/*.whl`` must match at least one file.
 
     Raises:
         ValueError: An authored task or a component environment names a bundle-relative file
@@ -798,16 +804,22 @@ def _check_authored_file_references(
                 )
     for environment in environments:
         spec = environment["spec"]
-        candidates: list[Any] = [spec.get("base_environment"), spec.get("project_environment")]
-        for list_key in ("dependencies", "java_dependencies"):
-            if isinstance(spec.get(list_key), list):
-                candidates.extend(spec[list_key])
+        dependencies = spec.get("dependencies") if isinstance(spec.get("dependencies"), list) else []
+        java_dependencies = spec.get("java_dependencies") if isinstance(spec.get("java_dependencies"), list) else []
+        base_environment = spec.get("base_environment")
+        candidates: list[Any] = [
+            *(dependency for dependency in dependencies if _is_dot_relative(dependency)),
+            *java_dependencies,
+            spec.get("project_environment"),
+        ]
+        if _is_dot_relative(base_environment) or (
+            isinstance(base_environment, str) and base_environment.endswith((".yaml", ".yml"))
+        ):
+            candidates.append(base_environment)
         references.extend(
             (f"Job environment {environment['environment_key']!r}", candidate)
             for candidate in candidates
-            if isinstance(candidate, str)
-            and candidate.startswith(("./", "../"))
-            and _is_bundle_relative_path(candidate)
+            if _is_bundle_relative_path(candidate)
         )
     for owner, reference in references:
         bundle_path = posixpath.normpath(posixpath.join("resources", reference))
@@ -1353,8 +1365,8 @@ def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
     return {"resources": {"pipelines": {resource["resource_key"]: resource["definition"]}}}
 
 
-# Bundle variable names may also hold hyphens, as in ``${var.cluster-id}``.
-_VAR_REFERENCE_RE = re.compile(r"\$\{var\.([^\W\d][\w-]*)\}")
+# Bundle variable names may also hold hyphens between other characters, as in ``${var.cluster-id}``.
+_VAR_REFERENCE_RE = re.compile(r"\$\{var\.([A-Za-z_][A-Za-z0-9_]*(?:-+[A-Za-z0-9_]+)*)\}")
 
 _BUILTIN_BUNDLE_VARIABLES = frozenset({"catalog", "schema", "node_type_id", "spark_version"})
 

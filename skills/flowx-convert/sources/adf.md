@@ -97,8 +97,9 @@ runs the task. A wheel or other authored file the environment installs is listed
 `spec.dependencies` as `../src/<path>`. Every `environment_key` a task uses must be declared, and
 two components may declare the same environment only with an identical spec (it is then written
 once). A relative path the task names for a notebook, Python or SQL file or a library, or an
-environment's `dependencies`, `java_dependencies`, `base_environment` or `project_environment`
-entry that starts with `./` or `../`, is read from the job YAML in `resources/`, so
+environment names in `java_dependencies` or `project_environment`, in `dependencies` when it starts
+with `./` or `../`, or in `base_environment` when it starts that way or names a `.yaml` or `.yml`
+file, is read from the job YAML in `resources/`, so
 it must name a file the bundle writes (such as `../src/<path>` for one of your `files`; a glob must
 match one); otherwise package refuses it. Workspace (`/...`) and `dbfs:` or other URI paths,
 `${...}` values and `source: GIT` payloads are not checked. Each `${var.X}` the task or an

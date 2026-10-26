@@ -1419,7 +1419,7 @@ def test_agentic_component_task_and_environment_variables_are_declared(tmp_path,
         task={
             "spark_python_task": {
                 "python_file": "../src/jobs/run.py",
-                "parameters": ["${var.run_date}", "${var.run-id}"],
+                "parameters": ["${var.run_date}", "${var.run-id}", "${var.foo-}", "${var.-foo}"],
             },
             "environment_key": "serverless",
         },
@@ -1439,6 +1439,7 @@ def test_agentic_component_task_and_environment_variables_are_declared(tmp_path,
 
     variables = yaml.safe_load((tmp_path / "databricks.yml").read_text(encoding="utf-8"))["variables"]
     assert {"orders_version", "run_date", "run-id", "tables", "cluster_id"} <= variables.keys()
+    assert not {"foo-", "-foo"} & variables.keys()
     assert "default" not in variables["run_date"]
     assert check_bundle_dir(tmp_path).ok
 
@@ -1460,17 +1461,17 @@ def test_agentic_component_task_and_environment_variables_are_declared(tmp_path,
         ),
         *(
             (
-                {
-                    "python_wheel_task": {"package_name": "orders", "entry_point": "main"},
-                    "environment_key": "serverless",
-                },
-                [{"environment_key": "serverless", "spec": {"environment_version": "2", **spec}}],
+                {"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "serverless"},
+                [{"environment_key": "serverless", "spec": spec}],
             )
             for spec in (
-                {"dependencies": ["../src/libraries/missing.whl"]},
-                {"java_dependencies": ["../src/libraries/missing.jar"]},
+                {"environment_version": "2", "dependencies": ["../src/libraries/missing.whl"]},
+                {"environment_version": "2", "java_dependencies": ["../src/libraries/missing.jar"]},
+                {"environment_version": "2", "java_dependencies": ["missing.jar"]},
                 {"project_environment": "../src/missing/pyproject.toml"},
+                {"project_environment": "missing/pyproject.toml"},
                 {"base_environment": "./missing-env.yaml"},
+                {"base_environment": "missing-env.yaml"},
             )
         ),
     ],
@@ -1507,6 +1508,21 @@ def test_agentic_component_file_references_outside_the_bundle_or_matching_a_glob
         ],
         task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "serverless"},
     )
+    project = AgenticComponentActivity(
+        name="Project",
+        task_key="project",
+        files=[{"path": "project/pyproject.toml", "content": "[project]\nname = 'orders'\n"}],
+        environments=[
+            {"environment_key": "project", "spec": {"project_environment": "../src/project/pyproject.toml"}},
+            {"environment_key": "base", "spec": {"base_environment": "workspace-base-environments/orders"}},
+        ],
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "project"},
+    )
+    base = AgenticComponentActivity(
+        name="Base",
+        task_key="base",
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "base"},
+    )
     repository = AgenticComponentActivity(
         name="Repository",
         task_key="repository",
@@ -1521,7 +1537,9 @@ def test_agentic_component_file_references_outside_the_bundle_or_matching_a_glob
         task={"notebook_task": {"notebook_path": "/Workspace/Shared/run"}},
     )
 
-    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[component, repository, workspace])), tmp_path)
+    write_bundle(
+        prepare_workflow(Pipeline(name="orders", tasks=[component, project, base, repository, workspace])), tmp_path
+    )
 
     assert (tmp_path / "databricks.yml").exists()
     assert check_bundle_dir(tmp_path).ok
