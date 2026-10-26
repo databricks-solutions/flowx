@@ -54,6 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from flowx.discovery_insights import _inventory_pipelines
 from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
 
@@ -708,17 +709,16 @@ def _unit_owned_activity_names(
             owned.update(_task_names(pipeline.get("tasks")))
         elif name not in agentic_names:
             elsewhere.update(_task_names(pipeline.get("tasks")))
-    for pipeline in (inventory or {}).get("pipelines") or []:
-        if isinstance(pipeline, dict):
-            names = {
-                str(activity.get("name"))
-                for activity in pipeline.get("activities") or []
-                if isinstance(activity, dict) and activity.get("name") is not None
-            }
-            if pipeline.get("name") in members:
-                owned.update(names)
-            elif pipeline.get("name") not in agentic_names:
-                elsewhere.update(names)
+    for pipeline in _inventory_pipelines(inventory or {}):
+        names = {
+            str(activity.get("name"))
+            for activity in pipeline.get("activities") or []
+            if isinstance(activity, dict) and activity.get("name") is not None
+        }
+        if pipeline.get("name") in members:
+            owned.update(names)
+        elif pipeline.get("name") not in agentic_names:
+            elsewhere.update(names)
     return owned - elsewhere
 
 
@@ -860,9 +860,7 @@ def baseline_pipeline_mismatch(baseline_report: dict[str, Any], inventory: dict[
     activities out of the inventory, while convert still writes them.
     """
     inventory_names = {
-        str(pipeline.get("name"))
-        for pipeline in inventory.get("pipelines", [])
-        if isinstance(pipeline, dict) and pipeline.get("name") is not None
+        str(pipeline.get("name")) for pipeline in _inventory_pipelines(inventory) if pipeline.get("name") is not None
     }
     report_pipelines = _report_pipelines(baseline_report)
     report_names = {str(pipeline.get("name")) for pipeline in report_pipelines}

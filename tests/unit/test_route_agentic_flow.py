@@ -48,10 +48,12 @@ from flowx.route_agentic import (
     apply_agentic_output,
     apply_plan,
     apply_plan_to_report,
+    baseline_pipeline_mismatch,
     load_agentic_output,
     rebuild,
     replace_unit_pipelines,
     routing_record,
+    routing_units,
     validate_report_structurally,
 )
 from flowx.routing import build_recommendation, record_plan
@@ -2078,3 +2080,25 @@ def test_the_agent_output_store_refuses_a_top_level_key_it_does_not_write(tmp_pa
         apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc_v2")])
 
     assert store_path.read_bytes() == store_before
+
+
+@pytest.mark.parametrize("pipelines", [1, {"parent": {"name": "parent"}}, "parent"], ids=["int", "dict", "str"])
+def test_a_rebuild_reads_an_inventory_whose_pipelines_is_not_a_list_as_listing_none(
+    tmp_path: Path, pipelines: Any
+) -> None:
+    """Route and package read the same inventory list; a malformed one names no pipeline instead of crashing."""
+    report = _report_two_pipelines()
+    inventory = {"source": "adf", "pipelines": pipelines}
+    output = {
+        "members": ["parent"],
+        "pipelines": [_named_lfc_pipeline("parent_lfc")],
+        "output_sha256": "x",
+        "replaced": [],
+    }
+    plan = _plan(parent="agentic", child="deterministic")
+    unit_id = next(iter(routing_units(plan)))
+
+    assert "re-run convert" in (baseline_pipeline_mismatch(report, inventory) or "")
+    rebuilt, _, record = rebuild(report, [], plan, {unit_id: output}, [], b"{}", b"[]", inventory=inventory)
+    assert record["components"][unit_id]["outcome"] == "agentic-applied"
+    assert [pipeline["name"] for pipeline in rebuilt["pipelines"]] == ["child", "parent_lfc"]

@@ -56,6 +56,7 @@ from flowx.discovery_insights import (
     AGENTIC_INSIGHTS_FILENAME,
     ENRICH_LOCK_FILENAME,
     INSIGHTS_KEY,
+    _inventory_pipelines,
     agentic_insights_hash_violations,
     inventory_fingerprint,
 )
@@ -129,8 +130,8 @@ def _pipeline_names(inventory: dict[str, Any]) -> set[str]:
     """
     return {
         pipeline["name"]
-        for pipeline in inventory.get("pipelines", [])
-        if isinstance(pipeline, dict) and isinstance(pipeline.get("name"), str) and pipeline["name"]
+        for pipeline in _inventory_pipelines(inventory)
+        if isinstance(pipeline.get("name"), str) and pipeline["name"]
     }
 
 
@@ -143,8 +144,8 @@ def _control_edges(inventory: dict[str, Any]) -> Iterable[tuple[str, str, str, b
     edge list of the wrong shape, and an endpoint that is not a string all read as unresolved or as no
     edge, never as a link.
     """
-    for pipeline in inventory.get("pipelines", []):
-        lineage = pipeline.get("lineage") if isinstance(pipeline, dict) else None
+    for pipeline in _inventory_pipelines(inventory):
+        lineage = pipeline.get("lineage")
         edges = lineage.get("control_edges") if isinstance(lineage, dict) else None
         for edge in edges if isinstance(edges, list) else []:
             if not isinstance(edge, dict):
@@ -225,8 +226,8 @@ def build_components(inventory: dict[str, Any]) -> tuple[list[list[str]], list[s
 def _activities_by_pipeline(inventory: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Map each pipeline name to its inventory ``activities`` list (flattened, as emitted)."""
     result: dict[str, list[dict[str, Any]]] = {}
-    for pipeline in inventory.get("pipelines", []):
-        if isinstance(pipeline, dict) and pipeline.get("name") is not None:
+    for pipeline in _inventory_pipelines(inventory):
+        if pipeline.get("name") is not None:
             activities = pipeline.get("activities") or []
             result[str(pipeline["name"])] = [entry for entry in activities if isinstance(entry, dict)]
     return result
@@ -235,8 +236,8 @@ def _activities_by_pipeline(inventory: dict[str, Any]) -> dict[str, list[dict[st
 def _motifs_by_pipeline(inventory: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Map each pipeline name to its additive ``motifs`` list (the #64 capability signal)."""
     result: dict[str, list[dict[str, Any]]] = {}
-    for pipeline in inventory.get("pipelines", []):
-        if isinstance(pipeline, dict) and pipeline.get("name") is not None:
+    for pipeline in _inventory_pipelines(inventory):
+        if pipeline.get("name") is not None:
             motifs = pipeline.get("motifs") or []
             result[str(pipeline["name"])] = [entry for entry in motifs if isinstance(entry, dict)]
     return result

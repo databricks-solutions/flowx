@@ -17,7 +17,7 @@ import pytest
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import ControlEdge, Lineage
-from flowx.routing import build_components, build_plan, carried_forward_plan, validate_plan
+from flowx.routing import build_components, build_plan, build_recommendation, carried_forward_plan, validate_plan
 
 
 def _node(task_key: str, native_type: str = "Notebook", *, strategy: str = "deterministic") -> SourceNode:
@@ -187,6 +187,15 @@ def test_a_malformed_lineage_block_is_read_as_no_edges(lineage: Any) -> None:
     inventory = _hand_edited(_inventory([_graph("a"), _graph("b")]), "a", lineage=lineage)
 
     assert build_components(inventory) == ([["a"], ["b"]], [])
+
+
+@pytest.mark.parametrize("pipelines", [1, {"a": {"name": "a"}}, "ab", None], ids=["int", "dict", "str", "null"])
+def test_an_inventory_whose_pipelines_is_not_a_list_lists_no_pipelines(pipelines: Any) -> None:
+    """The same reading enrich gives it: a malformed ``pipelines`` value lists none, rather than crashing route."""
+    inventory = {**_inventory([_graph("a")]), "pipelines": pipelines}
+
+    assert build_components(inventory) == ([], [])
+    assert build_recommendation(inventory)["components"] == []
 
 
 def test_a_pipeline_name_that_is_not_a_string_is_not_a_pipeline_identity() -> None:
