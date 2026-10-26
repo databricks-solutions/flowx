@@ -18,9 +18,8 @@ always-present ``signature``, and an open ``asset_type`` that also covers
 non-physical / logical / value hand-offs (e.g. an Airflow XCom). When a writer and
 a reader of one asset both set ``asset_type``, lineage matches them (on identity or
 signature) only if the two are exactly equal, so both sides must spell the type the same way. A
-graph's derived :class:`~flowx.models.lineage.Lineage` block is serialised through ``ir_serde``'s
-``lineage_to_dict`` for the same reason; its inverse (:func:`_lineage_from_dict`)
-lives here because ``ir_serde`` ships only the forward direction.
+graph's derived :class:`~flowx.models.lineage.Lineage` block goes through ``ir_serde``'s
+``lineage_to_dict`` / ``lineage_from_dict`` pair for the same reason.
 
 Every node dict carries a ``node_type`` discriminator (the dataclass name) so a
 :class:`~flowx.models.discovery.ContainerNode` or
@@ -35,7 +34,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from flowx.ir_serde import data_asset_from_dict, data_asset_to_dict, lineage_to_dict
+from flowx.ir_serde import data_asset_from_dict, data_asset_to_dict, lineage_from_dict, lineage_to_dict
 from flowx.models.discovery import (
     ContainerNode,
     GapNode,
@@ -46,7 +45,6 @@ from flowx.models.discovery import (
     SourceGraph,
     SourceNode,
 )
-from flowx.models.lineage import ControlEdge, DataEdge, Lineage, MotifAnnotation
 
 SOURCE_GRAPHS_FILENAME = "source_graphs.json"
 SOURCE_GRAPHS_CONTRACT_VERSION = "1"
@@ -101,7 +99,7 @@ def source_graph_from_dict(raw: dict[str, Any]) -> SourceGraph:
         run_timeout_seconds=raw.get("run_timeout_seconds"),
         tags=list(raw.get("tags") or []),
         tasks=[_node_from_dict(node) for node in raw.get("tasks") or []],
-        lineage=_lineage_from_dict(lineage) if lineage else None,
+        lineage=lineage_from_dict(lineage) if lineage else None,
         properties=dict(raw.get("properties") or {}),
         extensions=dict(raw.get("extensions") or {}),
         raw=raw.get("raw"),
@@ -227,51 +225,6 @@ def _canonical_sha256(value: Any) -> str:
     """Hash *value* as canonical JSON so the digest ignores key order and whitespace."""
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _lineage_from_dict(raw: dict[str, Any]) -> Lineage:
-    """Rehydrate a :class:`Lineage` block from the dict ``ir_serde.lineage_to_dict`` emits.
-
-    The inverse of that forward serialiser (which ``ir_serde`` does not itself
-    ship), so a discovery graph's lineage round-trips through this module. A
-    control edge is resolved only when it records ``resolved: true``; a missing or
-    non-boolean value reads as unresolved. A ``wait_for_completion`` that is not a
-    boolean reads as unset (``None``).
-    """
-    return Lineage(
-        control_edges=[
-            ControlEdge(
-                source_workflow=edge.get("source_workflow", ""),
-                target_workflow=edge.get("target_workflow", ""),
-                via_task_key=edge.get("via_task_key", ""),
-                wait_for_completion=wait if isinstance(wait := edge.get("wait_for_completion"), bool) else None,
-                resolved=edge.get("resolved") is True,
-            )
-            for edge in raw.get("control_edges") or []
-        ],
-        data_edges=[
-            DataEdge(
-                source_task_key=edge.get("source_task_key", ""),
-                target_task_key=edge.get("target_task_key", ""),
-                match_kind=edge.get("match_kind", ""),
-                match_key=edge.get("match_key", ""),
-                identity=edge.get("identity"),
-                asset_type=edge.get("asset_type"),
-            )
-            for edge in raw.get("data_edges") or []
-        ],
-        motifs=[
-            MotifAnnotation(
-                motif_id=motif.get("motif_id", ""),
-                member_task_keys=list(motif.get("member_task_keys") or []),
-                display_name=motif.get("display_name"),
-                databricks_replacement=motif.get("databricks_replacement"),
-                notes=list(motif.get("notes") or []),
-                source_type_hint=motif.get("source_type_hint"),
-            )
-            for motif in raw.get("motifs") or []
-        ],
-    )
 
 
 def _parameter_to_dict(spec: ParameterSpec) -> dict[str, Any]:

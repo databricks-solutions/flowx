@@ -17,9 +17,11 @@ from flowx.sources.adf.loader import (
     _parse_pipeline_json,
     _resolve_arm_parameters,
     build_inventory,
+    build_profile_rows,
     classify_activity,
     clear_stale_outputs,
     load_adf_definitions,
+    main,
 )
 
 # ---------------------------------------------------------------------------
@@ -343,6 +345,40 @@ class TestSwitchNesting:
         for expected in ("SetVar", "RouteByEnv", "ProdNotebook", "RunProdChild", "DevNotebook", "UnknownEnvNotebook"):
             assert expected in names
 
+    def test_switch_cases_sharing_a_value_keep_every_activity(self):
+        """A repeated case value adds its activities to that value in declared order, so every walk counts them all."""
+        data = {
+            "name": "routing",
+            "properties": {
+                "activities": [
+                    {
+                        "name": "Route",
+                        "type": "Switch",
+                        "typeProperties": {
+                            "cases": [
+                                {"value": "full", "activities": [{"name": "CopyA", "type": "Copy"}]},
+                                {"value": "delta", "activities": [{"name": "CopyB", "type": "Copy"}]},
+                                {"value": "full", "activities": []},
+                                {"value": "full", "activities": [{"name": "CopyC", "type": "Copy"}]},
+                            ]
+                        },
+                    }
+                ]
+            },
+        }
+        pipeline = _parse_pipeline_json(data)
+        switch = pipeline.activities[0]
+        assert switch.switch_cases is not None
+        assert {value: [a.name for a in acts] for value, acts in switch.switch_cases.items()} == {
+            "full": ["CopyA", "CopyC"],
+            "delta": ["CopyB"],
+        }
+        definitions = AdfDefinitions(pipelines=[pipeline])
+        [row] = build_profile_rows(definitions)
+        assert row["activities"] == 4
+        names = [item.activity_name for item in build_inventory(definitions).items]
+        assert sorted(names) == ["CopyA", "CopyB", "CopyC", "Route"]
+
     def test_lineage_walk_reaches_executepipeline_inside_switch(self):
         """The ExecutePipeline nested in a Switch case is reachable by the activity
         walker -- i.e. its control edge is no longer dropped."""
@@ -554,3 +590,35 @@ class TestClearStaleOutputs:
         """Clearing a directory with no flowx artifacts is a no-op (no error)."""
         clear_stale_outputs(tmp_path)
         assert list(tmp_path.iterdir()) == []
+
+
+class TestZeroPipelineWarning:
+    """discover must fail loud (stderr) when it parses zero pipelines."""
+
+    def test_arm_template_directory_warns_loudly(self, tmp_path, capsys):
+        """A dir holding ARM-template .json (no pipelines/ layout) loads 0 pipelines + warns."""
+        source_dir = tmp_path / "arm_export"
+        source_dir.mkdir()
+        # An ARM template dropped at the top level, not the expected pipelines/ layout.
+        (source_dir / "ARMTemplateForFactory.json").write_text(json.dumps({"resources": []}), encoding="utf-8")
+
+        exit_code = main(["--source-dir", str(source_dir), "--output-dir", str(tmp_path / "out")])
+
+        # Behaviour for the 0-pipeline case is unchanged (still exits 0); the deliverable is the
+        # loud stderr warning that steers the operator to pass the ARM template as the file path.
+        assert exit_code == 0
+        stderr = capsys.readouterr().err
+        assert "0 pipelines" in stderr
+        assert "ARM template" in stderr
+        assert ".json" in stderr
+        # The guidance names the user-facing flag (--adf-source-path), not the loader-internal one.
+        assert "--adf-source-path" in stderr
+        assert "--source-dir" not in stderr
+
+    def test_valid_directory_does_not_warn(self, fixtures_dir, tmp_path, capsys):
+        """A valid ADF export loads pipelines and emits no zero-pipeline warning."""
+        exit_code = main(["--source-dir", str(fixtures_dir), "--output-dir", str(tmp_path / "out")])
+
+        assert exit_code == 0
+        stderr = capsys.readouterr().err
+        assert "discover loaded 0 pipelines" not in stderr

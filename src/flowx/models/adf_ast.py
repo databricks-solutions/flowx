@@ -137,8 +137,9 @@ class AdfActivity:
         if_false_activities: Activities to run when an IfCondition evaluates to false.
         activities: Child activities for ForEach / Until containers.
         switch_cases: Per-case child activities for a Switch, keyed by case value
-            (``cases[].value`` -> that case's ``activities``). Preserves case
-            grouping; use :func:`switch_child_activities` for a flat view.
+            (``cases[].value`` -> that case's ``activities``; cases sharing a value
+            add to one list in declared order). Preserves case grouping; use
+            :func:`switch_child_activities` for a flat view.
         switch_default_activities: A Switch's ``defaultActivities`` (the branch
             taken when no case matches).
     """

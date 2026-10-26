@@ -121,7 +121,9 @@ class MotifAnnotation:
 
     Source-neutral record tying a motif id to the tasks that belong to it, so
     the lineage block can report motifs without depending on how any particular
-    source detects them.  ``member_task_keys`` lists the tasks the motif spans.
+    source detects them.  ``member_task_keys`` lists the tasks the motif spans,
+    and each member activity also carries the same
+    :attr:`flowx.models.ir.Activity.motif_id` tag.
 
     Attributes:
         motif_id: Identifier of the matched motif definition.
