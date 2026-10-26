@@ -698,6 +698,14 @@ def _holds_lock(lock_path: Path, token: str) -> bool:
         return False
 
 
+def _is_open_file(descriptor: int, path: Path) -> bool:
+    """Whether *path* is still the file open on *descriptor*, not one created there since."""
+    try:
+        return os.path.samestat(os.fstat(descriptor), path.stat())
+    except OSError:
+        return False
+
+
 @contextmanager
 def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
     """Hold the output directory's enrich lock, yielding its token, or ``None`` when another enrich holds it.
@@ -720,13 +728,19 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
         return
     try:
         try:
-            written = os.write(descriptor, token.encode("ascii"))
+            if os.write(descriptor, token.encode("ascii")) != len(token):
+                raise OSError(f"could not write the enrich lock {lock_path}")
+        except BaseException:
+            # The token may be missing or partial, so compare file identity instead; the open
+            # descriptor keeps its inode from being reused by a later enrich's lock.
+            if _is_open_file(descriptor, lock_path):
+                lock_path.unlink(missing_ok=True)
+            raise
         finally:
             os.close(descriptor)
-        if written != len(token):
-            raise OSError(f"could not write the enrich lock {lock_path}")
     except BaseException:
-        lock_path.unlink(missing_ok=True)
+        if _holds_lock(lock_path, token):
+            lock_path.unlink(missing_ok=True)
         raise
     keep_lock = False
     try:

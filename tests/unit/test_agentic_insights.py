@@ -793,6 +793,45 @@ def test_a_failed_lock_token_write_removes_the_lock(tmp_path: Path, monkeypatch:
     assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
 
 
+def test_a_failed_lock_token_write_keeps_a_later_enrichs_lock(tmp_path: Path, monkeypatch: Any) -> None:
+    """A discover clears metadata/ and a later enrich takes the lock while this one's token write fails."""
+    _discover(tmp_path)
+    lock_path = tmp_path / "metadata" / ".enrich.lock"
+
+    def write_failing_after_a_later_enrich_locks(descriptor: int, data: bytes) -> int:
+        lock_path.unlink()
+        lock_path.write_text("later-enrich-token", encoding="utf-8")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "write", write_failing_after_a_later_enrich_locks)
+    with pytest.raises(OSError, match="No space left"):
+        enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    monkeypatch.undo()
+
+    assert lock_path.read_text(encoding="utf-8") == "later-enrich-token"
+
+
+def test_a_failed_lock_close_after_the_token_is_written_removes_the_lock(tmp_path: Path, monkeypatch: Any) -> None:
+    """The token reached the lock but closing it failed, so the enrich stops before writing anything."""
+    inventory_path = _discover(tmp_path)
+    metadata = tmp_path / "metadata"
+    inventory_before = inventory_path.read_bytes()
+    real_close = os.close
+
+    def failing_close(descriptor: int) -> None:
+        real_close(descriptor)
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "close", failing_close)
+    with pytest.raises(OSError, match="Input/output error"):
+        enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    monkeypatch.undo()
+
+    assert inventory_path.read_bytes() == inventory_before
+    assert not (metadata / ".enrich.lock").exists()
+    assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
+
+
 def test_a_failed_recovery_write_rolls_back_to_the_insights_the_inventory_holds(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
