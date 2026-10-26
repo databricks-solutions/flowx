@@ -489,7 +489,7 @@ def _live_report_failures(
     may have been edited. The rebuild from the baseline, the stored gap fills, the plan and the stored
     outputs must then reproduce the report exactly, record included. Finally every agentic unit must
     have its agent output applied. A report without a record passes only when the plan routes nothing
-    agentic.
+    agentic and no gap fill is stored, because route stamps a record whenever it applies one.
     """
     from flowx.discovery_serde import canonical_sha256
     from flowx.models.conversion_plan import DECISION_AGENTIC
@@ -513,6 +513,16 @@ def _live_report_failures(
         if any(component.get("decision") == DECISION_AGENTIC for component in plan_document.get("components", [])):
             return [
                 f"the plan routes a component agentic but {REPORT_FILENAME} carries no routing record; re-run route"
+            ]
+        try:
+            stored_fills = load_agentic_output(output_dir).document.get("gap_fills")
+        except (OSError, ValueError) as error:
+            return [f"metadata/{AGENTIC_OUTPUT_FILENAME} is unreadable: {error}"]
+        if stored_fills:
+            return [
+                f"metadata/{AGENTIC_OUTPUT_FILENAME} stores a gap fill but {REPORT_FILENAME} carries no routing "
+                "record; re-run route, which applies the fill, or drops it when it was merged against an earlier "
+                "convert"
             ]
         return []
     failures: list[str] = []

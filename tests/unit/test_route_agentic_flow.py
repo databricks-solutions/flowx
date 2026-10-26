@@ -611,6 +611,36 @@ def test_a_gap_fill_survives_switching_every_component_back_to_deterministic(tmp
     assert _record_outcomes(report_path) == {"component-1": "deterministic", "component-2": "deterministic"}
 
 
+def test_package_refuses_a_re_converted_report_with_no_record_while_a_gap_fill_is_stored(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A re-convert drops the routing record, and a deterministic plan alone must not let package skip the fill."""
+    convert_report = _report_with_child_gap()
+    for pipeline in convert_report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, convert_report)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+    _write_work(tmp_path, convert_report, gaps=[])
+    capsys.readouterr()
+
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 1
+    assert "stores a gap fill but translation_report.json carries no routing record; re-run route" in (
+        capsys.readouterr().err
+    )
+    assert not (tmp_path / "child" / "databricks.yml").exists()
+
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    apply_plan(tmp_path, recorded)
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 0
+    child = next(p for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+
+
 def test_a_re_convert_drops_gap_fills_merged_against_the_old_baseline(tmp_path: Path) -> None:
     _route_parent_agentic(tmp_path, _report_with_child_gap())
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
