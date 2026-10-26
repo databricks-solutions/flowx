@@ -185,8 +185,8 @@ def _run_route(args: argparse.Namespace) -> int:
 
     Returns 1 on an inventory not shaped as discover writes it, insights files that disagree or a plan
     that fails validation (report + plan left untouched), while another route, fill-agentic or merge
-    holds the output folder's route lock, and
-    when every component is decided but convert has not written the report yet.
+    holds the output folder's route lock, and when every component is decided but convert has not
+    written the report yet.
     """
     from flowx.route_agentic import ROUTE_LOCK_HELD, route_lock
 

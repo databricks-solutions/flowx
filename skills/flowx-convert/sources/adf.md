@@ -157,7 +157,9 @@ matched. Add `--output <path>` to write a copy instead of overwriting. An in-pla
 `.work/translation_report.json` also takes the merged activities' gaps out of `.work/gaps.json`. After
 routing, only such an in-place merge is also stored as a gap fill in `metadata/agentic_conversion.json`
 (so a re-route keeps it, while route's saved deterministic baseline stays as convert wrote it); a merge
-written to an `--output` copy stores nothing and leaves `gaps.json` alone.
+written to an `--output` copy stores nothing and leaves `gaps.json` alone. A merge into the live report
+refuses, writing nothing, while a route, fill-agentic or another merge is writing to the same output
+folder, so run merges one at a time (see "One at a time per output folder" in the `flowx-route` skill).
 
 ## Step 6.1 — Just-in-time translation configuration
 
