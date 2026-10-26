@@ -2376,6 +2376,12 @@ def _reconstruct_configuration(raw: dict[str, Any] | None) -> Any:
 _AGENTIC_COMPONENT_FIELDS = frozenset(
     {"type", *(component_field.name for component_field in dataclasses.fields(AgenticComponentActivity))}
 )
+_AGENTIC_COMPONENT_FIELD_SHAPES = (
+    ("files", list, "list"),
+    ("resources", list, "list"),
+    ("environments", list, "list"),
+    ("task", dict, "mapping"),
+)
 
 
 def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
@@ -2387,8 +2393,10 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
 
     Raises:
         ValueError: An ``AgenticComponentActivity`` carries a field the
-            class does not define, such as ``file`` for ``files``; it is
-            refused rather than dropped.
+            class does not define, such as ``file`` for ``files``, or sets
+            ``files``, ``resources`` or ``environments`` to something other
+            than a list or ``task`` to something other than a mapping; it is
+            refused rather than dropped or coerced.
     """
     task_type = task_ir.get("type", "")
     base = _common_activity_kwargs(task_ir)
@@ -2592,12 +2600,15 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
         unknown_fields = sorted(task_ir.keys() - _AGENTIC_COMPONENT_FIELDS)
         if unknown_fields:
             raise ValueError(f"Agentic component {base['task_key']!r} has unknown field(s) {', '.join(unknown_fields)}")
+        for field_name, field_type, shape in _AGENTIC_COMPONENT_FIELD_SHAPES:
+            if field_name in task_ir and not isinstance(task_ir[field_name], field_type):
+                raise ValueError(f"Agentic component {base['task_key']!r} {field_name} must be a {shape}")
         return AgenticComponentActivity(
             **base,
-            files=list(task_ir.get("files") or []),
-            resources=list(task_ir.get("resources") or []),
-            environments=list(task_ir.get("environments") or []),
-            task=dict(task_ir.get("task") or {}),
+            files=list(task_ir.get("files", [])),
+            resources=list(task_ir.get("resources", [])),
+            environments=list(task_ir.get("environments", [])),
+            task=dict(task_ir.get("task", {})),
             raw_definition=task_ir.get("raw_definition"),
         )
     if task_type == "UnsupportedActivity":

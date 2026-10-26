@@ -1516,3 +1516,21 @@ def test_agentic_component_file_references_outside_the_bundle_or_matching_a_glob
 
     assert (tmp_path / "databricks.yml").exists()
     assert check_bundle_dir(tmp_path).ok
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("task", [["notebook_task", {"notebook_path": "../src/run.py"}]], "task must be a mapping"),
+        ("task", None, "task must be a mapping"),
+        ("files", {"path": "pipelines/orders.py", "content": ""}, "files must be a list"),
+        ("resources", "", "resources must be a list"),
+        ("environments", 0, "environments must be a list"),
+    ],
+)
+def test_serialized_agentic_component_with_a_field_of_the_wrong_shape_fails(field_name, value, message):
+    """A reload refuses a field of the wrong shape instead of coercing it into a valid-looking one."""
+    serialized = {**activity_to_dict(_activity()), field_name: value}
+
+    with pytest.raises(ValueError, match=f"Agentic component 'ingest_orders' {message}"):
+        pipeline_dict_to_ir({"name": "orders", "tasks": [serialized]})
