@@ -715,9 +715,10 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
     ``metadata/``. It keeps other enrich runs out only absent a concurrent discover; the module
     docstring lists the windows a discover opens. It is removed when the enrich finishes or raises,
     if it is still this enrich's.
-    It is left behind only when the two files may disagree -- a killed process, or an error that is
-    or was raised from :class:`_UnrecoveredWriteError` (a failed rollback, or an interrupt between
-    the two replaces) -- so the next enrich refuses until the lock is removed.
+    It is left behind when the two files may disagree -- a killed process, or an error that is or
+    was raised from :class:`_UnrecoveredWriteError` (a failed rollback, or an interrupt between the
+    two replaces) -- and, with nothing written, when writing the token fails and cleanup cannot
+    confirm the lock is still this enrich's. The next enrich refuses until the lock is removed.
     """
     lock_path = metadata_dir / ENRICH_LOCK_FILENAME
     token = secrets.token_hex(16)
