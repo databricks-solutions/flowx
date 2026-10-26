@@ -71,3 +71,22 @@ def read_template_file(name: str, search_paths: tuple[Path, ...]) -> TemplateFil
         return TemplateFile(name=name, path=path, reason=f"could not be read as UTF-8 text ({error})")
     # Airflow's Jinja environment drops a single trailing newline (keep_trailing_newline=False).
     return TemplateFile(name=name, path=path, content=content.removesuffix("\n"))
+
+
+def find_script_file(path: str, search_paths: tuple[Path, ...]) -> tuple[Path | None, str]:
+    """Finds a script a shell command names, reading only inside the DAG folder and template search path.
+
+    A relative path follows the template lookup rules. An absolute path is used only when it, after
+    following symbolic links, lies inside one of the search paths, so discover never copies an unrelated
+    file from the machine it runs on.
+    """
+    if not Path(path).is_absolute():
+        return find_template_file(path, search_paths)
+    if ".." in Path(path).parts:
+        return None, "climbs out of the template search path"
+    candidate = Path(path)
+    if not any(candidate.resolve().is_relative_to(root.resolve()) for root in search_paths):
+        return None, "is outside the DAG folder and template_searchpath, so discover does not read it"
+    if not candidate.is_file():
+        return None, "was not found"
+    return candidate, str(candidate)
