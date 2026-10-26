@@ -709,7 +709,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     :func:`flowx.route_agentic.drop_filled_gaps`); an unreadable ``gaps.json`` is left as it is. A
     merge written anywhere else (``output_path``, or into a copy such as modify's configured report)
     stores nothing and leaves ``gaps.json`` alone. Nothing is written until every result has been
-    applied.
+    applied. A merge into the live report holds the output folder's route lock (see
+    :func:`flowx.route_agentic.route_lock`), so it refuses while a route, fill-agentic or another merge
+    is writing there.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
@@ -721,14 +723,31 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
         ``(merged, unmatched)`` counts.
 
     Raises:
-        ValueError: A result would land in a pipeline the routing record routes agentic, or the
-            routing baseline is missing, no longer has the hashes the record names, or lacks the task a
-            merge replaced.
+        ValueError: A result would land in a pipeline the routing record routes agentic, the routing
+            baseline is missing, no longer has the hashes the record names, or lacks the task a merge
+            replaced, or another command holds the route lock.
     """
+    from flowx.route_agentic import REPORT_FILENAME, ROUTE_LOCK_HELD, WORK_DIRNAME, route_lock
+
+    output_dir = report_path.parent.parent
+    destination = output_path or report_path
+    live_report_path = output_dir / WORK_DIRNAME / REPORT_FILENAME
+    in_place = destination.resolve() == report_path.resolve() == live_report_path.resolve()
+    if not in_place:
+        return _merge_agentic_results(report_path, results_dir, destination, in_place=False)
+    with route_lock(output_dir) as held:
+        if not held:
+            raise ValueError(ROUTE_LOCK_HELD)
+        return _merge_agentic_results(report_path, results_dir, destination, in_place=True)
+
+
+def _merge_agentic_results(
+    report_path: Path, results_dir: Path, destination: Path, *, in_place: bool
+) -> tuple[int, int]:
+    """The body of :func:`merge_agentic_results`; a merge into the live report runs holding the route lock."""
     from flowx.discovery_serde import canonical_sha256
     from flowx.route_agentic import (
         GAPS_FILENAME,
-        REPORT_FILENAME,
         ROUTED_AGENTIC_MERGE_REFUSED,
         WORK_DIRNAME,
         applied_gap_fills,
@@ -745,9 +764,6 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     routed = routed_agentic_pipelines(report)
     record = routing_record(report)
     output_dir = report_path.parent.parent
-    destination = output_path or report_path
-    live_report_path = output_dir / WORK_DIRNAME / REPORT_FILENAME
-    in_place = destination.resolve() == report_path.resolve() == live_report_path.resolve()
     updates_baseline = record is not None and in_place
     baseline_by_name: dict[Any, dict[str, Any]] = {}
     baseline_report_sha256 = ""

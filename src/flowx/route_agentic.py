@@ -46,8 +46,10 @@ import copy
 import hashlib
 import json
 import os
+import secrets
 import tempfile
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -67,6 +69,17 @@ BASELINE_GAPS_FILENAME = "gaps.json"
 METADATA_DIRNAME = "metadata"
 INVENTORY_FILENAME = "inventory.json"
 AGENTIC_OUTPUT_FILENAME = "agentic_conversion.json"
+
+# Held in metadata/ while route, fill-agentic or a merge into the live report reads and rewrites the plan, the
+# report, its gaps and the agent's output, so two of them never interleave on one output folder.
+ROUTE_LOCK_FILENAME = ".route.lock"
+# A hosted agent cannot delete files in output_dir, but discover moves metadata/, the lock with it, into the archive.
+ROUTE_LOCK_HELD = (
+    f"another route, fill-agentic or merge is writing to this output folder (metadata/{ROUTE_LOCK_FILENAME} "
+    "exists); run this again once it finishes. If none is running, one was stopped mid-write: locally, delete "
+    f"metadata/{ROUTE_LOCK_FILENAME} and run route again; on the hosted MCP server, run discover again (it moves "
+    "metadata/, the lock with it, into metadata/archive/), then route and fill again"
+)
 
 # Top-level report key holding the routing record. It lives in the report, so a fresh convert (which
 # rewrites the report) clears it; the package phase and ir_serde read only the pipelines beside it.
@@ -383,6 +396,51 @@ def _gap_fill_checks_out(entry: Any) -> bool:
         and isinstance(entry["baseline_report_sha256"], str)
         and entry["fill_sha256"] == _fill_sha256(entry)
     )
+
+
+def _holds_route_lock(lock_path: Path, token: str) -> bool:
+    """Whether the lock file at *lock_path* is still the one this command created (holding *token*)."""
+    try:
+        return lock_path.read_text(encoding="utf-8") == token
+    except OSError:
+        return False
+
+
+@contextmanager
+def route_lock(output_dir: Path) -> Iterator[bool]:
+    """Hold the output folder's route lock, yielding ``False`` when another command already holds it.
+
+    Route, fill-agentic and a merge into the live report each read the plan, the report, its gaps and
+    the agent's output and then write some of them, so each takes this lock first and refuses with
+    :data:`ROUTE_LOCK_HELD` while another holds it. Like enrich's lock it is a file created with
+    ``O_EXCL`` holding a random token, so a command never removes a lock a later one created after
+    discover moved ``metadata/`` away. It is removed when the command finishes or raises; only a killed
+    process leaves it behind. Discover takes no lock. With no ``metadata/`` folder there is no plan or
+    inventory, so no route or fill can be running, and nothing is held.
+    """
+    metadata_dir = Path(output_dir) / METADATA_DIRNAME
+    if not metadata_dir.is_dir():
+        yield True
+        return
+    lock_path = metadata_dir / ROUTE_LOCK_FILENAME
+    token = secrets.token_hex(16)
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        yield False
+        return
+    try:
+        written = os.write(descriptor, token.encode("ascii"))
+    finally:
+        os.close(descriptor)
+    if written != len(token):
+        lock_path.unlink(missing_ok=True)
+        raise OSError(f"could not write the route lock {lock_path}")
+    try:
+        yield True
+    finally:
+        if _holds_route_lock(lock_path, token):
+            lock_path.unlink(missing_ok=True)
 
 
 def load_agentic_output(output_dir: Path) -> AgenticOutput:
@@ -1212,7 +1270,8 @@ def apply_agentic_output(
     ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation, a
     placeholder left in, a missing tasks list, an excluded pipeline, a bad or clashing name, structural
     validation failure, or any other error. Empty
-    ``authored_pipelines`` is refused.
+    ``authored_pipelines`` is refused, and so is a fill while another route, fill-agentic or merge holds
+    the output folder's route lock (see :func:`route_lock`).
 
     The stored entry carries the canonical hash of the complete authored pipelines. When that hash
     matches the stored one and the live report already holds those pipelines, this returns
@@ -1225,7 +1284,14 @@ def apply_agentic_output(
     members = {str(member) for member in unit_members}
     if not authored_pipelines:
         return {"ok": False, "error": "pipelines list cannot be empty", "violations": [], "pipelines": 0}
+    with route_lock(output_dir) as held:
+        if not held:
+            return {"ok": False, "error": None, "violations": [ROUTE_LOCK_HELD], "pipelines": 0}
+        return _fill_unit(output_dir, members, authored_pipelines)
 
+
+def _fill_unit(output_dir: Path, members: set[str], authored_pipelines: list[dict[str, Any]]) -> dict[str, Any]:
+    """The body of :func:`apply_agentic_output`, run while holding the output folder's route lock."""
     from flowx.routing import inventory_source
 
     unit_id, plan, inventory, error = _resolve_agentic_unit(output_dir, members)

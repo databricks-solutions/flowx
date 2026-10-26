@@ -330,6 +330,11 @@ Its guarantees:
 - The merged report is **always** validated with the structural bundle invariants (a real
   `prepare → write_bundle` pass) **before it is written** — no bypass — so a duplicate key, dangling
   dependency, cycle, or dangling pipeline/run_job reference can never land on disk (all-or-nothing).
+- **One at a time per output folder**: route, fill-agentic and a merge into the live report each hold
+  `metadata/.route.lock` while they work, and refuse with a violation, writing nothing, while another
+  holds it. Run fills one after another, never in parallel. A lock is left behind only when a run is
+  stopped mid-write; then delete it and run route again (on the hosted server, run discover again,
+  which moves `metadata/` and the lock into `metadata/archive/`, then route and fill again).
 
 ### Authoring an `AgenticComponentActivity` (the escape hatch)
 

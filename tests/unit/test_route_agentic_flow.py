@@ -39,6 +39,7 @@ from flowx.models.ir import ControlEdge, Lineage
 from flowx.route_agentic import (
     GAPS_FILENAME,
     REPORT_FILENAME,
+    ROUTE_LOCK_FILENAME,
     ROUTED_AGENTIC_MERGE_REFUSED,
     ROUTING_RECORD_KEY,
     WORK_DIRNAME,
@@ -1965,3 +1966,98 @@ def test_fill_refuses_a_component_that_puts_libraries_or_compute_on_the_activity
 
     assert report_path.read_bytes() == report_before
     assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+# --------------------------------------------------------------------------- #
+# One route, fill-agentic or in-place merge at a time per output folder.
+# --------------------------------------------------------------------------- #
+
+
+def _hold_route_lock(output_dir: Path) -> Path:
+    """Leave the lock file another route, fill-agentic or merge would be holding."""
+    lock_path = output_dir / "metadata" / ROUTE_LOCK_FILENAME
+    lock_path.write_text("another-command", encoding="utf-8")
+    return lock_path
+
+
+def test_fill_agentic_refuses_while_another_command_holds_the_route_lock(tmp_path: Path) -> None:
+    """Two fills in one turn both loaded the store, and the second write silently dropped the first unit."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    lock_path = _hold_route_lock(tmp_path)
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    assert result["ok"] is False
+    assert any("another route, fill-agentic or merge" in violation for violation in result["violations"])
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+    assert lock_path.read_text(encoding="utf-8") == "another-command"
+
+
+def test_route_refuses_while_another_command_holds_the_route_lock(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    plan_path = tmp_path / "metadata" / "conversion_plan.json"
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    plan_before, report_before = plan_path.read_bytes(), report_path.read_bytes()
+    _hold_route_lock(tmp_path)
+    capsys.readouterr()
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert any("another route, fill-agentic or merge" in violation for violation in payload["violations"])
+    assert plan_path.read_bytes() == plan_before
+    assert report_path.read_bytes() == report_before
+
+
+def test_an_in_place_merge_refuses_while_another_command_holds_the_route_lock(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    _hold_route_lock(tmp_path)
+
+    with pytest.raises(ValueError, match="another route, fill-agentic or merge"):
+        merge_agentic_results(report_path, results_dir)
+
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+def test_a_merge_into_a_separate_copy_takes_no_route_lock(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    _hold_route_lock(tmp_path)
+
+    copy_path = tmp_path / "merged.json"
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir, copy_path) == (1, 0)
+
+
+def test_route_fill_and_merge_release_the_route_lock(tmp_path: Path) -> None:
+    lock_path = tmp_path / "metadata" / ROUTE_LOCK_FILENAME
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 0
+    assert not lock_path.exists()
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir) == (1, 0)
+    assert not lock_path.exists()
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    assert not lock_path.exists()
+
+
+def test_a_fill_that_raises_releases_the_route_lock(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    (tmp_path / WORK_DIRNAME / REPORT_FILENAME).unlink()
+
+    with pytest.raises(FileNotFoundError):
+        apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    assert not (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).exists()

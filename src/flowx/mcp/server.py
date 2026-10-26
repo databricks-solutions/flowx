@@ -837,7 +837,8 @@ def build_server() -> FastMCP:
           that shares a bundle folder with another pipeline. The merged report is always validated
           structurally before writing (all-or-nothing). It is the only fill for a routed-agentic unit
           (to keep a pipeline 1:1, author one same-named pipeline); package refuses until every agentic
-          unit is filled.
+          unit is filled. Route, fill_agentic and an in-place merge_agentic hold metadata/.route.lock, so
+          run them one at a time per output_dir: while another holds it they refuse with a violation.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
