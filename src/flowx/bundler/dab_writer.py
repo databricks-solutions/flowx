@@ -775,8 +775,9 @@ def _check_authored_file_references(
 
     A component's task fragment and environments are written as given, and every job YAML sits in
     ``resources/``, so a relative path such as ``../src/x.py`` must name a file this bundle writes or
-    deploy fails. Environment dependencies count as paths only when they start with ``./`` or
-    ``../``; anything else there is a pip requirement. A glob such as ``../src/dist/*.whl`` must
+    deploy fails. An environment's ``dependencies``, ``java_dependencies``, ``base_environment`` and
+    ``project_environment`` count as paths only when they start with ``./`` or ``../``; anything
+    else there is a pip requirement or a workspace or volume path. A glob such as ``../src/dist/*.whl`` must
     match at least one file.
 
     Raises:
@@ -796,12 +797,17 @@ def _check_authored_file_references(
                     for reference in _task_bundle_file_references(task)
                 )
     for environment in environments:
+        spec = environment["spec"]
+        candidates: list[Any] = [spec.get("base_environment"), spec.get("project_environment")]
+        for list_key in ("dependencies", "java_dependencies"):
+            if isinstance(spec.get(list_key), list):
+                candidates.extend(spec[list_key])
         references.extend(
-            (f"Job environment {environment['environment_key']!r}", dependency)
-            for dependency in environment["spec"].get("dependencies") or []
-            if isinstance(dependency, str)
-            and dependency.startswith(("./", "../"))
-            and _is_bundle_relative_path(dependency)
+            (f"Job environment {environment['environment_key']!r}", candidate)
+            for candidate in candidates
+            if isinstance(candidate, str)
+            and candidate.startswith(("./", "../"))
+            and _is_bundle_relative_path(candidate)
         )
     for owner, reference in references:
         bundle_path = posixpath.normpath(posixpath.join("resources", reference))
@@ -1347,7 +1353,8 @@ def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
     return {"resources": {"pipelines": {resource["resource_key"]: resource["definition"]}}}
 
 
-_VAR_REFERENCE_RE = re.compile(r"\$\{var\.([A-Za-z_][A-Za-z0-9_]*)\}")
+# Bundle variable names may also hold hyphens, as in ``${var.cluster-id}``.
+_VAR_REFERENCE_RE = re.compile(r"\$\{var\.([^\W\d][\w-]*)\}")
 
 _BUILTIN_BUNDLE_VARIABLES = frozenset({"catalog", "schema", "node_type_id", "spark_version"})
 

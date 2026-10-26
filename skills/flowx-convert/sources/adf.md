@@ -97,7 +97,8 @@ runs the task. A wheel or other authored file the environment installs is listed
 `spec.dependencies` as `../src/<path>`. Every `environment_key` a task uses must be declared, and
 two components may declare the same environment only with an identical spec (it is then written
 once). A relative path the task names for a notebook, Python or SQL file or a library, or an
-environment dependency that starts with `./` or `../`, is read from the job YAML in `resources/`, so
+environment's `dependencies`, `java_dependencies`, `base_environment` or `project_environment`
+entry that starts with `./` or `../`, is read from the job YAML in `resources/`, so
 it must name a file the bundle writes (such as `../src/<path>` for one of your `files`; a glob must
 match one); otherwise package refuses it. Workspace (`/...`) and `dbfs:` or other URI paths,
 `${...}` values and `source: GIT` payloads are not checked. Each `${var.X}` the task or an
@@ -113,7 +114,9 @@ activity are replaced. The placeholder's other source metadata
 (`notifications`, `compute_mode`, `description`, `data_reads`, `data_writes`, `raw_definition` and the
 like) is kept for each field you leave out; a value you set wins. Of these, only `notifications` and
 `compute_mode` change the task flowx writes, and `parameter_approximations` (each exactly
-`widget_name`, `raw_expression`, `replacement` and `note` strings) are listed in SETUP.md. Put libraries and compute in the task fragment: setting
+`widget_name`, `raw_expression`, `replacement` and `note` strings) are listed in SETUP.md for a
+top-level component, as for a notebook task; an IfCondition, ForEach or Switch does not yet pass
+any child's approximations on. Put libraries and compute in the task fragment: setting
 `libraries` or `existing_cluster_id` on the activity is an error, and neither is taken from the
 placeholder. flowx does not override or remove any
 other value the fragment sets, except in three wiring passes that apply to authored tasks exactly as

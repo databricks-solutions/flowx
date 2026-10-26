@@ -1417,7 +1417,10 @@ def test_agentic_component_task_and_environment_variables_are_declared(tmp_path,
             }
         ],
         task={
-            "spark_python_task": {"python_file": "../src/jobs/run.py", "parameters": ["${var.run_date}"]},
+            "spark_python_task": {
+                "python_file": "../src/jobs/run.py",
+                "parameters": ["${var.run_date}", "${var.run-id}"],
+            },
             "environment_key": "serverless",
         },
     )
@@ -1435,7 +1438,7 @@ def test_agentic_component_task_and_environment_variables_are_declared(tmp_path,
     write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[wrap(component), loop])), tmp_path)
 
     variables = yaml.safe_load((tmp_path / "databricks.yml").read_text(encoding="utf-8"))["variables"]
-    assert {"orders_version", "run_date", "tables", "cluster_id"} <= variables.keys()
+    assert {"orders_version", "run_date", "run-id", "tables", "cluster_id"} <= variables.keys()
     assert "default" not in variables["run_date"]
     assert check_bundle_dir(tmp_path).ok
 
@@ -1455,14 +1458,20 @@ def test_agentic_component_task_and_environment_variables_are_declared(tmp_path,
             },
             [],
         ),
-        (
-            {"python_wheel_task": {"package_name": "orders", "entry_point": "main"}, "environment_key": "serverless"},
-            [
+        *(
+            (
                 {
+                    "python_wheel_task": {"package_name": "orders", "entry_point": "main"},
                     "environment_key": "serverless",
-                    "spec": {"environment_version": "2", "dependencies": ["../src/libraries/missing.whl"]},
-                }
-            ],
+                },
+                [{"environment_key": "serverless", "spec": {"environment_version": "2", **spec}}],
+            )
+            for spec in (
+                {"dependencies": ["../src/libraries/missing.whl"]},
+                {"java_dependencies": ["../src/libraries/missing.jar"]},
+                {"project_environment": "../src/missing/pyproject.toml"},
+                {"base_environment": "./missing-env.yaml"},
+            )
         ),
     ],
 )
