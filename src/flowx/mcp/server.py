@@ -425,7 +425,7 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
         result = runner.run_adapter(["route", "--output-dir", output_dir, *extra])
         payload = runner.parse_stdout_json(result)
         ok = bool(isinstance(payload, dict) and payload.get("ok"))
-        delivered = _route_files(p, Path(output_dir))
+        delivered = _route_files(p, Path(output_dir), route_ok=ok)
         return {"ok": ok and "error" not in delivered, "result": payload, "process": result.as_dict(), **delivered}
 
     if plan is None and plan_path is None:
@@ -438,14 +438,21 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
         return _run(["--plan-path", str(inline_path)])
 
 
-def _route_files(p: dict[str, Any], output_dir: Path) -> dict[str, Any]:
+def _route_files(p: dict[str, Any], output_dir: Path, *, route_ok: bool) -> dict[str, Any]:
     """Deliver the recorded plan and the routing review page, when route wrote them.
 
-    The agent needs both to edit the plan and show the page, so a file the size-bounded inline
-    bundle had to leave out returns an ``error`` naming the upload paths instead of the bundle.
+    The agent needs both to edit the plan and show the page, so after a successful route a file that
+    is missing, or that the size-bounded inline bundle had to leave out, returns an ``error``
+    instead of the bundle. After a failed route, whichever of the two exist are delivered as they are.
     """
     metadata = output_dir / "metadata"
-    files = [path for path in (metadata / "conversion_plan.json", metadata / "routing_review.html") if path.is_file()]
+    expected = (metadata / "conversion_plan.json", metadata / "routing_review.html")
+    files = [path for path in expected if path.is_file()]
+    missing = [path.name for path in expected if path not in files]
+    if route_ok and missing:
+        return {
+            "error": f"Route reported success but {' and '.join(missing)} is missing under {metadata}; run route again."
+        }
     if not files:
         return {}
     with tempfile.TemporaryDirectory(prefix="flowx-route-") as temporary:

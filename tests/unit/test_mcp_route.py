@@ -35,8 +35,15 @@ def captured(monkeypatch):
     calls: list[list[str]] = []
 
     def fake_run_adapter(args, **_kwargs):
-        calls.append([str(a) for a in args])
-        if args and args[0] == "route" and "--plan-path" not in [str(a) for a in args]:
+        argv = [str(a) for a in args]
+        calls.append(argv)
+        # A successful route always writes the plan and the review page; keep any a test wrote first.
+        metadata = Path(argv[argv.index("--output-dir") + 1]) / "metadata"
+        metadata.mkdir(parents=True, exist_ok=True)
+        for name, text in (("conversion_plan.json", '{"components": []}'), ("routing_review.html", "<html></html>")):
+            if not (metadata / name).exists():
+                (metadata / name).write_text(text, encoding="utf-8")
+        if args and args[0] == "route" and "--plan-path" not in argv:
             return _Result(json.dumps({"ok": True, "violations": [], "pending": ["component-1"], "applied": False}))
         return _Result(json.dumps({"ok": True, "violations": [], "components": 1, "edit": {"agentic_pipelines": []}}))
 
@@ -82,6 +89,41 @@ def test_route_fails_when_the_plan_or_review_page_is_too_large_to_return_inline(
     assert f"{oversized} (2100000 bytes)" in out["error"]
     assert "output_volume_path" in out["error"] and "output_workspace_path" in out["error"]
     assert out["result"]["ok"] is True
+
+
+def test_route_fails_when_a_successful_route_left_no_review_page(tmp_path: Path, monkeypatch) -> None:
+    """A file removed after route wrote it (a discover in between) is not delivered, so route must not say ok."""
+
+    def fake_run_adapter(args, **_kwargs):
+        metadata = tmp_path / "metadata"
+        metadata.mkdir(exist_ok=True)
+        (metadata / "conversion_plan.json").write_text('{"components": []}', encoding="utf-8")
+        return _Result(json.dumps({"ok": True, "violations": [], "pending": ["component-1"], "applied": False}))
+
+    monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
+
+    out = server._cmd_route({"output_dir": str(tmp_path)})
+
+    assert out["ok"] is False
+    assert "bundle" not in out
+    assert "routing_review.html is missing" in out["error"]
+
+
+def test_route_that_failed_still_returns_the_plan_already_recorded(tmp_path: Path, monkeypatch) -> None:
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "conversion_plan.json").write_text('{"components": []}', encoding="utf-8")
+
+    def fake_run_adapter(args, **_kwargs):
+        return _Result(json.dumps({"ok": False, "violations": ["a plan problem"], "components": 0}))
+
+    monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
+
+    out = server._cmd_route({"output_dir": str(tmp_path), "plan": {"components": []}})
+
+    assert out["ok"] is False
+    assert "error" not in out
+    assert list(out["bundle"]["files"]) == ["conversion_plan.json"]
 
 
 def test_route_uploads_an_oversized_plan_and_review_page(captured, tmp_path: Path, monkeypatch) -> None:
