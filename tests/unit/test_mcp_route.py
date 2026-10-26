@@ -109,6 +109,23 @@ def test_route_fails_when_a_successful_route_left_no_review_page(tmp_path: Path,
     assert "routing_review.html is missing" in out["error"]
 
 
+def test_route_fails_cleanly_when_a_file_goes_missing_while_it_is_copied(captured, tmp_path: Path, monkeypatch) -> None:
+    """A discover can move a file between route's success and the copy; that is a missing file, not a crash."""
+    real_copy = server.shutil.copy
+
+    def copy_after_discover_moved_the_page(source, destination):
+        if Path(source).name == "routing_review.html":
+            Path(source).unlink()
+        return real_copy(source, destination)
+
+    monkeypatch.setattr(server.shutil, "copy", copy_after_discover_moved_the_page)
+
+    out = server._cmd_route({"output_dir": str(tmp_path)})
+
+    assert out["ok"] is False
+    assert "routing_review.html is missing" in out["error"]
+
+
 def test_route_that_failed_still_returns_the_plan_already_recorded(tmp_path: Path, monkeypatch) -> None:
     metadata = tmp_path / "metadata"
     metadata.mkdir()

@@ -412,8 +412,9 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
     inventory: inline under ``bundle``, or uploaded to
     ``output_volume_path`` / ``output_workspace_path``, because a hosted agent cannot read the server's
     ``output_dir``; edit the plan and call route again with it as ``plan``. The returned ``ok``
-    reflects the CLI's success, and is False with an ``error`` naming the upload paths when either
-    file is too large to return inline; ``result`` carries the CLI's JSON.
+    reflects the CLI's success, and is False with an ``error`` when the CLI succeeded but either file
+    is missing (run route again) or too large to return inline (pass one of the upload paths);
+    ``result`` carries the CLI's JSON.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     plan = p.get("plan")
@@ -444,33 +445,38 @@ def _route_files(p: dict[str, Any], output_dir: Path, *, route_ok: bool) -> dict
     The agent needs both to edit the plan and show the page, so after a successful route a file that
     is missing, or that the size-bounded inline bundle had to leave out, returns an ``error``
     instead of the bundle. After a failed route, whichever of the two exist are delivered as they are.
+    Each file is copied before it is checked, so one a discover moves away meanwhile counts as missing.
     """
     metadata = output_dir / "metadata"
-    expected = (metadata / "conversion_plan.json", metadata / "routing_review.html")
-    files = [path for path in expected if path.is_file()]
-    missing = [path.name for path in expected if path not in files]
-    if route_ok and missing:
-        return {
-            "error": f"Route reported success but {' and '.join(missing)} is missing under {metadata}; run route again."
-        }
-    if not files:
-        return {}
     with tempfile.TemporaryDirectory(prefix="flowx-route-") as temporary:
-        for path in files:
-            shutil.copy(path, temporary)
+        copies: list[Path] = []
+        missing: list[str] = []
+        for name in ("conversion_plan.json", "routing_review.html"):
+            try:
+                copies.append(Path(shutil.copy(metadata / name, temporary)))
+            except OSError:
+                missing.append(name)
+        if route_ok and missing:
+            return {
+                "error": (
+                    f"Route reported success but {' and '.join(missing)} is missing under {metadata}; run route again."
+                )
+            }
+        if not copies:
+            return {}
         delivered = _bundle_output(p, Path(temporary))
-    if "bundle" not in delivered:
+        if "bundle" in delivered:
+            returned = delivered["bundle"]["files"]
+            left_out = [f"{copy.name} ({copy.stat().st_size} bytes)" for copy in copies if copy.name not in returned]
+            if left_out:
+                return {
+                    "error": (
+                        f"Too large to return inline: {', '.join(left_out)}. Route has written its files under "
+                        f"{metadata}; call route again with output_volume_path or output_workspace_path to have "
+                        "them uploaded there."
+                    )
+                }
         return delivered
-    returned = delivered["bundle"]["files"]
-    left_out = [f"{path.name} ({path.stat().st_size} bytes)" for path in files if path.name not in returned]
-    if left_out:
-        return {
-            "error": (
-                f"Too large to return inline: {', '.join(left_out)}. Route has written its files under {metadata}; "
-                "call route again with output_volume_path or output_workspace_path to have them uploaded there."
-            )
-        }
-    return delivered
 
 
 def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
@@ -810,7 +816,8 @@ def build_server() -> FastMCP:
           plan (the decisions, or an edited copy of the recorded plan) it records those. It also
           writes metadata/routing_review.html, the standard
           review page. The plan and the page come back under `bundle` (or are uploaded; ok is false
-          when either is too large to return inline, so pass one of the upload paths). While a
+          when either is missing, so run route again, or too large to return inline, so pass one of
+          the upload paths). While a
           decision is pending nothing is applied; once every component is decided route rebuilds the
           translation report from the unchanged baseline, the stored gap fills, the plan, and the
           agent's outputs in metadata/agentic_conversion.json: deterministic units stay as-is, agentic
