@@ -773,6 +773,26 @@ def test_an_interrupt_before_either_replace_releases_the_lock(tmp_path: Path, mo
     assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
 
 
+def test_a_failed_lock_token_write_removes_the_lock(tmp_path: Path, monkeypatch: Any) -> None:
+    """A full disk while writing the lock's token leaves nothing written, so the empty lock must not stay behind."""
+    inventory_path = _discover(tmp_path)
+    metadata = tmp_path / "metadata"
+    inventory_before = inventory_path.read_bytes()
+
+    def failing_write(descriptor: int, data: bytes) -> int:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "write", failing_write)
+    with pytest.raises(OSError, match="No space left"):
+        enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    monkeypatch.undo()
+
+    assert inventory_path.read_bytes() == inventory_before
+    assert not (metadata / AGENTIC_INSIGHTS_FILENAME).exists()
+    assert not (metadata / ".enrich.lock").exists()
+    assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
+
+
 def test_a_failed_recovery_write_rolls_back_to_the_insights_the_inventory_holds(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

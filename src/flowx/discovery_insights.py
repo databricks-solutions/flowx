@@ -719,12 +719,15 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
         yield None
         return
     try:
-        written = os.write(descriptor, token.encode("ascii"))
-    finally:
-        os.close(descriptor)
-    if written != len(token):
+        try:
+            written = os.write(descriptor, token.encode("ascii"))
+        finally:
+            os.close(descriptor)
+        if written != len(token):
+            raise OSError(f"could not write the enrich lock {lock_path}")
+    except BaseException:
         lock_path.unlink(missing_ok=True)
-        raise OSError(f"could not write the enrich lock {lock_path}")
+        raise
     keep_lock = False
     try:
         yield token
