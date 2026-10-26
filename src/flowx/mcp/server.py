@@ -412,7 +412,8 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
     inventory: inline under ``bundle``, or uploaded to
     ``output_volume_path`` / ``output_workspace_path``, because a hosted agent cannot read the server's
     ``output_dir``; edit the plan and call route again with it as ``plan``. The returned ``ok``
-    reflects the CLI's success; ``result`` carries its JSON.
+    reflects the CLI's success, and is False with an ``error`` naming the upload paths when either
+    file is too large to return inline; ``result`` carries the CLI's JSON.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     plan = p.get("plan")
@@ -424,7 +425,8 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
         result = runner.run_adapter(["route", "--output-dir", output_dir, *extra])
         payload = runner.parse_stdout_json(result)
         ok = bool(isinstance(payload, dict) and payload.get("ok"))
-        return {"ok": ok, "result": payload, "process": result.as_dict(), **_route_files(p, Path(output_dir))}
+        delivered = _route_files(p, Path(output_dir))
+        return {"ok": ok and "error" not in delivered, "result": payload, "process": result.as_dict(), **delivered}
 
     if plan is None and plan_path is None:
         return _run([])
@@ -437,16 +439,31 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _route_files(p: dict[str, Any], output_dir: Path) -> dict[str, Any]:
-    """Deliver the recorded plan and the routing review page, when route wrote them."""
+    """Deliver the recorded plan and the routing review page, when route wrote them.
+
+    The agent needs both to edit the plan and show the page, so a file the size-bounded inline
+    bundle had to leave out returns an ``error`` naming the upload paths instead of the bundle.
+    """
     metadata = output_dir / "metadata"
-    files = [metadata / name for name in ("conversion_plan.json", "routing_review.html")]
-    if not any(path.is_file() for path in files):
+    files = [path for path in (metadata / "conversion_plan.json", metadata / "routing_review.html") if path.is_file()]
+    if not files:
         return {}
     with tempfile.TemporaryDirectory(prefix="flowx-route-") as temporary:
         for path in files:
-            if path.is_file():
-                shutil.copy(path, temporary)
-        return _bundle_output(p, Path(temporary))
+            shutil.copy(path, temporary)
+        delivered = _bundle_output(p, Path(temporary))
+    if "bundle" not in delivered:
+        return delivered
+    returned = delivered["bundle"]["files"]
+    left_out = [f"{path.name} ({path.stat().st_size} bytes)" for path in files if path.name not in returned]
+    if left_out:
+        return {
+            "error": (
+                f"Too large to return inline: {', '.join(left_out)}. Route has written its files under {metadata}; "
+                "call route again with output_volume_path or output_workspace_path to have them uploaded there."
+            )
+        }
+    return delivered
 
 
 def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
@@ -785,7 +802,8 @@ def build_server() -> FastMCP:
           longer suggests, which go back to pending and are listed under `dropped_groupings`; with a
           plan (the decisions, or an edited copy of the recorded plan) it records those. It also
           writes metadata/routing_review.html, the standard
-          review page. The plan and the page come back under `bundle` (or are uploaded). While a
+          review page. The plan and the page come back under `bundle` (or are uploaded; ok is false
+          when either is too large to return inline, so pass one of the upload paths). While a
           decision is pending nothing is applied; once every component is decided route rebuilds the
           translation report from the unchanged baseline, the stored gap fills, the plan, and the
           agent's outputs in metadata/agentic_conversion.json: deterministic units stay as-is, agentic

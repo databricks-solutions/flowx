@@ -64,6 +64,45 @@ def test_route_returns_the_recorded_plan_and_review_page_inline(captured, tmp_pa
     assert sorted(out["bundle"]["files"]) == ["conversion_plan.json", "routing_review.html"]
 
 
+@pytest.mark.parametrize("oversized", ["conversion_plan.json", "routing_review.html"])
+def test_route_fails_when_the_plan_or_review_page_is_too_large_to_return_inline(
+    captured, tmp_path: Path, oversized: str
+) -> None:
+    """The inline bundle drops a file over its size cap, and the agent needs both to edit the plan and show the page."""
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "conversion_plan.json").write_text('{"components": []}', encoding="utf-8")
+    (metadata / "routing_review.html").write_text("<html></html>", encoding="utf-8")
+    (metadata / oversized).write_text("x" * 2_100_000, encoding="utf-8")
+
+    out = server._cmd_route({"output_dir": str(tmp_path)})
+
+    assert out["ok"] is False
+    assert "bundle" not in out
+    assert f"{oversized} (2100000 bytes)" in out["error"]
+    assert "output_volume_path" in out["error"] and "output_workspace_path" in out["error"]
+    assert out["result"]["ok"] is True
+
+
+def test_route_uploads_an_oversized_plan_and_review_page(captured, tmp_path: Path, monkeypatch) -> None:
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "conversion_plan.json").write_text("x" * 2_100_000, encoding="utf-8")
+    (metadata / "routing_review.html").write_text("<html></html>", encoding="utf-8")
+    uploaded: list[str] = []
+
+    def fake_upload(local_root: Path, volume_path: str) -> dict[str, Any]:
+        uploaded.extend(sorted(path.name for path in local_root.rglob("*")))
+        return {"output_volume_path": volume_path, "files": uploaded, "count": len(uploaded)}
+
+    monkeypatch.setattr(runner, "upload_tree_to_volume", fake_upload)
+
+    out = server._cmd_route({"output_dir": str(tmp_path), "output_volume_path": "/Volumes/main/default/flowx"})
+
+    assert out["ok"] is True
+    assert uploaded == ["conversion_plan.json", "routing_review.html"]
+
+
 def test_route_inline_plan_is_staged_and_forwarded_as_plan_path(captured, tmp_path: Path) -> None:
     plan = {"components": [{"component_id": "component-1", "members": ["a"], "decision": "agentic"}]}
     out = server._cmd_route({"output_dir": str(tmp_path), "plan": plan})

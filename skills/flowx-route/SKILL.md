@@ -90,7 +90,8 @@ and touches nothing else:
 
 - **MCP tool:** `flowx(command="route", parameters={"output_dir": "<dir>"})` — the plan and the page
   come back under `bundle` (or are uploaded to `output_volume_path` / `output_workspace_path`), because
-  a hosted agent cannot read the server's `output_dir`.
+  a hosted agent cannot read the server's `output_dir`. When either is too large to return inline, `ok`
+  is false and the error says so; call route again with one of the upload paths.
 - **venv CLI:** `"$PY" -m flowx.adapter route --output-dir <dir>` (`--out <file>` writes the result
   JSON to a file).
 
