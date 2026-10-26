@@ -112,7 +112,8 @@ component's `name`, `task_key`, `depends_on`, `timeout_seconds`, `max_retries` a
 activity are replaced. The placeholder's other source metadata
 (`notifications`, `compute_mode`, `description`, `data_reads`, `data_writes`, `raw_definition` and the
 like) is kept for each field you leave out; a value you set wins. Of these, only `notifications` and
-`compute_mode` change the task flowx writes. Put libraries and compute in the task fragment: setting
+`compute_mode` change the task flowx writes, and `parameter_approximations` (each exactly
+`widget_name`, `raw_expression`, `replacement` and `note` strings) are listed in SETUP.md. Put libraries and compute in the task fragment: setting
 `libraries` or `existing_cluster_id` on the activity is an error, and neither is taken from the
 placeholder. flowx does not override or remove any
 other value the fragment sets, except in three wiring passes that apply to authored tasks exactly as

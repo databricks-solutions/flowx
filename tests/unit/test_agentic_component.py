@@ -1534,3 +1534,68 @@ def test_serialized_agentic_component_with_a_field_of_the_wrong_shape_fails(fiel
 
     with pytest.raises(ValueError, match=f"Agentic component 'ingest_orders' {message}"):
         pipeline_dict_to_ir({"name": "orders", "tasks": [serialized]})
+
+
+@pytest.mark.parametrize("agent_sets_approximations", [False, True])
+def test_merged_agentic_component_parameter_approximations_reach_setup_md(tmp_path, agent_sets_approximations):
+    """Approximations the component carries, its own or kept from the placeholder, are listed in SETUP.md."""
+    inherited = {
+        "widget_name": "run_date",
+        "raw_expression": "@utcnow()",
+        "replacement": "{{job.start_time.iso_datetime}}",
+        "note": "Job start time, not the activity's own start time.",
+    }
+    authored = {**inherited, "widget_name": "load_date", "raw_expression": "@pipeline().TriggerTime"}
+    report = tmp_path / "translation_report.json"
+    placeholders = Pipeline(
+        name="orders",
+        tasks=[
+            PlaceholderActivity(
+                name="Transform",
+                task_key="transform",
+                original_type="ExecuteDataFlow",
+                parameter_approximations=[inherited],
+            )
+        ],
+    )
+    report.write_text(json.dumps(pipeline_to_dict(placeholders)), encoding="utf-8")
+    results = tmp_path / "agentic_results"
+    results.mkdir()
+    component = {"type": "AgenticComponentActivity", "resources": RESOURCES, "task": TASK}
+    if agent_sets_approximations:
+        component["parameter_approximations"] = [authored]
+    (results / "transform.json").write_text(
+        json.dumps({"activity_name": "Transform", "task": component}), encoding="utf-8"
+    )
+
+    assert merge_agentic_results(report, results) == (1, 0)
+    merged_pipeline, _ = pipeline_dict_to_ir(json.loads(report.read_text(encoding="utf-8")))
+    write_bundle(prepare_workflow(merged_pipeline), tmp_path / "bundle")
+
+    setup_md = (tmp_path / "bundle" / "SETUP.md").read_text(encoding="utf-8")
+    expected = authored if agent_sets_approximations else inherited
+    assert (
+        f"| `transform` | `{expected['widget_name']}` | `{expected['raw_expression']}` "
+        f"| `{expected['replacement']}` | {expected['note']} |"
+    ) in setup_md
+
+
+@pytest.mark.parametrize(
+    "approximation",
+    [
+        "run_date",
+        {"widget_name": "run_date", "raw_expression": "@utcnow()", "replacement": "{{job.start_time.iso_datetime}}"},
+        {"widget_name": "run_date", "raw_expression": "@utcnow()", "replacement": None, "note": "Job start time."},
+    ],
+)
+def test_agentic_component_rejects_malformed_parameter_approximations(approximation):
+    activity = AgenticComponentActivity(
+        name="Ingest orders",
+        task_key="ingest_orders",
+        resources=RESOURCES,
+        task=TASK,
+        parameter_approximations=[approximation],
+    )
+
+    with pytest.raises(ValueError, match="Agentic component 'ingest_orders' parameter approximation"):
+        prepare_workflow(Pipeline(name="orders", tasks=[activity]))
