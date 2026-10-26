@@ -10,7 +10,7 @@ import pytest
 from flowx.discovery_serde import (
     _HASHED_DOCUMENT_KEYS,
     SOURCE_GRAPHS_CONTRACT_VERSION,
-    _canonical_sha256,
+    canonical_sha256,
     read_source_graphs,
     source_graph_to_dict,
     source_graphs_document,
@@ -99,7 +99,7 @@ def test_graph_from_another_source_is_rejected() -> None:
     """A document labelled with one source cannot carry graphs from another, even with matching hashes."""
     document = source_graphs_document([_graph("first")], source="unit")
     document["source"] = "other"
-    document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
+    document["document_sha256"] = canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
 
     with pytest.raises(ValueError, match="holds a graph from another source"):
         source_graphs_from_document(document)
@@ -154,8 +154,8 @@ def test_unknown_contract_version_is_rejected() -> None:
 
 def _rehash(document: dict) -> dict:
     """Recompute both hashes after an edit, so a test reaches the checks that come after them."""
-    document["graph_sha256"] = [_canonical_sha256(graph) for graph in document["graphs"]]
-    document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
+    document["graph_sha256"] = [canonical_sha256(graph) for graph in document["graphs"]]
+    document["document_sha256"] = canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
     return document
 
 

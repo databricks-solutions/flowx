@@ -134,8 +134,8 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
         "graphs": [source_graph_to_dict(graph) for graph in graphs],
     }
     _check_graph_sources(document)
-    document["graph_sha256"] = [_canonical_sha256(graph) for graph in document["graphs"]]
-    document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
+    document["graph_sha256"] = [canonical_sha256(graph) for graph in document["graphs"]]
+    document["document_sha256"] = canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
     return document
 
 
@@ -192,13 +192,13 @@ def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
     recorded_graph_hashes = document.get("graph_sha256")
     if recorded_graph_hashes is None:
         raise ValueError("source_graphs document is missing graph_sha256")
-    actual_graph_hashes = [_canonical_sha256(graph) for graph in graphs]
+    actual_graph_hashes = [canonical_sha256(graph) for graph in graphs]
     if recorded_graph_hashes != actual_graph_hashes:
         raise ValueError("source_graphs graph_sha256 does not match the graphs it was recorded for")
     recorded_document_hash = document.get("document_sha256")
     if recorded_document_hash is None:
         raise ValueError("source_graphs document is missing document_sha256")
-    actual_document_hash = _canonical_sha256({key: document.get(key) for key in _HASHED_DOCUMENT_KEYS})
+    actual_document_hash = canonical_sha256({key: document.get(key) for key in _HASHED_DOCUMENT_KEYS})
     if recorded_document_hash != actual_document_hash:
         raise ValueError("source_graphs document_sha256 does not match the document content")
     _check_graph_sources(document)
@@ -221,7 +221,7 @@ def read_source_graphs(path: Path) -> list[SourceGraph]:
     return source_graphs_from_document(json.loads(path.read_text(encoding="utf-8")))
 
 
-def _canonical_sha256(value: Any) -> str:
+def canonical_sha256(value: Any) -> str:
     """Hash *value* as canonical JSON so the digest ignores key order and whitespace."""
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
