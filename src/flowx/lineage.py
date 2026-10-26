@@ -139,7 +139,7 @@ def data_edges_from_endpoints(
             if matched is None:
                 continue
             match_kind, match_key, identity = matched
-            asset_type = producer_asset.asset_type or consumer_asset.asset_type
+            asset_type = producer_asset.asset_type or consumer_asset.asset_type or None
             dedupe_key = (producer_key, consumer_key, match_kind, match_key, asset_type)
             if dedupe_key in seen:
                 continue
