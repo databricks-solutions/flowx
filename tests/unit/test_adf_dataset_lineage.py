@@ -925,6 +925,43 @@ def test_storage_account_that_is_not_letters_and_digits_names_no_account(type_pr
     assert _storage_account_identity(type_properties) is None
 
 
+@pytest.mark.parametrize(
+    ("key", "unreadable"),
+    [
+        ("folderPath", {"type": "NotAnAdfWrapper", "value": "secret/path"}),
+        ("folderPath", ["landing"]),
+        ("fileName", {"type": "NotAnAdfWrapper", "value": "orders.csv"}),
+        ("fileName", ["orders.csv"]),
+    ],
+)
+def test_unreadable_dataset_folder_or_file_name_gives_no_signature(key: str, unreadable: object) -> None:
+    """A location value the code cannot read is unknown, so the call-site folder never stands in for it."""
+    definitions = _landing_definitions(ds_known=("sales", "acct"), ds_unreadable=("sales", "acct"))
+    definitions.datasets["ds_unreadable"].properties["typeProperties"]["location"][key] = unreadable
+    _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_known", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_unreadable", produced=False), definitions)
+
+    assert writes[0].signature
+    assert reads[0].identity is None
+    assert reads[0].signature == ""
+    assert data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads]) == []
+
+
+@pytest.mark.parametrize("location_key", ["fileSystem", "container", "bucketName"])
+def test_file_system_holding_a_mask_names_no_store(location_key: str) -> None:
+    """No container, file system or bucket name can hold ``*``, so one that does is unknown, not a store."""
+    definitions = _landing_definitions(ds_masked=("raw*****", "acct"))
+    location = definitions.datasets["ds_masked"].properties["typeProperties"]["location"]
+    location[location_key] = location.pop("fileSystem")
+    location["folderPath"] = "landing"
+    reference = AdfDatasetReference(reference_name="ds_masked")
+    _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference]), definitions)
+
+    assert resolve_dataset_identity(reference, definitions) is None
+    assert writes[0].identity is None
+    assert "*" not in (writes[0].signature or "")
+
+
 def test_two_masked_storage_accounts_with_the_same_folder_shape_do_not_join_by_signature() -> None:
     """Two lakes whose ``url`` hides the account behind ``*`` are not provably one store, so no edge joins them."""
     masked_url = {"type": "SecureString", "value": "https://**********.dfs.core.windows.net"}

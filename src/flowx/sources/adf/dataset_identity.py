@@ -248,8 +248,9 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
 
     Uses the literal ``server`` (plus ``database`` when given) from the backing
     linked service's properties or plaintext connection string, exactly as written.
-    A ``server`` or ``database`` wrapped in an Expression or SecureString object is
-    read from its ``value`` and checked like a plain string. Neither name can hold
+    A ``server`` or ``database`` wrapped in an Expression or SecureString object (or
+    an untyped one with a ``value``) is read from its ``value`` and checked like a
+    plain string. Neither name can hold
     ``*``, so one that does is a masked secret (an export writes ``**********``). When the connection string is hidden
     (a Key Vault reference or a masked secret) the linked service name stands in for
     the server. A parameterised or masked server or database, a parameterised
@@ -314,7 +315,8 @@ def _resolve_file_store(
     """Resolve a file dataset's ``(file system, storage account)``.
 
     The file system is the ADLS ``fileSystem``, the Blob ``container``, or the S3 /
-    GCS ``bucketName``. Each part is ``None`` unless it resolves to a literal. The
+    GCS ``bucketName``. Each part is ``None`` unless it resolves to a literal. No file
+    system name can hold ``*``, so one that does is masked and unknown. The
     path identity and the signature's store qualifier both read the store here, so
     they always agree on what counts as a known file system and account.
     """
@@ -323,7 +325,7 @@ def _resolve_file_store(
     )
     account = _resolve_storage_account(linked_service)
     return (
-        file_system if file_system and _is_physical(file_system) else None,
+        file_system if file_system and _is_physical(file_system) and "*" not in file_system else None,
         account if account and _is_physical(account) else None,
     )
 
@@ -386,7 +388,7 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
     """Pull a storage account name out of a linked service, if present.
 
     Each of ``url``, ``sasUri`` and the connection string is read from its ``value``
-    when wrapped in an Expression or SecureString object. The whole of it must be
+    when wrapped in an Expression or SecureString object (or an untyped one). The whole of it must be
     physical before the account is cut out of it: cutting first would drop the
     closing ``]`` of an ARM expression or the tail of an ``@{...}`` and leave a
     fragment that looks literal. A storage account name is only letters and digits,
