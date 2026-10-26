@@ -121,13 +121,13 @@ def data_edges_from_endpoints(
     Returns:
         Deduplicated data edges in first-seen order. A producer never hands off to
         a consumer sharing its ``task_key`` (no self-edge), and identical
-        ``(producer, consumer, match_kind, match_key)`` edges are collapsed.
+        ``(producer, consumer, match_kind, match_key, asset_type)`` edges are collapsed.
     """
     producer_list = list(producers)
     consumer_list = list(consumers)
 
     edges: list[DataEdge] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str | None]] = set()
     # Every writer pairs with every reader of the same asset regardless of run order: two parallel
     # writers both hand off, and so does a writer that runs after the reader. "Proven" means the
     # assets match, not that this writer's output is the one the reader sees.
@@ -139,7 +139,8 @@ def data_edges_from_endpoints(
             if matched is None:
                 continue
             match_kind, match_key, identity = matched
-            dedupe_key = (producer_key, consumer_key, match_kind, match_key)
+            asset_type = producer_asset.asset_type or consumer_asset.asset_type
+            dedupe_key = (producer_key, consumer_key, match_kind, match_key, asset_type)
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
@@ -150,7 +151,7 @@ def data_edges_from_endpoints(
                     match_kind=match_kind,
                     match_key=match_key,
                     identity=identity,
-                    asset_type=producer_asset.asset_type or consumer_asset.asset_type,
+                    asset_type=asset_type,
                 )
             )
     return edges
