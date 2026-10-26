@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+from pathlib import Path
 from typing import Any
 
 from flowx.sources.airflow import operators as ops
@@ -47,6 +48,8 @@ class _DagVisitor(ast.NodeVisitor):
 
     def __init__(self, module: ast.Module, *, target_dag_variable: str | None = None) -> None:
         self._aliases = _import_aliases(module)
+        # The DAG module's path as given, which ``__file__`` names when the DAG builds paths from it.
+        self.dag_file: Path | None = None
         self.airflow_generation = _airflow_generation(module)
         self.asset_definitions = _asset_definitions(module, self._aliases)
         self._target_dag_variable = target_dag_variable

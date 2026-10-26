@@ -61,6 +61,10 @@ def _unresolved_activity_templates(activity: Activity) -> set[str]:
     unresolved: set[str] = set()
     for attribute in ("base_parameters", "job_parameters", "parameters", "sql", "generated_source"):
         unresolved |= templating.unresolved_jinja_expressions(getattr(activity, attribute, None))
+    # Generated source holds Python callable bodies that Airflow never renders, so only rendered fields
+    # are checked for statements and comments.
+    for attribute in ("base_parameters", "job_parameters", "parameters", "sql"):
+        unresolved |= templating.jinja_statements_or_comments(getattr(activity, attribute, None))
     return unresolved
 
 

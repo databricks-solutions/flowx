@@ -291,6 +291,8 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             if activity.parameters:
                 extra["parameters"] = dict(activity.parameters)
             extra["warehouse_ref"] = activity.warehouse_ref
+            if activity.template_file:
+                extra["template_file"] = dict(activity.template_file)
         case SparkJarActivity():
             extra["main_class_name"] = activity.main_class_name
             if activity.parameters:

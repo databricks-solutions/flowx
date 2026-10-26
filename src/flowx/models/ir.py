@@ -361,11 +361,14 @@ class SqlActivity(Activity):
             the query, referenced in the SQL as ``:name``.
         warehouse_ref: DAB reference for the warehouse id (defaults to the
             ``warehouse_id`` bundle variable).
+        template_file: Where the SQL came from when the source loaded it from a
+            template file (name, resolved path, and content), so a later gap keeps it.
     """
 
     sql: str
     parameters: dict[str, str] | None = None
     warehouse_ref: str = "${var.warehouse_id}"
+    template_file: dict[str, str] | None = None
 
 
 @dataclass(slots=True, kw_only=True)

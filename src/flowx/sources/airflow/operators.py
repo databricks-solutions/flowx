@@ -32,6 +32,7 @@ from flowx.models.ir import (
     SqlActivity,
 )
 from flowx.sources.airflow import callable_notebook, dataproc, templating
+from flowx.sources.airflow.template_files import read_template_file
 from flowx.utils import to_lowercase_key
 
 # --------------------------------------------------------------------------------------
@@ -624,9 +625,22 @@ def _sh_notebook_activity(ctx: OperatorContext, command: str) -> NotebookActivit
     )
 
 
+def _shell_jinja_placeholder(ctx: OperatorContext, command: str) -> Activity | None:
+    """Returns a gap for a shell command with Jinja statements or comments, which flowx does not render."""
+    if not templating.JINJA_STATEMENT_OR_COMMENT.search(command):
+        return None
+    return _placeholder(
+        ctx,
+        f"{ctx.operator} command uses Jinja statements or comments ({{% %}} / {{# #}}), which flowx does not "
+        "render; expand them into plain shell. Airflow also reads the {# in ${#name} as a comment start.",
+    )
+
+
 def _build_bash(ctx: OperatorContext) -> Activity:
     command = literal_str(ctx.kwargs.get("bash_command"))
     if command is not None:
+        if (jinja_gap := _shell_jinja_placeholder(ctx, command)) is not None:
+            return jinja_gap
         submit = parse_spark_submit(command)
         if submit is not None:
             return _spark_activity_from_submit(ctx, submit, "BashOperator spark-submit")
@@ -637,6 +651,8 @@ def _build_bash(ctx: OperatorContext) -> Activity:
 def _build_ssh(ctx: OperatorContext) -> Activity:
     command = literal_str(ctx.kwargs.get("command"))
     if command is not None:
+        if (jinja_gap := _shell_jinja_placeholder(ctx, command)) is not None:
+            return jinja_gap
         submit = parse_spark_submit(command)
         if submit is not None:
             # The SSH hop is eliminated -- Databricks runs Spark natively.
@@ -733,30 +749,6 @@ _SQL_TEMPLATE_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "MySqlOperator": (".sql", ".json"),
     "HiveOperator": (".hql", ".sql"),
 }
-_SQL_FILE_EXTENSIONS = (".sql", ".hql")
-_JINJA_STATEMENT_OR_COMMENT = re.compile(r"\{%|\{#")
-
-
-def _read_template_file(name: str, search_paths: tuple[Path, ...]) -> tuple[str | None, str]:
-    """Loads a template file the way Airflow's Jinja loader finds it, or explains why it cannot.
-
-    Jinja splits the name on ``/``, ignores empty and ``.`` segments, refuses ``..``, and returns the
-    first match across the search paths.
-    """
-    parts = [part for part in name.split("/") if part and part != "."]
-    if ".." in parts:
-        return None, "climbs out of the template search path"
-    for root in search_paths:
-        candidate = root.joinpath(*parts)
-        if candidate.is_file():
-            try:
-                content = candidate.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError) as error:
-                return None, f"could not be read as UTF-8 text ({error})"
-            # Airflow's Jinja environment drops a single trailing newline (keep_trailing_newline=False).
-            return content.removesuffix("\n"), str(candidate)
-    searched = ", ".join(str(root) for root in search_paths) or "an empty search path"
-    return None, f"was not found in {searched}"
 
 
 def _sql_builder(note: str, sql_kwarg: str = "sql") -> Callable[[OperatorContext], Activity]:
@@ -771,29 +763,29 @@ def _sql_builder(note: str, sql_kwarg: str = "sql") -> Callable[[OperatorContext
         if sql is None:
             return _placeholder(ctx, f"{ctx.operator} SQL is not a string literal; extract it manually.")
         if sql.endswith(_SQL_TEMPLATE_EXTENSIONS.get(ctx.operator, ())):
-            if not sql.endswith(_SQL_FILE_EXTENSIONS):
+            if sql.endswith(".json"):
                 return _placeholder(
                     ctx, f"{ctx.operator} loads {sql!r} as a template file of a type flowx does not read."
                 )
-            content, detail = _read_template_file(sql, ctx.template_search_paths)
-            if content is None:
+            loaded = read_template_file(sql, ctx.template_search_paths)
+            if loaded.content is None:
                 return _placeholder(
                     ctx,
-                    f"{ctx.operator} loads its SQL from template file {sql!r}, which {detail}. Make the file "
+                    f"{ctx.operator} loads its SQL from template file {sql!r}, which {loaded.reason}. Make the file "
                     "available next to the DAG or in a template_searchpath directory, or inline the SQL.",
                 )
-            template_file = {"template_file": {"path": sql, "resolved_path": detail, "content": content}}
-            sql = content
+            template_file: dict[str, str] | None = loaded.record()
+            sql = loaded.content
         else:
             template_file = None
-        if _JINJA_STATEMENT_OR_COMMENT.search(sql):
+        if templating.JINJA_STATEMENT_OR_COMMENT.search(sql):
             return _placeholder(
                 ctx,
                 f"{ctx.operator} SQL uses Jinja statements or comments ({{% %}} / {{# #}}), which Databricks "
                 "does not render; expand them into plain SQL.",
-                template_file,
+                {"template_file": template_file} if template_file else None,
             )
-        return SqlActivity(name=ctx.task_id, task_key=ctx.task_key, sql=sql)
+        return SqlActivity(name=ctx.task_id, task_key=ctx.task_key, sql=sql, template_file=template_file)
 
     return build
 
@@ -904,7 +896,7 @@ def build_placeholder(ctx: OperatorContext) -> Activity:
     )
 
 
-def build_placeholder_with_comment(ctx: OperatorContext, comment: str) -> Activity:
+def build_placeholder_with_comment(ctx: OperatorContext, comment: str) -> PlaceholderActivity:
     """Builds a placeholder carrying a caller-supplied migration explanation."""
     return _placeholder(ctx, comment)
 

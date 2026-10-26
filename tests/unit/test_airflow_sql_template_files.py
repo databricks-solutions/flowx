@@ -23,6 +23,11 @@ def _load(tmp_path: Path, task: str, *, dag_arguments: str = "", files: dict[str
         "from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator\n"
         "from airflow.providers.apache.hive.operators.hive import HiveOperator\n"
         "from airflow.operators.bash import BashOperator\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "from airflow.providers.postgres.operators.postgres import PostgresOperator\n"
+        "from airflow.providers.mysql.operators.mysql import MySqlOperator\n"
+        "import os\n"
+        "from pathlib import Path\n"
         f"with DAG(dag_id='d'{dag_arguments}) as dag:\n"
         f"    t = {task}\n",
         encoding="utf-8",
@@ -206,10 +211,11 @@ def test_jinja_statement_in_a_shell_command_fails_closed(tmp_path: Path) -> None
     assert isinstance(_task(pipeline), PlaceholderActivity)
 
 
-def test_bash_length_expansion_is_not_a_jinja_comment(tmp_path: Path) -> None:
+def test_bash_length_expansion_fails_closed_like_airflow_jinja(tmp_path: Path) -> None:
+    # Jinja opens a comment at the {# in ${#ROWS[@]}, so Airflow cannot render this command.
     pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='echo ${#ROWS[@]} # done')")
 
-    assert not isinstance(_task(pipeline), PlaceholderActivity)
+    assert isinstance(_task(pipeline), PlaceholderActivity)
 
 
 def test_symlinked_dag_searches_the_folder_it_is_linked_from(tmp_path: Path) -> None:
@@ -249,3 +255,139 @@ def test_relative_dag_path_searches_its_folder(tmp_path: Path, monkeypatch: pyte
     pipeline = load_airflow_dag(Path("dags/dag.py"))
 
     assert _task(pipeline).sql == "SELECT 1"
+
+
+def test_loaded_file_keeps_its_sql_when_a_later_check_makes_it_a_gap(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        "DatabricksSqlOperator(task_id='t', sql='load.sql')",
+        files={"dags/load.sql": "SELECT * FROM t WHERE id = {{ ti.xcom_pull(task_ids='a') }}"},
+    )
+
+    task = _task(pipeline)
+    assert isinstance(task, PlaceholderActivity)
+    assert (
+        task.raw_definition["template_file"]["content"] == "SELECT * FROM t WHERE id = {{ ti.xcom_pull(task_ids='a') }}"
+    )
+
+
+def test_loaded_sql_task_records_its_source_file(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path, "DatabricksSqlOperator(task_id='t', sql='load.sql')", files={"dags/load.sql": "SELECT 1"}
+    )
+
+    assert _task(pipeline).template_file == {
+        "path": "load.sql",
+        "resolved_path": str(tmp_path / "dags" / "load.sql"),
+        "content": "SELECT 1",
+    }
+
+
+def test_non_utf8_sql_file_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "dags").mkdir()
+    (tmp_path / "dags" / "latin.sql").write_bytes("SELECT 'é'".encode("latin-1"))
+
+    pipeline = _load(tmp_path, "DatabricksSqlOperator(task_id='t', sql='latin.sql')")
+
+    task = _task(pipeline)
+    assert isinstance(task, PlaceholderActivity)
+    assert "could not be read as UTF-8 text" in task.comment
+
+
+@pytest.mark.parametrize("operator", ["PostgresOperator", "MySqlOperator"])
+def test_postgres_and_mysql_read_sql_files(tmp_path: Path, operator: str) -> None:
+    pipeline = _load(tmp_path, f"{operator}(task_id='t', sql='load.sql')", files={"dags/load.sql": "SELECT 3"})
+
+    assert _task(pipeline).sql == "SELECT 3"
+
+
+def test_absolute_template_name_is_looked_up_inside_the_search_path(tmp_path: Path) -> None:
+    # Jinja drops the leading slash, so '/x/a.sql' is x/a.sql under each search folder.
+    pipeline = _load(tmp_path, "DatabricksSqlOperator(task_id='t', sql='/x/a.sql')", files={"dags/x/a.sql": "SELECT 4"})
+
+    assert _task(pipeline).sql == "SELECT 4"
+
+
+def test_symlink_leading_outside_the_folder_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "secret.sql").write_text("SELECT 'secret'", encoding="utf-8")
+    (tmp_path / "dags").mkdir()
+    (tmp_path / "dags" / "load.sql").symlink_to(tmp_path / "secret.sql")
+
+    pipeline = _load(tmp_path, "DatabricksSqlOperator(task_id='t', sql='load.sql')")
+
+    task = _task(pipeline)
+    assert isinstance(task, PlaceholderActivity)
+    assert "symbolic link that leads outside" in task.comment
+
+
+def test_dag_decorator_template_searchpath_is_used(tmp_path: Path) -> None:
+    sql_root = tmp_path / "sql"
+    sql_root.mkdir()
+    (sql_root / "load.sql").write_text("SELECT 5", encoding="utf-8")
+    dag_path = tmp_path / "dags" / "dag.py"
+    dag_path.parent.mkdir()
+    dag_path.write_text(
+        "from airflow.decorators import dag\n"
+        "from airflow.providers.databricks.operators.databricks_sql import DatabricksSqlOperator\n"
+        f"@dag(dag_id='d', template_searchpath={str(sql_root)!r})\n"
+        "def build():\n"
+        "    DatabricksSqlOperator(task_id='t', sql='load.sql')\n"
+        "build()\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(dag_path)
+
+    assert _task(pipeline).sql == "SELECT 5"
+
+
+@pytest.mark.parametrize(
+    "searchpath",
+    [
+        "os.path.join(os.path.dirname(__file__), 'sql')",
+        "Path(__file__).parent / 'sql'",
+        "[str(Path(__file__).parent / 'sql')]",
+        "os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sql')",
+    ],
+)
+def test_template_searchpath_built_from_dunder_file_is_resolved(tmp_path: Path, searchpath: str) -> None:
+    pipeline = _load(
+        tmp_path,
+        "DatabricksSqlOperator(task_id='t', sql='load.sql')",
+        dag_arguments=f", template_searchpath={searchpath}",
+        files={"dags/sql/load.sql": "SELECT 6"},
+    )
+
+    assert _task(pipeline).sql == "SELECT 6"
+    assert pipeline.reconciliation_status == "verified"
+
+
+def test_unusable_template_searchpath_is_reported_as_ignored(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path,
+        "DatabricksSqlOperator(task_id='t', sql='SELECT 1')",
+        dag_arguments=", template_searchpath='include/sql'",
+    )
+
+    entry = next(item for item in pipeline.audit["transformations"] if item.get("setting") == "template_searchpath")
+    assert entry["code"] == "dag_setting_ignored"
+    assert "include/sql (relative" in entry["unavailable_entries"]
+
+
+def test_python_callable_building_its_own_jinja_is_not_flagged(tmp_path: Path) -> None:
+    (tmp_path / "dags").mkdir()
+    dag_path = tmp_path / "dags" / "dag.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.python import PythonOperator\n"
+        "def render():\n"
+        "    template = '{% for row in rows %}row{% endfor %} {# note #}'\n"
+        "    print(template)\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = PythonOperator(task_id='t', python_callable=render)\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(dag_path)
+
+    assert not isinstance(_task(pipeline), PlaceholderActivity)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import os
+from collections.abc import Callable
 from pathlib import Path
 
 from flowx.sources.airflow import operators as ops
@@ -43,17 +45,77 @@ _RECOGNIZED_DAG_SETTINGS = frozenset(
 _NON_EXECUTION_DAG_SETTINGS = frozenset({"tags", "description", "doc_md", "dag_display_name", "default_args.owner"})
 
 
+_PATH_FUNCTIONS: dict[str, Callable[[str], str]] = {
+    "dirname": os.path.dirname,
+    "abspath": os.path.abspath,
+    "normpath": os.path.normpath,
+    "realpath": os.path.realpath,
+}
+
+
+def _dotted_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return f"{_dotted_name(node.value)}.{node.attr}"
+    return ""
+
+
+def _static_path(node: ast.expr, dag_file: Path | None) -> str | None:
+    """Evaluates a path expression built from literals and ``__file__``, or returns None.
+
+    Covers the usual ways a DAG names a folder beside itself: ``os.path.join(os.path.dirname(__file__),
+    "sql")``, ``Path(__file__).parent / "sql"``, and ``str(...)`` / ``os.fspath(...)`` around either.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name) and node.id == "__file__":
+        return str(dag_file) if dag_file is not None else None
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        inner = _static_path(node.value, dag_file)
+        return str(Path(inner).parent) if inner is not None else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left, right = _static_path(node.left, dag_file), _static_path(node.right, dag_file)
+        return str(Path(left) / right) if left is not None and right is not None else None
+    if not isinstance(node, ast.Call) or node.keywords:
+        return None
+    name = _dotted_name(node.func)
+    function = name.rsplit(".", 1)[-1]
+    if isinstance(node.func, ast.Attribute) and function in ("resolve", "absolute") and not node.args:
+        inner = _static_path(node.func.value, dag_file)
+        if inner is None:
+            return None
+        return str(Path(inner).resolve()) if function == "resolve" else str(Path(inner).absolute())
+    arguments = [_static_path(argument, dag_file) for argument in node.args]
+    if any(argument is None for argument in arguments):
+        return None
+    values = [argument for argument in arguments if argument is not None]
+    if function == "join" and name in ("os.path.join", "path.join", "join") and values:
+        return os.path.join(*values)
+    if (
+        function in _PATH_FUNCTIONS
+        and len(values) == 1
+        and name in (function, f"path.{function}", f"os.path.{function}")
+    ):
+        return _PATH_FUNCTIONS[function](values[0])
+    if name in ("Path", "pathlib.Path", "PurePath", "str", "os.fspath") and len(values) == 1:
+        return values[0]
+    return None
+
+
 def template_searchpath(visitor: _DagVisitor) -> list[str] | None:
-    """Returns the DAG's ``template_searchpath`` entries, ``[]`` when it is unset, or None when it is not static."""
+    """Returns the DAG's ``template_searchpath`` entries, ``[]`` when it is unset, or None when it is not static.
+
+    Entries may be literals or paths built from ``__file__``, evaluated against the DAG file.
+    """
     node = visitor.dag_kwargs.get("template_searchpath")
     if node is None or (isinstance(node, ast.Constant) and node.value is None):
         return []
-    value = ops.literal_value(node)
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, list | tuple) and all(isinstance(entry, str) for entry in value):
-        return list(value)
-    return None
+    elements = node.elts if isinstance(node, ast.List | ast.Tuple) else [node]
+    entries = [_static_path(element, visitor.dag_file) for element in elements]
+    if any(entry is None for entry in entries):
+        return None
+    return [entry for entry in entries if entry is not None]
 
 
 def template_search_directories(visitor: _DagVisitor) -> list[Path]:
@@ -121,18 +183,24 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
         if entries == []:
             return {"status": "ignored", "rationale": "template_searchpath_unset"}
         if entries is not None:
-            disposition = {
-                "status": "mapped",
-                "target": "template_file_resolution",
-                "rationale": "template_files_read_at_discovery",
-            }
             unavailable = _unavailable_search_entries(entries)
+            if len(unavailable) == len(entries):
+                disposition = {"status": "ignored", "rationale": "template_searchpath_unavailable_at_discovery"}
+            else:
+                disposition = {
+                    "status": "mapped",
+                    "target": "template_file_resolution",
+                    "rationale": "template_files_read_at_discovery",
+                }
             if unavailable:
                 disposition["unavailable_entries"] = "; ".join(unavailable)
             return disposition
         return {
             "status": "gap",
-            "message": "Airflow template_searchpath must be a static string or list of strings to locate SQL files.",
+            "message": (
+                "Airflow template_searchpath must be static strings, or paths built from __file__, to locate "
+                "template files."
+            ),
             "rationale": "template_searchpath_not_statically_resolvable",
         }
     if name == "dagrun_timeout":
