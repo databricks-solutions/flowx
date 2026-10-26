@@ -33,7 +33,7 @@ class AdapterResult:
     """Outcome of a single ``flowx.adapter`` invocation."""
 
     command: list[str]
-    returncode: int
+    returncode: int | None
     stdout: str
     stderr: str
 
@@ -61,17 +61,36 @@ def run_adapter(args: list[Any], *, cwd: str | Path | None = None, timeout: int 
         timeout: Seconds before the subprocess is killed.
 
     Returns:
-        The captured :class:`AdapterResult`.
+        The captured :class:`AdapterResult`. When the subprocess runs past *timeout*, the result
+        has ``returncode`` ``None``, whatever output it wrote so far, and a timeout message in
+        ``stderr``.
     """
     command = [sys.executable, "-m", "flowx.adapter", *[str(arg) for arg in args]]
-    proc = subprocess.run(
-        command,
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as expired:
+        stderr = _as_text(expired.stderr)
+        message = f"Timed out after {timeout} s (FLOWX_MCP_TIMEOUT)."
+        return AdapterResult(
+            command=command,
+            returncode=None,
+            stdout=_as_text(expired.stdout),
+            stderr=f"{stderr}\n{message}" if stderr else message,
+        )
     return AdapterResult(command=command, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+
+
+def _as_text(output: str | bytes | None) -> str:
+    """Return subprocess output as text, decoding bytes and treating ``None`` as empty."""
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output or ""
 
 
 def read_json(path: Path) -> Any | None:

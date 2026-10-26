@@ -1,0 +1,51 @@
+[
+  {
+    "activity_name": "paginate",
+    "activity_type": "Until",
+    "raw_definition": {
+      "dependsOn": [
+        {
+          "activity": "initial-request",
+          "dependencyConditions": [
+            "Succeeded"
+          ]
+        }
+      ],
+      "name": "paginate",
+      "type": "Until",
+      "typeProperties": {
+        "activities": [
+          {
+            "name": "page-request",
+            "type": "WebActivity",
+            "typeProperties": {
+              "method": "GET",
+              "url": "https://example.invalid/api/items?page=next"
+            }
+          },
+          {
+            "dependsOn": [
+              {
+                "activity": "page-request",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "name": "set-continuation",
+            "type": "SetVariable",
+            "typeProperties": {
+              "value": "done",
+              "variableName": "continuation"
+            }
+          }
+        ],
+        "expression": {
+          "type": "Expression",
+          "value": "@empty(variables('continuation'))"
+        },
+        "timeout": "0.00:05:00"
+      }
+    }
+  }
+]

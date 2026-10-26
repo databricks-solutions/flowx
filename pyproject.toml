@@ -1,10 +1,14 @@
 [project]
 name = "databricks-flowx"
 version = "0.1.0"
-description = "ADF to Databricks Lakeflow Jobs translator via Declarative Automation Bundles"
+description = "Translate data pipelines to Databricks Lakeflow Jobs via Declarative Automation Bundles."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{name = "Greg Hansen", email = "gregory.hansen@databricks.com"}]
+maintainers = [
+    {name = "Greg Hansen", email = "gregory.hansen@databricks.com"},
+    {name = "Peter Park", email = "peter.park@databricks.com"}
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
@@ -33,6 +37,12 @@ mcp = [
     "mcp>=1.12,<2",
     "uvicorn>=0.30",
     "starlette>=0.40",
+]
+# Install with `pip install -e .[azure]` to pull ADF definitions live from Azure
+# (`flowx extract --source adf`). Optional so the other phases never need the Azure stack.
+azure = [
+    "azure-identity>=1.17",
+    "requests>=2.31",
 ]
 
 [dependency-groups]
@@ -67,13 +77,18 @@ exclude = ['venv', '.venv', 'tests/*']
 module = ["mcp.*", "starlette.*", "uvicorn.*"]
 ignore_missing_imports = true
 
+# Optional `azure` extra (only installed for `flowx extract`).
+[[tool.mypy.overrides]]
+module = ["azure.*", "requests.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--no-header"
 cache_dir = ".venv/pytest-cache"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
-    "integration: marks tests that require live Azure Data Factory access",
+    "integration: marks tests that need live Azure or network access (the live profile tests); make integration skips them",
     "slow: marks tests that are slow to run",
 ]
 
@@ -81,7 +96,11 @@ markers = [
 cache-dir = ".venv/ruff-cache"
 target-version = "py312"
 line-length = 120
-exclude = ["templates/*", "tests/resources/airflow/review_repros/*"]
+exclude = [
+    "templates/*",
+    "tests/resources/airflow/review_repros/*",
+    "tests/integration/azure/adf/cases/*/expected/bundles/**",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

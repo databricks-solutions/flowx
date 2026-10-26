@@ -1,0 +1,30 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "name": "work",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "depends_on": [
+            "work"
+          ],
+          "name": "notify",
+          "strategy": "deterministic",
+          "type": "WebActivity"
+        }
+      ],
+      "name": "motif-activity-and-notify"
+    }
+  ],
+  "summary": {
+    "activity_count": 2,
+    "agentic_count": 0,
+    "coverage_pct": 100.0,
+    "deterministic_count": 2,
+    "pipeline_count": 1,
+    "unsupported_count": 0
+  }
+}

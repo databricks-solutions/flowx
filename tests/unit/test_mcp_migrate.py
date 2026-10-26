@@ -123,3 +123,21 @@ def test_interactive_false_skips_prompt_and_packages(stub_adapter, tmp_path: Pat
     )
     assert result["status"] == "completed"
     assert stub_adapter == ["discover", "convert", "package"]  # no inspect, no pause
+
+
+def test_failed_inspect_stops_before_package(stub_adapter, monkeypatch, tmp_path: Path):
+    def fake_run_adapter(args):
+        stub_adapter.append(args[0])
+        if args[0] == "inspect":
+            return runner.AdapterResult(command=[], returncode=None, stdout="", stderr="Timed out after 1 s.")
+        return _FakeResult()
+
+    monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
+    result = server._cmd_migrate(
+        {"source": "adf", "adf_source_path": str(tmp_path / "adf"), "output_dir": str(tmp_path / "out")}
+    )
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["failed_phase"] == "inspect"
+    assert result["steps"]["inspect"]["process"]["returncode"] is None
+    assert stub_adapter == ["discover", "convert", "inspect"]

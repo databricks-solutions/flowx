@@ -6,7 +6,10 @@ for the shared output layout, inventory shape, and how to run a phase.
 
 ## Step 1 — Determine the ADF source path
 
-Ask the user for the location of their ADF JSON exports. Accept either:
+Ask the user for the location of their ADF JSON exports. If they don't have one yet, run the
+`flowx-extract-metadata` skill first: it helps them get the definitions (ADF Studio export, the
+factory's Git repository, or a live pull through the Azure API) and returns the exact path to use.
+Accept either:
 - A Unity Catalog volume path (e.g. `/Volumes/main/default/adf_export`)
 - A local directory path (e.g. `./adf_export/`)
 

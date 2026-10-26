@@ -23,6 +23,8 @@ package.
 
 This is the top-level orchestration skill. It runs the full migration pipeline:
 
+0. **Extract** (ADF only, optional) — If the user has no export yet, get the factory's
+   definitions with `flowx-extract-metadata`
 1. **Discover** — Parse the source's definitions into a typed inventory
 2. **Convert** — Convert the source's tasks to Databricks IR (deterministic + agentic)
 3. **Package** — Generate Databricks Declarative Automation Bundles for deployment
@@ -181,10 +183,13 @@ Ask the user for all required inputs upfront:
 | Target schema | Schema within the catalog | No | `default` |
 | Bundle name | Name for the generated DABs project | No | derived from pipelines |
 
+If the user has no ADF export yet, run the `flowx-extract-metadata` skill first and use the
+`discover_path` it returns as the ADF source path.
+
 Example prompt:
 
 > To migrate your ADF pipelines, I need:
-> 1. Where are your ADF JSON exports? (UC volume path like `/Volumes/main/default/adf_export` or local directory)
+> 1. Where are your ADF JSON exports? (UC volume path like `/Volumes/main/default/adf_export` or local directory — or I can help you get them)
 > 2. Where should I write the output? (default: `./flowx_output/`)
 > 3. What target catalog and schema? (default: `main.default`)
 

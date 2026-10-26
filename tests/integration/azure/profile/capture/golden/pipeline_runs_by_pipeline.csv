@@ -1,0 +1,13 @@
+factory_name,subscription_id,pipelineName,totalRuns,succeededRuns,failedRuns,cancelledRuns,inProgressRuns,successRate,avgDurationMin,maxDurationMin,minDurationMin,totalActivityRuns,totalCost,orchCost,ingestionCost,pipelineActCost,externalCost,subscription_name,runs_per_day_avg,runs_per_hour_avg
+flowx-profiler-test-adf-vnet,<SUBSCRIPTION_1>,pl_web_public,9,9,0,0,0,100.0,1.97,4.08,0.39,18,0.0271,0.027,0.0,0.0,0.0001,demo-subscription,3.0,0.125
+flowx-profiler-test-adf-vnet,<SUBSCRIPTION_1>,pl_copy,9,9,0,0,0,100.0,2.17,2.99,1.9,9,0.368,0.018,0.35,0.0,0.0,demo-subscription,3.0,0.125
+flowx-profiler-test-adf,<SUBSCRIPTION_1>,pl_dataflow,9,9,0,0,0,100.0,3.41,3.97,3.05,9,1.2236,0.018,0.0,0.0,1.2056,demo-subscription,3.0,0.125
+flowx-profiler-test-adf-vnet,<SUBSCRIPTION_1>,pl_lookup_wait,9,9,0,0,0,100.0,1.98,2.33,1.57,18,0.0271,0.027,0.0,0.0001,0.0,demo-subscription,3.0,0.125
+flowx-profiler-test-adf,<SUBSCRIPTION_1>,pl_web_databricks,10,1,9,0,0,10.0,0.52,0.72,0.35,10,0.02,0.02,0.0,0.0,0.0,demo-subscription,3.33,0.1389
+flowx-profiler-test-adf,<SUBSCRIPTION_1>,pl_lookup_wait,9,9,0,0,0,100.0,1.05,3.96,0.37,18,0.0271,0.027,0.0,0.0001,0.0,demo-subscription,3.0,0.125
+flowx-profiler-test-adf,<SUBSCRIPTION_1>,pl_copy,9,9,0,0,0,100.0,0.5,0.67,0.4,9,0.168,0.018,0.15,0.0,0.0,demo-subscription,3.0,0.125
+flowx-profiler-test-adf-vnet,<SUBSCRIPTION_1>,pl_foreach,10,9,1,0,0,90.0,1.93,3.94,0.4,50,0.0604,0.06,0.0,0.0002,0.0002,demo-subscription,3.33,0.1389
+flowx-profiler-test-adf,<SUBSCRIPTION_1>,pl_databricks_job,10,1,9,0,0,10.0,0.64,2.0,0.36,10,0.02,0.02,0.0,0.0,0.0,demo-subscription,3.33,0.1389
+flowx-profiler-test-adf,<SUBSCRIPTION_1>,pl_foreach,10,1,9,0,0,10.0,0.72,0.92,0.4,50,0.0602,0.06,0.0,0.0001,0.0001,demo-subscription,3.33,0.1389
+flowx-profiler-test-adf-vnet,<SUBSCRIPTION_1>,pl_databricks_job,1,0,1,0,0,0.0,1.82,1.82,1.82,1,0.002,0.002,0.0,0.0,0.0,demo-subscription,0.33,0.0139
+flowx-profiler-test-adf-vnet,<SUBSCRIPTION_1>,pl_web_databricks,1,0,1,0,0,0.0,1.93,1.93,1.93,1,0.002,0.002,0.0,0.0,0.0,demo-subscription,0.33,0.0139

@@ -1,0 +1,25 @@
+[
+  {
+    "activity_name": "update-watermark",
+    "activity_type": "SqlServerStoredProcedure",
+    "raw_definition": {
+      "dependsOn": [
+        {
+          "activity": "incremental-copy",
+          "dependencyConditions": [
+            "Succeeded"
+          ]
+        }
+      ],
+      "linkedServiceName": {
+        "referenceName": "azure-sql",
+        "type": "LinkedServiceReference"
+      },
+      "name": "update-watermark",
+      "type": "SqlServerStoredProcedure",
+      "typeProperties": {
+        "storedProcedureName": "dbo.update_watermark"
+      }
+    }
+  }
+]

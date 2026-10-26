@@ -1,0 +1,44 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "name": "old-watermark",
+          "strategy": "deterministic",
+          "type": "Lookup"
+        },
+        {
+          "name": "new-watermark",
+          "strategy": "deterministic",
+          "type": "Lookup"
+        },
+        {
+          "depends_on": [
+            "old-watermark",
+            "new-watermark"
+          ],
+          "name": "incremental-copy",
+          "strategy": "deterministic",
+          "type": "Copy"
+        },
+        {
+          "depends_on": [
+            "incremental-copy"
+          ],
+          "name": "update-watermark",
+          "strategy": "agentic",
+          "type": "SqlServerStoredProcedure"
+        }
+      ],
+      "name": "motif-incremental-watermark"
+    }
+  ],
+  "summary": {
+    "activity_count": 4,
+    "agentic_count": 1,
+    "coverage_pct": 100.0,
+    "deterministic_count": 3,
+    "pipeline_count": 1,
+    "unsupported_count": 0
+  }
+}
