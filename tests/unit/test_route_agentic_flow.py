@@ -40,7 +40,6 @@ from flowx.route_agentic import (
     GAPS_FILENAME,
     REPORT_FILENAME,
     ROUTE_LOCK_FILENAME,
-    ROUTE_LOCK_HELD,
     ROUTED_AGENTIC_MERGE_REFUSED,
     ROUTING_RECORD_KEY,
     WORK_DIRNAME,
@@ -1153,6 +1152,36 @@ def test_combine_rejects_a_stale_fingerprint_plan(tmp_path: Path) -> None:
     assert "stale" in result["error"]
 
 
+@pytest.mark.parametrize("inventory", [[], "inventory"], ids=["list", "string"])
+def test_fill_refuses_an_inventory_that_is_not_an_object(tmp_path: Path, inventory: Any) -> None:
+    """Route refuses this inventory, so a fill after it is rewritten must refuse it too rather than crash."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    (tmp_path / "metadata" / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    assert result["ok"] is False
+    assert "must contain a JSON object" in result["error"] and "run discover again" in result["error"]
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+@pytest.mark.parametrize("inventory", [[], "inventory"], ids=["list", "string"])
+def test_apply_plan_refuses_an_inventory_that_is_not_an_object(tmp_path: Path, inventory: Any) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    (tmp_path / "metadata" / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must contain a JSON object"):
+        apply_plan(tmp_path, recorded)
+    assert report_path.read_bytes() == report_before
+
+
 def test_combine_marks_the_component_applied(tmp_path: Path) -> None:
     _setup_routed_agentic(tmp_path, decision="agentic")
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
@@ -2003,6 +2032,7 @@ def test_fill_agentic_refuses_while_another_command_holds_the_route_lock(tmp_pat
 def test_route_refuses_while_another_command_holds_the_route_lock(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Its hosted recovery says to convert before route, since discover moves .work/ too."""
     _route_parent_agentic(tmp_path, _report_two_pipelines())
     plan_path = tmp_path / "metadata" / "conversion_plan.json"
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
@@ -2014,7 +2044,10 @@ def test_route_refuses_while_another_command_holds_the_route_lock(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert any("another route, fill-agentic or merge" in violation for violation in payload["violations"])
+    [violation] = payload["violations"]
+    assert "another route, fill-agentic or merge" in violation
+    hosted_recovery = violation.split("on the hosted MCP server", 1)[1]
+    assert hosted_recovery.index("convert") < hosted_recovery.index("route")
     assert plan_path.read_bytes() == plan_before
     assert report_path.read_bytes() == report_before
 
@@ -2062,12 +2095,6 @@ def test_the_route_lock_holds_an_output_folder_with_no_metadata_folder_yet(tmp_p
         with route_lock(tmp_path) as second:
             assert second is False
     assert not (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).exists()
-
-
-def test_the_route_lock_message_says_to_convert_again_after_a_hosted_discover() -> None:
-    """Discover moves .work/ too, so route and fill need a convert before they can run."""
-    hosted = ROUTE_LOCK_HELD.split("on the hosted MCP server", 1)[1]
-    assert hosted.index("convert") < hosted.index("route")
 
 
 def test_a_merge_into_a_separate_copy_takes_no_route_lock(tmp_path: Path) -> None:

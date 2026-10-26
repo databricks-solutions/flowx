@@ -251,6 +251,29 @@ def test_without_insights_the_page_says_enrich_has_not_run() -> None:
     assert "Enrich has not run" in render_routing_review(_plan(), None, None)
 
 
+@pytest.mark.parametrize(
+    "lists",
+    [{"recommended_patterns": 1, "cascade": 1}, {"recommended_patterns": {"pattern": "x"}, "cascade": "abc"}],
+    ids=["numbers", "object-and-string"],
+)
+def test_a_malformed_recommendation_list_shows_nothing_without_crashing(lists: dict[str, Any]) -> None:
+    """Enrich validates these lists; one edited afterwards with its hashes recomputed must not stop the page."""
+    system = {"headline": "Adopt one connector", **lists}
+
+    source = _section(render_routing_review(_plan(), {"insights": {"system_recommendation": system}}, None), "source")
+
+    assert "Adopt one connector" in source
+    assert "Recommended approach" not in source and "What it replaces" not in source
+
+
+def test_only_named_replacements_are_listed() -> None:
+    system = {"headline": "h", "cascade": ["the copy loop", 7, ""]}
+
+    source = _section(render_routing_review(_plan(), {"insights": {"system_recommendation": system}}, None), "source")
+
+    assert "<p>What it replaces: the copy loop</p>" in source
+
+
 def test_route_writes_the_review_page_beside_the_plan(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     node = SourceNode(
         source_id="load",

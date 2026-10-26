@@ -261,8 +261,8 @@ def _pipeline_insights(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
         return {}
     result: dict[str, dict[str, Any]] = {}
     for entry in _listed(insights.get("pipeline_insights")):
-        if isinstance(entry, dict) and entry.get("pipeline") is not None:
-            result[str(entry["pipeline"])] = entry
+        if isinstance(entry, dict) and isinstance(entry.get("pipeline"), str):
+            result[entry["pipeline"]] = entry
     return result
 
 
@@ -440,6 +440,8 @@ def suggest_groupings(inventory: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(edge, dict) or edge.get("edge_type") != "inferred":
             continue
         source, target = relationship.get("from_pipeline"), relationship.get("to_pipeline")
+        if not isinstance(source, str) or not isinstance(target, str):
+            continue
         if source not in component_of or target not in component_of:
             continue
         basis: dict[str, Any] = {
@@ -457,7 +459,7 @@ def suggest_groupings(inventory: dict[str, Any]) -> list[dict[str, Any]]:
     pipelines_by_pattern: dict[str, set[str]] = {}
     for insight in _listed(insights.get("pipeline_insights")):
         pipeline = insight.get("pipeline") if isinstance(insight, dict) else None
-        if pipeline not in component_of:
+        if not isinstance(pipeline, str) or pipeline not in component_of:
             continue
         for pattern in _listed(insight.get("recommended_patterns")):
             if isinstance(pattern, dict) and pattern.get("simplification_pattern") is True:

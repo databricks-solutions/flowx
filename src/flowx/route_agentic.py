@@ -975,15 +975,19 @@ def apply_plan(output_dir: Path, plan: ConversionPlan) -> dict[str, Any]:
 
     Raises:
         FileNotFoundError: The inventory or translation report is missing.
-        ValueError: The plan is stale against the current discovery outputs, the insights files
-            disagree, a decision is pending, or the baseline was converted from another discover.
+        ValueError: The inventory is not shaped the way discover writes it, the plan is stale against
+            the current discovery outputs, the insights files disagree, a decision is pending, or the
+            baseline was converted from another discover.
     """
-    from flowx.routing import insights_file_violations, plan_binding_violations
+    from flowx.routing import insights_file_violations, inventory_shape_violations, plan_binding_violations
 
     inventory_path = Path(output_dir) / METADATA_DIRNAME / INVENTORY_FILENAME
     if not inventory_path.exists():
         raise FileNotFoundError(f"No {INVENTORY_FILENAME} under {inventory_path.parent}; run the discover phase first.")
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    malformed = inventory_shape_violations(inventory)
+    if malformed:
+        raise ValueError("; ".join(malformed))
     problems = plan_binding_violations(plan, inventory) + insights_file_violations(Path(output_dir), inventory)
     if problems:
         raise ValueError("; ".join(problems))
@@ -1027,9 +1031,9 @@ def _resolve_agentic_unit(
     ``(unit_id, plan, inventory, error)``, where ``plan`` is the recorded plan document and
     ``inventory`` the inventory it was checked against, read once so the fill rebuilds against that
     same one; every authored pipeline must carry its source. The error is set (and the other
-    three are ``None``) when: the inventory's source cannot be routed agentic
-    (:data:`flowx.routing.AGENTIC_ROUTING_SOURCES`); the plan or inventory is missing; the plan no
-    longer matches the current inventory, source graphs or insights, or the insights files disagree;
+    three are ``None``) when: the plan or inventory is missing; the inventory is not shaped the way
+    discover writes it; its source cannot be routed agentic (:data:`flowx.routing.AGENTIC_ROUTING_SOURCES`);
+    the plan no longer matches the current inventory, source graphs or insights, or the insights files disagree;
     a decision is still pending; ``members`` do not exactly equal one unit's members (a partial,
     superset, or mistyped group); or the exactly-matching unit is routed deterministic rather than
     agentic. Requiring an exact match to a routed-agentic unit stops a caller from swapping
@@ -1040,6 +1044,7 @@ def _resolve_agentic_unit(
         agentic_routing_supported,
         agentic_routing_unsupported_note,
         insights_file_violations,
+        inventory_shape_violations,
         plan_binding_violations,
     )
 
@@ -1055,6 +1060,9 @@ def _resolve_agentic_unit(
         return None, None, None, "No metadata/inventory.json; run the discover phase first."
 
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    malformed = inventory_shape_violations(inventory)
+    if malformed:
+        return None, None, None, malformed[0]
     if not agentic_routing_supported(inventory):
         return None, None, None, agentic_routing_unsupported_note(inventory)
     stale = plan_binding_violations(recorded, inventory)

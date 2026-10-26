@@ -223,8 +223,14 @@ def test_a_motif_names_only_the_activities_it_lists_by_name() -> None:
         {"pipeline_insights": 1},
         {"pipeline_insights": [{"pipeline": "a", "recommended_patterns": 1}]},
         {"pipeline_relationships": 1},
+        {"pipeline_insights": [{"pipeline": ["a"], "recommended_patterns": [{"simplification_pattern": True}]}]},
+        {
+            "pipeline_relationships": [
+                {"from_pipeline": ["a"], "to_pipeline": "a", "lineage_edge": {"edge_type": "inferred"}}
+            ]
+        },
     ],
-    ids=["pipeline-insights", "recommended-patterns", "relationships"],
+    ids=["pipeline-insights", "recommended-patterns", "relationships", "insight-pipeline", "relationship-endpoint"],
 )
 def test_a_malformed_insights_list_suggests_nothing_without_crashing(insights: dict[str, Any]) -> None:
     """Enrich validates these lists; one edited afterwards only takes suggestions away, never adds a capability."""
@@ -234,6 +240,16 @@ def test_a_malformed_insights_list_suggests_nothing_without_crashing(insights: d
 
     assert recommendation["components"][0]["options"]["agentic"]["recommended_patterns"] == []
     assert recommendation["suggested_groupings"] == []
+
+
+def test_an_insight_names_its_pipeline_only_by_a_string() -> None:
+    """A number would become the string "7" and give its patterns to a real pipeline named "7"."""
+    insight = {"pipeline": 7, "recommended_patterns": [{"pattern": "lakeflow_connect"}]}
+    inventory = {**_inventory([_graph("7")]), "source": "adf", "insights": {"pipeline_insights": [insight]}}
+
+    recommendation = build_recommendation(inventory)
+
+    assert recommendation["components"][0]["options"]["agentic"]["recommended_patterns"] == []
 
 
 def test_a_pipeline_name_that_is_not_a_string_is_not_a_pipeline_identity() -> None:

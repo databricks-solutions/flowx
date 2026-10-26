@@ -71,8 +71,9 @@ see "After package" below). If you run
 `convert` again after routing, run `route` straight after it: a fresh report carries no routing
 record, so route takes it as the new baseline and re-applies the plan and the agent's stored outputs
 (fills of convert's own gaps merged against the earlier report are dropped and must be merged again;
-route says how many). Route also refuses, writing nothing, an `inventory.json` not shaped the way
-discover writes it (a pipeline with no name or no `activities`, or its `pipelines`, a pipeline's
+route says how many). Route and fill-agentic also refuse, writing nothing, an `inventory.json` not
+shaped the way discover writes it (not a JSON object, a pipeline with no name or no `activities`, a
+motif with no string `motif_id` or no `member_task_keys`, or its `pipelines`, a pipeline's
 `activities` or `motifs`, or a motif's `member_task_keys` not a list of the right kind), since
 reading one as empty would make a pipeline look fully deterministic; run discover again.
 
