@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -2203,3 +2204,53 @@ def test_a_merge_refuses_a_store_whose_gap_fills_key_was_deleted(tmp_path: Path)
         merge_agentic_results(report_path, results_dir)
 
     assert store_path.read_bytes() == store_before
+
+
+def test_a_failed_route_lock_token_write_removes_only_its_own_lock(tmp_path: Path, monkeypatch: Any) -> None:
+    """A full disk while writing the token leaves nothing held, so the empty lock must not stay behind."""
+    (tmp_path / "metadata").mkdir()
+
+    def failing_write(descriptor: int, data: bytes) -> int:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "write", failing_write)
+    with pytest.raises(OSError, match="No space left"):
+        with route_lock(tmp_path):
+            pass
+    monkeypatch.undo()
+
+    assert not (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).exists()
+
+
+@pytest.mark.parametrize("failing", ["write", "close"])
+def test_a_failed_route_lock_token_write_or_close_keeps_a_later_commands_lock(
+    tmp_path: Path, monkeypatch: Any, failing: str
+) -> None:
+    """A discover clears metadata/ and a later command takes the lock while this one's write or close fails."""
+    (tmp_path / "metadata").mkdir()
+    lock_path = tmp_path / "metadata" / ROUTE_LOCK_FILENAME
+    real_close = os.close
+
+    def later_command_takes_the_lock() -> None:
+        lock_path.unlink()
+        lock_path.write_text("later-command-token", encoding="utf-8")
+
+    def failing_write(descriptor: int, data: bytes) -> int:
+        later_command_takes_the_lock()
+        return 0
+
+    def failing_close(descriptor: int) -> None:
+        real_close(descriptor)
+        later_command_takes_the_lock()
+        raise OSError(5, "Input/output error")
+
+    if failing == "write":
+        monkeypatch.setattr(os, "write", failing_write)
+    else:
+        monkeypatch.setattr(os, "close", failing_close)
+    with pytest.raises(OSError):
+        with route_lock(tmp_path):
+            pass
+    monkeypatch.undo()
+
+    assert lock_path.read_text(encoding="utf-8") == "later-command-token"

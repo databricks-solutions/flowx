@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from flowx.discovery_insights import _inventory_pipelines
+from flowx.discovery_insights import _holds_lock, _inventory_pipelines, _is_open_file
 from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
 
@@ -402,14 +402,6 @@ def _gap_fill_checks_out(entry: Any) -> bool:
     )
 
 
-def _holds_route_lock(lock_path: Path, token: str) -> bool:
-    """Whether the lock file at *lock_path* is still the one this command created (holding *token*)."""
-    try:
-        return lock_path.read_text(encoding="utf-8") == token
-    except OSError:
-        return False
-
-
 @contextmanager
 def route_lock(output_dir: Path) -> Iterator[bool]:
     """Hold the output folder's route lock, yielding ``False`` when another command already holds it.
@@ -418,10 +410,12 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
     the agent's output and then write some of them, so each takes this lock first and refuses with
     :data:`ROUTE_LOCK_HELD` while another holds it. Like enrich's lock it is a file created with
     ``O_EXCL`` holding a random token, so a command never removes a lock a later one created after
-    discover moved ``metadata/`` away. It is removed when the command finishes or raises; only a killed
-    process leaves it behind. Discover and convert take no lock. An output folder with no ``metadata/``
-    yet gets one, so a merge there is still held; a folder that does not exist holds no files to
-    guard, and the command then reports what it is missing.
+    discover moved ``metadata/`` away, and when writing the token fails it is removed only while it is
+    still the file this command opened. It is removed when the command finishes or raises; only a
+    killed process, or a failed token write that cannot confirm the lock is its own, leaves it behind.
+    Discover and convert take no lock. An output folder with no ``metadata/`` yet gets one, so a merge
+    there is still held; a folder that does not exist holds no files to guard, and the command then
+    reports what it is missing.
     """
     if not Path(output_dir).is_dir():
         yield True
@@ -436,16 +430,24 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
         yield False
         return
     try:
-        written = os.write(descriptor, token.encode("ascii"))
-    finally:
-        os.close(descriptor)
-    if written != len(token):
-        lock_path.unlink(missing_ok=True)
-        raise OSError(f"could not write the route lock {lock_path}")
+        try:
+            if os.write(descriptor, token.encode("ascii")) != len(token):
+                raise OSError(f"could not write the route lock {lock_path}")
+        except BaseException:
+            # The token may be missing or partial, so compare file identity, as enrich's lock does.
+            if _is_open_file(descriptor, lock_path):
+                lock_path.unlink(missing_ok=True)
+            raise
+        finally:
+            os.close(descriptor)
+    except BaseException:
+        if _holds_lock(lock_path, token):
+            lock_path.unlink(missing_ok=True)
+        raise
     try:
         yield True
     finally:
-        if _holds_route_lock(lock_path, token):
+        if _holds_lock(lock_path, token):
             lock_path.unlink(missing_ok=True)
 
 
