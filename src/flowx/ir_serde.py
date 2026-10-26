@@ -21,6 +21,7 @@ from typing import Any
 
 from flowx.models.ir import (
     Activity,
+    AgenticComponentActivity,
     AppendVariableActivity,
     ControlEdge,
     CopyActivity,
@@ -299,6 +300,14 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
     extra: dict[str, Any] = {}
 
     match activity:
+        case AgenticComponentActivity():
+            extra["files"] = activity.files
+            extra["resources"] = activity.resources
+            if activity.environments:
+                extra["environments"] = activity.environments
+            extra["task"] = activity.task
+            if activity.raw_definition is not None:
+                extra["raw_definition"] = activity.raw_definition
         case NotebookActivity():
             extra["notebook_path"] = activity.notebook_path
             if activity.base_parameters:
@@ -580,21 +589,62 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
     }
 
 
+_PLACEHOLDER_OWNED_COMPONENT_FIELDS = (
+    "task_key",
+    "name",
+    "depends_on",
+    "timeout_seconds",
+    "max_retries",
+    "min_retry_interval_millis",
+)
+
+# Source metadata a merged component keeps from its placeholder unless the agent sets its own.
+_PLACEHOLDER_INHERITED_COMPONENT_FIELDS = (
+    "description",
+    "cluster",
+    "compute_mode",
+    "notifications",
+    "parameter_approximations",
+    "motif_id",
+    "data_reads",
+    "data_writes",
+    "raw_definition",
+)
+
+
 def _find_and_replace_task(tasks: list[dict[str, Any]], activity_name: str, replacement: dict[str, Any]) -> bool:
     """Replace the task named *activity_name* with *replacement*, recursing into containers.
 
     Searches top-level tasks and the nested activity lists of IfCondition /
     ForEach / Switch containers.  Preserves the placeholder's ``task_key`` and
     ``depends_on`` when the replacement omits them so downstream dependency
-    edges stay intact.  Returns True when a match was replaced.
+    edges stay intact.  An ``AgenticComponentActivity`` replacement instead
+    always takes its identity, dependencies, timeout, and retries from the
+    placeholder, dropping any value the agent set (or the placeholder lacks),
+    because flowx owns those for an authored component.  It also keeps the
+    placeholder's source metadata (notifications, compute mode, description,
+    lineage, source definition and the like) for each field the agent leaves
+    out, except its cluster id and libraries, which a component only takes
+    from its task fragment; a value the agent sets wins.  Returns True when a
+    match was replaced.
     """
     nested_keys = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
     for index, task in enumerate(tasks):
         if task.get("name") == activity_name:
-            replacement.setdefault("task_key", task.get("task_key"))
-            replacement.setdefault("name", activity_name)
-            if "depends_on" not in replacement and task.get("depends_on"):
-                replacement["depends_on"] = task["depends_on"]
+            if replacement.get("type") == "AgenticComponentActivity":
+                for field_name in _PLACEHOLDER_OWNED_COMPONENT_FIELDS:
+                    if field_name in task:
+                        replacement[field_name] = task[field_name]
+                    else:
+                        replacement.pop(field_name, None)
+                for field_name in _PLACEHOLDER_INHERITED_COMPONENT_FIELDS:
+                    if field_name not in replacement and field_name in task:
+                        replacement[field_name] = task[field_name]
+            else:
+                replacement.setdefault("task_key", task.get("task_key"))
+                replacement.setdefault("name", activity_name)
+                if "depends_on" not in replacement and task.get("depends_on"):
+                    replacement["depends_on"] = task["depends_on"]
             tasks[index] = replacement
             return True
         for key in nested_keys:
@@ -622,7 +672,12 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     The matching placeholder task (located by ``name``, recursing into
     IfCondition / ForEach / Switch containers) is replaced by ``task``.  Use a
     ``NotebookActivity`` whose ``notebook_path`` points at a notebook the agent
-    wrote to the workspace; the prepare phase then references it directly.
+    wrote to the workspace; the prepare phase then references it directly.  An
+    ``AgenticComponentActivity`` keeps the placeholder's name, task key,
+    dependencies, timeout, and retries whatever the agent wrote, and the
+    placeholder's source metadata wherever the agent leaves a field out, except
+    its cluster id and libraries, which a component only takes from its task
+    fragment.
 
     Args:
         report_path: ``translation_report.json`` produced by the translate phase.
