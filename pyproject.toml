@@ -28,6 +28,7 @@ dependencies = [
     "pyyaml>=6.0",
     "databricks-sdk>=0.40",
     "sqlglot>=25.0",
+    "certifi>=2026.10.18"
 ]
 
 [project.optional-dependencies]
@@ -62,6 +63,10 @@ requires = [
     "hatchling>=1.27,<2.0"
 ]
 build-backend = "hatchling.build"
+
+[tool.uv]
+required-version = "~=0.11.0"
+exclude-newer-package = { "databricks-sdk" = false, "certifi" = false }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flowx"]
