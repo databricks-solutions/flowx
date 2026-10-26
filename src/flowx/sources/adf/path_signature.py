@@ -91,10 +91,10 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
 def _reads_as_text(value: Any) -> bool:
     """``True`` when a bound parameter *value* is text ADF can splice into a path, even ``""``.
 
-    That is a string, number or boolean, given bare or as the ``value`` of an Expression
-    or SecureString object (or of an untyped one). A
-    ``null``, a list, or an Expression with no ``value`` says nothing about the path,
-    so it is no more known than a parameter the call site never bound.
+    That is a string, number or boolean, given bare or as the ``value`` of an
+    Expression or SecureString object (or of an untyped one). A ``null``, a list, or
+    an Expression with no ``value`` says nothing about the path, so it is no more
+    known than a parameter the call site never bound.
     """
     return isinstance(_expression_value(value), (str, bool, int, float))
 
