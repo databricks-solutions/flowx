@@ -445,8 +445,9 @@ def _route_files(p: dict[str, Any], output_dir: Path, *, route_ok: bool) -> dict
     The agent needs both to edit the plan and show the page, so after a successful route a file that
     is missing, cannot be copied or read as UTF-8 text, or is left out of the size-bounded inline
     bundle returns an ``error`` instead of the bundle, and nothing is uploaded unless both are sound.
-    After a failed route, whichever of the two exist are delivered as they are. Each file is copied
-    before it is checked, so one a discover moves away meanwhile counts as missing.
+    After a failed route, whichever of the two exist are delivered as the bundle carries them (inline,
+    only UTF-8 text). Each file is copied before it is checked, so one a discover moves away meanwhile
+    counts as missing.
     """
     metadata = output_dir / "metadata"
     problems: list[str] = []
