@@ -859,6 +859,99 @@ def test_expression_wrapped_unprovable_url_or_sas_uri_gives_no_path_identity(typ
     assert _storage_account_identity(type_properties) is None
 
 
+_UNKNOWN_WRAPPER = {"type": "NotAnAdfWrapper", "value": "sql.contoso.net"}
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"server": _UNKNOWN_WRAPPER, "database": "Sales"},
+        {"server": "sql.contoso.net", "database": {"type": "NotAnAdfWrapper", "value": "Sales"}},
+    ],
+)
+def test_unknown_typed_object_on_server_or_database_gives_no_table_identity(type_properties: dict) -> None:
+    """Only an Expression or SecureString object, or an untyped one, is unwrapped; any other type stays unknown."""
+    assert _sql_store_identity(type_properties) is None
+
+
+def test_untyped_value_object_on_server_is_still_unwrapped() -> None:
+    assert _sql_store_identity({"server": {"value": "sql.contoso.net"}, "database": "Sales"}) == (
+        "sql.contoso.net/Sales/dbo.Orders"
+    )
+
+
+def test_unknown_typed_connection_string_hides_the_server_like_a_key_vault_secret() -> None:
+    """A connection string in an unknown object is not read, so only the linked service name qualifies the table."""
+    connection_string = {"type": "NotAnAdfWrapper", "value": "Server=sql.contoso.net;Database=Sales"}
+    assert _sql_store_identity({"connectionString": connection_string}) == "ls_sql/dbo.Orders"
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"url": {"type": "NotAnAdfWrapper", "value": "https://acct.dfs.core.windows.net"}},
+        {"sasUri": {"type": "NotAnAdfWrapper", "value": "https://acct.blob.core.windows.net/?sv=2022-11-02&sig=x"}},
+        {"connectionString": {"type": "NotAnAdfWrapper", "value": "DefaultEndpointsProtocol=https;AccountName=acct"}},
+    ],
+)
+def test_unknown_typed_object_on_url_sas_uri_or_connection_string_names_no_account(type_properties: dict) -> None:
+    assert _storage_account_identity(type_properties) is None
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"server": "**********.database.windows.net", "database": "Sales"},
+        {"server": "sql.contoso.net", "database": "Sales**********"},
+        {"connectionString": "Server=**********.database.windows.net;Database=Sales"},
+    ],
+)
+def test_mask_inside_server_or_database_gives_no_table_identity(type_properties: dict) -> None:
+    """A server or database name never holds ``*``, so one that does is masked, not a store name."""
+    assert _sql_store_identity(type_properties) is None
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"url": {"type": "SecureString", "value": "https://**********.dfs.core.windows.net"}},
+        {"sasUri": {"type": "SecureString", "value": "https://**********.blob.core.windows.net/?sv=2022-11-02"}},
+        {"url": "https://my-account.dfs.core.windows.net"},
+        {"connectionString": "DefaultEndpointsProtocol=https;AccountName=acct*****;EndpointSuffix=core.windows.net"},
+    ],
+)
+def test_storage_account_that_is_not_letters_and_digits_names_no_account(type_properties: dict) -> None:
+    """A storage account name is only letters and digits, so a masked or malformed host names no account."""
+    assert _storage_account_identity(type_properties) is None
+
+
+def test_two_masked_storage_accounts_with_the_same_folder_shape_do_not_join_by_signature() -> None:
+    """Two lakes whose ``url`` hides the account behind ``*`` are not provably one store, so no edge joins them."""
+    masked_url = {"type": "SecureString", "value": "https://**********.dfs.core.windows.net"}
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name, file_system="raw", folder_path="@dataset().folderPath", linked_service=f"ls_{name}"
+            )
+            for name in ("ds_a", "ds_b")
+        },
+        linked_services={
+            f"ls_{name}": AdfLinkedService(
+                name=f"ls_{name}", type="AzureBlobFS", properties={"typeProperties": {"url": masked_url}}
+            )
+            for name in ("ds_a", "ds_b")
+        },
+    )
+    _, writes = activity_data_assets(_landing_copy("WriteA", dataset="ds_a", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("ReadB", dataset="ds_b", produced=False), definitions)
+
+    assert "*" not in (writes[0].signature or "")
+    assert (
+        data_edges_from_endpoints([("WriteA", asset) for asset in writes], [("ReadB", asset) for asset in reads]) == []
+    )
+
+
 def _lake_definitions() -> AdfDefinitions:
     return AdfDefinitions(
         pipelines=[],

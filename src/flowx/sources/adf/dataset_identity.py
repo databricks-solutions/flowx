@@ -14,7 +14,10 @@ from flowx.models.adf_ast import AdfDatasetReference, AdfDefinitions
 from flowx.models.ir import TranslationContext
 from flowx.parser.expression_parser import resolve_expression, resolve_interpolated_string
 
-_ACCOUNT_NAME_RE = re.compile(r"AccountName=([A-Za-z0-9]+)", re.IGNORECASE)
+_ACCOUNT_NAME_RE = re.compile(r"AccountName=([^;]*)", re.IGNORECASE)
+_STORAGE_ACCOUNT_RE = re.compile(r"[A-Za-z0-9]+")
+# The object types whose ``value`` is the field's own value; any other typed object is left whole.
+_VALUE_OBJECT_TYPES = frozenset({"Expression", "SecureString"})
 _ARM_CALL_RE = re.compile(
     r"^\[\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\((?P<arguments>.*)\]$", re.DOTALL
 )
@@ -48,11 +51,14 @@ _DATASET_PARAMETER_RE = re.compile(r"dataset\(\)\??\.(\w+)")
 def _expression_value(value: Any) -> Any:
     """*value* itself, or the ``value`` of an ADF Expression-shaped object (``None`` when it has none).
 
-    Only an object typed ``Expression`` or carrying a ``value`` is unwrapped. Any other
-    object, such as a Key Vault secret reference, is returned whole, so a caller never
-    mistakes it for an empty value.
+    Only an object typed ``Expression`` or ``SecureString``, or an untyped one carrying a
+    ``value``, is unwrapped. Any other object, such as a Key Vault secret reference or a
+    type ADF does not define, is returned whole, so a caller never mistakes it for an
+    empty value or reads a value it cannot vouch for.
     """
-    if isinstance(value, dict) and (value.get("type") == "Expression" or "value" in value):
+    if isinstance(value, dict) and (
+        value.get("type") in _VALUE_OBJECT_TYPES or ("type" not in value and "value" in value)
+    ):
         return value.get("value")
     return value
 
@@ -242,8 +248,9 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
 
     Uses the literal ``server`` (plus ``database`` when given) from the backing
     linked service's properties or plaintext connection string, exactly as written.
-    A ``server`` or ``database`` wrapped in an Expression object is read from its
-    ``value`` and checked like a plain string. When the connection string is hidden
+    A ``server`` or ``database`` wrapped in an Expression or SecureString object is
+    read from its ``value`` and checked like a plain string. Neither name can hold
+    ``*``, so one that does is a masked secret (an export writes ``**********``). When the connection string is hidden
     (a Key Vault reference or a masked secret) the linked service name stands in for
     the server. A parameterised or masked server or database, a parameterised
     connection string, or a linked service that takes parameters, gives ``None``:
@@ -272,8 +279,7 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
     )
     store_parts = [part for part in (server, database) if part]
     if not all(
-        isinstance(part, str) and part.strip() and _is_physical(part) and not _is_masked_secret(part)
-        for part in store_parts
+        isinstance(part, str) and part.strip() and _is_physical(part) and "*" not in part for part in store_parts
     ):
         return None
     if server:
@@ -383,7 +389,8 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
     when wrapped in an Expression or SecureString object. The whole of it must be
     physical before the account is cut out of it: cutting first would drop the
     closing ``]`` of an ARM expression or the tail of an ``@{...}`` and leave a
-    fragment that looks literal.
+    fragment that looks literal. A storage account name is only letters and digits,
+    so a cut that holds anything else (a masked ``*``, a ``-``) names no account.
     """
     if linked_service is None:
         return None
@@ -396,7 +403,7 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
         host = url.replace("https://", "").split("/", 1)[0]
         host_no_port = host.split(":", 1)[0]
         if "." in host_no_port:
-            return host_no_port.split(".", 1)[0]
+            return _storage_account_name(host_no_port.split(".", 1)[0])
 
     sas_uri = _expression_value(type_props.get("sasUri")) or ""
     if isinstance(sas_uri, str) and sas_uri:
@@ -404,7 +411,7 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
             return None
         host = sas_uri.split("?", 1)[0].replace("https://", "").split("/", 1)[0]
         if "." in host:
-            return host.split(".", 1)[0]
+            return _storage_account_name(host.split(".", 1)[0])
 
     # Plaintext connection string (rare in az exports -- usually masked).
     connection_string = _expression_value(type_props.get("connectionString"))
@@ -413,11 +420,16 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
             return None
         match = _ACCOUNT_NAME_RE.search(connection_string)
         if match:
-            return match.group(1)
+            return _storage_account_name(match.group(1).strip())
 
     # AWS -- bucket name lives on the dataset, account is implicit; nothing useful
     # to return at the linked-service level for S3 / GCS.
     return None
+
+
+def _storage_account_name(text: str) -> str | None:
+    """*text* when it can be a storage account name (letters and digits only), else ``None``."""
+    return text if _STORAGE_ACCOUNT_RE.fullmatch(text) else None
 
 
 def _is_physical(value: str) -> bool:
@@ -435,12 +447,6 @@ def _is_physical(value: str) -> bool:
     if "{{" in value or "@{" in value or stripped.startswith("@"):
         return False
     return not _is_arm_expression(stripped)
-
-
-def _is_masked_secret(value: str) -> bool:
-    """``True`` for the ``**********`` an ADF export writes in place of a SecureString's value."""
-    stripped = value.strip()
-    return bool(stripped) and set(stripped) == {"*"}
 
 
 def _is_arm_expression(text: str) -> bool:
