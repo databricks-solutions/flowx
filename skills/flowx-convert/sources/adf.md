@@ -96,7 +96,13 @@ or `multi_node_cluster`); flowx adds that cluster to the job. A serverless task 
 runs the task. A wheel or other authored file the environment installs is listed in
 `spec.dependencies` as `../src/<path>`. Every `environment_key` a task uses must be declared, and
 two components may declare the same environment only with an identical spec (it is then written
-once).
+once). A relative path the task names for a notebook, Python or SQL file or a library, or an
+environment dependency that starts with `./` or `../`, is read from the job YAML in `resources/`, so
+it must name a file the bundle writes (such as `../src/<path>` for one of your `files`; a glob must
+match one); otherwise package refuses it. Workspace (`/...`) and `dbfs:` or other URI paths,
+`${...}` values and `source: GIT` payloads are not checked. Each `${var.X}` the task or an
+environment uses is declared in `databricks.yml`, without a default unless the bundle already
+declares it.
 
 flowx owns `task_key`, `depends_on`, `run_if`, `timeout_seconds`, `max_retries`,
 `min_retry_interval_millis` and `retry_on_timeout`; setting any of them in the fragment is an

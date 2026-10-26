@@ -1401,3 +1401,118 @@ def test_authored_loop_body_inside_a_for_each_job_keeps_its_own_input_references
     assert forwarded["env"] == "{{job.parameters.env}}"
     assert forwarded["tables"] == "{{job.parameters.tables}}"
     assert "table_name" not in forwarded
+
+
+@pytest.mark.parametrize("wrap", [lambda activity: activity, _inside_for_each_with_siblings])
+def test_agentic_component_task_and_environment_variables_are_declared(tmp_path, wrap):
+    """Each ``${var.X}`` an authored task or environment names is declared, as for authored pipeline resources."""
+    component = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[{"path": "jobs/run.py", "content": "print('run')\n"}],
+        environments=[
+            {
+                "environment_key": "serverless",
+                "spec": {"environment_version": "2", "dependencies": ["orders==${var.orders_version}"]},
+            }
+        ],
+        task={
+            "spark_python_task": {"python_file": "../src/jobs/run.py", "parameters": ["${var.run_date}"]},
+            "environment_key": "serverless",
+        },
+    )
+    loop = AgenticComponentActivity(
+        name="Loop",
+        task_key="loop_tables",
+        task={
+            "for_each_task": {
+                "inputs": "${var.tables}",
+                "task": {"task_key": "load_table", "existing_cluster_id": "${var.cluster_id}", "sql_task": {}},
+            }
+        },
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[wrap(component), loop])), tmp_path)
+
+    variables = yaml.safe_load((tmp_path / "databricks.yml").read_text(encoding="utf-8"))["variables"]
+    assert {"orders_version", "run_date", "tables", "cluster_id"} <= variables.keys()
+    assert "default" not in variables["run_date"]
+    assert check_bundle_dir(tmp_path).ok
+
+
+@pytest.mark.parametrize(
+    ("task", "environments"),
+    [
+        ({"notebook_task": {"notebook_path": "../src/missing.py"}}, []),
+        ({"notebook_task": {"notebook_path": "../../missing.py"}}, []),
+        ({"spark_python_task": {"python_file": "../src/missing.py"}, "environment_key": "serverless"}, None),
+        ({"sql_task": {"file": {"path": "../src/missing.sql"}, "warehouse_id": "${var.warehouse_id}"}}, []),
+        (
+            {
+                "spark_python_task": {"python_file": "../src/jobs/run.py"},
+                "existing_cluster_id": "0101-abc",
+                "libraries": [{"whl": "../src/libraries/missing.whl"}],
+            },
+            [],
+        ),
+        (
+            {"python_wheel_task": {"package_name": "orders", "entry_point": "main"}, "environment_key": "serverless"},
+            [
+                {
+                    "environment_key": "serverless",
+                    "spec": {"environment_version": "2", "dependencies": ["../src/libraries/missing.whl"]},
+                }
+            ],
+        ),
+    ],
+)
+def test_agentic_component_bundle_file_no_packaged_file_provides_fails(tmp_path, task, environments):
+    """A bundle-relative path in an authored task or environment must name a file the bundle writes."""
+    component = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[{"path": "jobs/run.py", "content": "print('run')\n"}],
+        environments=[SERVERLESS_ENVIRONMENT] if environments is None else environments,
+        task=task,
+    )
+
+    with pytest.raises(ValueError, match="names '[^']*missing[^']*', which no file in the bundle provides"):
+        write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[component])), tmp_path)
+    assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_agentic_component_file_references_outside_the_bundle_or_matching_a_glob_still_package(tmp_path):
+    """Workspace, repository, URI and pip references are not bundle files; a glob needs one match."""
+    component = AgenticComponentActivity(
+        name="Run",
+        task_key="run",
+        files=[
+            {"path": "jobs/run.py", "content": "print('run')\n"},
+            {"path": "dist/orders-1.0-py3-none-any.whl", "binary_content": "UEsDBAoAAAAA"},
+        ],
+        environments=[
+            {
+                "environment_key": "serverless",
+                "spec": {"environment_version": "2", "dependencies": ["requests==2.32.3", "../src/dist/*.whl"]},
+            }
+        ],
+        task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "serverless"},
+    )
+    repository = AgenticComponentActivity(
+        name="Repository",
+        task_key="repository",
+        task={
+            "notebook_task": {"notebook_path": "notebooks/run", "source": "GIT"},
+            "libraries": [{"jar": "dbfs:/jars/orders.jar"}, {"whl": "/Workspace/Shared/orders.whl"}],
+        },
+    )
+    workspace = AgenticComponentActivity(
+        name="Workspace",
+        task_key="workspace",
+        task={"notebook_task": {"notebook_path": "/Workspace/Shared/run"}},
+    )
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[component, repository, workspace])), tmp_path)
+
+    assert (tmp_path / "databricks.yml").exists()
+    assert check_bundle_dir(tmp_path).ok
