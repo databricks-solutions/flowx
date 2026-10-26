@@ -2038,7 +2038,8 @@ def test_a_merge_from_a_copy_into_the_live_report_refuses_while_the_route_lock_i
     """Writing the live report from another file is still a write of the live report."""
     _route_parent_agentic(tmp_path, _report_with_child_gap())
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
-    copy_path = tmp_path / WORK_DIRNAME / "copy.json"
+    copy_path = tmp_path / "staging" / WORK_DIRNAME / "copy.json"
+    copy_path.parent.mkdir(parents=True)
     copy_path.write_bytes(report_path.read_bytes())
     report_before = report_path.read_bytes()
     results_dir = tmp_path / "agentic_results"
@@ -2158,3 +2159,20 @@ def test_a_rebuild_reads_an_inventory_whose_pipelines_is_not_a_list_as_listing_n
     rebuilt, _, record = rebuild(report, [], plan, {unit_id: output}, [], b"{}", b"[]", inventory=inventory)
     assert record["components"][unit_id]["outcome"] == "agentic-applied"
     assert [pipeline["name"] for pipeline in rebuilt["pipelines"]] == ["child", "parent_lfc"]
+
+
+def test_a_merge_refuses_a_store_whose_gap_fills_key_was_deleted(tmp_path: Path) -> None:
+    """Deleting the key by hand would otherwise let the next merge rewrite the store without the earlier fill."""
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+    _edit_store(tmp_path, lambda store: store.pop("gap_fills"))
+    store_path = tmp_path / "metadata" / "agentic_conversion.json"
+    store_before = store_path.read_bytes()
+
+    with pytest.raises(ValueError, match=re.escape("missing ['gap_fills']")):
+        merge_agentic_results(report_path, results_dir)
+
+    assert store_path.read_bytes() == store_before

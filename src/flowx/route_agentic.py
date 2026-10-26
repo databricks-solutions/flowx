@@ -77,10 +77,10 @@ ROUTE_LOCK_FILENAME = ".route.lock"
 # A hosted agent cannot delete files in output_dir, but discover moves metadata/, the lock with it, into the archive.
 ROUTE_LOCK_HELD = (
     f"another route, fill-agentic or merge is writing to this output folder (metadata/{ROUTE_LOCK_FILENAME} "
-    "exists); run this again once it finishes. If none is running, one was stopped mid-write: locally, delete "
-    f"metadata/{ROUTE_LOCK_FILENAME} and run route again; on the hosted MCP server, run discover again (it moves "
-    "metadata/ and .work/, the lock with them, into metadata/archive/), then enrich if you used it, convert, "
-    "route and fill again"
+    "exists); run this command again once it finishes. If none is running, one was stopped mid-write: locally, "
+    f"delete metadata/{ROUTE_LOCK_FILENAME}, run route, then run this command again; on the hosted MCP server, "
+    "run discover again (it moves metadata/ and .work/, the lock with them, into metadata/archive/), then enrich "
+    "if you used it, convert, route, and every fill and merge again"
 )
 
 # Top-level report key holding the routing record. It lives in the report, so a fresh convert (which
