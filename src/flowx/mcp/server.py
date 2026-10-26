@@ -844,7 +844,8 @@ def build_server() -> FastMCP:
           (to keep a pipeline 1:1, author one same-named pipeline); package refuses until every agentic
           unit is filled. Route, fill_agentic and a merge_agentic written to the live report hold that
           output folder's metadata/.route.lock, so run them one at a time per output_dir: while another
-          holds it they refuse with a violation.
+          holds it they refuse, writing nothing (route and fill_agentic list the reason under
+          violations; merge_agentic returns ok false with it in the process output).
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
