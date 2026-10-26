@@ -97,6 +97,7 @@ _JINJA = re.compile(r"\{\{\s*(.*?)\s*\}\}")
 # Jinja statements and comments, closed or not. Jinja opens a comment at any ``{#``, including the one in
 # bash's ``${#name}``, so Airflow cannot render such text either.
 JINJA_STATEMENT_OR_COMMENT = re.compile(r"\{%.*?(?:%\}|$)|\{#.*?(?:#\}|$)", re.DOTALL)
+CLOSED_JINJA_STATEMENT_OR_COMMENT = re.compile(r"\{%.*?%\}|\{#.*?#\}", re.DOTALL)
 _PARAMETER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 

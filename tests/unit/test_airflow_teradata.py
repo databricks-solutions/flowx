@@ -252,8 +252,16 @@ def test_unparseable_heredoc_keeps_other_script_references() -> None:
     assert teradata.heredoc_scripts(command) == ["-- don't\nSEL 1;"]
 
 
-def test_unparseable_command_becomes_its_own_gap(tmp_path: Path) -> None:
-    pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command=\"echo 'bteq\")")
+@pytest.mark.parametrize(
+    "task",
+    [
+        "BashOperator(task_id='t', bash_command=\"echo 'bteq\")",
+        "BashOperator(task_id='t', bash_command='bash -c \"echo \\'bteq\"')",
+        "SSHOperator(task_id='t', command='ssh edge \"echo \\'bteq\"')",
+    ],
+)
+def test_unparseable_command_becomes_its_own_gap(tmp_path: Path, task: str) -> None:
+    pipeline = _load(tmp_path, task)
 
     task = _task(pipeline)
     assert isinstance(task, PlaceholderActivity)
@@ -500,3 +508,64 @@ def test_later_guard_comment_without_a_builder_comment_has_no_none(tmp_path: Pat
     pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='bteq < /opt/x.bteq', trigger_rule='one_done')")
 
     assert "None" not in _task(pipeline).comment
+
+
+@pytest.mark.parametrize(
+    ("task", "unconsumed"),
+    [
+        (
+            "BteqOperator(task_id='t', file_path='a.bteq', sql='SEL 1;', teradata_conn_id='td', ssh_conn_id='edge')",
+            "ssh_conn_id, teradata_conn_id",
+        ),
+        ("TeradataOperator(task_id='t', sql='SEL 1;', teradata_conn_id='td')", "teradata_conn_id"),
+    ],
+)
+def test_teradata_operators_consume_only_their_script_arguments(tmp_path: Path, task: str, unconsumed: str) -> None:
+    pipeline = _load(tmp_path, task)
+
+    assert f"argument(s) {unconsumed} are not represented" in _task(pipeline).comment
+    assert "teradata" in (_task(pipeline).raw_definition or {})
+
+
+def test_bash_dollar_hash_keeps_the_teradata_record_and_the_jinja_note(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='echo ${#files[@]}; bteq < /opt/a.bteq')")
+
+    task = _task(pipeline)
+    assert _teradata(pipeline)["utilities"] == ["bteq"]
+    assert "Jinja statements or comments" in task.comment
+
+
+def test_unclosed_jinja_statement_keeps_the_teradata_record_and_the_jinja_note(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command=\"bteq < /opt/a.bteq; {% if 'x\")")
+
+    task = _task(pipeline)
+    assert _teradata(pipeline)["utilities"] == ["bteq"]
+    assert "Jinja statements or comments" in task.comment
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bteq < a; {% if 'x",
+        'bash -c "bteq < a; {% if \'x"',
+        'ssh h "bteq < a; {% if \'x"',
+        "echo ${#x[@]}; bteq < a",
+        "cat a | bteq; {# don't",
+    ],
+)
+def test_unclosed_jinja_tag_does_not_hide_a_utility(command: str) -> None:
+    assert teradata.find_utilities(command) == ["bteq"]
+    assert teradata.script_references(command) == ["a"]
+
+
+@pytest.mark.parametrize(
+    ("command", "parses"),
+    [
+        ("echo hi; {% if 'x", False),
+        ('bash -c "echo \'bteq"', False),
+        ("echo 'bteq", False),
+        ("echo ${#x[@]}; bteq < a", True),
+    ],
+)
+def test_parse_check_does_not_fall_back_before_unclosed_jinja(command: str, parses: bool) -> None:
+    assert teradata.parses(command) is parses

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from flowx.sources.airflow.template_files import find_script_file
+from flowx.sources.airflow.templating import CLOSED_JINJA_STATEMENT_OR_COMMENT, JINJA_STATEMENT_OR_COMMENT
 
 UTILITIES = frozenset(
     {"bteq", "tbuild", "tdload", "fastload", "fastexport", "fexp", "mload", "multiload", "tpump", "arcmain"}
@@ -31,8 +32,6 @@ _HEREDOC = re.compile(
     re.DOTALL,
 )
 _JINJA_EXPRESSION = re.compile(r"\{\{.*?\}\}", re.DOTALL)
-# Jinja statements and comments are control flow around commands, so they act as command boundaries.
-_JINJA_STATEMENT_OR_COMMENT = re.compile(r"\{%.*?%\}|\{#.*?#\}", re.DOTALL)
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=", re.DOTALL)
 
 # Shell keywords that can stand before a command, as in ``do bteq < x`` or ``if ...; then bteq < x``.
@@ -92,9 +91,9 @@ class _Segment:
 def _mask_jinja(command: str) -> tuple[str, dict[str, str]]:
     """Replaces Jinja expressions with space-free markers so a path like ``x_{{ ds }}.bteq`` stays one word.
 
-    Jinja statements and comments are replaced by a command separator.
+    Closed Jinja statements and comments are replaced by a command separator.
     """
-    command = _JINJA_STATEMENT_OR_COMMENT.sub(" ; ", command)
+    command = CLOSED_JINJA_STATEMENT_OR_COMMENT.sub(" ; ", command)
     expressions: dict[str, str] = {}
 
     def mask(match: re.Match[str]) -> str:
@@ -143,8 +142,11 @@ def _shell_words(command: str) -> list[str] | None:
 
 
 def parses(command: str) -> bool:
-    """Returns whether a shell command parses, once here-document bodies are set aside."""
-    return _shell_words(command) is not None
+    """Returns whether a shell command, and every command a wrapper in it runs, parses outside here-documents.
+
+    Unlike utility detection, this never falls back to the text before an unclosed Jinja tag.
+    """
+    return _utility_segments(command, lenient=False) is not None
 
 
 def _command_name(word: str) -> str:
@@ -198,6 +200,16 @@ def _segments(command: str) -> list[_Segment] | None:
     return segments
 
 
+def _lenient_segments(command: str) -> list[_Segment] | None:
+    """Breaks a command into simple commands, retrying on the text before an unclosed Jinja tag if it fails."""
+    segments = _segments(command)
+    if segments is not None:
+        return segments
+    masked = CLOSED_JINJA_STATEMENT_OR_COMMENT.sub(" ; ", command)
+    unclosed = JINJA_STATEMENT_OR_COMMENT.search(masked)
+    return None if unclosed is None else _segments(masked[: unclosed.start()])
+
+
 def _nested_commands(segment: _Segment) -> list[str]:
     """Returns the command strings a wrapper runs: the ``-c`` string of a shell, or an ``ssh`` remote command."""
     arguments = segment.arguments
@@ -215,9 +227,13 @@ def _nested_commands(segment: _Segment) -> list[str]:
     return []
 
 
-def _utility_segments(command: str) -> list[_Segment] | None:
-    """Returns the segments that run a Teradata utility, including commands nested inside wrappers."""
-    segments = _segments(command)
+def _utility_segments(command: str, *, lenient: bool = True) -> list[_Segment] | None:
+    """Returns the segments that run a Teradata utility, including commands nested inside wrappers.
+
+    Returns None when the command or any command nested in it does not parse. When *lenient*, a command
+    that does not parse is retried on the text before its first unclosed Jinja tag.
+    """
+    segments = (_lenient_segments if lenient else _segments)(command)
     if segments is None:
         return None
     found: list[_Segment] = []
@@ -225,7 +241,10 @@ def _utility_segments(command: str) -> list[_Segment] | None:
         if segment.name in UTILITIES:
             found.append(segment)
         for nested in _nested_commands(segment):
-            found.extend(_utility_segments(nested) or [])
+            nested_found = _utility_segments(nested, lenient=lenient)
+            if nested_found is None:
+                return None
+            found.extend(nested_found)
     return found
 
 
@@ -234,7 +253,8 @@ def find_utilities(command: str) -> list[str]:
 
     Only a command word counts: the first word of each command, after keywords, assignments, and prefixes
     such as ``sudo`` or ``timeout 600``, including the command a shell runs with ``-c`` and an ``ssh`` remote
-    command. A command that does not parse yields nothing; the caller turns it into its own gap.
+    command. A command that does not parse, or wraps one that does not, yields nothing, unless it parses up to
+    an unclosed Jinja tag; the caller turns it into its own gap.
     """
     found: list[str] = []
     for segment in _utility_segments(command) or []:
@@ -259,7 +279,7 @@ def script_references(command: str) -> list[str]:
         for index, argument in enumerate(arguments[:-1]):
             if argument in ("<", "-f"):
                 add(arguments[index + 1])
-    segments = _segments(command) or []
+    segments = _lenient_segments(command) or []
     for previous, following in zip(segments, segments[1:], strict=False):
         if previous.name == "cat" and previous.pipes_to_next and following.name in UTILITIES:
             for path in previous.arguments:

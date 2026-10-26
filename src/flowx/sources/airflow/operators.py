@@ -991,6 +991,8 @@ _OPERATOR_CONSUMED_KWARGS: dict[str, frozenset[str]] = {
     "ShortCircuitOperator": frozenset({"python_callable", "op_args", "op_kwargs"}),
     "BashOperator": frozenset({"bash_command"}),
     "SSHOperator": frozenset({"command"}),
+    "BteqOperator": frozenset({"sql", "file_path"}),
+    "TeradataOperator": frozenset({"sql"}),
     "SparkSubmitOperator": frozenset({"application", "java_class", "application_args"}),
     "DatabricksSubmitRunOperator": frozenset({"json"}),
     "DatabricksSubmitRunDeferrableOperator": frozenset({"json"}),
