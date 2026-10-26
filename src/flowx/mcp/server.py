@@ -418,8 +418,9 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
     is satisfied, performing any data lookups), then re-calls ``migrate`` a single time with the
     complete ``answers`` (``["option_id=value", ...]``), which applies them and packages
     (``status="completed"``). No per-follow-up round trip. Pass ``interactive=False`` to skip the
-    prompt and package with defaults. The packaging keys are read only from the call that packages,
-    so a re-call has to repeat them.
+    prompt and package with defaults; only an ``answers`` re-call reuses the report, so a later
+    ``interactive=False`` call starts over from discover and needs the source again. The packaging
+    keys are read only from the call that packages, so a re-call has to repeat them.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     source_name = _source_name(p)
@@ -487,11 +488,12 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                         "only the options whose `show_when` clauses are all satisfied by the answers "
                         "collected so far, validating each answer against its `choices`. When the user "
                         "has answered every applicable option, call migrate again with the full "
-                        "`answers` list (['option_id=value', ...]) to apply and package in one shot. To "
-                        "accept defaults and skip prompting, call migrate with interactive=false. Either "
-                        "way, repeat any packaging_mode, group_by and group_spec from this call: the "
+                        "`answers` list (['option_id=value', ...]) to apply and package in one shot, "
+                        "repeating any packaging_mode, group_by and group_spec from this call: the "
                         "package step reads them only from the call that packages, so leaving them out "
-                        "packages with the default layout."
+                        "packages with the default layout. To accept defaults instead, call migrate with "
+                        "interactive=false and all of this call's parameters, source included; that "
+                        "call reruns discover and convert."
                     ),
                 }
 
@@ -674,10 +676,11 @@ def build_server() -> FastMCP:
           ``metadata_driven_lookup_tool=have``). No round trip per follow-up.
         - When every applicable option is answered, submit **once**: "migrate" re-called with the full
           ``answers`` (applies + packages), or standalone "apply_answers" → "package". The server still
-          validates every answer at apply time. ``interactive=false`` on "migrate" skips prompting.
-          Only the call that packages reads ``packaging_mode``, ``group_by`` and ``group_spec``, so
-          repeat them on the "migrate" re-call (with ``answers`` or ``interactive=false``) or pass
-          them to "package"; left out, it packages with the default layout.
+          validates every answer at apply time. ``interactive=false`` on the first "migrate" call
+          skips prompting; sent after "needs_input" it starts over, so it needs the source again and
+          reruns discover and convert. Only the call that packages reads ``packaging_mode``,
+          ``group_by`` and ``group_spec``, so repeat them on the "migrate" re-call or pass them to
+          "package"; left out, it packages with the default layout.
 
         Returns a dict ``{"ok": bool, ...}`` with per-command summaries (inventory / translation /
         bundle_files / questions / result) and a "process" block (stdout/stderr/returncode). An unknown

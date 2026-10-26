@@ -89,9 +89,10 @@ bulk-copy consolidation, non-Databricks task compute), it **does not package** â
    Repeat any `packaging_mode`, `group_by` and `group_spec` from the first call: the packaging step
    reads them from this call, so leaving them out packages with the default layout.
 
-To accept all defaults and skip the prompts, pass `"interactive": false`; when that is a re-call after
-`needs_input`, repeat the packaging keys there too. (Re-calling `migrate` with `answers` reuses the
-existing report and skips re-running discover/convert.)
+To accept all defaults and skip the prompts, pass `"interactive": false` on the first call. Only a
+re-call with `answers` reuses the existing report and skips re-running discover/convert; an
+`interactive: false` call made after `needs_input` starts over, so it needs the source parameters and
+the packaging keys again and reruns discover and convert.
 
 > **Large factories (hundredsâ€“thousands of pipelines): do not inline.** Inline `adf_definitions`
 > passes through your context window and is capped (~5 MB). Instead point the server at the source by
