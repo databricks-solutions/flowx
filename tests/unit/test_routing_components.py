@@ -217,6 +217,25 @@ def test_a_motif_names_only_the_activities_it_lists_by_name() -> None:
     assert [entry["activity"] for entry in deterministic["uncovered"]] == ["a"]
 
 
+@pytest.mark.parametrize(
+    "insights",
+    [
+        {"pipeline_insights": 1},
+        {"pipeline_insights": [{"pipeline": "a", "recommended_patterns": 1}]},
+        {"pipeline_relationships": 1},
+    ],
+    ids=["pipeline-insights", "recommended-patterns", "relationships"],
+)
+def test_a_malformed_insights_list_suggests_nothing_without_crashing(insights: dict[str, Any]) -> None:
+    """Enrich validates these lists; one edited afterwards only takes suggestions away, never adds a capability."""
+    inventory = {**_inventory([_graph("a")]), "source": "adf", "insights": insights}
+
+    recommendation = build_recommendation(inventory)
+
+    assert recommendation["components"][0]["options"]["agentic"]["recommended_patterns"] == []
+    assert recommendation["suggested_groupings"] == []
+
+
 def test_a_pipeline_name_that_is_not_a_string_is_not_a_pipeline_identity() -> None:
     """A number would become the string "7" and join an edge to a real pipeline named "7"."""
     edge = {"source_workflow": "a", "target_workflow": "7", "via_task_key": "call_7", "resolved": True}

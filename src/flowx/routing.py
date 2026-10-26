@@ -245,6 +245,11 @@ def _motifs_by_pipeline(inventory: dict[str, Any]) -> dict[str, list[dict[str, A
     return result
 
 
+def _listed(value: Any) -> list[Any]:
+    """``value`` when it is a list, else an empty one, so a malformed insights list suggests nothing."""
+    return value if isinstance(value, list) else []
+
+
 def _pipeline_insights(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Map each pipeline name to its ``insights.pipeline_insights`` entry, when insights are present.
 
@@ -255,7 +260,7 @@ def _pipeline_insights(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if not isinstance(insights, dict):
         return {}
     result: dict[str, dict[str, Any]] = {}
-    for entry in insights.get("pipeline_insights", []):
+    for entry in _listed(insights.get("pipeline_insights")):
         if isinstance(entry, dict) and entry.get("pipeline") is not None:
             result[str(entry["pipeline"])] = entry
     return result
@@ -366,7 +371,7 @@ def _agentic_option(members: list[str], inventory: dict[str, Any]) -> dict[str, 
         insight = insights_by_pipeline.get(pipeline)
         if not insight:
             continue
-        for pattern in insight.get("recommended_patterns") or []:
+        for pattern in _listed(insight.get("recommended_patterns")):
             if isinstance(pattern, dict):
                 recommended_patterns.append({"pipeline": pipeline, **pattern})
     has_simplification = any(pattern.get("simplification_pattern") for pattern in recommended_patterns)
@@ -430,7 +435,7 @@ def suggest_groupings(inventory: dict[str, Any]) -> list[dict[str, Any]]:
     component_of = {member: component_id for component_id, members in components_by_id.items() for member in members}
 
     links: list[tuple[set[str], dict[str, Any]]] = []
-    for relationship in insights.get("pipeline_relationships") or []:
+    for relationship in _listed(insights.get("pipeline_relationships")):
         edge = relationship.get("lineage_edge") if isinstance(relationship, dict) else None
         if not isinstance(edge, dict) or edge.get("edge_type") != "inferred":
             continue
@@ -450,11 +455,11 @@ def suggest_groupings(inventory: dict[str, Any]) -> list[dict[str, Any]]:
         links.append(({component_of[source], component_of[target]}, basis))
 
     pipelines_by_pattern: dict[str, set[str]] = {}
-    for insight in insights.get("pipeline_insights") or []:
+    for insight in _listed(insights.get("pipeline_insights")):
         pipeline = insight.get("pipeline") if isinstance(insight, dict) else None
         if pipeline not in component_of:
             continue
-        for pattern in insight.get("recommended_patterns") or []:
+        for pattern in _listed(insight.get("recommended_patterns")):
             if isinstance(pattern, dict) and pattern.get("simplification_pattern") is True:
                 if isinstance(pattern.get("pattern"), str) and pattern["pattern"]:
                     pipelines_by_pattern.setdefault(pattern["pattern"], set()).add(pipeline)
