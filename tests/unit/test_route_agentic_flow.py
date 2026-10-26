@@ -2061,3 +2061,20 @@ def test_a_fill_that_raises_releases_the_route_lock(tmp_path: Path) -> None:
         apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
 
     assert not (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).exists()
+
+
+@pytest.mark.parametrize("extra", [{"notes": "kept by hand"}, {"components_v2": {}}], ids=["notes", "lookalike"])
+def test_the_agent_output_store_refuses_a_top_level_key_it_does_not_write(tmp_path: Path, extra: Any) -> None:
+    """The next save rebuilds the store from its two keys, so any other key would be dropped without a word."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    _edit_store(tmp_path, lambda store: store.update(extra))
+    store_path = tmp_path / "metadata" / "agentic_conversion.json"
+    store_before = store_path.read_bytes()
+
+    with pytest.raises(ValueError, match=re.escape(f"unknown top-level key(s) {sorted(extra)}")):
+        load_agentic_output(tmp_path)
+    with pytest.raises(ValueError, match="unknown top-level key"):
+        apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc_v2")])
+
+    assert store_path.read_bytes() == store_before

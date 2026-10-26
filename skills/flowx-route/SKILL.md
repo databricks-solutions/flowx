@@ -430,7 +430,8 @@ Package refuses, writing nothing, when:
 - the saved baseline no longer has the hashes the record names ("re-run convert, then route"; route,
   fill-agentic and merge refuse it too), or a stored output or gap fill was edited, moved to another
   unit or pointed at another activity ("re-run fill-agentic", or merge that gap again). Every stored
-  entry carries a hash over all its fields, so any edit to it shows;
+  entry carries a hash over all its fields, so any edit to it shows, and a top-level key other than
+  `components` and `gap_fills` is refused rather than dropped on the next save;
 - a plan is recorded and the report carries no routing record while the plan routes a unit agentic
   or `agentic_conversion.json` stores a gap fill, as after a re-convert ("re-run route", which applies
   the fill, or drops it when it was merged against an earlier convert). With no plan recorded the

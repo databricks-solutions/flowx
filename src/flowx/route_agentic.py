@@ -93,6 +93,8 @@ OUTCOME_AGENTIC_NOT_VIABLE = "agentic-not-viable"
 
 BASELINE_CHANGED = "the deterministic baseline is missing or changed; re-run convert, then route"
 
+# The store's two top-level keys; every save writes only these.
+_STORE_KEYS = frozenset({"components", "gap_fills"})
 # Every field a stored unit output and a stored gap fill hold; any other key means it was edited.
 _OUTPUT_KEYS = frozenset({"members", "pipelines", "output_sha256", "replaced", "entry_sha256"})
 _GAP_FILL_KEYS = frozenset(
@@ -451,7 +453,8 @@ def load_agentic_output(output_dir: Path) -> AgenticOutput:
     and filling (or merging) that entry again replaces it.
 
     Raises:
-        ValueError: The file is not valid JSON or not shaped as ``{"components": {...}, "gap_fills": [...]}``.
+        ValueError: The file is not valid JSON or not shaped as ``{"components": {...}, "gap_fills": [...]}``,
+            with no other top-level key (every save writes only those two, so another would be dropped).
     """
     path = Path(output_dir) / METADATA_DIRNAME / AGENTIC_OUTPUT_FILENAME
     if not path.exists():
@@ -460,6 +463,9 @@ def load_agentic_output(output_dir: Path) -> AgenticOutput:
         document = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise ValueError(f"{AGENTIC_OUTPUT_FILENAME} is not valid JSON: {error}") from error
+    unknown = sorted(set(document) - _STORE_KEYS) if isinstance(document, dict) else []
+    if unknown:
+        raise ValueError(f"{AGENTIC_OUTPUT_FILENAME} has unknown top-level key(s) {unknown}; remove them")
     components = document.get("components", {}) if isinstance(document, dict) else None
     gap_fills = document.get("gap_fills", []) if isinstance(document, dict) else None
     if not isinstance(components, dict) or not isinstance(gap_fills, list):
