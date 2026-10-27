@@ -1,0 +1,25 @@
+fixtures:
+  spark_jar_daily:
+    provenance: xsd-derived
+    description: Two-step Spark JAR workflow with job.properties, sizing, dropped YARN settings, and retries.
+    rules: [SPARK-JAR, SPARK-LIB, SPARK-CONF, SPARK-CONF-DROP, SPARK-SIZING, PROP-JOB-PARAMETER, PROP-DERIVED-INLINE, PROP-STRIPPED, CF-OK-EDGE, CF-ERROR-KILL, CF-RETRY]
+  spark_python_local:
+    provenance: xsd-derived
+    description: PySpark script on a local master with a wf:id() argument.
+    rules: [SPARK-PYTHON, SPARK-LOCAL-MASTER, CF-ERROR-KILL]
+  decision_branches:
+    provenance: xsd-derived
+    description: Four-way decision with native, bridged, and agentic predicates and an empty default branch.
+    rules: [CF-DECISION-CHAIN, CF-OR-MERGE, EL-NATIVE-CONDITION, EL-BRIDGE-CONDITION, EL-AGENTIC-CONDITION]
+  fork_join:
+    provenance: xsd-derived
+    description: Fork with a two-action path and a one-action path joined before publish.
+    rules: [CF-FORK-JOIN, CF-OK-EDGE]
+  error_handlers:
+    provenance: xsd-derived
+    description: Shared error handler, error to kill, error to end, and a kill reached on an ok path.
+    rules: [CF-ERROR-ACTION, CF-ERROR-KILL, CF-ERROR-END, CF-KILL-TASK, CF-OR-MERGE, CF-UPSTREAM-SENTINEL]
+  agentic_actions:
+    provenance: xsd-derived
+    description: Pig, Sqoop, and (until M2) shell actions become counted agentic placeholders.
+    rules: [AGENTIC-ACTION]

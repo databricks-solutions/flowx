@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from flowx.models.dab import DabNotebook
 from flowx.preparer.activity_preparers.helpers import (
     bind_requested_job_cluster,
+    bind_spec_job_cluster,
     is_remote_artifact_uri,
     resolve_param_value,
 )
@@ -57,6 +58,7 @@ def prepare(activity: SparkPythonActivity, *, scope: str = "") -> PreparedActivi
         if activity.libraries:
             task["libraries"] = activity.libraries
         bind_requested_job_cluster(task, activity)
+        bind_spec_job_cluster(task, activity)
         return PreparedActivity(task=task, notebooks=[])
     if original_path and ("dbfs:" in original_path or "/" in original_path):
         filename = original_path.rsplit("/", 1)[-1] if "/" in original_path else original_path
@@ -88,4 +90,5 @@ def prepare(activity: SparkPythonActivity, *, scope: str = "") -> PreparedActivi
     if activity.libraries:
         task["libraries"] = activity.libraries
     bind_requested_job_cluster(task, activity)
+    bind_spec_job_cluster(task, activity)
     return PreparedActivity(task=task, notebooks=notebooks)

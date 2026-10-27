@@ -1,6 +1,6 @@
 """Source registry: isolate each migration source behind a uniform interface.
 
-flowx converts *from* a source orchestrator (ADF, Airflow, ...) *to* Databricks
+flowx converts *from* a source orchestrator (ADF, Airflow, Oozie, ...) *to* Databricks
 Lakeflow Jobs.  The ``discover`` and ``convert`` phases are irreducibly
 source-specific (ADF ARM JSON vs. Airflow Python DAGs share no parser), so each
 source lives in its own subpackage and registers the phase modules the adapter
@@ -58,6 +58,12 @@ _REGISTRY: dict[str, Source] = {
         discover_module="flowx.sources.airflow.discover",
         convert_module="flowx.sources.airflow.convert",
         source_path_flag="--airflow-source-path",
+    ),
+    "oozie": Source(
+        name="oozie",
+        discover_module="flowx.sources.oozie.discover",
+        convert_module="flowx.sources.oozie.convert",
+        source_path_flag="--oozie-source-path",
     ),
 }
 

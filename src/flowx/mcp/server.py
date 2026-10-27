@@ -41,13 +41,14 @@ def _transport_security() -> TransportSecuritySettings:
 
 
 _INSTRUCTIONS = """\
-flowx translates a source orchestrator's pipelines (Azure Data Factory or Apache Airflow) into
+flowx translates a source orchestrator's pipelines (Azure Data Factory, Apache Airflow, or Apache Oozie) into
 Databricks Lakeflow Jobs packaged as Declarative Automation Bundles (DABs). Everything is driven
 through the single `flowx` tool: `flowx(command="<command>", parameters={...})`.
 
-Every discover/convert/migrate call requires `source` ("adf" | "airflow") — there is no default.
+Every discover/convert/migrate call requires `source` ("adf" | "airflow" | "oozie") — there is no default.
 ADF reads adf_volume_path | adf_workspace_path | adf_definitions | adf_source_path; Airflow reads
-airflow_source_path (a DAG .py file or directory).
+airflow_source_path (a DAG .py file or directory); Oozie reads
+oozie_source_path (a directory of Oozie application directories).
 
 Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("inputs", {"phase": "discover", "source": "adf"})   # learn a phase's inputs
@@ -99,8 +100,9 @@ def _resolve_source(p: dict[str, Any], path_key: str | None = None) -> tuple[str
     2. ``adf_workspace_path`` — a ``/Workspace`` directory (e.g. an ADF Git folder); downloaded via
        the SDK Workspace API. Both (1) and (2) scale to large factories — the bytes bypass the agent.
     3. ``adf_definitions`` — an inline ARM-JSON payload (small jobs); materialized to a temp dir.
-    4. ``<source>_source_path`` (e.g. ``airflow_source_path``) or the explicit ``path_key`` — a path
-       the server itself can read. ``path_key`` is an *additional* key to try (e.g. ``source_dir``),
+    4. ``<source>_source_path`` (e.g. ``airflow_source_path``, ``oozie_source_path``) or the explicit
+       ``path_key`` — a path the server itself can read.
+       ``path_key`` is an *additional* key to try (e.g. ``source_dir``),
        not a replacement, so the source's natural key still resolves.
 
     For ``source="airflow"`` the volume/workspace/inline modes are ADF-specific and skipped; the DAG
@@ -402,7 +404,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                     "error": (
                         f"Provide a source path for source '{source_name}' "
                         "(adf: adf_volume_path / adf_workspace_path / adf_definitions / adf_source_path; "
-                        "airflow: airflow_source_path)."
+                        "airflow: airflow_source_path; oozie: oozie_source_path)."
                     ),
                 }
             discover_args = ["discover", "--source", source_name, "--source-path", source, "--output-dir", output_dir]
@@ -572,18 +574,20 @@ def build_server() -> FastMCP:
 
         Call as ``flowx(command="<command>", parameters={...})``. Commands and their
         ``parameters`` keys (req = required; phases share ``output_dir``, default "./flowx_output").
-        ``source`` ("adf" | "airflow") is **required** for discover/convert/migrate/inputs (and
+        ``source`` ("adf" | "airflow" | "oozie") is **required** for discover/convert/migrate/inputs (and
         workspace_paths, profile); there is no default. It selects both the parser and which
         source-path key applies: ADF reads adf_volume_path | adf_workspace_path | adf_definitions |
-        adf_source_path, Airflow reads ``airflow_source_path`` (a DAG .py file or directory).
+        adf_source_path, Airflow reads ``airflow_source_path`` (a DAG .py file or directory), Oozie reads
+        ``oozie_source_path`` (a directory of Oozie application directories).
         ``package`` is source-independent (it consumes the translation report).
 
         - "inputs": phase(req: "discover"|"convert"|"package"), source(req for discover/convert) —
           list a phase's input prompts.
-        - "discover": source(req), one ADF source key | airflow_source_path (req), output_dir,
-          pipeline, exclude_dag | exclude_dags (Airflow, repeatable list) — parse and audit definitions.
-        - "convert": source(req), (one ADF source key | airflow_source_path), output_dir, pipeline,
-          exclude_dag | exclude_dags (Airflow, repeatable list).
+        - "discover": source(req), one ADF source key | airflow_source_path | oozie_source_path (req), output_dir,
+          pipeline, exclude_dag | exclude_dags (Airflow DAGs or Oozie apps, repeatable list) — parse and audit
+          definitions.
+        - "convert": source(req), (one ADF source key | airflow_source_path | oozie_source_path), output_dir, pipeline,
+          exclude_dag | exclude_dags (Airflow DAGs or Oozie apps, repeatable list).
         - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
           merge ADF agent results. Airflow's legacy name-based merge is disabled; use resolve_agentic.
         - "resolve_agentic": source(req: "airflow"), action(req: prepare | stage | apply), output_dir,
@@ -595,13 +599,13 @@ def build_server() -> FastMCP:
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
         - "materialize_lookup": source(req: CSV path or literal CSV), out(req: destination JSON path).
         - "workspace_paths": source(req), report_path(req), (one ADF source key | airflow_source_path
-          | source_dir).
+          | oozie_source_path | source_dir).
         - "package": output_dir, output_volume_path, output_workspace_path, report_path,
           catalog(default "main"), schema(default "default"), bundle_name, profile,
           download_workspace_files(bool), keep_intermediates(bool).
-        - "migrate": source(req), one ADF source key | airflow_source_path (req), output_dir,
+        - "migrate": source(req), one ADF source key | airflow_source_path | oozie_source_path (req), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
-          exclude_dag | exclude_dags (Airflow, repeatable list),
+          exclude_dag | exclude_dags (Airflow DAGs or Oozie apps, repeatable list),
           answers(list of "ID=VALUE"), interactive(bool, default true), lookup_csv — runs
           discover→convert→package, returning the full option schema once (status "needs_input") when
           configuration is available; re-call once with the complete answers to apply (see below).
@@ -619,7 +623,8 @@ def build_server() -> FastMCP:
 
         Providing the source (a hosted app can't read the user's workspace/volume files directly). For
         ``source="airflow"`` pass ``airflow_source_path`` (a DAG .py file or directory the server can
-        read). For ``source="adf"``, in priority order:
+        read); for ``source="oozie"`` pass ``oozie_source_path`` (a directory of Oozie application
+        directories). For ``source="adf"``, in priority order:
         - ``adf_volume_path``: a UC Volume directory the server reads via the SDK Files API. **Preferred
           for large factories** — the bytes never pass through the agent. Requires the app's service
           principal to have read on the volume.

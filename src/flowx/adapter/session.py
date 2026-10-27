@@ -24,6 +24,7 @@ from flowx.adapter.constants import (
     INPUT_GROUP_SPEC,
     INPUT_INSTALL_DASHBOARD,
     INPUT_INVENTORY_PATH,
+    INPUT_OOZIE_SOURCE_PATH,
     INPUT_OUTPUT_BUNDLE_PATH,
     INPUT_OUTPUT_DIR,
     INPUT_PACKAGING_MODE,
@@ -258,6 +259,14 @@ _SOURCE_PATH_OPTION: dict[str, dict[str, str]] = {
         "prompt": "Where are the Airflow DAG files?",
         "description": "A DAG ``.py`` file or a local directory of DAG modules to migrate.",
     },
+    "oozie": {
+        "option_id": INPUT_OOZIE_SOURCE_PATH,
+        "prompt": "Where are the Oozie application directories?",
+        "description": (
+            "A local directory holding copies of the Oozie HDFS application directories "
+            "(each with workflow.xml, job.properties, lib/, scripts)."
+        ),
+    },
 }
 
 _OUTPUT_DIR_OPTION = MigrationInputOption(
@@ -475,7 +484,7 @@ class MigrationInputSession:
 
     Attributes:
         phase: One of ``"discover"``, ``"convert"``, ``"package"``.
-        source: Migration source (``"adf"`` / ``"airflow"``); words the
+        source: Migration source (``"adf"`` / ``"airflow"`` / ``"oozie"``); words the
             source-path prompt for the discover/convert phases. Required for
             those phases (there is no default source); unused for ``package``.
     """

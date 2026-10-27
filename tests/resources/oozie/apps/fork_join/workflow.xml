@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow-app name="fork_join" xmlns="uri:oozie:workflow:1.0">
+    <start to="extract"/>
+    <action name="extract">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>extract</name>
+            <class>com.example.extract</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="split"/>
+        <error to="fail"/>
+    </action>
+    <fork name="split">
+        <path start="a1"/>
+        <path start="b1"/>
+    </fork>
+    <action name="a1">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>a1</name>
+            <class>com.example.a1</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="a2"/>
+        <error to="fail"/>
+    </action>
+    <action name="a2">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>a2</name>
+            <class>com.example.a2</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="merge"/>
+        <error to="fail"/>
+    </action>
+    <action name="b1">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>b1</name>
+            <class>com.example.b1</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="merge"/>
+        <error to="fail"/>
+    </action>
+    <join name="merge" to="publish"/>
+    <action name="publish">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>publish</name>
+            <class>com.example.publish</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="end"/>
+        <error to="fail"/>
+    </action>
+    <kill name="fail">
+        <message>Workflow failed</message>
+    </kill>
+    <end name="end"/>
+</workflow-app>

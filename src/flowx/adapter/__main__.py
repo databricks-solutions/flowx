@@ -411,7 +411,7 @@ def _build_parser() -> argparse.ArgumentParser:
     inputs.add_argument(
         "--source",
         default=None,
-        help="Migration source (adf | airflow); required for discover/convert, unused for package.",
+        help="Migration source (adf | airflow | oozie); required for discover/convert, unused for package.",
     )
     inputs.add_argument(
         "--out",
@@ -588,7 +588,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "forward",
             nargs=argparse.REMAINDER,
             help=(
-                "Flags forwarded to the phase CLI (e.g. --source adf|airflow, "
+                "Flags forwarded to the phase CLI (e.g. --source adf|airflow|oozie, "
                 "--source-path/--source-dir, --output-dir, --pipeline)."
             ),
         )

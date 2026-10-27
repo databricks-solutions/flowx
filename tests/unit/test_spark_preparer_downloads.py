@@ -50,7 +50,7 @@ def test_gcs_jar_becomes_a_placeholder_without_a_download(
 
     prepared = spark_jar.prepare(activity)
 
-    assert prepared.task["libraries"] == [{"jar": "../lib/aggregate.jar"}]
+    assert prepared.task["libraries"] == [{"jar": "../src/lib/aggregate.jar"}]
     assert not any(notebook.binary_content for notebook in prepared.notebooks)
 
 
@@ -125,5 +125,5 @@ def test_kept_remote_jar_still_copies_a_dbfs_library(forbid_network: None, monke
 
     prepared = spark_jar.prepare(activity)
 
-    assert prepared.task["libraries"] == [{"jar": "gs://bucket/app.jar"}, {"jar": "../lib/dep.jar"}]
+    assert prepared.task["libraries"] == [{"jar": "gs://bucket/app.jar"}, {"jar": "../src/lib/dep.jar"}]
     assert prepared.notebooks, "a DBFS JAR that was not downloaded still needs its copy instructions"

@@ -7,11 +7,12 @@ from typing import TYPE_CHECKING
 from flowx.models.dab import DabNotebook
 from flowx.preparer.activity_preparers.helpers import (
     bind_requested_job_cluster,
+    bind_spec_job_cluster,
     is_remote_artifact_uri,
     resolve_param_value,
 )
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
-from flowx.preparer.workspace_downloader import download_dbfs_file
+from flowx.preparer.workspace_downloader import download_dbfs_file, read_local_artifact
 
 if TYPE_CHECKING:
     from flowx.models.ir import SparkJarActivity
@@ -67,9 +68,10 @@ def prepare(activity: SparkJarActivity, *, scope: str = "") -> PreparedActivity:
                 elif isinstance(path, str) and ("dbfs:" in path or "/" in path):
                     copies_needed = True
                     filename = path.rsplit("/", 1)[-1] if "/" in path else path
-                    rewritten_lib[key] = f"../lib/{filename}"
+                    # The bundler writes every generated artifact, lib/ included, under the bundle's src/ directory.
+                    rewritten_lib[key] = f"../src/lib/{filename}"
                     if key == "jar":
-                        jar_content = download_dbfs_file(path)
+                        jar_content = download_dbfs_file(path) or read_local_artifact(path)
                         if jar_content is not None:
                             downloaded_any = True
                             notebooks.append(
@@ -104,4 +106,5 @@ def prepare(activity: SparkJarActivity, *, scope: str = "") -> PreparedActivity:
         task["libraries"] = list(activity.libraries)
 
     bind_requested_job_cluster(task, activity)
+    bind_spec_job_cluster(task, activity)
     return PreparedActivity(task=task, notebooks=notebooks)

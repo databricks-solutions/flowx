@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow-app name="agentic_actions" xmlns="uri:oozie:workflow:1.0">
+    <start to="pig_step"/>
+    <action name="pig_step">
+        <pig>
+            <script>transform.pig</script>
+        </pig>
+        <ok to="sqoop_step"/>
+        <error to="fail"/>
+    </action>
+    <action name="sqoop_step">
+        <sqoop xmlns="uri:oozie:sqoop-action:1.0">
+            <command>import --connect jdbc:oracle:thin:@db:1521/x --table BOOKINGS --target-dir /data/raw</command>
+        </sqoop>
+        <ok to="shell_step"/>
+        <error to="fail"/>
+    </action>
+    <action name="shell_step">
+        <shell xmlns="uri:oozie:shell-action:1.0">
+            <exec>run.sh</exec>
+        </shell>
+        <ok to="end"/>
+        <error to="fail"/>
+    </action>
+    <kill name="fail">
+        <message>Workflow failed</message>
+    </kill>
+    <end name="end"/>
+</workflow-app>

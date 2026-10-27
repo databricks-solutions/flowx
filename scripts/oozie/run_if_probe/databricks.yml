@@ -1,0 +1,142 @@
+bundle:
+  name: flowx_oozie_run_if_probe
+
+resources:
+  jobs:
+    probe_failures:
+      name: flowx-oozie-probe-failures
+      tasks:
+        - task_key: a1_fails
+          notebook_task: {notebook_path: ./src/fail.py}
+        - task_key: a2_after_a1
+          depends_on: [{task_key: a1_fails}]
+          notebook_task: {notebook_path: ./src/ok.py}
+        # Q: does an UPSTREAM_FAILED dependency count as "failed" for AT_LEAST_ONE_FAILED?
+        - task_key: handler_on_a2_failed
+          depends_on: [{task_key: a2_after_a1}]
+          run_if: AT_LEAST_ONE_FAILED
+          notebook_task: {notebook_path: ./src/ok.py}
+        # Q: ALL_DONE with an excluded dependency.
+        - task_key: always_true
+          condition_task: {op: EQUAL_TO, left: "true", right: "true"}
+        - task_key: never_runs
+          depends_on: [{task_key: always_true, outcome: "false"}]
+          notebook_task: {notebook_path: ./src/ok.py}
+        - task_key: all_done_after_excluded
+          depends_on: [{task_key: never_runs}]
+          run_if: ALL_DONE
+          notebook_task: {notebook_path: ./src/ok.py}
+        # Q: does a matching condition-outcome dependency count as success for AT_LEAST_ONE_SUCCESS?
+        - task_key: merge_after_condition
+          depends_on: [{task_key: always_true, outcome: "true"}, {task_key: never_runs}]
+          run_if: AT_LEAST_ONE_SUCCESS
+          notebook_task: {notebook_path: ./src/ok.py}
+    probe_result_with_handler:
+      name: flowx-oozie-probe-result-with-handler
+      tasks:
+        - task_key: fails_first
+          notebook_task: {notebook_path: ./src/fail.py}
+        - task_key: handler
+          depends_on: [{task_key: fails_first}]
+          run_if: AT_LEAST_ONE_FAILED
+          notebook_task: {notebook_path: ./src/ok.py}
+    # The brief's probe_failures has no failed-chain leaf (its leaf is the handler), so this isolates the leaf rule.
+    probe_leaf_upstream_failed:
+      name: flowx-oozie-probe-leaf-upstream-failed
+      tasks:
+        - task_key: fails_first
+          notebook_task: {notebook_path: ./src/fail.py}
+        - task_key: leaf_after_failure
+          depends_on: [{task_key: fails_first}]
+          notebook_task: {notebook_path: ./src/ok.py}
+    probe_conditions:
+      name: flowx-oozie-probe-conditions
+      tasks:
+        - task_key: numeric_equal
+          condition_task: {op: EQUAL_TO, left: "05", right: "5"}
+        # A job made only of condition tasks is skipped entirely, so a notebook task must hang off the outcome.
+        - task_key: after_numeric_equal
+          depends_on: [{task_key: numeric_equal, outcome: "true"}]
+          notebook_task: {notebook_path: ./src/ok.py}
+        # GREATER_THAN with string operands ("abc" > "abd") is rejected by jobs/create (400 INVALID_PARAMETER_VALUE,
+        # 'Numeric operand "left" is not a valid number'), so it cannot be a task here; record.py hardcodes that finding.
+    probe_result_state_gates:
+      name: flowx-oozie-probe-result-state-gates
+      tasks:
+        - task_key: ok_task
+          notebook_task: {notebook_path: ./src/ok.py}
+        - task_key: fail_task
+          notebook_task: {notebook_path: ./src/fail.py}
+        - task_key: x_fails
+          notebook_task: {notebook_path: ./src/fail.py}
+        - task_key: y_skipped
+          depends_on: [{task_key: x_fails}]
+          notebook_task: {notebook_path: ./src/ok.py}
+        - task_key: never_cond
+          condition_task: {op: EQUAL_TO, left: "true", right: "false"}
+        - task_key: excluded_task
+          depends_on: [{task_key: never_cond, outcome: "true"}]
+          notebook_task: {notebook_path: ./src/ok.py}
+        - task_key: echo_ok_task
+          depends_on: [{task_key: ok_task}]
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ./src/echo.py
+            base_parameters: {value: "{{tasks.ok_task.result_state}}"}
+        - task_key: echo_fail_task
+          depends_on: [{task_key: fail_task}]
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ./src/echo.py
+            base_parameters: {value: "{{tasks.fail_task.result_state}}"}
+        - task_key: echo_y_skipped
+          depends_on: [{task_key: y_skipped}]
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ./src/echo.py
+            base_parameters: {value: "{{tasks.y_skipped.result_state}}"}
+        - task_key: echo_excluded_task
+          depends_on: [{task_key: excluded_task}]
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ./src/echo.py
+            base_parameters: {value: "{{tasks.excluded_task.result_state}}"}
+        - task_key: cond_ok_task
+          depends_on: [{task_key: ok_task}]
+          run_if: ALL_DONE
+          condition_task: {op: EQUAL_TO, left: "{{tasks.ok_task.result_state}}", right: "failed"}
+        - task_key: cond_fail_task
+          depends_on: [{task_key: fail_task}]
+          run_if: ALL_DONE
+          condition_task: {op: EQUAL_TO, left: "{{tasks.fail_task.result_state}}", right: "failed"}
+        - task_key: cond_y_skipped
+          depends_on: [{task_key: y_skipped}]
+          run_if: ALL_DONE
+          condition_task: {op: EQUAL_TO, left: "{{tasks.y_skipped.result_state}}", right: "failed"}
+        - task_key: cond_excluded_task
+          depends_on: [{task_key: excluded_task}]
+          run_if: ALL_DONE
+          condition_task: {op: EQUAL_TO, left: "{{tasks.excluded_task.result_state}}", right: "failed"}
+        - task_key: after_cond_fail
+          depends_on: [{task_key: cond_fail_task, outcome: "true"}]
+          notebook_task: {notebook_path: ./src/ok.py}
+        - task_key: after_cond_y
+          depends_on: [{task_key: cond_y_skipped, outcome: "true"}]
+          notebook_task: {notebook_path: ./src/ok.py}
+    # Runtime case for GREATER_THAN on strings: the operand is only known at run time, so jobs/create accepts it.
+    probe_string_greater_runtime:
+      name: flowx-oozie-probe-string-greater-runtime
+      parameters:
+        - {name: left_operand, default: "abc"}
+        - {name: right_operand, default: "abd"}
+      tasks:
+        - task_key: string_greater_runtime
+          condition_task: {op: GREATER_THAN, left: "{{job.parameters.left_operand}}", right: "{{job.parameters.right_operand}}"}
+        - task_key: after_string_greater_runtime
+          depends_on: [{task_key: string_greater_runtime, outcome: "false"}]
+          notebook_task: {notebook_path: ./src/ok.py}
+
+targets:
+  dev:
+    mode: development
+    default: true

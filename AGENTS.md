@@ -41,7 +41,7 @@ All skills and the bootstrap script are designed to run on **Databricks serverle
 
 ## Project Overview
 
-flowx is an agent plugin that translates Azure Data Factory (ADF) pipeline definitions into Databricks Lakeflow Jobs via Declarative Automation Bundles (DABs).
+flowx is an agent plugin that translates Azure Data Factory (ADF), Airflow, and Oozie pipeline definitions into Databricks Lakeflow Jobs via Declarative Automation Bundles (DABs).
 
 ## Data Flow
 
@@ -107,6 +107,9 @@ estimates current ADF spend from a live Azure scan and writes `metadata/tco/cost
 | `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/`                                                                                                            |
 | `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK                                                                                    |
 | `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table                                                                                       |
+| `sources/adf/` | ADF source: ARM JSON loader (`loader.py`, discover phase), translation engine (`translate.py`, convert phase), one translator per activity type (`translators/`) |
+| `sources/airflow/` | Airflow source: DAG parsing and lowering (`loader/`), discover/convert phases (`discover.py`, `convert.py`), operator builders (`operators.py`), static reconciliation audit (`audit.py`) |
+| `sources/oozie/` | Oozie source: workflow.xml parsing, EL, and control-flow lowering (`loader/`), discover/convert phases (`discover.py`, `convert.py`), one translator per action type (`translators/`), control-flow equivalence interpreters (`equivalence.py`) |
 | `sources/adf/extract/` | Live ADF extraction (`core.py`, self-contained and inlined into the generated notebook), export/path checks (`layout.py`), notebook rendering (`notebook.py`) |
 | `sources/adf/profile/` | Live ADF scanning and cost estimation for the `profile` phase (requires optional `azure` extra; Azure deps imported lazily)                                   |
 

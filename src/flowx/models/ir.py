@@ -74,6 +74,7 @@ class Activity:
             Each entry is a supported Databricks task library; see
             https://docs.databricks.com/aws/en/dev-tools/bundles/library-dependencies
             for the supported shapes.
+        run_if: Explicit DAB run_if; overrides the value derived from dependency outcomes.
     """
 
     name: str
@@ -94,6 +95,9 @@ class Activity:
     compute_mode: str | None = None
     # Collapsed activity_and_notify spec set by the adapter: {destination, events, args, destination_name}.
     notifications: dict[str, Any] | None = None
+    # Explicit DAB run_if for when the outcome-derived value can't express the rule (an Oozie node reached
+    # from mutually exclusive branches needs AT_LEAST_ONE_SUCCESS over condition-outcome edges).
+    run_if: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)

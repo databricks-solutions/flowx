@@ -339,6 +339,17 @@ def download_dbfs_file(dbfs_path: str) -> bytes | None:
     return None
 
 
+def read_local_artifact(path: str) -> bytes | None:
+    """Reads a ``file:`` URI that a source front-end resolved to a local copy (e.g. an Oozie app's ``lib/``).
+
+    Returns ``None`` for anything that isn't an existing local file, so callers can fall back to a placeholder.
+    """
+    if not path.startswith("file:"):
+        return None
+    local = Path(path.removeprefix("file://").removeprefix("file:"))
+    return local.read_bytes() if local.is_file() else None
+
+
 # ---------------------------------------------------------------------------
 # Opt-in toggle + auth gating
 # ---------------------------------------------------------------------------

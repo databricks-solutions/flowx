@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import TYPE_CHECKING, Any
 
 from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
@@ -96,6 +98,21 @@ def bind_requested_job_cluster(task: dict[str, Any], activity: Activity) -> None
     """
     if (activity.cluster or {}).get("_bind_default_cluster") and not task.get("existing_cluster_id"):
         task["job_cluster_key"] = DEFAULT_JOB_CLUSTER_KEY
+
+
+def bind_spec_job_cluster(task: dict[str, Any], activity: Activity) -> None:
+    """Binds *task* to a job cluster built from its own spec, sharing it with tasks whose spec is identical.
+
+    A source front-end that knows each task's exact compute (an Oozie spark action's spark-submit options)
+    sets ``_job_cluster_spec`` in the activity's cluster hint. Keying by a hash of the spec keeps identical
+    tasks on one cluster without flattening different ones onto the most common settings.
+    """
+    spec = (activity.cluster or {}).get("_job_cluster_spec")
+    if not spec or task.get("existing_cluster_id"):
+        return
+    digest = hashlib.sha1(json.dumps(spec, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+    task["job_cluster_key"] = f"spec_{digest}"
+    task["_job_cluster_spec"] = spec
 
 
 def is_remote_artifact_uri(path: str) -> bool:

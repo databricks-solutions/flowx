@@ -1,0 +1,189 @@
+{
+  "upstream_failed_counts_as_failed": true,
+  "excluded_counts_as_done_for_all_done": false,
+  "condition_outcome_dependency_counts_as_success": true,
+  "leaf_upstream_failed_fails_run": true,
+  "failed_non_leaf_with_successful_leaves": "SUCCESS_WITH_FAILURES",
+  "condition_numeric_string_equal": false,
+  "condition_string_greater_than_rejected_at_create": true,
+  "condition_string_greater_than_runtime": "condition task ended INTERNAL_ERROR/FAILED",
+  "result_state_reference_supported": true,
+  "result_state_literals": {
+    "SUCCESS": "success",
+    "FAILED": "failed",
+    "UPSTREAM_FAILED": "upstream_failed",
+    "EXCLUDED": null
+  },
+  "all_done_runs_after_upstream_failed": true,
+  "all_done_runs_after_failed": true,
+  "condition_on_result_state_distinguishes_failed_from_upstream_failed": true,
+  "result_state_gates_run_result_state": "SUCCESS_WITH_FAILURES",
+  "result_state_gates_run_id": 1089704830012349,
+  "probe_run_ids": [
+    666827792841670,
+    330734826682555,
+    696779674085668,
+    198250243570541,
+    1089704830012349,
+    470347700455397
+  ],
+  "recorded_on": "2026-10-24",
+  "workspace_host": "internal dev workspace (AWS, serverless jobs)",
+  "notes": {
+    "condition_numeric_string_equal": "false means EQUAL_TO '05' vs '5' is false, i.e. no numeric coercion",
+    "result_state_literals.EXCLUDED": "unobservable: ALL_DONE dependents of an EXCLUDED task are themselves EXCLUDED; TIMEDOUT and CANCELED are unmeasured"
+  },
+  "raw_task_states": {
+    "failures": {
+      "handler_on_a2_failed": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS"
+      },
+      "merge_after_condition": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS"
+      },
+      "a2_after_a1": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "UPSTREAM_FAILED"
+      },
+      "always_true": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS",
+        "condition_outcome": "true"
+      },
+      "all_done_after_excluded": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "EXCLUDED"
+      },
+      "never_runs": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "EXCLUDED"
+      },
+      "a1_fails": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "FAILED"
+      }
+    },
+    "failures_run_result_state": "SUCCESS_WITH_FAILURES",
+    "handler": {
+      "fails_first": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "FAILED"
+      },
+      "handler": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS"
+      }
+    },
+    "handler_run_result_state": "SUCCESS_WITH_FAILURES",
+    "leaf_upstream_failed": {
+      "leaf_after_failure": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "UPSTREAM_FAILED"
+      },
+      "fails_first": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "FAILED"
+      }
+    },
+    "leaf_upstream_failed_run_result_state": "FAILED",
+    "conditions": {
+      "numeric_equal": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS",
+        "condition_outcome": "false"
+      },
+      "after_numeric_equal": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "EXCLUDED"
+      }
+    },
+    "result_state_gates": {
+      "echo_y_skipped": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS",
+        "echo": "upstream_failed"
+      },
+      "after_cond_fail": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS"
+      },
+      "echo_excluded_task": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "EXCLUDED"
+      },
+      "fail_task": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "FAILED"
+      },
+      "cond_fail_task": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS",
+        "condition_outcome": "true"
+      },
+      "echo_fail_task": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS",
+        "echo": "failed"
+      },
+      "never_cond": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS",
+        "condition_outcome": "false"
+      },
+      "y_skipped": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "UPSTREAM_FAILED"
+      },
+      "cond_y_skipped": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS",
+        "condition_outcome": "false"
+      },
+      "echo_ok_task": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS",
+        "echo": "success"
+      },
+      "cond_excluded_task": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "EXCLUDED"
+      },
+      "after_cond_y": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "EXCLUDED"
+      },
+      "x_fails": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "FAILED"
+      },
+      "excluded_task": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "EXCLUDED"
+      },
+      "cond_ok_task": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS",
+        "condition_outcome": "false"
+      },
+      "ok_task": {
+        "life_cycle_state": "TERMINATED",
+        "result_state": "SUCCESS"
+      }
+    },
+    "result_state_gates_run_result_state": "SUCCESS_WITH_FAILURES",
+    "string_greater_runtime": {
+      "after_string_greater_runtime": {
+        "life_cycle_state": "SKIPPED",
+        "result_state": "UPSTREAM_FAILED"
+      },
+      "string_greater_runtime": {
+        "life_cycle_state": "INTERNAL_ERROR",
+        "result_state": "FAILED"
+      }
+    },
+    "condition_outcomes_source": "read programmatically from jobs.get_run tasks[*].condition_task.outcome",
+    "string_greater_than": "GREATER_THAN with literal operands 'abc'/'abd' is rejected by jobs/create (400 INVALID_PARAMETER_VALUE: Numeric operand \"left\" is not a valid number), so it errors before any run"
+  }
+}

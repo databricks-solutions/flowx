@@ -317,7 +317,7 @@ class TestSparkJarPreparer:
         assert "spark_jar_task" in prepared.task
         assert prepared.task["spark_jar_task"]["main_class_name"] == "com.example.Main"
         # Libraries are rewritten to bundle-relative paths
-        assert prepared.task["libraries"] == [{"jar": "../lib/my.jar"}]
+        assert prepared.task["libraries"] == [{"jar": "../src/lib/my.jar"}]
         # Placeholder readme is generated
         assert len(prepared.notebooks) == 1
         assert "jar_task_README.txt" in prepared.notebooks[0].relative_path

@@ -1795,6 +1795,29 @@ def _collect_required_cluster_keys(tasks: list[dict[str, Any]]) -> set[str]:
     return {task["job_cluster_key"] for task in _iter_tasks_recursively(tasks) if task.get("job_cluster_key")}
 
 
+def _pop_spec_job_clusters(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collects the per-spec job clusters tasks were bound to and strips the private spec marker."""
+    clusters: dict[str, dict[str, Any]] = {}
+    for task in _iter_tasks_recursively(tasks):
+        spec = task.pop("_job_cluster_spec", None)
+        if spec is None:
+            continue
+        clusters.setdefault(
+            task["job_cluster_key"],
+            {
+                "job_cluster_key": task["job_cluster_key"],
+                "new_cluster": {
+                    "spark_version": "${var.spark_version}",
+                    "node_type_id": "${var.node_type_id}",
+                    "data_security_mode": "SINGLE_USER",
+                    "single_user_name": "${workspace.current_user.userName}",
+                    **spec,
+                },
+            },
+        )
+    return list(clusters.values())
+
+
 def _strip_compute_mode_markers(tasks: list[dict[str, Any]]) -> None:
     """Removes the private ``_compute_mode`` marker from every task before YAML output.
 
@@ -2250,13 +2273,16 @@ def _build_job_resource(
 
     if attach_clusters:
         _bind_cluster_to_notebook_tasks(workflow.tasks)
-        needed_keys = _collect_required_cluster_keys(workflow.tasks)
-        if needed_keys:
-            cluster_extras = _infer_bundle_cluster_extras(workflow)
-            job_def["job_clusters"] = _build_default_job_clusters(
-                needed_keys,
-                extras=cluster_extras or None,
-            )
+        spec_clusters = _pop_spec_job_clusters(workflow.tasks)
+        spec_keys = {cluster["job_cluster_key"] for cluster in spec_clusters}
+        needed_keys = _collect_required_cluster_keys(workflow.tasks) - spec_keys
+        job_clusters = (
+            _build_default_job_clusters(needed_keys, extras=_infer_bundle_cluster_extras(workflow) or None)
+            if needed_keys
+            else []
+        )
+        if job_clusters or spec_clusters:
+            job_def["job_clusters"] = job_clusters + spec_clusters
 
     _strip_compute_mode_markers(workflow.tasks)
 
@@ -2537,8 +2563,8 @@ def _report_reconciliation_failures(report_path: Path) -> list[str]:
             continue
         tags = pipeline.get("tags")
         source = tags.get("source") if isinstance(tags, dict) else None
-        if source not in {"adf", "airflow"}:
-            failures.append(f"{label}: pipeline tags.source must be 'adf' or 'airflow'")
+        if source not in {"adf", "airflow", "oozie"}:
+            failures.append(f"{label}: pipeline tags.source must be 'adf', 'airflow', or 'oozie'")
             continue
 
         status = pipeline.get("reconciliation_status")
@@ -2549,18 +2575,18 @@ def _report_reconciliation_failures(report_path: Path) -> list[str]:
 
         audit = pipeline.get("audit")
         if not isinstance(audit, dict) or not required_airflow_audit_fields.issubset(audit):
-            failures.append(f"{label}: Airflow source-audit metadata is missing or incomplete")
+            failures.append(f"{label}: {source} source-audit metadata is missing or incomplete")
             continue
         migration_status = pipeline.get("migration_status", "included")
         if migration_status not in {"included", "excluded"}:
-            failures.append(f"{label}: unknown migration_status {migration_status!r} for Airflow")
+            failures.append(f"{label}: unknown migration_status {migration_status!r} for {source}")
             continue
         if status == "excluded":
             if migration_status != "excluded":
                 failures.append(f"{label}: reconciliation_status 'excluded' requires migration_status 'excluded'")
             continue
         if status not in airflow_statuses:
-            failures.append(f"{label}: unknown reconciliation_status {status!r} for Airflow")
+            failures.append(f"{label}: unknown reconciliation_status {status!r} for {source}")
             continue
         if migration_status == "excluded" or status != "failed":
             continue
@@ -2947,6 +2973,7 @@ def _common_activity_kwargs(task_ir: dict[str, Any]) -> dict[str, Any]:
         "required_parameters": dict(task_ir.get("required_parameters") or {}),
         "compute_mode": task_ir.get("compute_mode"),
         "notifications": task_ir.get("notifications"),
+        "run_if": task_ir.get("run_if"),
     }
 
 

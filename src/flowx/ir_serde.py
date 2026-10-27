@@ -131,6 +131,8 @@ def activity_to_dict(task: Activity) -> dict[str, Any]:
         task_dict["depends_on"] = [
             {"task_key": dependency.task_key, "outcome": dependency.outcome} for dependency in task.depends_on
         ]
+    if task.run_if:
+        task_dict["run_if"] = task.run_if
     if task.cluster:
         task_dict["cluster"] = task.cluster
     if task.existing_cluster_id:

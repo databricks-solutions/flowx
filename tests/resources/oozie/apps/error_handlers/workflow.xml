@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow-app name="error_handlers" xmlns="uri:oozie:workflow:1.0">
+    <start to="step1"/>
+    <action name="step1">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>step1</name>
+            <class>com.example.step1</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="step2"/>
+        <error to="fail"/>
+    </action>
+    <action name="step2">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>step2</name>
+            <class>com.example.step2</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="step3"/>
+        <error to="notify"/>
+    </action>
+    <action name="step3">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>step3</name>
+            <class>com.example.step3</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="step4"/>
+        <error to="notify"/>
+    </action>
+    <action name="step4">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>step4</name>
+            <class>com.example.step4</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="end"/>
+        <error to="end"/>
+    </action>
+    <action name="notify">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>notify</name>
+            <class>com.example.notify</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="fail"/>
+        <error to="fail"/>
+    </action>
+    <kill name="fail">
+        <message>Workflow failed</message>
+    </kill>
+    <end name="end"/>
+</workflow-app>

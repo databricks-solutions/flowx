@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow-app name="spark_python_local" xmlns="uri:oozie:workflow:1.0">
+    <start to="run_script"/>
+    <action name="run_script">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>local[*]</master>
+            <name>run_script</name>
+            <jar>job.py</jar>
+            <arg>${wf:id()}</arg>
+        </spark>
+        <ok to="end"/>
+        <error to="fail"/>
+    </action>
+    <kill name="fail">
+        <message>Script failed</message>
+    </kill>
+    <end name="end"/>
+</workflow-app>

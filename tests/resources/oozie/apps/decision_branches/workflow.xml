@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow-app name="decision_branches" xmlns="uri:oozie:workflow:1.0">
+    <start to="prepare_counts"/>
+    <action name="prepare_counts">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>prepare_counts</name>
+            <class>com.example.prepare_counts</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="route"/>
+        <error to="fail"/>
+    </action>
+    <decision name="route">
+        <switch>
+            <case to="full_load">${mode eq 'full'}</case>
+            <case to="delta_load">${fs:exists(flagPath) and mode ne 'skip'}</case>
+            <case to="counters_load">${hadoop:counters('prepare_counts')['RECORDS']['OUT'] gt 0}</case>
+            <default to="publish"/>
+        </switch>
+    </decision>
+    <action name="full_load">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>full_load</name>
+            <class>com.example.full_load</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="publish"/>
+        <error to="fail"/>
+    </action>
+    <action name="delta_load">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>delta_load</name>
+            <class>com.example.delta_load</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="publish"/>
+        <error to="fail"/>
+    </action>
+    <action name="counters_load">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>counters_load</name>
+            <class>com.example.counters_load</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="publish"/>
+        <error to="fail"/>
+    </action>
+    <action name="publish">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <master>yarn</master>
+            <name>publish</name>
+            <class>com.example.publish</class>
+            <jar>lib/etl.jar</jar>
+        </spark>
+        <ok to="end"/>
+        <error to="fail"/>
+    </action>
+    <kill name="fail">
+        <message>Workflow failed</message>
+    </kill>
+    <end name="end"/>
+</workflow-app>

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workflow-app name="spark_jar_daily" xmlns="uri:oozie:workflow:1.0">
+    <start to="load_bookings"/>
+    <action name="load_bookings" retry-max="2" retry-interval="5">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <resource-manager>${jobTracker}</resource-manager>
+            <name-node>${nameNode}</name-node>
+            <master>yarn</master>
+            <mode>cluster</mode>
+            <name>load_bookings</name>
+            <class>com.ek.LoadBookings</class>
+            <jar>${nameNode}/apps/daily/lib/etl.jar</jar>
+            <spark-opts>--num-executors 6 --executor-cores 4 --executor-memory 16g --driver-memory 8g --conf spark.sql.shuffle.partitions=${shufflePartitions} --conf spark.yarn.maxAppAttempts=1 --queue ${queueName}</spark-opts>
+            <arg>--input</arg>
+            <arg>${inputDir}</arg>
+            <arg>--date</arg>
+            <arg>${runDate}</arg>
+        </spark>
+        <ok to="aggregate"/>
+        <error to="fail"/>
+    </action>
+    <action name="aggregate">
+        <spark xmlns="uri:oozie:spark-action:1.0">
+            <resource-manager>${jobTracker}</resource-manager>
+            <name-node>${nameNode}</name-node>
+            <master>yarn</master>
+            <mode>cluster</mode>
+            <name>aggregate</name>
+            <class>com.ek.LoadBookings</class>
+            <jar>${nameNode}/apps/daily/lib/etl.jar</jar>
+            <spark-opts>--num-executors 6 --executor-cores 4 --executor-memory 16g --driver-memory 8g --conf spark.sql.shuffle.partitions=${shufflePartitions} --conf spark.yarn.maxAppAttempts=1 --queue ${queueName}</spark-opts>
+        </spark>
+        <ok to="end"/>
+        <error to="fail"/>
+    </action>
+    <kill name="fail">
+        <message>Daily load failed: ${wf:errorMessage(wf:lastErrorNode())}</message>
+    </kill>
+    <end name="end"/>
+</workflow-app>

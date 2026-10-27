@@ -30,7 +30,7 @@ def test_get_source_returns_phase_modules():
 
 def test_get_unknown_source_raises():
     with pytest.raises(KeyError, match="Unknown source"):
-        get_source("oozie")
+        get_source("nifi")
 
 
 # --------------------------------------------------------------------------------------

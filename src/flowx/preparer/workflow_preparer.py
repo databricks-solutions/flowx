@@ -13,6 +13,7 @@ from flowx.models.ir import (
     CopyActivity,
     DbtFactoryActivity,
     DeleteActivity,
+    Dependency,
     ExecutePipelineActivity,
     FilterActivity,
     ForEachActivity,
@@ -102,6 +103,17 @@ def run_if_from_adf_outcomes(outcomes: list[str | None]) -> str | None:
     return None
 
 
+# condition_task outcomes travel on the dependency itself; every other outcome only shapes run_if.
+_CONDITION_OUTCOMES: frozenset[str] = frozenset({"true", "false"})
+
+
+def _dependency_entry(dependency: Dependency) -> dict[str, str]:
+    """Renders one IR dependency as a DAB depends_on entry."""
+    if dependency.outcome in _CONDITION_OUTCOMES:
+        return {"task_key": dependency.task_key, "outcome": dependency.outcome}
+    return {"task_key": dependency.task_key}
+
+
 def build_common_task_fields(activity: Activity) -> dict[str, Any]:
     """Builds the task-level fields shared by every DAB task type.
 
@@ -112,9 +124,9 @@ def build_common_task_fields(activity: Activity) -> dict[str, Any]:
     task: dict[str, Any] = {"task_key": activity.task_key}
 
     if activity.depends_on:
-        task["depends_on"] = [{"task_key": dep.task_key} for dep in activity.depends_on]
-        run_if = run_if_from_adf_outcomes([dep.outcome for dep in activity.depends_on])
-        if run_if:
+        task["depends_on"] = [_dependency_entry(dep) for dep in activity.depends_on]
+        run_if = activity.run_if or run_if_from_adf_outcomes([dep.outcome for dep in activity.depends_on])
+        if run_if and run_if != "ALL_SUCCESS":
             task["run_if"] = run_if
 
     if activity.timeout_seconds is not None and activity.timeout_seconds > 0:
