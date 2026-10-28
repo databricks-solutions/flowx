@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>flowx routing review</title>
+<style>
+  /* Layout: a navy Databricks band, then one centred column of short, decision-first sections. */
+  :root {
+    --navy: #1b3139; --navy-soft: #2c4651; --lava: #ff3621; --lava-ink: #bd2b17;
+    --oat: #f9f7f4; --oat-deep: #eeede9; --line: #dcd8d0; --ink: #1b3139; --muted: #5b6b70; --paper: #ffffff;
+    --det: #00785a; --det-bg: #e3f4ee; --agt: #1d5fa8; --agt-bg: #e4eefa;
+    --wait: #a8460b; --wait-bg: #fdeedd; --pend: #6b5a00; --pend-bg: #fbf3cf;
+    --sans: "DM Sans", "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
+    --mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--oat); color: var(--ink); font: 15px/1.55 var(--sans); }
+  .band { background: var(--navy); color: var(--paper); padding-block: 22px 26px; padding-inline: 20px; }
+  .band-inner, main { max-width: 1040px; margin-inline: auto; }
+  .brand { font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; color: #c9d3d6; }
+  h1 { margin: 10px 0 4px; font-size: 26px; line-height: 1.2; font-weight: 700; text-wrap: balance; }
+  .band p { margin: 0; color: #c9d3d6; max-width: 70ch; }
+  main { padding-block: 24px 48px; padding-inline: 20px; display: grid; gap: 22px; }
+  section { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; }
+  h2 { margin: 0 0 12px; font-size: 18px; font-weight: 700; text-wrap: balance; }
+  h3 { margin: 0; font-size: 15px; font-weight: 700; }
+  p { margin: 0; }
+  .lead { font-size: 16px; max-width: 72ch; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  code, .mono { font-family: var(--mono); font-size: 13px; }
+  .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+  @media (max-width: 560px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .tile { background: var(--oat); border-radius: 8px; padding: 12px 14px; }
+  .tile b { display: block; font-size: 26px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .tile span { font-size: 13px; color: var(--muted); }
+  .tile.alert b { color: var(--lava-ink); }
+  .stack { display: grid; gap: 12px; }
+  .callout { border-left: 3px solid var(--lava); background: var(--oat); padding: 12px 14px; border-radius: 0 8px 8px 0;
+    display: grid; gap: 6px; }
+  .pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    white-space: nowrap; }
+  .pill-det { color: var(--det); background: var(--det-bg); }
+  .pill-agt { color: var(--agt); background: var(--agt-bg); }
+  .pill-pend { color: var(--pend); background: var(--pend-bg); }
+  .pill-wait { color: var(--wait); background: var(--wait-bg); }
+  .pill-muted { color: var(--muted); background: var(--oat-deep); }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--muted); background: var(--oat); padding: 8px 10px; }
+  td { padding: 10px; border-top: 1px solid var(--line); vertical-align: top; }
+  td.nowrap { white-space: nowrap; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: grid; gap: 8px; min-width: 0; }
+  .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .status { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+  .status div { display: flex; align-items: center; gap: 8px; }
+  ul, ol { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+  dl { margin: 0; display: grid; gap: 10px; }
+  dt { font-weight: 600; }
+  dd { margin: 2px 0 0; }
+  details { border-top: 1px solid var(--line); padding-top: 10px; }
+  summary { cursor: pointer; font-weight: 600; color: var(--navy-soft); }
+  summary:focus-visible { outline: 2px solid var(--lava); outline-offset: 2px; }
+  details > .stack { margin-top: 12px; }
+  pre { margin: 0; background: var(--navy); color: #e8edef; padding: 12px 14px; border-radius: 8px; overflow-x: auto;
+    font: 13px/1.5 var(--mono); }
+  footer { max-width: 1040px; margin: 0 auto; padding: 0 20px 40px; }
+</style>
+</head>
+<body>
+<header class="band">
+  <div class="band-inner">
+    <div class="brand">Databricks &middot; flowx migration</div>
+    <h1>Routing review</h1>
+    $source_line
+  </div>
+</header>
+<main>
+<section id="summary">
+  <h2>At a glance</h2>
+  $summary
+</section>
+
+<section id="source">
+  <h2>What the source does</h2>
+  $source
+</section>
+
+<section id="components">
+  <h2>Recommended conversion</h2>
+  $components
+</section>
+
+<section id="groupings">
+  <h2>Suggested groupings</h2>
+  $groupings
+</section>
+
+<section id="conversion">
+  <h2>What happens next</h2>
+  $conversion
+</section>
+
+<section id="conversation">
+  <h2>What you told us</h2>
+  $conversation
+</section>
+
+<section id="findings">
+  <h2>Notes</h2>
+  $findings
+</section>
+
+<section id="steer">
+  <h2>How to change a decision</h2>
+  $steer
+</section>
+</main>
+<footer>
+  $details
+</footer>
+</body>
+</html>
