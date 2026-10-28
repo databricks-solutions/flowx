@@ -344,10 +344,11 @@ Its guarantees:
 - **One at a time per output folder**: route, fill-agentic and a merge into the live report each hold
   `metadata/.route.lock` while they work, and refuse, writing nothing, while another holds it (route
   and fill-agentic return the reason under `violations`; a merge prints it and exits 1). Run fills one
-  after another, never in parallel. A lock is left behind only when a run is stopped mid-write; then
-  delete it, run route, and run the refused fill or merge again (on the hosted server, run discover
-  again, which moves `metadata/`, `.work/` and the lock into `metadata/archive/`, then enrich if you
-  used it, convert, route, and every fill and merge again).
+  after another, never in parallel. A lock is left behind only when a run is stopped mid-write, or when
+  writing the lock itself fails and the command can't confirm the lock is its own (it then writes
+  nothing); then delete it, run route, and run the refused fill or merge again (on the hosted server,
+  run discover again, which moves `metadata/`, `.work/` and the lock into `metadata/archive/`, then
+  enrich if you used it, convert, route, and every fill and merge again).
 
 ### Authoring an `AgenticComponentActivity` (the escape hatch)
 
