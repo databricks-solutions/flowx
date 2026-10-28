@@ -6,6 +6,14 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, TypeAlias
 
+# The lineage types are shared with the discovery graph, so they live in their own module. They are
+# re-exported here so existing ``flowx.models.ir`` imports keep working.
+from flowx.models.lineage import ControlEdge as ControlEdge
+from flowx.models.lineage import DataAsset as DataAsset
+from flowx.models.lineage import DataEdge as DataEdge
+from flowx.models.lineage import Lineage as Lineage
+from flowx.models.lineage import MotifAnnotation as MotifAnnotation
+
 if TYPE_CHECKING:
     from flowx.adapter.models import TranslationConfiguration
 
