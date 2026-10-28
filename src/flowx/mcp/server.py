@@ -170,6 +170,52 @@ def _excluded_dags(parameters: dict[str, Any]) -> list[str]:
     return [str(item) for item in value]
 
 
+def _packaging_args(parameters: dict[str, Any]) -> list[str]:
+    """Forwards the bundle-layout parameters to ``package`` as its CLI flags, refusing a mix that won't apply.
+
+    ``ValueError`` (which the dispatcher returns as ``ok: false``) is raised first for any of the three
+    that is set but isn't a string, because the CLI would only ever see it stringified (``False`` as the
+    spec path ``"False"``). A ``group_spec`` means "package by this spec", so it then fills in
+    ``per-group`` and ``spec`` for whichever of the other two is unset. ``ValueError`` is also raised
+    when ``group_by`` or ``group_spec`` is set but ``packaging_mode`` isn't ``per-group``, or when
+    ``group_by`` is ``spec`` without a ``group_spec`` or a ``group_spec`` comes with another
+    ``group_by``, because the CLI would quietly lay the bundles out without them. Anything else is
+    forwarded verbatim: unset keys are left off so the CLI's own defaults apply (``per-pipeline``,
+    ``inferred``), and an unrecognized string (``""`` included) reaches the CLI and is refused there
+    exactly as on the command line. Only a missing key or ``None`` counts as unset, plus a blank
+    ``group_spec`` because ``inputs package`` leaves it blank by default.
+    """
+    for key in ("packaging_mode", "group_by", "group_spec"):
+        value = parameters.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{key} must be a string, got {value!r}.")
+    group_spec = parameters.get("group_spec")
+    if group_spec == "":
+        group_spec = None
+    packaging_mode = parameters.get("packaging_mode")
+    group_by = parameters.get("group_by")
+    if group_spec is not None:
+        packaging_mode = "per-group" if packaging_mode is None else packaging_mode
+        group_by = "spec" if group_by is None else group_by
+    outside_per_group = (group_by is not None or group_spec is not None) and packaging_mode != "per-group"
+    spec_unpaired = (group_by == "spec") != (group_spec is not None)
+    if outside_per_group or spec_unpaired:
+        raise ValueError(
+            f"packaging_mode {parameters.get('packaging_mode')!r}, group_by {parameters.get('group_by')!r} and "
+            f"group_spec {parameters.get('group_spec')!r} don't fit together: group_by and group_spec only apply "
+            "with packaging_mode 'per-group', and group_by 'spec' and a group_spec go together (a group_spec "
+            "alone implies both)."
+        )
+    args: list[str] = []
+    if packaging_mode is not None:
+        args += ["--packaging-mode", packaging_mode]
+    if group_by is not None:
+        args += ["--group-by", group_by]
+    if group_spec is not None:
+        args += ["--group-spec", group_spec]
+    return args
+
+
 def _cmd_inputs(p: dict[str, Any]) -> dict[str, Any]:
     phase = p["phase"]
     args = ["inputs", phase]
@@ -358,6 +404,7 @@ def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
         args += ["--no-download-workspace-files"]
     if p.get("keep_intermediates"):
         args += ["--keep-intermediates"]
+    args += _packaging_args(p)
     result = runner.run_adapter(args)
     out = Path(output_dir)
     setup_md = runner.read_text(out / "SETUP.md") or runner.read_text(out / "setup" / "SETUP.md")
@@ -375,7 +422,10 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
     is satisfied, performing any data lookups), then re-calls ``migrate`` a single time with the
     complete ``answers`` (``["option_id=value", ...]``), which applies them and packages
     (``status="completed"``). No per-follow-up round trip. Pass ``interactive=False`` to skip the
-    prompt and package with defaults.
+    prompt and package with defaults; only an ``answers`` re-call reuses the report, so a later
+    ``interactive=False`` call starts over from discover and needs the source again. The packaging
+    keys aren't remembered between calls: every call checks its own before anything runs, but only
+    the call that packages lays the bundles out by them, so a re-call has to repeat them.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     source_name = _source_name(p)
@@ -383,6 +433,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
     schema = p.get("schema", "default")
     pipeline = p.get("pipeline")
     excluded_dags = _excluded_dags(p)
+    packaging_args = _packaging_args(p)
     answers = p.get("answers") or []
     interactive = p.get("interactive", True)
     out = Path(output_dir)
@@ -446,8 +497,12 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                         "only the options whose `show_when` clauses are all satisfied by the answers "
                         "collected so far, validating each answer against its `choices`. When the user "
                         "has answered every applicable option, call migrate again with the full "
-                        "`answers` list (['option_id=value', ...]) to apply and package in one shot. To "
-                        "accept defaults and skip prompting, call migrate with interactive=false."
+                        "`answers` list (['option_id=value', ...]) to apply and package in one shot, "
+                        "repeating any packaging_mode, group_by and group_spec from this call: they "
+                        "aren't remembered between calls and only shape the package step of the call "
+                        "that packages, so leaving them out packages with the default layout. To accept "
+                        "defaults instead, call migrate with interactive=false and all of this call's "
+                        "parameters, source included; that call reruns discover and convert."
                     ),
                 }
 
@@ -466,7 +521,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": False, "status": "failed", "failed_phase": "apply_answers", "steps": steps}
 
         package_res = runner.run_adapter(
-            ["package", "--output-dir", output_dir, "--catalog", catalog, "--schema", schema]
+            ["package", "--output-dir", output_dir, "--catalog", catalog, "--schema", schema, *packaging_args]
         )
         extra = _bundle_output(p, out) if package_res.ok else {}
         steps["package"] = _phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra)
@@ -598,13 +653,29 @@ def build_server() -> FastMCP:
           | source_dir).
         - "package": output_dir, output_volume_path, output_workspace_path, report_path,
           catalog(default "main"), schema(default "default"), bundle_name, profile,
-          download_workspace_files(bool), keep_intermediates(bool).
+          download_workspace_files(bool), keep_intermediates(bool), packaging_mode, group_by, group_spec.
+          ``packaging_mode`` ("per-pipeline" default | "single" | "per-group") lays a multi-pipeline
+          ADF migration out into bundles; for "per-group", ``group_by`` is "inferred" (default, by the
+          Run Pipeline call graph) or "spec", which uses ``group_spec``: a JSON/YAML file mapping
+          pipelines to groups (blank counts as unset). Sending ``group_spec`` fills in "per-group" and
+          "spec" for whichever of the two is unset. After that, ``ok: false`` is returned when
+          ``group_by`` or ``group_spec`` is sent without ``packaging_mode`` "per-group", or when
+          ``group_by`` "spec" comes without a ``group_spec`` or a ``group_spec`` with another
+          ``group_by``. ``group_spec`` must be a path the server itself can read, so on the hosted
+          server use "per-group" with ``group_by`` "inferred", or a server-local path. Any of the three
+          sent as a non-string, an unrecognized ``packaging_mode`` or ``group_by`` (``""`` included),
+          or a missing or malformed ``group_spec`` is also refused with ``ok: false``. A multi-DAG
+          Airflow migration is always packaged as one combined bundle: it never reads the spec file and
+          refuses only a non-string or unrecognized value or one of the combinations above.
         - "migrate": source(req), one ADF source key | airflow_source_path (req), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
-          exclude_dag | exclude_dags (Airflow, repeatable list),
+          exclude_dag | exclude_dags (Airflow, repeatable list), packaging_mode, group_by, group_spec
+          (as for "package", Airflow caveat included; a combination refused there is refused before
+          discover runs),
           answers(list of "ID=VALUE"), interactive(bool, default true), lookup_csv — runs
           discover→convert→package, returning the full option schema once (status "needs_input") when
-          configuration is available; re-call once with the complete answers to apply (see below).
+          configuration is available; re-call once with the complete answers to apply, repeating any
+          packaging_mode, group_by and group_spec (see below).
         - "profile": source(req: "adf"), output_dir, days(default 30), subscription_id, resource_group,
           factory_name (only with resource_group) — live Azure scan estimating current ADF spend; returns
           ``report_md`` and ``report_csv`` (metadata/tco/cost_comparison.md / .csv). Needs the server's
@@ -654,7 +725,12 @@ def build_server() -> FastMCP:
           ``metadata_driven_lookup_tool=have``). No round trip per follow-up.
         - When every applicable option is answered, submit **once**: "migrate" re-called with the full
           ``answers`` (applies + packages), or standalone "apply_answers" → "package". The server still
-          validates every answer at apply time. ``interactive=false`` on "migrate" skips prompting.
+          validates every answer at apply time. ``interactive=false`` on the first "migrate" call
+          skips prompting; sent after "needs_input" it starts over, so it needs the source again and
+          reruns discover and convert. ``packaging_mode``, ``group_by`` and ``group_spec`` aren't
+          remembered between calls: every call checks its own, but only the package step of the call
+          that packages uses them, so repeat them on the "migrate" re-call or pass them to "package";
+          left out, it packages with the default layout.
 
         Returns a dict ``{"ok": bool, ...}`` with per-command summaries (inventory / translation /
         bundle_files / questions / result) and a "process" block (stdout/stderr/returncode). An unknown

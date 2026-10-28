@@ -383,7 +383,8 @@ _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
             "``single`` (all pipelines in one bundle), or ``per-group`` (group pipelines into "
             "bundles by their Run Pipeline call graph, or by an explicit --group-spec). Forwarded "
             "to ``package`` as ``--packaging-mode``. For a single-pipeline migration every mode is "
-            "equivalent."
+            "equivalent, and a multi-DAG Airflow migration is always packaged as one combined bundle "
+            "whatever the mode."
         ),
         default="per-pipeline",
         required=False,
@@ -393,9 +394,13 @@ _PACKAGE_OPTIONS: tuple[MigrationInputOption, ...] = (
         prompt="Path to a pipeline->group spec (only for --packaging-mode per-group with explicit groups)?",
         description=(
             "Optional. JSON/YAML file mapping pipelines to group names (``{pipeline: group}`` or "
-            "``{group: [pipelines]}``). When set, package is run with ``--packaging-mode per-group "
-            "--group-by spec --group-spec <path>``. Leave blank to infer groups from the Run "
-            "Pipeline call graph."
+            "``{group: [pipelines]}``). Set packaging mode to ``per-group`` when giving one: package "
+            "then runs with ``--packaging-mode per-group --group-by spec --group-spec <path>``. Leave "
+            "blank to infer groups from the Run Pipeline call graph. Through MCP, a spec or "
+            "``group_by`` with any other packaging mode is refused, as are ``group_by`` ``spec`` "
+            "without a spec and a spec with another ``group_by``. It must be a path the server itself "
+            "can read, so on the hosted server leave it blank (``per-group`` then uses "
+            "``--group-by inferred``) or use a server-local path."
         ),
         default="",
         required=False,
