@@ -106,6 +106,19 @@ narrative.
    and it does not relax the rule above: you still **verify the release state against the current public
    Databricks docs before recommending** (never "recommend now, verify later").
 
+   **Check every pattern you recommend against the current Databricks platform limits.** Before you name
+   a pattern in `recommended_patterns` or `system_recommendation`, read the limits it rests on live from
+   the current public Databricks docs (for Lakeflow Connect, the connector's limits page and the resource
+   limits page) and check the estate's facts against them. Don't recommend a pattern a limit rules out.
+   Record each limit you relied on in the `conversion_notes` of every pipeline the recommendation covers
+   (for `system_recommendation`, each pipeline it applies to) as
+   `limit: <name> = <value> (source: <page>, read <date>)`. When an estate fact a limit check needs is
+   still unknown, note the pattern there as `not qualified: needs <fact>`; when the docs can't be
+   reached, as `not qualified: limits not checked`. Never use a remembered number. Release state isn't a
+   limit: it follows the rule above, so an unlabelled page is `release_state: unknown`. `flowx-route`
+   lists the limits its database-ingestion patterns rest on; for any other pattern, read the limits on
+   that capability's own pages.
+
 3. **Tell the user what you found, then ask at most three open questions.** Some facts that decide
    the target pattern aren't in the export, such as how long a list read at run time really is. Asking
    now, before convert, brings scale up before anything is converted. See "Summarise and ask" below.
