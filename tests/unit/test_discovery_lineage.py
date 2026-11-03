@@ -367,3 +367,28 @@ def test_calls_that_differ_only_in_wait_are_kept_apart() -> None:
         known_workflows={"child"},
     )
     assert [edge.wait_for_completion for edge in edges] == [True, False]
+
+
+def test_data_edges_that_differ_only_in_asset_type_are_kept_apart() -> None:
+    """Writes of one name as a file and as a table both hand off, whichever comes first."""
+    as_file = DataAsset(signature="s", asset_type="file")
+    as_table = DataAsset(signature="s", asset_type="table")
+    reader = _node("r", reads=[DataAsset(signature="s")])
+
+    file_first = build_graph_lineage(_graph(_node("w", writes=[as_file, as_table]), reader)).data_edges
+    table_first = build_graph_lineage(_graph(_node("w", writes=[as_table, as_file]), reader)).data_edges
+
+    assert [edge.asset_type for edge in file_first] == ["file", "table"]
+    assert [edge.asset_type for edge in table_first] == ["table", "file"]
+
+
+def test_an_empty_asset_type_counts_as_unknown_in_the_dedupe_key() -> None:
+    """An empty asset_type and a missing one are the same unknown, whichever side carries it."""
+    reader = _node("r", reads=[DataAsset(signature="s"), DataAsset(signature="s", asset_type="")])
+    writer = _node("w", writes=[DataAsset(signature="s"), DataAsset(signature="s", asset_type="")])
+
+    on_the_reader = build_graph_lineage(_graph(_node("w", writes=[DataAsset(signature="s")]), reader)).data_edges
+    on_the_writer = build_graph_lineage(_graph(writer, _node("r", reads=[DataAsset(signature="s")]))).data_edges
+
+    assert [edge.asset_type for edge in on_the_reader] == [None]
+    assert [edge.asset_type for edge in on_the_writer] == [None]
