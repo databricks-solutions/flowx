@@ -182,7 +182,9 @@ class SourceNode:
             shared typed field yet. Connection / linked-service details live
             here for now -- a typed connection field is a deliberate future
             expansion point.
-        raw: Verbatim source dict for this node, for lossless fallback.
+        raw: The source dict for this node, kept for fallback, or ``None`` when
+            the source keeps none. A source may clean it of fields that carry no
+            meaning, such as export metadata.
     """
 
     source_id: str
@@ -220,12 +222,12 @@ class ContainerNode(SourceNode):
 
 @dataclass(slots=True, kw_only=True)
 class GapNode(SourceNode):
-    """A node the source could not classify, kept with its raw payload + reason.
+    """A node the source could not classify, kept with its reason and any raw payload.
 
     Its :attr:`concept` defaults to ``CONCEPT_GAP`` so gaps are uniform across
-    sources. The unclassifiable payload is preserved in ``raw`` (inherited) and
-    the human-readable cause in :attr:`reason`, so discovery can report and
-    later resolve it rather than dropping it.
+    sources. The unclassifiable payload goes in ``raw`` (inherited) when the
+    source keeps it, and the human-readable cause in :attr:`reason`, so
+    discovery can report and later resolve it rather than dropping it.
 
     Attributes:
         reason: Why the node could not be classified.
@@ -267,7 +269,9 @@ class SourceGraph:
         properties: Free-form bag for graph-level platform-specific attributes.
         extensions: Alias-free overflow for anything else source-specific
             (e.g. ADF ``folder``, Airflow global Variables).
-        raw: Verbatim source dict for the whole workflow.
+        raw: The source dict for the whole workflow, or ``None`` when the source
+            keeps none. A source may clean it of fields that carry no meaning,
+            such as export metadata.
     """
 
     name: str
