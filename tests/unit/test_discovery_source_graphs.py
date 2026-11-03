@@ -18,7 +18,14 @@ from flowx.discovery_serde import (
     write_source_graphs,
 )
 from flowx.ir_serde import lineage_to_dict
-from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceDependency, SourceGraph, SourceNode
+from flowx.models.discovery import (
+    CONCEPT_NOTEBOOK,
+    ContainerNode,
+    ParameterSpec,
+    SourceDependency,
+    SourceGraph,
+    SourceNode,
+)
 from flowx.models.ir import ControlEdge, Lineage, MotifAnnotation
 
 
@@ -75,6 +82,25 @@ def test_hashes_do_not_depend_on_formatting(tmp_path: Path) -> None:
     assert [graph.name for graph in read_source_graphs(compact)] == ["first"]
 
 
+@pytest.mark.parametrize(
+    ("default", "read_back"),
+    [
+        ({10: "big", 9: "small"}, {"10": "big", "9": "small"}),
+        ({1: "a", "b": 2}, {"1": "a", "b": 2}),
+    ],
+    ids=["int_keys", "mixed_keys"],
+)
+def test_parameter_default_with_non_string_keys_reads_back(tmp_path: Path, default: dict, read_back: dict) -> None:
+    """A dict default whose keys JSON turns into strings still verifies after discover saves it."""
+    graph = SourceGraph(name="first", source="unit", parameters={"buckets": ParameterSpec(default=default)})
+    path = tmp_path / "source_graphs.json"
+
+    write_source_graphs(path, [graph], source="unit")
+    [restored] = read_source_graphs(path)
+
+    assert restored.parameters["buckets"].default == read_back
+
+
 @pytest.mark.parametrize("missing_key", ["graph_sha256", "document_sha256"])
 def test_document_missing_a_hash_is_rejected(missing_key: str) -> None:
     """Deleting a hash field cannot get an edited file past verification."""
@@ -113,6 +139,29 @@ def test_writer_refuses_a_graph_from_another_source(tmp_path: Path) -> None:
         source_graphs_document([_graph("first")], source="other")
     with pytest.raises(ValueError, match="holds a graph from another source"):
         write_source_graphs(path, [_graph("first")], source="other")
+    assert not path.exists()
+
+
+class _CustomNode(SourceNode):
+    """A node class the reader has no ``node_type`` for."""
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["top_level", "inside_a_container"])
+def test_writer_refuses_a_node_type_the_reader_would_refuse(tmp_path: Path, nested: bool) -> None:
+    """Discover cannot save a node the reader would later reject as an unknown node_type."""
+    custom = _CustomNode(source_id="c", task_key="c", concept=CONCEPT_NOTEBOOK, source="unit")
+    task = (
+        ContainerNode(source_id="box", task_key="box", concept="container", source="unit", branches={"body": [custom]})
+        if nested
+        else custom
+    )
+    graph = SourceGraph(name="first", source="unit", tasks=[task])
+    path = tmp_path / "source_graphs.json"
+
+    with pytest.raises(ValueError, match="_CustomNode"):
+        source_graphs_document([graph], source="unit")
+    with pytest.raises(ValueError, match="_CustomNode"):
+        write_source_graphs(path, [graph], source="unit")
     assert not path.exists()
 
 
