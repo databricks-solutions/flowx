@@ -118,7 +118,10 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
     in the same order as ``graphs``, and ``document_sha256`` covers ``contract_version``,
     ``source`` and ``graphs``. Both hashes are taken over canonical JSON (sorted keys,
     compact separators), so they do not depend on how the file happens to be indented.
-    The reader refuses any other top-level key, so nothing rides along unhashed.
+    The document is put through JSON before it is hashed, so the hashes cover what the
+    reader will load back (an int-keyed parameter default comes back with string keys,
+    for example) and the returned document is already in that form. The reader refuses
+    any other top-level key, so nothing rides along unhashed.
 
     Args:
         graphs: The workflows discover mapped onto the discovery graph contract.
@@ -132,11 +135,15 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
             exactly one of the three node classes, so the reader would refuse the
             document.
     """
-    document: dict[str, Any] = {
-        "contract_version": SOURCE_GRAPHS_CONTRACT_VERSION,
-        "source": source,
-        "graphs": [source_graph_to_dict(graph) for graph in graphs],
-    }
+    document: dict[str, Any] = json.loads(
+        json.dumps(
+            {
+                "contract_version": SOURCE_GRAPHS_CONTRACT_VERSION,
+                "source": source,
+                "graphs": [source_graph_to_dict(graph) for graph in graphs],
+            }
+        )
+    )
     _check_graph_sources(document)
     document["graph_sha256"] = [_canonical_sha256(graph) for graph in document["graphs"]]
     document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})

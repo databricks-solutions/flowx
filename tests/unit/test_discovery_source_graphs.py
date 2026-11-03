@@ -18,7 +18,14 @@ from flowx.discovery_serde import (
     write_source_graphs,
 )
 from flowx.ir_serde import lineage_to_dict
-from flowx.models.discovery import CONCEPT_NOTEBOOK, ContainerNode, SourceDependency, SourceGraph, SourceNode
+from flowx.models.discovery import (
+    CONCEPT_NOTEBOOK,
+    ContainerNode,
+    ParameterSpec,
+    SourceDependency,
+    SourceGraph,
+    SourceNode,
+)
 from flowx.models.ir import ControlEdge, Lineage, MotifAnnotation
 
 
@@ -73,6 +80,25 @@ def test_hashes_do_not_depend_on_formatting(tmp_path: Path) -> None:
     compact.write_text(json.dumps(document, separators=(",", ":")), encoding="utf-8")
 
     assert [graph.name for graph in read_source_graphs(compact)] == ["first"]
+
+
+@pytest.mark.parametrize(
+    ("default", "read_back"),
+    [
+        ({10: "big", 9: "small"}, {"10": "big", "9": "small"}),
+        ({1: "a", "b": 2}, {"1": "a", "b": 2}),
+    ],
+    ids=["int_keys", "mixed_keys"],
+)
+def test_parameter_default_with_non_string_keys_reads_back(tmp_path: Path, default: dict, read_back: dict) -> None:
+    """A dict default whose keys JSON turns into strings still verifies after discover saves it."""
+    graph = SourceGraph(name="first", source="unit", parameters={"buckets": ParameterSpec(default=default)})
+    path = tmp_path / "source_graphs.json"
+
+    write_source_graphs(path, [graph], source="unit")
+    [restored] = read_source_graphs(path)
+
+    assert restored.parameters["buckets"].default == read_back
 
 
 @pytest.mark.parametrize("missing_key", ["graph_sha256", "document_sha256"])
