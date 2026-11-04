@@ -66,7 +66,7 @@ def test_written_document_round_trips_and_carries_version_and_hashes(tmp_path: P
     assert on_disk == written
     assert on_disk["contract_version"] == SOURCE_GRAPHS_CONTRACT_VERSION
     assert on_disk["source"] == "unit"
-    assert len(on_disk["graph_sha256"]) == 2
+    assert set(on_disk) == {"contract_version", "source", "graphs", "document_sha256"}
     assert len(on_disk["document_sha256"]) == 64
     assert [source_graph_to_dict(graph) for graph in read_source_graphs(path)] == [
         source_graph_to_dict(graph) for graph in graphs
@@ -101,23 +101,13 @@ def test_parameter_default_with_non_string_keys_reads_back(tmp_path: Path, defau
     assert restored.parameters["buckets"].default == read_back
 
 
-@pytest.mark.parametrize("missing_key", ["graph_sha256", "document_sha256"])
-def test_document_missing_a_hash_is_rejected(missing_key: str) -> None:
-    """Deleting a hash field cannot get an edited file past verification."""
-    document = source_graphs_document([_graph("first")], source="unit")
-    del document[missing_key]
-
-    with pytest.raises(ValueError, match=f"missing {missing_key}"):
-        source_graphs_from_document(document)
-
-
-def test_edited_graph_with_both_hashes_deleted_fails_closed() -> None:
+def test_document_missing_its_hash_is_rejected() -> None:
+    """Deleting the hash cannot get an edited file past verification."""
     document = source_graphs_document([_graph("first")], source="unit")
     document["graphs"][0]["tasks"][0]["native_type"] = "Edited"
-    del document["graph_sha256"]
     del document["document_sha256"]
 
-    with pytest.raises(ValueError, match="missing graph_sha256"):
+    with pytest.raises(ValueError, match="missing document_sha256"):
         source_graphs_from_document(document)
 
 
@@ -175,11 +165,11 @@ def test_unknown_top_level_key_is_rejected() -> None:
 
 
 def test_edited_graph_fails_closed() -> None:
-    """Changing a graph after discover wrote it is caught by the per-graph hash."""
+    """Changing a graph after discover wrote it is caught by the document hash."""
     document = source_graphs_document([_graph("first")], source="unit")
     document["graphs"][0]["tasks"][0]["native_type"] = "Edited"
 
-    with pytest.raises(ValueError, match="graph_sha256"):
+    with pytest.raises(ValueError, match="document_sha256"):
         source_graphs_from_document(document)
 
 
@@ -202,8 +192,7 @@ def test_unknown_contract_version_is_rejected() -> None:
 
 
 def _rehash(document: dict) -> dict:
-    """Recompute both hashes after an edit, so a test reaches the checks that come after them."""
-    document["graph_sha256"] = [canonical_sha256(graph) for graph in document["graphs"]]
+    """Recompute the hash after an edit, so a test reaches the checks that come after it."""
     document["document_sha256"] = canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
     return document
 
@@ -296,7 +285,7 @@ def test_motifs_round_trip_inside_the_hashed_graph() -> None:
     assert restored[0].lineage is not None
     assert restored[0].lineage.motifs == [_motif("database")]
     document["graphs"][0]["lineage"]["motifs"][0]["member_task_keys"] = ["a"]
-    with pytest.raises(ValueError, match="graph_sha256"):
+    with pytest.raises(ValueError, match="document_sha256"):
         source_graphs_from_document(document)
 
 

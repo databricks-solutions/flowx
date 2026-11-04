@@ -9,14 +9,14 @@ from __future__ import annotations
 from flowx.models.adf_ast import AdfDatasetReference, AdfDefinitions
 from flowx.models.ir import TranslationContext
 from flowx.sources.adf.dataset_identity import (
-    _backing_linked_service,
-    _dataset_props,
-    _effective_dataset_params,
-    _resolve_file_store,
-    _resolve_table_reference,
-    _resolve_table_store,
-    _unparameterised_linked_service_name,
-    _written_file_system,
+    backing_linked_service,
+    dataset_props,
+    effective_dataset_params,
+    resolve_file_store,
+    resolve_table_reference,
+    resolve_table_store,
+    unparameterised_linked_service_name,
+    written_file_system,
 )
 
 # Location types (lower-cased) that name no store of their own: the server, share, lakehouse or
@@ -35,14 +35,14 @@ _LINKED_SERVICE_STORE_LOCATIONS = frozenset(
 )
 
 
-def _resolve_dataset_store(
+def resolve_dataset_store(
     dataset_ref: AdfDatasetReference,
     definitions: AdfDefinitions,
     context: TranslationContext,
 ) -> tuple[str | None, bool]:
     """Return ``(store, location_names_store)`` for a dataset; the store is ``None`` unless provable.
 
-    * A table's store is the one :func:`_resolve_table_store` names.
+    * A table's store is the one :func:`resolve_table_store` names.
     * A file's store is ``<file system>@<account>``. When the account is hidden (a Key
       Vault or masked connection string), a plain, unparameterised linked service
       name stands in for it.
@@ -55,7 +55,7 @@ def _resolve_dataset_store(
     linked-service locations. A parameterised file system names no store. A masked
     one (holding ``*``) names a store that cannot be proven, so it gives ``(None, True)``.
     """
-    properties = _dataset_props(dataset_ref, definitions)
+    properties = dataset_props(dataset_ref, definitions)
     if properties is None:
         return None, False
     type_props = properties.get("typeProperties") or properties
@@ -69,19 +69,19 @@ def _resolve_dataset_store(
             isinstance(location_type, str) and location_type.lower() in _LINKED_SERVICE_STORE_LOCATIONS
         )
         if not location_names_store:
-            dataset_params = _effective_dataset_params(dataset_ref, properties)
-            file_system, account = _resolve_file_store(
-                location, _backing_linked_service(properties, definitions), dataset_params, context
+            dataset_params = effective_dataset_params(dataset_ref, properties)
+            file_system, account = resolve_file_store(
+                location, backing_linked_service(properties, definitions), dataset_params, context
             )
-            if file_system is None and "*" in _written_file_system(location, dataset_params, context):
+            if file_system is None and "*" in written_file_system(location, dataset_params, context):
                 return None, True
             location_names_store = file_system is not None
-    _, table = _resolve_table_reference(dataset_ref, properties, context)
+    _, table = resolve_table_reference(dataset_ref, properties, context)
     if table:
-        return _resolve_table_store(properties, definitions), location_names_store
+        return resolve_table_store(properties, definitions), location_names_store
     if not location_names_store:
         return None, False
     if file_system is None:
-        return _unparameterised_linked_service_name(properties, definitions), True
-    store = account or _unparameterised_linked_service_name(properties, definitions)
+        return unparameterised_linked_service_name(properties, definitions), True
+    store = account or unparameterised_linked_service_name(properties, definitions)
     return (f"{file_system}@{store}" if store else None), True

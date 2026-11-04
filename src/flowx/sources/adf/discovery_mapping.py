@@ -1,6 +1,6 @@
 """Map the ADF AST onto the source-neutral discovery graph contract (``SourceGraph``).
 
-This is the ADF half of the discovery contract (issue #62): it turns the typed
+This is the ADF half of the discovery contract: it turns the typed
 ADF AST (:mod:`flowx.models.adf_ast`) into the shared
 :class:`~flowx.models.discovery.SourceGraph` model that both ADF and Airflow
 align to. The mapping is deliberately **1:1 and lossless**:
@@ -18,7 +18,7 @@ align to. The mapping is deliberately **1:1 and lossless**:
   the target-side translation strategy -- rides in the ``properties`` /
   ``extensions`` seams rather than being dropped or forced into a field.
 
-Data lineage (#62b) is populated here now: every node's ``data_reads`` /
+Data lineage is populated here: every node's ``data_reads`` /
 ``data_writes`` are resolved from the ADF dataset references via
 :func:`~flowx.sources.adf.dataset_lineage.activity_data_assets` (the two-tier
 identity / signature model), and every ``ExecutePipeline`` node records the child

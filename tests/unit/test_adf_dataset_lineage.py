@@ -1773,7 +1773,10 @@ def test_call_site_parameters_that_are_not_a_map_do_not_crash() -> None:
 
 
 def test_a_reference_that_passes_no_folder_gets_no_signature_from_the_dataset_folder() -> None:
-    """Only a reference that passes a ``folderPath`` joins on folder shape; the dataset's own folder never adds one."""
+    """Only a reference that passes an anchored folder joins on folder shape; the dataset's own folder never adds one.
+
+    The folder can be passed as ``folderPath`` or as a parameter the dataset's own folder reads.
+    """
     definitions = _wrapped_folder_definitions(ds_out="archive", ds_in="archive")
     for definition in definitions.datasets.values():
         definition.properties["typeProperties"]["location"]["fileName"] = "@dataset().fileName"
@@ -2320,3 +2323,68 @@ def test_an_arm_named_linked_service_never_gives_an_identity_even_when_it_is_loa
 
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_file"), definitions) is None
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_table"), definitions) is None
+
+
+def test_a_folder_bound_through_any_parameter_name_gets_the_same_signature_as_folderpath() -> None:
+    """A dataset reading its folder from ``@dataset().dir`` joins on folder shape just as ``folderPath`` does."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(name, file_system="sales", folder_path="@dataset().dir", linked_service="ls_acctA")
+            for name in ("ds_out", "ds_in")
+        },
+        linked_services={"ls_acctA": _adls_linked_service("ls_acctA", account="acctA")},
+    )
+
+    def _copy(name: str, *, dataset: str, produced: bool) -> AdfActivity:
+        reference = AdfDatasetReference(
+            reference_name=dataset,
+            parameters={"dir": {"value": "@concat('landing/', pipeline().parameters.env)", "type": "Expression"}},
+        )
+        if produced:
+            return AdfActivity(name=name, type="Copy", outputs=[reference])
+        return AdfActivity(name=name, type="Copy", inputs=[reference])
+
+    _, writes = activity_data_assets(_copy("Write", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_copy("Read", dataset="ds_in", produced=False), definitions)
+
+    assert writes[0].signature == reads[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [("Write", "Read")]
+
+
+def test_a_parameter_the_dataset_folder_does_not_read_does_not_qualify_the_reference() -> None:
+    """Only a parameter the dataset's folder reads (or ``folderPath`` itself) can anchor the signature."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_out": _adls_dataset("ds_out", file_system="sales", folder_path="@dataset().dir", linked_service="ls")
+        },
+        linked_services={"ls": _adls_linked_service("ls", account="acctA")},
+    )
+    reference = AdfDatasetReference(reference_name="ds_out", parameters={"unrelated": "landing/orders"})
+
+    _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference]), definitions)
+
+    assert writes[0].signature == ""
+
+
+def test_dataset_parameter_text_inside_quotes_is_not_a_parameter_the_folder_reads() -> None:
+    """``'dataset().dir/'`` in quotes is literal text, so a passed ``dir`` does not anchor the reference."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_out": _adls_dataset(
+                "ds_out",
+                file_system="sales",
+                folder_path="@concat('dataset().dir/', pipeline().parameters.run)",
+                linked_service="ls",
+            )
+        },
+        linked_services={"ls": _adls_linked_service("ls", account="acctA")},
+    )
+    reference = AdfDatasetReference(reference_name="ds_out", parameters={"dir": "landing/orders"})
+
+    _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference]), definitions)
+
+    assert writes[0].signature == ""

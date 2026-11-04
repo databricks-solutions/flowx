@@ -609,7 +609,7 @@ class TestClearStaleOutputs:
 
 
 class TestZeroPipelineWarning:
-    """discover must fail loud (stderr) when it parses zero pipelines."""
+    """discover warns on stderr, and still exits 0, when it parses zero pipelines."""
 
     def test_arm_template_directory_warns_loudly(self, tmp_path, capsys):
         """A dir holding ARM-template .json (no pipelines/ layout) loads 0 pipelines + warns."""
@@ -620,8 +620,8 @@ class TestZeroPipelineWarning:
 
         exit_code = main(["--source-dir", str(source_dir), "--output-dir", str(tmp_path / "out")])
 
-        # Behaviour for the 0-pipeline case is unchanged (still exits 0); the deliverable is the
-        # loud stderr warning that steers the operator to pass the ARM template as the file path.
+        # The 0-pipeline case exits 0; the deliverable is the stderr warning that steers the
+        # operator to pass the ARM template as the file path.
         assert exit_code == 0
         stderr = capsys.readouterr().err
         assert "0 pipelines" in stderr

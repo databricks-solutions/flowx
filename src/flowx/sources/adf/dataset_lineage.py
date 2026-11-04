@@ -6,7 +6,7 @@ Each read or write gets two keys, and :mod:`flowx.lineage` joins on them:
   file path (``abfss://...`` down to the file name). It is set only when every part
   is a literal; anything parameterised or unresolved leaves it ``None``.
 * **signature**, the weak key. It equals the identity when there is one. Otherwise
-  it is the structural path signature (:func:`_path_signature`): the folder and file
+  it is the structural path signature (:func:`path_signature`): the folder and file
   name with literal text kept and one ``<P>`` slot per run-time value, prefixed
   ``ST[<store>]/`` when the store is known. It is empty when nothing literal anchors
   the path, when the activity overrides the dataset's location at run time, and it
@@ -26,11 +26,11 @@ from collections.abc import Callable, Iterator
 from flowx.models.adf_ast import AdfActivity, AdfDatasetReference, AdfDefinitions
 from flowx.models.ir import DataAsset, TranslationContext
 from flowx.sources.adf.dataset_identity import (
-    _expression_value,
+    expression_value,
     resolve_dataset_identity,
 )
-from flowx.sources.adf.dataset_store import _resolve_dataset_store
-from flowx.sources.adf.path_signature import _path_signature
+from flowx.sources.adf.dataset_store import resolve_dataset_store
+from flowx.sources.adf.path_signature import path_signature
 
 __all__ = ["activity_data_assets", "resolve_dataset_identity"]
 
@@ -107,7 +107,7 @@ def _names_any(settings: object, is_override_key: Callable[[str], bool]) -> bool
     is as empty as a bare ``""``.
     """
     return isinstance(settings, dict) and any(
-        _expression_value(value) and is_override_key(key) for key, value in settings.items()
+        expression_value(value) and is_override_key(key) for key, value in settings.items()
     )
 
 
@@ -125,7 +125,7 @@ def _dataset_ref_to_asset(
     references cannot join by name; an empty signature joins nothing but still
     records the read or write. With *location_overridden* neither key is derived.
     A dataset that names its store but cannot prove it (see
-    :func:`_resolve_dataset_store`) gets no signature, because a folder shape alone
+    :func:`resolve_dataset_store`) gets no signature, because a folder shape alone
     cannot tell two such stores apart.
     """
     if location_overridden:
@@ -135,15 +135,15 @@ def _dataset_ref_to_asset(
         # Mirror the identity into the signature so the weak tier never joins a
         # resolved asset to an unresolved one that merely shares a physical value.
         return DataAsset(signature=identity, identity=identity, asset_type=_asset_type(dataset_ref, definitions))
-    path_signature = _path_signature(dataset_ref, definitions)
-    if path_signature is not None:
-        store, location_names_store = _resolve_dataset_store(dataset_ref, definitions, context)
+    folder_signature = path_signature(dataset_ref, definitions)
+    if folder_signature is not None:
+        store, location_names_store = resolve_dataset_store(dataset_ref, definitions, context)
         if store:
-            path_signature = f"ST[{store}]/{path_signature}"
+            folder_signature = f"ST[{store}]/{folder_signature}"
         elif location_names_store:
-            path_signature = None
+            folder_signature = None
     return DataAsset(
-        signature=path_signature if path_signature is not None else "",
+        signature=folder_signature if folder_signature is not None else "",
         identity=None,
         asset_type=_asset_type(dataset_ref, definitions),
     )
