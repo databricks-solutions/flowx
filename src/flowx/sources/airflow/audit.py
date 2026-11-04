@@ -67,9 +67,18 @@ def finding(
     }
 
 
-def audit_module(module: ast.Module, *, target_dag_variable: str | None = None) -> SourceAudit:
-    """Audits one isolated DAG module using a parser independent of the capture visitor."""
-    auditor = _SourceAuditor(module, target_dag_variable=target_dag_variable)
+def audit_module(
+    module: ast.Module,
+    *,
+    target_dag_variable: str | None = None,
+    other_dag_variables: frozenset[str] = frozenset(),
+) -> SourceAudit:
+    """Audits one isolated DAG module using a parser independent of the capture visitor.
+
+    *other_dag_variables* names the module's other DAGs; an operator that names one with ``dag=`` belongs
+    to that DAG, not this one.
+    """
+    auditor = _SourceAuditor(module, target_dag_variable=target_dag_variable, other_dag_variables=other_dag_variables)
     auditor.visit(module)
     auditor.settle_dagless_tasks()
     return auditor.audit
@@ -88,10 +97,17 @@ def source_label(path: Path, root: Path | None = None) -> str:
 class _SourceAuditor(ast.NodeVisitor):
     """Counts DAG constructs without using loader captures or translated activities."""
 
-    def __init__(self, module: ast.Module, *, target_dag_variable: str | None) -> None:
+    def __init__(
+        self,
+        module: ast.Module,
+        *,
+        target_dag_variable: str | None,
+        other_dag_variables: frozenset[str] = frozenset(),
+    ) -> None:
         self.audit = SourceAudit()
         self.aliases = _aliases(module)
         self.target_dag_variable = target_dag_variable
+        self.other_dag_variables = other_dag_variables
         self.occurrences: dict[tuple[str, int, int], int] = {}
         self.values: dict[str, Any] = {}
         self.task_refs: dict[str, list[str]] = {}
@@ -268,6 +284,8 @@ class _SourceAuditor(ast.NodeVisitor):
         if operator:
             dag = keywords.get("dag")
             dagless = False
+            if isinstance(dag, ast.Name) and dag.id in self.other_dag_variables:
+                return False
             if self.target_dag_variable is not None and not (
                 isinstance(dag, ast.Name) and dag.id == self.target_dag_variable
             ):

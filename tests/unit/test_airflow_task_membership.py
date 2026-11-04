@@ -397,3 +397,53 @@ def test_wiring_inside_a_statically_invoked_helper_adopts_the_task(tmp_path: Pat
 
     assert id(t_call) in membership.joined
     assert _load(tmp_path, source).reconciliation_status == "failed"
+
+
+def _load_all(tmp_path: Path, source: str) -> dict[str, Pipeline]:
+    return {pipeline.name: pipeline for pipeline in airflow_loader.load_airflow_dags(_write(tmp_path, source))}
+
+
+_TWO_DAG_MODULE = (
+    "from airflow import DAG\n"
+    "from airflow.operators.bash import BashOperator\n"
+    "a = DAG('a', schedule=None)\n"
+    "start = BashOperator(task_id='start', bash_command='x', dag=a)\n"
+    "with DAG('b', schedule=None) as b:\n"
+    "    x = BashOperator(task_id='x', bash_command='x')\n"
+    "    y = BashOperator(task_id='y', bash_command='x')\n"
+    "    x >> y\n"
+)
+
+
+def test_task_bound_to_another_dag_stays_out_of_a_with_dag(tmp_path: Path) -> None:
+    pipelines = _load_all(tmp_path, _TWO_DAG_MODULE)
+
+    assert _task_keys(pipelines["b"]) == {"x", "y"}
+    assert pipelines["b"].reconciliation_status == "verified"
+    assert _task_keys(pipelines["a"]) == {"start"}
+
+
+def test_task_naming_another_dag_inside_a_with_block_fails_closed(tmp_path: Path) -> None:
+    # z belongs to DAG a, but a's isolated module doesn't contain b's block, so neither DAG can capture it.
+    source = _TWO_DAG_MODULE + "    z = BashOperator(task_id='z', bash_command='x', dag=a)\n"
+
+    pipelines = _load_all(tmp_path, source)
+
+    assert _task_keys(pipelines["b"]) == {"x", "y"}
+    assert pipelines["b"].reconciliation_status == "failed"
+
+
+def test_task_naming_an_unknown_dag_variable_is_still_captured(tmp_path: Path) -> None:
+    source = (
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG('c', schedule=None) as dag:\n"
+        "    start = BashOperator(task_id='start', bash_command='x')\n"
+        "alias = dag\n"
+        "t = BashOperator(task_id='t', bash_command='x', dag=alias)\n"
+        "start >> t\n"
+    )
+
+    pipeline = _load(tmp_path, source)
+
+    assert "t" in _task_keys(pipeline)

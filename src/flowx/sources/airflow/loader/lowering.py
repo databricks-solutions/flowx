@@ -75,6 +75,7 @@ def _load_airflow_module(
     *,
     dbt_mode: str = "static",
     target_dag_variable: str | None = None,
+    other_dag_variables: frozenset[str] = frozenset(),
     source_file: str | None = None,
 ) -> Pipeline:
     """Parses one isolated DAG declaration into a flowx Pipeline IR.
@@ -83,6 +84,8 @@ def _load_airflow_module(
         dag_path: Path to a ``.py`` DAG module.
         dbt_mode: dbt-factory render mode for any dbt workload -- ``"static"`` (default,
             an inner job of per-node tasks) or ``"pydabs"`` (a deploy-time hook module).
+        other_dag_variables: Variables of the module's other DAGs, so a task that names one with
+            ``dag=`` stays out of this DAG.
 
     Returns:
         A :class:`~flowx.models.ir.Pipeline`. Mapped operators become their IR
@@ -92,8 +95,10 @@ def _load_airflow_module(
         sensors remain explicit placeholders; unmapped operators become a
         PlaceholderActivity.
     """
-    audit = source_audit.audit_module(module, target_dag_variable=target_dag_variable)
-    visitor = _DagVisitor(module, target_dag_variable=target_dag_variable)
+    audit = source_audit.audit_module(
+        module, target_dag_variable=target_dag_variable, other_dag_variables=other_dag_variables
+    )
+    visitor = _DagVisitor(module, target_dag_variable=target_dag_variable, other_dag_variables=other_dag_variables)
     visitor.dag_file = dag_path.absolute()
     visitor.visit(module)
     functions = visitor.functions()

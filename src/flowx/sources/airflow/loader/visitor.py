@@ -48,7 +48,13 @@ _EDGE_MODIFIER_CONSTRUCTS = frozenset({"Label"})
 class _DagVisitor(ast.NodeVisitor):
     """Collects operator calls, dependency edges, and the DAG's schedule."""
 
-    def __init__(self, module: ast.Module, *, target_dag_variable: str | None = None) -> None:
+    def __init__(
+        self,
+        module: ast.Module,
+        *,
+        target_dag_variable: str | None = None,
+        other_dag_variables: frozenset[str] = frozenset(),
+    ) -> None:
         self._aliases = _import_aliases(module)
         # The DAG module's path as given, which ``__file__`` names when the DAG builds paths from it.
         self.dag_file: Path | None = None
@@ -63,6 +69,9 @@ class _DagVisitor(ast.NodeVisitor):
         )
         self._calls_joined_by_wiring = wiring.joined
         self._calls_undecided_by_wiring = wiring.undecided
+        # Variables of the module's other DAGs. An operator naming one with dag= belongs to that DAG, even
+        # inside this DAG's ``with`` block, because an explicit dag= overrides the block.
+        self._other_dag_variables = other_dag_variables - {selected_dag}
         # Classic python_callable resolution starts at module scope. Nested functions are only visible
         # from their lexical parent and must never overwrite a same-named module function.
         self._functions: dict[str, ast.FunctionDef] = {
@@ -290,6 +299,8 @@ class _DagVisitor(ast.NodeVisitor):
         construct = _construct_name(call.func, self._aliases)
         kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
         dag_node = kwargs.get("dag")
+        if isinstance(dag_node, ast.Name) and dag_node.id in self._other_dag_variables:
+            return False
         if self._target_dag_variable is not None and not (
             isinstance(dag_node, ast.Name) and dag_node.id == self._target_dag_variable
         ):
@@ -1130,10 +1141,10 @@ def _wiring_membership(module: ast.Module, dag_variable: str, aliases: dict[str,
             if isinstance(statement, (ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
             context_dag = _with_dag_identity(statement, aliases)
-            if context_dag is not None:
+            if isinstance(statement, ast.With) and context_dag is not None:
                 context_dags.append(context_dag)
                 try:
-                    scan(statement.body)  # type: ignore[attr-defined]
+                    scan(statement.body)
                 finally:
                     context_dags.pop()
                 continue
