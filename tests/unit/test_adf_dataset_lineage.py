@@ -9,6 +9,7 @@ index 0.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -2320,3 +2321,19 @@ def test_an_arm_named_linked_service_never_gives_an_identity_even_when_it_is_loa
 
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_file"), definitions) is None
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_table"), definitions) is None
+
+
+def test_the_dataset_modules_import_only_public_names_from_each_other() -> None:
+    """A name another module imports is that module's public API, so it has no leading underscore."""
+    package_directory = Path(__file__).parent.parent.parent / "src" / "flowx" / "sources" / "adf"
+    private_imports = []
+    for module_name in ("dataset_identity", "dataset_store", "dataset_lineage", "path_signature"):
+        tree = ast.parse((package_directory / f"{module_name}.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("flowx.sources.adf."):
+                private_imports.extend(
+                    f"{module_name} imports {node.module}.{alias.name}"
+                    for alias in node.names
+                    if alias.name.startswith("_")
+                )
+    assert private_imports == []

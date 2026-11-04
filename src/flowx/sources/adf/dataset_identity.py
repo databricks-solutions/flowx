@@ -45,10 +45,10 @@ _ARM_FUNCTIONS = frozenset(
 )
 
 
-_DATASET_PARAMETER_RE = re.compile(r"dataset\(\)\??\.(\w+)")
+DATASET_PARAMETER_RE = re.compile(r"dataset\(\)\??\.(\w+)")
 
 
-def _expression_value(value: Any) -> Any:
+def expression_value(value: Any) -> Any:
     """*value* itself, or the ``value`` of an ADF Expression-shaped object (``None`` when it has none).
 
     Only an object typed ``Expression`` or ``SecureString``, or an untyped one carrying a
@@ -78,25 +78,25 @@ def resolve_dataset_identity(
     pipelines sharing a parameter name must never collide on the placeholder text.
     """
     resolution_context = context if context is not None else TranslationContext()
-    properties = _dataset_props(dataset_ref, definitions)
+    properties = dataset_props(dataset_ref, definitions)
     if properties is None:
         return None
-    schema, table = _resolve_table_reference(dataset_ref, properties, resolution_context)
+    schema, table = resolve_table_reference(dataset_ref, properties, resolution_context)
     if table:
         if not all(_is_physical(part) for part in (schema, table) if part):
             return None
         qualified_table = f"{schema}.{table}" if schema else table
-        store = _resolve_table_store(properties, definitions)
+        store = resolve_table_store(properties, definitions)
         return f"{store}/{qualified_table}" if store else None
     return _resolve_dataset_path(
         properties,
-        _backing_linked_service(properties, definitions),
-        _effective_dataset_params(dataset_ref, properties),
+        backing_linked_service(properties, definitions),
+        effective_dataset_params(dataset_ref, properties),
         resolution_context,
     )
 
 
-def _dataset_props(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> dict[str, Any] | None:
+def dataset_props(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> dict[str, Any] | None:
     """Return the ``properties`` dict for a dataset reference, or ``None``."""
     dataset = definitions.get_dataset(dataset_ref.reference_name)
     if not dataset:
@@ -121,7 +121,7 @@ def _resolve_param_value(
     text = raw
 
     stripped = text.strip()
-    match = _DATASET_PARAMETER_RE.fullmatch(stripped[1:]) if stripped.startswith("@") else None
+    match = DATASET_PARAMETER_RE.fullmatch(stripped[1:]) if stripped.startswith("@") else None
     if match:
         parameter_name = match.group(1)
         return _resolve_param_value(dataset_params.get(parameter_name, ""), dataset_params, context)
@@ -138,7 +138,7 @@ def _resolve_param_value(
     return text
 
 
-def _effective_dataset_params(dataset_ref: AdfDatasetReference, dataset_props: dict[str, Any]) -> dict[str, Any]:
+def effective_dataset_params(dataset_ref: AdfDatasetReference, dataset_props: dict[str, Any]) -> dict[str, Any]:
     """Effective parameter map: declared dataset defaults first, call-site overrides win.
 
     Declared or call-site ``parameters`` that are not a map (a list, say) bind nothing,
@@ -150,16 +150,16 @@ def _effective_dataset_params(dataset_ref: AdfDatasetReference, dataset_props: d
         for name, spec in declared.items():
             if isinstance(spec, dict) and "defaultValue" in spec:
                 effective[name] = spec["defaultValue"]
-    effective.update(_call_site_parameters(dataset_ref))
+    effective.update(call_site_parameters(dataset_ref))
     return effective
 
 
-def _call_site_parameters(dataset_ref: AdfDatasetReference) -> dict[str, Any]:
+def call_site_parameters(dataset_ref: AdfDatasetReference) -> dict[str, Any]:
     """The parameters the reference passes, or an empty map when they are missing or not a map."""
     return dict(dataset_ref.parameters) if isinstance(dataset_ref.parameters, dict) else {}
 
 
-def _resolve_table_reference(
+def resolve_table_reference(
     dataset_ref: AdfDatasetReference,
     dataset_props: dict[str, Any] | None,
     context: TranslationContext,
@@ -174,7 +174,7 @@ def _resolve_table_reference(
     if not dataset_props:
         return None, None
     type_props = dataset_props.get("typeProperties") if isinstance(dataset_props.get("typeProperties"), dict) else None
-    effective_params = _effective_dataset_params(dataset_ref, dataset_props)
+    effective_params = effective_dataset_params(dataset_ref, dataset_props)
     schema_raw = _pick_dataset_field(
         type_props,
         dataset_props,
@@ -237,13 +237,13 @@ def _linked_service_reference(dataset_props: dict[str, Any]) -> tuple[str, dict[
     return name, parameters if isinstance(parameters, dict) else {}
 
 
-def _backing_linked_service(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> Any:
+def backing_linked_service(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> Any:
     """Return the loaded definition of the dataset's linked service, or ``None``."""
     linked_service_name, _ = _linked_service_reference(dataset_props)
     return definitions.get_linked_service(linked_service_name) if linked_service_name else None
 
 
-def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> str | None:
+def resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> str | None:
     """Name the store that holds a dataset's table, or ``None`` when it is not provable.
 
     Uses the literal ``server`` (plus ``database`` when given) from the backing
@@ -264,18 +264,18 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
     linked_service = definitions.get_linked_service(linked_service_name)
     linked_service_properties = linked_service.properties if linked_service is not None else {}
     type_props = linked_service_properties.get("typeProperties") or linked_service_properties
-    connection_string = _expression_value(type_props.get("connectionString"))
+    connection_string = expression_value(type_props.get("connectionString"))
     if isinstance(connection_string, str) and not _is_physical(connection_string):
         return None
     connection_fields = _connection_string_fields(connection_string) if isinstance(connection_string, str) else {}
 
     server = (
-        _expression_value(type_props.get("server"))
+        expression_value(type_props.get("server"))
         or connection_fields.get("server")
         or connection_fields.get("data source")
     )
     database = (
-        _expression_value(type_props.get("database"))
+        expression_value(type_props.get("database"))
         or connection_fields.get("database")
         or connection_fields.get("initial catalog")
     )
@@ -286,10 +286,10 @@ def _resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefiniti
         return None
     if server:
         return "/".join(part.strip() for part in store_parts)
-    return _unparameterised_linked_service_name(dataset_props, definitions)
+    return unparameterised_linked_service_name(dataset_props, definitions)
 
 
-def _unparameterised_linked_service_name(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> str | None:
+def unparameterised_linked_service_name(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> str | None:
     """The dataset's linked service name when that linked service takes no parameters, else ``None``.
 
     A linked service with no parameters points at the same store on every use, so its
@@ -307,7 +307,7 @@ def _unparameterised_linked_service_name(dataset_props: dict[str, Any], definiti
     return linked_service_name
 
 
-def _resolve_file_store(
+def resolve_file_store(
     location: dict[str, Any],
     linked_service: Any,
     dataset_params: dict[str, Any],
@@ -321,7 +321,7 @@ def _resolve_file_store(
     path identity and the signature's store qualifier both read the store here, so
     they always agree on what counts as a known file system and account.
     """
-    file_system = _written_file_system(location, dataset_params, context)
+    file_system = written_file_system(location, dataset_params, context)
     account = _resolve_storage_account(linked_service)
     return (
         file_system if file_system and _is_physical(file_system) and "*" not in file_system else None,
@@ -329,7 +329,7 @@ def _resolve_file_store(
     )
 
 
-def _written_file_system(location: dict[str, Any], dataset_params: dict[str, Any], context: TranslationContext) -> str:
+def written_file_system(location: dict[str, Any], dataset_params: dict[str, Any], context: TranslationContext) -> str:
     """The location's file system, container or bucket as it resolves, before any check (``""`` when unset)."""
     return _resolve_param_value(
         location.get("fileSystem") or location.get("container") or location.get("bucketName"), dataset_params, context
@@ -380,7 +380,7 @@ def _resolve_dataset_path(
             return None
         return resolved
 
-    file_system, account = _resolve_file_store(location, linked_service, dataset_params, context)
+    file_system, account = resolve_file_store(location, linked_service, dataset_params, context)
     folder_path = _resolved_part(location.get("folderPath"))
     file_name = _resolved_part(location.get("fileName"))
     if file_system is None or account is None or folder_path is None or file_name is None:
@@ -405,7 +405,7 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
         return None
     type_props = linked_service.properties.get("typeProperties") or linked_service.properties
 
-    url = _expression_value(type_props.get("url")) or ""
+    url = expression_value(type_props.get("url")) or ""
     if isinstance(url, str) and url:
         if not _is_physical(url):
             return None
@@ -414,7 +414,7 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
         if "." in host_no_port:
             return _storage_account_name(host_no_port.split(".", 1)[0])
 
-    sas_uri = _expression_value(type_props.get("sasUri")) or ""
+    sas_uri = expression_value(type_props.get("sasUri")) or ""
     if isinstance(sas_uri, str) and sas_uri:
         if not _is_physical(sas_uri):
             return None
@@ -423,7 +423,7 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
             return _storage_account_name(host.split(".", 1)[0])
 
     # Plaintext connection string (rare in az exports -- usually masked).
-    connection_string = _expression_value(type_props.get("connectionString"))
+    connection_string = expression_value(type_props.get("connectionString"))
     if isinstance(connection_string, str):
         if not _is_physical(connection_string):
             return None
@@ -455,10 +455,10 @@ def _is_physical(value: str) -> bool:
     stripped = value.strip()
     if "{{" in value or "@{" in value or stripped.startswith("@"):
         return False
-    return not _is_arm_expression(stripped)
+    return not is_arm_expression(stripped)
 
 
-def _is_arm_expression(text: str) -> bool:
+def is_arm_expression(text: str) -> bool:
     """``True`` when *text* is an unevaluated ARM template expression such as ``[parameters('x')]``."""
     call = _ARM_CALL_RE.match(text)
     if call is None:
