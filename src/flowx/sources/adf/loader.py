@@ -1083,7 +1083,8 @@ def _warn_no_pipelines_found(source_dir: Path) -> None:
     The usual cause is pointing ``--adf-source-path`` at a directory that holds ARM-template
     ``.json`` file(s) instead of the expected ADF export layout (a ``pipelines/`` folder), or
     passing a directory when a single ARM template file was meant. We tailor the guidance to
-    whichever case we can detect, so an empty run never looks like a successful one. The message
+    whichever case we can detect, so an operator reading the output sees that nothing was loaded;
+    the exit code stays 0, so a script or CI job has to read the warning to notice. The message
     names ``--adf-source-path`` -- the user-facing flag the discover runner takes -- not the
     loader's internal ``--source-dir`` it normalises to.
     """

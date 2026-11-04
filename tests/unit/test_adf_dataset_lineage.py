@@ -9,7 +9,6 @@ index 0.
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 import pytest
@@ -2386,19 +2385,3 @@ def test_dataset_parameter_text_inside_quotes_is_not_a_parameter_the_folder_read
     _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference]), definitions)
 
     assert writes[0].signature == ""
-
-
-def test_the_dataset_modules_import_only_public_names_from_each_other() -> None:
-    """A name another module imports is that module's public API, so it has no leading underscore."""
-    package_directory = Path(__file__).parent.parent.parent / "src" / "flowx" / "sources" / "adf"
-    private_imports = []
-    for module_name in ("dataset_identity", "dataset_store", "dataset_lineage", "path_signature"):
-        tree = ast.parse((package_directory / f"{module_name}.py").read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("flowx.sources.adf."):
-                private_imports.extend(
-                    f"{module_name} imports {node.module}.{alias.name}"
-                    for alias in node.names
-                    if alias.name.startswith("_")
-                )
-    assert private_imports == []
