@@ -369,6 +369,20 @@ def test_non_physical_asset_type_and_empty_reads_writes_are_valid():
     assert reloaded.tasks[1].data_writes == []
 
 
+def test_lineage_block_reads_back_through_the_serialiser_that_wrote_it():
+    """``lineage_from_dict`` sits beside ``lineage_to_dict`` in ``ir_serde`` and inverts it exactly."""
+    from flowx.ir_serde import lineage_from_dict, lineage_to_dict
+    from flowx.models.lineage import MotifAnnotation
+
+    lineage = Lineage(
+        control_edges=[ControlEdge(source_workflow="pl", target_workflow="child", via_task_key="Run", resolved=False)],
+        data_edges=[DataEdge(source_task_key="a", target_task_key="b", match_kind="signature", match_key="ds")],
+        motifs=[MotifAnnotation(motif_id="m", member_task_keys=["a", "b"], source_type_hint="database")],
+    )
+
+    assert lineage_from_dict(json.loads(json.dumps(lineage_to_dict(lineage)))) == lineage
+
+
 def test_lineage_types_live_in_one_shared_module_and_ir_still_exports_them():
     """Discovery and IR share one set of lineage types; the IR names stay importable for the stacked code."""
     from flowx.models import discovery, ir

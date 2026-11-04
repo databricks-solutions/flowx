@@ -22,20 +22,15 @@ from typing import Any
 from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
-    ControlEdge,
     CopyActivity,
-    DataAsset,
-    DataEdge,
     DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
     FilterActivity,
     ForEachActivity,
     IfConditionActivity,
-    Lineage,
     LookupActivity,
     MotifActivity,
-    MotifAnnotation,
     NotebookActivity,
     Pipeline,
     PlaceholderActivity,
@@ -49,6 +44,7 @@ from flowx.models.ir import (
     WaitActivity,
     WebActivity,
 )
+from flowx.models.lineage import ControlEdge, DataAsset, DataEdge, Lineage, MotifAnnotation
 
 logger = logging.getLogger(__name__)
 
@@ -475,7 +471,6 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             if activity.job_parameters:
                 extra["job_parameters"] = activity.job_parameters
         case MotifActivity():
-            # motif_id now lives on the Activity base and is serialised by activity_to_dict.
             extra["display_name"] = activity.display_name
             extra["databricks_replacement"] = activity.databricks_replacement
             extra["matched_activity_names"] = activity.matched_activity_names

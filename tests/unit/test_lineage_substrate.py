@@ -92,7 +92,9 @@ def test_control_edges_fan_out_and_nested_switch_recursion():
         ],
     )
 
-    edges = build_control_edges(pipeline)
+    edges = build_control_edges(
+        pipeline, known_workflows={"child_a", "child_b", "child_c", "child_d", "child_e", "child_f"}
+    )
 
     targets = sorted(edge.target_workflow for edge in edges)
     assert targets == ["child_a", "child_b", "child_c", "child_d", "child_e", "child_f"]
@@ -132,14 +134,14 @@ def test_run_now_of_an_existing_job_is_not_a_cross_workflow_edge():
         tasks=[RunJobActivity(name="trigger", task_key="trigger", job_name="trigger", existing_job_id="123")],
     )
 
-    assert build_control_edges(pipeline) == []
+    assert build_control_edges(pipeline, known_workflows=set()) == []
 
 
 def test_control_edges_unresolved_callee_is_recorded_not_dropped():
     """An empty callee is kept with resolved=False rather than silently dropped."""
     pipeline = Pipeline(name="parent", tasks=[_execute("call", "")])
 
-    edges = build_control_edges(pipeline)
+    edges = build_control_edges(pipeline, known_workflows=set())
 
     assert len(edges) == 1
     assert edges[0].target_workflow == ""
@@ -160,7 +162,7 @@ def test_control_edges_no_self_edge():
     """A pipeline invoking itself produces no edge."""
     pipeline = Pipeline(name="loop", tasks=[_execute("call", "loop")])
 
-    assert build_control_edges(pipeline) == []
+    assert build_control_edges(pipeline, known_workflows={"loop"}) == []
 
 
 def test_control_edges_no_duplicate_from_recursion():
@@ -177,7 +179,7 @@ def test_control_edges_no_duplicate_from_recursion():
         ],
     )
 
-    edges = build_control_edges(pipeline)
+    edges = build_control_edges(pipeline, known_workflows={"child"})
 
     assert len(edges) == 1
     assert edges[0].target_workflow == "child"
@@ -376,7 +378,7 @@ def test_build_motif_annotations_carries_the_source_type_hint():
 def test_with_lineage_is_pure():
     """with_lineage returns a new pipeline and never mutates the input."""
     pipeline = Pipeline(name="p", tasks=[_notebook("n")])
-    lineage = build_lineage(pipeline)
+    lineage = build_lineage(pipeline, known_workflows=set())
 
     updated = with_lineage(pipeline, lineage)
 
@@ -488,6 +490,29 @@ def test_serde_round_trip_motif_activity_no_kwarg_collision_r1():
     assert task.display_name == "Auto Loader"
     assert task.matched_activity_names == ["Copy A", "Copy B"]
     assert task.data_reads == [DataAsset(signature="src", identity="raw.src")]
+
+
+def test_a_motif_activity_saved_without_a_motif_id_reads_back_as_unknown():
+    """The ``motif_id`` of a MotifActivity is a string, so a missing one reads back as ``"unknown"``, not ``None``."""
+    pipeline = Pipeline(
+        name="p",
+        tasks=[
+            MotifActivity(
+                name="motif",
+                task_key="motif_auto_loader",
+                motif_id="auto_loader",
+                display_name="Auto Loader",
+                databricks_replacement="auto_loader",
+                matched_activity_names=["Copy A"],
+            )
+        ],
+    )
+    saved = json.loads(json.dumps(pipeline_to_dict(pipeline)))
+    del saved["tasks"][0]["motif_id"]
+
+    reloaded, _ = pipeline_dict_to_ir(saved)
+
+    assert reloaded.tasks[0].motif_id == "unknown"
 
 
 def test_lineage_block_always_emits_lists_never_null():

@@ -12,12 +12,12 @@ from typing import Any
 
 from flowx.models.adf_ast import AdfDatasetReference, AdfDefinitions
 from flowx.sources.adf.dataset_identity import (
-    _DATASET_PARAMETER_RE,
-    _call_site_parameters,
-    _dataset_props,
-    _effective_dataset_params,
-    _expression_value,
-    _is_arm_expression,
+    DATASET_PARAMETER_RE,
+    call_site_parameters,
+    dataset_props,
+    effective_dataset_params,
+    expression_value,
+    is_arm_expression,
 )
 
 _QUOTED_LITERAL_RE = re.compile(r"'((?:[^']|'')*)'", re.DOTALL)
@@ -34,16 +34,18 @@ _RUNTIME_SLOT_RE = re.compile(r"<P(?::(?:[^<>]|<P>)*)?>")
 # expressions: add a new ADF construct there rather than patching the shape for it.
 
 
-def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> str | None:
+def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> str | None:
     """Structural signature of the folder and file name a parameterised reference points at.
 
     Both of these must hold, or the result is ``None``:
 
-    1. The reference passes a ``folderPath`` at the call site with literal text in it:
-       quoted text or a number in an expression, or text outside ``@{...}``, so
+    1. The reference passes the folder at the call site with literal text in it: quoted
+       text or a number in an expression, or text outside ``@{...}``, so
        ``landing/@{item().run}`` qualifies just as ``@concat('landing/', item().run)``
-       does. The dataset's own location is not enough on its own: a reference that
-       passes no anchored ``folderPath`` gets no signature. A file name alone never
+       does. The folder is passed as ``folderPath`` or as any parameter the dataset's own
+       location folder reads, so a dataset whose folder is ``@dataset().dir`` qualifies
+       through ``dir``. The dataset's own location is not enough on its own: a reference
+       that passes no anchored folder gets no signature. A file name alone never
        qualifies, since many unrelated activities write ``.csv`` files to opaque folders.
     2. The folder the reference resolves to has a literal segment. That folder is the
        dataset's own ``location.folderPath`` with each ``dataset().<name>`` filled in
@@ -57,20 +59,21 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
     other than Expression or SecureString) is unknown, so it gives ``None`` rather than
     borrowing the call site's. An untyped object is read by its ``value``.
     """
-    call_site = _call_site_parameters(dataset_ref)
-    passed_folder = _path_shape(call_site.get("folderPath"), {}, require_physical=True)
-    if passed_folder is None or not _has_literal_anchor(passed_folder):
-        return None
-    properties = _dataset_props(dataset_ref, definitions) or {}
+    call_site = call_site_parameters(dataset_ref)
+    properties = dataset_props(dataset_ref, definitions) or {}
     type_props = properties.get("typeProperties") or properties
     written_location = type_props.get("location")
     location: dict[str, Any] = written_location if isinstance(written_location, dict) else {}
-    written_values = {key: _expression_value(location.get(key)) for key in ("folderPath", "fileName")}
+    written_values = {key: expression_value(location.get(key)) for key in ("folderPath", "fileName")}
     if any(value is not None and not isinstance(value, str) for value in written_values.values()):
+        return None
+    unquoted_folder = _QUOTED_LITERAL_RE.sub("", written_values["folderPath"] or "")
+    folder_parameters = {"folderPath", *DATASET_PARAMETER_RE.findall(unquoted_folder)}
+    if not any(_passes_anchored_folder(call_site.get(name)) for name in folder_parameters):
         return None
     bindings = {
         name: value
-        for name, value in _effective_dataset_params(dataset_ref, properties).items()
+        for name, value in effective_dataset_params(dataset_ref, properties).items()
         if _reads_as_text(value)
     }
 
@@ -88,6 +91,12 @@ def _path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinition
     return f"FP[{folder_shape}]/FN[{file_shape if names_a_file else ''}]"
 
 
+def _passes_anchored_folder(value: Any) -> bool:
+    """``True`` when a call-site folder *value* is physical and holds literal text, not only run-time slots."""
+    folder_shape = _path_shape(value, {}, require_physical=True)
+    return folder_shape is not None and _has_literal_anchor(folder_shape)
+
+
 def _reads_as_text(value: Any) -> bool:
     """``True`` when a bound parameter *value* is text ADF can splice into a path, even ``""``.
 
@@ -96,7 +105,7 @@ def _reads_as_text(value: Any) -> bool:
     an Expression with no ``value`` says nothing about the path, so it is no more
     known than a parameter the call site never bound.
     """
-    return isinstance(_expression_value(value), (str, bool, int, float))
+    return isinstance(expression_value(value), (str, bool, int, float))
 
 
 def _path_shape(expression: Any, bindings: dict[str, Any], *, require_physical: bool) -> str | None:
@@ -138,10 +147,10 @@ def _raw_path_shape(expression: Any, bindings: dict[str, Any], *, require_physic
     if not isinstance(expression, str):
         return ""
     text = expression.strip()
-    is_arm_expression = bool(_is_arm_expression(text))
-    if require_physical and ("{{" in text or is_arm_expression):
+    is_arm_template = bool(is_arm_expression(text))
+    if require_physical and ("{{" in text or is_arm_template):
         return None
-    if is_arm_expression:
+    if is_arm_template:
         return text
     if text.startswith("@@"):
         return text[1:]
@@ -215,7 +224,7 @@ def _expression_shape(expression: str, bindings: dict[str, Any], *, require_phys
                 return None
             pieces.append(argument_shape)
         return "".join(pieces)
-    dataset_parameter = _DATASET_PARAMETER_RE.fullmatch(expression)
+    dataset_parameter = DATASET_PARAMETER_RE.fullmatch(expression)
     if dataset_parameter is None or dataset_parameter.group(1) not in bindings:
         return _runtime_slot(expression, bindings, require_physical=require_physical)
     return _raw_path_shape(bindings[dataset_parameter.group(1)], {}, require_physical=require_physical)
@@ -232,7 +241,7 @@ def _runtime_slot(expression: str, bindings: dict[str, Any], *, require_physical
     """
     pieces: list[str] = []
     piece_start = 0
-    for match in _DATASET_PARAMETER_RE.finditer(expression):
+    for match in DATASET_PARAMETER_RE.finditer(expression):
         if match.group(1) not in bindings or expression.count("'", 0, match.start()) % 2:
             continue
         bound_shape = _raw_path_shape(bindings[match.group(1)], {}, require_physical=require_physical)
