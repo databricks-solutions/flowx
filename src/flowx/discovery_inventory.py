@@ -14,7 +14,7 @@ from typing import Any
 from flowx.discovery_lineage import walk_nodes
 from flowx.ir_serde import lineage_to_dict
 from flowx.models.discovery import SourceGraph, SourceNode
-from flowx.models.lineage import Lineage, MotifAnnotation
+from flowx.models.lineage import MotifAnnotation
 
 # Well-known property key under which a mapper records a node's Databricks-target
 # translation strategy ("deterministic" / "agentic" / "unsupported"). Kept in the
@@ -63,10 +63,9 @@ def build_source_inventory(
     while its children are still listed.
 
     A graph with derived lineage gives its pipeline entry a ``lineage`` block with
-    its control and data edges, written by :func:`flowx.ir_serde.lineage_to_dict`.
-    That block's ``motifs`` is always empty. Detected motifs go in a separate
-    ``motifs`` list instead, and their member activities stay listed: collapsing a
-    motif is a convert decision, never a discover one. Exact-duplicate detections
+    its ``control_edges`` and ``data_edges``. Detected motifs are not in that block;
+    they go in a separate ``motifs`` list, and their member activities stay listed:
+    collapsing a motif is a convert decision, never a discover one. Exact-duplicate detections
     (same ``motif_id`` and same member set) collapse to one (see
     :func:`_dedupe_motif_entries`); overlapping-but-distinct matches are all kept.
 
@@ -97,8 +96,9 @@ def build_source_inventory(
                 "activities": [_activity_entry(node) for node in flattened],
             }
             if graph.lineage is not None:
-                edges_only = Lineage(control_edges=graph.lineage.control_edges, data_edges=graph.lineage.data_edges)
-                entry["lineage"] = lineage_to_dict(edges_only)
+                lineage_block = lineage_to_dict(graph.lineage)
+                del lineage_block["motifs"]
+                entry["lineage"] = lineage_block
                 if graph.lineage.motifs:
                     entry["motifs"] = _dedupe_motif_entries([_motif_entry(motif) for motif in graph.lineage.motifs])
             pipeline_entries.append(entry)
@@ -139,6 +139,12 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
     The first three keys (plus ``depends_on`` when the node has dependencies)
     reproduce the historical ADF activity shape byte-for-byte; the rest are the
     additive standardised fields.
+
+    Two keys repeat others. ``original_type`` holds the same value as ``type``, and
+    ``depends_on`` is only the upstream names from ``dependencies``. They are kept so
+    existing readers keep working; new readers should use ``type`` and
+    ``dependencies``, which also records each edge's conditions and whether it
+    resolved.
     """
     entry: dict[str, Any] = {
         "name": node.name if node.name is not None else node.task_key,

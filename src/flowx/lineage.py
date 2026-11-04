@@ -25,7 +25,7 @@ def control_edges_from_calls(
     source_workflow: str,
     calls: Iterable[tuple[str, bool | None, str]],
     *,
-    known_workflows: Collection[str] | None = None,
+    known_workflows: Collection[str],
 ) -> list[ControlEdge]:
     """Assemble deduplicated control edges from raw invocation primitives.
 
@@ -41,8 +41,8 @@ def control_edges_from_calls(
             may be empty when the callee could not be resolved from a partial export.
         known_workflows: Names of the workflows present in this export. An edge is
             resolved only when its target is one of them, so a callee missing from
-            the export stays unresolved. When ``None``, nothing can be confirmed and
-            every edge is unresolved.
+            the export stays unresolved. Required, so the caller has to choose; an
+            empty collection leaves every edge unresolved.
 
     Returns:
         Deduplicated control edges in first-seen order. A call whose target equals
@@ -67,7 +67,7 @@ def control_edges_from_calls(
                 target_workflow=target_name,
                 via_task_key=via_task_key,
                 wait_for_completion=wait,
-                resolved=bool(target_name) and known_workflows is not None and target_name in known_workflows,
+                resolved=bool(target_name) and target_name in known_workflows,
             )
         )
     return edges
@@ -76,12 +76,12 @@ def control_edges_from_calls(
 def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, str | None] | None:
     """Decide whether a written asset hands off to a read asset, and how.
 
-    Two tiers, per #36:
+    Two tiers:
 
     - **identity** -- when both sides resolved to a physical identity, they match
       only if those identities are equal. Two differently-resolved identities do
-      *not* fall through to a signature match; that is what manufactured the
-      spurious edges #36 removed. An empty identity counts as unresolved.
+      *not* fall through to a signature match, which would invent edges. An empty
+      identity counts as unresolved.
     - **signature** -- when at least one identity is unresolved, fall back to the
       neutral descriptor and match on equal, non-empty signatures.
 

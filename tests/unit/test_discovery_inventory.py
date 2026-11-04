@@ -215,10 +215,11 @@ def test_empty_input_yields_zero_coverage() -> None:
 def test_pipeline_carries_derived_lineage_block_that_round_trips() -> None:
     """A graph with derived lineage emits a per-pipeline block via the shared serialiser.
 
-    For a graph with no motifs, the emitted block must be byte-identical to what the
-    shared discovery serde produces for the same graph, and it must rehydrate through that serde back to
-    the original :class:`Lineage` -- proving the emitter consumes the one shared
-    lineage serialisation rather than a second hand-rolled one.
+    Apart from its motif slot (motifs have their own pipeline key), the emitted block
+    must be identical to what the shared discovery serde produces for the same graph,
+    and it must rehydrate through that serde back to the original :class:`Lineage` --
+    proving the emitter consumes the one shared lineage serialisation rather than a
+    second hand-rolled one.
     """
     lineage = Lineage(
         control_edges=[
@@ -236,8 +237,10 @@ def test_pipeline_carries_derived_lineage_block_that_round_trips() -> None:
     inventory = build_source_inventory([graph], source="unit", source_dir="/tmp/src")
     pipeline_entry = inventory["pipelines"][0]
 
-    # The block is present and byte-identical to the shared serde's per-graph output.
-    assert pipeline_entry["lineage"] == source_graph_to_dict(graph)["lineage"]
+    # The block is the shared serde's per-graph output without its motif slot.
+    serialised = source_graph_to_dict(graph)["lineage"]
+    assert pipeline_entry["lineage"] == {key: value for key, value in serialised.items() if key != "motifs"}
+    assert sorted(pipeline_entry["lineage"]) == ["control_edges", "data_edges"]
 
     # It round-trips through the shared serde back to the original Lineage.
     rehydrated = source_graph_from_dict(
@@ -323,8 +326,8 @@ def test_motifs_are_decoupled_from_the_lineage_block() -> None:
     """Motifs ride as their own pipeline key, never nested under ``lineage``.
 
     A graph that carries both derived edges and a detected motif in its lineage
-    emits both, and the inventory lineage block's motif slot stays empty, as it
-    always has, so motifs are only ever read from the ``motifs`` key.
+    emits both, and the inventory lineage block holds only the edges, so motifs are
+    only ever read from the ``motifs`` key.
     """
     lineage = Lineage(
         data_edges=[DataEdge(source_task_key="a", target_task_key="b", match_kind="identity", match_key="cat.sch.tbl")],
@@ -336,8 +339,7 @@ def test_motifs_are_decoupled_from_the_lineage_block() -> None:
     entry = inventory["pipelines"][0]
 
     assert entry["motifs"][0]["motif_id"] == "scd_type_2"
-    # The lineage block is present but its own motif slot is untouched and empty.
-    assert entry["lineage"]["motifs"] == []
+    assert "motifs" not in entry["lineage"]
 
 
 def test_exact_duplicate_motifs_collapse_but_overlapping_matches_survive() -> None:
