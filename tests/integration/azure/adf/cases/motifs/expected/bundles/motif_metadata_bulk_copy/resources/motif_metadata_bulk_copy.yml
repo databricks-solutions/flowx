@@ -1,0 +1,23 @@
+resources:
+  jobs:
+    motif_metadata_bulk_copy:
+      name: motif-metadata-bulk-copy
+      tasks:
+      - task_key: motif_metadata_driven_bulk_copy
+        description: 'Collapsed motif: Metadata-Driven Bulk Copy. Replaces 2 ADF activities
+          with for_each_ingestion.'
+        depends_on:
+        - task_key: motif_metadata_driven_bulk_copy_control_lookup
+        for_each_task:
+          inputs: '{{tasks.motif_metadata_driven_bulk_copy_control_lookup.values.items}}'
+          task:
+            task_key: motif_metadata_driven_bulk_copy_ingest
+            notebook_task:
+              notebook_path: ../src/notebooks/motif_metadata_driven_bulk_copy_ingest.py
+              base_parameters:
+                item: '{{input}}'
+          concurrency: 20
+      - task_key: motif_metadata_driven_bulk_copy_control_lookup
+        notebook_task:
+          notebook_path: ../src/notebooks/motif_metadata_driven_bulk_copy_control_lookup.py
+          base_parameters: {}

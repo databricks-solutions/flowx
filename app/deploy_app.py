@@ -24,17 +24,21 @@
 # MAGIC - **source_code_path** — workspace dir the app deploys from. Must be readable by the app's
 # MAGIC   service principal, so it defaults under `/Workspace/Shared` — **not** a private
 # MAGIC   `/Workspace/Users/<you>` home, which the app SP cannot read.
+# MAGIC - **source_deps** — source system whose deps to add to the app for the live `extract` and
+# MAGIC   `profile` commands (`azure`); blank adds none.
 
 # COMMAND ----------
 
 dbutils.widgets.text("repo_root", "/Workspace/Shared/flowx", "flowx repo root (contains app/ and src/flowx)")
 dbutils.widgets.text("app_name", "mcp-flowx", "App name")
 dbutils.widgets.text("source_code_path", "", "Workspace source path (blank = /Workspace/Shared/<app_name>)")
+dbutils.widgets.dropdown("source_deps", "", ["", "azure"], "Source system dependencies")
 
 repo_root = dbutils.widgets.get("repo_root").strip()
 app_name = dbutils.widgets.get("app_name").strip()
 source_code_path = dbutils.widgets.get("source_code_path").strip() or f"/Workspace/Shared/{app_name}"
-app_description = "flowx MCP server — ADF to Databricks Lakeflow migration tools"
+source_deps = dbutils.widgets.get("source_deps")
+app_description = "flowx MCP server — Lakeflow jobs migration tools"
 
 # COMMAND ----------
 
@@ -54,6 +58,7 @@ workspace_client = WorkspaceClient()
 print(f"repo_root        : {repo_root}")
 print(f"app_name         : {app_name}")
 print(f"source_code_path : {source_code_path}")
+print(f"source_deps    : {source_deps}")
 
 # COMMAND ----------
 
@@ -66,7 +71,7 @@ print(f"source_code_path : {source_code_path}")
 
 # COMMAND ----------
 
-flowx_module_count = deploy_helpers.stage_app_bundle(workspace_client, repo_root, source_code_path)
+flowx_module_count = deploy_helpers.stage_app_bundle(workspace_client, repo_root, source_code_path, source_deps)
 print(f"Staged app files + {flowx_module_count} flowx module files to {source_code_path}")
 
 # COMMAND ----------

@@ -466,6 +466,11 @@ def _reconcile_pipeline(
                 ),
                 "setting": str(candidate.details.get("name")),
                 **({"target": disposition["target"]} if disposition.get("target") else {}),
+                **(
+                    {"unavailable_entries": disposition["unavailable_entries"]}
+                    if disposition.get("unavailable_entries")
+                    else {}
+                ),
                 "rationale": disposition["rationale"],
             }
         )

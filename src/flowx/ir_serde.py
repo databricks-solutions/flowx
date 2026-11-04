@@ -70,6 +70,8 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
     }
     if pipeline.bundle_variables:
         result["bundle_variables"] = pipeline.bundle_variables
+    if pipeline.synthesized_variable_init_keys:
+        result["synthesized_variable_init_keys"] = sorted(pipeline.synthesized_variable_init_keys)
     if pipeline.description is not None:
         result["description"] = pipeline.description
     if pipeline.timeout_seconds is not None:
@@ -291,6 +293,8 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             if activity.parameters:
                 extra["parameters"] = dict(activity.parameters)
             extra["warehouse_ref"] = activity.warehouse_ref
+            if activity.template_file:
+                extra["template_file"] = dict(activity.template_file)
         case SparkJarActivity():
             extra["main_class_name"] = activity.main_class_name
             if activity.parameters:

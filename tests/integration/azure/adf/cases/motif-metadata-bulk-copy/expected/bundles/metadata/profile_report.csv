@@ -1,0 +1,2 @@
+pipeline,activities,datasets,linked_services,collapsible_patterns,databricks_native_activities,control_flow_activities,other_activities,complexity_score,complexity_size
+motif-metadata-bulk-copy,3,2,2,1,0,1,2,13,M

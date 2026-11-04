@@ -1,0 +1,1 @@
+{"name":"adls-gen2","properties":{"type":"AzureBlobFS","typeProperties":{"url":"<ADLS_DFS_ENDPOINT>"}}}

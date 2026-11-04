@@ -1,0 +1,1 @@
+{"name":"key-vault","properties":{"type":"AzureKeyVault","typeProperties":{"baseUrl":"<KEY_VAULT_URI>"}}}

@@ -1,0 +1,82 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "name": "data-flow",
+          "strategy": "agentic",
+          "type": "ExecuteDataFlow"
+        },
+        {
+          "name": "until",
+          "strategy": "agentic",
+          "type": "Until"
+        },
+        {
+          "name": "until-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "stored-procedure",
+          "strategy": "agentic",
+          "type": "SqlServerStoredProcedure"
+        },
+        {
+          "name": "azure-function",
+          "strategy": "agentic",
+          "type": "AzureFunction"
+        },
+        {
+          "name": "webhook",
+          "strategy": "agentic",
+          "type": "WebHook"
+        },
+        {
+          "name": "custom",
+          "strategy": "agentic",
+          "type": "Custom"
+        },
+        {
+          "name": "ssis",
+          "strategy": "agentic",
+          "type": "ExecuteSSISPackage"
+        },
+        {
+          "name": "azure-ml",
+          "strategy": "agentic",
+          "type": "AzureMLExecutePipeline"
+        },
+        {
+          "name": "get-metadata",
+          "strategy": "agentic",
+          "type": "GetMetadata"
+        },
+        {
+          "name": "validation",
+          "strategy": "agentic",
+          "type": "Validation"
+        },
+        {
+          "name": "script",
+          "strategy": "agentic",
+          "type": "Script"
+        },
+        {
+          "name": "fail",
+          "strategy": "agentic",
+          "type": "Fail"
+        }
+      ],
+      "name": "agentic-activities"
+    }
+  ],
+  "summary": {
+    "activity_count": 13,
+    "agentic_count": 12,
+    "coverage_pct": 100.0,
+    "deterministic_count": 1,
+    "pipeline_count": 1,
+    "unsupported_count": 0
+  }
+}

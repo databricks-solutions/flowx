@@ -20,6 +20,9 @@ from flowx.adapter import (
     gather_options,
     validate_answer,
 )
+from flowx.adapter.__main__ import (
+    _stamp_lookup_values_into_metadata_driven_motifs,
+)
 from flowx.adapter.__main__ import main as adapter_cli_main
 from flowx.adapter.constants import (
     COMPUTE_MODE_CLASSIC_MULTI_NODE,
@@ -39,17 +42,22 @@ from flowx.adapter.constants import (
 from flowx.adapter.operations import allowed_values_for, enum_for
 from flowx.models.ir import (
     CopyActivity,
+    FilterActivity,
     ForEachActivity,
+    IfConditionActivity,
     MotifActivity,
     NotebookActivity,
     Pipeline,
     SparkPythonActivity,
+    SwitchActivity,
+    SwitchCase,
     WaitActivity,
 )
 from flowx.models.motifs import (
     MOTIF_INCREMENTAL_LOAD_WATERMARK,
     DetectedMotif,
 )
+from flowx.motifs.collapsed_lookup_refs import repair_collapsed_lookup_references
 
 
 def _make_base(name: str = "task", task_key: str | None = None) -> dict[str, Any]:
@@ -1370,3 +1378,299 @@ class TestBundleOutput:
         job_yml = yaml.safe_load((tmp_path / "resources" / "job.yml").read_text())
         task = job_yml["resources"]["jobs"]["job"]["tasks"][0]
         assert task["job_cluster_key"] == "default_cluster"
+
+
+def _consolidated_bulk_copy_motif(
+    *,
+    task_key: str = "motif_metadata_driven_bulk_copy",
+    matched: list[str] | None = None,
+    lookup_values: list[dict[str, Any]] | None = None,
+    lookup_scope: str = "LKP_GetActiveTables",
+    consolidate: bool = True,
+    databricks_replacement: str = "for_each_ingestion",
+) -> MotifActivity:
+    """A metadata-driven bulk-copy motif that swallowed a Lookup.
+
+    ``matched_activity_names`` carries both the Lookup and the ForEach (as the
+    detector records them), while ``motif_config["lookup_scope"]`` is the task key
+    of the one Lookup the motif reproduces -- the one a dangling downstream
+    reference embeds.  ``consolidate`` toggles the Lakeflow-Connect consolidation;
+    the non-consolidated ``for_each_ingestion`` path collapses the Lookup and builds
+    ``<key>_control_lookup``, whereas other ``databricks_replacement`` values take the
+    generic scaffold path and emit no such task.
+    """
+    return MotifActivity(
+        **_make_base(task_key, task_key),
+        motif_id="metadata_driven_bulk_copy",
+        display_name="Metadata-Driven Bulk Copy",
+        databricks_replacement=databricks_replacement,
+        matched_activity_names=matched or ["LKP_GetActiveTables", "FE_CopyEachTable"],
+        source_type_hint="database",
+        consolidate_metadata_driven=consolidate,
+        lookup_values=lookup_values or [],
+        motif_config={"lookup_scope": lookup_scope},
+    )
+
+
+class TestInlineCollapsedLookupReferences:
+    """A ForEach that iterated a Lookup collapsed into a consolidated motif."""
+
+    _ROWS = [
+        {"source_schema": "dbo", "source_table": "customers", "target_table": "bronze.customers"},
+        {"source_schema": "dbo", "source_table": "orders", "target_table": "bronze.orders"},
+    ]
+
+    def _downstream_foreach(self, items: str) -> ForEachActivity:
+        return ForEachActivity(**_make_base("FE_TransformEachTable"), items_expression=items)
+
+    def test_inlines_lookup_values_for_reference_to_collapsed_lookup(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == json.dumps(self._ROWS)
+
+    def test_reference_to_live_task_is_untouched(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        # References a task that still exists, not one the motif collapsed.
+        foreach = self._downstream_foreach("{{tasks.SomeOtherTask.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.SomeOtherTask.values.result}}"
+
+    def test_dynamic_lookup_repoints_to_control_lookup_task(self):
+        # No materialised rows -> the motif expands to a for_each fed by a
+        # synthesised <task_key>_control_lookup task, so the downstream iterator
+        # is repointed at that runtime producer rather than left dangling.
+        motif = _consolidated_bulk_copy_motif(task_key="motif_mdbc", lookup_values=[])
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.motif_mdbc_control_lookup.values.items}}"
+
+    def test_dynamic_ref_not_emitted_when_control_lookup_absent(self):
+        # A Lakeflow-Connect database motif with no rows takes the generic scaffold path and emits no
+        # <task_key>_control_lookup, so the reference must be left untouched rather than pointed at a
+        # task that is never created.
+        motif = _consolidated_bulk_copy_motif(
+            task_key="motif_mdbc", lookup_values=[], databricks_replacement="lakeflow_connect_database"
+        )
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.LKP_GetActiveTables.values.result}}"
+
+    def test_non_result_lookup_reference_is_untouched(self):
+        # Only `.result` holds the iterable array; a firstRow column task value
+        # (e.g. `.tables`) must not be rewritten to the whole row array.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.tables}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.LKP_GetActiveTables.values.tables}}"
+
+    def test_reference_to_collapsed_foreach_member_is_untouched(self):
+        # matched_activity_names also carries the collapsed ForEach, but only the
+        # Lookup (lookup_scope) produces the control rows, so a reference to the
+        # ForEach member is not rewritten with lookup rows.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        foreach = self._downstream_foreach("{{tasks.FE_CopyEachTable.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.FE_CopyEachTable.values.result}}"
+
+    def test_stamp_then_inline_end_to_end(self):
+        # Mirrors the modify flow: stamp materialised rows onto the motif, then
+        # resolve the downstream reference against them.
+        motif = _consolidated_bulk_copy_motif(lookup_values=[])
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        stamped = _stamp_lookup_values_into_metadata_driven_motifs(pipeline, self._ROWS)
+        result = repair_collapsed_lookup_references(stamped)
+
+        assert result.tasks[1].items_expression == json.dumps(self._ROWS)
+
+    def test_rewrites_reference_inside_nested_foreach(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        inner = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        outer = ForEachActivity(
+            **_make_base("FE_Outer"),
+            items_expression="{{job.parameters.envs}}",
+            inner_activities=[inner],
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, outer])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].inner_activities[0].items_expression == json.dumps(self._ROWS)
+
+    def test_rewrites_reference_inside_if_branch(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        inner = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        gate = IfConditionActivity(
+            **_make_base("IF_Gate"),
+            op="Equals",
+            left="@pipeline().parameters.run",
+            right="yes",
+            if_true_activities=[inner],
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, gate])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].if_true_activities[0].items_expression == json.dumps(self._ROWS)
+
+    def test_rewrites_reference_inside_switch_case(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        inner = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        switch = SwitchActivity(
+            **_make_base("SW_Route"),
+            on_expression="@pipeline().parameters.env",
+            cases=[SwitchCase(value="prod", activities=[inner])],
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, switch])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].cases[0].activities[0].items_expression == json.dumps(self._ROWS)
+
+    def test_rewrites_reference_in_deeply_nested_interleaved_containers(self):
+        # If (false branch) -> Switch (default) -> ForEach (inner) -> target ForEach,
+        # so the walk must interleave container types and recurse several levels deep.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        target = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        mid = ForEachActivity(
+            **_make_base("FE_Mid"),
+            items_expression="{{job.parameters.x}}",
+            inner_activities=[target],
+        )
+        switch = SwitchActivity(**_make_base("SW"), on_expression="@env", default_activities=[mid])
+        gate = IfConditionActivity(
+            **_make_base("IF"),
+            op="Equals",
+            left="@a",
+            right="b",
+            if_false_activities=[switch],
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, gate])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        deepest = result.tasks[1].if_false_activities[0].default_activities[0].inner_activities[0]
+        assert deepest.items_expression == json.dumps(self._ROWS)
+
+    def test_repairs_non_consolidated_motif(self):
+        # The non-consolidated for_each_ingestion path also collapses the Lookup and
+        # builds <key>_control_lookup, so its downstream reference must be repaired too
+        # (the repair is not gated on consolidate_metadata_driven).
+        motif = _consolidated_bulk_copy_motif(task_key="motif_mdbc", consolidate=False)
+        foreach = self._downstream_foreach("{{tasks.LKP_GetActiveTables.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.motif_mdbc_control_lookup.values.items}}"
+
+    def test_repairs_reference_in_filter_activity(self):
+        # FilterActivity.items_expression carries the same .values.result refs as ForEach.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        filt = FilterActivity(
+            **_make_base("FL_ActiveTables"),
+            items_expression="{{tasks.LKP_GetActiveTables.values.result}}",
+            condition_expression="@greater(length(item.source_table), 0)",
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, filt])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == json.dumps(self._ROWS)
+
+    def test_tolerates_surrounding_whitespace(self):
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        foreach = self._downstream_foreach("  {{tasks.LKP_GetActiveTables.values.result}}  ")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == json.dumps(self._ROWS)
+
+    def test_packaging_repairs_reference_without_modify(self):
+        # The blocking case: a raw report packaged without the adapter modify flow must
+        # still be repaired. _pipeline_dict_to_workflow is the single funnel every
+        # packaging route goes through, so the repair runs there before prepare_workflow.
+        from flowx.bundler.dab_writer import _pipeline_dict_to_workflow
+
+        raw_report = {
+            "name": "p",
+            "tasks": [
+                {
+                    "type": "MotifActivity",
+                    "name": "motif",
+                    "task_key": "motif_mdbc",
+                    "motif_id": "metadata_driven_bulk_copy",
+                    "display_name": "MDBC",
+                    "databricks_replacement": "for_each_ingestion",
+                    "matched_activity_names": ["LKP_GetActiveTables", "FE_CopyEachTable"],
+                    "consolidate_metadata_driven": False,
+                    "lookup_values": [],
+                    "motif_config": {"lookup_scope": "LKP_GetActiveTables", "lookup_query": "SELECT 1"},
+                },
+                {
+                    "type": "ForEachActivity",
+                    "name": "FE_TransformEachTable",
+                    "task_key": "FE_TransformEachTable",
+                    "items_expression": "{{tasks.LKP_GetActiveTables.values.result}}",
+                    "inner_activities": [
+                        {"type": "NotebookActivity", "name": "NB", "task_key": "NB", "notebook_path": "/x"}
+                    ],
+                },
+            ],
+        }
+
+        workflow = _pipeline_dict_to_workflow(raw_report)
+
+        downstream = next(t for t in workflow.tasks if t.get("task_key") == "FE_TransformEachTable")
+        assert downstream["for_each_task"]["inputs"] == "{{tasks.motif_mdbc_control_lookup.values.items}}"
+
+    def test_repairs_reference_in_inputs_bridge_parameters(self):
+        # When items is a function over the lookup output, the ref lives in the ForEach
+        # inputs-bridge parameters, which the preparer prefers over items_expression.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS)
+        foreach = ForEachActivity(
+            **_make_base("FE_TransformEachTable"),
+            items_expression="@take(activity('LKP_GetActiveTables').output.value, 10)",
+            inputs_bridge_notebook_code="items = source_rows[:10]",
+            inputs_bridge_required_parameters={"source_rows": "{{tasks.LKP_GetActiveTables.values.result}}"},
+        )
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].inputs_bridge_required_parameters["source_rows"] == json.dumps(self._ROWS)
+        # The function-form items_expression is not a whole-string ref, so it is left as-is.
+        assert result.tasks[1].items_expression == "@take(activity('LKP_GetActiveTables').output.value, 10)"
+
+    def test_reference_to_other_collapsed_lookup_is_untouched(self):
+        # A motif reproduces only its primary Lookup (lookup_scope); a reference to a
+        # different Lookup the motif also collapsed must NOT be redirected to these rows,
+        # since that Lookup's data is not reproduced -- misrouting would serve wrong rows.
+        motif = _consolidated_bulk_copy_motif(lookup_values=self._ROWS, lookup_scope="LKP_Primary")
+        foreach = self._downstream_foreach("{{tasks.LKP_Secondary.values.result}}")
+        pipeline = Pipeline(name="p", tasks=[motif, foreach])
+
+        result = repair_collapsed_lookup_references(pipeline)
+
+        assert result.tasks[1].items_expression == "{{tasks.LKP_Secondary.values.result}}"

@@ -1,0 +1,1 @@
+{"name":"delta-table","properties":{"type":"AzureDatabricksDeltaLakeDataset","linkedServiceName":{"referenceName":"databricks-delta-lake","type":"LinkedServiceReference"},"typeProperties":{"database":"default","table":"flowx_integration"}}}

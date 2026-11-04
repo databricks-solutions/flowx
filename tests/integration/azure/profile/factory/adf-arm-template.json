@@ -1,0 +1,476 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "flowx profiler test factory. One pipeline per cost bucket the profiler prices (Copy / pipeline activity / external activity / Mapping Data Flow / orchestration), plus a ForEach. Deploy twice: once on the default Azure IR, once with managedVnet=true (managed-VNet IR with a known time-to-live). See README.md. The managed-VNet IR's outbound address isn't fixed and is outside the DataFactory service tag, so an IP-restricted Databricks workspace can't allowlist it: with managedVnet=true the external activities call a public, no-auth endpoint instead (same cost bucket, IR and TTL)."
+  },
+  "parameters": {
+    "factoryName": {
+      "type": "string"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "metadata": {
+        "description": "Existing StorageV2 account in this resource group holding profiler/input/sample.csv."
+      }
+    },
+    "databricksWorkspaceUrl": {
+      "type": "string",
+      "metadata": {
+        "description": "Host only, e.g. adb-123.2.azuredatabricks.net"
+      }
+    },
+    "databricksWorkspaceResourceId": {
+      "type": "string"
+    },
+    "databricksJobId": {
+      "type": "string",
+      "metadata": {
+        "description": "A serverless Databricks job the Databricks Job activity triggers."
+      }
+    },
+    "managedVnet": {
+      "type": "bool",
+      "defaultValue": false
+    },
+    "managedVnetTimeToLiveMinutes": {
+      "type": "int",
+      "defaultValue": 15
+    },
+    "includeDataFlow": {
+      "type": "bool",
+      "defaultValue": true
+    }
+  },
+  "variables": {
+    "factoryId": "[resourceId('Microsoft.DataFactory/factories', parameters('factoryName'))]",
+    "storageId": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+    "azureDatabricksResourceAppId": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d",
+    "irName": "ManagedVnetIR",
+    "connectVia": "[if(parameters('managedVnet'), createObject('connectVia', createObject('referenceName', variables('irName'), 'type', 'IntegrationRuntimeReference')), createObject())]",
+    "sourceDataset": {
+      "referenceName": "ds_sample_csv",
+      "type": "DatasetReference"
+    },
+    "lookupActivity": {
+      "name": "LookupFirstRow",
+      "type": "Lookup",
+      "typeProperties": {
+        "source": {
+          "type": "DelimitedTextSource",
+          "storeSettings": {
+            "type": "AzureBlobStorageReadSettings",
+            "recursive": false
+          },
+          "formatSettings": {
+            "type": "DelimitedTextReadSettings"
+          }
+        },
+        "dataset": "[variables('sourceDataset')]",
+        "firstRowOnly": true
+      }
+    },
+    "webActivity": {
+      "name": "[if(parameters('managedVnet'), 'CallPublicEndpoint', 'ListDatabricksJobs')]",
+      "type": "WebActivity",
+      "typeProperties": "[union(variables('webTypePropertiesBase'), variables('connectVia'))]"
+    },
+    "publicEndpointUrl": "https://management.azure.com/metadata/endpoints?api-version=2023-11-01",
+    "databricksWebTypeProperties": {
+      "method": "GET",
+      "url": "[format('https://{0}/api/2.1/jobs/list?limit=1', parameters('databricksWorkspaceUrl'))]",
+      "authentication": {
+        "type": "MSI",
+        "resource": "[variables('azureDatabricksResourceAppId')]"
+      }
+    },
+    "publicWebTypeProperties": {
+      "method": "GET",
+      "url": "[variables('publicEndpointUrl')]"
+    },
+    "webTypePropertiesBase": "[if(parameters('managedVnet'), variables('publicWebTypeProperties'), variables('databricksWebTypeProperties'))]",
+    "secondPublicWebActivity": {
+      "name": "CallPublicEndpointAgain",
+      "type": "WebActivity",
+      "dependsOn": [
+        {
+          "activity": "CallPublicEndpoint",
+          "dependencyConditions": [
+            "Succeeded"
+          ]
+        }
+      ],
+      "typeProperties": "[union(variables('publicWebTypeProperties'), variables('connectVia'))]"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.DataFactory/factories",
+      "apiVersion": "2018-06-01",
+      "name": "[parameters('factoryName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {}
+    },
+    {
+      "condition": "[parameters('managedVnet')]",
+      "type": "Microsoft.DataFactory/factories/managedVirtualNetworks",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/default', parameters('factoryName'))]",
+      "dependsOn": [
+        "[variables('factoryId')]"
+      ],
+      "properties": {}
+    },
+    {
+      "condition": "[parameters('managedVnet')]",
+      "type": "Microsoft.DataFactory/factories/integrationRuntimes",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/{1}', parameters('factoryName'), variables('irName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/managedVirtualNetworks', parameters('factoryName'), 'default')]"
+      ],
+      "properties": {
+        "type": "Managed",
+        "managedVirtualNetwork": {
+          "referenceName": "default",
+          "type": "ManagedVirtualNetworkReference"
+        },
+        "typeProperties": {
+          "computeProperties": {
+            "location": "AutoResolve",
+            "pipelineExternalComputeScaleProperties": {
+              "timeToLive": "[parameters('managedVnetTimeToLiveMinutes')]"
+            },
+            "copyComputeScaleProperties": {
+              "dataIntegrationUnit": 4,
+              "timeToLive": "[parameters('managedVnetTimeToLiveMinutes')]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "condition": "[parameters('managedVnet')]",
+      "type": "Microsoft.DataFactory/factories/managedVirtualNetworks/managedPrivateEndpoints",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/default/pe-blob', parameters('factoryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/managedVirtualNetworks', parameters('factoryName'), 'default')]"
+      ],
+      "properties": {
+        "privateLinkResourceId": "[variables('storageId')]",
+        "groupId": "blob"
+      }
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/linkedservices",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/ls_blob', parameters('factoryName'))]",
+      "dependsOn": [
+        "[variables('factoryId')]",
+        "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('factoryName'), variables('irName'))]"
+      ],
+      "properties": "[union(createObject('type', 'AzureBlobStorage', 'typeProperties', createObject('connectionString', format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix={2}', parameters('storageAccountName'), listKeys(variables('storageId'), '2023-01-01').keys[0].value, environment().suffixes.storage))), variables('connectVia'))]"
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/linkedservices",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/ls_databricks', parameters('factoryName'))]",
+      "dependsOn": [
+        "[variables('factoryId')]",
+        "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('factoryName'), variables('irName'))]"
+      ],
+      "properties": "[union(createObject('type', 'AzureDatabricks', 'typeProperties', createObject('domain', format('https://{0}', parameters('databricksWorkspaceUrl')), 'authentication', 'MSI', 'workspaceResourceId', parameters('databricksWorkspaceResourceId'))), variables('connectVia'))]"
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/ds_sample_csv', parameters('factoryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('factoryName'), 'ls_blob')]"
+      ],
+      "properties": {
+        "type": "DelimitedText",
+        "linkedServiceName": {
+          "referenceName": "ls_blob",
+          "type": "LinkedServiceReference"
+        },
+        "typeProperties": {
+          "location": {
+            "type": "AzureBlobStorageLocation",
+            "container": "profiler",
+            "folderPath": "input",
+            "fileName": "sample.csv"
+          },
+          "columnDelimiter": ",",
+          "firstRowAsHeader": true
+        }
+      }
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/ds_output_csv', parameters('factoryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('factoryName'), 'ls_blob')]"
+      ],
+      "properties": {
+        "type": "DelimitedText",
+        "linkedServiceName": {
+          "referenceName": "ls_blob",
+          "type": "LinkedServiceReference"
+        },
+        "typeProperties": {
+          "location": {
+            "type": "AzureBlobStorageLocation",
+            "container": "profiler",
+            "folderPath": "[format('output/{0}', parameters('factoryName'))]"
+          },
+          "columnDelimiter": ",",
+          "firstRowAsHeader": true
+        }
+      }
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/pl_copy', parameters('factoryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('factoryName'), 'ds_sample_csv')]",
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('factoryName'), 'ds_output_csv')]"
+      ],
+      "properties": {
+        "description": "Data movement bucket (Copy, DIU-hours).",
+        "activities": [
+          {
+            "name": "CopySampleCsv",
+            "type": "Copy",
+            "inputs": [
+              "[variables('sourceDataset')]"
+            ],
+            "outputs": [
+              {
+                "referenceName": "ds_output_csv",
+                "type": "DatasetReference"
+              }
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "DelimitedTextSource",
+                "storeSettings": {
+                  "type": "AzureBlobStorageReadSettings",
+                  "recursive": false
+                },
+                "formatSettings": {
+                  "type": "DelimitedTextReadSettings"
+                }
+              },
+              "sink": {
+                "type": "DelimitedTextSink",
+                "storeSettings": {
+                  "type": "AzureBlobStorageWriteSettings"
+                },
+                "formatSettings": {
+                  "type": "DelimitedTextWriteSettings",
+                  "fileExtension": ".csv"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/pl_lookup_wait', parameters('factoryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('factoryName'), 'ds_sample_csv')]"
+      ],
+      "properties": {
+        "description": "Pipeline-activity bucket (Lookup) plus a Wait.",
+        "activities": [
+          "[variables('lookupActivity')]",
+          {
+            "name": "WaitFiveSeconds",
+            "type": "Wait",
+            "dependsOn": [
+              {
+                "activity": "LookupFirstRow",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "typeProperties": {
+              "waitTimeInSeconds": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "condition": "[not(parameters('managedVnet'))]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/pl_web_databricks', parameters('factoryName'))]",
+      "dependsOn": [
+        "[variables('factoryId')]",
+        "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('factoryName'), variables('irName'))]"
+      ],
+      "properties": {
+        "description": "External-activity bucket via a Web activity calling the Databricks REST API with the factory's managed identity.",
+        "activities": [
+          "[variables('webActivity')]"
+        ]
+      }
+    },
+    {
+      "condition": "[not(parameters('managedVnet'))]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/pl_databricks_job', parameters('factoryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/linkedservices', parameters('factoryName'), 'ls_databricks')]"
+      ],
+      "properties": {
+        "description": "External-activity bucket via the Databricks Job activity (serverless job, managed identity).",
+        "activities": [
+          {
+            "name": "RunServerlessJob",
+            "type": "DatabricksJob",
+            "linkedServiceName": {
+              "referenceName": "ls_databricks",
+              "type": "LinkedServiceReference"
+            },
+            "typeProperties": {
+              "jobID": "[parameters('databricksJobId')]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('managedVnet')]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/pl_web_public', parameters('factoryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('factoryName'), variables('irName'))]"
+      ],
+      "properties": {
+        "description": "External-activity bucket on the managed-VNet IR: two Web activities calling a public, no-auth endpoint.",
+        "activities": [
+          "[variables('webActivity')]",
+          "[variables('secondPublicWebActivity')]"
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/pl_foreach', parameters('factoryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('factoryName'), 'ds_sample_csv')]",
+        "[resourceId('Microsoft.DataFactory/factories/integrationRuntimes', parameters('factoryName'), variables('irName'))]"
+      ],
+      "properties": {
+        "description": "Orchestration: a ForEach over two items, each running a Lookup and a Web activity.",
+        "activities": [
+          {
+            "name": "ForEachItem",
+            "type": "ForEach",
+            "typeProperties": {
+              "items": {
+                "value": "@createArray(1, 2)",
+                "type": "Expression"
+              },
+              "isSequential": false,
+              "batchCount": 2,
+              "activities": [
+                "[variables('lookupActivity')]",
+                "[variables('webActivity')]"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('includeDataFlow')]",
+      "type": "Microsoft.DataFactory/factories/dataflows",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/df_add_load_time', parameters('factoryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('factoryName'), 'ds_sample_csv')]",
+        "[resourceId('Microsoft.DataFactory/factories/datasets', parameters('factoryName'), 'ds_output_csv')]"
+      ],
+      "properties": {
+        "type": "MappingDataFlow",
+        "typeProperties": {
+          "sources": [
+            {
+              "dataset": "[variables('sourceDataset')]",
+              "name": "SourceCsv"
+            }
+          ],
+          "sinks": [
+            {
+              "dataset": {
+                "referenceName": "ds_output_csv",
+                "type": "DatasetReference"
+              },
+              "name": "SinkCsv"
+            }
+          ],
+          "transformations": [
+            {
+              "name": "AddLoadTime"
+            }
+          ],
+          "scriptLines": [
+            "source(allowSchemaDrift: true, validateSchema: false, ignoreNoFilesFound: false) ~> SourceCsv",
+            "SourceCsv derive(loaded_at = currentTimestamp()) ~> AddLoadTime",
+            "AddLoadTime sink(allowSchemaDrift: true, validateSchema: false, skipDuplicateMapInputs: true, skipDuplicateMapOutputs: true) ~> SinkCsv"
+          ]
+        }
+      }
+    },
+    {
+      "condition": "[parameters('includeDataFlow')]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "name": "[format('{0}/pl_dataflow', parameters('factoryName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.DataFactory/factories/dataflows', parameters('factoryName'), 'df_add_load_time')]"
+      ],
+      "properties": {
+        "description": "Mapping Data Flow bucket (vCore-hours), smallest General cluster.",
+        "activities": [
+          {
+            "name": "RunDataFlow",
+            "type": "ExecuteDataFlow",
+            "typeProperties": {
+              "dataflow": {
+                "referenceName": "df_add_load_time",
+                "type": "DataFlowReference"
+              },
+              "compute": {
+                "coreCount": 8,
+                "computeType": "General"
+              },
+              "traceLevel": "Fine"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

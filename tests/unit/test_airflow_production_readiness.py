@@ -11,7 +11,8 @@ from flowx.sources.airflow.loader import load_airflow_dag, load_airflow_dags
 _REPROS = Path(__file__).parents[1] / "resources" / "airflow" / "review_repros"
 
 _REPRO_CORPUS = {
-    "a1_assigned_dag.py": [("legacy_etl", "verified", 3)],
+    # bash_command="load.sh" names a script template that the repro does not ship.
+    "a1_assigned_dag.py": [("legacy_etl", "verified_with_gaps", 3)],
     "a2_task_key_collision.py": [("collide", "verified", 3)],
     "a8_classic_mapping.py": [("fan", "verified_with_gaps", 1)],
     "t1_loop.py": [("loop_dag", "verified", 3)],
@@ -43,7 +44,7 @@ _REPRO_CORPUS = {
     "t27_ss.py": [("ss3", "verified_with_gaps", 1)],
     "t28_nodash.py": [("nd", "verified", 2)],
     "t29_dagsem.py": [("dsem", "verified_with_gaps", 2)],
-    "t30_dagvar2.py": [("legacy_etl", "verified", 3)],
+    "t30_dagvar2.py": [("legacy_etl", "verified_with_gaps", 3)],
     "t31_inject.py": [("inj", "verified", 1)],
     "t32_multiassigned.py": [("team_a_etl", "verified", 2), ("team_b_etl", "verified", 2)],
 }

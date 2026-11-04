@@ -1,0 +1,1 @@
+{"name":"json-adls","properties":{"type":"Json","linkedServiceName":{"referenceName":"adls-gen2","type":"LinkedServiceReference"},"typeProperties":{"location":{"type":"AzureBlobFSLocation","fileSystem":"raw","folderPath":"json"}}}}

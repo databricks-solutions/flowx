@@ -1,0 +1,332 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "name": "data-flow",
+          "strategy": "agentic",
+          "type": "ExecuteDataFlow"
+        },
+        {
+          "name": "until",
+          "strategy": "agentic",
+          "type": "Until"
+        },
+        {
+          "name": "until-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "stored-procedure",
+          "strategy": "agentic",
+          "type": "SqlServerStoredProcedure"
+        },
+        {
+          "name": "azure-function",
+          "strategy": "agentic",
+          "type": "AzureFunction"
+        },
+        {
+          "name": "webhook",
+          "strategy": "agentic",
+          "type": "WebHook"
+        },
+        {
+          "name": "custom",
+          "strategy": "agentic",
+          "type": "Custom"
+        },
+        {
+          "name": "ssis",
+          "strategy": "agentic",
+          "type": "ExecuteSSISPackage"
+        },
+        {
+          "name": "azure-ml",
+          "strategy": "agentic",
+          "type": "AzureMLExecutePipeline"
+        },
+        {
+          "name": "get-metadata",
+          "strategy": "agentic",
+          "type": "GetMetadata"
+        },
+        {
+          "name": "validation",
+          "strategy": "agentic",
+          "type": "Validation"
+        },
+        {
+          "name": "script",
+          "strategy": "agentic",
+          "type": "Script"
+        },
+        {
+          "name": "fail",
+          "strategy": "agentic",
+          "type": "Fail"
+        }
+      ],
+      "name": "agentic-activities"
+    },
+    {
+      "activities": [
+        {
+          "name": "copy",
+          "strategy": "deterministic",
+          "type": "Copy"
+        },
+        {
+          "name": "notebook",
+          "strategy": "deterministic",
+          "type": "DatabricksNotebook"
+        },
+        {
+          "name": "spark-jar",
+          "strategy": "deterministic",
+          "type": "DatabricksSparkJar"
+        },
+        {
+          "name": "spark-python",
+          "strategy": "deterministic",
+          "type": "DatabricksSparkPython"
+        },
+        {
+          "name": "databricks-job",
+          "strategy": "deterministic",
+          "type": "DatabricksJob"
+        },
+        {
+          "name": "lookup",
+          "strategy": "deterministic",
+          "type": "Lookup"
+        },
+        {
+          "name": "web",
+          "strategy": "deterministic",
+          "type": "WebActivity"
+        },
+        {
+          "name": "delete",
+          "strategy": "deterministic",
+          "type": "Delete"
+        },
+        {
+          "name": "execute-child",
+          "strategy": "deterministic",
+          "type": "ExecutePipeline"
+        },
+        {
+          "name": "wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "set-variable",
+          "strategy": "deterministic",
+          "type": "SetVariable"
+        },
+        {
+          "name": "append-variable",
+          "strategy": "deterministic",
+          "type": "AppendVariable"
+        },
+        {
+          "name": "filter",
+          "strategy": "deterministic",
+          "type": "Filter"
+        },
+        {
+          "name": "foreach",
+          "strategy": "deterministic",
+          "type": "ForEach"
+        },
+        {
+          "name": "foreach-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "if-condition",
+          "strategy": "deterministic",
+          "type": "IfCondition"
+        },
+        {
+          "name": "true-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "false-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "switch",
+          "strategy": "deterministic",
+          "type": "Switch"
+        },
+        {
+          "name": "case-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "name": "default-wait",
+          "strategy": "deterministic",
+          "type": "Wait"
+        }
+      ],
+      "name": "all-activity-types"
+    },
+    {
+      "activities": [
+        {
+          "name": "child-notebook",
+          "strategy": "deterministic",
+          "type": "DatabricksNotebook"
+        }
+      ],
+      "name": "child-pipeline"
+    },
+    {
+      "activities": [
+        {
+          "name": "launch-child",
+          "strategy": "deterministic",
+          "type": "ExecutePipeline"
+        },
+        {
+          "depends_on": [
+            "launch-child"
+          ],
+          "name": "mixed-script",
+          "strategy": "agentic",
+          "type": "Script"
+        },
+        {
+          "depends_on": [
+            "mixed-script"
+          ],
+          "name": "complete",
+          "strategy": "deterministic",
+          "type": "SetVariable"
+        }
+      ],
+      "name": "complex-orchestration"
+    },
+    {
+      "activities": [
+        {
+          "name": "work",
+          "strategy": "deterministic",
+          "type": "Wait"
+        },
+        {
+          "depends_on": [
+            "work"
+          ],
+          "name": "notify",
+          "strategy": "deterministic",
+          "type": "WebActivity"
+        }
+      ],
+      "name": "motif-activity-and-notify"
+    },
+    {
+      "activities": [
+        {
+          "name": "old-watermark",
+          "strategy": "deterministic",
+          "type": "Lookup"
+        },
+        {
+          "name": "new-watermark",
+          "strategy": "deterministic",
+          "type": "Lookup"
+        },
+        {
+          "depends_on": [
+            "old-watermark",
+            "new-watermark"
+          ],
+          "name": "incremental-copy",
+          "strategy": "deterministic",
+          "type": "Copy"
+        },
+        {
+          "depends_on": [
+            "incremental-copy"
+          ],
+          "name": "update-watermark",
+          "strategy": "agentic",
+          "type": "SqlServerStoredProcedure"
+        }
+      ],
+      "name": "motif-incremental-watermark"
+    },
+    {
+      "activities": [
+        {
+          "name": "lookup-metadata",
+          "strategy": "deterministic",
+          "type": "Lookup"
+        },
+        {
+          "depends_on": [
+            "lookup-metadata"
+          ],
+          "name": "copy-each-table",
+          "strategy": "deterministic",
+          "type": "ForEach"
+        },
+        {
+          "name": "dynamic-copy",
+          "strategy": "deterministic",
+          "type": "Copy"
+        }
+      ],
+      "name": "motif-metadata-bulk-copy"
+    },
+    {
+      "activities": [
+        {
+          "name": "initial-request",
+          "strategy": "deterministic",
+          "type": "WebActivity"
+        },
+        {
+          "depends_on": [
+            "initial-request"
+          ],
+          "name": "paginate",
+          "strategy": "agentic",
+          "type": "Until"
+        },
+        {
+          "name": "page-request",
+          "strategy": "deterministic",
+          "type": "WebActivity"
+        },
+        {
+          "depends_on": [
+            "page-request"
+          ],
+          "name": "set-continuation",
+          "strategy": "deterministic",
+          "type": "SetVariable"
+        }
+      ],
+      "name": "motif-rest-api-pagination"
+    }
+  ],
+  "summary": {
+    "activity_count": 51,
+    "agentic_count": 15,
+    "coverage_pct": 100.0,
+    "deterministic_count": 36,
+    "pipeline_count": 8,
+    "unsupported_count": 0
+  }
+}

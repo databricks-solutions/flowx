@@ -1,0 +1,35 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "name": "lookup-metadata",
+          "strategy": "deterministic",
+          "type": "Lookup"
+        },
+        {
+          "depends_on": [
+            "lookup-metadata"
+          ],
+          "name": "copy-each-table",
+          "strategy": "deterministic",
+          "type": "ForEach"
+        },
+        {
+          "name": "dynamic-copy",
+          "strategy": "deterministic",
+          "type": "Copy"
+        }
+      ],
+      "name": "motif-metadata-bulk-copy"
+    }
+  ],
+  "summary": {
+    "activity_count": 3,
+    "agentic_count": 0,
+    "coverage_pct": 100.0,
+    "deterministic_count": 3,
+    "pipeline_count": 1,
+    "unsupported_count": 0
+  }
+}

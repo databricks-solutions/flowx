@@ -10,14 +10,18 @@ Mirrors what ``deploy.sh`` does, minus the CLI: assemble a self-contained source
 at a workspace path, then create/deploy the app from it.
 """
 
+import io
 import os
+import tomllib
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import App, AppDeployment, AppDeploymentMode
 from databricks.sdk.service.workspace import ImportFormat
 
 # Top-level files the app needs alongside the vendored flowx package.
-APP_BUNDLE_FILES = ("app.py", "app.yaml", "requirements.txt")
+APP_BUNDLE_FILES = ("app.py", "app.yaml")
+
+SOURCE_DEPS = ("azure",)
 
 
 def validate_repo_root(repo_root: str) -> None:
@@ -66,14 +70,37 @@ def upload_directory(
     return uploaded_file_count
 
 
+def app_requirements(repo_root: str, source_deps: str = "") -> bytes:
+    """Return the app's requirements.txt plus the pyproject extra named by ``source_deps``.
+
+    Raises:
+        ValueError: If ``source_deps`` is not empty or one of ``SOURCE_DEPS``.
+    """
+    extra = source_deps.strip().lower()
+    if extra and extra not in SOURCE_DEPS:
+        raise ValueError(f"Unknown source_deps {source_deps!r}; allowed: {', '.join(SOURCE_DEPS)}.")
+    with open(os.path.join(repo_root, "app", "requirements.txt"), "rb") as file_handle:
+        contents = file_handle.read()
+    if extra:
+        with open(os.path.join(repo_root, "pyproject.toml"), "rb") as file_handle:
+            requirements = tomllib.load(file_handle)["project"]["optional-dependencies"][extra]
+        contents += "".join(f"{requirement}\n" for requirement in requirements).encode()
+    return contents
+
+
 def stage_app_bundle(
-    workspace_client: WorkspaceClient, repo_root: str, source_code_path: str
+    workspace_client: WorkspaceClient,
+    repo_root: str,
+    source_code_path: str,
+    source_deps: str = "",
 ) -> int:
     """Assemble the self-contained app bundle at ``source_code_path`` in the workspace.
 
-    Uploads the top-level app files and a fresh copy of the ``flowx`` package (the prior
-    copy is deleted first so removed modules do not linger). Returns the flowx module count.
+    Uploads the top-level app files, the requirements (plus the ``source_deps`` extra, if
+    any), and a fresh copy of the ``flowx`` package (the prior copy is deleted first so removed
+    modules do not linger). Returns the flowx module count.
     """
+    requirements = app_requirements(repo_root, source_deps)
     app_directory = os.path.join(repo_root, "app")
     workspace_client.workspace.mkdirs(source_code_path)
 
@@ -83,6 +110,12 @@ def stage_app_bundle(
             os.path.join(app_directory, file_name),
             f"{source_code_path}/{file_name}",
         )
+    workspace_client.workspace.upload(
+        f"{source_code_path}/requirements.txt",
+        io.BytesIO(requirements),
+        format=ImportFormat.RAW,
+        overwrite=True,
+    )
 
     package_source_directory = os.path.join(repo_root, "src", "flowx")
     package_workspace_directory = f"{source_code_path}/flowx"

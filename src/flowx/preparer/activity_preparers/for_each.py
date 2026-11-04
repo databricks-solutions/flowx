@@ -24,7 +24,7 @@ from flowx.preparer.workflow_preparer import (
     build_common_task_fields,
     prepare_activity,
 )
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 if TYPE_CHECKING:
     from flowx.models.ir import ForEachActivity
@@ -157,8 +157,16 @@ def prepare(
     concurrency = activity.concurrency if activity.concurrency is not None else 20
     inputs, inputs_bridge_task, inputs_bridge_notebooks = _resolve_for_each_inputs_with_bridge(activity)
     if inputs_bridge_task is not None:
-        existing_deps = list(task.get("depends_on") or [])
-        task["depends_on"] = [*existing_deps, {"task_key": inputs_bridge_task["task_key"]}]
+        # The bridge computes the iterator input from the ForEach's upstream task values, so it must
+        # run under the ForEach's original trigger.  Move the upstream deps and their ``run_if`` onto
+        # the bridge, then make the ForEach depend only on the bridge.  Leaving the deps/``run_if`` on
+        # the ForEach too would add a succeeding dependency (the bridge) that breaks non-success
+        # triggers like ALL_FAILED, and a bridge without ``run_if`` would not start for failed upstreams.
+        if "depends_on" in task:
+            inputs_bridge_task["depends_on"] = task["depends_on"]
+        if "run_if" in task:
+            inputs_bridge_task["run_if"] = task.pop("run_if")
+        task["depends_on"] = [{"task_key": inputs_bridge_task["task_key"]}]
 
     inner_activities = activity.inner_activities
     all_notebooks: list[DabNotebook] = list(inputs_bridge_notebooks)
@@ -205,7 +213,7 @@ def prepare(
             )
             inner_workflows.append(inner_workflow)
 
-            inner_job_key = normalize_task_key(inner_job_name)
+            inner_job_key = to_lowercase_key(inner_job_name)
             body_task: dict[str, Any] = {
                 "task_key": f"{activity.task_key}_iteration",
                 "run_job_task": {
@@ -265,7 +273,7 @@ def prepare(
         )
         inner_workflows.append(inner_workflow)
 
-        inner_job_key = normalize_task_key(inner_job_name)
+        inner_job_key = to_lowercase_key(inner_job_name)
         body_task = {
             "task_key": f"{activity.task_key}_iteration",
             "run_job_task": {

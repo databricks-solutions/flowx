@@ -1,0 +1,1 @@
+{"description":"Complete live integration factory","pipelines":["agentic-activities","all-activity-types","child-pipeline","complex-orchestration","motif-activity-and-notify","motif-incremental-watermark","motif-metadata-bulk-copy","motif-rest-api-pagination"]}

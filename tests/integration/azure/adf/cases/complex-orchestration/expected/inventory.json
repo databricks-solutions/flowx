@@ -1,0 +1,38 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "name": "launch-child",
+          "strategy": "deterministic",
+          "type": "ExecutePipeline"
+        },
+        {
+          "depends_on": [
+            "launch-child"
+          ],
+          "name": "mixed-script",
+          "strategy": "agentic",
+          "type": "Script"
+        },
+        {
+          "depends_on": [
+            "mixed-script"
+          ],
+          "name": "complete",
+          "strategy": "deterministic",
+          "type": "SetVariable"
+        }
+      ],
+      "name": "complex-orchestration"
+    }
+  ],
+  "summary": {
+    "activity_count": 3,
+    "agentic_count": 1,
+    "coverage_pct": 100.0,
+    "deterministic_count": 2,
+    "pipeline_count": 1,
+    "unsupported_count": 0
+  }
+}

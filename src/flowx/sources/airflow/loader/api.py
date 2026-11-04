@@ -19,7 +19,7 @@ from flowx.sources.airflow.loader.dag_discovery import (
     _top_level_dag_declarations,
 )
 from flowx.sources.airflow.loader.lowering import _load_airflow_module
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 _HOST_PATTERN = re.compile(r"https://([A-Za-z0-9._-]*(?:azuredatabricks\.net|databricks\.com|cloud\.databricks\.com))")
 
@@ -116,7 +116,7 @@ def load_pipelines(
 
 def _replace_excluded_dag_references(pipelines: list[Pipeline], excluded: set[str]) -> None:
     """Replaces included-to-excluded run-job references with explicit placeholders."""
-    excluded_by_key = {normalize_task_key(name): name for name in excluded}
+    excluded_by_key = {to_lowercase_key(name): name for name in excluded}
     for pipeline in pipelines:
         if pipeline.migration_status == "excluded":
             continue

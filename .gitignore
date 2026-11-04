@@ -11,6 +11,7 @@ build/
 
 # Virtual environments
 .venv/
+.migration-venv
 venv/
 ENV/
 
@@ -37,6 +38,14 @@ Thumbs.db
 flowx_output/
 dab_output/
 
+# Azure integration Terraform runtime artifacts (keep the provider lock file)
+/tests/integration/azure/terraform/.terraform/
+/tests/integration/azure/terraform/*.tfstate
+/tests/integration/azure/terraform/*.tfstate.*
+/tests/integration/azure/terraform/crash.log
+/tests/integration/azure/terraform/crash.*.log
+!/tests/integration/azure/terraform/.terraform.lock.hcl
+
 # Temporary ingest downloads
 tmp_adf_ingest_*/
 
@@ -47,3 +56,6 @@ tmp_adf_ingest_*/
 *.key
 credentials.json
 /fixlog/
+
+# Isaac tool state
+.isaac/

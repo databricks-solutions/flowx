@@ -1,0 +1,53 @@
+resources:
+  jobs:
+    agentic_activities:
+      name: agentic-activities
+      tasks:
+      - task_key: azure-function
+        notebook_task:
+          notebook_path: ../src/notebooks/azure-function.py
+          base_parameters: {}
+      - task_key: azure-ml
+        notebook_task:
+          notebook_path: ../src/notebooks/azure-ml.py
+          base_parameters: {}
+      - task_key: custom
+        notebook_task:
+          notebook_path: ../src/notebooks/custom.py
+          base_parameters: {}
+      - task_key: data-flow
+        notebook_task:
+          notebook_path: ../src/notebooks/data-flow.py
+          base_parameters: {}
+      - task_key: fail
+        notebook_task:
+          notebook_path: ../src/notebooks/fail.py
+          base_parameters: {}
+      - task_key: get-metadata
+        notebook_task:
+          notebook_path: ../src/notebooks/get-metadata.py
+          base_parameters: {}
+      - task_key: script
+        notebook_task:
+          notebook_path: ../src/notebooks/script.py
+          base_parameters: {}
+      - task_key: ssis
+        notebook_task:
+          notebook_path: ../src/notebooks/ssis.py
+          base_parameters: {}
+      - task_key: stored-procedure
+        notebook_task:
+          notebook_path: ../src/notebooks/stored-procedure.py
+          base_parameters: {}
+      - task_key: until
+        notebook_task:
+          notebook_path: ../src/notebooks/until.py
+          base_parameters: {}
+      - task_key: validation
+        notebook_task:
+          notebook_path: ../src/notebooks/validation.py
+          base_parameters: {}
+      - task_key: webhook
+        notebook_task:
+          notebook_path: ../src/notebooks/webhook.py
+          base_parameters: {}

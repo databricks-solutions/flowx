@@ -14,7 +14,7 @@ The graph is the single source of truth for two packaging decisions:
   the generated ``DEPLOY.md`` can suggest the order the operator (or ``flowx.adapter deploy``)
   should deploy in.
 
-Keys throughout are the normalized pipeline resource keys (:func:`flowx.utils.normalize_task_key`),
+Keys throughout are the normalized pipeline resource keys (:func:`flowx.utils.to_lowercase_key`),
 matching the job resource keys emitted into ``resources/*.yml`` and the ``${resources.jobs.X.id}`` /
 ``${var.X}`` refs, so they line up 1:1 with what :mod:`flowx.bundler.deployer` discovers at deploy
 time.
@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 if TYPE_CHECKING:
     from flowx.preparer.workflow_preparer import PreparedWorkflow
@@ -61,8 +61,8 @@ def _iter_run_job_targets(tasks: list[dict[str, Any]]) -> list[str]:
 
 def _workflow_own_keys(workflow: PreparedWorkflow) -> set[str]:
     """Returns the job resource keys a workflow owns: its own key plus every inner ForEach job key."""
-    keys = {normalize_task_key(workflow.name)}
-    keys.update(normalize_task_key(inner.name) for inner in workflow.inner_workflows)
+    keys = {to_lowercase_key(workflow.name)}
+    keys.update(to_lowercase_key(inner.name) for inner in workflow.inner_workflows)
     return keys
 
 
@@ -79,11 +79,11 @@ def build_pipeline_dependencies(workflows: list[PreparedWorkflow]) -> dict[str, 
         A dict with one entry per workflow (keyed by its normalized name), whose value is the set of
         other pipeline keys it calls. Every workflow appears as a key, even with no dependencies.
     """
-    key_by_workflow = {normalize_task_key(wf.name): wf for wf in workflows}
+    key_by_workflow = {to_lowercase_key(wf.name): wf for wf in workflows}
     deps: dict[str, set[str]] = {key: set() for key in key_by_workflow}
 
     for workflow in workflows:
-        owner = normalize_task_key(workflow.name)
+        owner = to_lowercase_key(workflow.name)
         own_keys = _workflow_own_keys(workflow)
         callees = list(_iter_run_job_targets(workflow.tasks))
         for inner in workflow.inner_workflows:

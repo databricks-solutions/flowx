@@ -1,0 +1,1 @@
+{"name":"child-pipeline","properties":{"activities":[{"name":"child-notebook","type":"DatabricksNotebook","typeProperties":{"notebookPath":"/Shared/flowx/child"},"linkedServiceName":{"referenceName":"databricks-parameterized","type":"LinkedServiceReference"}}]}}

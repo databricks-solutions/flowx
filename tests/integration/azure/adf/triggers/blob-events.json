@@ -1,0 +1,1 @@
+{"name":"blob-events","properties":{"runtimeState":"Stopped","type":"BlobEventsTrigger","typeProperties":{"blobPathBeginsWith":"/raw/blobs/csv/","blobPathEndsWith":".csv","ignoreEmptyBlobs":true,"events":["Microsoft.Storage.BlobCreated"],"scope":"<STORAGE_ACCOUNT_ID>"},"pipelines":[{"pipelineReference":{"referenceName":"all-activity-types","type":"PipelineReference"}}]}}

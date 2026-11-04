@@ -48,25 +48,52 @@ def recursive_camel_to_snake(obj: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Task-key normalisation
+# Key sanitisation
 # ---------------------------------------------------------------------------
 
-_TASK_KEY_RE = re.compile(r"[^a-z0-9_]")
+_LOWERCASE_KEY_RE = re.compile(r"[^a-z0-9_]")
 
 
-def normalize_task_key(name: str) -> str:
-    """Sanitises a display name for use as a Databricks task key.
+def to_lowercase_key(name: str) -> str:
+    """Sanitises a name into a key and lowercases it.
+
+    Lowercases, replaces every character outside ``[a-z0-9_]`` with ``_`` (so
+    hyphens fold to ``_``), collapses runs of ``_``, and strips leading/trailing
+    ``_``.  Returns ``""`` for an all-illegal name.  Differs from
+    :func:`to_case_preserving_key`, which keeps case and hyphens.
 
     Args:
         name: Original activity or pipeline name.
 
     Returns:
-        Cleaned task key string.
+        Cleaned, lowercased key string.
     """
     lowered = name.strip().lower()
-    replaced = _TASK_KEY_RE.sub("_", lowered)
+    replaced = _LOWERCASE_KEY_RE.sub("_", lowered)
     collapsed = re.sub(r"_+", "_", replaced).strip("_")
     return collapsed
+
+
+_CASE_PRESERVING_KEY_RE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def to_case_preserving_key(name: str) -> str:
+    """Sanitises a name into a key while keeping its original case and hyphens.
+
+    Replaces every character outside ``[a-zA-Z0-9_-]`` with ``_``, collapses runs
+    of ``_``, and strips leading/trailing ``_``.  Returns ``"unnamed"`` for an
+    all-illegal name.  Differs from :func:`to_lowercase_key`, which lowercases
+    and folds hyphens; use this one when the key must match the case-preserving
+    key the ADF translator bakes into ``{{tasks.<key>.values.Y}}`` references.
+
+    Args:
+        name: Original activity name.
+
+    Returns:
+        Cleaned key string, or ``"unnamed"`` when nothing survives.
+    """
+    key = _CASE_PRESERVING_KEY_RE.sub("_", name)
+    return re.sub(r"_+", "_", key).strip("_") or "unnamed"
 
 
 # ---------------------------------------------------------------------------

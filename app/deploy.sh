@@ -15,7 +15,19 @@
 #                       service principal, so it defaults to /Workspace/Shared — NOT a user's
 #                       private /Workspace/Users/<me> home, which the app SP cannot read.
 #   DATABRICKS_PROFILE  CLI profile to use (default: env/DEFAULT auth)
+#   SOURCE_DEPS         Source system whose deps to add to the app for the live `extract` and
+#                       `profile` commands (default: none).
+#                       Only `azure` is supported, e.g. SOURCE_DEPS=azure ./app/deploy.sh.
 set -euo pipefail
+
+SOURCE_DEPS="$(printf '%s' "${SOURCE_DEPS:-}" | tr '[:upper:]' '[:lower:]')"
+case "$SOURCE_DEPS" in
+  "" | azure) ;;
+  *)
+    echo "ERROR: unknown SOURCE_DEPS '$SOURCE_DEPS' (allowed: azure)" >&2
+    exit 2
+    ;;
+esac
 
 APP_NAME="${APP_NAME:-mcp-flowx}"
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,6 +70,15 @@ dbx() { (cd "$STAGE_DIR" && databricks "${PROFILE_FLAG[@]}" "$@"); }
 
 echo "==> Staging self-contained app bundle in $STAGE_DIR (outside the repo so sync includes every file)"
 cp "$APP_DIR/app.py" "$APP_DIR/app.yaml" "$APP_DIR/requirements.txt" "$STAGE_DIR/"
+if [ -n "$SOURCE_DEPS" ]; then
+  if ! python3 -c 'import tomllib' 2>/dev/null; then
+    echo "ERROR: SOURCE_DEPS=$SOURCE_DEPS needs python3 >= 3.11 (it reads pyproject.toml with tomllib); found $(python3 --version 2>&1)" >&2
+    exit 1
+  fi
+  echo "==> Adding the $SOURCE_DEPS source deps (SOURCE_DEPS=$SOURCE_DEPS)"
+  python3 -c 'import sys, tomllib; print("\n".join(tomllib.load(open(sys.argv[1], "rb"))["project"]["optional-dependencies"][sys.argv[2]]))' \
+    "$REPO_ROOT/pyproject.toml" "$SOURCE_DEPS" >> "$STAGE_DIR/requirements.txt"
+fi
 cp -R "$REPO_ROOT/src/flowx" "$STAGE_DIR/flowx"
 find "$STAGE_DIR/flowx" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 

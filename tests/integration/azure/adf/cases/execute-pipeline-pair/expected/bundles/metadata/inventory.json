@@ -1,0 +1,48 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "name": "child-notebook",
+          "strategy": "deterministic",
+          "type": "DatabricksNotebook"
+        }
+      ],
+      "name": "child-pipeline"
+    },
+    {
+      "activities": [
+        {
+          "name": "launch-child",
+          "strategy": "deterministic",
+          "type": "ExecutePipeline"
+        },
+        {
+          "depends_on": [
+            "launch-child"
+          ],
+          "name": "mixed-script",
+          "strategy": "agentic",
+          "type": "Script"
+        },
+        {
+          "depends_on": [
+            "mixed-script"
+          ],
+          "name": "complete",
+          "strategy": "deterministic",
+          "type": "SetVariable"
+        }
+      ],
+      "name": "complex-orchestration"
+    }
+  ],
+  "summary": {
+    "activity_count": 4,
+    "agentic_count": 1,
+    "coverage_pct": 100.0,
+    "deterministic_count": 3,
+    "pipeline_count": 2,
+    "unsupported_count": 0
+  }
+}

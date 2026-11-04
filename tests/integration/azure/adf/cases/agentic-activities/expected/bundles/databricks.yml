@@ -1,0 +1,21 @@
+bundle:
+  name: agentic_activities
+variables:
+  catalog:
+    description: Target catalog
+    default: main
+  schema:
+    description: Target schema
+    default: default
+include:
+- resources/*.yml
+sync:
+  include:
+  - src/**
+targets:
+  dev:
+    mode: development
+  staging:
+    mode: production
+  prod:
+    mode: production
