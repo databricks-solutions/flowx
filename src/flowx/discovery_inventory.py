@@ -141,9 +141,8 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
     additive standardised fields.
 
     ``depends_on`` is only the upstream names from ``dependencies``. It is kept so
-    existing readers keep working; new readers should use ``type`` and
-    ``dependencies``, which also records each edge's conditions and whether it
-    resolved.
+    existing readers keep working; new readers should use ``dependencies``, which
+    also records each edge's conditions and whether it resolved.
     """
     entry: dict[str, Any] = {
         "name": node.name if node.name is not None else node.task_key,

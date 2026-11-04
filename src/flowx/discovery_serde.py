@@ -106,9 +106,8 @@ def source_graph_from_dict(raw: dict[str, Any]) -> SourceGraph:
 def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[str, Any]:
     """Build the ``metadata/source_graphs.json`` document a discover run persists.
 
-    The envelope is ``{contract_version, source, graphs}``, the same keys the Airflow
-    discover phase writes, plus a content hash so a later phase can prove it is
-    reading exactly what discover produced: ``document_sha256`` covers
+    The envelope is ``{contract_version, source, graphs}`` plus a content hash so a
+    later phase can prove it is reading exactly what discover produced: ``document_sha256`` covers
     ``contract_version``, ``source`` and ``graphs``. It is taken over canonical JSON
     (sorted keys, compact separators), so it does not depend on how the file happens to
     be indented. The document is put through JSON before it is hashed, so the hash covers
