@@ -65,6 +65,8 @@ flowx(command="migrate", parameters={
   "output_dir": ..., "catalog": ..., "schema": ..., "pipeline": "<optional>"})
 ```
 
+For Airflow, use `source="airflow"` with `airflow_definitions` (relative `.py` path → DAG source), `airflow_volume_path`, `airflow_workspace_path`, or a locally readable `airflow_source_path`. Inline Airflow sources enforce byte, file-count, and UTF-8 relative-path limits; use a Volume or Workspace directory for a large DAG estate.
+
 **`migrate` is interactive when configuration options exist.** After translating, if the pipeline
 raises any configuration options (e.g. how to handle an `activity_and_notify` motif, metadata-driven
 bulk-copy consolidation, non-Databricks task compute), it **does not package** — it returns the
@@ -96,9 +98,7 @@ To accept all defaults and skip the prompts, pass `"interactive": false`. (Re-ca
 > target via the SDK (returned as `bundle_uploaded` instead of inline `bundle`). Grant the
 > `mcp-flowx` app's service principal read on the source and write on the output target.
 
-For step-by-step control, run the commands in order (the app reuses `output_dir` across calls, so
-only `discover` needs the source input). `source` ("adf" | "airflow") is required for
-discover/convert and for `inputs discover`/`inputs convert`; for Airflow, swap `adf_definitions` for `airflow_source_path`. `merge_agentic` is ADF-only. `package` and `inputs package` are source-independent:
+For step-by-step control, run the commands in order. `source` ("adf" | "airflow") is required for discover/convert and for `inputs discover`/`inputs convert`; pass the source input again whenever a phase must parse it. For Airflow, use one of `airflow_definitions`, `airflow_volume_path`, `airflow_workspace_path`, or `airflow_source_path`. `merge_agentic` is ADF-only. `package` and `inputs package` are source-independent:
 
 ```
 flowx(command="inputs", parameters={"phase": "discover", "source": "adf"})  # source req for discover/convert
@@ -111,7 +111,9 @@ flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema"
 flowx(command="record_results", parameters={...}) / flowx(command="install_dashboard", parameters={...})
 ```
 
-For an Airflow report with eligible leaf placeholders, use the `flowx-resolve-airflow-gaps` skill between convert and package. It calls `resolve_agentic` with `action="prepare"`, stages one or more provider candidates, and applies only the gap fingerprints the user explicitly accepts. Package must then receive `<output_dir>/.work/translation_report.agentic.json` as `report_path`.
+For an Airflow report with eligible leaf placeholders, use the `flowx-resolve-airflow-gaps` skill between convert and package. It calls `resolve_agentic` with `action="prepare"`, stages one or more provider candidates, and applies only the gap fingerprints the user explicitly accepts. Hosted `action="apply"` must receive the same Airflow source input used for prepare because each hosted materialization is temporary. Package must then receive `<output_dir>/.work/translation_report.agentic.json` as `report_path`.
+
+If no gap is eligible for the leaf contract and the user deliberately wants a bundle that retains linked failing placeholders, call `package` with the deterministic `report_path` and `allow_unresolved_gaps=true`. The explicit acknowledgment returns `status="packaged_with_unresolved_gaps"`. Without it, package fails before writing bundle files. Reviewed reports remain governed by persisted evidence and return `completed_with_reviewed_gaps` when reviewed placeholders remain.
 
 The server's `output_dir` is ephemeral and not reachable from your workspace, so **have `migrate`/
 `package` write the DAB to the target via the SDK** — pass `"output_volume_path": "/Volumes/…"` or
