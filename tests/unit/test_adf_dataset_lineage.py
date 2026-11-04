@@ -2367,6 +2367,27 @@ def test_a_parameter_the_dataset_folder_does_not_read_does_not_qualify_the_refer
     assert writes[0].signature == ""
 
 
+def test_dataset_parameter_text_inside_quotes_is_not_a_parameter_the_folder_reads() -> None:
+    """``'dataset().dir/'`` in quotes is literal text, so a passed ``dir`` does not anchor the reference."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_out": _adls_dataset(
+                "ds_out",
+                file_system="sales",
+                folder_path="@concat('dataset().dir/', pipeline().parameters.run)",
+                linked_service="ls",
+            )
+        },
+        linked_services={"ls": _adls_linked_service("ls", account="acctA")},
+    )
+    reference = AdfDatasetReference(reference_name="ds_out", parameters={"dir": "landing/orders"})
+
+    _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference]), definitions)
+
+    assert writes[0].signature == ""
+
+
 def test_the_dataset_modules_import_only_public_names_from_each_other() -> None:
     """A name another module imports is that module's public API, so it has no leading underscore."""
     package_directory = Path(__file__).parent.parent.parent / "src" / "flowx" / "sources" / "adf"

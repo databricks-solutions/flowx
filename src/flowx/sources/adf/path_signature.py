@@ -67,7 +67,8 @@ def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions
     written_values = {key: expression_value(location.get(key)) for key in ("folderPath", "fileName")}
     if any(value is not None and not isinstance(value, str) for value in written_values.values()):
         return None
-    folder_parameters = {"folderPath", *DATASET_PARAMETER_RE.findall(written_values["folderPath"] or "")}
+    unquoted_folder = _QUOTED_LITERAL_RE.sub("", written_values["folderPath"] or "")
+    folder_parameters = {"folderPath", *DATASET_PARAMETER_RE.findall(unquoted_folder)}
     if not any(_passes_anchored_folder(call_site.get(name)) for name in folder_parameters):
         return None
     bindings = {
