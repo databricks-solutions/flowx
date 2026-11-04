@@ -81,6 +81,8 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
         }
     if pipeline.translation_configuration is not None:
         result["translation_configuration"] = configuration_to_dict(pipeline.translation_configuration)
+    if pipeline.lineage is not None:
+        result["lineage"] = lineage_to_dict(pipeline.lineage)
     return result
 
 
@@ -269,6 +271,12 @@ def activity_to_dict(task: Activity) -> dict[str, Any]:
         task_dict["libraries"] = task.libraries
     if task.parameter_approximations:
         task_dict["parameter_approximations"] = task.parameter_approximations
+    if task.motif_id:
+        task_dict["motif_id"] = task.motif_id
+    if task.data_reads:
+        task_dict["data_reads"] = [data_asset_to_dict(asset) for asset in task.data_reads]
+    if task.data_writes:
+        task_dict["data_writes"] = [data_asset_to_dict(asset) for asset in task.data_writes]
 
     extra = activity_extra_fields(task)
     task_dict.update(extra)
@@ -463,7 +471,6 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             if activity.job_parameters:
                 extra["job_parameters"] = activity.job_parameters
         case MotifActivity():
-            extra["motif_id"] = activity.motif_id
             extra["display_name"] = activity.display_name
             extra["databricks_replacement"] = activity.databricks_replacement
             extra["matched_activity_names"] = activity.matched_activity_names
@@ -564,6 +571,7 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
         "reconciliation_status": pipeline.reconciliation_status,
         "migration_status": pipeline.migration_status,
         "audit": dict(pipeline.audit),
+        "lineage": lineage_to_dict(pipeline.lineage) if pipeline.lineage is not None else None,
     }
 
 
