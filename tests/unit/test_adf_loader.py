@@ -551,29 +551,45 @@ class TestArmParameterHelpers:
 class TestClearStaleOutputs:
     """Discover must reset a reused output_dir so prior runs don't leak into the bundle."""
 
-    def test_removes_prior_run_artifacts(self, tmp_path):
-        """Stale per-pipeline metadata and a prior generated bundle are removed."""
+    def test_moves_prior_run_artifacts_into_an_archive(self, tmp_path):
+        """A prior run's metadata, intermediates and bundle leave their places for a recorded archive."""
+        prior = {
+            "metadata/OldPipeline.arm.json": "{}",
+            "resources/old_pipeline.yml": "name: old",
+            "src/notebooks/old.py": "print('old')",
+            ".work/translation_report.json": "{}",
+            "databricks.yml": "bundle: old",
+            "SETUP.md": "# old",
+            "WARNINGS.md": "# old",
+        }
+        for relative, content in prior.items():
+            (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / relative).write_text(content, encoding="utf-8")
+
+        record_path = clear_stale_outputs(tmp_path)
+
+        assert record_path is not None
+        assert [path.name for path in (tmp_path / "metadata").iterdir()] == ["archive"]
+        for name in ("resources", "src", ".work", "databricks.yml", "SETUP.md", "WARNINGS.md"):
+            assert not (tmp_path / name).exists()
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        assert sorted(entry["from"] for entry in record["moved"]) == sorted(prior)
+        for entry in record["moved"]:
+            assert (tmp_path / entry["to"]).read_text(encoding="utf-8") == prior[entry["from"]]
+
+    def test_keeps_earlier_archives_and_adds_a_new_one(self, tmp_path):
+        """A second re-run archives the first re-run's outputs next to the first archive."""
         (tmp_path / "metadata").mkdir()
-        (tmp_path / "metadata" / "OldPipeline.arm.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "resources").mkdir()
-        (tmp_path / "resources" / "old_pipeline.yml").write_text("name: old", encoding="utf-8")
-        (tmp_path / "src" / "notebooks").mkdir(parents=True)
-        (tmp_path / "src" / "notebooks" / "old.py").write_text("print('old')", encoding="utf-8")
-        (tmp_path / ".work").mkdir()
-        (tmp_path / ".work" / "translation_report.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "databricks.yml").write_text("bundle: old", encoding="utf-8")
-        (tmp_path / "SETUP.md").write_text("# old", encoding="utf-8")
-        (tmp_path / "WARNINGS.md").write_text("# old", encoding="utf-8")
+        (tmp_path / "metadata" / "inventory.json").write_text("{}", encoding="utf-8")
+        first = clear_stale_outputs(tmp_path)
+        (tmp_path / "metadata" / "inventory.json").write_text('{"run": 2}', encoding="utf-8")
 
-        clear_stale_outputs(tmp_path)
+        second = clear_stale_outputs(tmp_path)
 
-        assert not (tmp_path / "metadata").exists()
-        assert not (tmp_path / "resources").exists()
-        assert not (tmp_path / "src").exists()
-        assert not (tmp_path / ".work").exists()
-        assert not (tmp_path / "databricks.yml").exists()
-        assert not (tmp_path / "SETUP.md").exists()
-        assert not (tmp_path / "WARNINGS.md").exists()
+        assert first is not None and second is not None and first != second
+        assert first.is_file() and second.is_file()
+        moved = json.loads(second.read_text(encoding="utf-8"))["moved"]
+        assert [entry["from"] for entry in moved] == ["metadata/inventory.json"]
 
     def test_preserves_unrelated_files(self, tmp_path):
         """Only flowx-managed entries are removed; unrelated files stay put."""
@@ -587,8 +603,8 @@ class TestClearStaleOutputs:
         assert (tmp_path / "user_data" / "keep.csv").exists()
 
     def test_idempotent_on_empty_dir(self, tmp_path):
-        """Clearing a directory with no flowx artifacts is a no-op (no error)."""
-        clear_stale_outputs(tmp_path)
+        """Clearing a directory with no flowx artifacts is a no-op (no error) and archives nothing."""
+        assert clear_stale_outputs(tmp_path) is None
         assert list(tmp_path.iterdir()) == []
 
 

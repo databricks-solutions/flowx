@@ -68,6 +68,11 @@ All under the shared `<output_dir>/metadata/` folder:
 | `metadata/source_graphs.json` | (ADF) The saved source graphs (activities, lineage and detected motifs), versioned and content-hashed; the inventory is built from it and records its hash as `source_graphs_sha256` |
 | `metadata/profile_report.csv` | Per-pipeline complexity report (counts + T-shirt size) |
 | `metadata/<pipeline>.arm.json` | (ADF) Verbatim original source for each pipeline (provenance) |
+| `metadata/archive/<UTC time>/` | Only on a re-run: the earlier run's `metadata/`, `.work/` and bundle, moved here with an `archive.json` of what moved, from where and when |
+
+Discover starts each run afresh. Over an output folder that already holds a run, it moves that run's
+files into a new archive folder instead of deleting them, and says so; package keeps `metadata/`,
+so the archive stays.
 
 The inventory classifies every task into one of three strategies:
 

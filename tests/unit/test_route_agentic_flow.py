@@ -1,0 +1,2256 @@
+"""Tests for the Phase-1 in-engine agentic conversion flow (route -> alter -> fill).
+
+The confirmed flow, built here:
+
+* ``route`` groups pipelines by connected component (reusing :mod:`flowx.routing`), takes a
+  per-component deterministic/agentic decision, records the fingerprint-bound conversion plan, and
+  then **edits** the deterministic ``translation_report.json``: for every pipeline in an
+  agentic-routed component it removes the deterministic tasks, replaces them with
+  ``PlaceholderActivity`` entries, and appends one ``AgenticGap`` per task to ``gaps.json``. Pipelines
+  in deterministic components are left byte-identical, and with no agentic decision the report and
+  gaps are untouched (the non-breaking guarantee).
+* the agent then authors the fill. A routed-agentic group is filled only by the **cross-pipeline
+  COMBINE** (N pipelines -> M, e.g. one Lakeflow Connect pipeline), which swaps the group's pipelines
+  for the agent-authored pipeline(s), typically carrying ``AgenticComponentActivity`` nodes. The
+  name-matched :func:`flowx.ir_serde.merge_agentic_results` fills only convert's own gaps.
+* the merged report is validated structurally via the existing
+  :func:`flowx.validate.bundle_invariants.check_bundle_dir` (unique keys, no dangling deps, acyclic,
+  no dangling pipeline/run_job references).
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from flowx.adapter.__main__ import main as adapter_main
+from flowx.bundler.dab_writer import main as package_main
+from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
+from flowx.ir_serde import merge_agentic_results
+from flowx.models.conversion_plan import ConversionPlan
+from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
+from flowx.models.ir import ControlEdge, Lineage
+from flowx.route_agentic import (
+    GAPS_FILENAME,
+    REPORT_FILENAME,
+    ROUTE_LOCK_FILENAME,
+    ROUTED_AGENTIC_MERGE_REFUSED,
+    ROUTING_RECORD_KEY,
+    WORK_DIRNAME,
+    agentic_pipeline_names,
+    alter_report,
+    apply_agentic_output,
+    apply_plan,
+    apply_plan_to_report,
+    baseline_pipeline_mismatch,
+    load_agentic_output,
+    rebuild,
+    replace_unit_pipelines,
+    route_lock,
+    routing_record,
+    routing_units,
+    validate_report_structurally,
+)
+from flowx.routing import build_recommendation, record_plan
+from flowx.sources.adf.translate import main as translate_main
+
+# --------------------------------------------------------------------------- #
+# Fixtures.
+# --------------------------------------------------------------------------- #
+
+
+def _notebook_task(name: str, task_key: str, path: str = "/Workspace/Shared/x") -> dict[str, Any]:
+    return {"name": name, "task_key": task_key, "type": "NotebookActivity", "notebook_path": path}
+
+
+def _copy_task(name: str, task_key: str) -> dict[str, Any]:
+    return {"name": name, "task_key": task_key, "type": "CopyActivity"}
+
+
+def _report_two_pipelines() -> dict[str, Any]:
+    """A 'parent' pipeline (one Copy) and a 'child' pipeline (one Notebook)."""
+    return {
+        "pipelines": [
+            {"name": "parent", "tasks": [_copy_task("Extract", "extract")]},
+            {"name": "child", "tasks": [_notebook_task("Load", "load")]},
+        ]
+    }
+
+
+def _plan(*, parent: str = "agentic", child: str = "deterministic") -> dict[str, Any]:
+    """An authored/recorded plan: 'parent' and 'child' each their own component."""
+    return {
+        "components": [
+            {"component_id": "component-1", "members": ["parent"], "decision": parent},
+            {"component_id": "component-2", "members": ["child"], "decision": child},
+        ]
+    }
+
+
+def _lfc_pipeline() -> dict[str, Any]:
+    """One agent-authored Lakeflow Connect pipeline via the AgenticComponentActivity escape hatch."""
+    pipeline_definition = {
+        "name": "orders_ingestion",
+        "catalog": "${var.catalog}",
+        "target": "${var.schema}",
+        "ingestion_definition": {"connection_name": "c", "objects": []},
+    }
+    return {
+        "name": "orders_lfc",
+        "tags": {"source": "adf"},
+        "tasks": [
+            {
+                "name": "Ingest orders",
+                "task_key": "ingest_orders",
+                "type": "AgenticComponentActivity",
+                "files": [],
+                "resources": [{"resource_key": "orders_ingestion", "definition": pipeline_definition}],
+                "task": {"pipeline_task": {"pipeline_id": "${resources.pipelines.orders_ingestion.id}"}},
+            }
+        ],
+    }
+
+
+def _named_lfc_pipeline(name: str) -> dict[str, Any]:
+    """A correctly-tagged authored combine pipeline with a caller-chosen ``name``."""
+    pipeline = _lfc_pipeline()
+    pipeline["name"] = name
+    return pipeline
+
+
+def _write_work(output_dir: Path, report: dict[str, Any], gaps: list[dict[str, Any]] | None = None) -> None:
+    work = output_dir / WORK_DIRNAME
+    work.mkdir(parents=True, exist_ok=True)
+    (work / REPORT_FILENAME).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if gaps is not None:
+        (work / GAPS_FILENAME).write_text(json.dumps(gaps, indent=2), encoding="utf-8")
+
+
+def _node(task_key: str, native_type: str) -> SourceNode:
+    return SourceNode(
+        source_id=task_key,
+        task_key=task_key,
+        concept=CONCEPT_NOTEBOOK,
+        source="unit",
+        name=task_key,
+        native_type=native_type,
+        properties={STRATEGY_PROPERTY: "deterministic"},
+        raw={"name": task_key, "type": native_type},
+    )
+
+
+def _routed_inventory() -> dict[str, Any]:
+    """Inventory whose single 'parent -> child' control edge forms one component {child, parent}."""
+    parent = SourceGraph(
+        name="parent",
+        source="unit",
+        tasks=[_node("call_child", "ExecutePipeline")],
+        lineage=Lineage(
+            control_edges=[ControlEdge(source_workflow="parent", target_workflow="child", via_task_key="call_child")]
+        ),
+    )
+    child = SourceGraph(name="child", source="unit", tasks=[_node("copy_orders", "Copy")])
+    return build_source_inventory([parent, child], source="adf", source_dir="/tmp/src")
+
+
+def _setup_routed_agentic(output_dir: Path, *, decision: str = "agentic") -> None:
+    """Write inventory + report, then record and apply a plan routing {child, parent} per ``decision``."""
+    _write_work(output_dir, _report_two_pipelines())
+    metadata = output_dir / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "inventory.json").write_text(json.dumps(_routed_inventory(), indent=2), encoding="utf-8")
+    plan = {"components": [{"component_id": "component-1", "members": ["child", "parent"], "decision": decision}]}
+    result = record_plan(output_dir, plan=plan)
+    assert result["ok"], result
+    recorded = ConversionPlan.load(output_dir)
+    assert recorded is not None
+    apply_plan(output_dir, recorded)
+
+
+def _two_component_inventory() -> dict[str, Any]:
+    """Inventory with no control edge, so 'parent' and 'child' are separate components."""
+    parent = SourceGraph(name="parent", source="unit", tasks=[_node("extract", "Copy")])
+    child = SourceGraph(name="child", source="unit", tasks=[_node("load", "Script")])
+    return build_source_inventory([parent, child], source="adf", source_dir="/tmp/src")
+
+
+def _route_two_components(output_dir: Path, *, parent: str, child: str) -> None:
+    """Record a plan deciding 'parent' and 'child' (each its own component) as given, and apply it."""
+    inventory = json.loads((output_dir / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+    components = [
+        {
+            "component_id": component["component_id"],
+            "members": component["members"],
+            "decision": parent if component["members"] == ["parent"] else child,
+        }
+        for component in build_recommendation(inventory)["components"]
+    ]
+    assert record_plan(output_dir, plan={"components": components})["ok"] is True
+    recorded = ConversionPlan.load(output_dir)
+    assert recorded is not None
+    apply_plan(output_dir, recorded)
+
+
+def _route_parent_agentic(output_dir: Path, report: dict[str, Any], *, child: str = "deterministic") -> None:
+    """Write ``report`` and the two-component inventory, then route 'parent' agentic and 'child' as given."""
+    _write_work(output_dir, report, gaps=[])
+    metadata = output_dir / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "inventory.json").write_text(json.dumps(_two_component_inventory(), indent=2), encoding="utf-8")
+    _route_two_components(output_dir, parent="agentic", child=child)
+
+
+def _report_with_child_gap() -> dict[str, Any]:
+    """The two-pipeline report where convert left 'child''s top-level 'Load' as an agentic gap."""
+    report = _report_two_pipelines()
+    report["pipelines"][1]["tasks"] = [
+        {"name": "Load", "task_key": "load", "type": "PlaceholderActivity", "original_type": "Script"}
+    ]
+    return report
+
+
+def _record_outcomes(report_path: Path) -> dict[str, str]:
+    record = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
+    assert record is not None
+    return {component_id: entry["outcome"] for component_id, entry in record["components"].items()}
+
+
+# --------------------------------------------------------------------------- #
+# Decision selection.
+# --------------------------------------------------------------------------- #
+
+
+def test_agentic_pipeline_names_selects_only_agentic_component_members() -> None:
+    plan = {
+        "components": [
+            {"component_id": "component-1", "members": ["parent", "shared"], "decision": "agentic"},
+            {"component_id": "component-2", "members": ["child"], "decision": "deterministic"},
+        ]
+    }
+    assert agentic_pipeline_names(plan) == {"parent", "shared"}
+
+
+def test_agentic_pipeline_names_gives_the_same_answer_as_the_routing_units() -> None:
+    """An accepted grouping makes its members agentic, whatever its components' own rows still say."""
+    plan = {
+        "components": [
+            {"component_id": "component-1", "members": ["parent"], "decision": None},
+            {"component_id": "component-2", "members": ["child"], "decision": "agentic"},
+            {"component_id": "component-3", "members": ["solo"], "decision": "deterministic"},
+        ],
+        "suggested_groupings": [
+            {
+                "grouping_id": "grouping-1",
+                "components": ["component-1", "component-2"],
+                "members": ["child", "parent"],
+                "accepted": True,
+            }
+        ],
+    }
+
+    assert agentic_pipeline_names(plan) == {"child", "parent"}
+
+
+# --------------------------------------------------------------------------- #
+# Report alteration (the edit step).
+# --------------------------------------------------------------------------- #
+
+
+def test_alter_report_with_no_agentic_pipelines_is_identity() -> None:
+    report = _report_two_pipelines()
+    gaps: list[dict[str, Any]] = []
+    original = copy.deepcopy(report)
+    new_report, new_gaps = alter_report(report, gaps, set())
+    assert new_report == original
+    assert new_gaps == []
+
+
+def test_alter_report_placeholders_agentic_pipeline_and_leaves_deterministic_untouched() -> None:
+    report = _report_two_pipelines()
+    child_before = copy.deepcopy(report["pipelines"][1])
+    new_report, new_gaps = alter_report(report, [], {"parent"})
+
+    parent = next(p for p in new_report["pipelines"] if p["name"] == "parent")
+    child = next(p for p in new_report["pipelines"] if p["name"] == "child")
+    # The agentic pipeline's deterministic Copy task became a placeholder marking the gap.
+    assert [task["type"] for task in parent["tasks"]] == ["PlaceholderActivity"]
+    placeholder = parent["tasks"][0]
+    assert placeholder["name"] == "Extract" and placeholder["task_key"] == "extract"
+    assert placeholder["original_type"] == "CopyActivity"
+    # The deterministic pipeline is byte-identical.
+    assert child == child_before
+
+
+def test_alter_report_emits_one_gap_per_removed_task_tagged_with_pipeline() -> None:
+    _report, gaps = alter_report(_report_two_pipelines(), [], {"parent"})
+    assert len(gaps) == 1
+    gap = gaps[0]
+    assert gap["activity_name"] == "Extract"
+    assert gap["activity_type"] == "CopyActivity"
+    assert gap["pipeline"] == "parent"
+
+
+def test_alter_report_emits_exactly_one_gap_per_task_replacing_prior_gaps() -> None:
+    report = {
+        "pipelines": [
+            {
+                "name": "parent",
+                "tasks": [_copy_task("Extract", "extract"), _copy_task("Flow", "flow")],
+            }
+        ]
+    }
+    # A pre-existing (untagged) convert gap for a task that will be routed must not be duplicated.
+    existing_gaps = [{"activity_name": "Flow", "activity_type": "ExecuteDataFlow", "raw_definition": None}]
+    _report, gaps = alter_report(report, existing_gaps, {"parent"})
+    # One gap per routed task, no duplicates, all tagged with the pipeline.
+    assert len(gaps) == 2
+    identities = sorted((gap["pipeline"], gap["activity_name"]) for gap in gaps)
+    assert identities == [("parent", "Extract"), ("parent", "Flow")]
+    assert len(identities) == len(set(identities))
+
+
+def test_alter_report_is_idempotent_on_gaps() -> None:
+    report = {"pipelines": [{"name": "parent", "tasks": [_copy_task("Extract", "extract")]}]}
+    once_report, once_gaps = alter_report(report, [], {"parent"})
+    twice_report, twice_gaps = alter_report(once_report, once_gaps, {"parent"})
+    # Running the edit again does not append a second gap for the same routed task.
+    assert twice_gaps == once_gaps
+    assert len(twice_gaps) == 1
+
+
+def test_alter_report_keeps_a_non_routed_gap_that_shares_a_task_name_with_a_routed_task() -> None:
+    # Both pipelines have a task named "Sync"; only 'parent' is routed agentic. The untagged convert
+    # gap belongs to the non-routed 'other' and must survive -- the drop must not match by global name.
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [_copy_task("Sync", "sync_parent")]},
+            {"name": "other", "tasks": [_copy_task("Sync", "sync_other")]},
+        ]
+    }
+    existing = [{"activity_name": "Sync", "activity_type": "ExecuteDataFlow", "raw_definition": None}]
+    _report, gaps = alter_report(report, existing, {"parent"})
+
+    # The non-routed pipeline's untagged "Sync" gap survives.
+    assert existing[0] in gaps
+    # The routed pipeline contributes exactly one tagged gap for its own "Sync" task.
+    tagged = [gap for gap in gaps if gap.get("pipeline") == "parent"]
+    assert tagged == [
+        {
+            "activity_name": "Sync",
+            "activity_type": "CopyActivity",
+            "raw_definition": tagged[0]["raw_definition"],
+            "pipeline": "parent",
+        }
+    ]
+    # No duplicate tagged gap for the routed task.
+    assert len(tagged) == 1
+
+
+def _if_with_nested_gap(name: str, task_key: str) -> dict[str, Any]:
+    """An IfCondition whose true branch holds convert's own placeholder for an unsupported activity."""
+    return {
+        "name": name,
+        "task_key": task_key,
+        "type": "IfConditionActivity",
+        "if_true_activities": [{"name": "Nested Gap", "task_key": "nested_gap", "type": "PlaceholderActivity"}],
+    }
+
+
+def _until_with_nested_gap(name: str, task_key: str) -> dict[str, Any]:
+    """Convert's placeholder for an Until, whose loop body holds an unsupported activity only in its ADF JSON."""
+    nested = {"name": "Nested Gap", "type": "Script", "typeProperties": {}}
+    raw_definition = {
+        "name": name,
+        "type": "Until",
+        "typeProperties": {
+            "expression": {"value": "@equals(1, 1)", "type": "Expression"},
+            "activities": [{"name": "Gate", "type": "IfCondition", "typeProperties": {"ifTrueActivities": [nested]}}],
+        },
+    }
+    return {
+        "name": name,
+        "task_key": task_key,
+        "type": "PlaceholderActivity",
+        "original_type": "Until",
+        "raw_definition": raw_definition,
+    }
+
+
+def _foreach_with_nested_gap(name: str, task_key: str) -> dict[str, Any]:
+    """A ForEach whose loop body holds convert's own placeholder for an unsupported activity."""
+    return {
+        "name": name,
+        "task_key": task_key,
+        "type": "ForEachActivity",
+        "inner_activities": [{"name": "Nested Gap", "task_key": "nested_gap", "type": "PlaceholderActivity"}],
+    }
+
+
+def _switch_with_nested_gap(name: str, task_key: str) -> dict[str, Any]:
+    """A Switch whose one case holds convert's own placeholder for an unsupported activity."""
+    nested = {"name": "Nested Gap", "task_key": "nested_gap", "type": "PlaceholderActivity"}
+    return {
+        "name": name,
+        "task_key": task_key,
+        "type": "SwitchActivity",
+        "cases": [{"value": "orders", "activities": [nested]}],
+        "default_activities": [],
+    }
+
+
+_NESTED_GAP_CONTAINERS = [
+    _if_with_nested_gap,
+    _until_with_nested_gap,
+    _foreach_with_nested_gap,
+    _switch_with_nested_gap,
+]
+
+
+@pytest.mark.parametrize("container", _NESTED_GAP_CONTAINERS)
+def test_alter_report_supersedes_an_untagged_gap_nested_inside_a_routed_container(container: Any) -> None:
+    report = {"pipelines": [{"name": "parent", "tasks": [container("Check", "check")]}]}
+    nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
+
+    _report, gaps = alter_report(report, [nested], {"parent"})
+
+    assert nested not in gaps
+    assert [(gap["pipeline"], gap["activity_name"]) for gap in gaps] == [("parent", "Check")]
+
+
+@pytest.mark.parametrize("other_container", _NESTED_GAP_CONTAINERS)
+def test_alter_report_keeps_a_nested_gap_whose_name_a_non_routed_container_also_holds(other_container: Any) -> None:
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [_if_with_nested_gap("Check", "check")]},
+            {"name": "other", "tasks": [other_container("Wait", "wait")]},
+        ]
+    }
+    nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
+
+    _report, gaps = alter_report(report, [nested], {"parent"})
+
+    assert nested in gaps
+
+
+@pytest.mark.parametrize("container", _NESTED_GAP_CONTAINERS)
+def test_a_filled_unit_with_a_nested_convert_gap_leaves_no_gaps(tmp_path: Path, container: Any) -> None:
+    report = _report_two_pipelines()
+    report["pipelines"][0]["tasks"] = [container("Check", "check")]
+    _write_work(tmp_path, report, gaps=[{"activity_name": "Nested Gap", "activity_type": "Script"}])
+    metadata = tmp_path / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "inventory.json").write_text(json.dumps(_two_component_inventory(), indent=2), encoding="utf-8")
+    _route_two_components(tmp_path, parent="agentic", child="deterministic")
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+
+    assert json.loads((tmp_path / WORK_DIRNAME / GAPS_FILENAME).read_text(encoding="utf-8")) == []
+
+
+def test_alter_report_keeps_gaps_for_non_routed_pipelines() -> None:
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [_copy_task("Extract", "extract")]},
+            {"name": "other", "tasks": [_copy_task("Keep", "keep")]},
+        ]
+    }
+    existing = [{"activity_name": "OtherGap", "activity_type": "Custom", "raw_definition": None, "pipeline": "other"}]
+    _report, gaps = alter_report(report, existing, {"parent"})
+    # The non-routed pipeline's gap survives; the routed pipeline contributes exactly one.
+    assert {gap["activity_name"] for gap in gaps} == {"OtherGap", "Extract"}
+
+
+def test_alter_report_preserves_depends_on_edges_on_placeholders() -> None:
+    report = {
+        "pipelines": [
+            {
+                "name": "parent",
+                "tasks": [
+                    _copy_task("A", "a"),
+                    {**_copy_task("B", "b"), "depends_on": [{"task_key": "a", "outcome": "Succeeded"}]},
+                ],
+            }
+        ]
+    }
+    new_report, _gaps = alter_report(report, [], {"parent"})
+    task_b = new_report["pipelines"][0]["tasks"][1]
+    assert task_b["type"] == "PlaceholderActivity"
+    assert task_b["depends_on"] == [{"task_key": "a", "outcome": "Succeeded"}]
+
+
+def test_alter_report_handles_the_single_pipeline_report_shape() -> None:
+    report = {"name": "parent", "tasks": [_copy_task("Extract", "extract")]}
+    new_report, gaps = alter_report(report, [], {"parent"})
+    assert new_report["tasks"][0]["type"] == "PlaceholderActivity"
+    assert len(gaps) == 1
+
+
+# --------------------------------------------------------------------------- #
+# apply_plan_to_report: I/O + non-breaking golden.
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_plan_to_report_edits_report_and_gaps_files(tmp_path: Path) -> None:
+    _write_work(tmp_path, _report_two_pipelines(), gaps=[])
+    summary = apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
+    assert summary["agentic_pipelines"] == ["parent"]
+
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    parent = next(p for p in report["pipelines"] if p["name"] == "parent")
+    assert parent["tasks"][0]["type"] == "PlaceholderActivity"
+    gaps = json.loads((tmp_path / WORK_DIRNAME / GAPS_FILENAME).read_text(encoding="utf-8"))
+    assert [gap["pipeline"] for gap in gaps] == ["parent"]
+
+
+def test_apply_plan_to_report_all_deterministic_leaves_files_byte_identical(tmp_path: Path) -> None:
+    _write_work(tmp_path, _report_two_pipelines(), gaps=[])
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
+    report_before = report_path.read_bytes()
+    gaps_before = gaps_path.read_bytes()
+
+    summary = apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"), inventory=None)
+    assert summary["agentic_pipelines"] == []
+    assert report_path.read_bytes() == report_before
+    assert gaps_path.read_bytes() == gaps_before
+
+
+# --------------------------------------------------------------------------- #
+# Per-pipeline agentic fill: reuse the existing name-matched merge.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("pipeline", ["parent", None])
+def test_merge_into_a_routed_agentic_pipeline_is_refused(tmp_path: Path, pipeline: str | None) -> None:
+    _write_work(tmp_path, _report_two_pipelines(), gaps=[])
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    routed_report = report_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    results_dir.mkdir()
+    result: dict[str, Any] = {"activity_name": "Extract", "task": _notebook_task("Extract", "extract")}
+    if pipeline is not None:
+        result["pipeline"] = pipeline
+    (results_dir / "extract.json").write_text(json.dumps(result), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=re.escape(ROUTED_AGENTIC_MERGE_REFUSED)):
+        merge_agentic_results(report_path, results_dir)
+    assert report_path.read_bytes() == routed_report
+
+
+@pytest.mark.parametrize("pipeline", ["child", None])
+def test_merge_still_fills_convert_gaps_in_a_deterministic_pipeline(tmp_path: Path, pipeline: str | None) -> None:
+    _write_work(tmp_path, _report_with_child_gap(), gaps=[])
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    results_dir.mkdir()
+    result: dict[str, Any] = {"activity_name": "Load", "task": _notebook_task("Load", "load", "/Workspace/Shared/l")}
+    if pipeline is not None:
+        result["pipeline"] = pipeline
+    (results_dir / "load.json").write_text(json.dumps(result), encoding="utf-8")
+
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+
+    merged = json.loads(report_path.read_text(encoding="utf-8"))
+    child = next(p for p in merged["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+    assert _record_outcomes(report_path) == {"component-1": "agentic-not-viable", "component-2": "deterministic"}
+
+
+def test_a_merged_top_level_gap_is_stored_apart_and_survives_a_re_route_with_the_baseline_unchanged(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = _report_with_child_gap()
+    for pipeline in report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, report)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    baseline_path = tmp_path / WORK_DIRNAME / "route_baseline" / REPORT_FILENAME
+    baseline_before = baseline_path.read_bytes()
+    record_before = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+
+    assert baseline_path.read_bytes() == baseline_before
+    record_after = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
+    assert record_before is not None and record_after is not None
+    assert record_after["gap_fills_sha256"] != record_before["gap_fills_sha256"]
+    assert record_after == {**record_before, "gap_fills_sha256": record_after["gap_fills_sha256"]}
+    stored = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
+    assert [(fill["pipeline"], fill["activity_name"]) for fill in stored["gap_fills"]] == [("child", "Load")]
+
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    assert apply_plan(tmp_path, recorded)["altered"] is False
+    child = next(p for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+    assert baseline_path.read_bytes() == baseline_before
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+    capsys.readouterr()
+    package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"])
+    assert "preflight failed" not in capsys.readouterr().err
+    assert (tmp_path / "child" / "databricks.yml").exists()
+
+
+def test_a_gap_fill_survives_switching_every_component_back_to_deterministic(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    child = next(p for p in report["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+    assert _record_outcomes(report_path) == {"component-1": "deterministic", "component-2": "deterministic"}
+
+
+def test_package_refuses_a_re_converted_report_with_no_record_while_a_gap_fill_is_stored(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A re-convert drops the routing record, and a deterministic plan alone must not let package skip the fill."""
+    convert_report = _report_with_child_gap()
+    for pipeline in convert_report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, convert_report)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+    _write_work(tmp_path, convert_report, gaps=[])
+    capsys.readouterr()
+
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 1
+    assert "stores a gap fill but translation_report.json carries no routing record; re-run route" in (
+        capsys.readouterr().err
+    )
+    assert not (tmp_path / "child" / "databricks.yml").exists()
+
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    apply_plan(tmp_path, recorded)
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 0
+    child = next(p for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+
+
+def test_a_re_convert_drops_gap_fills_merged_against_the_old_baseline(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+    reconverted = _report_with_child_gap()
+    reconverted["pipelines"][0]["tasks"][0]["task_key"] = "extract_again"
+    _write_work(tmp_path, reconverted, gaps=[])
+
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    assert apply_plan(tmp_path, recorded)["dropped_gap_fills"] == 1
+
+    stored = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
+    assert stored["gap_fills"] == []
+    child = next(p for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "PlaceholderActivity"
+
+
+def test_a_merge_written_to_a_separate_copy_leaves_the_baseline_and_live_report_alone(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    baseline_path = tmp_path / WORK_DIRNAME / "route_baseline" / REPORT_FILENAME
+    live_before = report_path.read_bytes()
+    baseline_before = baseline_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    copy_path = tmp_path / WORK_DIRNAME / "merged.json"
+
+    assert merge_agentic_results(report_path, results_dir, copy_path) == (1, 0)
+
+    assert report_path.read_bytes() == live_before
+    assert baseline_path.read_bytes() == baseline_before
+    merged_copy = json.loads(copy_path.read_text(encoding="utf-8"))
+    child = next(p for p in merged_copy["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+    assert routing_record(merged_copy) == routing_record(json.loads(live_before))
+
+
+def test_an_untargeted_merge_is_checked_where_it_lands_after_earlier_merges(tmp_path: Path) -> None:
+    report = {
+        "pipelines": [
+            {"name": "child", "tasks": [{"name": "Script1", "task_key": "s", "type": "PlaceholderActivity"}]},
+            {"name": "parent", "tasks": [_copy_task("Script1", "s")]},
+        ]
+    }
+    _write_work(tmp_path, report, gaps=[])
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    routed_report = report_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    results_dir.mkdir()
+    for file_name, task_name in (("a.json", "Script1_done"), ("b.json", "Script1")):
+        result = {"activity_name": "Script1", "task": _notebook_task(task_name, "s")}
+        (results_dir / file_name).write_text(json.dumps(result), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=re.escape(ROUTED_AGENTIC_MERGE_REFUSED)):
+        merge_agentic_results(report_path, results_dir)
+    assert report_path.read_bytes() == routed_report
+
+
+_LOAD_GAP = {"activity_name": "Load", "activity_type": "Script", "raw_definition": None}
+
+
+def _route_parent_agentic_over_a_child_gap(output_dir: Path) -> None:
+    """Route 'parent' agentic over convert's output, where 'child''s 'Load' is a gap in gaps.json too."""
+    _write_work(output_dir, _report_with_child_gap(), gaps=[_LOAD_GAP])
+    metadata = output_dir / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "inventory.json").write_text(json.dumps(_two_component_inventory(), indent=2), encoding="utf-8")
+    _route_two_components(output_dir, parent="agentic", child="deterministic")
+
+
+def _gap_keys(output_dir: Path) -> list[tuple[Any, Any]]:
+    gaps = json.loads((output_dir / WORK_DIRNAME / GAPS_FILENAME).read_text(encoding="utf-8"))
+    return [(gap.get("pipeline"), gap.get("activity_name")) for gap in gaps]
+
+
+def test_a_live_merge_takes_the_gap_it_filled_out_of_gaps_json(tmp_path: Path) -> None:
+    _route_parent_agentic_over_a_child_gap(tmp_path)
+    assert _gap_keys(tmp_path) == [(None, "Load"), ("parent", "Extract")]
+    _write_merge_result(tmp_path / "agentic_results", "child", "Load", "load")
+
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, tmp_path / "agentic_results") == (1, 0)
+
+    assert _gap_keys(tmp_path) == [("parent", "Extract")]
+
+
+def test_a_live_merge_leaves_an_unreadable_gaps_json_alone_and_still_merges(tmp_path: Path) -> None:
+    """gaps.json is only a to-do list, so a broken one never stops the merge half way through its writes."""
+    _route_parent_agentic_over_a_child_gap(tmp_path)
+    gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
+    gaps_path.write_text("{not json", encoding="utf-8")
+    _write_merge_result(tmp_path / "agentic_results", "child", "Load", "load")
+
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, tmp_path / "agentic_results") == (1, 0)
+
+    assert gaps_path.read_text(encoding="utf-8") == "{not json"
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    child = next(pipeline for pipeline in report["pipelines"] if pipeline["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+
+
+@pytest.mark.parametrize("to_a_copy", [False, True], ids=["in-place", "to-a-copy"])
+def test_a_merge_before_any_route_takes_its_gap_out_of_gaps_json_only_in_place(tmp_path: Path, to_a_copy: bool) -> None:
+    _write_work(tmp_path, _report_with_child_gap(), gaps=[_LOAD_GAP])
+    _write_merge_result(tmp_path / "agentic_results", "child", "Load", "load")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    copy_path = tmp_path / WORK_DIRNAME / "merged.json" if to_a_copy else None
+
+    assert merge_agentic_results(report_path, tmp_path / "agentic_results", copy_path) == (1, 0)
+
+    assert _gap_keys(tmp_path) == ([(None, "Load")] if to_a_copy else [])
+
+
+def test_a_re_route_keeps_a_filled_gap_out_of_gaps_json(tmp_path: Path) -> None:
+    """Route rebuilds gaps.json from convert's saved gaps, so it drops a stored fill's gap just as the merge did."""
+    _route_parent_agentic_over_a_child_gap(tmp_path)
+    _write_merge_result(tmp_path / "agentic_results", "child", "Load", "load")
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, tmp_path / "agentic_results") == (1, 0)
+    gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
+    merged_gaps = gaps_path.read_bytes()
+
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    apply_plan(tmp_path, recorded)
+    assert gaps_path.read_bytes() == merged_gaps
+
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+    assert _gap_keys(tmp_path) == []
+
+
+def _rebuilt_gaps(report: dict[str, Any], gaps: list[dict[str, Any]], filled: list[tuple[str, str]]) -> list[Any]:
+    """The gaps route's rebuild writes for ``report`` once each ``(pipeline, activity)`` in ``filled`` is filled."""
+    report_bytes = json.dumps(report).encode("utf-8")
+    fills = [
+        {
+            "pipeline": pipeline,
+            "activity_name": activity_name,
+            "task": _notebook_task(activity_name, "filled"),
+            "baseline_report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+        }
+        for pipeline, activity_name in filled
+    ]
+    plan = _plan(parent="deterministic", child="deterministic")
+    _report, new_gaps, _record = rebuild(report, gaps, plan, None, fills, report_bytes, b"[]", inventory=None)
+    return new_gaps
+
+
+@pytest.mark.parametrize("container", _NESTED_GAP_CONTAINERS)
+def test_a_gap_fill_of_a_container_also_drops_the_gaps_nested_in_it(container: Any) -> None:
+    report = {"pipelines": [{"name": "child", "tasks": [container("Check", "check")]}]}
+    nested = {"activity_name": "Nested Gap", "activity_type": "Script", "raw_definition": None}
+
+    assert _rebuilt_gaps(report, [nested], [("child", "Check")]) == []
+
+
+def test_a_rebuild_does_not_count_an_applied_outputs_pipelines_as_open_gaps() -> None:
+    """The merge leaves fill-agentic's pipelines out of the open names, so the rebuild must too."""
+    report = _report_with_child_gap()
+    report_bytes = json.dumps(report).encode("utf-8")
+    authored = _named_lfc_pipeline("parent_lfc")
+    authored["tasks"].append({"name": "Grouped", "task_key": "grouped", "type": "MotifActivity"})
+    authored["tasks"][-1]["matched_activity_names"] = ["Load"]
+    outputs = {"component-1": {"members": ["parent"], "pipelines": [authored], "output_sha256": "x"}}
+    fill = {
+        "pipeline": "child",
+        "activity_name": "Load",
+        "task": _notebook_task("Load", "load"),
+        "baseline_report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+    }
+
+    _report, gaps, _record = rebuild(report, [_LOAD_GAP], _plan(), outputs, [fill], report_bytes, b"[]", inventory=None)
+
+    assert gaps == []
+
+
+@pytest.mark.parametrize(
+    ("other_task", "kept"),
+    [({"type": "PlaceholderActivity"}, True), ({"type": "NotebookActivity", "notebook_path": "/x"}, False)],
+    ids=["still-a-gap-elsewhere", "converted-elsewhere"],
+)
+def test_a_gap_fill_keeps_a_gap_whose_name_is_still_open_in_another_pipeline(
+    other_task: dict[str, Any], kept: bool
+) -> None:
+    """Convert's gaps carry no pipeline, so a same-named gap still open elsewhere may be that pipeline's own."""
+    report = {
+        "pipelines": [
+            {"name": "child", "tasks": [{"name": "Load", "task_key": "load", "type": "PlaceholderActivity"}]},
+            {"name": "other", "tasks": [{"name": "Load", "task_key": "load", **other_task}]},
+        ]
+    }
+
+    gaps = _rebuilt_gaps(report, [_LOAD_GAP], [("child", "Load")])
+
+    assert gaps == ([_LOAD_GAP] if kept else [])
+
+
+# --------------------------------------------------------------------------- #
+# The routing record: re-routing under different decisions is refused.
+# --------------------------------------------------------------------------- #
+
+
+def test_route_writes_no_record_when_nothing_is_routed_agentic(tmp_path: Path) -> None:
+    _write_work(tmp_path, _report_two_pipelines(), gaps=[])
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    before = report_path.read_bytes()
+
+    apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"), inventory=None)
+
+    assert report_path.read_bytes() == before
+
+
+def test_reroute_to_different_decision_rebuilds_the_report(tmp_path: Path) -> None:
+    """Re-routing with different decisions rebuilds deterministically; switching back restores convert's bytes."""
+    _write_work(tmp_path, _report_two_pipelines(), gaps=[])
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
+    converted_report = report_path.read_bytes()
+    converted_gaps = gaps_path.read_bytes()
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
+    first = json.loads(report_path.read_text(encoding="utf-8"))
+    first_outcomes = {cid: entry["outcome"] for cid, entry in first[ROUTING_RECORD_KEY]["components"].items()}
+    assert first_outcomes["component-1"] == "agentic-not-viable"
+    assert first_outcomes["component-2"] == "deterministic"
+
+    apply_plan_to_report(tmp_path, _plan(parent="deterministic", child="deterministic"), inventory=None)
+
+    assert report_path.read_bytes() == converted_report
+    assert gaps_path.read_bytes() == converted_gaps
+
+
+def test_route_takes_a_fresh_convert_as_the_new_baseline(tmp_path: Path) -> None:
+    _write_work(tmp_path, _report_two_pipelines(), gaps=[])
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
+    reconverted = _report_two_pipelines()
+    reconverted["pipelines"][1]["tasks"] = [_notebook_task("Load", "load", "/Workspace/Shared/reconverted")]
+    _write_work(tmp_path, reconverted, gaps=[])
+
+    apply_plan_to_report(tmp_path, _plan(parent="agentic", child="deterministic"), inventory=None)
+
+    baseline = tmp_path / WORK_DIRNAME / "route_baseline" / REPORT_FILENAME
+    assert json.loads(baseline.read_text(encoding="utf-8")) == reconverted
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    child = next(p for p in report["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["notebook_path"] == "/Workspace/Shared/reconverted"
+
+
+def test_a_re_convert_without_gaps_clears_the_gaps_an_agentic_route_wrote(tmp_path: Path) -> None:
+    pipelines = tmp_path / "export" / "pipelines"
+    pipelines.mkdir(parents=True)
+    wait = {"name": "pause", "type": "Wait", "dependsOn": [], "typeProperties": {"waitTimeInSeconds": 1}}
+    document = {"name": "orders", "properties": {"activities": [wait]}}
+    (pipelines / "orders.json").write_text(json.dumps(document), encoding="utf-8")
+    output_dir = tmp_path / "out"
+    source = ["--source", "adf", "--source-path", str(tmp_path / "export"), "--output-dir", str(output_dir)]
+    report_path = output_dir / WORK_DIRNAME / REPORT_FILENAME
+    gaps_path = output_dir / WORK_DIRNAME / GAPS_FILENAME
+    plan_path = tmp_path / "plan.json"
+
+    def route(decision: str) -> None:
+        plan = {"components": [{"component_id": "component-1", "members": ["orders"], "decision": decision}]}
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        assert adapter_main(["route", "--output-dir", str(output_dir), "--plan-path", str(plan_path)]) == 0
+
+    assert adapter_main(["discover", *source]) == 0
+    assert adapter_main(["convert", *source]) == 0
+    route("agentic")
+    assert [gap["pipeline"] for gap in json.loads(gaps_path.read_text(encoding="utf-8"))] == ["orders"]
+    assert adapter_main(["convert", *source]) == 0
+    reconverted_report = report_path.read_bytes()
+
+    route("deterministic")
+
+    assert not gaps_path.exists()
+    assert report_path.read_bytes() == reconverted_report
+
+
+def test_reroute_under_the_same_decisions_keeps_fills_and_updates_the_plan_hash(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    first_record = routing_record(json.loads(report_path.read_text(encoding="utf-8")))
+    assert first_record is not None
+
+    rationale_plan = {
+        "components": [
+            {
+                "component_id": "component-1",
+                "members": ["child", "parent"],
+                "decision": "agentic",
+                "rationale": "same decision, recorded again",
+            }
+        ]
+    }
+    assert record_plan(tmp_path, plan=rationale_plan)["ok"] is True
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    assert apply_plan(tmp_path, recorded)["altered"] is False
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert [pipeline["name"] for pipeline in report["pipelines"]] == ["orders_lfc"]
+    second_record = routing_record(report)
+    assert second_record is not None
+    assert second_record["conversion_plan_sha256"] != first_record["conversion_plan_sha256"]
+    assert second_record["baseline_report_sha256"] == first_record["baseline_report_sha256"]
+    assert second_record["components"] == first_record["components"]
+
+
+# --------------------------------------------------------------------------- #
+# Cross-pipeline COMBINE: the new pipeline-grain fill (N pipelines -> one LFC).
+# --------------------------------------------------------------------------- #
+
+
+def test_replace_unit_pipelines_replaces_group_pipelines_with_authored_ones() -> None:
+    report = _report_two_pipelines()
+    merged = replace_unit_pipelines(report, {"parent", "child"}, [_lfc_pipeline()])
+    names = [pipeline["name"] for pipeline in merged["pipelines"]]
+    assert names == ["orders_lfc"]
+
+
+def test_replace_unit_pipelines_keeps_pipelines_outside_the_group() -> None:
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [_copy_task("Extract", "extract")]},
+            {"name": "child", "tasks": [_notebook_task("Load", "load")]},
+            {"name": "unrelated", "tasks": [_notebook_task("Keep", "keep")]},
+        ]
+    }
+    merged = replace_unit_pipelines(report, {"parent", "child"}, [_lfc_pipeline()])
+    names = sorted(pipeline["name"] for pipeline in merged["pipelines"])
+    assert names == ["orders_lfc", "unrelated"]
+
+
+def test_combine_fill_of_two_pipelines_into_one_lfc_passes_structural_validation() -> None:
+    report = _report_two_pipelines()
+    merged = replace_unit_pipelines(report, {"parent", "child"}, [_lfc_pipeline()])
+    result = validate_report_structurally(merged)
+    assert result.ok, [f"{finding.code}: {finding.message}" for finding in result.findings]
+
+
+def test_combine_fill_with_a_dangling_pipeline_reference_is_caught() -> None:
+    dangling = _lfc_pipeline()
+    # Point the pipeline_task at a resource that is never declared in this activity's resources list.
+    dangling["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.ghost.id}"}}
+    merged = replace_unit_pipelines(_report_two_pipelines(), {"parent", "child"}, [dangling])
+    result = validate_report_structurally(merged)
+    assert not result.ok
+    assert any(finding.code == "dangling_pipeline_reference" for finding in result.violations)
+
+
+def test_apply_agentic_output_writes_merged_report_when_valid(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert result["ok"] is True
+    assert result["component_id"] == "component-1"
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert [pipeline["name"] for pipeline in report["pipelines"]] == ["orders_lfc"]
+
+
+def test_apply_agentic_output_rejects_and_does_not_write_on_dangling_reference(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_before = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
+    dangling = _lfc_pipeline()
+    dangling["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.ghost.id}"}}
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [dangling])
+    assert result["ok"] is False
+    assert any("dangling_pipeline_reference" in violation for violation in result["violations"])
+    # The report on disk is untouched when validation fails.
+    assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+
+
+def test_combine_rejects_an_authored_pipeline_missing_the_source_tag(tmp_path: Path) -> None:
+    """FIX 2: an authored pipeline without tags.source == 'adf' fails closed at combine (nothing written)."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_before = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
+    untagged = _lfc_pipeline()
+    del untagged["tags"]
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [untagged])
+
+    assert result["ok"] is False
+    assert any("tags.source" in violation and "adf" in violation for violation in result["violations"])
+    # Nothing is written when the source tag is missing.
+    assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+
+
+def test_combine_rejects_an_authored_pipeline_with_wrong_source_tag(tmp_path: Path) -> None:
+    """A non-'adf' source tag is rejected the same way (routing/agentic is ADF-only)."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    mistagged = _lfc_pipeline()
+    mistagged["tags"] = {"source": "airflow"}
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [mistagged])
+
+    assert result["ok"] is False
+    assert any("tags.source" in violation for violation in result["violations"])
+
+
+def test_combine_is_idempotent_running_twice_yields_no_duplicate(tmp_path: Path) -> None:
+    """FIX 3: re-running combine with the same members + authored pipeline does not duplicate it."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+
+    first = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert first["ok"] is True
+    assert first["already_applied"] is False
+
+    # The recorded plan still lists {parent, child}, so the plan/membership check passes again; the
+    # report, however, now contains only the authored pipeline. A naive re-run would re-append it.
+    second = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert second["ok"] is True
+    assert second["already_applied"] is True
+
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    names = [pipeline["name"] for pipeline in report["pipelines"]]
+    assert names == ["orders_lfc"]  # exactly one authored pipeline, no duplicate
+
+
+def test_a_different_combine_on_an_applied_component_replaces_and_rebuilds(tmp_path: Path) -> None:
+    """A second combine with a different hash replaces the stored entry and rebuilds."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    first = apply_agentic_output(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc")])
+    assert first["ok"] is True and first["already_applied"] is False
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    first_names = [p["name"] for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"]]
+    assert first_names == ["orders_lfc"]
+
+    second = apply_agentic_output(tmp_path, ["parent", "child"], [_named_lfc_pipeline("orders_lfc_v2")])
+
+    assert second["ok"] is True
+    assert second["already_applied"] is False
+    second_names = [p["name"] for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"]]
+    assert second_names == ["orders_lfc_v2"]
+
+
+def test_combine_idempotent_when_authored_name_collides_with_a_former_member(tmp_path: Path) -> None:
+    """FIX 3 (b): an authored name colliding with a former member is still detected as already-combined.
+
+    After the first combine the report holds a pipeline named 'parent' (a former member). Name-based
+    detection would see 'parent' present and conclude the combine had not happened; the routing record
+    keeps the detection correct and independent of names.
+    """
+    _setup_routed_agentic(tmp_path, decision="agentic")
+
+    first = apply_agentic_output(tmp_path, ["parent", "child"], [_named_lfc_pipeline("parent")])
+    assert first["ok"] is True and first["already_applied"] is False
+
+    second = apply_agentic_output(tmp_path, ["parent", "child"], [_named_lfc_pipeline("parent")])
+    assert second["ok"] is True
+    assert second["already_applied"] is True
+
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    names = [pipeline["name"] for pipeline in report["pipelines"]]
+    assert names == ["parent"]  # exactly one authored pipeline, no duplicate
+
+
+# --------------------------------------------------------------------------- #
+# Combine membership is bound to the recorded, fingerprint-bound plan.
+# --------------------------------------------------------------------------- #
+
+
+def test_combine_rejects_a_deterministic_component(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="deterministic")
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "not agentic" in result["error"]
+    # A deterministic component is never swapped out.
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert sorted(pipeline["name"] for pipeline in report["pipelines"]) == ["child", "parent"]
+
+
+def test_combine_rejects_a_partial_member_set(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    result = apply_agentic_output(tmp_path, ["parent"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "do not exactly match" in result["error"]
+
+
+def test_combine_rejects_a_superset_member_set(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    result = apply_agentic_output(tmp_path, ["parent", "child", "extra"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "do not exactly match" in result["error"]
+
+
+def test_combine_rejects_a_typoed_member(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    result = apply_agentic_output(tmp_path, ["parent", "chld"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "do not exactly match" in result["error"]
+
+
+def test_combine_rejects_a_stale_fingerprint_plan(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    # Mutate the inventory after recording so the recorded fingerprint no longer matches.
+    inventory_path = tmp_path / "metadata" / "inventory.json"
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory["pipelines"].append({"name": "late_addition", "activities": [], "motifs": []})
+    inventory_path.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "stale" in result["error"]
+
+
+@pytest.mark.parametrize("inventory", [[], "inventory"], ids=["list", "string"])
+def test_fill_refuses_an_inventory_that_is_not_an_object(tmp_path: Path, inventory: Any) -> None:
+    """Route refuses this inventory, so a fill after it is rewritten must refuse it too rather than crash."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    (tmp_path / "metadata" / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    assert result["ok"] is False
+    assert "must contain a JSON object" in result["error"] and "run discover again" in result["error"]
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+@pytest.mark.parametrize("inventory", [[], "inventory"], ids=["list", "string"])
+def test_apply_plan_refuses_an_inventory_that_is_not_an_object(tmp_path: Path, inventory: Any) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    (tmp_path / "metadata" / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must contain a JSON object"):
+        apply_plan(tmp_path, recorded)
+    assert report_path.read_bytes() == report_before
+
+
+def test_combine_marks_the_component_applied(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    assert _record_outcomes(report_path) == {"component-1": "agentic-not-viable"}
+
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+
+    assert _record_outcomes(report_path) == {"component-1": "agentic-applied"}
+
+
+def _write_merge_result(results_dir: Path, pipeline: str, activity_name: str, task_key: str) -> None:
+    results_dir.mkdir(exist_ok=True)
+    (results_dir / f"{task_key}.json").write_text(
+        json.dumps(
+            {
+                "pipeline": pipeline,
+                "activity_name": activity_name,
+                "task": _notebook_task(activity_name, task_key, f"/Workspace/Shared/agentic_{task_key}"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_merge_after_a_combine_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combined_report = report_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "parent", "Extract", "extract")
+
+    with pytest.raises(ValueError, match=re.escape(ROUTED_AGENTIC_MERGE_REFUSED)):
+        merge_agentic_results(report_path, results_dir)
+    exit_code = translate_main(["--merge-agentic", "--report", str(report_path), "--agentic-results", str(results_dir)])
+
+    assert exit_code == 1
+    assert ROUTED_AGENTIC_MERGE_REFUSED in capsys.readouterr().err
+    assert report_path.read_bytes() == combined_report
+
+
+def _colliding_authored_pipelines() -> list[dict[str, Any]]:
+    """Authored combine pipelines that reuse both member names and the routed task names."""
+    parent = _named_lfc_pipeline("parent")
+    parent["tasks"][0]["name"] = "Extract"
+    child = {"name": "child", "tags": {"source": "adf"}, "tasks": [_notebook_task("Load", "load")]}
+    return [parent, child]
+
+
+def test_combine_rerun_is_idempotent_when_authored_names_reuse_every_member(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+
+    first = apply_agentic_output(tmp_path, ["parent", "child"], _colliding_authored_pipelines())
+    assert first["ok"] is True and first["already_applied"] is False
+    second = apply_agentic_output(tmp_path, ["parent", "child"], _colliding_authored_pipelines())
+
+    assert second["ok"] is True
+    assert second["already_applied"] is True
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert [pipeline["name"] for pipeline in report["pipelines"]] == ["parent", "child"]
+
+
+@pytest.mark.parametrize(
+    ("pipeline", "activity_name"),
+    [("parent", "Extract"), ("child", "Load"), (None, "Load")],
+)
+def test_merge_after_a_combine_reusing_every_member_name_is_refused(
+    tmp_path: Path, pipeline: str | None, activity_name: str
+) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_agentic_output(tmp_path, ["parent", "child"], _colliding_authored_pipelines())["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combined_report = report_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    results_dir.mkdir()
+    result: dict[str, Any] = {"activity_name": activity_name, "task": _notebook_task(activity_name, "replaced")}
+    if pipeline is not None:
+        result["pipeline"] = pipeline
+    (results_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=re.escape(ROUTED_AGENTIC_MERGE_REFUSED)):
+        merge_agentic_results(report_path, results_dir)
+    assert report_path.read_bytes() == combined_report
+
+
+def test_merge_into_an_authored_combine_pipeline_is_refused(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "orders_lfc", "Ingest orders", "ingest_orders")
+
+    with pytest.raises(ValueError, match=re.escape(ROUTED_AGENTIC_MERGE_REFUSED)):
+        merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir)
+
+
+def test_combine_requires_route_to_have_applied_the_plan(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    _write_work(tmp_path, _report_two_pipelines())  # convert ran again, so the report has no record
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    assert result["ok"] is False
+    assert "routing record" in result["error"]
+
+
+def test_combine_requires_a_recorded_plan(tmp_path: Path) -> None:
+    _write_work(tmp_path, _report_two_pipelines())  # report only; no plan recorded
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert result["ok"] is False
+    assert "conversion_plan.json" in result["error"]
+
+
+def test_an_invalid_replacement_combine_is_refused_and_keeps_the_applied_one(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
+    report_before = report_path.read_bytes()
+    combines_before = combines_path.read_bytes()
+    dangling = _named_lfc_pipeline("orders_lfc_v2")
+    dangling["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.ghost.id}"}}
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [dangling])
+
+    assert result["ok"] is False
+    assert any("dangling_pipeline_reference" in violation for violation in result["violations"])
+    assert report_path.read_bytes() == report_before
+    assert combines_path.read_bytes() == combines_before
+
+
+def test_combine_stores_sorted_members_and_hashes_every_pipeline_field(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    described = _lfc_pipeline()
+    described["description"] = "Ingest orders through Lakeflow Connect"
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [described])
+
+    assert result["ok"] is True and result["already_applied"] is False
+    combines = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
+    assert combines["components"]["component-1"]["members"] == ["child", "parent"]
+    assert combines["components"]["component-1"]["pipelines"] == [described]
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert report["pipelines"] == [described]
+
+
+def test_combine_replaces_a_hand_edited_store_entry(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
+    combined = combines_path.read_bytes()
+    edited = json.loads(combined)
+    edited["components"]["component-1"]["pipelines"][0]["tasks"] = []
+    combines_path.write_text(json.dumps(edited, indent=2), encoding="utf-8")
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    assert result["ok"] is True and result["already_applied"] is False
+    assert combines_path.read_bytes() == combined
+
+
+def test_a_combine_routed_back_to_deterministic_records_no_combine_hash(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines(), child="agentic")
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+
+    _route_two_components(tmp_path, parent="deterministic", child="agentic")
+
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    record = routing_record(report)
+    assert record is not None
+    (parent_entry,) = [entry for entry in record["components"].values() if entry["members"] == ["parent"]]
+    assert parent_entry["outcome"] == "deterministic"
+    assert parent_entry["output_sha256"] is None
+    assert [pipeline["name"] for pipeline in report["pipelines"]] == ["parent", "child"]
+
+
+def test_combine_refuses_a_name_that_another_components_combine_would_drop(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines(), child="agentic")
+    child_lfc = _named_lfc_pipeline("child_lfc")
+    child_lfc["tasks"][0]["resources"][0]["resource_key"] = "child_ingestion"
+    child_lfc["tasks"][0]["task"] = {"pipeline_task": {"pipeline_id": "${resources.pipelines.child_ingestion.id}"}}
+    assert apply_agentic_output(tmp_path, ["child"], [child_lfc])["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
+    report_before = report_path.read_bytes()
+    combines_before = combines_path.read_bytes()
+
+    result = apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("child")])
+
+    assert result["ok"] is False
+    assert "clash" in result["error"]
+    assert report_path.read_bytes() == report_before
+    assert combines_path.read_bytes() == combines_before
+
+
+@pytest.mark.parametrize(
+    "authored_names",
+    [["child"], ["orders_lfc", "orders_lfc"]],
+    ids=["outside-the-component", "within-the-authored-list"],
+)
+def test_combine_refuses_authored_names_that_clash(tmp_path: Path, authored_names: list[str]) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    authored = [_named_lfc_pipeline(name) for name in authored_names]
+    for index, pipeline in enumerate(authored):
+        pipeline["tasks"][0]["resources"][0]["resource_key"] = f"orders_ingestion_{index}"
+        pipeline["tasks"][0]["task"] = {
+            "pipeline_task": {"pipeline_id": f"${{resources.pipelines.orders_ingestion_{index}.id}}"}
+        }
+
+    result = apply_agentic_output(tmp_path, ["parent"], authored)
+
+    assert result["ok"] is False
+    assert "clash" in result["error"]
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+def test_a_unit_switched_back_to_deterministic_frees_its_authored_names(tmp_path: Path) -> None:
+    """Only a unit whose output is applied holds its names; a stored output no longer applied blocks nothing."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("orders_lfc")])["ok"] is True
+    _route_two_components(tmp_path, parent="deterministic", child="agentic")
+
+    result = apply_agentic_output(tmp_path, ["child"], [_named_lfc_pipeline("orders_lfc")])
+
+    assert result["ok"] is True, result
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert [pipeline["name"] for pipeline in report["pipelines"]] == ["parent", "orders_lfc"]
+
+
+def test_an_applied_units_authored_names_stay_taken(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines(), child="agentic")
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("orders_lfc")])["ok"] is True
+
+    result = apply_agentic_output(tmp_path, ["child"], [_named_lfc_pipeline("orders_lfc")])
+
+    assert result["ok"] is False
+    assert "clash" in result["error"]
+
+
+def test_combine_same_hash_returns_already_applied_true_with_unchanged_message(tmp_path: Path) -> None:
+    """Same authored pipelines hash returns already_applied: True with message 'already applied, unchanged'."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
+
+    first = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert first["ok"] is True and first["already_applied"] is False
+    report_before = report_path.read_bytes()
+    combines_before = combines_path.read_bytes()
+
+    second = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert second["ok"] is True
+    assert second["already_applied"] is True
+    assert second.get("message") == "already applied, unchanged"
+
+    assert report_path.read_bytes() == report_before
+    assert combines_path.read_bytes() == combines_before
+
+
+def test_combine_empty_pipelines_list_is_refused(tmp_path: Path) -> None:
+    """Empty pipelines list is refused and writes nothing."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
+    report_before = report_path.read_bytes()
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [])
+
+    assert result["ok"] is False
+    assert "cannot be empty" in result["error"]
+    assert report_path.read_bytes() == report_before
+    assert not combines_path.exists()
+
+
+def test_combine_validation_failure_writes_nothing(tmp_path: Path) -> None:
+    """When structural validation fails, neither the store nor the report is written."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    combines_path = tmp_path / "metadata" / "agentic_conversion.json"
+    report_before = report_path.read_bytes()
+
+    bad_pipeline = copy.deepcopy(_lfc_pipeline())
+    bad_pipeline["name"] = "orders_lfc_bad"
+    bad_task = bad_pipeline["tasks"][0]
+    bad_task["depends_on"] = [{"task_key": "nonexistent"}]
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [bad_pipeline])
+
+    assert result["ok"] is False
+    assert "violations" in result
+    assert report_path.read_bytes() == report_before
+    assert not combines_path.exists()
+
+
+def test_combine_re_apply_after_reroute_rebuilds_unchanged(tmp_path: Path) -> None:
+    """After a re-route, re-applying the same combine rebuilds from baseline."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+
+    first = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+    assert first["ok"] is True
+    report_after_combine = report_path.read_bytes()
+
+    plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
+    apply_plan_to_report(tmp_path, plan, inventory=None)
+    report_after_reroute = report_path.read_bytes()
+
+    assert report_after_combine == report_after_reroute
+
+
+def test_merge_agentic_refuses_routed_agentic_pipeline(tmp_path: Path) -> None:
+    """merge_agentic refuses a result landing in a routed-agentic pipeline."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "parent", "Extract", "extract")
+
+    with pytest.raises(ValueError) as exc:
+        merge_agentic_results(report_path, results_dir)
+    assert "routed agentic" in str(exc.value)
+    assert "fill-agentic" in str(exc.value)
+    assert "re-run convert" not in str(exc.value) and "combine" not in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# The agent's output history, gaps of applied units, and fill-time checks.
+# --------------------------------------------------------------------------- #
+
+
+def _stored_output(output_dir: Path, unit_id: str) -> dict[str, Any]:
+    stored = json.loads((output_dir / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
+    return stored["components"][unit_id]
+
+
+def test_the_first_fill_is_not_a_replacement_and_a_different_output_is(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])["ok"] is True
+    first = _stored_output(tmp_path, "component-1")
+    assert first["replaced"] == []
+    described = _lfc_pipeline()
+    described["description"] = "a different pattern"
+
+    assert apply_agentic_output(tmp_path, ["parent", "child"], [described])["ok"] is True
+
+    second = _stored_output(tmp_path, "component-1")
+    assert second["replaced"] == [{"from": first["output_sha256"], "to": second["output_sha256"]}]
+    record = routing_record(json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8")))
+    assert record is not None and "replacements" not in record["components"]["component-1"]
+
+
+def test_the_output_history_survives_switching_to_deterministic_and_back(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    changed = _named_lfc_pipeline("parent_lfc")
+    changed["description"] = "changed"
+    assert apply_agentic_output(tmp_path, ["parent"], [changed])["ok"] is True
+
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+    assert routing_record(json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))) is None
+    _route_two_components(tmp_path, parent="agentic", child="deterministic")
+
+    assert len(_stored_output(tmp_path, "component-2")["replaced"]) == 1
+    assert _record_outcomes(tmp_path / WORK_DIRNAME / REPORT_FILENAME)["component-2"] == "agentic-applied"
+
+
+def test_an_applied_unit_leaves_no_routed_gaps(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
+    assert [gap["pipeline"] for gap in json.loads(gaps_path.read_text(encoding="utf-8"))] == ["parent"]
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+
+    assert json.loads(gaps_path.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize(
+    "authored_names",
+    [["Child"], ["Sales Load", "Sales-Load"]],
+    ids=["with-a-deterministic-pipeline", "within-the-authored-list"],
+)
+def test_fill_refuses_names_that_share_a_bundle_folder(tmp_path: Path, authored_names: list[str]) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    authored = [_named_lfc_pipeline(name) for name in authored_names]
+    for index, pipeline in enumerate(authored):
+        pipeline["tasks"][0]["resources"][0]["resource_key"] = f"ingestion_{index}"
+        pipeline["tasks"][0]["task"] = {
+            "pipeline_task": {"pipeline_id": f"${{resources.pipelines.ingestion_{index}.id}}"}
+        }
+
+    result = apply_agentic_output(tmp_path, ["parent"], authored)
+
+    assert result["ok"] is False
+    assert any("shares the bundle folder" in violation for violation in result["violations"])
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+@pytest.mark.parametrize("name", [["parent_lfc"], {"name": "parent_lfc"}, ""], ids=["list", "object", "empty"])
+def test_fill_refuses_a_pipeline_name_that_is_not_a_non_empty_string(tmp_path: Path, name: object) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    authored = _named_lfc_pipeline("parent_lfc")
+    authored["name"] = name
+
+    result = apply_agentic_output(tmp_path, ["parent"], [authored])
+
+    assert result["ok"] is False
+    assert any("give every pipeline a name" in violation for violation in result["violations"])
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda pipeline: pipeline.pop("tasks"),
+        lambda pipeline: pipeline.update(tasks=[]),
+        lambda pipeline: pipeline.update(tasks="load"),
+        lambda pipeline: pipeline.update(tasks={"name": "load"}),
+        lambda pipeline: pipeline.update(tasks=None),
+        lambda pipeline: pipeline.update(tasks=["load"]),
+        lambda pipeline: pipeline.update(migration_status="excluded"),
+    ],
+    ids=["no-tasks", "empty-tasks", "tasks-a-string", "tasks-an-object", "tasks-null", "tasks-strings", "excluded"],
+)
+def test_fill_refuses_an_authored_pipeline_package_would_not_build(tmp_path: Path, edit: Any) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    authored = _named_lfc_pipeline("parent_lfc")
+    edit(authored)
+
+    result = apply_agentic_output(tmp_path, ["parent"], [authored])
+
+    assert result["ok"] is False
+    assert any("parent_lfc" in violation for violation in result["violations"])
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+def test_fill_refuses_an_authored_pipeline_that_still_holds_a_placeholder(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    authored = _named_lfc_pipeline("parent_lfc")
+    authored["tasks"].append(
+        {
+            "name": "Loop",
+            "task_key": "loop",
+            "type": "ForEachActivity",
+            "inner_activities": [{"name": "Todo", "task_key": "todo", "type": "PlaceholderActivity"}],
+        }
+    )
+
+    result = apply_agentic_output(tmp_path, ["parent"], [authored])
+
+    assert result["ok"] is False
+    assert result["violations"] == [
+        "parent_lfc: still has placeholder tasks ['Todo']; convert every task before filling the unit"
+    ]
+
+
+def test_route_refuses_a_report_converted_from_a_different_discover(tmp_path: Path) -> None:
+    stale = _report_two_pipelines()
+    stale["pipelines"][1]["name"] = "removed_since"
+    _write_work(tmp_path, stale, gaps=[])
+    metadata = tmp_path / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    (metadata / "inventory.json").write_text(json.dumps(_two_component_inventory(), indent=2), encoding="utf-8")
+    report_before = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
+
+    with pytest.raises(ValueError, match=r"different discover \(missing \['child'\], extra \['removed_since'\]\)"):
+        _route_two_components(tmp_path, parent="agentic", child="deterministic")
+    assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+
+
+def test_a_pipeline_without_activities_is_not_taken_for_a_different_discover(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADF discover leaves a pipeline with no activities out of the inventory; convert still writes it."""
+    pipelines = tmp_path / "export" / "pipelines"
+    pipelines.mkdir(parents=True)
+    wait = {"name": "pause", "type": "Wait", "dependsOn": [], "typeProperties": {"waitTimeInSeconds": 1}}
+    for name, activities in (("empty", []), ("orders", [wait])):
+        document = {"name": name, "properties": {"activities": activities}}
+        (pipelines / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+    output_dir = tmp_path / "out"
+    source = ["--source", "adf", "--source-path", str(tmp_path / "export"), "--output-dir", str(output_dir)]
+    assert adapter_main(["discover", *source]) == 0
+    assert adapter_main(["convert", *source]) == 0
+    plan_path = tmp_path / "plan.json"
+    plan = {"components": [{"component_id": "component-1", "members": ["orders"], "decision": "agentic"}]}
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    capsys.readouterr()
+
+    assert adapter_main(["route", "--output-dir", str(output_dir), "--plan-path", str(plan_path)]) == 0
+
+    assert _record_outcomes(output_dir / WORK_DIRNAME / REPORT_FILENAME) == {"component-1": "agentic-not-viable"}
+    capsys.readouterr()
+    assert package_main(["--output-dir", str(output_dir), "--no-download-workspace-files"]) == 1
+    error = capsys.readouterr().err
+    assert "different discover" not in error
+    assert "component 'component-1' (orders) is routed agentic but has no agent output yet" in error
+
+
+def test_package_asks_to_re_run_modify_after_a_merge_made_since_modify(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = _report_with_child_gap()
+    for pipeline in report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, report)
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+    capsys.readouterr()
+
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 1
+
+    assert "the configured report is out of date; re-run modify" in capsys.readouterr().err
+    assert not (tmp_path / "child" / "databricks.yml").exists()
+    assert adapter_main(["modify", str(report_path), "--output-dir", str(tmp_path)]) == 0
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 0
+    audit = json.loads((tmp_path / "metadata" / "route_audit.json").read_text(encoding="utf-8"))
+    assert [(fill["pipeline"], fill["activity_name"]) for fill in audit["gap_fills"]] == [("child", "Load")]
+
+
+def test_package_refuses_an_edited_gap_fill(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    report = _report_with_child_gap()
+    for pipeline in report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, report)
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir) == (1, 0)
+    store_path = tmp_path / "metadata" / "agentic_conversion.json"
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    store["gap_fills"][0]["task"]["notebook_path"] = "/Workspace/Shared/tampered"
+    store_path.write_text(json.dumps(store), encoding="utf-8")
+    capsys.readouterr()
+
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files"]) == 1
+
+    assert "agentic_conversion.json has been edited (gap fill 'Load')" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# A filled unit owns the convert gaps of its collapsed motifs and its inventory-only activities.
+# --------------------------------------------------------------------------- #
+
+
+def _motif_task() -> dict[str, Any]:
+    """A motif that collapsed the 'list_files' and 'copy_files' activities into one task."""
+    return {
+        "name": "File ingestion",
+        "task_key": "file_ingestion",
+        "type": "MotifActivity",
+        "motif_id": "file_ingestion",
+        "display_name": "File ingestion",
+        "databricks_replacement": "auto_loader",
+        "matched_activity_names": ["list_files", "copy_files"],
+    }
+
+
+def _route_parent_with_motif_and_missing_activity(output_dir: Path, *, child_activities: list[str]) -> None:
+    """Route 'parent' agentic: its report task is a collapsed motif, and 'probe_folder' is in the inventory only."""
+    parent = SourceGraph(
+        name="parent",
+        source="unit",
+        tasks=[_node("list_files", "GetMetadata"), _node("copy_files", "Copy"), _node("probe_folder", "GetMetadata")],
+    )
+    child = SourceGraph(name="child", source="unit", tasks=[_node(name, "Copy") for name in child_activities])
+    metadata = output_dir / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    inventory = build_source_inventory([parent, child], source="adf", source_dir="/tmp/src")
+    (metadata / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [_motif_task()]},
+            {"name": "child", "tasks": [_copy_task(name, name) for name in child_activities]},
+        ]
+    }
+    convert_gaps = [
+        {"activity_name": "list_files", "activity_type": "GetMetadata"},
+        {"activity_name": "probe_folder", "activity_type": "GetMetadata"},
+    ]
+    _write_work(output_dir, report, gaps=convert_gaps)
+    _route_two_components(output_dir, parent="agentic", child="deterministic")
+
+
+def test_a_filled_unit_drops_the_gaps_of_its_collapsed_motif_and_inventory_only_activities(tmp_path: Path) -> None:
+    _route_parent_with_motif_and_missing_activity(tmp_path, child_activities=["publish"])
+    gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
+    unfilled = json.loads(gaps_path.read_text(encoding="utf-8"))
+    assert {(gap.get("pipeline"), gap["activity_name"]) for gap in unfilled} == {
+        ("parent", "File ingestion"),
+        (None, "probe_folder"),
+    }
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+
+    assert json.loads(gaps_path.read_text(encoding="utf-8")) == []
+
+
+def test_a_filled_unit_keeps_a_gap_whose_name_a_non_routed_pipeline_also_holds(tmp_path: Path) -> None:
+    _route_parent_with_motif_and_missing_activity(tmp_path, child_activities=["publish", "probe_folder"])
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+
+    gaps = json.loads((tmp_path / WORK_DIRNAME / GAPS_FILENAME).read_text(encoding="utf-8"))
+    assert gaps == [{"activity_name": "probe_folder", "activity_type": "GetMetadata"}]
+
+
+def test_two_filled_units_drop_an_inventory_only_gap_name_they_share(tmp_path: Path) -> None:
+    parent = SourceGraph(name="parent", source="unit", tasks=[_node("extract", "Copy"), _node("probe", "GetMetadata")])
+    child = SourceGraph(name="child", source="unit", tasks=[_node("load", "Copy"), _node("probe", "GetMetadata")])
+    metadata = tmp_path / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    inventory = build_source_inventory([parent, child], source="adf", source_dir="/tmp/src")
+    (metadata / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [_copy_task("extract", "extract")]},
+            {"name": "child", "tasks": [_copy_task("load", "load")]},
+        ]
+    }
+    probe_gap = {"activity_name": "probe", "activity_type": "GetMetadata"}
+    _write_work(tmp_path, report, gaps=[probe_gap, dict(probe_gap)])
+    _route_two_components(tmp_path, parent="agentic", child="agentic")
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    assert apply_agentic_output(tmp_path, ["child"], [_named_lfc_pipeline("child_lfc")])["ok"] is True
+
+    assert json.loads((tmp_path / WORK_DIRNAME / GAPS_FILENAME).read_text(encoding="utf-8")) == []
+
+
+# --------------------------------------------------------------------------- #
+# The saved baseline is checked against the routing record before every rebuild.
+# --------------------------------------------------------------------------- #
+
+
+def _tamper_with_baseline(output_dir: Path) -> None:
+    path = output_dir / WORK_DIRNAME / "route_baseline" / REPORT_FILENAME
+    baseline = json.loads(path.read_text(encoding="utf-8"))
+    baseline["pipelines"][0]["tasks"][0]["comment"] = "edited by hand"
+    path.write_text(json.dumps(baseline, indent=2), encoding="utf-8")
+
+
+def test_a_re_route_refuses_a_baseline_changed_since_the_routing_record(tmp_path: Path) -> None:
+    """Package refuses this baseline, so route must not re-stamp the record with its new hash."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    _tamper_with_baseline(tmp_path)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+
+    with pytest.raises(ValueError, match="baseline is missing or changed"):
+        apply_plan(tmp_path, recorded)
+    assert report_path.read_bytes() == report_before
+
+
+def test_fill_refuses_a_baseline_changed_since_the_routing_record(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    _tamper_with_baseline(tmp_path)
+
+    result = apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])
+
+    assert result["ok"] is False
+    assert "baseline is missing or changed" in result["error"]
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+@pytest.mark.parametrize("edit", ["tamper", "drop-record-hash"])
+def test_merge_refuses_a_baseline_that_does_not_match_the_routing_record(tmp_path: Path, edit: str) -> None:
+    """Without the record's hash the merge used to bind its fill to the string 'None'."""
+    report = _report_with_child_gap()
+    _route_parent_agentic(tmp_path, report)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    if edit == "tamper":
+        _tamper_with_baseline(tmp_path)
+    else:
+        routed = json.loads(report_path.read_text(encoding="utf-8"))
+        del routed[ROUTING_RECORD_KEY]["baseline_report_sha256"]
+        report_path.write_text(json.dumps(routed, indent=2), encoding="utf-8")
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+
+    with pytest.raises(ValueError, match="baseline is missing or changed"):
+        merge_agentic_results(report_path, results_dir)
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+def test_a_merge_result_naming_its_pipeline_with_a_list_is_unmatched(tmp_path: Path) -> None:
+    _write_work(tmp_path, _report_with_child_gap())
+    results_dir = tmp_path / "agentic_results"
+    results_dir.mkdir()
+    (results_dir / "load.json").write_text(
+        json.dumps({"pipeline": ["child"], "activity_name": "Load", "task": _notebook_task("Load", "load")}),
+        encoding="utf-8",
+    )
+
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir) == (0, 1)
+
+
+def test_rebuilding_or_applying_a_plan_requires_the_inventory_argument(tmp_path: Path) -> None:
+    """Leaving the inventory out used to skip the baseline-against-inventory check without a word."""
+    _write_work(tmp_path, _report_two_pipelines())
+
+    with pytest.raises(TypeError, match="inventory"):
+        apply_plan_to_report(tmp_path, _plan())  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="inventory"):
+        rebuild(_report_two_pipelines(), [], _plan(), {}, [], b"{}", b"[]")  # type: ignore[call-arg]
+
+
+# --------------------------------------------------------------------------- #
+# Every field of a stored output or gap fill is covered by its hash.
+# --------------------------------------------------------------------------- #
+
+
+def _two_filled_components(output_dir: Path) -> dict[str, str]:
+    """Route 'parent' and 'child' agentic, fill 'parent' only; return each pipeline's unit id."""
+    _route_parent_agentic(output_dir, _report_two_pipelines(), child="agentic")
+    assert apply_agentic_output(output_dir, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    record = routing_record(json.loads((output_dir / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8")))
+    assert record is not None
+    return {entry["members"][0]: unit_id for unit_id, entry in record["components"].items()}
+
+
+def _edit_store(output_dir: Path, edit: Any) -> None:
+    store_path = output_dir / "metadata" / "agentic_conversion.json"
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    edit(store)
+    store_path.write_text(json.dumps(store, indent=2), encoding="utf-8")
+
+
+def test_a_stored_output_moved_to_another_unit_is_not_applied(tmp_path: Path) -> None:
+    units = _two_filled_components(tmp_path)
+
+    def move(store: dict[str, Any]) -> None:
+        entry = store["components"].pop(units["parent"])
+        store["components"][units["child"]] = {**entry, "members": ["child"]}
+
+    _edit_store(tmp_path, move)
+
+    stored = load_agentic_output(tmp_path)
+    assert units["child"] not in stored.outputs
+    assert stored.edited == [units["child"]]
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda entry: entry.update(replaced=[{"from": "a" * 64, "to": entry["output_sha256"]}]),
+        lambda entry: entry.update(note="kept by hand"),
+    ],
+    ids=["history", "unknown-key"],
+)
+def test_a_stored_output_whose_history_or_keys_were_edited_is_not_applied(tmp_path: Path, edit: Any) -> None:
+    units = _two_filled_components(tmp_path)
+    _edit_store(tmp_path, lambda store: edit(store["components"][units["parent"]]))
+
+    stored = load_agentic_output(tmp_path)
+    assert stored.outputs == {}
+    assert stored.edited == [units["parent"]]
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda fill: fill.update(pipeline="parent"),
+        lambda fill: fill.update(activity_name="Extract"),
+        lambda fill: fill.update(baseline_report_sha256="b" * 64),
+        lambda fill: fill.update(note="kept by hand"),
+    ],
+    ids=["pipeline", "activity", "baseline", "unknown-key"],
+)
+def test_a_gap_fill_retargeted_by_hand_is_not_applied(tmp_path: Path, edit: Any) -> None:
+    report = _report_with_child_gap()
+    _route_parent_agentic(tmp_path, report)
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir) == (1, 0)
+    _edit_store(tmp_path, lambda store: edit(store["gap_fills"][0]))
+
+    stored = load_agentic_output(tmp_path)
+    assert stored.gap_fills == []
+    assert len(stored.edited) == 1
+
+
+@pytest.mark.parametrize(
+    "field",
+    [{"libraries": [{"whl": "../src/x.whl"}]}, {"existing_cluster_id": "1234-5678-abc"}],
+    ids=["libraries", "cluster"],
+)
+def test_fill_refuses_a_component_that_puts_libraries_or_compute_on_the_activity(tmp_path: Path, field: Any) -> None:
+    """The component contract package enforces applies at fill, so nothing is stored for a component it would refuse."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    authored = _named_lfc_pipeline("parent_lfc")
+    authored["tasks"][0].update(field)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+
+    with pytest.raises(ValueError, match=next(iter(field))):
+        apply_agentic_output(tmp_path, ["parent"], [authored])
+
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+# --------------------------------------------------------------------------- #
+# One route, fill-agentic or in-place merge at a time per output folder.
+# --------------------------------------------------------------------------- #
+
+
+def _hold_route_lock(output_dir: Path) -> Path:
+    """Leave the lock file another route, fill-agentic or merge would be holding."""
+    lock_path = output_dir / "metadata" / ROUTE_LOCK_FILENAME
+    lock_path.write_text("another-command", encoding="utf-8")
+    return lock_path
+
+
+def test_fill_agentic_refuses_while_another_command_holds_the_route_lock(tmp_path: Path) -> None:
+    """Two fills in one turn both loaded the store, and the second write silently dropped the first unit."""
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    lock_path = _hold_route_lock(tmp_path)
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    assert result["ok"] is False
+    assert any("another route, fill-agentic or merge" in violation for violation in result["violations"])
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+    assert lock_path.read_text(encoding="utf-8") == "another-command"
+
+
+def test_route_refuses_while_another_command_holds_the_route_lock(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Its hosted recovery says to convert before route, since discover moves .work/ too."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    plan_path = tmp_path / "metadata" / "conversion_plan.json"
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    plan_before, report_before = plan_path.read_bytes(), report_path.read_bytes()
+    _hold_route_lock(tmp_path)
+    capsys.readouterr()
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    [violation] = payload["violations"]
+    assert "another route, fill-agentic or merge" in violation
+    hosted_recovery = violation.split("on the hosted MCP server", 1)[1]
+    assert hosted_recovery.index("convert") < hosted_recovery.index("route")
+    assert plan_path.read_bytes() == plan_before
+    assert report_path.read_bytes() == report_before
+
+
+def test_an_in_place_merge_refuses_while_another_command_holds_the_route_lock(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    _hold_route_lock(tmp_path)
+
+    with pytest.raises(ValueError, match="another route, fill-agentic or merge"):
+        merge_agentic_results(report_path, results_dir)
+
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
+def test_a_merge_from_a_copy_into_the_live_report_refuses_while_the_route_lock_is_held(tmp_path: Path) -> None:
+    """Writing the live report from another file is still a write of the live report."""
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    copy_path = tmp_path / "staging" / WORK_DIRNAME / "copy.json"
+    copy_path.parent.mkdir(parents=True)
+    copy_path.write_bytes(report_path.read_bytes())
+    report_before = report_path.read_bytes()
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    _hold_route_lock(tmp_path)
+
+    with pytest.raises(ValueError, match="another route, fill-agentic or merge"):
+        merge_agentic_results(copy_path, results_dir, report_path)
+
+    assert report_path.read_bytes() == report_before
+
+
+def test_the_route_lock_holds_an_output_folder_with_no_metadata_folder_yet(tmp_path: Path) -> None:
+    """Two merges into a convert-only folder must not both run unheld."""
+    (tmp_path / WORK_DIRNAME).mkdir()
+
+    with route_lock(tmp_path) as first:
+        assert first is True
+        assert (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).is_file()
+        with route_lock(tmp_path) as second:
+            assert second is False
+    assert not (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).exists()
+
+
+def test_a_merge_into_a_separate_copy_takes_no_route_lock(tmp_path: Path) -> None:
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    _hold_route_lock(tmp_path)
+
+    copy_path = tmp_path / "merged.json"
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir, copy_path) == (1, 0)
+
+
+def test_route_fill_and_merge_release_the_route_lock(tmp_path: Path) -> None:
+    lock_path = tmp_path / "metadata" / ROUTE_LOCK_FILENAME
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 0
+    assert not lock_path.exists()
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir) == (1, 0)
+    assert not lock_path.exists()
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    assert not lock_path.exists()
+
+
+def test_a_fill_that_raises_releases_the_route_lock(tmp_path: Path) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    (tmp_path / WORK_DIRNAME / REPORT_FILENAME).unlink()
+
+    with pytest.raises(FileNotFoundError):
+        apply_agentic_output(tmp_path, ["parent", "child"], [_lfc_pipeline()])
+
+    assert not (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    ("edit", "named"),
+    [
+        (lambda store: store.update({"notes": "kept by hand"}), "unknown top-level key(s) ['notes']"),
+        (lambda store: store.update({"components_v2": {}}), "unknown top-level key(s) ['components_v2']"),
+        (lambda store: store.pop("gap_fills"), "missing ['gap_fills']"),
+        (lambda store: store.pop("components"), "missing ['components']"),
+    ],
+    ids=["notes", "lookalike", "no-gap-fills", "no-components"],
+)
+def test_the_agent_output_store_must_hold_exactly_its_two_keys(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], edit: Any, named: str
+) -> None:
+    """Every save writes both keys and only those: an added key would be dropped, a deleted one lose its entries."""
+    report = _report_two_pipelines()
+    for pipeline in report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, report)
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    _edit_store(tmp_path, edit)
+    store_path = tmp_path / "metadata" / "agentic_conversion.json"
+    store_before = store_path.read_bytes()
+    capsys.readouterr()
+
+    with pytest.raises(ValueError, match=re.escape(named)):
+        load_agentic_output(tmp_path)
+    with pytest.raises(ValueError, match=re.escape(named)):
+        apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc_v2")])
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 1
+    assert named in capsys.readouterr().err
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 1
+    assert named in capsys.readouterr().err
+
+    assert store_path.read_bytes() == store_before
+
+
+@pytest.mark.parametrize("pipelines", [1, {"parent": {"name": "parent"}}, "parent"], ids=["int", "dict", "str"])
+def test_a_rebuild_reads_an_inventory_whose_pipelines_is_not_a_list_as_listing_none(
+    tmp_path: Path, pipelines: Any
+) -> None:
+    """Route and package read the same inventory list; a malformed one names no pipeline instead of crashing."""
+    report = _report_two_pipelines()
+    inventory = {"source": "adf", "pipelines": pipelines}
+    output = {
+        "members": ["parent"],
+        "pipelines": [_named_lfc_pipeline("parent_lfc")],
+        "output_sha256": "x",
+        "replaced": [],
+    }
+    plan = _plan(parent="agentic", child="deterministic")
+    unit_id = next(iter(routing_units(plan)))
+
+    assert "re-run convert" in (baseline_pipeline_mismatch(report, inventory) or "")
+    rebuilt, _, record = rebuild(report, [], plan, {unit_id: output}, [], b"{}", b"[]", inventory=inventory)
+    assert record["components"][unit_id]["outcome"] == "agentic-applied"
+    assert [pipeline["name"] for pipeline in rebuilt["pipelines"]] == ["child", "parent_lfc"]
+
+
+def test_a_merge_refuses_a_store_whose_gap_fills_key_was_deleted(tmp_path: Path) -> None:
+    """Deleting the key by hand would otherwise let the next merge rewrite the store without the earlier fill."""
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(report_path, results_dir) == (1, 0)
+    _edit_store(tmp_path, lambda store: store.pop("gap_fills"))
+    store_path = tmp_path / "metadata" / "agentic_conversion.json"
+    store_before = store_path.read_bytes()
+
+    with pytest.raises(ValueError, match=re.escape("missing ['gap_fills']")):
+        merge_agentic_results(report_path, results_dir)
+
+    assert store_path.read_bytes() == store_before
+
+
+def test_a_failed_route_lock_token_write_removes_only_its_own_lock(tmp_path: Path, monkeypatch: Any) -> None:
+    """A full disk while writing the token leaves nothing held, so the empty lock must not stay behind."""
+    (tmp_path / "metadata").mkdir()
+
+    def failing_write(descriptor: int, data: bytes) -> int:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "write", failing_write)
+    with pytest.raises(OSError, match="No space left"):
+        with route_lock(tmp_path):
+            pass
+    monkeypatch.undo()
+
+    assert not (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).exists()
+
+
+@pytest.mark.parametrize("failing", ["write", "close"])
+def test_a_failed_route_lock_token_write_or_close_keeps_a_later_commands_lock(
+    tmp_path: Path, monkeypatch: Any, failing: str
+) -> None:
+    """A discover clears metadata/ and a later command takes the lock while this one's write or close fails."""
+    (tmp_path / "metadata").mkdir()
+    lock_path = tmp_path / "metadata" / ROUTE_LOCK_FILENAME
+    real_close = os.close
+
+    def later_command_takes_the_lock() -> None:
+        lock_path.unlink()
+        lock_path.write_text("later-command-token", encoding="utf-8")
+
+    def failing_write(descriptor: int, data: bytes) -> int:
+        later_command_takes_the_lock()
+        return 0
+
+    def failing_close(descriptor: int) -> None:
+        real_close(descriptor)
+        later_command_takes_the_lock()
+        raise OSError(5, "Input/output error")
+
+    if failing == "write":
+        monkeypatch.setattr(os, "write", failing_write)
+    else:
+        monkeypatch.setattr(os, "close", failing_close)
+    with pytest.raises(OSError):
+        with route_lock(tmp_path):
+            pass
+    monkeypatch.undo()
+
+    assert lock_path.read_text(encoding="utf-8") == "later-command-token"
