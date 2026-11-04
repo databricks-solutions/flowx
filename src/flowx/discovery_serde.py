@@ -2,9 +2,10 @@
 
 Kept separate from :mod:`flowx.ir_serde` on purpose: ``ir_serde`` owns the
 ``translation_report.json`` convert->package contract for the Databricks IR, and
-the discovery graph is a different model with a different lifecycle. This module is
-its own round-trip pair so evolving one shape never disturbs the other. It also
-owns the persisted ``metadata/source_graphs.json`` envelope
+the discovery graph is a different model with a different lifecycle. The graph and
+node shapes are this module's own; the data-asset and lineage shapes come from
+``ir_serde`` (see below), so changing those also changes ``source_graphs.json``.
+It also owns the persisted ``metadata/source_graphs.json`` envelope
 (:func:`source_graphs_document`), versioned and content-hashed, so every source's
 discover phase writes the same file and a later phase can read the graphs back
 without going to the source again.

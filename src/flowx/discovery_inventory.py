@@ -140,8 +140,7 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
     reproduce the historical ADF activity shape byte-for-byte; the rest are the
     additive standardised fields.
 
-    Two keys repeat others. ``original_type`` holds the same value as ``type``, and
-    ``depends_on`` is only the upstream names from ``dependencies``. They are kept so
+    ``depends_on`` is only the upstream names from ``dependencies``. It is kept so
     existing readers keep working; new readers should use ``type`` and
     ``dependencies``, which also records each edge's conditions and whether it
     resolved.
@@ -156,7 +155,6 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
         entry["depends_on"] = upstream_names
 
     entry["task_key"] = node.task_key
-    entry["original_type"] = node.native_type
     entry["dependencies"] = [
         {
             "upstream": dependency.upstream,
