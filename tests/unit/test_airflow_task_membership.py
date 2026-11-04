@@ -10,6 +10,7 @@ import pytest
 from flowx.models.ir import Pipeline, RunJobActivity
 from flowx.sources.airflow import audit as source_audit
 from flowx.sources.airflow import loader as airflow_loader
+from flowx.sources.airflow.loader.visitor import _wiring_membership
 
 
 def _write(tmp_path: Path, source: str) -> Path:
@@ -321,3 +322,78 @@ def test_audit_keeps_a_named_but_unwired_dagless_task_as_an_orphan(tmp_path: Pat
 
     assert audit.unresolved == []
     assert {candidate.details.get("task_id") for candidate in audit.tasks} == {"start"}
+
+
+def test_adopted_task_does_not_enable_the_dag_retry_email(tmp_path: Path) -> None:
+    # Neither task retries in Airflow: start sets retries=0 and child never receives default_args.
+    source = (
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "dag = DAG('c', schedule=None, default_args={'retries': 2, 'email': ['a@x.com'], 'email_on_retry': True})\n"
+        "start = BashOperator(task_id='start', bash_command='x', dag=dag, retries=0)\n"
+        "child = BashOperator(task_id='child', bash_command='x')\n"
+        "start >> child\n"
+    )
+
+    pipeline = _load(tmp_path, source)
+
+    assert "unsupported_dag_setting" not in {finding["code"] for finding in pipeline.not_translatable}
+    assert pipeline.reconciliation_status == "verified"
+
+
+def test_operator_without_dag_argument_joins_through_cross_downstream(tmp_path: Path) -> None:
+    source = (
+        "from airflow import DAG\n"
+        "from airflow.models.baseoperator import cross_downstream\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "dag = DAG('c', schedule=None)\n"
+        "start = BashOperator(task_id='start', bash_command='x', dag=dag)\n"
+        "t = BashOperator(task_id='t', bash_command='x')\n"
+        "cross_downstream([start], [t])\n"
+    )
+
+    pipeline = _load(tmp_path, source)
+
+    assert ("start", "t") in _edges(pipeline)
+    assert pipeline.reconciliation_status == "verified"
+
+
+def test_task_built_after_a_with_dag_block_and_wired_in_does_not_inherit_default_args(tmp_path: Path) -> None:
+    source = (
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG('c', schedule=None, default_args={'retries': 4}) as dag:\n"
+        "    start = BashOperator(task_id='start', bash_command='x')\n"
+        "t = BashOperator(task_id='t', bash_command='x')\n"
+        "start >> t\n"
+    )
+
+    pipeline = _load(tmp_path, source)
+
+    tasks = {task.task_key: task for task in pipeline.tasks}
+    assert tasks["start"].max_retries == 4
+    assert tasks["t"].max_retries is None
+    assert ("start", "t") in _edges(pipeline)
+
+
+def test_wiring_inside_a_statically_invoked_helper_adopts_the_task(tmp_path: Path) -> None:
+    # The wiring scan follows the helper, so t is adopted. The capture and audit passes don't follow
+    # wiring helpers yet (#178), so the start -> t edge is still missing and reconciliation fails
+    # closed instead of verifying with only start.
+    source = (
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "dag = DAG('c', schedule=None)\n"
+        "start = BashOperator(task_id='start', bash_command='x', dag=dag)\n"
+        "t = BashOperator(task_id='t', bash_command='x')\n"
+        "def wire():\n"
+        "    start >> t\n"
+        "wire()\n"
+    )
+    module = ast.parse(source)
+    t_call = module.body[4].value
+
+    membership = _wiring_membership(module, "dag", {})
+
+    assert id(t_call) in membership.joined
+    assert _load(tmp_path, source).reconciliation_status == "failed"

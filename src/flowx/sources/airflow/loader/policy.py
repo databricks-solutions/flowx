@@ -156,14 +156,15 @@ def _job_email_notifications(visitor: _DagVisitor) -> dict[str, list[str]]:
 
 def _retry_email_is_active(visitor: _DagVisitor) -> bool:
     """Returns whether any captured task can emit an Airflow retry email."""
-    for _, _, kwargs in visitor.operators.values():
-        retry_node = kwargs.get("retries", visitor.default_args.get("retries"))
+    for var, (_, _, kwargs) in visitor.operators.items():
+        default_args = visitor.default_args_for(var)
+        retry_node = kwargs.get("retries", default_args.get("retries"))
         if retry_node is None:
             continue
         retry_count = ops.literal_value(retry_node)
         if isinstance(retry_count, int) and not isinstance(retry_count, bool) and retry_count <= 0:
             continue
-        on_retry = kwargs.get("email_on_retry", visitor.default_args.get("email_on_retry"))
+        on_retry = kwargs.get("email_on_retry", default_args.get("email_on_retry"))
         if isinstance(on_retry, ast.Constant) and on_retry.value is False:
             continue
         return True

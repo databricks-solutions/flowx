@@ -55,9 +55,10 @@ class _DagVisitor(ast.NodeVisitor):
         self.airflow_generation = _airflow_generation(module)
         self.asset_definitions = _asset_definitions(module, self._aliases)
         self._target_dag_variable = target_dag_variable
+        selected_dag = target_dag_variable or _context_dag_identity(module, self._aliases)
         wiring = (
-            _wiring_membership(module, target_dag_variable, self._aliases)
-            if target_dag_variable
+            _wiring_membership(module, selected_dag, self._aliases)
+            if selected_dag
             else _WiringMembership(joined=set(), undecided=set())
         )
         self._calls_joined_by_wiring = wiring.joined
@@ -294,6 +295,9 @@ class _DagVisitor(ast.NodeVisitor):
         ):
             if not _omits_dag(dag_node) or id(node) not in self._calls_joined_by_wiring:
                 return False
+        if not self._dag_scope_depth and id(node) in self._calls_undecided_by_wiring:
+            return False
+        if id(node) in self._calls_joined_by_wiring:
             self.adopted_capture_ids.add(var)
         call = ast.Call(
             func=ast.Name(id=construct, ctx=ast.Load()),
@@ -697,13 +701,11 @@ class _DagVisitor(ast.NodeVisitor):
                     isinstance(dag_argument, ast.Name) and dag_argument.id == self._target_dag_variable
                 )
             is_assigned_task_factory = self._helper_targets_assigned_dag(node)
-            in_selected_assigned_dag = (
-                in_selected_assigned_dag
-                or is_assigned_task_factory
-                or id(node) in self._calls_joined_by_wiring
-                or id(node) in self._calls_undecided_by_wiring
-            )
-        if (self._dag_scope_depth or in_selected_assigned_dag) and id(node) not in self._claimed_task_call_ids:
+            in_selected_assigned_dag = in_selected_assigned_dag or is_assigned_task_factory
+        joins_through_wiring = id(node) in self._calls_joined_by_wiring or id(node) in self._calls_undecided_by_wiring
+        if (self._dag_scope_depth or in_selected_assigned_dag or joins_through_wiring) and id(
+            node
+        ) not in self._claimed_task_call_ids:
             is_operator = _direct_operator_call(node, self._aliases) is not None
             is_mapped_operator = _mapped_operator_call(node, self._aliases) is not None
             is_taskflow = self._taskflow_def_name(node)[0] is not None
@@ -1020,7 +1022,12 @@ def _wiring_membership(module: ast.Module, dag_variable: str, aliases: dict[str,
     Airflow puts an operator built without ``dag=`` (and outside a ``with DAG():`` block) into the DAG of
     the task it is wired to, so ``start >> TriggerDagRunOperator(...)`` makes the trigger part of
     ``start``'s DAG. Coordinator DAGs depend on this heavily. Wiring is followed through ``>>`` / ``<<``
-    (including list fan-out), ``set_upstream`` / ``set_downstream``, and ``chain``.
+    (including list fan-out), ``set_upstream`` / ``set_downstream``, ``chain``, and ``cross_downstream``,
+    and into a module-level wiring helper at each place it is called.
+
+    *dag_variable* names the selected DAG: the ``dag = DAG(...)`` variable, or the identity
+    ``_with_dag_identity`` gives a ``with DAG(...)`` block. Operators built inside a ``with DAG(...)``
+    block belong to that DAG; ones built after it without ``dag=`` are adoption candidates like any other.
 
     Edges are read in source order, the way Airflow applies them. A task joins a DAG only when the
     other end of an edge already has one. Airflow raises at import when two tasks that both lack a DAG
@@ -1033,6 +1040,9 @@ def _wiring_membership(module: ast.Module, dag_variable: str, aliases: dict[str,
     adopted: set[str] = set()
     call_ids: dict[str, int] = {}
     current_binding: dict[str, str] = {}
+    context_dags: list[str] = []
+    wiring_helpers: dict[str, ast.FunctionDef] = {}
+    followed_helpers: list[str] = []
 
     def operator_call(node: ast.expr) -> ast.Call | None:
         if not isinstance(node, ast.Call):
@@ -1053,7 +1063,8 @@ def _wiring_membership(module: ast.Module, dag_variable: str, aliases: dict[str,
             dag_argument = dag_argument_of(call)
             call_ids[key] = id(node)
             if dag_argument is None or _omits_dag(dag_argument):
-                dag_of[key] = None
+                # Inside a ``with DAG(...)`` block Airflow gives the operator the block's DAG.
+                dag_of[key] = context_dags[-1] if context_dags else None
             elif isinstance(dag_argument, ast.Name):
                 dag_of[key] = dag_argument.id
             else:
@@ -1109,7 +1120,22 @@ def _wiring_membership(module: ast.Module, dag_variable: str, aliases: dict[str,
 
     def scan(statements: list[ast.stmt]) -> None:
         for statement in statements:
-            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if isinstance(statement, ast.FunctionDef):
+                # Python binds the name when the def runs, so only a call after it can follow it.
+                if _is_wiring_helper(statement, aliases):
+                    wiring_helpers[statement.name] = statement
+                else:
+                    wiring_helpers.pop(statement.name, None)
+                continue
+            if isinstance(statement, (ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            context_dag = _with_dag_identity(statement, aliases)
+            if context_dag is not None:
+                context_dags.append(context_dag)
+                try:
+                    scan(statement.body)  # type: ignore[attr-defined]
+                finally:
+                    context_dags.pop()
                 continue
             if (
                 isinstance(statement, ast.For)
@@ -1139,6 +1165,25 @@ def _wiring_membership(module: ast.Module, dag_variable: str, aliases: dict[str,
                     positions = [keys_for(argument) for argument in call.args]
                     for left, right in zip(positions, positions[1:]):
                         connect(left, right)
+                elif _construct_name(call.func, aliases) == "cross_downstream":
+                    arguments = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
+                    from_tasks = call.args[0] if call.args else arguments.get("from_tasks")
+                    to_tasks = call.args[1] if len(call.args) > 1 else arguments.get("to_tasks")
+                    if from_tasks is not None and to_tasks is not None:
+                        connect(keys_for(from_tasks), keys_for(to_tasks))
+                elif (
+                    isinstance(call.func, ast.Name)
+                    and not call.args
+                    and not call.keywords
+                    and call.func.id in wiring_helpers
+                    and call.func.id not in followed_helpers
+                ):
+                    # The helper's edges apply here, when Airflow runs the call.
+                    followed_helpers.append(call.func.id)
+                    try:
+                        scan(wiring_helpers[call.func.id].body)
+                    finally:
+                        followed_helpers.pop()
             for field_name in ("body", "orelse", "finalbody"):
                 nested = getattr(statement, field_name, None)
                 if isinstance(nested, list):
@@ -1149,7 +1194,7 @@ def _wiring_membership(module: ast.Module, dag_variable: str, aliases: dict[str,
     scan(module.body)
     joined = {call_ids[key] for key in adopted if dag_of[key] == dag_variable}
     undecided = {call_ids[key] for key, dag in dag_of.items() if dag == _UNDECIDED_DAG}
-    undecided |= _dagless_calls_outside(module, set(call_ids.values()), operator_call)
+    undecided |= _dagless_calls_outside(module, set(call_ids.values()), operator_call, aliases)
     return _WiringMembership(joined=joined, undecided=undecided)
 
 
@@ -1157,18 +1202,22 @@ def _dagless_calls_outside(
     module: ast.Module,
     followed_call_ids: set[int],
     operator_call: Callable[[ast.expr], ast.Call | None],
+    aliases: dict[str, str],
 ) -> set[int]:
     """Returns ids of module-level operator calls without a DAG that the wiring scan never followed.
 
     These are built in shapes like ``ts.append(Op(...))``, ``[Op(...) for n in ids]`` or
     ``a, b = Op(...), Op(...)``, where the scan can't tell what wiring later reaches them. Function and
-    class bodies are skipped, as the scan skips them.
+    class bodies are skipped, as the scan skips them, and so are ``with DAG(...)`` bodies, whose
+    operators already have that DAG.
     """
     found: set[int] = set()
     pending: list[ast.AST] = list(module.body)
     while pending:
         node = pending.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.stmt) and _with_dag_identity(node, aliases) is not None:
             continue
         if isinstance(node, ast.Call):
             call = operator_call(node)
@@ -1185,3 +1234,59 @@ def _dagless_calls_outside(
                     continue
         pending.extend(ast.iter_child_nodes(node))
     return found
+
+
+def _with_dag_identity(statement: ast.stmt, aliases: dict[str, str]) -> str | None:
+    """Names the DAG a ``with DAG(...)`` statement opens, or returns None for any other statement.
+
+    The name is the ``as`` variable when there is one, so ``dag=dag`` elsewhere matches it, and a
+    position-based stand-in otherwise.
+    """
+    if not isinstance(statement, ast.With):
+        return None
+    for item in statement.items:
+        if isinstance(item.context_expr, ast.Call) and _construct_name(item.context_expr.func, aliases) == "DAG":
+            if isinstance(item.optional_vars, ast.Name):
+                return item.optional_vars.id
+            return f"<with DAG at line {statement.lineno}>"
+    return None
+
+
+def _context_dag_identity(module: ast.Module, aliases: dict[str, str]) -> str | None:
+    """Returns the identity of the module's single top-level ``with DAG(...)`` block, if it has one."""
+    identities = [
+        identity for statement in module.body if (identity := _with_dag_identity(statement, aliases)) is not None
+    ]
+    return identities[0] if len(identities) == 1 else None
+
+
+def _is_wiring_helper(node: ast.FunctionDef, aliases: dict[str, str]) -> bool:
+    """Returns whether *node* is a helper the wiring scan can follow at its call site.
+
+    Same rule as the capture pass and audit use for wiring helpers: no decorators, no parameters, and a
+    body (after an optional docstring) of wiring statements only, so following it can't bind names.
+    """
+    arguments = node.args
+    if node.decorator_list or arguments.posonlyargs or arguments.args or arguments.kwonlyargs:
+        return False
+    if arguments.vararg or arguments.kwarg:
+        return False
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        if isinstance(body[0].value.value, str):
+            body = body[1:]
+    return all(_is_wiring_statement(statement, aliases) for statement in body)
+
+
+def _is_wiring_statement(statement: ast.stmt, aliases: dict[str, str]) -> bool:
+    """Returns whether *statement* only expresses task dependency wiring."""
+    if not isinstance(statement, ast.Expr):
+        return False
+    value = statement.value
+    if isinstance(value, ast.BinOp):
+        return isinstance(value.op, (ast.RShift, ast.LShift))
+    if not isinstance(value, ast.Call):
+        return False
+    if isinstance(value.func, ast.Attribute) and value.func.attr in ("set_upstream", "set_downstream"):
+        return True
+    return _construct_name(value.func, aliases) in ("chain", "cross_downstream")
