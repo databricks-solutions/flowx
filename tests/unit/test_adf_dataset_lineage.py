@@ -1773,7 +1773,10 @@ def test_call_site_parameters_that_are_not_a_map_do_not_crash() -> None:
 
 
 def test_a_reference_that_passes_no_folder_gets_no_signature_from_the_dataset_folder() -> None:
-    """Only a reference that passes a ``folderPath`` joins on folder shape; the dataset's own folder never adds one."""
+    """Only a reference that passes an anchored folder joins on folder shape; the dataset's own folder never adds one.
+
+    The folder can be passed as ``folderPath`` or as a parameter the dataset's own folder reads.
+    """
     definitions = _wrapped_folder_definitions(ds_out="archive", ds_in="archive")
     for definition in definitions.datasets.values():
         definition.properties["typeProperties"]["location"]["fileName"] = "@dataset().fileName"
