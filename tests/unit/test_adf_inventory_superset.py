@@ -97,7 +97,6 @@ def test_activity_entries_superset_legacy_shape(tmp_path: Path) -> None:
             for key, value in legacy_entry.items():
                 assert new_entry[key] == value, (pipeline["name"], key)
             # Additive standardized fields are present.
-            assert new_entry["original_type"] == legacy_entry["type"]
             assert "dependencies" in new_entry
             assert "raw" in new_entry
 
@@ -131,7 +130,7 @@ def test_inventory_carries_per_pipeline_lineage(tmp_path: Path) -> None:
     for pipeline in inventory["pipelines"]:
         assert "lineage" in pipeline, pipeline["name"]
         # Additive block only -- historical per-pipeline keys are untouched.
-        assert set(pipeline["lineage"].keys()) == {"control_edges", "data_edges", "motifs"}
+        assert set(pipeline["lineage"].keys()) == {"control_edges", "data_edges"}
         control_edges += len(pipeline["lineage"]["control_edges"])
         data_edges += len(pipeline["lineage"]["data_edges"])
 
@@ -146,7 +145,7 @@ def test_inventory_surfaces_detected_motifs_without_collapsing(tmp_path: Path) -
     It must appear in the pipeline's additive ``motifs`` list -- carrying its type,
     Databricks replacement target, and participating activities -- while every
     member still appears as its own entry in ``activities`` (no discover-time
-    collapse) and the lineage block's own motif slot stays empty (decoupled).
+    collapse) and the lineage block carries no motifs (decoupled).
     """
     metadata = _run_discover(tmp_path)
     inventory = json.loads((metadata / "inventory.json").read_text())
@@ -171,8 +170,8 @@ def test_inventory_surfaces_detected_motifs_without_collapsing(tmp_path: Path) -
     for member in bulk["member_task_keys"]:
         assert member in activity_names, member
 
-    # Decoupled from lineage: the additive motifs key is separate from lineage.motifs.
-    assert pipeline["lineage"]["motifs"] == []
+    # Decoupled from lineage: motifs ride on the pipeline entry, not inside its lineage block.
+    assert "motifs" not in pipeline["lineage"]
 
 
 def test_pipelines_without_a_motif_omit_the_motifs_key(tmp_path: Path) -> None:
@@ -206,7 +205,7 @@ def test_discover_persists_source_graphs_that_match_the_inventory(tmp_path: Path
 
     assert document["contract_version"] == "1"
     assert document["source"] == "adf"
-    assert len(document["graph_sha256"]) == len(graphs) == inventory["summary"]["pipeline_count"]
+    assert len(document["graphs"]) == len(graphs) == inventory["summary"]["pipeline_count"]
     listed = {pipeline["name"] for pipeline in inventory["pipelines"]}
     assert listed <= {graph.name for graph in graphs}
     assert inventory["source_graphs_sha256"] == document["document_sha256"]

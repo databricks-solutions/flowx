@@ -4,15 +4,18 @@ The source-neutral derivation itself -- the identity vs signature join tiers, no
 self-edges, no duplicates, fan-out, and Switch / ForEach / If recursion -- driven
 straight off :class:`SourceGraph` / :class:`SourceNode` values. Per-source
 population of a node's reads / writes / invocation markers (the ADF and Airflow
-mappers) is exercised in the per-source test suites (#62 / #63); this file stays
+mappers) is exercised in the per-source test suites; this file stays
 free of any ``sources/*`` coupling.
 """
 
 from __future__ import annotations
 
+import pytest
+
 from flowx.discovery_lineage import (
     INVOKES_WAIT_PROPERTY,
     INVOKES_WORKFLOW_PROPERTY,
+    build_graph_control_edges,
     build_graph_lineage,
     walk_nodes,
     with_graph_lineage,
@@ -62,7 +65,7 @@ def test_identity_tier_joins_across_different_signatures() -> None:
         _node("writer", writes=[DataAsset(signature="ds_out", identity="curated.orders")]),
         _node("reader", reads=[DataAsset(signature="ds_in_other", identity="curated.orders")]),
     )
-    edges = build_graph_lineage(graph).data_edges
+    edges = build_graph_lineage(graph, known_workflows=()).data_edges
     assert len(edges) == 1
     assert (edges[0].source_task_key, edges[0].target_task_key) == ("writer", "reader")
     assert edges[0].match_kind == "identity"
@@ -74,7 +77,7 @@ def test_signature_tier_when_identity_unresolved() -> None:
         _node("writer", writes=[DataAsset(signature="FP[wm|slots=1]/FN[v.txt|slots=0]")]),
         _node("reader", reads=[DataAsset(signature="FP[wm|slots=1]/FN[v.txt|slots=0]")]),
     )
-    edges = build_graph_lineage(graph).data_edges
+    edges = build_graph_lineage(graph, known_workflows=()).data_edges
     assert len(edges) == 1
     assert edges[0].match_kind == "signature"
     assert edges[0].identity is None
@@ -86,19 +89,19 @@ def test_signature_tier_with_one_resolved_side_claims_no_identity() -> None:
         _node("writer", writes=[DataAsset(signature="shared", identity="curated.orders")]),
         _node("reader", reads=[DataAsset(signature="shared")]),
     )
-    edges = build_graph_lineage(graph).data_edges
+    edges = build_graph_lineage(graph, known_workflows=()).data_edges
     assert len(edges) == 1
     assert edges[0].match_kind == "signature"
     assert edges[0].identity is None
 
 
 def test_distinct_identities_do_not_fall_back_to_signature() -> None:
-    """Two resolved-but-different identities never manufacture a signature edge (#36)."""
+    """Two resolved-but-different identities never manufacture a signature edge."""
     graph = _graph(
         _node("writer", writes=[DataAsset(signature="shared", identity="a.first")]),
         _node("reader", reads=[DataAsset(signature="shared", identity="b.second")]),
     )
-    assert build_graph_lineage(graph).data_edges == []
+    assert build_graph_lineage(graph, known_workflows=()).data_edges == []
 
 
 def test_empty_identities_do_not_join_on_identity() -> None:
@@ -107,7 +110,7 @@ def test_empty_identities_do_not_join_on_identity() -> None:
         _node("writer", writes=[DataAsset(signature="bronze/orders", identity="")]),
         _node("reader", reads=[DataAsset(signature="silver/orders", identity="")]),
     )
-    assert build_graph_lineage(graph).data_edges == []
+    assert build_graph_lineage(graph, known_workflows=()).data_edges == []
 
 
 def test_signature_match_needs_the_same_asset_type_when_both_are_known() -> None:
@@ -120,8 +123,10 @@ def test_signature_match_needs_the_same_asset_type_when_both_are_known() -> None
         _node("writer", writes=[DataAsset(signature="orders", asset_type="file")]),
         _node("reader", reads=[DataAsset(signature="orders")]),
     )
-    assert build_graph_lineage(mismatched).data_edges == []
-    assert [edge.asset_type for edge in build_graph_lineage(one_side_unknown).data_edges] == ["file"]
+    assert build_graph_lineage(mismatched, known_workflows=()).data_edges == []
+    assert [edge.asset_type for edge in build_graph_lineage(one_side_unknown, known_workflows=()).data_edges] == [
+        "file"
+    ]
 
 
 def test_fan_out_one_writer_many_readers() -> None:
@@ -130,7 +135,7 @@ def test_fan_out_one_writer_many_readers() -> None:
         _node("reader_one", reads=[DataAsset(signature="ds", identity="x.y")]),
         _node("reader_two", reads=[DataAsset(signature="ds", identity="x.y")]),
     )
-    edges = build_graph_lineage(graph).data_edges
+    edges = build_graph_lineage(graph, known_workflows=()).data_edges
     assert {edge.target_task_key for edge in edges} == {"reader_one", "reader_two"}
 
 
@@ -143,7 +148,7 @@ def test_no_self_edge_and_no_duplicates() -> None:
         ),
         _node("reader", reads=[DataAsset(signature="ds", identity="x.y")]),
     )
-    edges = build_graph_lineage(graph).data_edges
+    edges = build_graph_lineage(graph, known_workflows=()).data_edges
     assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [("both", "reader")]
 
 
@@ -165,7 +170,7 @@ def test_data_edges_recurse_into_switch_and_foreach_branches() -> None:
         source=SOURCE_ADF,
         branches={"body": [reader]},
     )
-    edges = build_graph_lineage(_graph(switch, loop)).data_edges
+    edges = build_graph_lineage(_graph(switch, loop), known_workflows=()).data_edges
     assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [("writer", "reader")]
 
 
@@ -197,7 +202,7 @@ def test_control_edge_from_invocation_marker() -> None:
 
 def test_control_edge_unresolved_callee_recorded_not_dropped() -> None:
     graph = _graph(_node("call", invokes="", wait=True), name="parent")
-    edges = build_graph_lineage(graph).control_edges
+    edges = build_graph_lineage(graph, known_workflows=()).control_edges
     assert len(edges) == 1
     assert edges[0].target_workflow == ""
     assert edges[0].resolved is False
@@ -205,12 +210,12 @@ def test_control_edge_unresolved_callee_recorded_not_dropped() -> None:
 
 def test_control_edge_self_call_is_dropped() -> None:
     graph = _graph(_node("call", invokes="parent", wait=True), name="parent")
-    assert build_graph_lineage(graph).control_edges == []
+    assert build_graph_lineage(graph, known_workflows=()).control_edges == []
 
 
 def test_with_graph_lineage_returns_new_graph_and_leaves_input_untouched() -> None:
     graph = _graph(_node("call", invokes="child", wait=False), name="parent")
-    result = with_graph_lineage(graph)
+    result = with_graph_lineage(graph, known_workflows=())
     assert graph.lineage is None
     assert result is not graph
     assert len(result.lineage.control_edges) == 1
@@ -248,7 +253,7 @@ def test_every_writer_of_an_asset_hands_off_to_its_reader() -> None:
         _node("writer_two", writes=[DataAsset(signature="ds", identity="x.y")]),
         _node("reader", reads=[DataAsset(signature="ds", identity="x.y")]),
     )
-    edges = build_graph_lineage(graph).data_edges
+    edges = build_graph_lineage(graph, known_workflows=()).data_edges
     assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [
         ("writer_one", "reader"),
         ("writer_two", "reader"),
@@ -260,15 +265,30 @@ def test_writer_that_runs_after_the_reader_still_gets_an_edge() -> None:
     reader = _node("reader", reads=[DataAsset(signature="ds", identity="x.y")])
     writer = _node("writer", writes=[DataAsset(signature="ds", identity="x.y")])
     writer.dependencies = [SourceDependency(upstream="reader")]
-    edges = build_graph_lineage(_graph(reader, writer)).data_edges
+    edges = build_graph_lineage(_graph(reader, writer), known_workflows=()).data_edges
     assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [("writer", "reader")]
 
 
-def test_named_callee_is_unresolved_when_known_workflows_is_not_given() -> None:
-    """Without the export's workflow names nothing can be confirmed, so a named callee stays unresolved."""
+def test_known_workflows_is_a_required_keyword() -> None:
+    """Forgetting the export's workflow names is an error, not a graph full of unresolved edges."""
     graph = _graph(_node("call", invokes="child"), name="parent")
-    assert [edge.resolved for edge in build_graph_lineage(graph).control_edges] == [False]
-    assert [edge.resolved for edge in control_edges_from_calls("parent", [("child", None, "call")])] == [False]
+    with pytest.raises(TypeError, match="known_workflows"):
+        build_graph_control_edges(graph)  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="known_workflows"):
+        build_graph_lineage(graph)  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="known_workflows"):
+        with_graph_lineage(graph)  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="known_workflows"):
+        control_edges_from_calls("parent", [("child", None, "call")])  # type: ignore[call-arg]
+
+
+def test_named_callee_is_unresolved_when_no_workflow_is_known() -> None:
+    """An export that lists no workflows cannot confirm a named callee, so it stays unresolved."""
+    graph = _graph(_node("call", invokes="child"), name="parent")
+    assert [edge.resolved for edge in build_graph_lineage(graph, known_workflows=()).control_edges] == [False]
+    assert [
+        edge.resolved for edge in control_edges_from_calls("parent", [("child", None, "call")], known_workflows=())
+    ] == [False]
 
 
 def test_with_graph_lineage_keeps_motifs_already_on_the_graph() -> None:
@@ -338,7 +358,7 @@ def test_data_edge_between_nodes_nested_in_different_containers() -> None:
         _container("loop_b", body=[_container("switch", caseA=[reader], default=[])]),
     )
 
-    edges = build_graph_lineage(graph).data_edges
+    edges = build_graph_lineage(graph, known_workflows=()).data_edges
 
     assert [(edge.source_task_key, edge.target_task_key, edge.match_kind) for edge in edges] == [
         ("writer", "reader", "identity")
@@ -355,8 +375,10 @@ def test_identity_match_needs_the_same_asset_type_when_both_are_known() -> None:
         _node("writer", writes=[DataAsset(signature="w", identity="sales.orders", asset_type="table")]),
         _node("reader", reads=[DataAsset(signature="r", identity="sales.orders")]),
     )
-    assert build_graph_lineage(mismatched).data_edges == []
-    assert [edge.match_kind for edge in build_graph_lineage(one_side_unknown).data_edges] == ["identity"]
+    assert build_graph_lineage(mismatched, known_workflows=()).data_edges == []
+    assert [edge.match_kind for edge in build_graph_lineage(one_side_unknown, known_workflows=()).data_edges] == [
+        "identity"
+    ]
 
 
 def test_calls_that_differ_only_in_wait_are_kept_apart() -> None:
@@ -375,8 +397,12 @@ def test_data_edges_that_differ_only_in_asset_type_are_kept_apart() -> None:
     as_table = DataAsset(signature="s", asset_type="table")
     reader = _node("r", reads=[DataAsset(signature="s")])
 
-    file_first = build_graph_lineage(_graph(_node("w", writes=[as_file, as_table]), reader)).data_edges
-    table_first = build_graph_lineage(_graph(_node("w", writes=[as_table, as_file]), reader)).data_edges
+    file_first = build_graph_lineage(
+        _graph(_node("w", writes=[as_file, as_table]), reader), known_workflows=()
+    ).data_edges
+    table_first = build_graph_lineage(
+        _graph(_node("w", writes=[as_table, as_file]), reader), known_workflows=()
+    ).data_edges
 
     assert [edge.asset_type for edge in file_first] == ["file", "table"]
     assert [edge.asset_type for edge in table_first] == ["table", "file"]
@@ -387,8 +413,12 @@ def test_an_empty_asset_type_counts_as_unknown_in_the_dedupe_key() -> None:
     reader = _node("r", reads=[DataAsset(signature="s"), DataAsset(signature="s", asset_type="")])
     writer = _node("w", writes=[DataAsset(signature="s"), DataAsset(signature="s", asset_type="")])
 
-    on_the_reader = build_graph_lineage(_graph(_node("w", writes=[DataAsset(signature="s")]), reader)).data_edges
-    on_the_writer = build_graph_lineage(_graph(writer, _node("r", reads=[DataAsset(signature="s")]))).data_edges
+    on_the_reader = build_graph_lineage(
+        _graph(_node("w", writes=[DataAsset(signature="s")]), reader), known_workflows=()
+    ).data_edges
+    on_the_writer = build_graph_lineage(
+        _graph(writer, _node("r", reads=[DataAsset(signature="s")])), known_workflows=()
+    ).data_edges
 
     assert [edge.asset_type for edge in on_the_reader] == [None]
     assert [edge.asset_type for edge in on_the_writer] == [None]

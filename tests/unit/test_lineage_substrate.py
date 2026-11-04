@@ -92,7 +92,9 @@ def test_control_edges_fan_out_and_nested_switch_recursion():
         ],
     )
 
-    edges = build_control_edges(pipeline)
+    edges = build_control_edges(
+        pipeline, known_workflows={"child_a", "child_b", "child_c", "child_d", "child_e", "child_f"}
+    )
 
     targets = sorted(edge.target_workflow for edge in edges)
     assert targets == ["child_a", "child_b", "child_c", "child_d", "child_e", "child_f"]
@@ -132,14 +134,14 @@ def test_run_now_of_an_existing_job_is_not_a_cross_workflow_edge():
         tasks=[RunJobActivity(name="trigger", task_key="trigger", job_name="trigger", existing_job_id="123")],
     )
 
-    assert build_control_edges(pipeline) == []
+    assert build_control_edges(pipeline, known_workflows=set()) == []
 
 
 def test_control_edges_unresolved_callee_is_recorded_not_dropped():
     """An empty callee is kept with resolved=False rather than silently dropped."""
     pipeline = Pipeline(name="parent", tasks=[_execute("call", "")])
 
-    edges = build_control_edges(pipeline)
+    edges = build_control_edges(pipeline, known_workflows=set())
 
     assert len(edges) == 1
     assert edges[0].target_workflow == ""
@@ -160,7 +162,7 @@ def test_control_edges_no_self_edge():
     """A pipeline invoking itself produces no edge."""
     pipeline = Pipeline(name="loop", tasks=[_execute("call", "loop")])
 
-    assert build_control_edges(pipeline) == []
+    assert build_control_edges(pipeline, known_workflows={"loop"}) == []
 
 
 def test_control_edges_no_duplicate_from_recursion():
@@ -177,7 +179,7 @@ def test_control_edges_no_duplicate_from_recursion():
         ],
     )
 
-    edges = build_control_edges(pipeline)
+    edges = build_control_edges(pipeline, known_workflows={"child"})
 
     assert len(edges) == 1
     assert edges[0].target_workflow == "child"
@@ -376,7 +378,7 @@ def test_build_motif_annotations_carries_the_source_type_hint():
 def test_with_lineage_is_pure():
     """with_lineage returns a new pipeline and never mutates the input."""
     pipeline = Pipeline(name="p", tasks=[_notebook("n")])
-    lineage = build_lineage(pipeline)
+    lineage = build_lineage(pipeline, known_workflows=set())
 
     updated = with_lineage(pipeline, lineage)
 

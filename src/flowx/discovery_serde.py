@@ -2,24 +2,20 @@
 
 Kept separate from :mod:`flowx.ir_serde` on purpose: ``ir_serde`` owns the
 ``translation_report.json`` convert->package contract for the Databricks IR, and
-the discovery graph is a different model with a different lifecycle. This module is
-its own round-trip pair so evolving one shape never disturbs the other. It also
-owns the persisted ``metadata/source_graphs.json`` envelope
+the discovery graph is a different model with a different lifecycle. The graph and
+node shapes are this module's own; the data-asset and lineage shapes come from
+``ir_serde`` (see below), so changing those also changes ``source_graphs.json``.
+It also owns the persisted ``metadata/source_graphs.json`` envelope
 (:func:`source_graphs_document`), versioned and content-hashed, so every source's
 discover phase writes the same file and a later phase can read the graphs back
 without going to the source again.
 
-The DataAsset (de)serialisers are reused from ``ir_serde`` (``data_asset_to_dict``
-/ ``data_asset_from_dict``) so the data-asset shape has a single definition
-shared by the lineage substrate and the discovery graph. That shape is a general,
-best-effort description of what a task reads/writes -- not physical-only: a
-resolvable physical ``identity`` when there is one (else ``None``), an
-always-present ``signature``, and an open ``asset_type`` that also covers
-non-physical / logical / value hand-offs (e.g. an Airflow XCom). When a writer and
-a reader of one asset both set ``asset_type``, lineage matches them (on identity or
-signature) only if the two are exactly equal, so both sides must spell the type the same way. A
-graph's derived :class:`~flowx.models.lineage.Lineage` block goes through ``ir_serde``'s
-``lineage_to_dict`` / ``lineage_from_dict`` pair for the same reason.
+The data-asset and lineage (de)serialisers are reused from ``ir_serde``
+(``data_asset_to_dict`` / ``data_asset_from_dict`` and ``lineage_to_dict`` /
+``lineage_from_dict``), so each shape has one definition shared by the lineage
+substrate and the discovery graph. A data asset describes what a task reads or
+writes on a best-effort basis, not only physical tables; see
+:class:`~flowx.models.lineage.DataAsset`.
 
 Every node dict carries a ``node_type`` discriminator (the dataclass name) so a
 :class:`~flowx.models.discovery.ContainerNode` or
@@ -50,7 +46,7 @@ SOURCE_GRAPHS_FILENAME = "source_graphs.json"
 SOURCE_GRAPHS_CONTRACT_VERSION = "1"
 
 _HASHED_DOCUMENT_KEYS = ("contract_version", "source", "graphs")
-_DOCUMENT_KEYS = frozenset({*_HASHED_DOCUMENT_KEYS, "graph_sha256", "document_sha256"})
+_DOCUMENT_KEYS = frozenset({*_HASHED_DOCUMENT_KEYS, "document_sha256"})
 _NODE_CLASSES = (SourceNode, ContainerNode, GapNode)
 _NODE_TYPES = frozenset(node_class.__name__ for node_class in _NODE_CLASSES)
 
@@ -110,14 +106,12 @@ def source_graph_from_dict(raw: dict[str, Any]) -> SourceGraph:
 def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[str, Any]:
     """Build the ``metadata/source_graphs.json`` document a discover run persists.
 
-    The envelope is ``{contract_version, source, graphs}``, the same keys the Airflow
-    discover phase writes, plus two content hashes so a later phase can prove it is
-    reading exactly what discover produced: ``graph_sha256`` holds one hash per graph,
-    in the same order as ``graphs``, and ``document_sha256`` covers ``contract_version``,
-    ``source`` and ``graphs``. Both hashes are taken over canonical JSON (sorted keys,
-    compact separators), so they do not depend on how the file happens to be indented.
-    The document is put through JSON before it is hashed, so the hashes cover what the
-    reader will load back (an int-keyed parameter default comes back with string keys,
+    The envelope is ``{contract_version, source, graphs}`` plus a content hash so a
+    later phase can prove it is reading exactly what discover produced: ``document_sha256`` covers
+    ``contract_version``, ``source`` and ``graphs``. It is taken over canonical JSON
+    (sorted keys, compact separators), so it does not depend on how the file happens to
+    be indented. The document is put through JSON before it is hashed, so the hash covers
+    what the reader will load back (an int-keyed parameter default comes back with string keys,
     for example) and the returned document is already in that form. The reader refuses
     any other top-level key, so nothing rides along unhashed.
 
@@ -143,7 +137,6 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
         )
     )
     _check_graph_sources(document)
-    document["graph_sha256"] = [_canonical_sha256(graph) for graph in document["graphs"]]
     document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
     return document
 
@@ -164,7 +157,7 @@ def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
     """Read the graphs back out of a ``source_graphs.json`` document, failing closed on drift.
 
     Only contract version ``"1"`` is accepted, with no top-level keys beyond the
-    envelope and its two hashes. Both content hashes are required and must match the
+    envelope and its hash. The content hash is required and must match the
     content, and every graph must come from the document's ``source``, so a
     hand-edited or truncated file raises instead of quietly handing a different graph
     to a later phase. A document that is not a JSON object, a graph entry that is not
@@ -199,12 +192,6 @@ def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
         raise ValueError("source_graphs document has no 'graphs' list")
     if not all(isinstance(graph, dict) for graph in graphs):
         raise ValueError("source_graphs document has a malformed graph that is not a JSON object")
-    recorded_graph_hashes = document.get("graph_sha256")
-    if recorded_graph_hashes is None:
-        raise ValueError("source_graphs document is missing graph_sha256")
-    actual_graph_hashes = [_canonical_sha256(graph) for graph in graphs]
-    if recorded_graph_hashes != actual_graph_hashes:
-        raise ValueError("source_graphs graph_sha256 does not match the graphs it was recorded for")
     recorded_document_hash = document.get("document_sha256")
     if recorded_document_hash is None:
         raise ValueError("source_graphs document is missing document_sha256")
