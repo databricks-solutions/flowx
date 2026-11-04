@@ -56,9 +56,7 @@ def walk_nodes(nodes: list[SourceNode]) -> Iterator[SourceNode]:
                 yield from walk_nodes(children)
 
 
-def build_graph_control_edges(
-    graph: SourceGraph, *, known_workflows: Collection[str] | None = None
-) -> list[ControlEdge]:
+def build_graph_control_edges(graph: SourceGraph, *, known_workflows: Collection[str]) -> list[ControlEdge]:
     """Derive cross-workflow invocation edges for a discovery graph.
 
     One edge per node that carries the :data:`INVOKES_WORKFLOW_PROPERTY` marker,
@@ -112,7 +110,7 @@ def build_graph_data_edges(graph: SourceGraph) -> list[DataEdge]:
     return data_edges_from_endpoints(producers, consumers)
 
 
-def build_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] | None = None) -> Lineage:
+def build_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str]) -> Lineage:
     """Compose the source-neutral lineage block for a discovery graph.
 
     Edges are derived here from the graph alone. Motifs come from a source's own
@@ -123,8 +121,7 @@ def build_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] 
     Args:
         graph: The source graph to derive lineage for.
         known_workflows: Names of the workflows present in this export; an
-            invocation edge is resolved only when its target is one of them, and
-            never when this is ``None``. See
+            invocation edge is resolved only when its target is one of them. See
             :func:`~flowx.lineage.control_edges_from_calls`.
 
     Returns:
@@ -136,7 +133,7 @@ def build_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] 
     )
 
 
-def with_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] | None = None) -> SourceGraph:
+def with_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str]) -> SourceGraph:
     """Return a *new* graph carrying its derived lineage, leaving the input untouched.
 
     Pure: builds the lineage block and attaches it via :func:`dataclasses.replace`
@@ -146,8 +143,7 @@ def with_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str] |
     Args:
         graph: The source graph to copy.
         known_workflows: Names of the workflows present in this export, passed
-            straight to :func:`build_graph_lineage`. Without it, every invocation
-            edge is unresolved.
+            straight to :func:`build_graph_lineage`.
 
     Returns:
         A shallow copy of *graph* with :attr:`SourceGraph.lineage` populated.

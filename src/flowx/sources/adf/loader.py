@@ -1083,7 +1083,8 @@ def _warn_no_pipelines_found(source_dir: Path) -> None:
     The usual cause is pointing ``--adf-source-path`` at a directory that holds ARM-template
     ``.json`` file(s) instead of the expected ADF export layout (a ``pipelines/`` folder), or
     passing a directory when a single ARM template file was meant. We tailor the guidance to
-    whichever case we can detect, so an empty run never looks like a successful one. The message
+    whichever case we can detect, so an operator reading the output sees that nothing was loaded;
+    the exit code stays 0, so a script or CI job has to read the warning to notice. The message
     names ``--adf-source-path`` -- the user-facing flag the discover runner takes -- not the
     loader's internal ``--source-dir`` it normalises to.
     """
@@ -1144,9 +1145,9 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Loaded %d pipeline(s) from %s", len(definitions.pipelines), args.source_dir)
 
     # A directory of ARM templates with no recognized ``pipelines/`` layout parses to zero
-    # pipelines and would otherwise finish with a success-shaped "Loaded 0 pipeline(s)". Fail
-    # loud (stderr) so the operator notices the export layout / path is wrong rather than
-    # trusting an empty-but-green run.
+    # pipelines and would otherwise finish with a success-shaped "Loaded 0 pipeline(s)". Warn
+    # on stderr so the operator notices the export layout / path is wrong; the exit code stays 0,
+    # so a script or CI job has to read the warning to see it.
     if not definitions.pipelines:
         _warn_no_pipelines_found(args.source_dir)
 

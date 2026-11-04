@@ -1,7 +1,7 @@
 """Tests for the ADF -> discovery graph mapper (:mod:`flowx.sources.adf.discovery_mapping`).
 
 Proves the mapping is 1:1 and lossless: every activity becomes one discovery
-node, the ADF type is retained verbatim as ``native_type`` / ``original_type``,
+node, the ADF type is retained verbatim as ``native_type``,
 the source dict is preserved on ``raw``, dependency edges keep all of their
 outcome conditions, and control-flow nesting maps to labelled container branches.
 """
@@ -48,7 +48,7 @@ def test_activity_maps_1to1_retaining_type_and_raw() -> None:
     assert node.source == SOURCE_ADF
     assert node.name == "Run Notebook"
     assert node.task_key == "Run Notebook"
-    # ADF type is retained verbatim -- native_type is the original_type source.
+    # ADF type is retained verbatim as native_type.
     assert node.native_type == "DatabricksNotebook"
     # Verbatim source dict preserved for lossless fallback.
     assert node.raw == raw_activity
