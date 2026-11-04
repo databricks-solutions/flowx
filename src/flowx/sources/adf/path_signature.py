@@ -39,11 +39,13 @@ def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions
 
     Both of these must hold, or the result is ``None``:
 
-    1. The reference passes a ``folderPath`` at the call site with literal text in it:
-       quoted text or a number in an expression, or text outside ``@{...}``, so
+    1. The reference passes the folder at the call site with literal text in it: quoted
+       text or a number in an expression, or text outside ``@{...}``, so
        ``landing/@{item().run}`` qualifies just as ``@concat('landing/', item().run)``
-       does. The dataset's own location is not enough on its own: a reference that
-       passes no anchored ``folderPath`` gets no signature. A file name alone never
+       does. The folder is passed as ``folderPath`` or as any parameter the dataset's own
+       location folder reads, so a dataset whose folder is ``@dataset().dir`` qualifies
+       through ``dir``. The dataset's own location is not enough on its own: a reference
+       that passes no anchored folder gets no signature. A file name alone never
        qualifies, since many unrelated activities write ``.csv`` files to opaque folders.
     2. The folder the reference resolves to has a literal segment. That folder is the
        dataset's own ``location.folderPath`` with each ``dataset().<name>`` filled in
@@ -58,15 +60,15 @@ def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions
     borrowing the call site's. An untyped object is read by its ``value``.
     """
     call_site = call_site_parameters(dataset_ref)
-    passed_folder = _path_shape(call_site.get("folderPath"), {}, require_physical=True)
-    if passed_folder is None or not _has_literal_anchor(passed_folder):
-        return None
     properties = dataset_props(dataset_ref, definitions) or {}
     type_props = properties.get("typeProperties") or properties
     written_location = type_props.get("location")
     location: dict[str, Any] = written_location if isinstance(written_location, dict) else {}
     written_values = {key: expression_value(location.get(key)) for key in ("folderPath", "fileName")}
     if any(value is not None and not isinstance(value, str) for value in written_values.values()):
+        return None
+    folder_parameters = {"folderPath", *DATASET_PARAMETER_RE.findall(written_values["folderPath"] or "")}
+    if not any(_passes_anchored_folder(call_site.get(name)) for name in folder_parameters):
         return None
     bindings = {
         name: value
@@ -86,6 +88,12 @@ def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions
     file_shape = _shape_of("fileName", require_physical=False)
     names_a_file = file_shape and (_has_literal_anchor(file_shape) or "<P:" in file_shape)
     return f"FP[{folder_shape}]/FN[{file_shape if names_a_file else ''}]"
+
+
+def _passes_anchored_folder(value: Any) -> bool:
+    """``True`` when a call-site folder *value* is physical and holds literal text, not only run-time slots."""
+    folder_shape = _path_shape(value, {}, require_physical=True)
+    return folder_shape is not None and _has_literal_anchor(folder_shape)
 
 
 def _reads_as_text(value: Any) -> bool:
