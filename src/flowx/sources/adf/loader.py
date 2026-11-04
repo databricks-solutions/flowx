@@ -1144,9 +1144,9 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Loaded %d pipeline(s) from %s", len(definitions.pipelines), args.source_dir)
 
     # A directory of ARM templates with no recognized ``pipelines/`` layout parses to zero
-    # pipelines and would otherwise finish with a success-shaped "Loaded 0 pipeline(s)". Fail
-    # loud (stderr) so the operator notices the export layout / path is wrong rather than
-    # trusting an empty-but-green run.
+    # pipelines and would otherwise finish with a success-shaped "Loaded 0 pipeline(s)". Warn
+    # on stderr so the operator notices the export layout / path is wrong; the exit code stays 0,
+    # so a script or CI job has to read the warning to see it.
     if not definitions.pipelines:
         _warn_no_pipelines_found(args.source_dir)
 
