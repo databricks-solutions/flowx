@@ -253,6 +253,38 @@ def _reconcile_pipeline(
                 candidate=candidate,
             )
         )
+    # A task without a DAG of its own is only in the DAG because of an edge, so an adopted capture
+    # with no captured edge means the capture pass missed the wiring that adds it.
+    wired_capture_ids = {edge.upstream_id for edge in visitor.edge_captures} | {
+        edge.downstream_id for edge in visitor.edge_captures
+    }
+    unwired_adoption_keys: set[str] = set()
+    for capture_id in sorted(visitor.adopted_capture_ids - wired_capture_ids):
+        adopted_node = visitor.capture_source_nodes.get(capture_id)
+        task_key = var_to_task_key.get(capture_id, capture_id)
+        unwired_adoption_keys.add(task_key)
+        candidate = source_audit.AuditCandidate(
+            kind="task",
+            code="adopted_task_wiring_not_captured",
+            line=getattr(adopted_node, "lineno", 0),
+            column=getattr(adopted_node, "col_offset", 0),
+            occurrence=1,
+            end_line=getattr(adopted_node, "end_lineno", 0),
+            end_column=getattr(adopted_node, "end_col_offset", 0),
+            details={"capture_id": capture_id, "task_key": task_key},
+        )
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="adopted_task_wiring_not_captured",
+                severity="failed",
+                message=(
+                    "A task built without dag= joins this DAG through wiring, but the capture pass recorded "
+                    "none of that wiring, so its dependencies would be lost."
+                ),
+                candidate=candidate,
+            )
+        )
     for statement in visitor.unclaimed_statements:
         candidate = source_audit.AuditCandidate(
             kind="statement",
@@ -739,7 +771,7 @@ def _reconcile_pipeline(
     failed_findings = [item for item in findings if item["severity"] == "failed"]
     gap_findings = [item for item in findings if item["severity"] == "gap"]
     status = "failed" if failed_findings else "verified_with_gaps" if gap_findings else "verified"
-    failed_capture_keys = argument_failure_keys | set(missing_task_keys)
+    failed_capture_keys = argument_failure_keys | set(missing_task_keys) | unwired_adoption_keys
     agentic_captured_count = len(placeholders)
     deterministic_count = captured_task_count - len(failed_capture_keys) - agentic_captured_count
     agentic_count = agentic_captured_count + len(unresolved)

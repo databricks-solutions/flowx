@@ -78,8 +78,15 @@ def test_source_capture_mutations_fail_reconciliation(
     if mutation in {"task", "edge"}:
         original_audit = audit.audit_module
 
-        def mutate(module: ast.Module, *, target_dag_variable: str | None = None) -> audit.SourceAudit:
-            result = original_audit(module, target_dag_variable=target_dag_variable)
+        def mutate(
+            module: ast.Module,
+            *,
+            target_dag_variable: str | None = None,
+            other_dag_variables: frozenset[str] = frozenset(),
+        ) -> audit.SourceAudit:
+            result = original_audit(
+                module, target_dag_variable=target_dag_variable, other_dag_variables=other_dag_variables
+            )
             if mutation == "task":
                 result.tasks.append(_candidate("task", "removed_capture_task"))
             else:
@@ -295,8 +302,15 @@ def test_helper_capture_does_not_depend_on_independent_auditor_classification(
     repro = Path(__file__).parents[1] / "resources" / "airflow" / "review_repros" / "t8_helperfn.py"
     original_audit = audit.audit_module
 
-    def omit_helper_candidates(module: ast.Module, *, target_dag_variable: str | None = None) -> audit.SourceAudit:
-        result = original_audit(module, target_dag_variable=target_dag_variable)
+    def omit_helper_candidates(
+        module: ast.Module,
+        *,
+        target_dag_variable: str | None = None,
+        other_dag_variables: frozenset[str] = frozenset(),
+    ) -> audit.SourceAudit:
+        result = original_audit(
+            module, target_dag_variable=target_dag_variable, other_dag_variables=other_dag_variables
+        )
         result.tasks = [candidate for candidate in result.tasks if candidate.code != "helper_factory_task"]
         return result
 

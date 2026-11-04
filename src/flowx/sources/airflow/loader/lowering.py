@@ -75,6 +75,7 @@ def _load_airflow_module(
     *,
     dbt_mode: str = "static",
     target_dag_variable: str | None = None,
+    other_dag_variables: frozenset[str] = frozenset(),
     source_file: str | None = None,
 ) -> Pipeline:
     """Parses one isolated DAG declaration into a flowx Pipeline IR.
@@ -83,6 +84,8 @@ def _load_airflow_module(
         dag_path: Path to a ``.py`` DAG module.
         dbt_mode: dbt-factory render mode for any dbt workload -- ``"static"`` (default,
             an inner job of per-node tasks) or ``"pydabs"`` (a deploy-time hook module).
+        other_dag_variables: Variables of the module's other DAGs, so a task that names one with
+            ``dag=`` stays out of this DAG.
 
     Returns:
         A :class:`~flowx.models.ir.Pipeline`. Mapped operators become their IR
@@ -92,8 +95,10 @@ def _load_airflow_module(
         sensors remain explicit placeholders; unmapped operators become a
         PlaceholderActivity.
     """
-    audit = source_audit.audit_module(module, target_dag_variable=target_dag_variable)
-    visitor = _DagVisitor(module, target_dag_variable=target_dag_variable)
+    audit = source_audit.audit_module(
+        module, target_dag_variable=target_dag_variable, other_dag_variables=other_dag_variables
+    )
+    visitor = _DagVisitor(module, target_dag_variable=target_dag_variable, other_dag_variables=other_dag_variables)
     visitor.dag_file = dag_path.absolute()
     visitor.visit(module)
     functions = visitor.functions()
@@ -187,9 +192,10 @@ def _load_airflow_module(
                     "task_key": var_to_task_key[trigger_var],
                     "covered_capture_ids": sorted(covered_tasks),
                 }
+
     # Airflow searches the DAG file's folder as imported, without following symlinks.
     template_search_paths = (dag_path.absolute().parent, *template_search_directories(visitor))
-    dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions, visitor.default_args)
+    dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions, visitor.default_args_for)
     dropped |= dataproc_plan.dropped
     upstreams = _rewire_dropped(upstreams, dropped)
 
@@ -365,7 +371,7 @@ def _load_airflow_module(
             functions=visitor.functions_for(var),
             source=source,
             call_source=call_source,
-            default_args=visitor.default_args,
+            default_args=visitor.default_args_for(var),
             template_search_paths=template_search_paths,
         )
         builder = ops.OPERATOR_REGISTRY.get(operator, ops.build_placeholder)
@@ -427,7 +433,7 @@ def _load_airflow_module(
                     arguments=sorted(unconsumed),
                 )
             )
-        unrepresented_policy = templating.unrepresented_retry_policy_arguments(visitor.default_args, kwargs)
+        unrepresented_policy = templating.unrepresented_retry_policy_arguments(visitor.default_args_for(var), kwargs)
         if unrepresented_policy:
             names = ", ".join(unrepresented_policy)
             activity = _replace_with_placeholder(
@@ -523,7 +529,7 @@ def _load_airflow_module(
             )
 
         # Stamp policy only after every semantic guard has selected the final leaf activity.
-        policy = templating.retry_policy(visitor.default_args, kwargs)
+        policy = templating.retry_policy(visitor.default_args_for(var), kwargs)
         activity.max_retries = policy.get("max_retries")
         activity.timeout_seconds = policy.get("timeout_seconds")
         activity.min_retry_interval_millis = policy.get("min_retry_interval_millis")
