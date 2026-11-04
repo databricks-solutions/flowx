@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -174,9 +175,13 @@ def plan_dataproc(
     operators: dict[str, tuple[str, str, dict[str, ast.expr]]],
     upstreams: dict[str, list[str]],
     functions: dict[str, ast.FunctionDef],
-    default_args: dict[str, ast.expr],
+    default_args_for: Callable[[str], dict[str, ast.expr]],
 ) -> DataprocPlan:
-    """Decides which Dataproc tasks Jobs compute absorbs and what compute each workload runs on."""
+    """Decides which Dataproc tasks Jobs compute absorbs and what compute each workload runs on.
+
+    *default_args_for* returns the DAG ``default_args`` that apply to a given task variable, which is
+    empty for a task that joined the DAG only through wiring.
+    """
     plan = DataprocPlan()
     dataproc_vars = {
         variable: (task_id, dataproc.canonical_name(operator), operator, kwargs)
@@ -388,7 +393,7 @@ def plan_dataproc(
         if blocker is not None:
             retain(sensor, f"{canonical} was not collapsed into native task completion: {blocker}.")
             continue
-        timing = _sensor_timing(kwargs, default_args)
+        timing = _sensor_timing(kwargs, default_args_for(sensor))
         if target_asynchronous:
             described = "; ".join(f"{name}={value}" for name, value in timing.items())
             plan.disclosures.append(

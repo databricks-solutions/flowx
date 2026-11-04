@@ -163,7 +163,7 @@ def _load_airflow_module(
                     "task_key": var_to_task_key[trigger_var],
                     "covered_capture_ids": sorted(covered_tasks),
                 }
-    dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions, visitor.default_args)
+    dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions, visitor.default_args_for)
     dropped |= dataproc_plan.dropped
     upstreams = _rewire_dropped(upstreams, dropped)
 
@@ -339,7 +339,7 @@ def _load_airflow_module(
             functions=visitor.functions_for(var),
             source=source,
             call_source=call_source,
-            default_args=visitor.default_args,
+            default_args=visitor.default_args_for(var),
         )
         builder = ops.OPERATOR_REGISTRY.get(operator, ops.build_placeholder)
         activity = builder(ctx)
@@ -398,7 +398,7 @@ def _load_airflow_module(
                     arguments=sorted(unconsumed),
                 )
             )
-        unrepresented_policy = templating.unrepresented_retry_policy_arguments(visitor.default_args, kwargs)
+        unrepresented_policy = templating.unrepresented_retry_policy_arguments(visitor.default_args_for(var), kwargs)
         if unrepresented_policy:
             names = ", ".join(unrepresented_policy)
             activity = ops.build_placeholder_with_comment(
@@ -490,7 +490,7 @@ def _load_airflow_module(
             )
 
         # Stamp policy only after every semantic guard has selected the final leaf activity.
-        policy = templating.retry_policy(visitor.default_args, kwargs)
+        policy = templating.retry_policy(visitor.default_args_for(var), kwargs)
         activity.max_retries = policy.get("max_retries")
         activity.timeout_seconds = policy.get("timeout_seconds")
         activity.min_retry_interval_millis = policy.get("min_retry_interval_millis")

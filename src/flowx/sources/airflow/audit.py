@@ -99,8 +99,9 @@ class _SourceAuditor(ast.NodeVisitor):
         # reaches the DAG. Each instance gets a key; current_dagless maps a reference (a variable name or
         # an inline call's reference) to the instance it denotes right now, so a reassigned variable never
         # drags its earlier task along. edge_endpoint_keys remembers what each audited edge connected.
-        self.dagless_tasks: dict[str, tuple[AuditCandidate, list[AuditCandidate]]] = {}
+        self.dagless_tasks: dict[str, tuple[ast.Call, AuditCandidate, list[AuditCandidate]]] = {}
         self.dagless_instance_by_call: dict[int, str] = {}
+        self.named_dagless: set[str] = set()
         self.current_dagless: dict[str, str] = {}
         self.edge_endpoint_keys: dict[int, tuple[str, str]] = {}
         self.taskflow_defs = {
@@ -176,6 +177,7 @@ class _SourceAuditor(ast.NodeVisitor):
                     instance = self.dagless_instance_by_call.get(id(node.value))
                     if instance is not None:
                         self.current_dagless[target] = instance
+                        self.named_dagless.add(instance)
                 return
         if target:
             if isinstance(node.value, ast.Name) and node.value.id in self.values:
@@ -294,7 +296,7 @@ class _SourceAuditor(ast.NodeVisitor):
                 )
             if dagless:
                 instance = f"dagless:{len(self.dagless_tasks)}"
-                self.dagless_tasks[instance] = (candidate, unresolved)
+                self.dagless_tasks[instance] = (call, candidate, unresolved)
                 self.dagless_instance_by_call[id(call)] = instance
             else:
                 self.audit.tasks.append(candidate)
@@ -401,6 +403,10 @@ class _SourceAuditor(ast.NodeVisitor):
         Airflow puts an operator built without ``dag=`` into the DAG of whatever task it is wired to, so
         a ``dag``-less task reachable through audited edges from a DAG task is part of the DAG. One that
         never connects to it isn't, so neither it nor the edges touching it are audited.
+
+        A held task that was never bound to a plain name and never ended up on an edge is one this audit
+        can't tie to any wiring. Its membership is unknown, so it is reported as unresolved rather than
+        dropped.
         """
         if not self.dagless_tasks:
             return
@@ -417,10 +423,20 @@ class _SourceAuditor(ast.NodeVisitor):
                 continue
             reached.add(key)
             pending.extend(neighbours.get(key, ()))
-        for instance, (candidate, unresolved) in self.dagless_tasks.items():
+        endpoints = {key for keys in self.edge_endpoint_keys.values() for key in keys}
+        for instance, (call, candidate, unresolved) in self.dagless_tasks.items():
             if instance in reached:
                 self.audit.tasks.append(candidate)
                 self.audit.unresolved.extend(unresolved)
+            elif instance not in endpoints and instance not in self.named_dagless:
+                self.audit.unresolved.append(
+                    self._candidate(
+                        "unresolved",
+                        "dagless_task_membership_unknown",
+                        call,
+                        expression=ast.unparse(call),
+                    )
+                )
         self.audit.edges = [
             edge
             for edge in self.audit.edges
