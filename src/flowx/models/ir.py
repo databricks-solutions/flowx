@@ -102,8 +102,7 @@ class Activity:
     compute_mode: str | None = None
     # Collapsed activity_and_notify spec set by the adapter: {destination, events, args, destination_name}.
     notifications: dict[str, Any] | None = None
-    # Lineage substrate (#61): source-neutral data assets this activity reads from and writes to,
-    # populated by per-source extractors in follow-up work. Always lists, never None.
+    # Source-neutral data assets this activity reads from and writes to. Always lists, never None.
     data_reads: list[DataAsset] = field(default_factory=list)
     data_writes: list[DataAsset] = field(default_factory=list)
     # Id of the motif this activity was folded into (or belongs to); None when it is part of no motif.

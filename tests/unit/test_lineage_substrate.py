@@ -490,6 +490,29 @@ def test_serde_round_trip_motif_activity_no_kwarg_collision_r1():
     assert task.data_reads == [DataAsset(signature="src", identity="raw.src")]
 
 
+def test_a_motif_activity_saved_without_a_motif_id_reads_back_as_unknown():
+    """The ``motif_id`` of a MotifActivity is a string, so a missing one reads back as ``"unknown"``, not ``None``."""
+    pipeline = Pipeline(
+        name="p",
+        tasks=[
+            MotifActivity(
+                name="motif",
+                task_key="motif_auto_loader",
+                motif_id="auto_loader",
+                display_name="Auto Loader",
+                databricks_replacement="auto_loader",
+                matched_activity_names=["Copy A"],
+            )
+        ],
+    )
+    saved = json.loads(json.dumps(pipeline_to_dict(pipeline)))
+    del saved["tasks"][0]["motif_id"]
+
+    reloaded, _ = pipeline_dict_to_ir(saved)
+
+    assert reloaded.tasks[0].motif_id == "unknown"
+
+
 def test_lineage_block_always_emits_lists_never_null():
     """An attached empty lineage serialises its edge collections as lists, not null."""
     pipeline = with_lineage(Pipeline(name="p", tasks=[_notebook("n")]), Lineage())
