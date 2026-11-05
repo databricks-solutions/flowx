@@ -39,6 +39,17 @@ else
 fi
 ```
 
+## Step 2 — Ask about the live Azure features
+
+Ask the user before installing anything:
+
+> Do you want the live Azure features: pull ADF definitions with `extract` and estimate current
+> spend with `profile`? They need extra Azure packages (`azure-identity`, `requests`) and Azure
+> credentials.
+
+Remember the answer. On **yes**, the steps below add flowx's optional `azure` extra; on **no**,
+they install the base dependencies only (the default). You can re-run setup later to add it.
+
 ---
 
 ## Path A — Databricks Genie Code (MCP, no virtual environment)
@@ -50,12 +61,14 @@ venv** — it isn't needed. Deploy the MCP server instead.
 SDK to stage a self-contained bundle (the app entrypoint plus a vendored copy of the flowx source)
 to **`/Workspace/Shared/mcp-flowx`** and create/deploy the **`mcp-flowx`** Databricks App. Set its
 `repo_root` widget to the flowx checkout (e.g. `/Workspace/Shared/flowx`). Because it uploads through
-the SDK Workspace API, it runs directly in a serverless Genie Code session. The notebook prints the
-app URL; the MCP endpoint is `<app-url>/mcp`.
+the SDK Workspace API, it runs directly in a serverless Genie Code session. Set its `source_deps`
+widget to `azure` if the user said yes in Step 2 (it adds the Azure deps to the app); otherwise leave
+it blank. The notebook prints the app URL; the MCP endpoint is `<app-url>/mcp`.
 
 **CLI alternative:** `bash <plugin_dir>/app/deploy.sh` does the same via the Databricks CLI
-(`apps deploy` / `sync`), but those commands require a CLI session — run it from a workspace web
-terminal or a local machine, **not** serverless notebook Python.
+(`apps deploy` / `sync`); prefix it with `SOURCE_DEPS=azure` if the user said yes in Step 2. Those
+commands require a CLI session — run it from a workspace web terminal or a local machine, **not**
+serverless notebook Python.
 
 > **Clone into a shared location.** The app's service principal cannot read private
 > `/Workspace/Users/<you>` folders by default, so `deploy.sh` deploys the source from
@@ -73,6 +86,9 @@ After it deploys, relay these follow-up steps to the user (the script also print
    choose **Custom MCP server**, select the `mcp-flowx` app, and **Save**. The single
    `flowx` tool then appears (MCP needs Agent mode; it uses one of the 20 tool slots).
    Verify via the health endpoint `<app-url>/`.
+4. **Profiling only (yes in Step 2):** give the app an Azure service principal as described in
+   `app/README.md` (*Optional: live Azure features*), then run it with
+   `flowx(command="profile", parameters={"source": "adf", ...})`.
 
 Once added, the `discover`, `convert`, `package`, and `migrate` skills run **entirely through the
 `flowx` MCP tool** (`flowx(command="…", parameters={…})`) — there is no venv, no
@@ -95,7 +111,8 @@ isolated venv (created once and reused).
 ### Step B1 — Run the bootstrap script
 
 ```bash
-bash <plugin_dir>/scripts/bootstrap.sh
+bash <plugin_dir>/scripts/bootstrap.sh                       # user said no in Step 2
+bash <plugin_dir>/scripts/bootstrap.sh --source-deps=azure   # user said yes in Step 2
 ```
 
 Where `<plugin_dir>` is the flowx plugin root (the directory containing `src/`, `skills/`, and
@@ -104,6 +121,8 @@ Where `<plugin_dir>` is the flowx plugin root (the directory containing `src/`, 
 1. Check that `python3`, `pip`, and the `venv` module are available.
 2. Create the venv at `<plugin_dir>/.venv`.
 3. Install `requirements.txt` into that venv using `pip`.
+   With `--source-deps=azure`, also install flowx from this checkout with its `azure` extra
+   (`pip install -e '<plugin_dir>[azure]'`), so the installed version matches the source tree.
 4. Write the resolved interpreter path to `<plugin_dir>/.migration-venv` for the other skills.
 
 ### Step B2 — Handle a missing Python or pip

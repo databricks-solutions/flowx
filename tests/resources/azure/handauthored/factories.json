@@ -1,0 +1,4 @@
+{"value": [
+  {"name": "demo-factory", "location": "East US", "id": "/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.DataFactory/factories/demo-factory"},
+  {"name": "second-factory", "location": "West Europe", "id": "/subscriptions/SUB/resourceGroups/RG2/providers/Microsoft.DataFactory/factories/second-factory"}
+]}

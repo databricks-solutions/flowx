@@ -11,6 +11,9 @@
     "quartz_cron_expression": "0 0 0 * * ?",
     "timezone_id": "UTC"
   },
+  "synthesized_variable_init_keys": [
+    "_init_state"
+  ],
   "tags": {
     "pipeline": "complex-orchestration",
     "source": "adf"

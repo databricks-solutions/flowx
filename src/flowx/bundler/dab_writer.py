@@ -2759,7 +2759,9 @@ def _rewrite_post_branch_dependencies(tasks: list[dict[str, Any]]) -> None:
                 seen_keys.add(key)
                 deduped.append(dep)
             task["depends_on"] = deduped
-            task.setdefault("run_if", "AT_LEAST_ONE_SUCCESS")
+            # The untaken branch's terminals are SKIPPED, so NONE_FAILED lets the join run yet still propagates a
+            # taken-branch failure (ADF dependsOn [Succeeded]); AT_LEAST_ONE_SUCCESS let a sibling success mask it.
+            task.setdefault("run_if", "NONE_FAILED")
 
 
 _TASK_VALUE_REF = re.compile(r"\{\{tasks\.([^.]+)\.values\.[^}]+\}\}")
@@ -3449,6 +3451,7 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         migration_status=pipeline_dict.get("migration_status", "included"),
         audit=dict(pipeline_dict.get("audit") or {}),
         lineage=lineage_from_dict(raw_lineage) if raw_lineage else None,
+        synthesized_variable_init_keys=frozenset(pipeline_dict.get("synthesized_variable_init_keys") or ()),
     )
     return pipeline, parameters
 

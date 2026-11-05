@@ -3,12 +3,6 @@ resources:
     complex_orchestration:
       name: complex-orchestration
       tasks:
-      - task_key: _init_state
-        notebook_task:
-          notebook_path: ../src/notebooks/init_state.py
-          base_parameters:
-            variable_name: state
-            value: start
       - task_key: launch-child
         run_job_task:
           job_id: ${var.child_pipeline_job_id}

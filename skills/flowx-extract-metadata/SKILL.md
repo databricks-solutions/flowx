@@ -52,8 +52,9 @@ PY="$(cat <plugin_dir>/.migration-venv)"
 "$PY" -m flowx.adapter extract --source adf ...
 ```
 
-The plugin venv from `flowx-setup` doesn't include the Azure sign-in package. Install flowx's
-`azure` extra into it once:
+The Azure sign-in package is an optional extra. Answer **yes** to the `setup` skill's live Azure
+features question, which runs `bootstrap.sh --source-deps azure`. To add it to an existing venv
+instead:
 
 ```bash
 "$PY" -m pip install -e '<plugin_dir>[azure]'

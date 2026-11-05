@@ -3,12 +3,6 @@ resources:
     all_activity_types:
       name: all-activity-types
       tasks:
-      - task_key: _init_status
-        notebook_task:
-          notebook_path: ../src/notebooks/init_status.py
-          base_parameters:
-            variable_name: status
-            value: new
       - task_key: append-variable
         notebook_task:
           notebook_path: ../src/notebooks/append_variable.py

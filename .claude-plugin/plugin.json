@@ -13,6 +13,7 @@
     "./skills/flowx-extract-metadata",
     "./skills/flowx-resolve-airflow-gaps",
     "./skills/flowx-discover",
+    "./skills/flowx-profile",
     "./skills/flowx-enrich",
     "./skills/flowx-route",
     "./skills/flowx-convert",

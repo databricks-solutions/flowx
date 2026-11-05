@@ -12,6 +12,7 @@ from flowx.models.ir import (
     NotebookActivity,
     Pipeline,
     PlaceholderActivity,
+    SqlActivity,
 )
 from flowx.sources.airflow import audit as source_audit
 from flowx.sources.airflow import operators as ops
@@ -31,7 +32,11 @@ from flowx.sources.airflow.loader.graph import (
     _root_trigger_sensor,
     _trigger_from_sensor,
 )
-from flowx.sources.airflow.loader.policy import _job_email_notifications, _job_timeout_seconds
+from flowx.sources.airflow.loader.policy import (
+    _job_email_notifications,
+    _job_timeout_seconds,
+    template_search_directories,
+)
 from flowx.sources.airflow.loader.reconcile import _iter_placeholders, _semantic_finding
 from flowx.sources.airflow.loader.schedule import (
     _asset_schedule_from_node,
@@ -45,6 +50,24 @@ from flowx.sources.airflow.loader.visitor import _DagVisitor
 _DATABRICKS_JOB_TAG_LIMIT = 25
 
 
+def _replace_with_placeholder(ctx: ops.OperatorContext, current: Activity, comment: str) -> PlaceholderActivity:
+    """Replaces *current* with a placeholder, keeping what the builder recorded about the task.
+
+    A builder can record more than the call source, such as the template file a SQL task was loaded from
+    or a builder placeholder's own details, so a later guard adds its reason instead of dropping them.
+    """
+    replacement = ops.build_placeholder_with_comment(ctx, comment)
+    carried: dict[str, Any] = {}
+    if isinstance(current, PlaceholderActivity):
+        replacement.comment = " ".join(filter(None, (current.comment, comment)))
+        carried = dict(current.raw_definition or {})
+    elif isinstance(current, SqlActivity) and current.template_file:
+        carried = {"template_file": dict(current.template_file)}
+    if carried:
+        replacement.raw_definition = {**carried, **(replacement.raw_definition or {})}
+    return replacement
+
+
 def _load_airflow_module(
     dag_path: Path,
     source: str,
@@ -52,6 +75,7 @@ def _load_airflow_module(
     *,
     dbt_mode: str = "static",
     target_dag_variable: str | None = None,
+    other_dag_variables: frozenset[str] = frozenset(),
     source_file: str | None = None,
 ) -> Pipeline:
     """Parses one isolated DAG declaration into a flowx Pipeline IR.
@@ -60,6 +84,8 @@ def _load_airflow_module(
         dag_path: Path to a ``.py`` DAG module.
         dbt_mode: dbt-factory render mode for any dbt workload -- ``"static"`` (default,
             an inner job of per-node tasks) or ``"pydabs"`` (a deploy-time hook module).
+        other_dag_variables: Variables of the module's other DAGs, so a task that names one with
+            ``dag=`` stays out of this DAG.
 
     Returns:
         A :class:`~flowx.models.ir.Pipeline`. Mapped operators become their IR
@@ -69,8 +95,11 @@ def _load_airflow_module(
         sensors remain explicit placeholders; unmapped operators become a
         PlaceholderActivity.
     """
-    audit = source_audit.audit_module(module, target_dag_variable=target_dag_variable)
-    visitor = _DagVisitor(module, target_dag_variable=target_dag_variable)
+    audit = source_audit.audit_module(
+        module, target_dag_variable=target_dag_variable, other_dag_variables=other_dag_variables
+    )
+    visitor = _DagVisitor(module, target_dag_variable=target_dag_variable, other_dag_variables=other_dag_variables)
+    visitor.dag_file = dag_path.absolute()
     visitor.visit(module)
     functions = visitor.functions()
 
@@ -163,7 +192,10 @@ def _load_airflow_module(
                     "task_key": var_to_task_key[trigger_var],
                     "covered_capture_ids": sorted(covered_tasks),
                 }
-    dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions, visitor.default_args)
+
+    # Airflow searches the DAG file's folder as imported, without following symlinks.
+    template_search_paths = (dag_path.absolute().parent, *template_search_directories(visitor))
+    dataproc_plan = plan_dataproc(visitor.operators, upstreams, functions, visitor.default_args_for)
     dropped |= dataproc_plan.dropped
     upstreams = _rewire_dropped(upstreams, dropped)
 
@@ -339,18 +371,20 @@ def _load_airflow_module(
             functions=visitor.functions_for(var),
             source=source,
             call_source=call_source,
-            default_args=visitor.default_args,
+            default_args=visitor.default_args_for(var),
+            template_search_paths=template_search_paths,
         )
         builder = ops.OPERATOR_REGISTRY.get(operator, ops.build_placeholder)
         activity = builder(ctx)
         if var in dataproc_plan.retained_reasons:
-            activity = ops.build_placeholder_with_comment(ctx, dataproc_plan.retained_reasons[var])
+            activity = _replace_with_placeholder(ctx, activity, dataproc_plan.retained_reasons[var])
         elif var in dataproc_plan.clusters and not isinstance(activity, PlaceholderActivity):
             activity.cluster = dict(dataproc_plan.clusters[var])
         activity.depends_on = depends_on
         if trigger_mapping.status == "unsupported":
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 f"Airflow trigger_rule {trigger_mapping.rule!r} is unsupported. {trigger_mapping.message}",
             )
             activity.depends_on = depends_on
@@ -381,8 +415,9 @@ def _load_airflow_module(
         unconsumed = ops.unconsumed_kwargs(operator, kwargs)
         if unconsumed:
             names = ", ".join(sorted(unconsumed))
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 f"Airflow {operator} argument(s) {names} are not represented by the Databricks task; "
                 "translate them explicitly.",
             )
@@ -398,11 +433,12 @@ def _load_airflow_module(
                     arguments=sorted(unconsumed),
                 )
             )
-        unrepresented_policy = templating.unrepresented_retry_policy_arguments(visitor.default_args, kwargs)
+        unrepresented_policy = templating.unrepresented_retry_policy_arguments(visitor.default_args_for(var), kwargs)
         if unrepresented_policy:
             names = ", ".join(unrepresented_policy)
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 f"Airflow task policy argument(s) {names} cannot be represented statically; "
                 "resolve the policy before migration.",
             )
@@ -423,8 +459,9 @@ def _load_airflow_module(
         date_values = sorted(logical_dates.logical_date_values(activity))
         date_gap = logical_semantics.unavailable_reason(set(date_values)) if date_values else None
         if date_gap is not None:
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 f"Airflow interval macro(s) {', '.join(date_values)} cannot be reproduced: {date_gap}.",
             )
             activity.depends_on = depends_on
@@ -442,8 +479,9 @@ def _load_airflow_module(
         unresolved_templates = _unresolved_activity_templates(activity)
         if unresolved_templates:
             expressions = ", ".join(sorted(unresolved_templates))
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 f"Airflow template expression(s) {expressions} have no deterministic Databricks mapping; "
                 "translate the value manually.",
             )
@@ -467,8 +505,9 @@ def _load_airflow_module(
             partial_note = (
                 " The mapping also contains .partial() fixed arguments." if var in visitor.partial_mapped else ""
             )
-            activity = ops.build_placeholder_with_comment(
+            activity = _replace_with_placeholder(
                 ctx,
+                activity,
                 "Classic Airflow dynamic mapping cannot be emitted until every mapped argument is "
                 f"bound into the inner task ({', '.join(mapped_names) or 'unknown mapping'}).{partial_note}",
             )
@@ -490,7 +529,7 @@ def _load_airflow_module(
             )
 
         # Stamp policy only after every semantic guard has selected the final leaf activity.
-        policy = templating.retry_policy(visitor.default_args, kwargs)
+        policy = templating.retry_policy(visitor.default_args_for(var), kwargs)
         activity.max_retries = policy.get("max_retries")
         activity.timeout_seconds = policy.get("timeout_seconds")
         activity.min_retry_interval_millis = policy.get("min_retry_interval_millis")

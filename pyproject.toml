@@ -28,6 +28,7 @@ dependencies = [
     "pyyaml>=6.0",
     "databricks-sdk>=0.40",
     "sqlglot>=25.0",
+    "certifi>=2026.10.18"
 ]
 
 [project.optional-dependencies]
@@ -63,6 +64,10 @@ requires = [
 ]
 build-backend = "hatchling.build"
 
+[tool.uv]
+required-version = "~=0.11.0"
+exclude-newer-package = { "databricks-sdk" = false, "certifi" = false }
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/flowx"]
 
@@ -88,7 +93,7 @@ addopts = "--no-header"
 cache_dir = ".venv/pytest-cache"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
-    "integration: marks tests that need live Azure access; make integration skips them (none use it today)",
+    "integration: marks tests that need live Azure or network access (the live profile tests); make integration skips them",
     "slow: marks tests that are slow to run",
 ]
 

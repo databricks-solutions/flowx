@@ -21,6 +21,9 @@
     "pause_status": "PAUSED",
     "url": "<STORAGE_ACCOUNT_ID>"
   },
+  "synthesized_variable_init_keys": [
+    "_init_status"
+  ],
   "tags": {
     "pipeline": "all-activity-types",
     "source": "adf"

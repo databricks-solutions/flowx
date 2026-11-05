@@ -19,6 +19,7 @@ import json as _json
 import re
 import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from flowx.models.ir import (
@@ -30,7 +31,8 @@ from flowx.models.ir import (
     SparkPythonActivity,
     SqlActivity,
 )
-from flowx.sources.airflow import callable_notebook, dataproc, templating
+from flowx.sources.airflow import callable_notebook, dataproc, templating, teradata
+from flowx.sources.airflow.template_files import find_template_file, read_template_file
 from flowx.utils import to_lowercase_key
 
 # --------------------------------------------------------------------------------------
@@ -128,6 +130,8 @@ class OperatorContext:
         call_source: The verbatim source of this operator call, embedded in a
             PlaceholderActivity so the agentic-gap round can reason from it (the
             Airflow analog of ADF's raw ARM JSON).
+        template_search_paths: Directories Airflow searches for template files, in
+            order: the DAG file's folder, then the DAG's ``template_searchpath``.
     """
 
     task_id: str
@@ -138,6 +142,7 @@ class OperatorContext:
     source: str
     call_source: str = ""
     default_args: dict[str, ast.expr] = field(default_factory=dict)
+    template_search_paths: tuple[Path, ...] = ()
 
 
 # --------------------------------------------------------------------------------------
@@ -620,25 +625,124 @@ def _sh_notebook_activity(ctx: OperatorContext, command: str) -> NotebookActivit
     )
 
 
+# Airflow treats a command ending in one of the operator's ``template_ext`` as a script file name.
+_SHELL_TEMPLATE_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "BashOperator": (".sh", ".bash"),
+    "SSHOperator": (".sh", ".bash", ".csh", ".zsh", ".dash", ".ksh"),
+}
+_SHELL_FILE_EXTENSIONS = (".sh", ".bash")
+
+
+def _shell_activity(ctx: OperatorContext, command_kwarg: str) -> Activity:
+    """Builds a Bash or SSH task: a Teradata gap, a native Spark task for spark-submit, or a ``%sh`` notebook.
+
+    A command naming a script template file is replaced by the file's contents, as Airflow renders it.
+    Teradata work is detected first, so a gap for another reason still carries the script inventory.
+    """
+    command = literal_str(ctx.kwargs.get(command_kwarg))
+    if command is None:
+        return _placeholder(ctx, f"{ctx.operator} command is not a string literal; supply the command manually.")
+    if command.endswith(_SHELL_TEMPLATE_EXTENSIONS.get(ctx.operator, ())):
+        if not command.endswith(_SHELL_FILE_EXTENSIONS):
+            return _placeholder(ctx, f"{ctx.operator} loads {command!r} as a script for a shell other than bash.")
+        loaded = read_template_file(command, ctx.template_search_paths)
+        if loaded.content is None:
+            return _placeholder(
+                ctx,
+                f"{ctx.operator} loads its command from script file {command!r}, which {loaded.reason}. Make the "
+                "file available next to the DAG or in a template_searchpath directory, or inline the command.",
+            )
+        command = loaded.content
+    jinja_note = (
+        f"The {ctx.operator} command uses Jinja statements or comments ({{% %}} / {{# #}}), which flowx does not "
+        "render; expand them into plain shell. Airflow also reads the {# in ${#name} as a comment start."
+        if templating.JINJA_STATEMENT_OR_COMMENT.search(command)
+        else None
+    )
+    utilities = teradata.find_utilities(command)
+    if utilities:
+        scripts = [
+            teradata.script_record(path, ctx.template_search_paths, remote=ctx.operator == "SSHOperator")
+            for path in teradata.script_references(command)
+        ]
+        return _teradata_placeholder(ctx, utilities, scripts, teradata.heredoc_scripts(command), jinja_note)
+    if jinja_note is not None:
+        return _placeholder(ctx, jinja_note)
+    if not teradata.parses(command):
+        return _placeholder(
+            ctx,
+            f"flowx could not parse this {ctx.operator} command as shell (for example an unbalanced quote), so it "
+            "cannot tell what the command runs; check and translate it manually.",
+        )
+    submit = parse_spark_submit(command)
+    if submit is not None:
+        # The SSH hop is eliminated -- Databricks runs Spark natively.
+        return _spark_activity_from_submit(ctx, submit, f"{ctx.operator} spark-submit")
+    return _sh_notebook_activity(ctx, command)
+
+
 def _build_bash(ctx: OperatorContext) -> Activity:
-    command = literal_str(ctx.kwargs.get("bash_command"))
-    if command is not None:
-        submit = parse_spark_submit(command)
-        if submit is not None:
-            return _spark_activity_from_submit(ctx, submit, "BashOperator spark-submit")
-        return _sh_notebook_activity(ctx, command)
-    return _placeholder(ctx, "BashOperator command is not a string literal; supply the command manually.")
+    return _shell_activity(ctx, "bash_command")
 
 
 def _build_ssh(ctx: OperatorContext) -> Activity:
-    command = literal_str(ctx.kwargs.get("command"))
-    if command is not None:
-        submit = parse_spark_submit(command)
-        if submit is not None:
-            # The SSH hop is eliminated -- Databricks runs Spark natively.
-            return _spark_activity_from_submit(ctx, submit, "SSHOperator spark-submit")
-        return _sh_notebook_activity(ctx, command)
-    return _placeholder(ctx, "SSHOperator command is not a string literal; supply the command manually.")
+    return _shell_activity(ctx, "command")
+
+
+def _teradata_placeholder(
+    ctx: OperatorContext,
+    utilities: list[str],
+    scripts: list[dict[str, Any]],
+    inline_scripts: list[str],
+    extra_note: str | None = None,
+) -> Activity:
+    message, details = teradata.gap_details(utilities, scripts, inline_scripts)
+    return _placeholder(ctx, " ".join(filter(None, (message, extra_note))), {"teradata": details})
+
+
+def _literal_statements(node: ast.expr | None) -> list[str]:
+    """Returns an operator's SQL as a list of statements: one string, or a literal list of strings."""
+    value = literal_value(node)
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list | tuple) and all(isinstance(statement, str) for statement in value):
+        return list(value)
+    return []
+
+
+def _build_bteq(ctx: OperatorContext) -> Activity:
+    """A BteqOperator runs a BTEQ script, inline as ``sql`` or from ``file_path``, through the bteq client.
+
+    With an ``ssh_conn_id`` the operator reads ``file_path`` on the SSH host, so discover does not read it.
+    """
+    file_path = literal_str(ctx.kwargs.get("file_path"))
+    sql = literal_str(ctx.kwargs.get("sql"))
+    ssh_connection = ctx.kwargs.get("ssh_conn_id")
+    remote = ssh_connection is not None and not (
+        isinstance(ssh_connection, ast.Constant) and ssh_connection.value in (None, "")
+    )
+    scripts = (
+        [teradata.script_record(file_path, ctx.template_search_paths, remote=remote)] if file_path is not None else []
+    )
+    return _teradata_placeholder(ctx, ["bteq"], scripts, [sql] if sql is not None and file_path is None else [])
+
+
+def _build_teradata_sql(ctx: OperatorContext) -> Activity:
+    """A TeradataOperator runs Teradata SQL: inline statements, or ``.sql`` template files (its template_ext).
+
+    Airflow renders each statement of a list separately, so each one that names a ``.sql`` file is loaded.
+    """
+    scripts: list[dict[str, Any]] = []
+    inline: list[str] = []
+    for statement in _literal_statements(ctx.kwargs.get("sql")):
+        if not statement.endswith(".sql"):
+            inline.append(statement)
+            continue
+        path, detail = find_template_file(statement, ctx.template_search_paths)
+        scripts.append(
+            {"path": statement, "unresolved": detail} if path is None else teradata.script_record_at(statement, path)
+        )
+    return _teradata_placeholder(ctx, [], scripts, inline)
 
 
 def _build_spark_submit(ctx: OperatorContext) -> Activity:
@@ -721,14 +825,51 @@ def _build_databricks_submit_run(ctx: OperatorContext) -> Activity:
     )
 
 
+# Airflow treats a SQL string ending in one of the operator's ``template_ext`` as a template file name.
+_SQL_TEMPLATE_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "DatabricksSqlOperator": (".sql",),
+    "SQLExecuteQueryOperator": (".sql", ".json"),
+    "PostgresOperator": (".sql", ".json"),
+    "MySqlOperator": (".sql", ".json"),
+    "HiveOperator": (".hql", ".sql"),
+}
+
+
 def _sql_builder(note: str, sql_kwarg: str = "sql") -> Callable[[OperatorContext], Activity]:
-    """Factory: build a warehouse-backed SqlActivity (sql_task) from an operator's inline SQL."""
+    """Factory: build a warehouse-backed SqlActivity (sql_task) from an operator's SQL.
+
+    A SQL string that names a template file is replaced by the file's contents, as Airflow renders it.
+    Jinja statements and comments (``{% %}``, ``{# #}``) have no Databricks equivalent and fail closed.
+    """
 
     def build(ctx: OperatorContext) -> Activity:
         sql = literal_str(ctx.kwargs.get(sql_kwarg)) or literal_str(ctx.kwargs.get("hql"))
         if sql is None:
             return _placeholder(ctx, f"{ctx.operator} SQL is not a string literal; extract it manually.")
-        return SqlActivity(name=ctx.task_id, task_key=ctx.task_key, sql=sql)
+        if sql.endswith(_SQL_TEMPLATE_EXTENSIONS.get(ctx.operator, ())):
+            if sql.endswith(".json"):
+                return _placeholder(
+                    ctx, f"{ctx.operator} loads {sql!r} as a template file of a type flowx does not read."
+                )
+            loaded = read_template_file(sql, ctx.template_search_paths)
+            if loaded.content is None:
+                return _placeholder(
+                    ctx,
+                    f"{ctx.operator} loads its SQL from template file {sql!r}, which {loaded.reason}. Make the file "
+                    "available next to the DAG or in a template_searchpath directory, or inline the SQL.",
+                )
+            template_file: dict[str, str] | None = loaded.record()
+            sql = loaded.content
+        else:
+            template_file = None
+        if templating.JINJA_STATEMENT_OR_COMMENT.search(sql):
+            return _placeholder(
+                ctx,
+                f"{ctx.operator} SQL uses Jinja statements or comments ({{% %}} / {{# #}}), which Databricks "
+                "does not render; expand them into plain SQL.",
+                {"template_file": template_file} if template_file else None,
+            )
+        return SqlActivity(name=ctx.task_id, task_key=ctx.task_key, sql=sql, template_file=template_file)
 
     return build
 
@@ -816,10 +957,13 @@ def _build_dataproc(ctx: OperatorContext) -> Activity:
 # --------------------------------------------------------------------------------------
 
 
-def _placeholder(ctx: OperatorContext, comment: str) -> Activity:
+def _placeholder(ctx: OperatorContext, comment: str, details: dict[str, Any] | None = None) -> PlaceholderActivity:
     # Carry the operator's raw source so the agentic-gap round can reason from it
     # (the Airflow analog of ADF's raw ARM JSON), mirroring the ADF placeholder path.
+    # *details* adds what the builder read beyond the call, such as a loaded template file.
     raw_definition = {"operator": ctx.operator, "source": ctx.call_source} if ctx.call_source else None
+    if details:
+        raw_definition = {**(raw_definition or {}), **details}
     return PlaceholderActivity(
         name=ctx.task_id,
         task_key=ctx.task_key,
@@ -836,7 +980,7 @@ def build_placeholder(ctx: OperatorContext) -> Activity:
     )
 
 
-def build_placeholder_with_comment(ctx: OperatorContext, comment: str) -> Activity:
+def build_placeholder_with_comment(ctx: OperatorContext, comment: str) -> PlaceholderActivity:
     """Builds a placeholder carrying a caller-supplied migration explanation."""
     return _placeholder(ctx, comment)
 
@@ -847,6 +991,8 @@ _OPERATOR_CONSUMED_KWARGS: dict[str, frozenset[str]] = {
     "ShortCircuitOperator": frozenset({"python_callable", "op_args", "op_kwargs"}),
     "BashOperator": frozenset({"bash_command"}),
     "SSHOperator": frozenset({"command"}),
+    "BteqOperator": frozenset({"sql", "file_path"}),
+    "TeradataOperator": frozenset({"sql"}),
     "SparkSubmitOperator": frozenset({"application", "java_class", "application_args"}),
     "DatabricksSubmitRunOperator": frozenset({"json"}),
     "DatabricksSubmitRunDeferrableOperator": frozenset({"json"}),
@@ -1006,6 +1152,8 @@ OPERATOR_REGISTRY: dict[str, Callable[[OperatorContext], Activity]] = {
     "ShortCircuitOperator": _build_branch,
     "BashOperator": _build_bash,
     "SSHOperator": _build_ssh,
+    "BteqOperator": _build_bteq,
+    "TeradataOperator": _build_teradata_sql,
     "SparkSubmitOperator": _build_spark_submit,
     "DatabricksSubmitRunOperator": _build_databricks_submit_run,
     "DatabricksSubmitRunDeferrableOperator": _build_databricks_submit_run,

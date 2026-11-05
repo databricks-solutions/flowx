@@ -102,6 +102,7 @@ Or run individual phases:
 /flowx:flowx-convert     # Deterministic + agentic translation
 /flowx:flowx-route       # Decide deterministic vs. agentic per pipeline group and fill the agentic groups (ADF)
 /flowx:flowx-package     # Generate DABs project
+/flowx:flowx-profile     # (ADF, optional) Estimate current ADF spend from a live Azure scan
 ```
 
 (In Genie Code, invoke the same skills with the `@` prefix, e.g. `@flowx-migrate`.)
@@ -173,7 +174,7 @@ agent using LLM-assisted reasoning from the activity's ARM JSON.
 
 ## Supported Airflow Operators
 
-The Airflow source parses DAG `.py` modules **statically** (via `ast`, no Airflow install or DAG execution) and maps the constructs below to the shared IR — 38 operator/sensor types in the parser registry, plus the dbt CLI, Cosmos, and TaskFlow constructs.
+The Airflow source parses DAG `.py` modules **statically** (via `ast`, no Airflow install or DAG execution) and maps the constructs below to the shared IR — 74 operator/sensor types in the parser registry, plus the dbt CLI, Cosmos, and TaskFlow constructs.
 
 Unlike the ADF path, an Airflow operator's path is decided **per instance** by whether its inputs are statically resolvable. A recognized operator lowers to a real Databricks task (**deterministic**), or — when a value can't be resolved from source alone — to a failing placeholder + `gaps.json` entry (**agentic**). A few constructs are always agentic because their behavior is inherently runtime.
 
@@ -183,6 +184,7 @@ Unlike the ADF path, an Airflow operator's path is decided **per instance** by w
 | Compute / scripts | `PythonVirtualenvOperator`, `ExternalPythonOperator` | Notebook task + `%pip install` | Deterministic |
 | Compute / scripts | `BashOperator`, `SSHOperator` | `%sh` notebook (`spark-submit` lifted when option arity is known) | Deterministic † |
 | Compute / scripts | `SparkSubmitOperator` | Spark JAR / Python task | Deterministic |
+| Teradata | `BteqOperator`, `TeradataOperator`, and Bash/SSH commands that run `bteq`, TPT (`tbuild`, `tdload`), or the load/export utilities | Placeholder + gap carrying the script | Agentic |
 | Databricks provider | `DatabricksSubmitRunOperator` (+ `…DeferrableOperator`) | Notebook / run task | Deterministic |
 | Databricks provider | `DatabricksRunNowOperator` (+ `…DeferrableOperator`) | `run_job_task` | Deterministic |
 | Databricks provider | `DatabricksNotebookOperator` | Notebook task | Deterministic |
@@ -209,7 +211,7 @@ Unlike the ADF path, an Airflow operator's path is decided **per instance** by w
 | TaskFlow API | `@task.branch`, `@task.short_circuit`, `@task_group` (decorator form) | Placeholder + gap | Agentic |
 
 **†** Deterministic when the relevant values are statically resolvable; otherwise the instance routes
-to an agentic gap — e.g. a non-literal command / SQL / endpoint / path, a callable that reads Airflow
+to an agentic gap — e.g. a non-literal command / SQL / endpoint / path, a SQL template file (`.sql` / `.hql`) that is not next to the DAG or in a static `template_searchpath`, a callable that reads Airflow
 task context or XCom, an unsafe inline template context, or a non-literal `.expand()` /
 `.partial().expand()`.
 **Agentic** emits a failing placeholder + `gaps.json` entry (eligible for the leaf-gap

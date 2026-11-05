@@ -1,0 +1,8 @@
+{"properties": {
+  "columns": [{"name": "PreTaxCost"}, {"name": "MeterSubcategory"}, {"name": "ResourceId"}, {"name": "Currency"}],
+  "rows": [
+    [12.34, "", "/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.DataFactory/factories/demo-factory", "USD"],
+    [3.5, "Managed Airflow", "/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.DataFactory/factories/demo-factory", "USD"],
+    [9.99, "", "/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.DataFactory/factories/unrelated", "USD"]
+  ]
+}}

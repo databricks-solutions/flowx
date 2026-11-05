@@ -60,6 +60,9 @@ def load_airflow_dags(
                 _module_for_dag(module, declaration, declarations),
                 dbt_mode=dbt_mode,
                 target_dag_variable=declaration.target_dag_variable,
+                other_dag_variables=frozenset(
+                    other.variable for other in declarations if other is not declaration and other.variable
+                ),
                 source_file=source_file or dag_path.name,
             )
         )

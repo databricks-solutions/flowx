@@ -94,6 +94,10 @@ _PARAM_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 _JINJA = re.compile(r"\{\{\s*(.*?)\s*\}\}")
+# Jinja statements and comments, closed or not. Jinja opens a comment at any ``{#``, including the one in
+# bash's ``${#name}``, so Airflow cannot render such text either.
+JINJA_STATEMENT_OR_COMMENT = re.compile(r"\{%.*?(?:%\}|$)|\{#.*?(?:#\}|$)", re.DOTALL)
+CLOSED_JINJA_STATEMENT_OR_COMMENT = re.compile(r"\{%.*?%\}|\{#.*?#\}", re.DOTALL)
 _PARAMETER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -380,6 +384,17 @@ def convert_params(value: Any) -> tuple[Any, set[str]]:
             params |= refs
         return out_dict, params
     return value, params
+
+
+def jinja_statements_or_comments(value: Any) -> set[str]:
+    """Returns Jinja statements and comments (``{% %}``, ``{# #}``), which Databricks never renders."""
+    if isinstance(value, str):
+        return set(JINJA_STATEMENT_OR_COMMENT.findall(value))
+    if isinstance(value, list):
+        return set().union(*(jinja_statements_or_comments(item) for item in value)) if value else set()
+    if isinstance(value, dict):
+        return set().union(*(jinja_statements_or_comments(item) for item in value.values())) if value else set()
+    return set()
 
 
 def unresolved_jinja_expressions(value: Any) -> set[str]:

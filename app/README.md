@@ -31,6 +31,7 @@ operation; `parameters` is its keyword-argument dict.
 | `workspace_paths` | `adapter workspace-paths` | Detect workspace paths / hosts |
 | `package` | `adapter package` | Emit the deployable DAB bundle |
 | `migrate` | discover→convert→package | Deterministic-only migration in one call (never runs `enrich` or `route`; for a migration that enriches (any source) or routes (ADF), run the phases one at a time, passing the same source to `discover` and `convert`) |
+| `profile` | `adapter profile` | Estimate current ADF spend (live Azure scan; needs the `azure` extra) |
 | `record_results` | `adapter record-results` | Write coverage to a UC table |
 | `install_dashboard` | `adapter install-dashboard` | Publish the coverage dashboard |
 
@@ -68,6 +69,31 @@ app entrypoint plus a vendored copy of the pure-Python `flowx` package) to `/Wor
 and create/deploy the app (default name **`mcp-flowx`**). Because it uploads through the SDK Workspace
 API, it runs directly in a serverless Genie Code session — no CLI needed. The deployment logic lives in
 `app/deploy_helpers.py` (imported by the notebook, so it is also unit-testable).
+
+**Optional: live Azure features (ADF cost profiling).** The `profile` command needs Azure deps
+(`azure-identity`, `requests`) that the app leaves out by default. To include them, set the
+notebook's `source_deps` widget to `azure`, or run `SOURCE_DEPS=azure ./app/deploy.sh`; both append
+the `azure` extra from `pyproject.toml` to the app's requirements. Without them, `profile` returns
+exit code 2 with an install hint.
+
+The app also needs an Azure service principal. Add its client secret to the app as a **Secret**
+resource (Apps → your app → Edit → App resources; resource key e.g. `azure-sp-secret`, permission
+*Can read*), then add this to `app/app.yaml` before deploying:
+
+```yaml
+env:
+  - name: AZURE_TENANT_ID
+    value: "<tenant id>"
+  - name: AZURE_CLIENT_ID
+    value: "<client id>"
+  - name: AZURE_CLIENT_SECRET
+    valueFrom: azure-sp-secret
+```
+
+The service principal needs Reader and Data Factory Contributor on the subscription or resource
+group it scans, and Cost Management Reader on the subscription (see
+`skills/flowx-profile/sources/adf.md`). Anyone with **Can use** on the app can run `profile` with this
+identity, so grant it only to people who may see these factories' runs and costs.
 
 **CLI alternative — `deploy.sh`:**
 

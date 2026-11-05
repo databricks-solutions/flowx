@@ -71,6 +71,13 @@ path for discover, and `--emit-notebook` writes a notebook the user runs themsel
 optional `azure` extra (`azure-identity`, `requests`). The `flowx-extract-metadata` skill drives it;
 the MCP tool has no `extract` command yet.
 
+A separate, standalone **Profile** phase (`python -m flowx.adapter profile --source adf`, ADF only)
+estimates current ADF spend from a live Azure scan and writes `metadata/tco/cost_comparison.{csv,md}`
+(overwritten each run). It needs the optional `azure` extra (`pip install -e '.[azure]'`, or
+`pip install 'azure-identity>=1.17'` in the plugin venv) and Azure credentials
+(`az login` locally; a service principal via env vars on Genie Code / CI). It never reads
+`metadata/inventory.json`.
+
 ### Key Patterns
 - `@dataclass(slots=True, kw_only=True)` for all models
 - Immutable `TranslationContext` threaded through visitors
@@ -105,6 +112,7 @@ the MCP tool has no `extract` command yet.
 | `route_agentic.py` | Applies a routing decision after convert: rebuilds the report from the never-rewritten baseline (`.work/route_baseline/`), the plan, and the agent's output in `metadata/agentic_conversion.json` (per-unit pipelines + fills of convert's own gaps); `fill-agentic` is the only fill for routed-agentic units |
 | `models/conversion_plan.py` | Typed `ConversionPlan` (schema 3): the library's load/validate/record API for `conversion_plan.json`, one decision per component (pending until made), suggested groupings, the routing conversation, bound to the inventory, `source_graphs.json` and `agentic_insights.json` hashes; package fails closed on a mismatch, a pending decision, or an unfilled agentic unit |
 | `sources/adf/extract/` | Live ADF extraction (`core.py`, self-contained and inlined into the generated notebook), export/path checks (`layout.py`), notebook rendering (`notebook.py`) |
+| `sources/adf/profile/` | Live ADF scanning and cost estimation for the `profile` phase (requires optional `azure` extra; Azure deps imported lazily)                                   |
 
 ## Activity Types
 

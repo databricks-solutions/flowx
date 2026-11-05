@@ -212,3 +212,21 @@ def test_after_a_rerun_the_current_bundle_is_delivered_and_listed_before_archive
         current = [index for index, path in enumerate(delivered) if not path.startswith("metadata/archive/")]
         assert archived and {"databricks.yml", "resources/job.yml", "src/notebook.py"} <= set(delivered)
         assert max(current) < min(archived)
+
+
+def test_failed_inspect_stops_before_package(stub_adapter, monkeypatch, tmp_path: Path):
+    def fake_run_adapter(args):
+        stub_adapter.append(args[0])
+        if args[0] == "inspect":
+            return runner.AdapterResult(command=[], returncode=None, stdout="", stderr="Timed out after 1 s.")
+        return _FakeResult()
+
+    monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
+    result = server._cmd_migrate(
+        {"source": "adf", "adf_source_path": str(tmp_path / "adf"), "output_dir": str(tmp_path / "out")}
+    )
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["failed_phase"] == "inspect"
+    assert result["steps"]["inspect"]["process"]["returncode"] is None
+    assert stub_adapter == ["discover", "convert", "inspect"]
