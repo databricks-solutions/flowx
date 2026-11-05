@@ -7,6 +7,7 @@ import copy
 import dataclasses
 import hashlib
 import json
+import posixpath
 import re
 import sys
 import tempfile
@@ -422,6 +423,12 @@ def write_bundle_group(
         environments = _collect_environments(workflow)
         _check_environment_keys(environments, workflow)
         environments_by_workflow.append(environments)
+    _check_authored_file_references(
+        workflows,
+        [environment for environments in environments_by_workflow for environment in environments],
+        catalog,
+        schema,
+    )
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
     # sql_task references ${var.warehouse_id}; declare it once if any workflow in the group uses one
     # (no default -> user supplies at deploy).
@@ -429,6 +436,10 @@ def write_bundle_group(
         pipeline_variable_declarations.setdefault(
             "warehouse_id", {"description": "SQL warehouse id for sql_task queries"}
         )
+    for name, declaration in _build_authored_variable_declarations(
+        workflows, [environment for environments in environments_by_workflow for environment in environments]
+    ).items():
+        pipeline_variable_declarations.setdefault(name, declaration)
 
     # Hoisted factory globals become bundle variables. Collected per workflow (each call also merges the
     # workflow's inner ForEach jobs): the bundle-scoped surfaces — databricks.yml ``variables:`` and
@@ -666,6 +677,13 @@ def write_bundle_group(
         created_files.append(warnings_path.resolve())
 
     return created_files
+
+
+def _iter_prepared_workflows(workflows: list[PreparedWorkflow]) -> Iterator[PreparedWorkflow]:
+    """Yields each workflow of the group followed by its inner ForEach jobs."""
+    for workflow in workflows:
+        yield workflow
+        yield from workflow.inner_workflows
 
 
 def _iter_workflow_secrets(workflow: PreparedWorkflow) -> list[SecretInstruction]:
@@ -1683,19 +1701,7 @@ def _check_agentic_file_collisions(workflows: list[PreparedWorkflow], catalog: s
     """
     authored_paths: set[str] = set()
     signatures_by_path: dict[str, set[object]] = {}
-    setup_notebooks = generate_setup_tasks(
-        secrets=[secret for workflow in workflows for secret in _iter_workflow_secrets(workflow)],
-        setup_tasks=[task for workflow in workflows for task in _iter_workflow_setup_tasks(workflow)],
-        catalog=catalog,
-        schema=schema,
-    )
-    generated_notebooks = [
-        notebook
-        for workflow in workflows
-        for prepared in (workflow, *workflow.inner_workflows)
-        for notebook in prepared.notebooks
-    ]
-    for notebook in [*generated_notebooks, *setup_notebooks]:
+    for notebook in _bundle_files(workflows, catalog, schema):
         if notebook.authored:
             authored_paths.add(notebook.relative_path)
         elif _is_bundle_root_artifact(notebook):
@@ -1727,6 +1733,134 @@ def _check_agentic_file_collisions(workflows: list[PreparedWorkflow], catalog: s
                 f"Agentic component file {relative_path!r} clashes on disk with {clashing_paths[0]!r}: paths that "
                 "differ only in case are one file on case-insensitive file systems, and a file cannot also be "
                 "a directory; give each file its own path"
+            )
+
+
+def _bundle_files(workflows: list[PreparedWorkflow], catalog: str, schema: str) -> list[DabNotebook]:
+    """Return every generated, authored and setup file the bundle writer writes for *workflows* and their inner jobs."""
+    setup_notebooks = generate_setup_tasks(
+        secrets=[secret for workflow in workflows for secret in _iter_workflow_secrets(workflow)],
+        setup_tasks=[task for workflow in workflows for task in _iter_workflow_setup_tasks(workflow)],
+        catalog=catalog,
+        schema=schema,
+    )
+    generated_notebooks = [
+        notebook
+        for workflow in workflows
+        for prepared in (workflow, *workflow.inner_workflows)
+        for notebook in prepared.notebooks
+    ]
+    return [*generated_notebooks, *setup_notebooks]
+
+
+_TASK_FILE_PATH_FIELDS = (
+    ("notebook_task", ("notebook_path",)),
+    ("spark_python_task", ("python_file",)),
+    ("sql_task", ("file", "path")),
+)
+_LIBRARY_FILE_KEYS = ("whl", "jar", "egg", "requirements")
+
+
+def _task_bundle_file_references(task: dict[str, Any]) -> list[str]:
+    """Return the bundle-relative file paths *task* names in its payload and libraries.
+
+    A payload whose ``source`` is ``GIT`` names a repository file, and a path that starts with
+    ``/``, carries a scheme such as ``dbfs:`` or names a ``${...}`` value is not a bundle file,
+    so none of those is returned.
+    """
+    references: list[Any] = []
+    for payload_kind, path_keys in _TASK_FILE_PATH_FIELDS:
+        value: Any = task.get(payload_kind)
+        source_holder = value.get("file") if payload_kind == "sql_task" and isinstance(value, dict) else value
+        if isinstance(source_holder, dict) and source_holder.get("source") == "GIT":
+            continue
+        for path_key in path_keys:
+            value = value.get(path_key) if isinstance(value, dict) else None
+        references.append(value)
+    for library in task.get("libraries") or []:
+        if isinstance(library, dict):
+            references.extend(library.get(library_key) for library_key in _LIBRARY_FILE_KEYS)
+    return [reference for reference in references if _is_bundle_relative_path(reference)]
+
+
+def _is_dot_relative(reference: Any) -> bool:
+    """Return whether *reference* is a string path that starts with ``./`` or ``../``."""
+    return isinstance(reference, str) and reference.startswith(("./", "../"))
+
+
+def _is_bundle_relative_path(reference: Any) -> bool:
+    """Return whether *reference* is a path the bundle resolves against its resource file."""
+    return (
+        isinstance(reference, str)
+        and bool(reference)
+        and not reference.startswith("/")
+        and ":" not in reference
+        and "${" not in reference
+    )
+
+
+def _check_authored_file_references(
+    workflows: list[PreparedWorkflow], environments: list[dict[str, Any]], catalog: str, schema: str
+) -> None:
+    """Fail when an authored task or environment names a bundle file that the bundle does not write.
+
+    A component's task fragment and environments are written as given, and every job YAML sits in
+    ``resources/``, so a relative path such as ``../src/x.py`` must name a file this bundle writes or
+    deploy fails. Every relative ``java_dependencies`` and ``project_environment`` entry is such a
+    path. A ``dependencies`` entry counts only when it starts with ``./`` or ``../``, since anything
+    else there is a pip requirement, and a ``base_environment`` only when it starts that way or names
+    a ``.yaml`` or ``.yml`` file, since anything else is a workspace base environment. A glob such
+    as ``../src/dist/*.whl`` must match at least one file.
+
+    Raises:
+        ValueError: An authored task or a component environment names a bundle-relative file
+            that no generated, authored or setup file provides.
+    """
+    written_paths = {
+        notebook.relative_path if _is_bundle_root_artifact(notebook) else f"src/{notebook.relative_path}"
+        for notebook in _bundle_files(workflows, catalog, schema)
+    }
+    references: list[tuple[str, str]] = []
+    for current in _iter_prepared_workflows(workflows):
+        for task in _iter_tasks_recursively(current.tasks):
+            if task.get("_authored"):
+                references.extend(
+                    (f"Agentic component task {task.get('task_key')!r}", reference)
+                    for reference in _task_bundle_file_references(task)
+                )
+    for environment in environments:
+        spec = environment["spec"]
+        dependencies = spec.get("dependencies") if isinstance(spec.get("dependencies"), list) else []
+        java_dependencies = spec.get("java_dependencies") if isinstance(spec.get("java_dependencies"), list) else []
+        base_environment = spec.get("base_environment")
+        candidates: list[Any] = [
+            *(dependency for dependency in dependencies if _is_dot_relative(dependency)),
+            *java_dependencies,
+            spec.get("project_environment"),
+        ]
+        if _is_dot_relative(base_environment) or (
+            isinstance(base_environment, str) and base_environment.endswith((".yaml", ".yml"))
+        ):
+            candidates.append(base_environment)
+        references.extend(
+            (f"Job environment {environment['environment_key']!r}", candidate)
+            for candidate in candidates
+            if _is_bundle_relative_path(candidate)
+        )
+    for owner, reference in references:
+        bundle_path = posixpath.normpath(posixpath.join("resources", reference))
+        if any(character in reference for character in "*?["):
+            pattern_depth = len(PurePosixPath(bundle_path).parts)
+            provided = any(
+                len(PurePosixPath(path).parts) == pattern_depth and PurePosixPath(path).match(bundle_path)
+                for path in written_paths
+            )
+        else:
+            provided = bundle_path in written_paths
+        if not provided:
+            raise ValueError(
+                f"{owner} names {reference!r}, which no file in the bundle provides; add it to the "
+                "component's files or point at a workspace path"
             )
 
 
@@ -2283,7 +2417,8 @@ def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
     return {"resources": {"pipelines": {resource["resource_key"]: resource["definition"]}}}
 
 
-_VAR_REFERENCE_RE = re.compile(r"\$\{var\.([A-Za-z_][A-Za-z0-9_]*)\}")
+# Bundle variable names may also hold hyphens between other characters, as in ``${var.cluster-id}``.
+_VAR_REFERENCE_RE = re.compile(r"\$\{var\.([A-Za-z_][A-Za-z0-9_]*(?:-+[A-Za-z0-9_]+)*)\}")
 
 _CLUSTER_VARIABLES = frozenset({"node_type_id", "spark_version"})
 _BUILTIN_BUNDLE_VARIABLES = frozenset({"catalog", "schema"}) | _CLUSTER_VARIABLES
@@ -2367,6 +2502,27 @@ def _build_pipeline_variable_declarations(
                 "description": f"Value for ${{var.{name}}} referenced by a generated pipeline resource.",
             }
     return declarations
+
+
+def _build_authored_variable_declarations(
+    workflows: list[PreparedWorkflow], environments: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Returns ``variables:`` declarations for every ``${var.…}`` an agent-authored task or environment references.
+
+    An agentic component's task fragment and environments are written as given, so each variable
+    they name must be declared in the root ``variables:`` block, as for its pipeline resources, or
+    ``databricks bundle validate`` fails on an undefined reference. Each is declared without a
+    default for the user to fill in; a variable the bundle already declares keeps its declaration.
+    """
+    referenced = _collect_variable_references(environments)
+    for current in _iter_prepared_workflows(workflows):
+        for task in _iter_tasks_recursively(current.tasks):
+            if task.get("_authored"):
+                referenced |= _collect_variable_references(task)
+    return {
+        name: {"description": f"Value for ${{var.{name}}} referenced by an agentic component."}
+        for name in sorted(referenced)
+    }
 
 
 def _collect_required_cluster_keys(tasks: list[dict[str, Any]]) -> set[str]:
@@ -3317,6 +3473,12 @@ def _reconstruct_configuration(raw: dict[str, Any] | None) -> Any:
 _AGENTIC_COMPONENT_FIELDS = frozenset(
     {"type", *(component_field.name for component_field in dataclasses.fields(AgenticComponentActivity))}
 )
+_AGENTIC_COMPONENT_FIELD_SHAPES = (
+    ("files", list, "list"),
+    ("resources", list, "list"),
+    ("environments", list, "list"),
+    ("task", dict, "mapping"),
+)
 
 
 def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
@@ -3328,8 +3490,10 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
 
     Raises:
         ValueError: An ``AgenticComponentActivity`` carries a field the
-            class does not define, such as ``file`` for ``files``; it is
-            refused rather than dropped.
+            class does not define, such as ``file`` for ``files``, or sets
+            ``files``, ``resources`` or ``environments`` to something other
+            than a list or ``task`` to something other than a mapping; it is
+            refused rather than dropped or coerced.
     """
     task_type = task_ir.get("type", "")
     base = _common_activity_kwargs(task_ir)
@@ -3533,12 +3697,15 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
         unknown_fields = sorted(task_ir.keys() - _AGENTIC_COMPONENT_FIELDS)
         if unknown_fields:
             raise ValueError(f"Agentic component {base['task_key']!r} has unknown field(s) {', '.join(unknown_fields)}")
+        for field_name, field_type, shape in _AGENTIC_COMPONENT_FIELD_SHAPES:
+            if field_name in task_ir and not isinstance(task_ir[field_name], field_type):
+                raise ValueError(f"Agentic component {base['task_key']!r} {field_name} must be a {shape}")
         return AgenticComponentActivity(
             **base,
-            files=list(task_ir.get("files") or []),
-            resources=list(task_ir.get("resources") or []),
-            environments=list(task_ir.get("environments") or []),
-            task=dict(task_ir.get("task") or {}),
+            files=list(task_ir.get("files", [])),
+            resources=list(task_ir.get("resources", [])),
+            environments=list(task_ir.get("environments", [])),
+            task=dict(task_ir.get("task", {})),
             raw_definition=task_ir.get("raw_definition"),
         )
     if task_type == "UnsupportedActivity":
