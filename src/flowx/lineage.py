@@ -125,7 +125,7 @@ def control_edges_from_calls(
     return edges
 
 
-def build_control_edges(pipeline: Pipeline, *, known_workflows: Collection[str] | None = None) -> list[ControlEdge]:
+def build_control_edges(pipeline: Pipeline, *, known_workflows: Collection[str]) -> list[ControlEdge]:
     """Derive cross-workflow invocation edges for a pipeline.
 
     Emits one :class:`ControlEdge` per invoking activity -- an
@@ -303,7 +303,7 @@ def build_motif_annotations(pipeline: Pipeline) -> list[MotifAnnotation]:
     return annotations
 
 
-def build_lineage(pipeline: Pipeline, *, known_workflows: Collection[str] | None = None) -> Lineage:
+def build_lineage(pipeline: Pipeline, *, known_workflows: Collection[str]) -> Lineage:
     """Compose the full source-neutral lineage block for a pipeline.
 
     Args:

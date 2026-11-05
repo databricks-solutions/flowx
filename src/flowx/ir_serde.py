@@ -25,7 +25,6 @@ from flowx.models.ir import (
     Activity,
     AgenticComponentActivity,
     AppendVariableActivity,
-    ControlEdge,
     CopyActivity,
     DbtFactoryActivity,
     DeleteActivity,
@@ -487,7 +486,6 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
             if activity.job_parameters:
                 extra["job_parameters"] = activity.job_parameters
         case MotifActivity():
-            # motif_id now lives on the Activity base and is serialised by activity_to_dict.
             extra["display_name"] = activity.display_name
             extra["databricks_replacement"] = activity.databricks_replacement
             extra["matched_activity_names"] = activity.matched_activity_names

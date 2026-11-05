@@ -3516,10 +3516,8 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             bridge_required_parameters=dict(task_ir.get("bridge_required_parameters") or {}),
         )
     if task_type == "MotifActivity":
-        # motif_id arrives via ``base`` (Activity now owns the field); passing it again here
-        # would raise "multiple values for keyword argument 'motif_id'".
         return MotifActivity(
-            **base,
+            **(base | {"motif_id": task_ir.get("motif_id", "unknown")}),
             display_name=task_ir.get("display_name", base["name"]),
             databricks_replacement=task_ir.get("databricks_replacement", "notebook"),
             matched_activity_names=list(task_ir.get("matched_activity_names", [])),
