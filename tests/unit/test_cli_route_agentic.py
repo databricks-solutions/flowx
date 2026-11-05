@@ -386,3 +386,108 @@ def test_route_records_the_routing_conversation_and_refuses_a_malformed_one(
         "conversation[0]: 'answer' must be a non-empty string",
         "conversation[0]: 'question' must be a non-empty string",
     ]
+
+
+def _edit_inventory(output_dir: Path, edit: Any) -> None:
+    inventory_path = output_dir / "metadata" / "inventory.json"
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory_path.write_text(json.dumps(edit(inventory), indent=2), encoding="utf-8")
+
+
+def _drop_child_key(inventory: dict[str, Any], key: str) -> dict[str, Any]:
+    child = next(pipeline for pipeline in inventory["pipelines"] if pipeline.get("name") == "child")
+    del child[key]
+    return inventory
+
+
+def _set_on_child(key: str, value: Any) -> Any:
+    def edit(inventory: dict[str, Any]) -> dict[str, Any]:
+        child = next(pipeline for pipeline in inventory["pipelines"] if pipeline["name"] == "child")
+        child[key] = value
+        return inventory
+
+    return edit
+
+
+@pytest.mark.parametrize(
+    ("edit", "named"),
+    [
+        (lambda inventory: [inventory], "must contain a JSON object, not list"),
+        (lambda inventory: {**inventory, "pipelines": 1}, "'pipelines' must be a list of objects"),
+        (lambda inventory: {**inventory, "pipelines": [1]}, "'pipelines' must be a list of objects"),
+        (
+            _set_on_child("activities", {"copy_orders": {"name": "copy_orders", "strategy": "agentic"}}),
+            "pipeline 'child' 'activities' must be a list of objects",
+        ),
+        (_set_on_child("motifs", 1), "pipeline 'child' 'motifs' must be a list of objects"),
+        (
+            lambda inventory: _drop_child_key(inventory, "activities"),
+            "pipeline 'child' 'activities' must be a list of objects",
+        ),
+        (_set_on_child("name", ""), "must have a non-empty string 'name'"),
+        (
+            _set_on_child("motifs", [{"motif_id": "m", "member_task_keys": "copy_orders"}]),
+            "pipeline 'child' motif 'm' 'member_task_keys' must be a list of activity names",
+        ),
+        (
+            _set_on_child("motifs", [{"motif_id": "m"}]),
+            "pipeline 'child' motif 'm' 'member_task_keys' must be a list of activity names",
+        ),
+        (
+            _set_on_child("motifs", [{"motif_id": 7, "member_task_keys": ["copy_orders"]}]),
+            "pipeline 'child' has a motif with no 'motif_id'",
+        ),
+    ],
+    ids=[
+        "root-list",
+        "pipelines-int",
+        "pipeline-int",
+        "activities-dict",
+        "motifs-int",
+        "no-activities",
+        "empty-name",
+        "member-keys-str",
+        "member-keys-missing",
+        "motif-id-number",
+    ],
+)
+def test_route_refuses_an_inventory_not_shaped_as_discover_writes_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], edit: Any, named: str
+) -> None:
+    """Read as none, a malformed list would make a pipeline look fully deterministic, or crash route."""
+    _setup(tmp_path)
+    _edit_inventory(tmp_path, edit)
+
+    assert adapter_cli_main(["route", "--output-dir", str(tmp_path)]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert any(named in violation and "run discover again" in violation for violation in payload["violations"])
+    assert not (tmp_path / "metadata" / "conversion_plan.json").exists()
+
+
+def test_record_plan_refuses_an_inventory_route_cannot_read(tmp_path: Path) -> None:
+    """The library's record step checks the shape too, so no caller records a plan over a malformed inventory."""
+    from flowx.routing import record_plan
+
+    _setup(tmp_path)
+    _edit_inventory(tmp_path, lambda inventory: {**inventory, "pipelines": 1})
+
+    result = record_plan(tmp_path, plan={"components": []})
+
+    assert result["ok"] is False
+    assert any("'pipelines' must be a list of objects" in violation for violation in result["violations"])
+    assert not (tmp_path / "metadata" / "conversion_plan.json").exists()
+
+
+def test_record_plan_checks_its_arguments_before_the_inventory(tmp_path: Path) -> None:
+    from flowx.routing import record_plan
+
+    _setup(tmp_path)
+    _edit_inventory(tmp_path, lambda inventory: {**inventory, "pipelines": 1})
+
+    with pytest.raises(ValueError, match="exactly one"):
+        record_plan(tmp_path)
+    _edit_inventory(tmp_path, lambda inventory: [])
+    with pytest.raises(ValueError, match="exactly one"):
+        record_plan(tmp_path)

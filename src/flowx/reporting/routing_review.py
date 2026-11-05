@@ -233,11 +233,13 @@ def _source(insights: dict[str, Any] | None) -> str:
         lines = []
         if system.get("headline"):
             lines.append(f"<p><strong>{_text(system['headline'])}</strong></p>")
-        patterns = [entry for entry in system.get("recommended_patterns") or [] if isinstance(entry, dict)]
+        recommended = system.get("recommended_patterns")
+        patterns = [entry for entry in recommended if isinstance(entry, dict)] if isinstance(recommended, list) else []
         if patterns:
             fit = f": {_text(patterns[0].get('fit'))}" if patterns[0].get("fit") else ""
             lines.append(f"<p>Recommended approach: {_text(patterns[0].get('pattern'))}{fit}</p>")
-        cascade = [str(item) for item in system.get("cascade") or [] if item]
+        replaced = system.get("cascade")
+        cascade = [item for item in replaced if isinstance(item, str) and item] if isinstance(replaced, list) else []
         if cascade:
             lines.append(f"<p>What it replaces: {escape('; '.join(cascade))}</p>")
         if system.get("decision_driver"):

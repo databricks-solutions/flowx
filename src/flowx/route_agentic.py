@@ -46,12 +46,15 @@ import copy
 import hashlib
 import json
 import os
+import secrets
 import tempfile
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from flowx.discovery_insights import _holds_lock, _inventory_pipelines, _is_open_file
 from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
 
@@ -68,6 +71,18 @@ METADATA_DIRNAME = "metadata"
 INVENTORY_FILENAME = "inventory.json"
 AGENTIC_OUTPUT_FILENAME = "agentic_conversion.json"
 
+# Held in metadata/ while route, fill-agentic or a merge into the live report reads and rewrites the plan, the
+# report, its gaps and the agent's output, so two of them never interleave on one output folder.
+ROUTE_LOCK_FILENAME = ".route.lock"
+# A hosted agent cannot delete files in output_dir, but discover moves metadata/, the lock with it, into the archive.
+ROUTE_LOCK_HELD = (
+    f"another route, fill-agentic or merge is writing to this output folder (metadata/{ROUTE_LOCK_FILENAME} "
+    "exists); run this command again once it finishes. If none is running, one was stopped mid-write: locally, "
+    f"delete metadata/{ROUTE_LOCK_FILENAME}, run route, then run this command again; on the hosted MCP server, "
+    "run discover again (it moves metadata/ and .work/, the lock with them, into metadata/archive/), then enrich "
+    "if you used it, convert, route, and every fill and merge again"
+)
+
 # Top-level report key holding the routing record. It lives in the report, so a fresh convert (which
 # rewrites the report) clears it; the package phase and ir_serde read only the pipelines beside it.
 ROUTING_RECORD_KEY = "_routing_record"
@@ -80,6 +95,8 @@ OUTCOME_AGENTIC_NOT_VIABLE = "agentic-not-viable"
 
 BASELINE_CHANGED = "the deterministic baseline is missing or changed; re-run convert, then route"
 
+# The store's two top-level keys; every save writes only these.
+_STORE_KEYS = frozenset({"components", "gap_fills"})
 # Every field a stored unit output and a stored gap fill hold; any other key means it was edited.
 _OUTPUT_KEYS = frozenset({"members", "pipelines", "output_sha256", "replaced", "entry_sha256"})
 _GAP_FILL_KEYS = frozenset(
@@ -385,6 +402,55 @@ def _gap_fill_checks_out(entry: Any) -> bool:
     )
 
 
+@contextmanager
+def route_lock(output_dir: Path) -> Iterator[bool]:
+    """Hold the output folder's route lock, yielding ``False`` when another command already holds it.
+
+    Route, fill-agentic and a merge into the live report each read the plan, the report, its gaps and
+    the agent's output and then write some of them, so each takes this lock first and refuses with
+    :data:`ROUTE_LOCK_HELD` while another holds it. Like enrich's lock it is a file created with
+    ``O_EXCL`` holding a random token, so a command never removes a lock a later one created after
+    discover moved ``metadata/`` away, and when writing the token fails it is removed only while it is
+    still the file this command opened. It is removed when the command finishes or raises; only a
+    killed process, or a failed token write that cannot confirm the lock is its own, leaves it behind.
+    Discover and convert take no lock. An output folder with no ``metadata/`` yet gets one, so a merge
+    there is still held; a folder that does not exist holds no files to guard, and the command then
+    reports what it is missing.
+    """
+    if not Path(output_dir).is_dir():
+        yield True
+        return
+    metadata_dir = Path(output_dir) / METADATA_DIRNAME
+    metadata_dir.mkdir(exist_ok=True)
+    lock_path = metadata_dir / ROUTE_LOCK_FILENAME
+    token = secrets.token_hex(16)
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        yield False
+        return
+    try:
+        try:
+            if os.write(descriptor, token.encode("ascii")) != len(token):
+                raise OSError(f"could not write the route lock {lock_path}")
+        except BaseException:
+            # The token may be missing or partial, so compare file identity, as enrich's lock does.
+            if _is_open_file(descriptor, lock_path):
+                lock_path.unlink(missing_ok=True)
+            raise
+        finally:
+            os.close(descriptor)
+    except BaseException:
+        if _holds_lock(lock_path, token):
+            lock_path.unlink(missing_ok=True)
+        raise
+    try:
+        yield True
+    finally:
+        if _holds_lock(lock_path, token):
+            lock_path.unlink(missing_ok=True)
+
+
 def load_agentic_output(output_dir: Path) -> AgenticOutput:
     """Read ``metadata/agentic_conversion.json``; empty when the agent has written nothing yet.
 
@@ -393,7 +459,9 @@ def load_agentic_output(output_dir: Path) -> AgenticOutput:
     and filling (or merging) that entry again replaces it.
 
     Raises:
-        ValueError: The file is not valid JSON or not shaped as ``{"components": {...}, "gap_fills": [...]}``.
+        ValueError: The file is not valid JSON or not shaped as ``{"components": {...}, "gap_fills": [...]}``
+            with exactly those two top-level keys (every save writes both and only those, so another key
+            would be dropped and a deleted one would silently drop what it held).
     """
     path = Path(output_dir) / METADATA_DIRNAME / AGENTIC_OUTPUT_FILENAME
     if not path.exists():
@@ -402,6 +470,13 @@ def load_agentic_output(output_dir: Path) -> AgenticOutput:
         document = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise ValueError(f"{AGENTIC_OUTPUT_FILENAME} is not valid JSON: {error}") from error
+    if isinstance(document, dict) and set(document) != _STORE_KEYS:
+        unknown, missing = sorted(set(document) - _STORE_KEYS), sorted(_STORE_KEYS - set(document))
+        raise ValueError(
+            f"{AGENTIC_OUTPUT_FILENAME} must hold exactly 'components' and 'gap_fills'"
+            + (f"; unknown top-level key(s) {unknown}" if unknown else "")
+            + (f"; missing {missing}" if missing else "")
+        )
     components = document.get("components", {}) if isinstance(document, dict) else None
     gap_fills = document.get("gap_fills", []) if isinstance(document, dict) else None
     if not isinstance(components, dict) or not isinstance(gap_fills, list):
@@ -644,17 +719,17 @@ def _unit_owned_activity_names(
             owned.update(_task_names(pipeline.get("tasks")))
         elif name not in agentic_names:
             elsewhere.update(_task_names(pipeline.get("tasks")))
-    for pipeline in (inventory or {}).get("pipelines") or []:
-        if isinstance(pipeline, dict):
-            names = {
-                str(activity.get("name"))
-                for activity in pipeline.get("activities") or []
-                if isinstance(activity, dict) and activity.get("name") is not None
-            }
-            if pipeline.get("name") in members:
-                owned.update(names)
-            elif pipeline.get("name") not in agentic_names:
-                elsewhere.update(names)
+    for pipeline in _inventory_pipelines(inventory or {}):
+        activities = pipeline.get("activities")
+        names = {
+            str(activity.get("name"))
+            for activity in (activities if isinstance(activities, list) else [])
+            if isinstance(activity, dict) and activity.get("name") is not None
+        }
+        if pipeline.get("name") in members:
+            owned.update(names)
+        elif pipeline.get("name") not in agentic_names:
+            elsewhere.update(names)
     return owned - elsewhere
 
 
@@ -796,9 +871,7 @@ def baseline_pipeline_mismatch(baseline_report: dict[str, Any], inventory: dict[
     activities out of the inventory, while convert still writes them.
     """
     inventory_names = {
-        str(pipeline.get("name"))
-        for pipeline in inventory.get("pipelines", [])
-        if isinstance(pipeline, dict) and pipeline.get("name") is not None
+        str(pipeline.get("name")) for pipeline in _inventory_pipelines(inventory) if pipeline.get("name") is not None
     }
     report_pipelines = _report_pipelines(baseline_report)
     report_names = {str(pipeline.get("name")) for pipeline in report_pipelines}
@@ -904,15 +977,19 @@ def apply_plan(output_dir: Path, plan: ConversionPlan) -> dict[str, Any]:
 
     Raises:
         FileNotFoundError: The inventory or translation report is missing.
-        ValueError: The plan is stale against the current discovery outputs, the insights files
-            disagree, a decision is pending, or the baseline was converted from another discover.
+        ValueError: The inventory is not shaped the way discover writes it, the plan is stale against
+            the current discovery outputs, the insights files disagree, a decision is pending, or the
+            baseline was converted from another discover.
     """
-    from flowx.routing import insights_file_violations, plan_binding_violations
+    from flowx.routing import insights_file_violations, inventory_shape_violations, plan_binding_violations
 
     inventory_path = Path(output_dir) / METADATA_DIRNAME / INVENTORY_FILENAME
     if not inventory_path.exists():
         raise FileNotFoundError(f"No {INVENTORY_FILENAME} under {inventory_path.parent}; run the discover phase first.")
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    malformed = inventory_shape_violations(inventory)
+    if malformed:
+        raise ValueError("; ".join(malformed))
     problems = plan_binding_violations(plan, inventory) + insights_file_violations(Path(output_dir), inventory)
     if problems:
         raise ValueError("; ".join(problems))
@@ -956,9 +1033,9 @@ def _resolve_agentic_unit(
     ``(unit_id, plan, inventory, error)``, where ``plan`` is the recorded plan document and
     ``inventory`` the inventory it was checked against, read once so the fill rebuilds against that
     same one; every authored pipeline must carry its source. The error is set (and the other
-    three are ``None``) when: the inventory's source cannot be routed agentic
-    (:data:`flowx.routing.AGENTIC_ROUTING_SOURCES`); the plan or inventory is missing; the plan no
-    longer matches the current inventory, source graphs or insights, or the insights files disagree;
+    three are ``None``) when: the plan or inventory is missing; the inventory is not shaped the way
+    discover writes it; its source cannot be routed agentic (:data:`flowx.routing.AGENTIC_ROUTING_SOURCES`);
+    the plan no longer matches the current inventory, source graphs or insights, or the insights files disagree;
     a decision is still pending; ``members`` do not exactly equal one unit's members (a partial,
     superset, or mistyped group); or the exactly-matching unit is routed deterministic rather than
     agentic. Requiring an exact match to a routed-agentic unit stops a caller from swapping
@@ -969,6 +1046,7 @@ def _resolve_agentic_unit(
         agentic_routing_supported,
         agentic_routing_unsupported_note,
         insights_file_violations,
+        inventory_shape_violations,
         plan_binding_violations,
     )
 
@@ -984,6 +1062,9 @@ def _resolve_agentic_unit(
         return None, None, None, "No metadata/inventory.json; run the discover phase first."
 
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    malformed = inventory_shape_violations(inventory)
+    if malformed:
+        return None, None, None, malformed[0]
     if not agentic_routing_supported(inventory):
         return None, None, None, agentic_routing_unsupported_note(inventory)
     stale = plan_binding_violations(recorded, inventory)
@@ -1212,7 +1293,8 @@ def apply_agentic_output(
     ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation, a
     placeholder left in, a missing tasks list, an excluded pipeline, a bad or clashing name, structural
     validation failure, or any other error. Empty
-    ``authored_pipelines`` is refused.
+    ``authored_pipelines`` is refused, and so is a fill while another route, fill-agentic or merge holds
+    the output folder's route lock (see :func:`route_lock`).
 
     The stored entry carries the canonical hash of the complete authored pipelines. When that hash
     matches the stored one and the live report already holds those pipelines, this returns
@@ -1225,7 +1307,14 @@ def apply_agentic_output(
     members = {str(member) for member in unit_members}
     if not authored_pipelines:
         return {"ok": False, "error": "pipelines list cannot be empty", "violations": [], "pipelines": 0}
+    with route_lock(output_dir) as held:
+        if not held:
+            return {"ok": False, "error": None, "violations": [ROUTE_LOCK_HELD], "pipelines": 0}
+        return _fill_unit(output_dir, members, authored_pipelines)
 
+
+def _fill_unit(output_dir: Path, members: set[str], authored_pipelines: list[dict[str, Any]]) -> dict[str, Any]:
+    """The body of :func:`apply_agentic_output`, run while holding the output folder's route lock."""
     from flowx.routing import inventory_source
 
     unit_id, plan, inventory, error = _resolve_agentic_unit(output_dir, members)

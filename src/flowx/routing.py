@@ -56,6 +56,7 @@ from flowx.discovery_insights import (
     AGENTIC_INSIGHTS_FILENAME,
     ENRICH_LOCK_FILENAME,
     INSIGHTS_KEY,
+    _inventory_pipelines,
     agentic_insights_hash_violations,
     inventory_fingerprint,
 )
@@ -129,8 +130,8 @@ def _pipeline_names(inventory: dict[str, Any]) -> set[str]:
     """
     return {
         pipeline["name"]
-        for pipeline in inventory.get("pipelines", [])
-        if isinstance(pipeline, dict) and isinstance(pipeline.get("name"), str) and pipeline["name"]
+        for pipeline in _inventory_pipelines(inventory)
+        if isinstance(pipeline.get("name"), str) and pipeline["name"]
     }
 
 
@@ -143,8 +144,8 @@ def _control_edges(inventory: dict[str, Any]) -> Iterable[tuple[str, str, str, b
     edge list of the wrong shape, and an endpoint that is not a string all read as unresolved or as no
     edge, never as a link.
     """
-    for pipeline in inventory.get("pipelines", []):
-        lineage = pipeline.get("lineage") if isinstance(pipeline, dict) else None
+    for pipeline in _inventory_pipelines(inventory):
+        lineage = pipeline.get("lineage")
         edges = lineage.get("control_edges") if isinstance(lineage, dict) else None
         for edge in edges if isinstance(edges, list) else []:
             if not isinstance(edge, dict):
@@ -225,21 +226,28 @@ def build_components(inventory: dict[str, Any]) -> tuple[list[list[str]], list[s
 def _activities_by_pipeline(inventory: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Map each pipeline name to its inventory ``activities`` list (flattened, as emitted)."""
     result: dict[str, list[dict[str, Any]]] = {}
-    for pipeline in inventory.get("pipelines", []):
-        if isinstance(pipeline, dict) and pipeline.get("name") is not None:
-            activities = pipeline.get("activities") or []
-            result[str(pipeline["name"])] = [entry for entry in activities if isinstance(entry, dict)]
+    for pipeline in _inventory_pipelines(inventory):
+        if pipeline.get("name") is not None:
+            activities = pipeline.get("activities")
+            listed = activities if isinstance(activities, list) else []
+            result[str(pipeline["name"])] = [entry for entry in listed if isinstance(entry, dict)]
     return result
 
 
 def _motifs_by_pipeline(inventory: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Map each pipeline name to its additive ``motifs`` list (the #64 capability signal)."""
     result: dict[str, list[dict[str, Any]]] = {}
-    for pipeline in inventory.get("pipelines", []):
-        if isinstance(pipeline, dict) and pipeline.get("name") is not None:
-            motifs = pipeline.get("motifs") or []
-            result[str(pipeline["name"])] = [entry for entry in motifs if isinstance(entry, dict)]
+    for pipeline in _inventory_pipelines(inventory):
+        if pipeline.get("name") is not None:
+            motifs = pipeline.get("motifs")
+            listed = motifs if isinstance(motifs, list) else []
+            result[str(pipeline["name"])] = [entry for entry in listed if isinstance(entry, dict)]
     return result
+
+
+def _listed(value: Any) -> list[Any]:
+    """``value`` when it is a list, else an empty one, so a malformed insights list suggests nothing."""
+    return value if isinstance(value, list) else []
 
 
 def _pipeline_insights(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -252,9 +260,9 @@ def _pipeline_insights(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if not isinstance(insights, dict):
         return {}
     result: dict[str, dict[str, Any]] = {}
-    for entry in insights.get("pipeline_insights", []):
-        if isinstance(entry, dict) and entry.get("pipeline") is not None:
-            result[str(entry["pipeline"])] = entry
+    for entry in _listed(insights.get("pipeline_insights")):
+        if isinstance(entry, dict) and isinstance(entry.get("pipeline"), str):
+            result[entry["pipeline"]] = entry
     return result
 
 
@@ -276,9 +284,11 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
     covered_activities: set[tuple[str, str]] = set()
     for pipeline in members:
         for motif in motifs_by_pipeline.get(pipeline, []):
-            if motif.get("motif_id") is not None:
-                motif_ids.append(str(motif["motif_id"]))
-            covered_activities.update((pipeline, str(key)) for key in motif.get("member_task_keys") or [])
+            if isinstance(motif.get("motif_id"), str):
+                motif_ids.append(motif["motif_id"])
+            keys = motif.get("member_task_keys")
+            if isinstance(keys, list):
+                covered_activities.update((pipeline, key) for key in keys if isinstance(key, str))
 
     counts = {"deterministic": 0, "agentic": 0, "unsupported": 0}
     uncovered: list[dict[str, Any]] = []
@@ -361,7 +371,7 @@ def _agentic_option(members: list[str], inventory: dict[str, Any]) -> dict[str, 
         insight = insights_by_pipeline.get(pipeline)
         if not insight:
             continue
-        for pattern in insight.get("recommended_patterns") or []:
+        for pattern in _listed(insight.get("recommended_patterns")):
             if isinstance(pattern, dict):
                 recommended_patterns.append({"pipeline": pipeline, **pattern})
     has_simplification = any(pattern.get("simplification_pattern") for pattern in recommended_patterns)
@@ -425,11 +435,13 @@ def suggest_groupings(inventory: dict[str, Any]) -> list[dict[str, Any]]:
     component_of = {member: component_id for component_id, members in components_by_id.items() for member in members}
 
     links: list[tuple[set[str], dict[str, Any]]] = []
-    for relationship in insights.get("pipeline_relationships") or []:
+    for relationship in _listed(insights.get("pipeline_relationships")):
         edge = relationship.get("lineage_edge") if isinstance(relationship, dict) else None
         if not isinstance(edge, dict) or edge.get("edge_type") != "inferred":
             continue
         source, target = relationship.get("from_pipeline"), relationship.get("to_pipeline")
+        if not isinstance(source, str) or not isinstance(target, str):
+            continue
         if source not in component_of or target not in component_of:
             continue
         basis: dict[str, Any] = {
@@ -445,11 +457,11 @@ def suggest_groupings(inventory: dict[str, Any]) -> list[dict[str, Any]]:
         links.append(({component_of[source], component_of[target]}, basis))
 
     pipelines_by_pattern: dict[str, set[str]] = {}
-    for insight in insights.get("pipeline_insights") or []:
+    for insight in _listed(insights.get("pipeline_insights")):
         pipeline = insight.get("pipeline") if isinstance(insight, dict) else None
-        if pipeline not in component_of:
+        if not isinstance(pipeline, str) or pipeline not in component_of:
             continue
-        for pattern in insight.get("recommended_patterns") or []:
+        for pattern in _listed(insight.get("recommended_patterns")):
             if isinstance(pattern, dict) and pattern.get("simplification_pattern") is True:
                 if isinstance(pattern.get("pattern"), str) and pattern["pattern"]:
                     pipelines_by_pattern.setdefault(pattern["pattern"], set()).add(pipeline)
@@ -974,6 +986,49 @@ def recorded_plan_violations(plan: ConversionPlan, inventory: dict[str, Any]) ->
     return violations
 
 
+def inventory_shape_violations(inventory: Any) -> list[str]:
+    """What keeps route from reading ``inventory.json`` the way discover writes it; empty when nothing does.
+
+    Route decides from each pipeline's activities and motifs. Read as none, a ``pipelines``,
+    ``activities`` or ``motifs`` value that is not a list of objects, a pipeline with no
+    ``activities`` or no name, or a motif with no id or whose ``member_task_keys`` is missing or not a
+    list of names, would make a pipeline look fully deterministic or drop it, so route refuses it
+    instead. Discover always writes each pipeline's name and activities (motifs only when it found
+    some), so any other shape means the file was edited; running discover again rewrites it.
+    """
+    if not isinstance(inventory, dict):
+        return [
+            f"metadata/inventory.json must contain a JSON object, not {type(inventory).__name__}; run discover again"
+        ]
+    pipelines = inventory.get("pipelines")
+    if not isinstance(pipelines, list) or not _is_list_of(pipelines, dict):
+        return ["metadata/inventory.json 'pipelines' must be a list of objects; run discover again"]
+    violations: list[str] = []
+    for index, pipeline in enumerate(pipelines):
+        name = pipeline.get("name")
+        label = name if isinstance(name, str) and name else f"pipelines[{index}]"
+        if not isinstance(name, str) or not name:
+            violations.append(f"metadata/inventory.json {label} must have a non-empty string 'name'")
+        if not _is_list_of(pipeline.get("activities"), dict):
+            violations.append(f"metadata/inventory.json pipeline {label!r} 'activities' must be a list of objects")
+        if not _is_list_of(pipeline.get("motifs", []), dict):
+            violations.append(f"metadata/inventory.json pipeline {label!r} 'motifs' must be a list of objects")
+        for motif in pipeline.get("motifs", []) if _is_list_of(pipeline.get("motifs", []), dict) else []:
+            if not isinstance(motif.get("motif_id"), str) or not motif["motif_id"]:
+                violations.append(f"metadata/inventory.json pipeline {label!r} has a motif with no 'motif_id'")
+            if not _is_list_of(motif.get("member_task_keys"), str):
+                violations.append(
+                    f"metadata/inventory.json pipeline {label!r} motif {motif.get('motif_id')!r} "
+                    "'member_task_keys' must be a list of activity names"
+                )
+    return [f"{violation}; run discover again" for violation in violations]
+
+
+def _is_list_of(value: Any, kind: type) -> bool:
+    """Whether ``value`` is a list whose every entry is a ``kind``."""
+    return isinstance(value, list) and all(isinstance(entry, kind) for entry in value)
+
+
 def insights_file_violations(output_dir: Path, inventory: dict[str, Any] | None) -> list[str]:
     """Check ``agentic_insights.json`` and the inventory's ``insights`` block still agree.
 
@@ -1039,14 +1094,16 @@ def record_plan(
         ValueError: when neither or both plan sources are provided, or the inventory is not a JSON
             object.
     """
+    raw = load_plan(plan=plan, plan_path=plan_path)
     inventory_path = Path(output_dir) / "metadata" / "inventory.json"
     if not inventory_path.exists():
         raise FileNotFoundError(f"No inventory.json under {inventory_path.parent}; run the discover phase first.")
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     if not isinstance(inventory, dict):
         raise ValueError(f"inventory.json must contain a JSON object, got {type(inventory).__name__}")
-
-    raw = load_plan(plan=plan, plan_path=plan_path)
+    malformed = inventory_shape_violations(inventory)
+    if malformed:
+        return {"ok": False, "violations": malformed, "components": 0}
     violations = validate_plan(raw, inventory)
     if violations:
         return {"ok": False, "violations": violations, "components": 0}

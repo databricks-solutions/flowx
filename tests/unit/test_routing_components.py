@@ -17,7 +17,7 @@ import pytest
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.models.ir import ControlEdge, Lineage
-from flowx.routing import build_components, build_plan, carried_forward_plan, validate_plan
+from flowx.routing import build_components, build_plan, build_recommendation, carried_forward_plan, validate_plan
 
 
 def _node(task_key: str, native_type: str = "Notebook", *, strategy: str = "deterministic") -> SourceNode:
@@ -187,6 +187,69 @@ def test_a_malformed_lineage_block_is_read_as_no_edges(lineage: Any) -> None:
     inventory = _hand_edited(_inventory([_graph("a"), _graph("b")]), "a", lineage=lineage)
 
     assert build_components(inventory) == ([["a"], ["b"]], [])
+
+
+@pytest.mark.parametrize("pipelines", [1, {"a": {"name": "a"}}, "ab", None], ids=["int", "dict", "str", "null"])
+def test_an_inventory_whose_pipelines_is_not_a_list_lists_no_pipelines(pipelines: Any) -> None:
+    """The same reading enrich gives it: a malformed ``pipelines`` value lists none, rather than crashing route."""
+    inventory = {**_inventory([_graph("a")]), "pipelines": pipelines}
+
+    assert build_components(inventory) == ([], [])
+    assert build_recommendation(inventory)["components"] == []
+
+
+@pytest.mark.parametrize("key", ["activities", "motifs"])
+def test_a_pipeline_list_that_is_not_a_list_reads_as_none_without_crashing(key: str) -> None:
+    inventory = _inventory([_graph("a")])
+    inventory["pipelines"][0][key] = 1
+
+    assert [component["members"] for component in build_recommendation(inventory)["components"]] == [["a"]]
+
+
+def test_a_motif_names_only_the_activities_it_lists_by_name() -> None:
+    """A string is not a list of names: its characters must never cover a same-lettered activity."""
+    inventory = _inventory([_graph("p", nodes=[_node("a", "Custom", strategy="agentic")])])
+    inventory["pipelines"][0]["motifs"] = [{"motif_id": "m", "member_task_keys": "a"}]
+
+    deterministic = build_recommendation(inventory)["components"][0]["options"]["deterministic"]
+
+    assert deterministic["capable"] is False
+    assert [entry["activity"] for entry in deterministic["uncovered"]] == ["a"]
+
+
+@pytest.mark.parametrize(
+    "insights",
+    [
+        {"pipeline_insights": 1},
+        {"pipeline_insights": [{"pipeline": "a", "recommended_patterns": 1}]},
+        {"pipeline_relationships": 1},
+        {"pipeline_insights": [{"pipeline": ["a"], "recommended_patterns": [{"simplification_pattern": True}]}]},
+        {
+            "pipeline_relationships": [
+                {"from_pipeline": ["a"], "to_pipeline": "a", "lineage_edge": {"edge_type": "inferred"}}
+            ]
+        },
+    ],
+    ids=["pipeline-insights", "recommended-patterns", "relationships", "insight-pipeline", "relationship-endpoint"],
+)
+def test_a_malformed_insights_list_suggests_nothing_without_crashing(insights: dict[str, Any]) -> None:
+    """Enrich validates these lists; one edited afterwards only takes suggestions away, never adds a capability."""
+    inventory = {**_inventory([_graph("a")]), "source": "adf", "insights": insights}
+
+    recommendation = build_recommendation(inventory)
+
+    assert recommendation["components"][0]["options"]["agentic"]["recommended_patterns"] == []
+    assert recommendation["suggested_groupings"] == []
+
+
+def test_an_insight_names_its_pipeline_only_by_a_string() -> None:
+    """A number would become the string "7" and give its patterns to a real pipeline named "7"."""
+    insight = {"pipeline": 7, "recommended_patterns": [{"pattern": "lakeflow_connect"}]}
+    inventory = {**_inventory([_graph("7")]), "source": "adf", "insights": {"pipeline_insights": [insight]}}
+
+    recommendation = build_recommendation(inventory)
+
+    assert recommendation["components"][0]["options"]["agentic"]["recommended_patterns"] == []
 
 
 def test_a_pipeline_name_that_is_not_a_string_is_not_a_pipeline_identity() -> None:

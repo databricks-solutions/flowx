@@ -412,7 +412,9 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
     inventory: inline under ``bundle``, or uploaded to
     ``output_volume_path`` / ``output_workspace_path``, because a hosted agent cannot read the server's
     ``output_dir``; edit the plan and call route again with it as ``plan``. The returned ``ok``
-    reflects the CLI's success; ``result`` carries its JSON.
+    reflects the CLI's success, and is False with an ``error``, and nothing uploaded, when the CLI
+    succeeded but either file is missing or unreadable (run route again) or too large to return
+    inline (pass one of the upload paths); ``result`` carries the CLI's JSON.
     """
     output_dir = p.get("output_dir", "./flowx_output")
     plan = p.get("plan")
@@ -424,7 +426,8 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
         result = runner.run_adapter(["route", "--output-dir", output_dir, *extra])
         payload = runner.parse_stdout_json(result)
         ok = bool(isinstance(payload, dict) and payload.get("ok"))
-        return {"ok": ok, "result": payload, "process": result.as_dict(), **_route_files(p, Path(output_dir))}
+        delivered = _route_files(p, Path(output_dir), route_ok=ok)
+        return {"ok": ok and "error" not in delivered, "result": payload, "process": result.as_dict(), **delivered}
 
     if plan is None and plan_path is None:
         return _run([])
@@ -436,17 +439,49 @@ def _cmd_route(p: dict[str, Any]) -> dict[str, Any]:
         return _run(["--plan-path", str(inline_path)])
 
 
-def _route_files(p: dict[str, Any], output_dir: Path) -> dict[str, Any]:
-    """Deliver the recorded plan and the routing review page, when route wrote them."""
+def _route_files(p: dict[str, Any], output_dir: Path, *, route_ok: bool) -> dict[str, Any]:
+    """Deliver the recorded plan and the routing review page, when route wrote them.
+
+    The agent needs both to edit the plan and show the page, so after a successful route a file that
+    is missing, cannot be copied or read as UTF-8 text, or is left out of the size-bounded inline
+    bundle returns an ``error`` instead of the bundle, and nothing is uploaded unless both are sound.
+    After a failed route, whichever of the two exist are delivered as the bundle carries them (inline,
+    only UTF-8 text). Each file is copied before it is checked, so one a discover moves away meanwhile
+    counts as missing.
+    """
     metadata = output_dir / "metadata"
-    files = [metadata / name for name in ("conversion_plan.json", "routing_review.html")]
-    if not any(path.is_file() for path in files):
-        return {}
+    problems: list[str] = []
     with tempfile.TemporaryDirectory(prefix="flowx-route-") as temporary:
-        for path in files:
-            if path.is_file():
-                shutil.copy(path, temporary)
-        return _bundle_output(p, Path(temporary))
+        copies: list[Path] = []
+        for name in ("conversion_plan.json", "routing_review.html"):
+            try:
+                copy = Path(shutil.copy(metadata / name, temporary))
+            except FileNotFoundError:
+                problems.append(f"{name} is missing, so run route again")
+                continue
+            except OSError as error:
+                problems.append(f"{name} could not be copied ({error})")
+                continue
+            copies.append(copy)
+            try:
+                copy.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                problems.append(f"{name} is not UTF-8 text, so run route again")
+            except OSError as error:
+                problems.append(f"{name} could not be read ({error})")
+        if route_ok and problems:
+            return {"error": f"Route succeeded, but under {metadata}: {'; '.join(problems)}."}
+        delivered = _bundle_output(p, Path(temporary)) if copies else {}
+        truncated = set(delivered.get("bundle", {}).get("truncated", []))
+        too_large = [
+            f"{copy.name} ({copy.stat().st_size} bytes) is too large to return inline, so call route again with "
+            "output_volume_path or output_workspace_path to have it uploaded there"
+            for copy in copies
+            if copy.name in truncated
+        ]
+    if route_ok and too_large:
+        return {"error": f"Route succeeded, but under {metadata}: {'; '.join(too_large)}."}
+    return delivered
 
 
 def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
@@ -785,7 +820,9 @@ def build_server() -> FastMCP:
           longer suggests, which go back to pending and are listed under `dropped_groupings`; with a
           plan (the decisions, or an edited copy of the recorded plan) it records those. It also
           writes metadata/routing_review.html, the standard
-          review page. The plan and the page come back under `bundle` (or are uploaded). While a
+          review page. The plan and the page come back under `bundle` (or are uploaded; ok is false,
+          with nothing uploaded, when either is missing or unreadable, so run route again, or too
+          large to return inline, so pass one of the upload paths). While a
           decision is pending nothing is applied; once every component is decided route rebuilds the
           translation report from the unchanged baseline, the stored gap fills, the plan, and the
           agent's outputs in metadata/agentic_conversion.json: deterministic units stay as-is, agentic
@@ -805,7 +842,10 @@ def build_server() -> FastMCP:
           that shares a bundle folder with another pipeline. The merged report is always validated
           structurally before writing (all-or-nothing). It is the only fill for a routed-agentic unit
           (to keep a pipeline 1:1, author one same-named pipeline); package refuses until every agentic
-          unit is filled.
+          unit is filled. Route, fill_agentic and a merge_agentic written to the live report hold that
+          output folder's metadata/.route.lock, so run them one at a time per output_dir: while another
+          holds it they refuse, writing nothing (route and fill_agentic list the reason under
+          violations; merge_agentic returns ok false with it in the process output).
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

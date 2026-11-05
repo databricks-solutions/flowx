@@ -185,9 +185,22 @@ def _run_route(args: argparse.Namespace) -> int:
     and nothing routed agentic leaves convert's report byte-identical. Re-routing under any decisions
     is allowed.
 
-    Returns 1 on insights files that disagree or a plan that fails validation (report + plan left
-    untouched), and when every component is decided but convert has not written the report yet.
+    Returns 1 on an inventory not shaped as discover writes it, insights files that disagree or a plan
+    that fails validation (report + plan left untouched), while another route, fill-agentic or merge
+    holds the output folder's route lock, and when every component is decided but convert has not
+    written the report yet.
     """
+    from flowx.route_agentic import ROUTE_LOCK_HELD, route_lock
+
+    with route_lock(args.output_dir) as held:
+        if not held:
+            _emit_json({"ok": False, "violations": [ROUTE_LOCK_HELD], "components": 0}, args.out)
+            return 1
+        return _route_locked(args)
+
+
+def _route_locked(args: argparse.Namespace) -> int:
+    """The body of :func:`_run_route`, run while holding the output folder's route lock."""
     from flowx import routing
     from flowx.models.conversion_plan import PLAN_FILENAME, ConversionPlan
     from flowx.reporting.routing_review import write_routing_review
@@ -201,6 +214,10 @@ def _run_route(args: argparse.Namespace) -> int:
         inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         print(f"Failed to read {inventory_path}: {error}", file=sys.stderr)
+        return 1
+    malformed = routing.inventory_shape_violations(inventory)
+    if malformed:
+        _emit_json({"ok": False, "violations": malformed, "components": 0}, args.out)
         return 1
     disagree = routing.insights_file_violations(args.output_dir, inventory)
     if disagree:
