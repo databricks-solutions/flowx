@@ -7,7 +7,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 # The lineage types are shared with the discovery graph, so they live in their own module. They are
-# re-exported here so existing ``flowx.models.ir`` imports keep working.
+# re-exported here so code that works with the IR can import them from this module.
 from flowx.models.lineage import ControlEdge as ControlEdge
 from flowx.models.lineage import DataAsset as DataAsset
 from flowx.models.lineage import DataEdge as DataEdge

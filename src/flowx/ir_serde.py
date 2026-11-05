@@ -27,18 +27,14 @@ from flowx.models.ir import (
     AppendVariableActivity,
     ControlEdge,
     CopyActivity,
-    DataAsset,
-    DataEdge,
     DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
     FilterActivity,
     ForEachActivity,
     IfConditionActivity,
-    Lineage,
     LookupActivity,
     MotifActivity,
-    MotifAnnotation,
     NotebookActivity,
     Pipeline,
     PlaceholderActivity,
@@ -52,6 +48,7 @@ from flowx.models.ir import (
     WaitActivity,
     WebActivity,
 )
+from flowx.models.lineage import ControlEdge, DataAsset, DataEdge, Lineage, MotifAnnotation
 
 logger = logging.getLogger(__name__)
 

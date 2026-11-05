@@ -48,27 +48,18 @@ CONCEPT_GAP = "gap"
 
 @dataclass(slots=True, kw_only=True)
 class ScheduleSpec:
-    """A workflow schedule kept in the SOURCE's own shape.
+    """A workflow schedule, kept as the source gave it.
 
-    Deliberately source-faithful, not Databricks-normalised. ``kind`` is a
-    neutral trigger category, ``expression`` holds the schedule exactly as the
-    source gives it -- an Airflow ``schedule_interval`` cron string or preset,
-    an ADF trigger recurrence payload -- and ``timezone`` carries the timezone
-    the source itself declares (ADF ``timeZone``, an Airflow DAG timezone).
-    Databricks-*target* normalisation -- a Quartz cron string, ``pause_status``
-    -- is a convert/target concern and is intentionally **not** typed here; a
-    mapper that needs to stash such derived values for now puts them in
-    :attr:`extensions`, never as first-class fields. Kept minimal on purpose --
-    fields get promoted only once genuinely shared.
+    Databricks-specific forms (a Quartz cron string, ``pause_status``) are a convert
+    concern and are not typed here.
 
     Attributes:
-        kind: Neutral trigger category (e.g. ``"schedule"`` / ``"interval"`` /
-            ``"file_arrival"`` / ``"continuous"`` / ``"manual"``), ``""`` when
-            unknown.
-        expression: The source schedule as-given -- a cron / interval / preset
-            string, or a structured recurrence payload.
+        kind: Trigger category such as ``"schedule"``, ``"interval"``,
+            ``"file_arrival"``, ``"continuous"`` or ``"manual"``; ``""`` when unknown.
+        expression: The schedule as given: a cron, interval or preset string, or a
+            structured recurrence payload.
         timezone: The timezone the source declares, verbatim, or ``None``.
-        extensions: Overflow for any other source-specific schedule detail.
+        extensions: Any other source-specific schedule detail.
     """
 
     kind: str
@@ -96,22 +87,16 @@ class ParameterSpec:
 
 @dataclass(slots=True, kw_only=True)
 class PolicySpec:
-    """Retry / timeout policy, normalised to seconds.
+    """Retry and timeout policy, in seconds.
 
-    Used both per node (:attr:`SourceNode.policy`) and as a cascading graph
-    default (:attr:`SourceGraph.default_policy`), e.g. an Airflow DAG's
-    ``default_args`` retries/timeout that apply to every task unless a task
-    overrides them.
-
-    Only the genuinely shared retry/timeout knobs are typed; source-specific
-    policy (ADF ``secure_input`` / ``secure_output``, Airflow retry-delay
-    shapes, email-on-failure) rides in :attr:`extensions`.
+    Used per node (:attr:`SourceNode.policy`) and as a graph-wide default
+    (:attr:`SourceGraph.default_policy`) that a node's own policy overrides.
 
     Attributes:
-        timeout_seconds: Execution timeout in seconds, when resolvable.
+        timeout_seconds: Execution timeout, when resolvable.
         max_retries: Maximum retry count.
-        retry_interval_seconds: Delay between retries in seconds.
-        extensions: Source-specific policy fields with no shared typed home.
+        retry_interval_seconds: Delay between retries.
+        extensions: Source-specific policy fields with no typed home.
     """
 
     timeout_seconds: int | None = None
@@ -124,20 +109,14 @@ class PolicySpec:
 class SourceDependency:
     """A dependency edge from a node to one upstream node.
 
-    ``conditions`` is a **per-edge** outcome list -- the natural ADF shape,
-    where each individual edge carries the upstream outcome(s) that must hold
-    (``["Succeeded", "Skipped"]``). This is distinct from Airflow's
-    ``trigger_rule``, which is a single rule on the *downstream* node quantified
-    over all its upstreams together and so cannot live on an edge; that rides in
-    :attr:`SourceNode.run_condition` instead.
+    Conditions belong to the edge. A rule that covers all of a node's upstreams
+    together lives in :attr:`SourceNode.run_condition` instead.
 
     Attributes:
-        upstream: Task key of the upstream node this edge depends on.
-        conditions: Required upstream outcome(s) for THIS edge; empty when
-            unconditional. Per-edge (ADF); see :attr:`SourceNode.run_condition`
-            for Airflow's node-level ``trigger_rule``.
-        resolved: ``False`` when the upstream could not be resolved (e.g. a
-            partial export); recorded, not dropped.
+        upstream: Task key of the upstream node.
+        conditions: Upstream outcomes required on this edge (for example
+            ``["Succeeded", "Skipped"]``); empty when unconditional.
+        resolved: ``False`` when the upstream is not in the export (kept, not dropped).
     """
 
     upstream: str
@@ -164,25 +143,21 @@ class SourceNode:
             a TaskFlow decorator).
         dependencies: Upstream dependency edges, each with its own per-edge
             outcome conditions (the ADF shape).
-        run_condition: Node-level aggregate run rule quantified over all this
-            node's upstreams together -- Airflow's ``trigger_rule`` (e.g.
-            ``"all_success"``, ``"none_failed_min_one_success"``,
-            ``"one_failed"``). ``None`` when the source has no such notion
-            (ADF, which expresses outcomes per-edge on :attr:`dependencies`).
-        policy: Retry / timeout policy, when the source declares one on the
-            node; falls back to :attr:`SourceGraph.default_policy` otherwise.
-        data_reads: Best-effort description of what this node reads, as
-            :class:`~flowx.models.lineage.DataAsset` values (reuses #61). Population
-            is best-effort and open -- physical tables/files, logical datasets,
-            or value hand-offs (an Airflow XCom) alike -- and an empty list is
-            valid where the source records nothing.
-        data_writes: Best-effort description of what this node writes; same
-            open, best-effort semantics as :attr:`data_reads`.
+        run_condition: Run rule covering all of this node's upstreams together (for
+            example ``"all_success"``); ``None`` when the source sets conditions per
+            edge on :attr:`dependencies` instead.
+        policy: Retry and timeout policy the node declares; otherwise
+            :attr:`SourceGraph.default_policy` applies.
+        data_reads: What this node reads, best effort, as
+            :class:`~flowx.models.lineage.DataAsset` values; empty is valid.
+        data_writes: What this node writes; same rules as :attr:`data_reads`.
         properties: Free-form bag for platform-specific attributes with no
             shared typed field yet. Connection / linked-service details live
             here for now -- a typed connection field is a deliberate future
             expansion point.
-        raw: Verbatim source dict for this node, for lossless fallback.
+        raw: The source dict for this node, kept for fallback, or ``None`` when
+            the source keeps none. A source may clean it of fields that carry no
+            meaning, such as export metadata.
     """
 
     source_id: str
@@ -220,12 +195,12 @@ class ContainerNode(SourceNode):
 
 @dataclass(slots=True, kw_only=True)
 class GapNode(SourceNode):
-    """A node the source could not classify, kept with its raw payload + reason.
+    """A node the source could not classify, kept with its reason and any raw payload.
 
     Its :attr:`concept` defaults to ``CONCEPT_GAP`` so gaps are uniform across
-    sources. The unclassifiable payload is preserved in ``raw`` (inherited) and
-    the human-readable cause in :attr:`reason`, so discovery can report and
-    later resolve it rather than dropping it.
+    sources. The unclassifiable payload goes in ``raw`` (inherited) when the
+    source keeps it, and the human-readable cause in :attr:`reason`, so
+    discovery can report and later resolve it rather than dropping it.
 
     Attributes:
         reason: Why the node could not be classified.
@@ -259,15 +234,14 @@ class SourceGraph:
         tags: Free-form label list (ADF annotations, Airflow user tags).
         tasks: Top-level nodes; control flow nests further nodes via
             :class:`ContainerNode`.
-        lineage: Source-neutral lineage block (control/data edges) derived over
-            this graph, or ``None`` when lineage has not been derived. Reuses the
-            #61 :class:`~flowx.models.lineage.Lineage` type so the discovery graph and
-            the IR lineage substrate share one vocabulary; populated by
-            :mod:`flowx.discovery_lineage` in the discover phase.
+        lineage: Lineage derived over this graph by :mod:`flowx.discovery_lineage`,
+            or ``None`` when it has not been derived.
         properties: Free-form bag for graph-level platform-specific attributes.
         extensions: Alias-free overflow for anything else source-specific
             (e.g. ADF ``folder``, Airflow global Variables).
-        raw: Verbatim source dict for the whole workflow.
+        raw: The source dict for the whole workflow, or ``None`` when the source
+            keeps none. A source may clean it of fields that carry no meaning,
+            such as export metadata.
     """
 
     name: str
