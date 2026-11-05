@@ -698,6 +698,14 @@ def _holds_lock(lock_path: Path, token: str) -> bool:
         return False
 
 
+def _is_open_file(descriptor: int, path: Path) -> bool:
+    """Whether *path* is still the file open on *descriptor*, not one created there since."""
+    try:
+        return os.path.samestat(os.fstat(descriptor), path.stat())
+    except OSError:
+        return False
+
+
 @contextmanager
 def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
     """Hold the output directory's enrich lock, yielding its token, or ``None`` when another enrich holds it.
@@ -707,9 +715,10 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
     ``metadata/``. It keeps other enrich runs out only absent a concurrent discover; the module
     docstring lists the windows a discover opens. It is removed when the enrich finishes or raises,
     if it is still this enrich's.
-    It is left behind only when the two files may disagree -- a killed process, or an error that is
-    or was raised from :class:`_UnrecoveredWriteError` (a failed rollback, or an interrupt between
-    the two replaces) -- so the next enrich refuses until the lock is removed.
+    It is left behind when the two files may disagree -- a killed process, or an error that is or
+    was raised from :class:`_UnrecoveredWriteError` (a failed rollback, or an interrupt between the
+    two replaces) -- and, with nothing written, when writing the token fails and cleanup cannot
+    confirm the lock is still this enrich's. The next enrich refuses until the lock is removed.
     """
     lock_path = metadata_dir / ENRICH_LOCK_FILENAME
     token = secrets.token_hex(16)
@@ -719,12 +728,21 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
         yield None
         return
     try:
-        written = os.write(descriptor, token.encode("ascii"))
-    finally:
-        os.close(descriptor)
-    if written != len(token):
-        lock_path.unlink(missing_ok=True)
-        raise OSError(f"could not write the enrich lock {lock_path}")
+        try:
+            if os.write(descriptor, token.encode("ascii")) != len(token):
+                raise OSError(f"could not write the enrich lock {lock_path}")
+        except BaseException:
+            # The token may be missing or partial, so compare file identity instead; the open
+            # descriptor keeps its inode from being reused by a later enrich's lock.
+            if _is_open_file(descriptor, lock_path):
+                lock_path.unlink(missing_ok=True)
+            raise
+        finally:
+            os.close(descriptor)
+    except BaseException:
+        if _holds_lock(lock_path, token):
+            lock_path.unlink(missing_ok=True)
+        raise
     keep_lock = False
     try:
         yield token

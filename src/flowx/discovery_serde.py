@@ -137,7 +137,7 @@ def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[st
         )
     )
     _check_graph_sources(document)
-    document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
+    document["document_sha256"] = canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
     return document
 
 

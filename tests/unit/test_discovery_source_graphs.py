@@ -193,7 +193,7 @@ def test_unknown_contract_version_is_rejected() -> None:
 
 def _rehash(document: dict) -> dict:
     """Recompute the hash after an edit, so a test reaches the checks that come after it."""
-    document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
+    document["document_sha256"] = canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
     return document
 
 
