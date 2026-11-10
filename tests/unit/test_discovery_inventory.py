@@ -126,7 +126,7 @@ def test_activity_entry_carries_legacy_and_additive_fields() -> None:
     assert entries["b"]["task_key"] == "b"
     assert "original_type" not in entries["a"]
     assert entries["a"]["dependencies"] == []
-    assert entries["a"]["raw"] == {"name": "a", "type": "Notebook"}
+    assert "raw" not in entries["a"]
     assert entries["b"]["dependencies"] == [{"upstream": "a", "conditions": ["Succeeded", "Skipped"], "resolved": True}]
 
 
@@ -434,7 +434,6 @@ def test_inventory_emits_lineage_and_additive_source_fields() -> None:
         "strategy": "deterministic",
         "task_key": "task",
         "dependencies": [],
-        "raw": {"task_key": "task"},
     }
     assert entry["lineage"]["control_edges"][0]["target_workflow"] == "child"
 

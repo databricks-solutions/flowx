@@ -729,7 +729,7 @@ def test_mcp_enrich_prepare_fails_when_the_inventory_is_too_large_to_return_inli
     """An inventory over the inline bound is dropped from the bundle, so prepare must not report success."""
     server = pytest.importorskip("flowx.mcp.server")
     inventory = _inventory()
-    inventory["pipelines"][0]["raw"] = {"description": "x" * 2_100_000}
+    inventory["source_dir"] = "/Volumes/main/default/" + "x" * 2_100_000
     _write_inventory(tmp_path, inventory)
 
     prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
