@@ -349,8 +349,10 @@ def _nodes_for_scope(activities: list[AdfActivity], definitions: AdfDefinitions)
     """Map the activities of one pipeline or container branch, flagging upstreams that are not in it.
 
     ADF only lets an activity depend on a sibling in the same list, so a ``dependsOn`` name that is
-    not one of these activities is a missing or misspelled upstream. The edge is kept with
-    ``resolved=False`` so discover reports it; package still refuses it, as before.
+    not one of these activities is a missing or misspelled upstream. The edge is kept and marked
+    ``resolved=False`` in the inventory. Package still refuses such an upstream at the top level of
+    a pipeline. An If or Switch branch activity that names an activity outside its branch is flagged
+    here only: package flattens the branches into the parent job, where that name is a real task.
     """
     nodes = [_activity_to_node(activity, definitions) for activity in activities]
     sibling_names = {node.task_key for node in nodes}
