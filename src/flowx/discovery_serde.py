@@ -1,0 +1,391 @@
+"""JSON serialisation for the source-neutral discovery graph contract (:mod:`flowx.models.discovery`).
+
+Kept separate from :mod:`flowx.ir_serde` on purpose: ``ir_serde`` owns the
+``translation_report.json`` convert->package contract for the Databricks IR, and
+the discovery graph is a different model with a different lifecycle. The graph and
+node shapes are this module's own; the data-asset and lineage shapes come from
+``ir_serde`` (see below), so changing those also changes ``source_graphs.json``.
+It also owns the persisted ``metadata/source_graphs.json`` envelope
+(:func:`source_graphs_document`), versioned and content-hashed, so every source's
+discover phase writes the same file and a later phase can read the graphs back
+without going to the source again.
+
+The data-asset and lineage (de)serialisers are reused from ``ir_serde``
+(``data_asset_to_dict`` / ``data_asset_from_dict`` and ``lineage_to_dict`` /
+``lineage_from_dict``), so each shape has one definition shared by the lineage
+substrate and the discovery graph. A data asset describes what a task reads or
+writes on a best-effort basis, not only physical tables; see
+:class:`~flowx.models.lineage.DataAsset`.
+
+Every node dict carries a ``node_type`` discriminator (the dataclass name) so a
+:class:`~flowx.models.discovery.ContainerNode` or
+:class:`~flowx.models.discovery.GapNode` rehydrates to the right class. Lists are
+always emitted as lists (never ``None``) for stable golden diffs.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+from typing import Any
+
+from flowx.ir_serde import data_asset_from_dict, data_asset_to_dict, lineage_from_dict, lineage_to_dict
+from flowx.models.discovery import (
+    ContainerNode,
+    GapNode,
+    ParameterSpec,
+    PolicySpec,
+    ScheduleSpec,
+    SourceDependency,
+    SourceGraph,
+    SourceNode,
+)
+
+SOURCE_GRAPHS_FILENAME = "source_graphs.json"
+SOURCE_GRAPHS_CONTRACT_VERSION = "1"
+
+_HASHED_DOCUMENT_KEYS = ("contract_version", "source", "graphs")
+_DOCUMENT_KEYS = frozenset({*_HASHED_DOCUMENT_KEYS, "document_sha256"})
+_NODE_CLASSES = (SourceNode, ContainerNode, GapNode)
+_NODE_TYPES = frozenset(node_class.__name__ for node_class in _NODE_CLASSES)
+
+
+def source_graph_to_dict(graph: SourceGraph) -> dict[str, Any]:
+    """Serialise a :class:`SourceGraph` to a JSON-friendly dictionary."""
+    result: dict[str, Any] = {
+        "name": graph.name,
+        "source": graph.source,
+        "parameters": {name: _parameter_to_dict(spec) for name, spec in graph.parameters.items()},
+        "variables": {name: _parameter_to_dict(spec) for name, spec in graph.variables.items()},
+        "tags": list(graph.tags),
+        "tasks": [_node_to_dict(node) for node in graph.tasks],
+    }
+    if graph.description is not None:
+        result["description"] = graph.description
+    if graph.schedule is not None:
+        result["schedule"] = _schedule_to_dict(graph.schedule)
+    if graph.default_policy is not None:
+        result["default_policy"] = _policy_to_dict(graph.default_policy)
+    if graph.run_timeout_seconds is not None:
+        result["run_timeout_seconds"] = graph.run_timeout_seconds
+    if graph.lineage is not None:
+        result["lineage"] = lineage_to_dict(graph.lineage)
+    if graph.properties:
+        result["properties"] = dict(graph.properties)
+    if graph.extensions:
+        result["extensions"] = dict(graph.extensions)
+    if graph.raw is not None:
+        result["raw"] = graph.raw
+    return result
+
+
+def source_graph_from_dict(raw: dict[str, Any]) -> SourceGraph:
+    """Rehydrate a :class:`SourceGraph` from the dict :func:`source_graph_to_dict` emits."""
+    schedule = raw.get("schedule")
+    default_policy = raw.get("default_policy")
+    lineage = raw.get("lineage")
+    return SourceGraph(
+        name=raw.get("name", ""),
+        source=raw.get("source", ""),
+        description=raw.get("description"),
+        parameters={name: _parameter_from_dict(spec) for name, spec in (raw.get("parameters") or {}).items()},
+        variables={name: _parameter_from_dict(spec) for name, spec in (raw.get("variables") or {}).items()},
+        schedule=_schedule_from_dict(schedule) if schedule else None,
+        default_policy=_policy_from_dict(default_policy) if isinstance(default_policy, dict) else None,
+        run_timeout_seconds=raw.get("run_timeout_seconds"),
+        tags=list(raw.get("tags") or []),
+        tasks=[_node_from_dict(node) for node in raw.get("tasks") or []],
+        lineage=lineage_from_dict(lineage) if lineage else None,
+        properties=dict(raw.get("properties") or {}),
+        extensions=dict(raw.get("extensions") or {}),
+        raw=raw.get("raw"),
+    )
+
+
+def source_graphs_document(graphs: list[SourceGraph], *, source: str) -> dict[str, Any]:
+    """Build the ``metadata/source_graphs.json`` document a discover run persists.
+
+    The envelope is ``{contract_version, source, graphs}`` plus a content hash so a
+    later phase can prove it is reading exactly what discover produced: ``document_sha256`` covers
+    ``contract_version``, ``source`` and ``graphs``. It is taken over canonical JSON
+    (sorted keys, compact separators), so it does not depend on how the file happens to
+    be indented. The document is put through JSON before it is hashed, so the hash covers
+    what the reader will load back (an int-keyed parameter default comes back with string keys,
+    for example) and the returned document is already in that form. The reader refuses
+    any other top-level key, so nothing rides along unhashed.
+
+    Args:
+        graphs: The workflows discover mapped onto the discovery graph contract.
+        source: Source discriminator (``SOURCE_ADF`` / ``SOURCE_AIRFLOW``).
+
+    Returns:
+        The JSON-friendly document, ready to write.
+
+    Raises:
+        ValueError: A graph's ``source`` differs from *source*, or a node is not
+            exactly one of the three node classes, so the reader would refuse the
+            document.
+    """
+    document: dict[str, Any] = json.loads(
+        json.dumps(
+            {
+                "contract_version": SOURCE_GRAPHS_CONTRACT_VERSION,
+                "source": source,
+                "graphs": [source_graph_to_dict(graph) for graph in graphs],
+            }
+        )
+    )
+    _check_graph_sources(document)
+    document["document_sha256"] = _canonical_sha256({key: document[key] for key in _HASHED_DOCUMENT_KEYS})
+    return document
+
+
+def write_source_graphs(path: Path, graphs: list[SourceGraph], *, source: str) -> dict[str, Any]:
+    """Write the persisted source-graph document to *path* and return what was written.
+
+    Builds the document with :func:`source_graphs_document`, so a graph from another
+    source or a node the reader has no ``node_type`` for raises before anything is
+    written.
+    """
+    document = source_graphs_document(graphs, source=source)
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    return document
+
+
+def source_graphs_from_document(document: dict[str, Any]) -> list[SourceGraph]:
+    """Read the graphs back out of a ``source_graphs.json`` document, failing closed on drift.
+
+    Only contract version ``"1"`` is accepted, with no top-level keys beyond the
+    envelope and its hash. The content hash is required and must match the
+    content, and every graph must come from the document's ``source``, so a
+    hand-edited or truncated file raises instead of quietly handing a different graph
+    to a later phase. A document that is not a JSON object, a graph entry that is not
+    a JSON object, and a graph the reader cannot rehydrate also raise. Field types
+    are not otherwise checked.
+
+    Args:
+        document: The parsed JSON document.
+
+    Returns:
+        The rehydrated graphs, in file order.
+
+    Raises:
+        ValueError: The document is not a JSON object, the contract version is
+            unsupported, the document has an unknown top-level key, ``graphs`` is not
+            a list, a graph entry is not a JSON object or cannot be rehydrated, a
+            graph's ``source`` differs from the document's, or a hash is missing or
+            does not match the content.
+    """
+    if not isinstance(document, dict):
+        raise ValueError("source_graphs document is not a JSON object")
+    version = document.get("contract_version")
+    if version != SOURCE_GRAPHS_CONTRACT_VERSION:
+        raise ValueError(
+            f"Unsupported source_graphs contract_version {version!r}; expected {SOURCE_GRAPHS_CONTRACT_VERSION!r}"
+        )
+    unknown_keys = sorted(set(document) - _DOCUMENT_KEYS)
+    if unknown_keys:
+        raise ValueError(f"source_graphs document has unexpected top-level keys {unknown_keys}")
+    graphs = document.get("graphs")
+    if not isinstance(graphs, list):
+        raise ValueError("source_graphs document has no 'graphs' list")
+    if not all(isinstance(graph, dict) for graph in graphs):
+        raise ValueError("source_graphs document has a malformed graph that is not a JSON object")
+    recorded_document_hash = document.get("document_sha256")
+    if recorded_document_hash is None:
+        raise ValueError("source_graphs document is missing document_sha256")
+    actual_document_hash = _canonical_sha256({key: document.get(key) for key in _HASHED_DOCUMENT_KEYS})
+    if recorded_document_hash != actual_document_hash:
+        raise ValueError("source_graphs document_sha256 does not match the document content")
+    _check_graph_sources(document)
+    try:
+        return [source_graph_from_dict(graph) for graph in graphs]
+    except (AttributeError, TypeError) as error:
+        raise ValueError(f"source_graphs document has a malformed graph: {error}") from error
+
+
+def _check_graph_sources(document: dict[str, Any]) -> None:
+    """Raise when any graph in *document* comes from a source other than the document's own."""
+    source = document.get("source")
+    for graph in document["graphs"]:
+        if graph.get("source") != source:
+            raise ValueError(f"source_graphs document for source {source!r} holds a graph from another source")
+
+
+def read_source_graphs(path: Path) -> list[SourceGraph]:
+    """Load and verify the persisted source graphs at *path* (see :func:`source_graphs_from_document`)."""
+    return source_graphs_from_document(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _canonical_sha256(value: Any) -> str:
+    """Hash *value* as canonical JSON so the digest ignores key order and whitespace."""
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _parameter_to_dict(spec: ParameterSpec) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    if spec.type is not None:
+        result["type"] = spec.type
+    if spec.default is not None:
+        result["default"] = spec.default
+    return result
+
+
+def _parameter_from_dict(raw: dict[str, Any]) -> ParameterSpec:
+    return ParameterSpec(type=raw.get("type"), default=raw.get("default"))
+
+
+def _schedule_to_dict(schedule: ScheduleSpec) -> dict[str, Any]:
+    result: dict[str, Any] = {"kind": schedule.kind}
+    if schedule.expression is not None:
+        result["expression"] = schedule.expression
+    if schedule.timezone is not None:
+        result["timezone"] = schedule.timezone
+    if schedule.extensions:
+        result["extensions"] = dict(schedule.extensions)
+    return result
+
+
+def _schedule_from_dict(raw: dict[str, Any]) -> ScheduleSpec:
+    return ScheduleSpec(
+        kind=raw.get("kind", ""),
+        expression=raw.get("expression"),
+        timezone=raw.get("timezone"),
+        extensions=dict(raw.get("extensions") or {}),
+    )
+
+
+def _policy_to_dict(policy: PolicySpec) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    if policy.timeout_seconds is not None:
+        result["timeout_seconds"] = policy.timeout_seconds
+    if policy.max_retries is not None:
+        result["max_retries"] = policy.max_retries
+    if policy.retry_interval_seconds is not None:
+        result["retry_interval_seconds"] = policy.retry_interval_seconds
+    if policy.extensions:
+        result["extensions"] = dict(policy.extensions)
+    return result
+
+
+def _policy_from_dict(raw: dict[str, Any]) -> PolicySpec:
+    return PolicySpec(
+        timeout_seconds=raw.get("timeout_seconds"),
+        max_retries=raw.get("max_retries"),
+        retry_interval_seconds=raw.get("retry_interval_seconds"),
+        extensions=dict(raw.get("extensions") or {}),
+    )
+
+
+def _dependency_to_dict(dependency: SourceDependency) -> dict[str, Any]:
+    return {
+        "upstream": dependency.upstream,
+        "conditions": list(dependency.conditions),
+        "resolved": dependency.resolved,
+    }
+
+
+def _dependency_from_dict(raw: dict[str, Any]) -> SourceDependency:
+    """Rehydrate a dependency; only an explicit ``resolved: true`` reads as resolved."""
+    return SourceDependency(
+        upstream=raw.get("upstream", ""),
+        conditions=list(raw.get("conditions") or []),
+        resolved=raw.get("resolved") is True,
+    )
+
+
+def _node_to_dict(node: SourceNode) -> dict[str, Any]:
+    """Serialise any SourceNode (including Container/Gap subclasses) to a dict.
+
+    The ``node_type`` discriminator is the dataclass name so the matching
+    subclass is rebuilt on the way back. Any other class, including a further
+    subclass, raises, because the reader would refuse its ``node_type``.
+    """
+    if type(node) not in _NODE_CLASSES:
+        raise ValueError(
+            f"Cannot write discovery node of type {type(node).__name__!r}; expected one of {sorted(_NODE_TYPES)}"
+        )
+    result: dict[str, Any] = {
+        "node_type": type(node).__name__,
+        "source_id": node.source_id,
+        "task_key": node.task_key,
+        "concept": node.concept,
+        "source": node.source,
+        "dependencies": [_dependency_to_dict(dependency) for dependency in node.dependencies],
+        "data_reads": [data_asset_to_dict(asset) for asset in node.data_reads],
+        "data_writes": [data_asset_to_dict(asset) for asset in node.data_writes],
+    }
+    if node.name is not None:
+        result["name"] = node.name
+    if node.native_type is not None:
+        result["native_type"] = node.native_type
+    if node.run_condition is not None:
+        result["run_condition"] = node.run_condition
+    if node.policy is not None:
+        result["policy"] = _policy_to_dict(node.policy)
+    if node.properties:
+        result["properties"] = dict(node.properties)
+    if node.raw is not None:
+        result["raw"] = node.raw
+    if isinstance(node, ContainerNode):
+        result["branches"] = {
+            label: [_node_to_dict(child) for child in children] for label, children in node.branches.items()
+        }
+    if isinstance(node, GapNode) and node.reason is not None:
+        result["reason"] = node.reason
+    return result
+
+
+def _node_from_dict(raw: dict[str, Any]) -> SourceNode:
+    """Rehydrate any SourceNode from its dict, dispatching on ``node_type``.
+
+    Optional fields absent from the dict fall back to each class's model
+    default rather than being forced to ``""`` / empty. In particular
+    ``concept`` is passed through only when the dict carries a non-empty value,
+    so a partial :class:`GapNode` dict (no ``concept`` key) rehydrates with the
+    model default ``CONCEPT_GAP`` instead of being overridden with ``""``.
+    A ``node_type`` other than the three node classes raises rather than
+    quietly becoming a plain :class:`SourceNode` and dropping its extra fields, and
+    so does ``branches`` on anything but a :class:`ContainerNode` or ``reason`` on
+    anything but a :class:`GapNode` (an absent ``node_type`` means ``SourceNode``).
+    """
+    common: dict[str, Any] = {
+        "source_id": raw.get("source_id", ""),
+        "task_key": raw.get("task_key", ""),
+        "source": raw.get("source", ""),
+        "name": raw.get("name"),
+        "native_type": raw.get("native_type"),
+        "run_condition": raw.get("run_condition"),
+        "dependencies": [_dependency_from_dict(dependency) for dependency in raw.get("dependencies") or []],
+        "policy": _policy_from_dict(raw["policy"]) if isinstance(raw.get("policy"), dict) else None,
+        "data_reads": [data_asset_from_dict(asset) for asset in raw.get("data_reads") or []],
+        "data_writes": [data_asset_from_dict(asset) for asset in raw.get("data_writes") or []],
+        "properties": dict(raw.get("properties") or {}),
+        "raw": raw.get("raw"),
+    }
+    concept = raw.get("concept")
+    if concept:
+        common["concept"] = concept
+
+    node_type = raw.get("node_type", "SourceNode")
+    if node_type not in _NODE_TYPES:
+        raise ValueError(f"Unknown discovery node_type {node_type!r}; expected one of {sorted(_NODE_TYPES)}")
+    for field_name, owner in (("branches", "ContainerNode"), ("reason", "GapNode")):
+        if field_name in raw and node_type != owner:
+            raise ValueError(f"Discovery node_type {node_type!r} cannot hold {field_name!r}; only a {owner} can")
+    if node_type == "GapNode":
+        # Leave `concept` unset when absent so GapNode's CONCEPT_GAP default wins.
+        return GapNode(**common, reason=raw.get("reason"))
+    # SourceNode / ContainerNode require `concept`; only a malformed dict omits it.
+    common.setdefault("concept", "")
+    if node_type == "ContainerNode":
+        return ContainerNode(
+            **common,
+            branches={
+                label: [_node_from_dict(child) for child in children]
+                for label, children in (raw.get("branches") or {}).items()
+            },
+        )
+    return SourceNode(**common)
