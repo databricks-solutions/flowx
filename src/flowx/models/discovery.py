@@ -113,10 +113,13 @@ class SourceDependency:
     together lives in :attr:`SourceNode.run_condition` instead.
 
     Attributes:
-        upstream: Task key of the upstream node.
+        upstream: Task key of the upstream node, or the name as the source wrote it
+            when the edge is unresolved.
         conditions: Upstream outcomes required on this edge (for example
             ``["Succeeded", "Skipped"]``); empty when unconditional.
-        resolved: ``False`` when the upstream is not in the export (kept, not dropped).
+        resolved: ``False`` when no node in the same workflow scope (for example the
+            same pipeline, container or DAG) has the upstream's name, such as a missing
+            or misspelled upstream. The edge is kept, not dropped.
     """
 
     upstream: str
