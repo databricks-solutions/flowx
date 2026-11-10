@@ -118,12 +118,56 @@ def test_a_nested_activity_resolves_its_upstream_only_within_its_own_container_b
             "type": "IfCondition",
             "typeProperties": {
                 "expression": {"value": "@true", "type": "Expression"},
-                "ifTrueActivities": [{"name": "OnTrue", **wait}],
+                "ifTrueActivities": [
+                    {"name": "OnTrue", **wait},
+                    {
+                        "name": "AlsoTrue",
+                        **wait,
+                        "dependsOn": [{"activity": "OnFalse", "dependencyConditions": succeeded}],
+                    },
+                ],
                 "ifFalseActivities": [
                     {
                         "name": "OnFalse",
                         **wait,
                         "dependsOn": [{"activity": "OnTrue", "dependencyConditions": succeeded}],
+                    }
+                ],
+            },
+        },
+        {
+            "name": "Route",
+            "type": "Switch",
+            "typeProperties": {
+                "on": {"value": "@pipeline().parameters.mode", "type": "Expression"},
+                "cases": [
+                    {
+                        "value": "full",
+                        "activities": [
+                            {"name": "FullStart", **wait},
+                            {
+                                "name": "FullNext",
+                                **wait,
+                                "dependsOn": [{"activity": "FullStart", "dependencyConditions": succeeded}],
+                            },
+                        ],
+                    },
+                    {
+                        "value": "delta",
+                        "activities": [
+                            {
+                                "name": "DeltaStep",
+                                **wait,
+                                "dependsOn": [{"activity": "FullStart", "dependencyConditions": succeeded}],
+                            }
+                        ],
+                    },
+                ],
+                "defaultActivities": [
+                    {
+                        "name": "Fallback",
+                        **wait,
+                        "dependsOn": [{"activity": "Outer", "dependencyConditions": succeeded}],
                     }
                 ],
             },
@@ -134,9 +178,14 @@ def test_a_nested_activity_resolves_its_upstream_only_within_its_own_container_b
 
     loop = next(node for node in graph.tasks if node.name == "Loop")
     branch = next(node for node in graph.tasks if node.name == "Branch")
-    assert isinstance(loop, ContainerNode) and isinstance(branch, ContainerNode)
+    route = next(node for node in graph.tasks if node.name == "Route")
+    assert isinstance(loop, ContainerNode) and isinstance(branch, ContainerNode) and isinstance(route, ContainerNode)
     assert _dependency_resolution(loop.branches["body"]) == {"Second": {"First": True}, "Third": {"Outer": False}}
+    assert _dependency_resolution(branch.branches["true"]) == {"AlsoTrue": {"OnFalse": False}}
     assert _dependency_resolution(branch.branches["false"]) == {"OnFalse": {"OnTrue": False}}
+    assert _dependency_resolution(route.branches["full"]) == {"FullNext": {"FullStart": True}}
+    assert _dependency_resolution(route.branches["delta"]) == {"DeltaStep": {"FullStart": False}}
+    assert _dependency_resolution(route.branches["default"]) == {"Fallback": {"Outer": False}}
 
 
 def test_no_motif_collapse_every_activity_is_a_node() -> None:
