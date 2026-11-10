@@ -85,7 +85,8 @@ class DataEdge:
 
 @dataclass(slots=True, kw_only=True)
 class MotifAnnotation:
-    """A detected motif and the tasks it spans.
+    """A detected motif and the tasks it spans. Each member activity also carries the same
+    :attr:`flowx.models.ir.Activity.motif_id` tag.
 
     Attributes:
         motif_id: Identifier of the matched motif definition.
