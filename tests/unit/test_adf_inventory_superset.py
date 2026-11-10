@@ -15,6 +15,7 @@ Two guarantees:
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -98,7 +99,7 @@ def test_activity_entries_superset_legacy_shape(tmp_path: Path) -> None:
                 assert new_entry[key] == value, (pipeline["name"], key)
             # Additive standardized fields are present.
             assert "dependencies" in new_entry
-            assert "raw" in new_entry
+            assert "raw" not in new_entry
 
 
 def test_dependencies_field_carries_conditions(tmp_path: Path) -> None:
@@ -113,6 +114,32 @@ def test_dependencies_field_carries_conditions(tmp_path: Path) -> None:
     for edge in edges:
         assert set(edge.keys()) == {"upstream", "conditions", "resolved"}
         assert isinstance(edge["conditions"], list)
+
+
+def test_a_misspelled_depends_on_is_flagged_unresolved_in_the_inventory(tmp_path: Path) -> None:
+    """Renaming one ``dependsOn`` in a fixture pipeline shows up as ``resolved: false`` and nowhere else."""
+    source_dir = tmp_path / "export"
+    shutil.copytree(FIXTURES_DIR, source_dir)
+    pipeline_file = source_dir / "pipelines" / "pipeline_set_variable_chain.json"
+    pipeline = json.loads(pipeline_file.read_text())
+    renamed = next(
+        activity for activity in pipeline["properties"]["activities"] if activity["name"] == "Set Catalog Name"
+    )
+    renamed["dependsOn"][0]["activity"] = "Set Enviroment"
+    pipeline_file.write_text(json.dumps(pipeline))
+
+    output_dir = tmp_path / "out"
+    assert main(["--source-dir", str(source_dir), "--output-dir", str(output_dir)]) == 0
+    inventory = json.loads((output_dir / "metadata" / "inventory.json").read_text())
+
+    unresolved = {
+        (entry_pipeline["name"], activity["name"], edge["upstream"])
+        for entry_pipeline in inventory["pipelines"]
+        for activity in entry_pipeline["activities"]
+        for edge in activity["dependencies"]
+        if not edge["resolved"]
+    }
+    assert unresolved == {("pipeline_set_variable_chain", "Set Catalog Name", "Set Enviroment")}
 
 
 def test_inventory_carries_per_pipeline_lineage(tmp_path: Path) -> None:

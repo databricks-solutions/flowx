@@ -324,7 +324,7 @@ def adf_pipeline_to_source_graph(pipeline: AdfPipeline, definitions: AdfDefiniti
         parameters=_parameters_to_specs(pipeline.parameters),
         variables=_variables_to_specs(pipeline.variables),
         tags=list(pipeline.annotations) if pipeline.annotations else [],
-        tasks=[_activity_to_node(activity, resolved_definitions) for activity in pipeline.activities],
+        tasks=_nodes_for_scope(pipeline.activities, resolved_definitions),
         properties=properties,
         raw=_pipeline_without_get_defaults(pipeline.raw),
     )
@@ -343,6 +343,22 @@ def _warn_duplicate_switch_cases(graph: SourceGraph) -> None:
                 duplicate["value"],
                 duplicate["branches"],
             )
+
+
+def _nodes_for_scope(activities: list[AdfActivity], definitions: AdfDefinitions) -> list[SourceNode]:
+    """Map the activities of one pipeline or container branch, flagging upstreams that are not in it.
+
+    ADF only lets an activity depend on a sibling in the same list, so a ``dependsOn`` name that is
+    not one of these activities is a missing or misspelled upstream. The edge is kept and marked
+    ``resolved=False`` in the inventory. Package has its own dependency checks, but they do not
+    cover every case, so an edge flagged here may not be refused later.
+    """
+    nodes = [_activity_to_node(activity, definitions) for activity in activities]
+    sibling_names = {node.task_key for node in nodes}
+    for node in nodes:
+        for dependency in node.dependencies:
+            dependency.resolved = dependency.upstream in sibling_names
+    return nodes
 
 
 def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> SourceNode:
@@ -499,22 +515,20 @@ def _control_flow_branches(activity: AdfActivity, definitions: AdfDefinitions) -
     """
     if activity.type == "IfCondition":
         return {
-            "true": [_activity_to_node(child, definitions) for child in (activity.if_true_activities or [])],
-            "false": [_activity_to_node(child, definitions) for child in (activity.if_false_activities or [])],
+            "true": _nodes_for_scope(activity.if_true_activities or [], definitions),
+            "false": _nodes_for_scope(activity.if_false_activities or [], definitions),
         }
     if activity.type in ("ForEach", "Until"):
-        return {"body": [_activity_to_node(child, definitions) for child in (activity.activities or [])]}
+        return {"body": _nodes_for_scope(activity.activities or [], definitions)}
     if activity.type == "Switch":
         branches: dict[str, list[SourceNode]] = {}
         # Built from the raw cases: the parsed AST merges cases that share a value and skips empty
         # ones, while each declared case stays its own branch here.
         for _, label, case in _switch_case_labels(activity):
-            branches[label] = [
-                _activity_to_node(parse_activity(child), definitions) for child in case.get("activities") or []
-            ]
-        branches["default"] = [
-            _activity_to_node(child, definitions) for child in (activity.switch_default_activities or [])
-        ]
+            branches[label] = _nodes_for_scope(
+                [parse_activity(child) for child in case.get("activities") or []], definitions
+            )
+        branches["default"] = _nodes_for_scope(activity.switch_default_activities or [], definitions)
         return branches
     return None
 

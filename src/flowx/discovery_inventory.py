@@ -143,6 +143,11 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
     ``depends_on`` is only the upstream names from ``dependencies``. It is kept so
     existing readers keep working; new readers should use ``dependencies``, which
     also records each edge's conditions and whether it resolved.
+
+    The entry does not carry the node's ``raw`` source payload. That payload is on
+    every node in ``source_graphs.json`` (and in the verbatim ``<pipeline>.arm.json``
+    for ADF), so repeating it here would only add tokens for an agent reading a big
+    factory, and would stop the inventory being shared without the source code.
     """
     entry: dict[str, Any] = {
         "name": node.name if node.name is not None else node.task_key,
@@ -162,8 +167,6 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
         }
         for dependency in node.dependencies
     ]
-    if node.raw is not None:
-        entry["raw"] = node.raw
     return entry
 
 
