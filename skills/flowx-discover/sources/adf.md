@@ -106,8 +106,9 @@ to a PySpark notebook.
 
 ## Where to look for the facts enrich asks about
 
-`flowx-enrich` reads the raw activity JSON in `inventory.json` (and `metadata/<pipeline>.arm.json`) to
-find the facts that narrow the target pattern. In ADF they sit in:
+`flowx-enrich` reads each activity's `raw` JSON in `metadata/source_graphs.json` (and
+`metadata/<pipeline>.arm.json`) to find the facts that narrow the target pattern. The inventory itself
+carries no `raw` payloads. In ADF they sit in:
 
 - a Lookup feeding `ForEach.items`, and an `ExecutePipeline` called once per item (scale, repeat);
 - dataset parameters and sink paths templated by item (fan-in);
