@@ -67,8 +67,11 @@ narrative.
    inventory records a top-level `source_graphs_sha256` (ADF discover does), copy it into
    `authored_against` by default, so enrich can refuse your insights if discover runs again before
    you submit them; when it records none, leave `authored_against` out.
-2. **Read the source artifacts** you need to form judgment — the per-pipeline `raw` payloads in the
-   inventory, the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source — enough to state
+2. **Read the source artifacts** you need to form judgment: each activity's `raw` payload in
+   `metadata/source_graphs.json`, the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source.
+   The inventory carries no `raw` payloads. On the hosted MCP server, where you cannot read
+   `output_dir`, read the original export you passed to discover instead (the `adf_volume_path` /
+   `adf_workspace_path` directory, or the `adf_definitions` you sent). Read enough to state
    each pipeline's *intent* and the Databricks patterns that fit. Ground every recommended pattern in
    a **real, publicly-documented** Databricks capability; never invent a product name.
 

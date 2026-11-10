@@ -74,6 +74,120 @@ def test_dependencies_capture_all_conditions() -> None:
     assert node_b.dependencies[0].conditions == ["Succeeded", "Skipped"]
 
 
+def _dependency_resolution(nodes: list[SourceNode]) -> dict[str, dict[str, bool]]:
+    """Map each node name to ``{upstream: resolved}`` for its dependency edges."""
+    return {node.name: {dep.upstream: dep.resolved for dep in node.dependencies} for node in nodes if node.dependencies}
+
+
+def test_dependency_on_a_missing_or_misspelled_upstream_is_kept_but_unresolved() -> None:
+    """An upstream that is not an activity of the pipeline is flagged at discover, not dropped."""
+    activities = [
+        {"name": "A", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}},
+        {"name": "B", "type": "Wait", "dependsOn": [{"activity": "A", "dependencyConditions": ["Succeeded"]}]},
+        {"name": "C", "type": "Wait", "dependsOn": [{"activity": "b", "dependencyConditions": ["Succeeded"]}]},
+        {"name": "D", "type": "Wait", "dependsOn": [{"activity": "Gone", "dependencyConditions": ["Failed"]}]},
+    ]
+
+    graph = _pipeline(activities)
+
+    assert _dependency_resolution(graph.tasks) == {"B": {"A": True}, "C": {"b": False}, "D": {"Gone": False}}
+    kept_edge = next(node for node in graph.tasks if node.name == "D").dependencies[0]
+    assert kept_edge.conditions == ["Failed"]
+
+
+def test_a_nested_activity_resolves_its_upstream_only_within_its_own_container_branch() -> None:
+    """A body or branch activity must name a sibling; naming an outer or other-branch activity is unresolved."""
+    wait = {"type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}
+    succeeded = ["Succeeded"]
+    activities = [
+        {"name": "Outer", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}},
+        {
+            "name": "Loop",
+            "type": "ForEach",
+            "typeProperties": {
+                "items": {"value": "@pipeline().parameters.items", "type": "Expression"},
+                "activities": [
+                    {"name": "First", **wait},
+                    {"name": "Second", **wait, "dependsOn": [{"activity": "First", "dependencyConditions": succeeded}]},
+                    {"name": "Third", **wait, "dependsOn": [{"activity": "Outer", "dependencyConditions": succeeded}]},
+                ],
+            },
+        },
+        {
+            "name": "Branch",
+            "type": "IfCondition",
+            "typeProperties": {
+                "expression": {"value": "@true", "type": "Expression"},
+                "ifTrueActivities": [
+                    {"name": "OnTrue", **wait},
+                    {
+                        "name": "AlsoTrue",
+                        **wait,
+                        "dependsOn": [{"activity": "OnFalse", "dependencyConditions": succeeded}],
+                    },
+                ],
+                "ifFalseActivities": [
+                    {
+                        "name": "OnFalse",
+                        **wait,
+                        "dependsOn": [{"activity": "OnTrue", "dependencyConditions": succeeded}],
+                    }
+                ],
+            },
+        },
+        {
+            "name": "Route",
+            "type": "Switch",
+            "typeProperties": {
+                "on": {"value": "@pipeline().parameters.mode", "type": "Expression"},
+                "cases": [
+                    {
+                        "value": "full",
+                        "activities": [
+                            {"name": "FullStart", **wait},
+                            {
+                                "name": "FullNext",
+                                **wait,
+                                "dependsOn": [{"activity": "FullStart", "dependencyConditions": succeeded}],
+                            },
+                        ],
+                    },
+                    {
+                        "value": "delta",
+                        "activities": [
+                            {
+                                "name": "DeltaStep",
+                                **wait,
+                                "dependsOn": [{"activity": "FullStart", "dependencyConditions": succeeded}],
+                            }
+                        ],
+                    },
+                ],
+                "defaultActivities": [
+                    {
+                        "name": "Fallback",
+                        **wait,
+                        "dependsOn": [{"activity": "Outer", "dependencyConditions": succeeded}],
+                    }
+                ],
+            },
+        },
+    ]
+
+    graph = _pipeline(activities)
+
+    loop = next(node for node in graph.tasks if node.name == "Loop")
+    branch = next(node for node in graph.tasks if node.name == "Branch")
+    route = next(node for node in graph.tasks if node.name == "Route")
+    assert isinstance(loop, ContainerNode) and isinstance(branch, ContainerNode) and isinstance(route, ContainerNode)
+    assert _dependency_resolution(loop.branches["body"]) == {"Second": {"First": True}, "Third": {"Outer": False}}
+    assert _dependency_resolution(branch.branches["true"]) == {"AlsoTrue": {"OnFalse": False}}
+    assert _dependency_resolution(branch.branches["false"]) == {"OnFalse": {"OnTrue": False}}
+    assert _dependency_resolution(route.branches["full"]) == {"FullNext": {"FullStart": True}}
+    assert _dependency_resolution(route.branches["delta"]) == {"DeltaStep": {"FullStart": False}}
+    assert _dependency_resolution(route.branches["default"]) == {"Fallback": {"Outer": False}}
+
+
 def test_no_motif_collapse_every_activity_is_a_node() -> None:
     """Activities that a motif would merge each stay their own node (no collapse)."""
     activities = [
