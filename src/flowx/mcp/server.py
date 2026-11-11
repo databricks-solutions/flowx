@@ -782,8 +782,10 @@ def build_server() -> FastMCP:
         - "convert": source(req), one ADF source key | airflow_source_path (req: the same source discover
           read), output_dir, pipeline, exclude_dag | exclude_dags (Airflow, repeatable list).
         - "merge_agentic": source(req: "adf"), report_path(req), agentic_results_dir(req), output_path —
-          merge ADF agent results for convert's own agentic gaps. Refuses (writing nothing) any
-          result landing in a pipeline the routing record routes agentic — fill those with
+          merge ADF agent results for convert's own agentic gaps. A result whose task, or a task nested
+          in it, package would build as a stub (a PlaceholderActivity, an UnsupportedActivity, or a type
+          that is not an IR task type) is skipped as unmatched, so its gap stays open. Refuses (writing
+          nothing) any result landing in a pipeline the routing record routes agentic — fill those with
           fill_agentic. After routing, a merge written in place into the live
           .work/translation_report.json is also stored as a gap fill in metadata/agentic_conversion.json,
           so every rebuild re-applies it on top of the unchanged deterministic baseline; a merge written
@@ -838,8 +840,9 @@ def build_server() -> FastMCP:
           component or accepted grouping in the recorded, fingerprint-bound conversion_plan.json and the
           report's routing record. Same authored pipelines as already stored returns already_applied:
           true (idempotent, no writes). Different pipelines replace the stored output (recorded in its
-          `replaced` history) and rebuild. Authored pipelines must hold no placeholder task and no name
-          that shares a bundle folder with another pipeline. The merged report is always validated
+          `replaced` history) and rebuild. Authored pipelines must hold no task package would build as a
+          stub (a PlaceholderActivity, an UnsupportedActivity, or a type that is not an IR task type) and
+          no name that shares a bundle folder with another pipeline. The merged report is always validated
           structurally before writing (all-or-nothing). It is the only fill for a routed-agentic unit
           (to keep a pipeline 1:1, author one same-named pipeline); package refuses until every agentic
           unit is filled. Route, fill_agentic and a merge_agentic written to the live report hold that
