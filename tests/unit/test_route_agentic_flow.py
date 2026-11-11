@@ -1651,6 +1651,32 @@ def test_fill_refuses_an_authored_pipeline_that_still_holds_a_placeholder(tmp_pa
     ]
 
 
+@pytest.mark.parametrize("bad_type", ["NotebokActivity", "notebookactivity", "", None, 7])
+def test_fill_refuses_an_authored_task_with_an_unknown_type(tmp_path: Path, bad_type: Any) -> None:
+    """A misspelled type would be rebuilt as a placeholder stub, so the fill must be refused, not recorded."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    authored = _named_lfc_pipeline("parent_lfc")
+    authored["tasks"].append(
+        {
+            "name": "Loop",
+            "task_key": "loop",
+            "type": "ForEachActivity",
+            "inner_activities": [{"name": "Typo", "task_key": "typo", "type": bad_type}],
+        }
+    )
+
+    result = apply_agentic_output(tmp_path, ["parent"], [authored])
+
+    assert result["ok"] is False
+    assert result["violations"] == [
+        f"parent_lfc: task 'Typo' has unknown type {bad_type!r}; use one of the IR task types"
+    ]
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
 def test_route_refuses_a_report_converted_from_a_different_discover(tmp_path: Path) -> None:
     stale = _report_two_pipelines()
     stale["pipelines"][1]["name"] = "removed_since"

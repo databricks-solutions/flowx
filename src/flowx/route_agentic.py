@@ -57,6 +57,7 @@ from typing import Any
 from flowx.discovery_insights import _holds_lock, _inventory_pipelines, _is_open_file
 from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
+from flowx.models.ir import Activity
 
 # The report + gaps live under the shared output dir's transient .work/ folder, beside the pipeline IR.
 WORK_DIRNAME = ".work"
@@ -1210,6 +1211,28 @@ def _authored_placeholder_violations(authored_pipelines: list[dict[str, Any]]) -
     return violations
 
 
+def _authored_unknown_type_violations(authored_pipelines: list[dict[str, Any]]) -> list[str]:
+    """Reports each authored task whose ``type`` is no IR activity class.
+
+    Package rebuilds such a task as a placeholder stub, which the placeholder check above cannot see, so a
+    misspelled type would otherwise be accepted as a finished fill.
+    """
+    known_types = {activity_class.__name__ for activity_class in Activity.__subclasses__()}
+    violations: list[str] = []
+    for index, pipeline in enumerate(authored_pipelines):
+        if not isinstance(pipeline, dict) or not isinstance(pipeline.get("tasks"), list):
+            continue
+        label = pipeline.get("name") or f"pipeline[{index}]"
+        for task in _walk_tasks(pipeline.get("tasks")):
+            task_type = task.get("type")
+            if not isinstance(task_type, str) or task_type not in known_types:
+                violations.append(
+                    f"{label}: task {str(task.get('name'))!r} has unknown type {task_type!r}; "
+                    "use one of the IR task types"
+                )
+    return violations
+
+
 def _authored_name_violations(authored_pipelines: list[dict[str, Any]]) -> list[str]:
     """Reports each authored pipeline whose name isn't a non-empty string, before any name is compared."""
     violations: list[str] = []
@@ -1328,6 +1351,7 @@ def _fill_unit(output_dir: Path, members: set[str], authored_pipelines: list[dic
     authoring_violations += _authored_buildable_violations(authored_pipelines)
     authoring_violations += _authored_source_tag_violations(authored_pipelines, source)
     authoring_violations += _authored_placeholder_violations(authored_pipelines)
+    authoring_violations += _authored_unknown_type_violations(authored_pipelines)
     if authoring_violations:
         return {"ok": False, "error": None, "violations": authoring_violations, "pipelines": 0}
 
