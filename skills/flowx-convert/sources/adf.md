@@ -164,7 +164,9 @@ Where the fragment leaves a value out, flowx adds only the plumbing the task nee
 ```
 
 Placeholders are replaced in place, status → `translated`. Exits non-zero if any result can't be
-matched. Add `--output <path>` to write a copy instead of overwriting. An in-place merge into
+matched. A result whose task, or a task nested in it, is a `PlaceholderActivity`, an
+`UnsupportedActivity` or not an IR task type (package would build it as a stub) counts as unmatched
+and is not merged, so its gap stays open. Add `--output <path>` to write a copy instead of overwriting. An in-place merge into
 `.work/translation_report.json` also takes the merged activities' gaps out of `.work/gaps.json`. After
 routing, only such an in-place merge is also stored as a gap fill in `metadata/agentic_conversion.json`
 (so a re-route keeps it, while route's saved deterministic baseline stays as convert wrote it); a merge
