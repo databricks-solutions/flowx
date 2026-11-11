@@ -843,9 +843,9 @@ def build_server() -> FastMCP:
           metadata/.enrich.lock) and both files are left untouched on failure. A lock a stopped enrich
           left behind is cleared locally by deleting it and running enrich again; on the hosted server,
           run discover again (it clears metadata/ and the lock), then prepare and apply. Author the insights by
-          reading inventory.json + the source artifacts first, setting `authored_against` (optional,
-          checked when given) to its source_graphs_sha256 when it records one and leaving it out
-          otherwise (see the flowx-enrich skill's insights.md).
+          reading inventory.json + the source artifacts first (source_graphs.json), setting
+          `authored_against` (optional, checked when given) to its source_graphs_sha256 when it records one and
+          leaving it out otherwise (see the flowx-enrich skill's insights.md).
         - "route": output_dir(req), at most one of plan(inline object) | plan_path, output_volume_path,
           output_workspace_path (run convert first) — groups pipelines into connected
           components over control lineage and writes the recommendation straight into
