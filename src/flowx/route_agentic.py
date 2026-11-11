@@ -548,10 +548,10 @@ def drop_filled_gaps(
 
     A fill replaces one task, so convert's gap for it, and for every activity nested in it, is done.
     Convert's gaps carry no pipeline, so one is dropped only when no pipeline of ``report`` outside
-    ``routed`` still has that name open: a placeholder, an activity in a placeholder's source definition,
-    or an activity a motif collapsed. A same-named gap still open in another pipeline may be that
-    pipeline's own, so it is kept. A routed pipeline's work is listed in its own pipeline-tagged gaps,
-    which are never dropped here.
+    ``routed`` still has that name open: a task package would build as a stub (see :func:`_is_stub_task`),
+    an activity in such a task's source definition, or an activity a motif collapsed. A same-named gap
+    still open in another pipeline may be that pipeline's own, so it is kept. A routed pipeline's work is
+    listed in its own pipeline-tagged gaps, which are never dropped here.
 
     Args:
         gaps: The gaps list to filter.
