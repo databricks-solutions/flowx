@@ -69,9 +69,7 @@ narrative.
    you submit them; when it records none, leave `authored_against` out.
 2. **Read the source artifacts** you need to form judgment: each activity's `raw` payload in
    `metadata/source_graphs.json`, the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source.
-   The inventory carries no `raw` payloads. On the hosted MCP server, where you cannot read
-   `output_dir`, read the original export you passed to discover instead (the `adf_volume_path` /
-   `adf_workspace_path` directory, or the `adf_definitions` you sent). Read enough to state
+   The inventory carries no `raw` payloads. Read enough to state
    each pipeline's *intent* and the Databricks patterns that fit. Ground every recommended pattern in
    a **real, publicly-documented** Databricks capability; never invent a product name.
 

@@ -623,10 +623,9 @@ def build_server() -> FastMCP:
           metadata/.enrich.lock) and both files are left untouched on failure. A lock a stopped enrich
           left behind is cleared locally by deleting it and running enrich again; on the hosted server,
           run discover again (it clears metadata/ and the lock), then prepare and apply. Author the insights by
-          reading inventory.json + the source artifacts first (source_graphs.json, or on the hosted
-          server the export you passed to discover), setting `authored_against` (optional,
-          checked when given) to its source_graphs_sha256 when it records one and leaving it out
-          otherwise (see the flowx-enrich skill's insights.md).
+          reading inventory.json + the source artifacts first (source_graphs.json), setting
+          `authored_against` (optional, checked when given) to its source_graphs_sha256 when it records one and
+          leaving it out otherwise (see the flowx-enrich skill's insights.md).
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
