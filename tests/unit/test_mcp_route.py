@@ -246,13 +246,23 @@ def test_route_uploads_an_oversized_plan_and_review_page(captured, tmp_path: Pat
     assert uploaded == ["conversion_plan.json", "routing_review.html"]
 
 
-def test_route_inline_plan_is_staged_and_forwarded_as_plan_path(captured, tmp_path: Path) -> None:
+def test_route_inline_plan_is_staged_and_forwarded_as_plan_path(captured, tmp_path: Path, monkeypatch) -> None:
     plan = {"components": [{"component_id": "component-1", "members": ["a"], "decision": "agentic"}]}
+    staged: list[Any] = []
+    forward = runner.run_adapter
+
+    def reading_fake(args, **kwargs):
+        argv = [str(a) for a in args]
+        staged.append(json.loads(Path(argv[argv.index("--plan-path") + 1]).read_text(encoding="utf-8")))
+        return forward(args, **kwargs)
+
+    monkeypatch.setattr(runner, "run_adapter", reading_fake)
+
     out = server._cmd_route({"output_dir": str(tmp_path), "plan": plan})
+
     assert out["ok"] is True
-    argv = captured[0]
-    assert argv[0] == "route"
-    assert "--plan-path" in argv  # inline plan staged to a real temp file
+    assert captured[0][0] == "route"
+    assert staged == [plan]
 
 
 def test_route_forwards_an_explicit_plan_path(captured, tmp_path: Path) -> None:
@@ -294,15 +304,26 @@ def captured_fill(monkeypatch):
     return calls
 
 
-def test_fill_agentic_inline_pipelines_are_staged(captured_fill, tmp_path: Path) -> None:
-    out = server._cmd_fill_agentic(
-        {"output_dir": str(tmp_path), "members": ["parent", "child"], "pipelines": [{"name": "lfc", "tasks": []}]}
-    )
+def test_fill_agentic_inline_pipelines_are_staged(captured_fill, tmp_path: Path, monkeypatch) -> None:
+    pipelines = [{"name": "lfc", "tasks": []}]
+    staged: list[Any] = []
+    forward = runner.run_adapter
+
+    def reading_fake(args, **kwargs):
+        argv = [str(a) for a in args]
+        staged.append(json.loads(Path(argv[argv.index("--pipelines-path") + 1]).read_text(encoding="utf-8")))
+        return forward(args, **kwargs)
+
+    monkeypatch.setattr(runner, "run_adapter", reading_fake)
+
+    parameters = {"output_dir": str(tmp_path), "members": ["parent", "child"], "pipelines": pipelines}
+    out = server._cmd_fill_agentic(parameters)
+
     assert out["ok"] is True
     argv = captured_fill[0]
     assert argv[0] == "fill-agentic" and argv[1] == "--output-dir"
     assert argv[argv.index("--members") + 1] == "parent,child"
-    assert "--pipelines-path" in argv
+    assert staged == [pipelines]
 
 
 def test_fill_agentic_forwards_members_string_and_path(captured_fill, tmp_path: Path) -> None:

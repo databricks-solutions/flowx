@@ -695,7 +695,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     dependencies, timeout, and retries whatever the agent wrote, and the
     placeholder's source metadata wherever the agent leaves a field out, except
     its cluster id and libraries, which a component only takes from its task
-    fragment.
+    fragment. A result whose task, or a task nested in it, package would build as a stub (a
+    ``PlaceholderActivity``, an ``UnsupportedActivity`` or a type that is no IR activity class) is
+    skipped as unmatched, so its gap stays open.
 
     This fills convert's own agentic gaps. A pipeline the routing record routes agentic is filled
     only by ``fill-agentic``, so a result that names one, or an untargeted result that would
@@ -754,6 +756,7 @@ def _merge_agentic_results(
         GAPS_FILENAME,
         ROUTED_AGENTIC_MERGE_REFUSED,
         WORK_DIRNAME,
+        _placeholder_task_names,
         applied_gap_fills,
         drop_filled_gaps,
         load_agentic_output,
@@ -814,6 +817,15 @@ def _merge_agentic_results(
             raise ValueError(ROUTED_AGENTIC_MERGE_REFUSED)
         if target is None:
             logger.warning("No placeholder named '%s' found for %s", activity_name, result_file.name)
+            unmatched += 1
+            continue
+        stubs = _placeholder_task_names([task])
+        if stubs:
+            logger.warning(
+                "Skipping %s: package would build tasks %s as stubs; use one of the IR task types",
+                result_file.name,
+                stubs,
+            )
             unmatched += 1
             continue
         replace_task_by_name(target["tasks"], activity_name, dict(task))

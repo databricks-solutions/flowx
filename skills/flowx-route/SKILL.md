@@ -334,8 +334,10 @@ Its guarantees:
   deterministic since, or joined into a grouping) holds no name.
 - **Buildable**: each authored pipeline needs a non-empty string `name` and a non-empty `tasks` list
   of task objects, and must not be marked `migration_status: "excluded"` (package skips those).
-- **Fully converted**: an authored pipeline that still holds a `PlaceholderActivity` (top level or
-  inside a ForEach / If / Switch) is refused.
+- **Fully converted**: an authored pipeline that still holds a `PlaceholderActivity` or an
+  `UnsupportedActivity`, or a task whose `type` is not an IR task type (for example a misspelt
+  `NotebokActivity`), at the top level or inside a ForEach / If / Switch, is refused: package would
+  build each of those as a stub.
 - Each authored pipeline **must** carry `"tags": {"source": "adf"}`; a missing or non-`adf` tag fails
   closed. An empty `pipelines` list is refused.
 - The merged report is **always** validated with the structural bundle invariants (a real

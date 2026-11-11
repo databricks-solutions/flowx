@@ -50,6 +50,7 @@ from flowx.route_agentic import (
     apply_plan,
     apply_plan_to_report,
     baseline_pipeline_mismatch,
+    drop_filled_gaps,
     load_agentic_output,
     rebuild,
     replace_unit_pipelines,
@@ -777,6 +778,55 @@ def test_a_re_route_keeps_a_filled_gap_out_of_gaps_json(tmp_path: Path) -> None:
 
     _route_two_components(tmp_path, parent="deterministic", child="deterministic")
     assert _gap_keys(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        {"name": "Load", "task_key": "load", "type": "NotebokActivity", "notebook_path": "/Workspace/Shared/l"},
+        {"name": "Load", "task_key": "load", "type": "UnsupportedActivity", "original_type": "Script"},
+        {
+            "name": "Load",
+            "task_key": "load",
+            "type": "ForEachActivity",
+            "inner_activities": [{"name": "Inner", "task_key": "inner", "type": "NotebokActivity"}],
+        },
+    ],
+    ids=["misspelled", "unsupported", "nested-misspelled"],
+)
+def test_a_merge_result_package_would_build_as_a_stub_leaves_the_gap_open(tmp_path: Path, task: dict[str, Any]) -> None:
+    """Package builds an unknown or unsupported task type as a stub notebook, so such a result is no fill."""
+    _route_parent_agentic_over_a_child_gap(tmp_path)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    results_dir = tmp_path / "agentic_results"
+    results_dir.mkdir()
+    result = {"pipeline": "child", "activity_name": "Load", "task": task}
+    (results_dir / "load.json").write_text(json.dumps(result), encoding="utf-8")
+
+    assert merge_agentic_results(report_path, results_dir) == (0, 1)
+
+    assert _gap_keys(tmp_path) == [(None, "Load"), ("parent", "Extract")]
+    assert load_agentic_output(tmp_path).gap_fills == []
+    child = next(p for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "PlaceholderActivity"
+
+
+@pytest.mark.parametrize(
+    ("task_type", "gaps_left"),
+    [
+        ("NotebokActivity", [_LOAD_GAP]),
+        ("UnsupportedActivity", [_LOAD_GAP]),
+        (None, [_LOAD_GAP]),
+        ("NotebookActivity", []),
+    ],
+)
+def test_a_filled_task_package_would_build_as_a_stub_keeps_its_gap(task_type: Any, gaps_left: list[Any]) -> None:
+    """A stored fill replayed by a rebuild drops its gap only when package builds the task as real work."""
+    filled_report = _report_with_child_gap()
+    filled_report["pipelines"][1]["tasks"] = [{"name": "Load", "task_key": "load", "type": task_type}]
+    fills = [{"pipeline": "child", "activity_name": "Load"}]
+
+    assert drop_filled_gaps([_LOAD_GAP], filled_report, set(), _report_with_child_gap(), fills) == gaps_left
 
 
 def _rebuilt_gaps(report: dict[str, Any], gaps: list[dict[str, Any]], filled: list[tuple[str, str]]) -> list[Any]:
@@ -1631,15 +1681,19 @@ def test_fill_refuses_an_authored_pipeline_package_would_not_build(tmp_path: Pat
     assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
 
 
-def test_fill_refuses_an_authored_pipeline_that_still_holds_a_placeholder(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stub_type", ["PlaceholderActivity", "UnsupportedActivity"])
+def test_fill_refuses_an_authored_pipeline_that_still_holds_a_placeholder(tmp_path: Path, stub_type: str) -> None:
+    """Package prepares both types as a stub notebook that raises, so neither is a converted task."""
     _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
     authored = _named_lfc_pipeline("parent_lfc")
     authored["tasks"].append(
         {
             "name": "Loop",
             "task_key": "loop",
             "type": "ForEachActivity",
-            "inner_activities": [{"name": "Todo", "task_key": "todo", "type": "PlaceholderActivity"}],
+            "inner_activities": [{"name": "Todo", "task_key": "todo", "type": stub_type, "original_type": "Until"}],
         }
     )
 
@@ -1649,6 +1703,36 @@ def test_fill_refuses_an_authored_pipeline_that_still_holds_a_placeholder(tmp_pa
     assert result["violations"] == [
         "parent_lfc: still has placeholder tasks ['Todo']; convert every task before filling the unit"
     ]
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+    assert "agentic-applied" not in _record_outcomes(report_path).values()
+
+
+@pytest.mark.parametrize("bad_type", ["NotebokActivity", "notebookactivity", "", None, 7])
+def test_fill_refuses_an_authored_task_with_an_unknown_type(tmp_path: Path, bad_type: Any) -> None:
+    """A misspelled type would be rebuilt as a placeholder stub, so the fill must be refused, not recorded."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    authored = _named_lfc_pipeline("parent_lfc")
+    authored["tasks"].append(
+        {
+            "name": "Loop",
+            "task_key": "loop",
+            "type": "ForEachActivity",
+            "inner_activities": [{"name": "Typo", "task_key": "typo", "type": bad_type}],
+        }
+    )
+
+    result = apply_agentic_output(tmp_path, ["parent"], [authored])
+
+    assert result["ok"] is False
+    assert result["violations"] == [
+        "parent_lfc: still has placeholder tasks ['Typo']; convert every task before filling the unit",
+        f"parent_lfc: task 'Typo' has unknown type {bad_type!r}; use one of the IR task types",
+    ]
+    assert report_path.read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
 
 
 def test_route_refuses_a_report_converted_from_a_different_discover(tmp_path: Path) -> None:

@@ -57,6 +57,7 @@ from typing import Any
 from flowx.discovery_insights import _holds_lock, _inventory_pipelines, _is_open_file
 from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
+from flowx.models.ir import Activity
 
 # The report + gaps live under the shared output dir's transient .work/ folder, beside the pipeline IR.
 WORK_DIRNAME = ".work"
@@ -117,6 +118,8 @@ _PLACEHOLDER_COMMENT = (
 _NESTED_TASK_KEYS = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
 # Where an ADF activity's typeProperties hold nested activities (ForEach / Until / If / Switch).
 _ADF_NESTED_ACTIVITY_KEYS = ("activities", "ifTrueActivities", "ifFalseActivities", "defaultActivities")
+_IR_TASK_TYPES = frozenset(activity_class.__name__ for activity_class in Activity.__subclasses__())
+_STUB_TASK_TYPES = frozenset({"PlaceholderActivity", "UnsupportedActivity"})
 
 
 # --------------------------------------------------------------------------- #
@@ -545,10 +548,10 @@ def drop_filled_gaps(
 
     A fill replaces one task, so convert's gap for it, and for every activity nested in it, is done.
     Convert's gaps carry no pipeline, so one is dropped only when no pipeline of ``report`` outside
-    ``routed`` still has that name open: a placeholder, an activity in a placeholder's source definition,
-    or an activity a motif collapsed. A same-named gap still open in another pipeline may be that
-    pipeline's own, so it is kept. A routed pipeline's work is listed in its own pipeline-tagged gaps,
-    which are never dropped here.
+    ``routed`` still has that name open: a task package would build as a stub (see :func:`_is_stub_task`),
+    an activity in such a task's source definition, or an activity a motif collapsed. A same-named gap
+    still open in another pipeline may be that pipeline's own, so it is kept. A routed pipeline's work is
+    listed in its own pipeline-tagged gaps, which are never dropped here.
 
     Args:
         gaps: The gaps list to filter.
@@ -1174,15 +1177,25 @@ def _task_names(tasks: Any) -> set[str]:
     return names
 
 
+def _is_stub_task(task: dict[str, Any]) -> bool:
+    """Whether package would build ``task`` as a stub notebook rather than real work.
+
+    That is a ``PlaceholderActivity``, an ``UnsupportedActivity``, or a task whose ``type`` is no IR
+    activity class, which package rebuilds as a placeholder.
+    """
+    task_type = task.get("type")
+    return not isinstance(task_type, str) or task_type in _STUB_TASK_TYPES or task_type not in _IR_TASK_TYPES
+
+
 def _open_task_names(tasks: Any) -> set[str]:
     """The names among ``tasks`` that still need converting, the only ones a convert gap can belong to.
 
-    That is each placeholder and the activities nested in its source definition, and the activities a
-    motif collapsed, looking inside containers too.
+    That is each task package would build as a stub (see :func:`_is_stub_task`) and the activities
+    nested in its source definition, and the activities a motif collapsed, looking inside containers too.
     """
     names: set[str] = set()
     for task in _walk_tasks(tasks):
-        if task.get("type") == "PlaceholderActivity":
+        if _is_stub_task(task):
             names.add(str(task.get("name")))
             names.update(_adf_activity_names([task.get("raw_definition")]))
         if task.get("type") == "MotifActivity":
@@ -1191,12 +1204,12 @@ def _open_task_names(tasks: Any) -> set[str]:
 
 
 def _placeholder_task_names(tasks: Any) -> list[str]:
-    """The names of every ``PlaceholderActivity`` among ``tasks``, looking inside containers too."""
-    return [str(task.get("name")) for task in _walk_tasks(tasks) if task.get("type") == "PlaceholderActivity"]
+    """The names of every task among ``tasks`` package would build as a stub, looking inside containers too."""
+    return [str(task.get("name")) for task in _walk_tasks(tasks) if _is_stub_task(task)]
 
 
 def _authored_placeholder_violations(authored_pipelines: list[dict[str, Any]]) -> list[str]:
-    """Reports each authored pipeline that still holds a placeholder task, which would ship as a stub."""
+    """Reports each authored pipeline that still holds a task package would ship as a stub."""
     violations: list[str] = []
     for index, pipeline in enumerate(authored_pipelines):
         if not isinstance(pipeline, dict) or not isinstance(pipeline.get("tasks"), list):
@@ -1207,6 +1220,26 @@ def _authored_placeholder_violations(authored_pipelines: list[dict[str, Any]]) -
             violations.append(
                 f"{label}: still has placeholder tasks {placeholders}; convert every task before filling the unit"
             )
+    return violations
+
+
+def _authored_unknown_type_violations(authored_pipelines: list[dict[str, Any]]) -> list[str]:
+    """Reports each authored task whose ``type`` is no IR activity class, naming the type to correct.
+
+    Package rebuilds such a task as a placeholder stub, so the placeholder check above lists it too.
+    """
+    violations: list[str] = []
+    for index, pipeline in enumerate(authored_pipelines):
+        if not isinstance(pipeline, dict) or not isinstance(pipeline.get("tasks"), list):
+            continue
+        label = pipeline.get("name") or f"pipeline[{index}]"
+        for task in _walk_tasks(pipeline.get("tasks")):
+            task_type = task.get("type")
+            if not isinstance(task_type, str) or task_type not in _IR_TASK_TYPES:
+                violations.append(
+                    f"{label}: task {str(task.get('name'))!r} has unknown type {task_type!r}; "
+                    "use one of the IR task types"
+                )
     return violations
 
 
@@ -1282,7 +1315,8 @@ def apply_agentic_output(
     ``metadata/agentic_conversion.json``, and rebuilds (applying them deterministically). The
     membership must exactly match a routed-agentic unit (a component, or an accepted grouping) in the
     plan, and every authored pipeline must carry the correct source tag, hold a non-empty ``tasks`` list
-    of task objects with no placeholder task, not be marked ``migration_status`` ``excluded``, and have a
+    of task objects with no task package would build as a stub (a placeholder or unsupported task, or
+    an unknown task type), not be marked ``migration_status`` ``excluded``, and have a
     non-empty string name of its own: no repeat within the list, no member of another unit, no pipeline
     another unit's applied output authored, and no bundle folder shared with another pipeline once
     normalised. A name may reuse a member of this unit, since the fill replaces it. A stored output the
@@ -1291,7 +1325,8 @@ def apply_agentic_output(
 
     Returns ``{"ok", "violations", "error", "component_id", "pipelines", "already_applied", "message"}``.
     ``ok`` is ``False`` (and nothing written) on a plan/membership error, source tag violation, a
-    placeholder left in, a missing tasks list, an excluded pipeline, a bad or clashing name, structural
+    placeholder or unsupported task left in, an unknown task type, a missing tasks list, an excluded
+    pipeline, a bad or clashing name, structural
     validation failure, or any other error. Empty
     ``authored_pipelines`` is refused, and so is a fill while another route, fill-agentic or merge holds
     the output folder's route lock (see :func:`route_lock`).
@@ -1328,6 +1363,7 @@ def _fill_unit(output_dir: Path, members: set[str], authored_pipelines: list[dic
     authoring_violations += _authored_buildable_violations(authored_pipelines)
     authoring_violations += _authored_source_tag_violations(authored_pipelines, source)
     authoring_violations += _authored_placeholder_violations(authored_pipelines)
+    authoring_violations += _authored_unknown_type_violations(authored_pipelines)
     if authoring_violations:
         return {"ok": False, "error": None, "violations": authoring_violations, "pipelines": 0}
 

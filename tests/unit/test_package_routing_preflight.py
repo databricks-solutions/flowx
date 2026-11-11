@@ -238,8 +238,7 @@ def test_route_agentic_then_deterministic_switches_back_to_deterministic(
     assert _route("deterministic") == 0
     capsys.readouterr()
     assert report_path.read_bytes() == converted
-    baseline_gaps = tmp_path / WORK_DIRNAME / "route_baseline" / "gaps.json"
-    assert (tmp_path / WORK_DIRNAME / "gaps.json").read_bytes() == baseline_gaps.read_bytes()
+    assert (tmp_path / WORK_DIRNAME / "gaps.json").read_bytes() == b"[]"
     assert _package(tmp_path) == 0
 
 
