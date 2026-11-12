@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -345,8 +345,16 @@ class _DagVisitor(ast.NodeVisitor):
             self._constants.pop(name, None)
 
     def _follow_dict_calls(self, node: ast.AST) -> None:
-        """Applies the changing method calls an expression makes on tracked dicts, such as ``x.pop("k")``."""
+        """Applies the changes an expression makes to tracked dicts, such as ``x.pop("k")``.
+
+        A tracked dict passed to a function may be changed there, so that ends its tracking, except as a
+        ``default_args=`` argument or to a builtin that only reads it.
+        """
         for call in ast.walk(node):
+            if isinstance(call, ast.Call):
+                for name in _dict_arguments_passed(call, self._dict_bindings, self.taskflow_defs):
+                    self._dict_bindings.pop(name, None)
+                    self._constants.pop(name, None)
             if (
                 isinstance(call, ast.Call)
                 and isinstance(call.func, ast.Attribute)
@@ -381,6 +389,18 @@ class _DagVisitor(ast.NodeVisitor):
                 self._dict_bindings[name] = dictionary
                 return
         self._dict_bindings.pop(name, None)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """Reads ``name: type = value`` like a plain assignment for dict tracking and constants."""
+        if node.value is not None and isinstance(node.target, ast.Name):
+            assignment = ast.copy_location(ast.Assign(targets=[node.target], value=node.value), node)
+            self._track_dict_assignment(assignment)
+            value = _safe_static_value(node.value, self._constants)
+            if value is _UNRESOLVED:
+                self._constants.pop(node.target.id, None)
+            else:
+                self._constants[node.target.id] = value
+        self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         if isinstance(node.target, ast.Name):
@@ -1148,6 +1168,28 @@ class _DagVisitor(ast.NodeVisitor):
 
 # Dict methods that change the dict in place.
 _DICT_CHANGING_METHODS = frozenset({"update", "pop", "popitem", "setdefault", "clear"})
+# Airflow constructors, which store the arguments they are given.
+_CONSTRUCTOR_SUFFIXES = ("Operator", "Sensor", "DAG", "TaskGroup", "Group")
+# Builtins that read a dict passed to them without changing it.
+_DICT_READING_FUNCTIONS = frozenset({"dict", "len", "list", "print", "repr", "sorted", "str", "deepcopy", "dumps"})
+
+
+def _dict_arguments_passed(call: ast.Call, tracked: Collection[str], task_functions: Collection[str]) -> list[str]:
+    """Returns the tracked dicts a call passes to a function that may change them.
+
+    Building a DAG, operator, sensor, or task group, or invoking a TaskFlow task, only stores its arguments.
+    """
+    function = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", "")
+    if (
+        function in _DICT_READING_FUNCTIONS
+        or function in task_functions
+        or function.endswith(_CONSTRUCTOR_SUFFIXES)
+        or _is_task_construct(function)
+    ):
+        return []
+    values = [*call.args, *(keyword.value for keyword in call.keywords if keyword.arg != "default_args")]
+    passed = [value.value if isinstance(value, ast.Starred) else value for value in values]
+    return [value.id for value in passed if isinstance(value, ast.Name) and value.id in tracked]
 
 
 def _dict_literal(node: ast.expr, bindings: dict[str, ast.Dict]) -> ast.Dict | None:

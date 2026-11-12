@@ -127,7 +127,12 @@ def is_ready_to_deploy(pipeline: Pipeline) -> bool:
 
 # Disclosures that change how the job behaves, printed after the summary so they are read, not just stored.
 SUMMARY_DISCLOSURES = frozenset(
-    {"schedule_paused_until_migration_completes", "schedule_timezone_defaulted", "dag_id_not_static"}
+    {
+        "schedule_paused_until_migration_completes",
+        "schedule_timezone_defaulted",
+        "dag_id_not_static",
+        "max_concurrent_runs_defaulted",
+    }
 )
 
 

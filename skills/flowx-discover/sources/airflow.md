@@ -60,8 +60,8 @@ Job settings to review:
 
 Lead with **Converted %** and **Ready to deploy**. **Classified** counts placeholders too, so 100% there
 does not mean anything converted. Repeat every line under "Job settings to review" to the user: they
-name a schedule emitted paused, a timezone assumed to be UTC, or a job name that fell back to the file
-name. Each DAG's `ready_to_deploy` flag in `inventory.json` says the same per DAG.
+name a schedule emitted paused, a timezone assumed to be UTC, a job name that fell back to the file
+name, or a job that allows one run at a time where Airflow allowed more. Each DAG's `ready_to_deploy` flag in `inventory.json` says the same per DAG.
 
 ## Step 5 — Detail agentic tasks
 
