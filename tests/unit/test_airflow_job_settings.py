@@ -5,8 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
+from flowx.bundler.dab_writer import pipeline_dict_to_ir, write_bundle
+from flowx.ir_serde import pipeline_to_dict
 from flowx.models.ir import Pipeline
+from flowx.preparer.workflow_preparer import prepare_workflow
 from flowx.sources.airflow.loader import load_airflow_dag
 
 
@@ -118,3 +122,38 @@ def test_unresolvable_dag_id_is_disclosed(tmp_path: Path) -> None:
     disclosure = _transformation(pipeline, "dag_id_not_static")
     assert disclosure is not None
     assert disclosure["expression"] == "f'{PREFIX}_load'"
+
+
+def test_max_active_runs_sets_the_job_concurrency(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, ", max_active_runs=3, start_date=pendulum.datetime(2024, 1, 1, tz='UTC')")
+
+    assert pipeline.max_concurrent_runs == 3
+    assert pipeline.reconciliation_status == "verified"
+    assert _transformation(pipeline, "max_concurrent_runs_defaulted") is None
+
+
+def test_dynamic_max_active_runs_is_a_gap(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, ", max_active_runs=RUNS")
+
+    assert pipeline.max_concurrent_runs is None
+    assert any(item["details"].get("name") == "max_active_runs" for item in pipeline.not_translatable)
+
+
+def test_unset_max_active_runs_on_a_scheduled_dag_is_disclosed(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "")
+
+    assert pipeline.max_concurrent_runs is None
+    disclosure = _transformation(pipeline, "max_concurrent_runs_defaulted")
+    assert disclosure is not None
+    assert "16 by default" in disclosure["message"]
+
+
+def test_max_concurrent_runs_reaches_the_bundle(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, ", max_active_runs=2, start_date=pendulum.datetime(2024, 1, 1, tz='UTC')")
+    rehydrated, _ = pipeline_dict_to_ir(pipeline_to_dict(pipeline))
+    out = tmp_path / "bundle"
+
+    write_bundle(prepare_workflow(rehydrated), out, catalog="main", schema="a")
+
+    job = next(iter(yaml.safe_load(next((out / "resources").glob("*.yml")).read_text())["resources"]["jobs"].values()))
+    assert job["max_concurrent_runs"] == 2

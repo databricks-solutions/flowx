@@ -35,6 +35,7 @@ from flowx.sources.airflow.loader.graph import (
 from flowx.sources.airflow.loader.policy import (
     _job_email_notifications,
     _job_timeout_seconds,
+    job_max_concurrent_runs,
     template_search_directories,
 )
 from flowx.sources.airflow.loader.reconcile import _iter_placeholders, _semantic_finding
@@ -189,6 +190,18 @@ def _load_airflow_module(
             "message": (
                 "The DAG's dag_id is not a literal or a name built from __file__, so the job is named after "
                 "the DAG variable or file. Rename the job if Airflow resolves the dag_id differently."
+            ),
+        }
+    concurrency_disclosure: dict[str, Any] | None = None
+    if schedule is not None and "max_active_runs" not in visitor.dag_kwargs:
+        concurrency_disclosure = {
+            "code": "max_concurrent_runs_defaulted",
+            "rationale": "dag_declares_no_max_active_runs",
+            "message": (
+                "The DAG sets no max_active_runs, so Airflow allows the deployment's [core] "
+                "max_active_runs_per_dag runs at once (16 by default). The Databricks job keeps its default of one "
+                "run at a time, so a run that overlaps the next schedule delays it; set max_concurrent_runs to "
+                "allow overlap."
             ),
         }
     timezone_disclosure: dict[str, Any] | None = None
@@ -807,6 +820,7 @@ def _load_airflow_module(
         parameters=parameters,
         schedule=schedule,
         timeout_seconds=_job_timeout_seconds(visitor),
+        max_concurrent_runs=job_max_concurrent_runs(visitor),
         email_notifications=_job_email_notifications(visitor),
         tags=tags,
     )
@@ -823,6 +837,7 @@ def _load_airflow_module(
         schedule_proof=schedule_proof,
         timezone_disclosure=timezone_disclosure,
         dag_id_disclosure=dag_id_disclosure,
+        concurrency_disclosure=concurrency_disclosure,
         setting_sources={
             name: records
             for name, value in visitor.dag_kwargs.items()

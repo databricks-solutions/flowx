@@ -623,6 +623,7 @@ class Pipeline:
         parameters: Pipeline parameter definitions.
         schedule: Serialized schedule definition, if any.
         timeout_seconds: Maximum execution time for one workflow run.
+        max_concurrent_runs: How many runs of the job may be active at once, when the source sets it.
         email_notifications: Job-level email recipients grouped by notification event.
         tasks: Ordered list of translated activities.
         tags: System and user-defined tags.
@@ -646,6 +647,7 @@ class Pipeline:
     parameters: list[dict[str, Any]] | None = None
     schedule: dict[str, Any] | None = None
     timeout_seconds: int | None = None
+    max_concurrent_runs: int | None = None
     email_notifications: dict[str, list[str]] = field(default_factory=dict)
     tasks: list[Activity] = field(default_factory=list)
     tags: dict[str, str] = field(default_factory=dict)
