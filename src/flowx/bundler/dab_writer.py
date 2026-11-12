@@ -31,6 +31,7 @@ from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
     CopyActivity,
+    DbtCommandActivity,
     DbtFactoryActivity,
     DeleteActivity,
     Dependency,
@@ -414,11 +415,11 @@ def write_bundle_group(
     for workflow in workflows:
         pipeline_resources.extend(_collect_pipeline_resources(workflow))
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
-    # sql_task references ${var.warehouse_id}; declare it once if any workflow in the group uses one
-    # (no default -> user supplies at deploy).
-    if any(_bundle_uses_sql_task(workflow) for workflow in workflows):
+    # sql_task and dbt_task reference ${var.warehouse_id}; declare it once if any workflow in the group
+    # uses one (no default -> user supplies at deploy).
+    if any(_bundle_uses_warehouse(workflow) for workflow in workflows):
         pipeline_variable_declarations.setdefault(
-            "warehouse_id", {"description": "SQL warehouse id for sql_task queries"}
+            "warehouse_id", {"description": "SQL warehouse id for sql_task queries and dbt_task runs"}
         )
 
     # Hoisted factory globals become bundle variables. Collected per workflow (each call also merges the
@@ -1879,10 +1880,12 @@ def _any_task_uses_classic_cluster(tasks: list[dict[str, Any]]) -> bool:
     return any(task.get("job_cluster_key") for task in _iter_tasks_recursively(tasks))
 
 
-def _bundle_uses_sql_task(workflow: PreparedWorkflow) -> bool:
-    """Return True if any task (parent or inner workflow) is a sql_task."""
+def _bundle_uses_warehouse(workflow: PreparedWorkflow) -> bool:
+    """Return True if any task (parent or inner workflow) is a sql_task or dbt_task."""
     task_lists = [workflow.tasks, *(inner.tasks for inner in workflow.inner_workflows)]
-    return any("sql_task" in task for tasks in task_lists for task in _iter_tasks_recursively(tasks))
+    return any(
+        "sql_task" in task or "dbt_task" in task for tasks in task_lists for task in _iter_tasks_recursively(tasks)
+    )
 
 
 def _bind_cluster_to_notebook_tasks(tasks: list[dict[str, Any]]) -> None:
@@ -2823,6 +2826,13 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             full_refresh=bool(task_ir.get("full_refresh", False)),
             resource_types=list(task_ir.get("resource_types") or []),
             nodes=list(task_ir.get("nodes") or []),
+        )
+    if task_type == "DbtCommandActivity":
+        return DbtCommandActivity(
+            **base,
+            commands=list(task_ir.get("commands") or []),
+            project_dir=task_ir.get("project_dir", ""),
+            warehouse_ref=task_ir.get("warehouse_ref", "${var.warehouse_id}"),
         )
     if task_type == "SqlActivity":
         return SqlActivity(

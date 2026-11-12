@@ -23,6 +23,7 @@ from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
     CopyActivity,
+    DbtCommandActivity,
     DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
@@ -290,6 +291,10 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
                 extra["bridge_required_parameters"] = dict(activity.bridge_required_parameters)
         case WaitActivity():
             extra["wait_time_seconds"] = activity.wait_time_seconds
+        case DbtCommandActivity():
+            extra["commands"] = list(activity.commands)
+            extra["project_dir"] = activity.project_dir
+            extra["warehouse_ref"] = activity.warehouse_ref
         case SqlActivity():
             extra["sql"] = activity.sql
             if activity.parameters:

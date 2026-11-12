@@ -372,6 +372,27 @@ class SqlActivity(Activity):
 
 
 @dataclass(slots=True, kw_only=True)
+class DbtCommandActivity(Activity):
+    """dbt CLI commands -> one Databricks ``dbt_task``.
+
+    A source task that runs dbt commands from a shell (an Airflow BashOperator running ``dbt run``)
+    becomes one native dbt task running the same commands in order, on the bundle's SQL warehouse, which
+    generates the dbt profile.
+
+    Attributes:
+        commands: The dbt commands, each starting with ``dbt``, run in order; the task stops at the first
+            that fails.
+        project_dir: Where the dbt project lives on the source machine. The preparer copies it into the
+            bundle when it is available where packaging runs.
+        warehouse_ref: DAB reference for the warehouse id (defaults to the ``warehouse_id`` bundle variable).
+    """
+
+    commands: list[str]
+    project_dir: str
+    warehouse_ref: str = "${var.warehouse_id}"
+
+
+@dataclass(slots=True, kw_only=True)
 class SparkJarActivity(Activity):
     """Spark JAR activity.
 
