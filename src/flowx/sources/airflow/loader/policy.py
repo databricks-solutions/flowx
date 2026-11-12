@@ -179,6 +179,22 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
             "message": f"Airflow DAG setting {name!r} has no deterministic Databricks Jobs mapping.",
             "rationale": "no_deterministic_databricks_jobs_mapping",
         }
+    if name == "default_args":
+        default_args = visitor.dag_kwargs.get("default_args")
+        if (isinstance(default_args, ast.Constant) and default_args.value is None) or (
+            isinstance(default_args, ast.Dict)
+            and all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in default_args.keys)
+        ):
+            return None
+        return {
+            "status": "gap",
+            "message": (
+                "Airflow default_args must be a dict literal, or a dict built in the DAG file from literal keys, "
+                "before flowx can read it; the task settings it carries (such as retries, retry_delay, "
+                "execution_timeout, email, and start_date) were not migrated."
+            ),
+            "rationale": "default_args_not_statically_resolvable",
+        }
     if name == "template_searchpath":
         entries = template_searchpath(visitor)
         if entries == []:
