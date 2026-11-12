@@ -174,6 +174,18 @@ def _load_airflow_module(
         elif schedule_gap is not None:
             visitor.unresolved_constructs.append((schedule_gap, schedule_node))
     has_schedule = schedule is not None
+    timezone_disclosure: dict[str, Any] | None = None
+    if schedule is not None and "timezone_id" in schedule and visitor.timezone is None:
+        timezone_disclosure = {
+            "code": "schedule_timezone_defaulted",
+            "timezone_id": schedule["timezone_id"],
+            "rationale": "dag_declares_no_timezone",
+            "message": (
+                "The DAG sets no timezone or timezone-aware start_date, so Airflow schedules it in the "
+                "deployment's [core] default_timezone. flowx used UTC; set schedule.timezone_id if that "
+                "deployment uses another zone."
+            ),
+        }
 
     # Dummy/Empty operators are structural and can be removed after dependency rewiring.
     dropped = {var for var, (_, op, _) in visitor.operators.items() if op in ops.DUMMY_OPERATORS}
@@ -788,6 +800,7 @@ def _load_airflow_module(
         semantic_findings=semantic_findings,
         sensor_lift_proof=sensor_lift_proof,
         schedule_proof=schedule_proof,
+        timezone_disclosure=timezone_disclosure,
         argument_proofs=argument_proofs,
         collapse_proofs=dataproc_plan.proofs,
         logical_date_resolver=logical_date_resolver,
