@@ -174,6 +174,18 @@ def _load_airflow_module(
         elif schedule_gap is not None:
             visitor.unresolved_constructs.append((schedule_gap, schedule_node))
     has_schedule = schedule is not None
+    dag_id_disclosure: dict[str, Any] | None = None
+    if visitor.unresolved_dag_id is not None:
+        dag_id_disclosure = {
+            "code": "dag_id_not_static",
+            "expression": ast.unparse(visitor.unresolved_dag_id),
+            "job_name": visitor.dag_id or Path(dag_path).stem,
+            "rationale": "dag_id_named_after_the_dag_variable_or_file",
+            "message": (
+                "The DAG's dag_id is not a literal or a name built from __file__, so the job is named after "
+                "the DAG variable or file. Rename the job if Airflow resolves the dag_id differently."
+            ),
+        }
     timezone_disclosure: dict[str, Any] | None = None
     if schedule is not None and "timezone_id" in schedule and visitor.timezone is None:
         timezone_disclosure = {
@@ -762,7 +774,8 @@ def _load_airflow_module(
     parameters = [
         {"name": name, "default": _declared_param_default(name, visitor.dag_params)} for name in sorted(param_names)
     ] or None
-    tags = {"source": "airflow", "dag_id": visitor.dag_id or ""}
+    pipeline_name = visitor.dag_id or Path(dag_path).stem
+    tags = {"source": "airflow", "dag_id": pipeline_name}
     if visitor.catchup:
         # Airflow catchup=True has no DABs schedule setting; it maps to running a native Databricks
         # backfill, which overrides the reserved logical-date parameter per replayed window.
@@ -780,7 +793,7 @@ def _load_airflow_module(
     )
     expected_ir_edges = {(dependency.task_key, task.task_key) for task in tasks for dependency in task.depends_on or []}
     pipeline = Pipeline(
-        name=visitor.dag_id or Path(dag_path).stem,
+        name=pipeline_name,
         description=visitor.dag_description,
         tasks=tasks,
         parameters=parameters,
@@ -801,6 +814,7 @@ def _load_airflow_module(
         sensor_lift_proof=sensor_lift_proof,
         schedule_proof=schedule_proof,
         timezone_disclosure=timezone_disclosure,
+        dag_id_disclosure=dag_id_disclosure,
         argument_proofs=argument_proofs,
         collapse_proofs=dataproc_plan.proofs,
         logical_date_resolver=logical_date_resolver,

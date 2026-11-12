@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from flowx.models.ir import Pipeline
 from flowx.sources.airflow.loader import load_airflow_dag
 
@@ -69,3 +71,50 @@ def test_job_with_a_dag_setting_gap_is_scheduled_paused(tmp_path: Path) -> None:
     pipeline = _load(tmp_path, ", default_args=SHARED_DEFAULTS")
 
     assert pipeline.schedule["pause_status"] == "PAUSED"
+
+
+@pytest.mark.parametrize(
+    "dag_id",
+    [
+        "os.path.basename(__file__).replace('.py', '')",
+        "os.path.splitext(os.path.basename(__file__))[0]",
+        "Path(__file__).stem",
+    ],
+)
+def test_dag_id_built_from_the_file_name_names_the_job(tmp_path: Path, dag_id: str) -> None:
+    dag_path = tmp_path / "udp_dim_aircraft.py"
+    dag_path.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        f"DAG_ID = {dag_id}\n"
+        "with DAG(dag_id=DAG_ID) as dag:\n"
+        "    t = BashOperator(task_id='t', bash_command='echo hi')\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(dag_path)
+
+    assert pipeline.name == "udp_dim_aircraft"
+    assert pipeline.tags["dag_id"] == "udp_dim_aircraft"
+    assert _transformation(pipeline, "dag_id_not_static") is None
+
+
+def test_unresolvable_dag_id_is_disclosed(tmp_path: Path) -> None:
+    dag_path = tmp_path / "job.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "from settings import PREFIX\n"
+        "with DAG(dag_id=f'{PREFIX}_load') as dag:\n"
+        "    t = BashOperator(task_id='t', bash_command='echo hi')\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(dag_path)
+
+    assert pipeline.tags["dag_id"] == "job"
+    disclosure = _transformation(pipeline, "dag_id_not_static")
+    assert disclosure is not None
+    assert disclosure["expression"] == "f'{PREFIX}_load'"
