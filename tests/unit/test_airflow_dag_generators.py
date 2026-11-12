@@ -18,6 +18,8 @@ from flowx.sources.airflow.loader import discover_dags, load_pipelines
         "from dagfactory import load_yaml_dags\nload_yaml_dags(globals_dict=globals())\n",
         "from gusty import create_dag\ndag = create_dag('/opt/airflow/dags/jobs')\n",
         "from configs import build_all\nfor name, built in build_all().items():\n    globals()[name] = built\n",
+        "from configs import build_all\nglobals().update(build_all())\n",
+        "from configs import register\nregister(globals())\n",
     ],
 )
 def test_generated_dag_file_is_reported_as_a_failed_source(tmp_path: Path, source: str) -> None:
@@ -56,3 +58,9 @@ def test_factory_registered_through_globals_still_expands(tmp_path: Path) -> Non
 
     assert sorted(pipeline.name for pipeline in pipelines) == ["a", "b"]
     assert {pipeline.reconciliation_status for pipeline in pipelines} == {"verified"}
+
+
+def test_helper_that_only_reads_globals_is_not_reported(tmp_path: Path) -> None:
+    (tmp_path / "registry.py").write_text("def lookup(name):\n    return globals().get(name)\n", encoding="utf-8")
+
+    assert discover_dags(tmp_path) == []

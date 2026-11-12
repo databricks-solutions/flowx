@@ -9,9 +9,17 @@ from __future__ import annotations
 
 import re
 
-# Variables every POSIX shell, or bash itself, provides, so they exist on Databricks compute too.
+# Variables every POSIX shell or bash provides, and those Databricks compute sets, so they exist there too.
 SHELL_PROVIDED = frozenset(
     {
+        "BASH",
+        "BASHPID",
+        "BASH_REMATCH",
+        "BASH_SOURCE",
+        "BASH_VERSION",
+        "HOSTTYPE",
+        "JAVA_HOME",
+        "SPARK_HOME",
         "HOME",
         "PATH",
         "PWD",

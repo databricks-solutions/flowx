@@ -24,6 +24,7 @@ from flowx.sources.airflow.shell_tools import unavailable_programs
         ("cleanup() { rm -f /tmp/x; }; cleanup", []),
         ("set -e\nmkdir -p /tmp/out && curl -s https://x | tee /tmp/out/x | wc -l", []),
         ("python3 -c 'print(1)'", []),
+        ("shopt -s nullglob; mapfile -t rows < f; typeset -i n=1; hash -r; kill -0 $$", []),
         ("echo {{ ds }}", []),
     ],
 )

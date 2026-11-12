@@ -100,3 +100,12 @@ def test_default_args_none_is_unset(tmp_path: Path) -> None:
     pipeline = _load(tmp_path, "", "None")
 
     assert pipeline.reconciliation_status == "verified"
+
+
+def test_key_popped_into_a_variable_is_not_audited(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path, "default_args = {'depends_on_past': True, 'retries': 2}\nflag = default_args.pop('depends_on_past')"
+    )
+
+    assert pipeline.reconciliation_status == "verified"
+    assert _task(pipeline).max_retries == 2

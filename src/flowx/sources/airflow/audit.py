@@ -218,6 +218,7 @@ class _SourceAuditor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _follow_dict_items(self, node: ast.Assign) -> None:
+        self._follow_dict_calls(node.value)
         for target in node.targets:
             if isinstance(target, ast.Name):
                 items = _audited_dict_items(node.value, self.dict_items) if len(node.targets) == 1 else None
@@ -241,8 +242,29 @@ class _SourceAuditor(ast.NodeVisitor):
                 if isinstance(target, ast.Name):
                     self.dict_items.pop(target.id, None)
 
+    def _follow_dict_calls(self, node: ast.AST) -> None:
+        for call in ast.walk(node):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in self.dict_items
+                and call.func.attr in {"update", "pop", "popitem", "setdefault", "clear"}
+            ):
+                self._follow_dict_method(call.func.value.id, call)
+
     def _follow_dict_method(self, name: str, call: ast.Call) -> None:
-        """Follows ``name.update({...})`` or ``name.update(key=value)``; any other method call ends the tracking."""
+        """Follows ``update({...})``, ``update(key=value)``, and ``pop("key")``; any other change ends the tracking."""
+        key = call.args[0] if call.args else None
+        if (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "pop"
+            and isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and len(call.args) <= 2
+        ):
+            self.dict_items[name] = {item: value for item, value in self.dict_items[name].items() if item != key.value}
+            return
         updated: dict[str, ast.expr] | None = None
         if isinstance(call.func, ast.Attribute) and call.func.attr == "update" and len(call.args) <= 1:
             updated = _audited_dict_items(call.args[0], self.dict_items) if call.args else {}
@@ -272,13 +294,7 @@ class _SourceAuditor(ast.NodeVisitor):
 
     def visit_Expr(self, node: ast.Expr) -> None:
         value = node.value
-        if (
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Attribute)
-            and isinstance(value.func.value, ast.Name)
-            and value.func.value.id in self.dict_items
-        ):
-            self._follow_dict_method(value.func.value.id, value)
+        self._follow_dict_calls(value)
         if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.RShift, ast.LShift)):
             self._audit_shift(value)
             return

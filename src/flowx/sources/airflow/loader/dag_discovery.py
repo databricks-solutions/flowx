@@ -308,10 +308,20 @@ def dag_generator(module: ast.Module) -> ast.AST | None:
     """Returns the statement through which a module builds DAGs flowx cannot see, or None.
 
     That is a call into a DAG-generating library (dag-factory, gusty), or a module that registers objects
-    through ``globals()``, which Airflow scans for DAGs. Called only for modules with no DAG declaration
-    flowx recognizes, so such a file is reported rather than skipped.
+    through ``globals()`` (an item assignment, ``globals().update(...)``, or ``globals()`` passed to a
+    function), which Airflow scans for DAGs. Reading ``globals()`` does not count. Called only for modules
+    with no DAG declaration flowx recognizes, so such a file is reported rather than skipped.
     """
     aliases = _import_aliases(module)
+
+    def is_globals(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "globals"
+            and not node.args
+        )
+
     for node in ast.walk(module):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             names = [item.name for item in node.names] if isinstance(node, ast.Import) else [node.module or ""]
@@ -321,8 +331,14 @@ def dag_generator(module: ast.Module) -> ast.AST | None:
             target = aliases.get(node.func.id, "") if isinstance(node.func, ast.Name) else ""
             if target.split(".")[0] in _DAG_GENERATOR_PACKAGES:
                 return node
-            if isinstance(node.func, ast.Name) and node.func.id == "globals" and not node.args:
+            if any(is_globals(argument) for argument in [*node.args, *(item.value for item in node.keywords)]):
                 return node
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "update" and is_globals(node.func.value):
+                return node
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Subscript) and is_globals(target.value) for target in node.targets
+        ):
+            return node
     return None
 
 
