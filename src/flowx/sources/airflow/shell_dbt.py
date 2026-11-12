@@ -75,7 +75,8 @@ def _join(base: str | None, path: str) -> str:
 
 def _segments(command: str) -> list[tuple[str | None, list[str]]] | None:
     """Splits a command into ``(separator before it, words)`` simple commands, or None if it does not parse."""
-    lexer = shlex.shlex(command.replace("\\\n", " ").replace("\n", " ; "), posix=True, punctuation_chars=_PUNCTUATION)
+    text = command.strip().replace("\\\n", " ").replace("\n", " ; ")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=_PUNCTUATION)
     lexer.whitespace_split = True
     lexer.commenters = ""
     try:
@@ -85,17 +86,23 @@ def _segments(command: str) -> list[tuple[str | None, list[str]]] | None:
     segments: list[tuple[str | None, list[str]]] = []
     separator: str | None = None
     current: list[str] = []
-    for word in [*words, ";"]:
+    for word in words:
         if word in _SEPARATORS:
-            if current:
-                segments.append((separator, current))
-                current = []
+            if not current:
+                # A leading or repeated separator.
+                return None
+            segments.append((separator, current))
+            current = []
             separator = word
         elif set(word) <= set(_PUNCTUATION) or word in ("{", "}") or word.startswith("#") or "`" in word:
             # A pipe, redirect, subshell, background job, comment, brace group, or command substitution.
             return None
         else:
             current.append(word)
+    if not current:
+        # An empty command or a trailing separator.
+        return None
+    segments.append((separator, current))
     return segments
 
 
@@ -115,15 +122,15 @@ def parse(command: str, working_directory: str | None = None) -> ShellDbt | None
     commands: list[str] = []
     dropped: list[str] = []
     for separator, words in segments:
+        if separator not in (None, "&&"):
+            # After ``;`` the shell runs the next command even when this one fails; a dbt task stops.
+            return None
         if words[0] == "cd" and not commands:
             if len(words) != 2 or "$" in words[1]:
                 return None
             base_dir = _join(base_dir, words[1])
             continue
         if not _is_dbt_executable(words[0]) or len(words) < 2 or words[1] not in SUBCOMMANDS:
-            return None
-        if commands and separator != "&&":
-            # After ``;`` the shell runs the next command even when this one fails; a dbt task stops.
             return None
         if executable not in (None, words[0]):
             return None
@@ -176,6 +183,6 @@ def locate_project(project_dir: str, source_root: Path | None) -> Path | None:
     matches = [
         marker.parent
         for marker in source_root.rglob("dbt_project.yml")
-        if marker.parent.name == name and not ({"dbt_packages", "target"} & set(marker.parts))
+        if marker.parent.name == name and not ({"dbt_packages", "target"} & set(marker.relative_to(source_root).parts))
     ]
     return matches[0] if len(matches) == 1 else None

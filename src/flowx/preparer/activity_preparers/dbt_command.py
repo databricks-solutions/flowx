@@ -11,9 +11,11 @@ import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import yaml
+
 from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
+from flowx.dbt.bundle_files import DBT_PACKAGES, tree_artifacts
 from flowx.models.dab import DabNotebook
-from flowx.preparer.activity_preparers.dbt_factory import DBT_PACKAGES, tree_artifacts
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
 from flowx.utils import to_lowercase_key
 
@@ -28,13 +30,32 @@ _EXCLUDED_PROJECT_PARTS = frozenset({"dbt_packages", "profiles.yml"})
 _PACKAGE_FILES = ("packages.yml", "dependencies.yml")
 
 
+def _declares_packages(project: Path) -> bool:
+    """Returns whether the project's package files list any package; one that cannot be read counts as yes."""
+    for name in _PACKAGE_FILES:
+        path = project / name
+        if not path.is_file():
+            continue
+        try:
+            content = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            return True
+        if content is not None and (
+            not isinstance(content, dict) or content.get("packages") or content.get("projects")
+        ):
+            return True
+    return False
+
+
 def _project_folder(activity: DbtCommandActivity) -> str:
     """Returns the project's folder under ``src/``: the project folder's name and a digest of its path.
 
-    The digest keeps two projects with the same folder name apart.
+    The path is the one the source task names, so the folder is the same wherever flowx runs, and the digest
+    keeps two projects with the same folder name apart.
     """
-    name = to_lowercase_key(Path(activity.project_dir).name) or "project"
-    digest = hashlib.sha256(activity.project_dir.encode("utf-8")).hexdigest()[:8]
+    source = activity.source_project_dir or activity.project_dir
+    name = to_lowercase_key(Path(source).name) or "project"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:8]
     return f"{_DBT_PROJECTS_RELATIVE_PATH}/{name}_{digest}"
 
 
@@ -64,7 +85,7 @@ def prepare(activity: DbtCommandActivity, *, scope: str = "") -> PreparedActivit
     folder = _project_folder(activity)
     commands = list(activity.commands)
     installs_packages = any(command.split()[:2] == ["dbt", "deps"] for command in commands)
-    if not installs_packages and any((project / name).is_file() for name in _PACKAGE_FILES):
+    if not installs_packages and _declares_packages(project):
         commands.insert(0, "dbt deps")
 
     task = build_common_task_fields(activity)

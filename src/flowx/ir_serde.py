@@ -294,6 +294,8 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
         case DbtCommandActivity():
             extra["commands"] = list(activity.commands)
             extra["project_dir"] = activity.project_dir
+            if activity.source_project_dir is not None:
+                extra["source_project_dir"] = activity.source_project_dir
             extra["warehouse_ref"] = activity.warehouse_ref
         case SqlActivity():
             extra["sql"] = activity.sql

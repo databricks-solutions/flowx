@@ -22,7 +22,8 @@ from flowx.sources.airflow.loader import load_pipelines
         ("${DBT_BIN} run-operation merge_dim", "/srv/proj", ["dbt run-operation merge_dim"], "/srv/proj"),
         ("/opt/venv/bin/dbt build", "/srv/proj", ["dbt build"], "/srv/proj"),
         ("cd /opt/proj && dbt deps && dbt run", None, ["dbt deps", "dbt run"], "/opt/proj"),
-        ("cd proj\ndbt run", "/srv", ["dbt run"], "/srv/proj"),
+        ("cd proj && dbt run", "/srv", ["dbt run"], "/srv/proj"),
+        ("\n    dbt run --select a\n", "/srv", ["dbt run --select a"], "/srv"),
         ("dbt run --project-dir=../other", "/srv/proj", ["dbt run"], "/srv/other"),
         ("dbt run --vars '{\"day\": 1}'", "/p", ["dbt run --vars '{\"day\": 1}'"], "/p"),
         ("dbt test", None, ["dbt test"], None),
@@ -50,6 +51,11 @@ def test_profile_options_are_dropped_and_reported() -> None:
     "command",
     [
         "dbt run; dbt test",
+        "cd /missing; dbt run",
+        "cd proj\ndbt run",
+        "dbt run &&",
+        "&& dbt run",
+        "dbt run && && dbt test",
         "dbt run\ndbt test",
         "dbt run || true",
         "dbt run | tee run.log",
@@ -129,6 +135,38 @@ def test_project_on_the_airflow_machine_is_found_by_folder_name(tmp_path: Path) 
     assert disclosure["project_dir"] == "/home/ec2-user/airflow/intelsat_ca"
 
 
+def test_discover_folder_under_a_target_folder_still_finds_the_project(tmp_path: Path) -> None:
+    root = tmp_path / "target" / "repo"
+    project = _project(root)
+
+    pipeline = _load(
+        root, "BashOperator(task_id='t', bash_command='dbt run', cwd='/home/ec2-user/airflow/intelsat_ca')"
+    )
+
+    task = _task(pipeline)
+    assert isinstance(task, DbtCommandActivity)
+    assert task.project_dir == str(project)
+
+
+def test_two_same_named_projects_under_the_discover_folder_are_a_gap(tmp_path: Path) -> None:
+    _project(tmp_path, parent="dags/team_a")
+    _project(tmp_path, parent="dags/team_b")
+
+    pipeline = _load(
+        tmp_path, "BashOperator(task_id='t', bash_command='dbt run', cwd='/home/ec2-user/airflow/intelsat_ca')"
+    )
+
+    assert isinstance(_task(pipeline), PlaceholderActivity)
+
+
+def test_relative_project_path_says_it_must_be_absolute(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='dbt run', cwd='projects/intelsat_ca')")
+
+    task = _task(pipeline)
+    assert isinstance(task, PlaceholderActivity)
+    assert "is relative to a working directory flowx does not know" in task.comment
+
+
 def test_project_not_found_where_flowx_runs_is_a_gap(tmp_path: Path) -> None:
     pipeline = _load(
         tmp_path, "BashOperator(task_id='t', bash_command='dbt run', cwd='/home/ec2-user/airflow/missing')"
@@ -164,11 +202,21 @@ def test_dbt_with_a_dynamic_cwd_is_not_lowered(tmp_path: Path) -> None:
 
 
 def test_dbt_with_other_unrepresented_arguments_is_a_gap(tmp_path: Path) -> None:
-    pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='dbt run', cwd='/p', env={'A': '1'})")
+    project = _project(tmp_path)
+    pipeline = _load(
+        tmp_path, f"BashOperator(task_id='t', bash_command='dbt run', cwd={str(project)!r}, env={{'A': '1'}})"
+    )
 
     task = _task(pipeline)
     assert isinstance(task, PlaceholderActivity)
+    assert "cwd, env" in task.comment
     assert not any(item["code"] == "shell_dbt_lowered_to_dbt_task" for item in pipeline.audit["transformations"])
+    arguments = next(
+        item
+        for item in pipeline.audit["transformations"]
+        if item["code"] == "operator_arguments_classified" and item["capture_id"] == "t"
+    )["arguments"]
+    assert {"name": "cwd", "status": "unconsumed", "rationale": "no_declared_semantics"} in arguments
 
 
 def _bundle(tmp_path: Path, activity: DbtCommandActivity) -> tuple[dict, Path]:
@@ -179,7 +227,7 @@ def _bundle(tmp_path: Path, activity: DbtCommandActivity) -> tuple[dict, Path]:
     return next(iter(job["resources"]["jobs"].values())), out
 
 
-def _project(tmp_path: Path, *files: str, parent: str = "dags") -> Path:
+def _project(tmp_path: Path, files: dict[str, str] | None = None, parent: str = "dags") -> Path:
     project = tmp_path / parent / "intelsat_ca"
     (project / "models").mkdir(parents=True)
     (project / "dbt_packages" / "dbt_utils").mkdir(parents=True)
@@ -187,8 +235,8 @@ def _project(tmp_path: Path, *files: str, parent: str = "dags") -> Path:
     (project / "profiles.yml").write_text("intelsat_ca:\n  outputs: {}\n", encoding="utf-8")
     (project / "dbt_project.yml").write_text("name: intelsat_ca\n", encoding="utf-8")
     (project / "models" / "dim.sql").write_text("select 1\n", encoding="utf-8")
-    for name in files:
-        (project / name).write_text("packages: []\n", encoding="utf-8")
+    for name, content in (files or {}).items():
+        (project / name).write_text(content, encoding="utf-8")
     return project
 
 
@@ -218,12 +266,48 @@ def test_dbt_task_runs_on_the_warehouse_with_the_project_in_the_bundle(tmp_path:
 
 
 def test_project_with_packages_installs_them_first(tmp_path: Path) -> None:
-    project = _project(tmp_path, "packages.yml")
+    project = _project(tmp_path, {"packages.yml": "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\n"})
     job, _ = _bundle(
         tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
     )
 
     assert job["tasks"][0]["dbt_task"]["commands"] == ["dbt deps", "dbt run"]
+
+
+def test_package_file_declaring_no_packages_adds_no_deps(tmp_path: Path) -> None:
+    project = _project(tmp_path, {"packages.yml": "packages: []\n"})
+    job, _ = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
+    )
+
+    assert job["tasks"][0]["dbt_task"]["commands"] == ["dbt run"]
+
+
+def test_bundle_folder_follows_the_source_path_not_the_local_checkout(tmp_path: Path) -> None:
+    first = _project(tmp_path, parent="checkout_a")
+    second = _project(tmp_path, parent="checkout_b")
+    source = "/home/ec2-user/airflow/intelsat_ca"
+
+    folders = {
+        task["dbt_task"]["project_directory"]
+        for project in (first, second)
+        for task in prepare_workflow(
+            Pipeline(
+                name="p",
+                tasks=[
+                    DbtCommandActivity(
+                        name="t",
+                        task_key="t",
+                        commands=["dbt run"],
+                        project_dir=str(project),
+                        source_project_dir=source,
+                    )
+                ],
+            )
+        ).tasks
+    }
+
+    assert len(folders) == 1
 
 
 def test_missing_project_becomes_a_failing_setup_task(tmp_path: Path) -> None:

@@ -457,11 +457,8 @@ def _load_airflow_module(
                     capture_id=var,
                 )
             )
-        unconsumed = ops.unconsumed_kwargs(operator, kwargs) - ctx.consumed_arguments
-        if ctx.consumed_arguments:
-            proof = argument_proof_by_capture[var]
-            proof["arguments"] = ops.argument_classification(operator, kwargs, ctx.consumed_arguments)
-        if unconsumed:
+        unconsumed = ops.unconsumed_kwargs(operator, kwargs)
+        if unconsumed - ctx.consumed_arguments:
             names = ", ".join(sorted(unconsumed))
             activity = _replace_with_placeholder(
                 ctx,
@@ -578,6 +575,9 @@ def _load_airflow_module(
 
         if not isinstance(activity, PlaceholderActivity):
             builder_disclosures.extend(ctx.disclosures)
+            if ctx.consumed_arguments:
+                proof = argument_proof_by_capture[var]
+                proof["arguments"] = ops.argument_classification(operator, kwargs, ctx.consumed_arguments)
         # Stamp policy only after every semantic guard has selected the final leaf activity.
         policy = templating.retry_policy(visitor.default_args_for(var), kwargs)
         activity.max_retries = policy.get("max_retries")

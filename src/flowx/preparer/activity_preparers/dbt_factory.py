@@ -17,6 +17,7 @@ import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from flowx.dbt.bundle_files import DBT_PACKAGES, tree_artifacts
 from flowx.dbt.manifest import explode_manifest
 from flowx.models.dab import DabNotebook, SetupTask
 from flowx.preparer.workflow_preparer import (
@@ -33,30 +34,6 @@ _RUNNER_RELATIVE_PATH = "notebooks/run_dbt_command.py"
 _DBT_PROJECT_RELATIVE_PATH = "dbt_project"
 _DBT_PROFILES_RELATIVE_PATH = "dbt_profiles"
 _DBT_FACTORY_VERSION = "0.3.5"
-_EXCLUDED_DBT_PATH_PARTS = {".git", ".venv", "__pycache__", "logs", "target"}
-# The dbt packages every generated dbt task installs.
-DBT_PACKAGES = ("dbt-databricks==1.12.2", "dbt-core==1.11.12")
-
-
-def tree_artifacts(
-    source_root: Path, destination_root: str, *, excluded_parts: frozenset[str] = frozenset()
-) -> list[DabNotebook]:
-    """Returns bundle artifacts for files beneath a local source directory.
-
-    Files under build, cache, and log folders are skipped, as are any under *excluded_parts*.
-    """
-    if not source_root.is_dir():
-        return []
-    return [
-        DabNotebook(
-            relative_path=(Path(destination_root) / source.relative_to(source_root)).as_posix(),
-            binary_content=source.read_bytes(),
-        )
-        for source in sorted(source_root.rglob("*"))
-        if source.is_file()
-        and not source.is_symlink()
-        and not ((_EXCLUDED_DBT_PATH_PARTS | excluded_parts) & set(source.relative_to(source_root).parts))
-    ]
 
 
 def _dbt_source_artifacts(activity: DbtFactoryActivity) -> list[DabNotebook]:

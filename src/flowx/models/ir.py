@@ -382,13 +382,15 @@ class DbtCommandActivity(Activity):
     Attributes:
         commands: The dbt commands, each starting with ``dbt``, run in order; the task stops at the first
             that fails.
-        project_dir: Where the dbt project lives on the source machine. The preparer copies it into the
-            bundle when it is available where packaging runs.
+        project_dir: Where the dbt project was found where flowx ran; the preparer copies it into the bundle.
+        source_project_dir: The project path as the source task names it, such as its ``cwd``. It names the
+            project's folder in the bundle, so the folder is the same wherever flowx runs.
         warehouse_ref: DAB reference for the warehouse id (defaults to the ``warehouse_id`` bundle variable).
     """
 
     commands: list[str]
     project_dir: str
+    source_project_dir: str | None = None
     warehouse_ref: str = "${var.warehouse_id}"
 
 

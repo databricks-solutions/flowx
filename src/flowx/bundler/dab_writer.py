@@ -2832,6 +2832,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             **base,
             commands=list(task_ir.get("commands") or []),
             project_dir=task_ir.get("project_dir", ""),
+            source_project_dir=task_ir.get("source_project_dir"),
             warehouse_ref=task_ir.get("warehouse_ref", "${var.warehouse_id}"),
         )
     if task_type == "SqlActivity":
