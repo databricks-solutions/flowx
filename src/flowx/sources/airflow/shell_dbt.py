@@ -11,6 +11,7 @@ import posixpath
 import re
 import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # dbt subcommands a Databricks dbt task can run.
 SUBCOMMANDS = frozenset(
@@ -108,7 +109,8 @@ def parse(command: str, working_directory: str | None = None) -> ShellDbt | None
     segments = _segments(command)
     if not segments:
         return None
-    project_dir = working_directory
+    base_dir = working_directory
+    project_dir: str | None = None
     executable: str | None = None
     commands: list[str] = []
     dropped: list[str] = []
@@ -116,7 +118,7 @@ def parse(command: str, working_directory: str | None = None) -> ShellDbt | None
         if words[0] == "cd" and not commands:
             if len(words) != 2 or "$" in words[1]:
                 return None
-            project_dir = _join(project_dir, words[1])
+            base_dir = _join(base_dir, words[1])
             continue
         if not _is_dbt_executable(words[0]) or len(words) < 2 or words[1] not in SUBCOMMANDS:
             return None
@@ -126,6 +128,7 @@ def parse(command: str, working_directory: str | None = None) -> ShellDbt | None
         if executable not in (None, words[0]):
             return None
         executable = words[0]
+        command_dir = base_dir
         arguments: list[str] = []
         index = 1
         while index < len(words):
@@ -139,14 +142,40 @@ def parse(command: str, working_directory: str | None = None) -> ShellDbt | None
                         return None
                     value = words[index + 1]
                     index += 1
+                if "$" in value:
+                    return None
                 if name == _PROJECT_OPTION:
-                    project_dir = _join(project_dir, value)
+                    command_dir = _join(base_dir, value)
                 else:
                     dropped.append(f"{name} {value}")
             else:
                 arguments.append(word)
             index += 1
+        if commands and command_dir != project_dir:
+            # One dbt task runs every command in one project.
+            return None
+        project_dir = command_dir
         commands.append(shlex.join(["dbt", *arguments]))
     if executable is None:
         return None
     return ShellDbt(commands=commands, project_dir=project_dir, executable=executable, dropped_options=dropped)
+
+
+def locate_project(project_dir: str, source_root: Path | None) -> Path | None:
+    """Finds a dbt project where discover runs: at its source path, or by folder name under *source_root*.
+
+    The source path is usually on the Airflow machine, so the project is looked for as the one folder under
+    *source_root* with the same name that holds a ``dbt_project.yml``. Returns None when there is no such
+    project, or more than one.
+    """
+    if (Path(project_dir) / "dbt_project.yml").is_file():
+        return Path(project_dir)
+    if source_root is None:
+        return None
+    name = Path(project_dir).name
+    matches = [
+        marker.parent
+        for marker in source_root.rglob("dbt_project.yml")
+        if marker.parent.name == name and not ({"dbt_packages", "target"} & set(marker.parts))
+    ]
+    return matches[0] if len(matches) == 1 else None

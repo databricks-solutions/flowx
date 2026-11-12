@@ -12,7 +12,7 @@ from flowx.ir_serde import pipeline_to_dict
 from flowx.models.ir import DbtCommandActivity, NotebookActivity, Pipeline, PlaceholderActivity
 from flowx.preparer.workflow_preparer import prepare_workflow
 from flowx.sources.airflow import shell_dbt
-from flowx.sources.airflow.loader import load_airflow_dag
+from flowx.sources.airflow.loader import load_pipelines
 
 
 @pytest.mark.parametrize(
@@ -61,6 +61,9 @@ def test_profile_options_are_dropped_and_reported() -> None:
         "source venv/bin/activate && dbt run",
         "dbt frobnicate",
         "dbt run && echo done",
+        "dbt run --project-dir $PROJECT",
+        "dbt run --target $ENV",
+        "dbt run --project-dir /p/a && dbt test --project-dir /p/b",
         "echo hi",
     ],
 )
@@ -69,7 +72,8 @@ def test_commands_doing_more_than_dbt_are_not_recognized(command: str) -> None:
 
 
 def _load(tmp_path: Path, task: str) -> Pipeline:
-    dag_path = tmp_path / "dag.py"
+    dag_path = tmp_path / "dags" / "dag.py"
+    dag_path.parent.mkdir(exist_ok=True)
     dag_path.write_text(
         "from airflow import DAG\n"
         "from airflow.operators.bash import BashOperator\n"
@@ -77,7 +81,7 @@ def _load(tmp_path: Path, task: str) -> Pipeline:
         f"    t = {task}\n",
         encoding="utf-8",
     )
-    return load_airflow_dag(dag_path)
+    return load_pipelines(tmp_path)[0]
 
 
 def _task(pipeline: Pipeline):
@@ -85,14 +89,16 @@ def _task(pipeline: Pipeline):
 
 
 def test_bash_dbt_task_becomes_a_dbt_task_with_cwd_as_its_project(tmp_path: Path) -> None:
+    project = _project(tmp_path)
     pipeline = _load(
-        tmp_path, "BashOperator(task_id='t', bash_command='$DBT_PATH run --select dim', cwd='/srv/proj', retries=2)"
+        tmp_path,
+        f"BashOperator(task_id='t', bash_command='$DBT_PATH run --select dim', cwd={str(project)!r}, retries=2)",
     )
 
     task = _task(pipeline)
     assert isinstance(task, DbtCommandActivity)
     assert task.commands == ["dbt run --select dim"]
-    assert task.project_dir == "/srv/proj"
+    assert task.project_dir == str(project)
     assert task.max_retries == 2
     assert pipeline.reconciliation_status == "verified"
     disclosure = next(
@@ -105,6 +111,33 @@ def test_bash_dbt_task_becomes_a_dbt_task_with_cwd_as_its_project(tmp_path: Path
         if item["code"] == "operator_arguments_classified" and item["capture_id"] == "t"
     )["arguments"]
     assert {"name": "cwd", "status": "consumed", "rationale": "operator_adapter"} in arguments
+
+
+def test_project_on_the_airflow_machine_is_found_by_folder_name(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+
+    pipeline = _load(
+        tmp_path, "BashOperator(task_id='t', bash_command='dbt run', cwd='/home/ec2-user/airflow/intelsat_ca')"
+    )
+
+    task = _task(pipeline)
+    assert isinstance(task, DbtCommandActivity)
+    assert task.project_dir == str(project)
+    disclosure = next(
+        item for item in pipeline.audit["transformations"] if item["code"] == "shell_dbt_lowered_to_dbt_task"
+    )
+    assert disclosure["project_dir"] == "/home/ec2-user/airflow/intelsat_ca"
+
+
+def test_project_not_found_where_flowx_runs_is_a_gap(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path, "BashOperator(task_id='t', bash_command='dbt run', cwd='/home/ec2-user/airflow/missing')"
+    )
+
+    task = _task(pipeline)
+    assert isinstance(task, PlaceholderActivity)
+    assert "was not found" in task.comment
+    assert pipeline.reconciliation_status == "verified_with_gaps"
 
 
 def test_cwd_stays_a_gap_for_a_command_that_is_not_dbt(tmp_path: Path) -> None:
@@ -146,9 +179,12 @@ def _bundle(tmp_path: Path, activity: DbtCommandActivity) -> tuple[dict, Path]:
     return next(iter(job["resources"]["jobs"].values())), out
 
 
-def _project(tmp_path: Path, *files: str) -> Path:
-    project = tmp_path / "intelsat_ca"
+def _project(tmp_path: Path, *files: str, parent: str = "dags") -> Path:
+    project = tmp_path / parent / "intelsat_ca"
     (project / "models").mkdir(parents=True)
+    (project / "dbt_packages" / "dbt_utils").mkdir(parents=True)
+    (project / "dbt_packages" / "dbt_utils" / "dbt_project.yml").write_text("name: dbt_utils\n", encoding="utf-8")
+    (project / "profiles.yml").write_text("intelsat_ca:\n  outputs: {}\n", encoding="utf-8")
     (project / "dbt_project.yml").write_text("name: intelsat_ca\n", encoding="utf-8")
     (project / "models" / "dim.sql").write_text("select 1\n", encoding="utf-8")
     for name in files:
@@ -163,8 +199,10 @@ def test_dbt_task_runs_on_the_warehouse_with_the_project_in_the_bundle(tmp_path:
     )
 
     task = job["tasks"][0]
+    folder = task["dbt_task"]["project_directory"]
+    assert folder.startswith("../src/dbt_projects/intelsat_ca_")
     assert task["dbt_task"] == {
-        "project_directory": "../src/dbt_projects/intelsat_ca",
+        "project_directory": folder,
         "commands": ["dbt run"],
         "warehouse_id": "${var.warehouse_id}",
         "catalog": "${var.catalog}",
@@ -172,7 +210,10 @@ def test_dbt_task_runs_on_the_warehouse_with_the_project_in_the_bundle(tmp_path:
         "source": "WORKSPACE",
     }
     assert task["job_cluster_key"] == "default_cluster"
-    assert (out / "src" / "dbt_projects" / "intelsat_ca" / "models" / "dim.sql").is_file()
+    copied = out / folder.removeprefix("../")
+    assert (copied / "models" / "dim.sql").is_file()
+    assert not (copied / "profiles.yml").exists()
+    assert not (copied / "dbt_packages").exists()
     assert "warehouse_id" in yaml.safe_load((out / "databricks.yml").read_text())["variables"]
 
 
@@ -194,7 +235,24 @@ def test_missing_project_becomes_a_failing_setup_task(tmp_path: Path) -> None:
     task = job["tasks"][0]
     assert "dbt_task" not in task
     notebook = out / "src" / "notebooks" / "t_dbt_project_required.py"
-    assert "Copy it to src/dbt_projects/proj" in notebook.read_text()
+    assert "Make it available at that path" in notebook.read_text()
+
+
+def test_projects_with_the_same_folder_name_get_separate_folders(tmp_path: Path) -> None:
+    first = _project(tmp_path, parent="team_a")
+    second = _project(tmp_path, parent="team_b")
+    workflow = prepare_workflow(
+        Pipeline(
+            name="p",
+            tasks=[
+                DbtCommandActivity(name="a", task_key="a", commands=["dbt run"], project_dir=str(first)),
+                DbtCommandActivity(name="b", task_key="b", commands=["dbt run"], project_dir=str(second)),
+            ],
+        )
+    )
+
+    folders = {task["dbt_task"]["project_directory"] for task in workflow.tasks}
+    assert len(folders) == 2
 
 
 def test_dbt_command_activity_round_trips_through_the_report() -> None:

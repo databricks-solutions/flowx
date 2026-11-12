@@ -7,13 +7,13 @@ when packaging can read it there.
 
 from __future__ import annotations
 
-import copy
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
 from flowx.models.dab import DabNotebook
-from flowx.preparer.activity_preparers.dbt_factory import tree_artifacts
+from flowx.preparer.activity_preparers.dbt_factory import DBT_PACKAGES, tree_artifacts
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
 from flowx.utils import to_lowercase_key
 
@@ -21,17 +21,21 @@ if TYPE_CHECKING:
     from flowx.models.ir import DbtCommandActivity
 
 _DBT_PROJECTS_RELATIVE_PATH = "dbt_projects"
-_DBT_LIBRARIES = [
-    {"pypi": {"package": "dbt-databricks==1.12.2"}},
-    {"pypi": {"package": "dbt-core==1.11.12"}},
-]
+# Installed packages and connection profiles are not part of the project: the task runs ``dbt deps`` and
+# Databricks generates the profile from the task's warehouse.
+_EXCLUDED_PROJECT_PARTS = frozenset({"dbt_packages", "profiles.yml"})
 # Files that declare dbt packages, which a fresh task environment installs with ``dbt deps``.
 _PACKAGE_FILES = ("packages.yml", "dependencies.yml")
 
 
 def _project_folder(activity: DbtCommandActivity) -> str:
-    """Returns the project's folder under ``src/``, named after the source project folder."""
-    return f"{_DBT_PROJECTS_RELATIVE_PATH}/{to_lowercase_key(Path(activity.project_dir).name) or 'project'}"
+    """Returns the project's folder under ``src/``: the project folder's name and a digest of its path.
+
+    The digest keeps two projects with the same folder name apart.
+    """
+    name = to_lowercase_key(Path(activity.project_dir).name) or "project"
+    digest = hashlib.sha256(activity.project_dir.encode("utf-8")).hexdigest()[:8]
+    return f"{_DBT_PROJECTS_RELATIVE_PATH}/{name}_{digest}"
 
 
 def _missing_project(activity: DbtCommandActivity) -> PreparedActivity:
@@ -39,8 +43,8 @@ def _missing_project(activity: DbtCommandActivity) -> PreparedActivity:
     relative_path = f"notebooks/{activity.task_key}_dbt_project_required.py"
     folder = _project_folder(activity)
     message = (
-        f"dbt project {activity.project_dir} was not found where flowx package ran. Copy it to src/{folder} "
-        "in this bundle, re-run flowx package, and redeploy."
+        f"dbt project {activity.project_dir} was not found where flowx package ran. Make it available at that "
+        f"path, re-run flowx package so it is copied to src/{folder}, and redeploy."
     )
     content = (
         "# Databricks notebook source\n"
@@ -73,5 +77,7 @@ def prepare(activity: DbtCommandActivity, *, scope: str = "") -> PreparedActivit
         "source": "WORKSPACE",
     }
     task["job_cluster_key"] = DEFAULT_JOB_CLUSTER_KEY
-    task["libraries"] = copy.deepcopy(_DBT_LIBRARIES)
-    return PreparedActivity(task=task, notebooks=tree_artifacts(project, folder))
+    task["libraries"] = [{"pypi": {"package": package}} for package in DBT_PACKAGES]
+    return PreparedActivity(
+        task=task, notebooks=tree_artifacts(project, folder, excluded_parts=_EXCLUDED_PROJECT_PARTS)
+    )
