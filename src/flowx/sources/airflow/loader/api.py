@@ -19,6 +19,7 @@ from flowx.sources.airflow.loader.dag_discovery import (
     _top_level_dag_declarations,
 )
 from flowx.sources.airflow.loader.lowering import _load_airflow_module
+from flowx.sources.airflow.loader.reconcile import pause_unfinished_schedule
 from flowx.utils import to_lowercase_key
 
 _HOST_PATTERN = re.compile(r"https://([A-Za-z0-9._-]*(?:azuredatabricks\.net|databricks\.com|cloud\.databricks\.com))")
@@ -145,6 +146,7 @@ def _replace_excluded_dag_references(pipelines: list[Pipeline], excluded: set[st
                 pipeline.not_translatable.append(entry)
                 if pipeline.reconciliation_status != "failed":
                     pipeline.reconciliation_status = "verified_with_gaps"
+                pause_unfinished_schedule(pipeline)
                 pipeline.audit["agentic_count"] = int(pipeline.audit.get("agentic_count", 0)) + 1
                 pipeline.audit["deterministic_count"] = max(0, int(pipeline.audit.get("deterministic_count", 0)) - 1)
 
