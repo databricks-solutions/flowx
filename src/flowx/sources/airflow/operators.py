@@ -31,7 +31,7 @@ from flowx.models.ir import (
     SparkPythonActivity,
     SqlActivity,
 )
-from flowx.sources.airflow import callable_notebook, dataproc, templating, teradata
+from flowx.sources.airflow import callable_notebook, dataproc, shell_environment, templating, teradata
 from flowx.sources.airflow.template_files import find_template_file, read_template_file
 from flowx.utils import to_lowercase_key
 
@@ -673,6 +673,17 @@ def _shell_activity(ctx: OperatorContext, command_kwarg: str) -> Activity:
             ctx,
             f"flowx could not parse this {ctx.operator} command as shell (for example an unbalanced quote), so it "
             "cannot tell what the command runs; check and translate it manually.",
+        )
+    environment = shell_environment.environment_references(command)
+    if environment:
+        machine = "SSH host" if ctx.operator == "SSHOperator" else "Airflow worker"
+        names = ", ".join(f"${name}" for name in environment)
+        return _placeholder(
+            ctx,
+            f"This {ctx.operator} command reads environment variable(s) {names}, which come from the {machine} "
+            "and are not set on Databricks compute. Replace them with values, job parameters, or compute "
+            "environment variables, then translate the command.",
+            {"environment_variables": environment},
         )
     submit = parse_spark_submit(command)
     if submit is not None:
