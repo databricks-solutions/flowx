@@ -248,6 +248,30 @@ def _utility_segments(command: str, *, lenient: bool = True) -> list[_Segment] |
     return found
 
 
+def command_names(command: str) -> list[str] | None:
+    """Returns every command word a shell command runs, in order of first use, or None if it does not parse.
+
+    Includes the commands a shell runs with ``-c`` and an ``ssh`` remote command, and the text before an
+    unclosed Jinja tag when that is all that parses.
+    """
+    segments = _lenient_segments(command)
+    if segments is None:
+        return None
+    names: list[str] = []
+    for segment in segments:
+        nested = [_command_name_list(item) for item in _nested_commands(segment)]
+        if any(item is None for item in nested):
+            return None
+        for name in [segment.name, *(name for item in nested for name in item or [])]:
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _command_name_list(command: str) -> list[str] | None:
+    return command_names(command)
+
+
 def find_utilities(command: str) -> list[str]:
     """Returns the Teradata utilities a shell command runs, in order of first use.
 

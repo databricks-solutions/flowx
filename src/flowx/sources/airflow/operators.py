@@ -31,7 +31,7 @@ from flowx.models.ir import (
     SparkPythonActivity,
     SqlActivity,
 )
-from flowx.sources.airflow import callable_notebook, dataproc, shell_environment, templating, teradata
+from flowx.sources.airflow import callable_notebook, dataproc, shell_environment, shell_tools, templating, teradata
 from flowx.sources.airflow.template_files import find_template_file, read_template_file
 from flowx.utils import to_lowercase_key
 
@@ -689,6 +689,16 @@ def _shell_activity(ctx: OperatorContext, command_kwarg: str) -> Activity:
     if submit is not None:
         # The SSH hop is eliminated -- Databricks runs Spark natively.
         return _spark_activity_from_submit(ctx, submit, f"{ctx.operator} spark-submit")
+    programs = shell_tools.unavailable_programs(command)
+    if programs:
+        machine = "SSH host" if ctx.operator == "SSHOperator" else "Airflow worker"
+        return _placeholder(
+            ctx,
+            f"This {ctx.operator} command runs {', '.join(programs)}, which Databricks compute does not provide "
+            f"(it is installed on, or a file on, the {machine}). Replace it with a Databricks equivalent, such as "
+            "a native task, a Python library, or a cluster init script, then translate the command.",
+            {"unavailable_programs": programs},
+        )
     return _sh_notebook_activity(ctx, command)
 
 
