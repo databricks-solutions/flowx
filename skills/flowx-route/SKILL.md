@@ -104,7 +104,14 @@ The plan lists every component with its `members`, the library's `recommended` r
 first-class conversion `options` (a *deterministic* option carrying the engine-capability assessment
 and any uncovered activities, and an *agentic* option carrying the `recommended_patterns` from enrich,
 with any `simplification_pattern` flagged and release states disclosed), and `decision: null`
-(pending). It also lists the `suggested_groupings`, an empty `conversation`, and the `findings`
+(pending). The library recommends `agentic` for a component only when it has an activity the engine
+cannot translate 1:1 **and** enrich recommended at least one pattern for one of its pipelines (any
+entry in the agentic option's `recommended_patterns`); otherwise it recommends `deterministic`, and
+each untranslatable activity stays a per-activity gap (for ADF, the one `convert --merge-agentic` fills). So without
+enrich, or when enrich found no pattern, every component is recommended `deterministic`. The agentic
+route is a redesign onto a modernisation or simplification pattern, separate from that per-activity
+gap fill, and it is still the customer's decision. The plan also lists the `suggested_groupings`, an
+empty `conversation`, and the `findings`
 (unresolved control edges kept, never severed). A decision already in the file for a component with
 the same members is kept, so re-running route, or running it after a re-enrich, keeps your decisions,
 except the components of an accepted grouping route no longer suggests, which go back to pending and

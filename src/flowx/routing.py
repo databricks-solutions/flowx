@@ -14,9 +14,10 @@ optionally enriches it with an additive ``insights`` block. This module turns th
   *agentic* option (the recommended Databricks patterns from the ``insights`` block, with any
   ``simplification_pattern`` such as a multi-pipeline -> Lakeflow Connect re-architecture surfaced
   prominently) -- so the user can choose per group;
-* ``recommended`` is a library-computed starting suggestion (deterministic when the whole component
-  is engine-capable), and ``decision`` is the user's authored per-component choice, ``None`` while
-  it is still pending;
+* ``recommended`` is a library-computed starting suggestion (agentic only when the component has an
+  activity the engine cannot translate and enrich recommended a Databricks pattern for it; otherwise
+  deterministic, with each such activity left as a per-activity gap), and ``decision`` is the user's
+  authored per-component choice, ``None`` while it is still pending;
 * **suggested groupings** join whole components the insights link -- by an inferred relationship,
   or by a simplification pattern recommended for pipelines in more than one component -- so the user
   can accept converting them together agentically as one unit (:func:`suggest_groupings`).
@@ -395,15 +396,22 @@ def recommend_component(members: list[str], inventory: dict[str, Any]) -> tuple[
         inventory: The discover ``inventory.json`` document (deterministic or enriched).
 
     Returns:
-        ``(recommended, options)`` where ``recommended`` is ``"deterministic"`` when the whole
-        component is engine-capable or the inventory's source cannot be routed agentic, else
-        ``"agentic"``; and ``options`` carries the ``deterministic`` and ``agentic`` peers as
-        first-class entries.
+        ``(recommended, options)`` where ``recommended`` is ``"agentic"`` only when the component
+        has an activity the engine cannot translate 1:1 **and** enrich recommended at least one
+        Databricks pattern for one of its pipelines; otherwise ``"deterministic"``. A component
+        with an untranslatable activity but no recommended pattern stays deterministic, where that
+        activity is one per-activity gap (for ADF, filled by ``convert --merge-agentic``). A source
+        that cannot be routed agentic is always deterministic. A pattern counts only when it names
+        itself, so a malformed entry never flips a recommendation. ``options`` carries the
+        ``deterministic`` and ``agentic`` peers as first-class entries.
     """
     deterministic = _deterministic_option(members, inventory)
     agentic = _agentic_option(members, inventory)
-    route_deterministic = deterministic["capable"] or not agentic_routing_supported(inventory)
-    recommended = _DETERMINISTIC_STRATEGY if route_deterministic else "agentic"
+    has_named_pattern = any(
+        isinstance(pattern.get("pattern"), str) and pattern["pattern"] for pattern in agentic["recommended_patterns"]
+    )
+    route_agentic = not deterministic["capable"] and has_named_pattern and agentic_routing_supported(inventory)
+    recommended = "agentic" if route_agentic else _DETERMINISTIC_STRATEGY
     return recommended, {"deterministic": deterministic, "agentic": agentic}
 
 

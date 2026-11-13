@@ -269,7 +269,7 @@ def test_package_refuses_a_plan_given_an_unknown_key_after_route(
 @pytest.mark.parametrize(
     "edit",
     [
-        lambda plan: plan["components"][0].update(recommended="deterministic"),
+        lambda plan: plan["components"][0].update(recommended="agentic"),
         lambda plan: plan["components"][0]["options"]["deterministic"].update(capable=True),
         lambda plan: plan.update(findings=["nothing to see"]),
     ],
