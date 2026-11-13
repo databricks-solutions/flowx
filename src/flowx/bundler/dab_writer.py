@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import dataclasses
+import hashlib
 import json
 import posixpath
 import re
@@ -389,6 +390,408 @@ def _default_report_path(output_dir: Path) -> Path:
     return work / "translation_report.json"
 
 
+def _routing_plan_failures(output_dir: Path, report_path: Path) -> list[str]:
+    """Check a recorded routing plan still matches what is about to be packaged.
+
+    Whenever enrich ran, ``agentic_insights.json`` must still agree with the inventory's ``insights``
+    block, plan or no plan. A report that carries a routing record needs its plan: package refuses
+    one whose ``conversion_plan.json`` is missing. A plan is bound to the inventory, the saved source
+    graphs and the saved agentic insights it was decided on, and must still decide every component
+    once with nothing pending; if discover or enrich ran again since route, package refuses rather
+    than shipping a report that no longer reflects the user's decision. It also refuses when the
+    report's routing record disagrees with the plan, and while any agentic unit has no agent output
+    yet: an agentic decision is packaged agentically, never as the deterministic stand-in.
+
+    The live ``.work/translation_report.json`` is the report route, the fill and merge keep in step
+    with the saved deterministic baseline, so it is always the one replayed (see
+    :func:`_live_report_failures`; its remedy is "re-run route"). Any other packaged report -- modify's
+    configured copy, or one written with ``modify --out`` -- can't be replayed, because modify changes
+    its pipelines, so its routing record must equal the live one; otherwise package refuses with "the
+    configured report is out of date; re-run modify".
+
+    Returns one message per problem; an empty list means there is no routing to check or it still matches.
+    """
+    from flowx.models.conversion_plan import ConversionPlan
+    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, routing_record
+    from flowx.routing import insights_file_violations, plan_binding_violations, recorded_plan_violations
+
+    metadata_dir = Path(output_dir) / "metadata"
+    inventory_path = metadata_dir / "inventory.json"
+    inventory: Any = None
+    if inventory_path.is_file():
+        try:
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            return [f"metadata/inventory.json is unreadable: {error}"]
+    insights_failures = insights_file_violations(Path(output_dir), inventory if isinstance(inventory, dict) else None)
+    if insights_failures:
+        return insights_failures
+
+    try:
+        plan = ConversionPlan.load(Path(output_dir))
+    except (OSError, ValueError) as error:
+        return [f"metadata/conversion_plan.json is unreadable: {error}"]
+
+    report: Any = None
+    try:
+        report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        report = None
+    live_path = Path(output_dir) / WORK_DIRNAME / REPORT_FILENAME
+    configured = Path(report_path).resolve() != live_path.resolve()
+    live_report = report
+    if configured:
+        try:
+            live_report = json.loads(live_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            live_report = {}
+
+    if plan is None:
+        if routing_record(report) is not None or routing_record(live_report) is not None:
+            return [
+                f"{REPORT_FILENAME} was routed (it carries a routing record) but metadata/conversion_plan.json "
+                "is missing; restore the plan, or re-run convert to package without routing"
+            ]
+        return []
+
+    if inventory is None:
+        return ["metadata/conversion_plan.json was recorded but metadata/inventory.json is missing"]
+    if not isinstance(inventory, dict):
+        return ["metadata/inventory.json must contain a JSON object"]
+
+    stale = plan_binding_violations(plan, inventory)
+    if stale:
+        return [f"metadata/{message}" if message.startswith("conversion_plan.json") else message for message in stale]
+    invalid = recorded_plan_violations(plan, inventory)
+    if invalid:
+        return [
+            f"metadata/conversion_plan.json is not a valid decision: {violation}; re-run route" for violation in invalid
+        ]
+    pending = plan.pending_components()
+    if pending:
+        return [
+            f"components {pending} have no decision yet; decide them in metadata/conversion_plan.json and re-run route"
+        ]
+
+    if report is None:
+        return []
+    failures = _live_report_failures(Path(output_dir), plan.to_dict(), live_report, inventory)
+    if failures:
+        return failures
+    if configured and routing_record(report) != routing_record(live_report):
+        return ["the configured report is out of date; re-run modify"]
+    return []
+
+
+def _live_report_failures(
+    output_dir: Path, plan_document: dict[str, Any], report: Any, inventory: dict[str, Any]
+) -> list[str]:
+    """Check the live translation report still equals a fresh replay of the rebuild.
+
+    The report's routing record must match the plan, the saved deterministic baseline must still have
+    the hashes the record names and the inventory's pipelines, and no stored agent output or gap fill
+    may have been edited. The rebuild from the baseline, the stored gap fills, the plan and the stored
+    outputs must then reproduce the report exactly, record included. Finally every agentic unit must
+    have its agent output applied. A report without a record passes only when the plan routes nothing
+    agentic and no gap fill is stored, because route stamps a record whenever it applies one.
+    """
+    from flowx.discovery_serde import canonical_sha256
+    from flowx.models.conversion_plan import DECISION_AGENTIC
+    from flowx.route_agentic import (
+        AGENTIC_OUTPUT_FILENAME,
+        BASELINE_CHANGED,
+        OUTCOME_AGENTIC_NOT_VIABLE,
+        REPORT_FILENAME,
+        ROUTING_RECORD_KEY,
+        agentic_pipeline_names,
+        baseline_pipeline_mismatch,
+        load_agentic_output,
+        load_routed_baseline,
+        rebuild,
+        routing_record,
+        routing_record_mismatches,
+    )
+
+    record = routing_record(report)
+    if record is None:
+        if any(component.get("decision") == DECISION_AGENTIC for component in plan_document.get("components", [])):
+            return [
+                f"the plan routes a component agentic but {REPORT_FILENAME} carries no routing record; re-run route"
+            ]
+        try:
+            stored_fills = load_agentic_output(output_dir).document.get("gap_fills")
+        except (OSError, ValueError) as error:
+            return [f"metadata/{AGENTIC_OUTPUT_FILENAME} is unreadable: {error}"]
+        if stored_fills:
+            return [
+                f"metadata/{AGENTIC_OUTPUT_FILENAME} stores a gap fill but {REPORT_FILENAME} carries no routing "
+                "record; re-run route, which applies the fill, or drops it when it was merged against an earlier "
+                "convert"
+            ]
+        return []
+    failures: list[str] = []
+    if record.get("conversion_plan_sha256") != canonical_sha256(plan_document):
+        failures.append(f"{REPORT_FILENAME} was routed under a different conversion plan; re-run route")
+    failures.extend(f"{mismatch}; re-run route" for mismatch in routing_record_mismatches(record, plan_document))
+    if failures:
+        return failures
+
+    try:
+        baseline_report, baseline_gaps, baseline_report_bytes, baseline_gaps_bytes = load_routed_baseline(
+            output_dir, record
+        )
+    except (OSError, ValueError):
+        return [BASELINE_CHANGED]
+    mismatch = baseline_pipeline_mismatch(baseline_report, inventory)
+    if mismatch and agentic_pipeline_names(plan_document):
+        return [mismatch]
+
+    try:
+        stored = load_agentic_output(output_dir)
+    except (OSError, ValueError) as error:
+        return [f"metadata/{AGENTIC_OUTPUT_FILENAME} is unreadable: {error}"]
+    if stored.edited:
+        return [
+            f"metadata/{AGENTIC_OUTPUT_FILENAME} has been edited ({', '.join(stored.edited)}); "
+            "re-run fill-agentic for that component, or merge that gap again"
+        ]
+
+    rebuilt_report, _, rebuilt_record = rebuild(
+        baseline_report,
+        baseline_gaps,
+        plan_document,
+        stored.outputs,
+        stored.gap_fills,
+        baseline_report_bytes,
+        baseline_gaps_bytes,
+        inventory=inventory,
+    )
+    report_without_record = {key: value for key, value in report.items() if key != ROUTING_RECORD_KEY}
+    if rebuilt_record != record or report_without_record != rebuilt_report:
+        return [f"{REPORT_FILENAME} does not match a fresh rebuild; re-run route"]
+
+    return [
+        f"component {unit_id!r} ({', '.join(entry.get('members') or [])}) is routed agentic but has no agent "
+        "output yet; fill it with fill-agentic, or decide it deterministic and re-run route"
+        for unit_id, entry in record["components"].items()
+        if entry.get("outcome") == OUTCOME_AGENTIC_NOT_VIABLE
+    ]
+
+
+# The bundle folders the latest package wrote, kept under metadata/: "." for one bundle at the top of the
+# output folder, otherwise one folder per pipeline named by normalize_task_key.
+PACKAGED_BUNDLES_FILENAME = "packaged_bundles.json"
+# What a bundle at the top of the output folder holds besides metadata/.
+_TOP_LEVEL_BUNDLE_ENTRIES = ("databricks.yml", "SETUP.md", "WARNINGS.md", "resources", "src")
+
+
+def read_packaged_bundles(output_dir: Path) -> list[str]:
+    """The bundle folders the latest package recorded in ``metadata/packaged_bundles.json``; empty when none.
+
+    The record is ``{"bundles": [...]}``, each entry ``"."`` for a bundle at the top of the output folder
+    or the folder name package gives a pipeline's bundle. Anything else (a path, a non-string, another
+    key) is refused, so the record can never point package or discover at a folder outside the bundles
+    package wrote.
+
+    Raises:
+        ValueError: The record is not valid JSON or not that shape.
+    """
+    path = Path(output_dir) / "metadata" / PACKAGED_BUNDLES_FILENAME
+    if not path.is_file():
+        return []
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"metadata/{PACKAGED_BUNDLES_FILENAME} is unreadable: {error}") from error
+    bundles = document.get("bundles") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"bundles"}
+        or not isinstance(bundles, list)
+        or not all(_is_bundle_folder_name(name) for name in bundles)
+    ):
+        raise ValueError(
+            f'metadata/{PACKAGED_BUNDLES_FILENAME} must be {{"bundles": [...]}} listing "." or bundle folder names'
+        )
+    return list(bundles)
+
+
+def _is_bundle_folder_name(name: Any) -> bool:
+    """Whether ``name`` is "." or a folder name package gives a pipeline's bundle."""
+    return isinstance(name, str) and (name == "." or (bool(name) and normalize_task_key(name) == name))
+
+
+def _archive_stale_bundles(output_dir: Path, bundle_dirs: list[Path], previous_bundles: list[str]) -> Path | None:
+    """Move every bundle folder the previous package recorded and this one will not write into the archive.
+
+    A bundle folder an earlier package wrote for a pipeline this report no longer has (an agentic unit's
+    pipelines replaced under new names, or a narrower convert) would otherwise stay beside the new
+    bundles, complete and deployable. For ``"."`` that is the top-level bundle's own entries. Package
+    runs this once its staging preflight passes and before it writes anything into the output folder,
+    so a name the old and new layouts share (a pipeline named Src and the top-level bundle's ``src/``)
+    is cleared before the new bundle lands there instead of being mixed into it. The folders move into
+    ``metadata/archive/<UTC time>/`` with an ``archive.json`` rather than being deleted. A folder package
+    never recorded, and ``metadata/`` itself, are left alone. Returns the archive record, or ``None``
+    when nothing moved.
+    """
+    from flowx.sources.adf.loader import archive_outputs
+
+    output_dir = Path(output_dir)
+    current = {bundle_dir.relative_to(output_dir).as_posix() for bundle_dir in bundle_dirs}
+    entries = sorted(
+        {
+            output_dir / entry
+            for name in previous_bundles
+            if name not in current and name != "metadata"
+            for entry in (_TOP_LEVEL_BUNDLE_ENTRIES if name == "." else [name])
+        }
+    )
+    return archive_outputs(output_dir, entries, reason="package no longer writes these bundle folders")
+
+
+def _archive_stale_outputs(output_dir: Path, bundle_dirs: list[Path], written: list[Path]) -> Path | None:
+    """Move the resource files this package did not write into the archive, then record its bundle folders.
+
+    ``databricks.yml`` includes every ``resources/*.yml``, so a resource an earlier package wrote (say, an
+    agentic unit the user has since routed deterministic) would still deploy. Package overwrites the files
+    it writes again; after writing, any other ``resources/*.yml`` in a bundle it wrote, a file added by
+    hand included, moves into ``metadata/archive/<UTC time>/`` with an ``archive.json`` rather than being
+    deleted. Then ``metadata/packaged_bundles.json`` records the bundle folders this package wrote, so the
+    next package and discover's reset know which ones to move. Returns the archive record, or ``None``
+    when nothing moved.
+    """
+    from flowx.sources.adf.loader import archive_outputs
+
+    output_dir = Path(output_dir)
+    written_paths = {Path(path).resolve() for path in written}
+    entries = [
+        path
+        for bundle_dir in bundle_dirs
+        for path in sorted((bundle_dir / "resources").glob("*.yml"))
+        if path.resolve() not in written_paths
+    ]
+    record_path = archive_outputs(output_dir, entries, reason="package no longer writes these resource files")
+    metadata_dir = output_dir / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    current = sorted(bundle_dir.relative_to(output_dir).as_posix() for bundle_dir in bundle_dirs)
+    (metadata_dir / PACKAGED_BUNDLES_FILENAME).write_text(
+        json.dumps({"bundles": current}, indent=2) + "\n", encoding="utf-8"
+    )
+    return record_path
+
+
+def _file_sha256(path: Path) -> str | None:
+    """SHA-256 of a file's bytes, or ``None`` when it cannot be read."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Path | None:
+    """Persist a compact routing audit to ``metadata/route_audit.json`` before the prune.
+
+    Package prunes the transient ``.work/`` folder (translation report + ``gaps.json``) by default,
+    which erases the "what did routing change?" trail. When a routing decision was recorded
+    (``metadata/conversion_plan.json`` exists), summarise each routing unit -- its decision, and from
+    the report's routing record its outcome, fingerprint and applied output hash, plus the history of
+    outputs it replaced from ``metadata/agentic_conversion.json`` -- and the gap fills applied, into an
+    additive ``metadata/`` artifact that survives the prune. It also records the routing conversation,
+    the hashes of the inventory, the saved source graphs and agentic insights the plan was bound to,
+    the plan (the same canonical hash the routing record holds), and the packaged report, plus the
+    baseline report and gaps route started from as the routing record names them, so the trail can be
+    checked against those files later.
+
+    Returns the written path, or ``None`` when there is no recorded plan (no routing happened) -- so
+    the no-route path writes nothing and stays byte-identical.
+    """
+    from flowx.discovery_insights import inventory_fingerprint
+    from flowx.discovery_serde import canonical_sha256
+    from flowx.models.conversion_plan import DECISION_AGENTIC, DECISION_DETERMINISTIC, ConversionPlan
+    from flowx.route_agentic import OUTCOME_DETERMINISTIC, load_agentic_output, routing_record, routing_units
+
+    metadata_dir = Path(output_dir) / "metadata"
+    try:
+        plan = ConversionPlan.load(Path(output_dir))
+    except (OSError, ValueError):
+        return None
+    if plan is None:
+        return None
+
+    inventory_sha256: str | None = None
+    try:
+        inventory = json.loads((metadata_dir / "inventory.json").read_text(encoding="utf-8"))
+        if isinstance(inventory, dict):
+            inventory_sha256 = inventory_fingerprint(inventory)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    record: dict[str, Any] | None = None
+    if report_path is not None:
+        try:
+            record = routing_record(json.loads(Path(report_path).read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            record = None
+    recorded_units = record.get("components") if record is not None else None
+    if not isinstance(recorded_units, dict):
+        recorded_units = {}
+    try:
+        stored = load_agentic_output(Path(output_dir))
+    except ValueError:
+        stored = None
+    stored_entries = stored.document.get("components", {}) if stored is not None else {}
+
+    plan_document = plan.to_dict()
+    units: list[dict[str, Any]] = []
+    agentic_pipelines: set[str] = set()
+    for unit_id, unit in routing_units(plan_document).items():
+        recorded = recorded_units.get(unit_id)
+        unit_entry: dict[str, Any] = {"component_id": unit_id, "members": list(unit["members"])}
+        if unit.get("components"):
+            unit_entry["grouped_components"] = list(unit["components"])
+        unit_entry["decision"] = unit["decision"]
+        if isinstance(recorded, dict):
+            unit_entry["outcome"] = recorded.get("outcome")
+            unit_entry["output_sha256"] = recorded.get("output_sha256")
+            unit_entry["fingerprint"] = recorded.get("fingerprint")
+        else:
+            unit_entry["outcome"] = OUTCOME_DETERMINISTIC if unit["decision"] == DECISION_DETERMINISTIC else None
+            unit_entry["output_sha256"] = None
+        stored_entry = stored_entries.get(unit_id)
+        if isinstance(stored_entry, dict) and stored_entry.get("replaced"):
+            unit_entry["replaced"] = stored_entry["replaced"]
+        units.append(unit_entry)
+        if unit["decision"] == DECISION_AGENTIC:
+            agentic_pipelines.update(unit["members"])
+
+    baseline_report_sha256 = record.get("baseline_report_sha256") if record is not None else None
+    gap_fills = [
+        {"pipeline": fill["pipeline"], "activity_name": fill["activity_name"], "task_sha256": fill["task_sha256"]}
+        for fill in (stored.gap_fills if stored is not None else [])
+        if baseline_report_sha256 is not None and fill["baseline_report_sha256"] == baseline_report_sha256
+    ]
+
+    audit = {
+        "schema": "flowx.route_audit/v2",
+        "recorded_against_inventory_sha256": plan.inventory_sha256,
+        "inventory_sha256": inventory_sha256,
+        "source_graphs_sha256": plan.source_graphs_sha256,
+        "agentic_insights_sha256": plan.agentic_insights_sha256,
+        "conversion_plan_sha256": canonical_sha256(plan_document),
+        "baseline_report_sha256": baseline_report_sha256,
+        "baseline_gaps_sha256": record.get("baseline_gaps_sha256") if record is not None else None,
+        "translation_report_sha256": _file_sha256(report_path) if report_path is not None else None,
+        "components": units,
+        "agentic_pipelines": sorted(agentic_pipelines),
+        "gap_fills": gap_fills,
+        "conversation": [entry.to_dict() for entry in plan.conversation],
+    }
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = metadata_dir / "route_audit.json"
+    audit_path.write_text(json.dumps(audit, indent=2), encoding="utf-8")
+    return audit_path
+
+
 def main(argv: list[str] | None = None) -> int:
     """Package-phase entry point for DAB bundle generation.
 
@@ -472,6 +875,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {failure}", file=sys.stderr)
         return 1
 
+    plan_failures = _routing_plan_failures(args.output_dir, args.report)
+    if plan_failures:
+        print("Error: routing plan preflight failed; no bundle files were written.", file=sys.stderr)
+        for failure in plan_failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+    try:
+        previous_bundles = read_packaged_bundles(args.output_dir)
+    except ValueError as error:
+        print(
+            f"Error: {error}; fix or delete it, or run discover again, which archives it. "
+            "No bundle files were written.",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.profile:
         set_profile(args.profile)
 
@@ -550,6 +969,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    bundle_dirs = (
+        [args.output_dir]
+        if shared_airflow_bundle or len(workflows) == 1
+        else [args.output_dir / normalize_task_key(workflow.name) for workflow in workflows]
+    )
+    _archive_stale_bundles(args.output_dir, bundle_dirs, previous_bundles)
+
     all_created: list[Path] = []
     if shared_airflow_bundle:
         combined = _combine_airflow_workflows(workflows)
@@ -581,19 +1007,22 @@ def main(argv: list[str] | None = None) -> int:
             all_created.extend(created)
             print(f"  [{index + 1}/{len(workflows)}] {workflow.name}: {len(created)} files")
 
+    _archive_stale_outputs(args.output_dir, bundle_dirs, all_created)
+
     # Tier-0 structural check over the emitted bundle(s): duplicate task keys / job params,
     # dangling depends_on, undeclared {{job.parameters.X}}, leaked YAML anchors. Source-agnostic.
-    bundle_dirs = (
-        [args.output_dir]
-        if shared_airflow_bundle or len(workflows) == 1
-        else [args.output_dir / normalize_task_key(workflow.name) for workflow in workflows]
-    )
     invariant_violations = 0
     for bundle_dir in bundle_dirs:
         result = check_bundle_dir(bundle_dir)
         if not result.ok or result.warnings:
             print(format_result(result), file=sys.stderr)
         invariant_violations += len(result.violations)
+
+    # Persist the routing/gaps audit to metadata/ before pruning .work/, so the "what did routing
+    # change?" trail survives the default prune. No-ops (writes nothing) when no plan was recorded.
+    audit_path = _write_route_audit(args.output_dir, args.report)
+    if audit_path is not None:
+        print(f"Wrote routing audit to {audit_path}")
 
     if not args.keep_intermediates:
         work_dir = args.output_dir / ".work"

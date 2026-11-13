@@ -86,6 +86,10 @@ intermediates under `.work/` (pruned by `package`).
 | `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/` |
 | `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK |
 | `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table |
+| `reporting/routing_review.py` | Renders `metadata/routing_review.html`, the standard eight-section routing review page, from `routing_review_template.html` (stdlib only, no timestamps) |
+| `routing.py` | Groups pipelines into connected components over control lineage; recommends deterministic/agentic per component (both options) and suggests groupings from the insights; writes the recommendation into `metadata/conversion_plan.json` with decisions pending and records the user's edits (additive; convert untouched). Agentic decisions are ADF-only; also the reader-side check that `agentic_insights.json` agrees with the inventory |
+| `route_agentic.py` | Applies a routing decision after convert: rebuilds the report from the never-rewritten baseline (`.work/route_baseline/`), the plan, and the agent's output in `metadata/agentic_conversion.json` (per-unit pipelines + fills of convert's own gaps); `fill-agentic` is the only fill for routed-agentic units |
+| `models/conversion_plan.py` | Typed `ConversionPlan` (schema 3): the library's load/validate/record API for `conversion_plan.json`, one decision per component (pending until made), suggested groupings, the routing conversation, bound to the inventory, `source_graphs.json` and `agentic_insights.json` hashes; package fails closed on a mismatch, a pending decision, or an unfilled agentic unit |
 
 ## Activity Types
 
