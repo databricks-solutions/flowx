@@ -168,7 +168,10 @@ def _why(component: Any) -> str:
         return escape(f"All {total} activities convert automatically.")
     kinds = sorted({str(entry.get("type")) for entry in uncovered if entry.get("type")})
     reason = f"{_plural(len(uncovered), 'activity', 'activities')} can't convert 1:1"
-    return escape(f"{reason} ({', '.join(kinds)})." if kinds else f"{reason}.")
+    sentence = f"{reason} ({', '.join(kinds)})." if kinds else f"{reason}."
+    if component.recommended == DECISION_AGENTIC:
+        sentence += " Enrich also recommends a Databricks pattern for this group."
+    return escape(sentence)
 
 
 def _suggested_pattern(component: Any) -> str:
@@ -274,7 +277,9 @@ def _components(plan: ConversionPlan) -> str:
         )
         parts.append(
             f"<h3>Agentic redesign ({len(redesign)})</h3>"
-            '<p class="muted small">The agent builds these as new Databricks pipelines rather than translating 1:1.</p>'
+            '<p class="muted small">The agent builds these as new Databricks pipelines rather than translating 1:1. '
+            "The library recommends a group here only when part of it can't convert 1:1 and enrich suggested a "
+            "Databricks pattern for it; a group you chose agentic yourself is listed too.</p>"
             '<div class="scroll"><table><thead><tr><th>Group</th><th>Why</th><th>Suggested pattern</th>'
             f"<th>Decision</th></tr></thead><tbody>{rows}</tbody></table></div>"
         )
@@ -294,7 +299,8 @@ def _components(plan: ConversionPlan) -> str:
             f"<details><summary>Recommended deterministic ({len(automatic)}"
             f"{f', {pending} pending' if pending else ''})</summary>"
             '<div class="stack"><p class="muted small">flowx\'s deterministic engine translates these 1:1; any '
-            "activity listed under Why is left as a gap to fill.</p>"
+            "activity listed under Why is left as a gap to fill, and the agent fills it on its own while the rest of "
+            "the group converts as it is.</p>"
             '<div class="scroll"><table><thead><tr><th>Group</th><th>Pipelines</th><th>Why</th><th>Decision</th></tr>'
             f"</thead><tbody>{rows}</tbody></table></div></div></details>"
         )

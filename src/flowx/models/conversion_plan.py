@@ -73,8 +73,9 @@ class ComponentPlan:
     Attributes:
         component_id: Stable id assigned by the library (``"component-<n>"``).
         members: The component's pipeline names, sorted (library-computed).
-        recommended: The library's starting suggestion -- ``"deterministic"`` when the component is
-            engine-capable, else ``"agentic"``.
+        recommended: The library's starting suggestion -- ``"agentic"`` only when the component has an
+            activity the engine cannot translate and enrich recommended a pattern for one of its
+            pipelines, else ``"deterministic"``.
         decision: The user's authored per-component choice (may override :attr:`recommended`), or
             ``None`` while it is still pending. Route applies a plan only once nothing is pending.
         options: Both conversion options with their evidence (library-computed), in the recorded

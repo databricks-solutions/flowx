@@ -106,8 +106,44 @@ def test_a_deterministic_recommendation_with_gaps_is_not_called_automatic() -> N
     assert "1 recommended for deterministic conversion" in summary
     assert "automatic" not in summary + components
     assert "<summary>Recommended deterministic (1, 1 pending)</summary>" in components
-    assert "translates these 1:1; any activity listed under Why is left as a gap to fill." in components
+    assert (
+        "translates these 1:1; any activity listed under Why is left as a gap to fill, and the agent fills it on "
+        "its own while the rest of the group converts as it is." in components
+    )
     assert "2 activities can&#x27;t convert 1:1 (Until)." in components
+
+
+def test_an_agentic_recommendation_says_it_rests_on_a_gap_and_an_enrich_pattern() -> None:
+    recommended = ComponentPlan(
+        component_id="component-1",
+        members=["extract"],
+        recommended="agentic",
+        options={
+            "deterministic": {"capable": False, "uncovered": [{"type": "ExecuteDataFlow"}]},
+            "agentic": {"recommended_patterns": [{"pipeline": "extract", "pattern": "Lakeflow Connect"}]},
+        },
+    )
+    page = render_routing_review(_plan(components=[recommended]), None, None)
+
+    components = _section(page, "components")
+    assert (
+        "1 activity can&#x27;t convert 1:1 (ExecuteDataFlow). Enrich also recommends a Databricks pattern" in components
+    )
+    assert "recommends a group here only when part of it can't convert 1:1 and enrich suggested a" in components
+
+
+def test_a_group_routed_agentic_by_the_user_does_not_claim_an_enrich_pattern() -> None:
+    chosen = ComponentPlan(
+        component_id="component-1",
+        members=["extract"],
+        recommended="deterministic",
+        decision="agentic",
+        options={"deterministic": {"capable": False, "uncovered": [{"type": "ExecuteDataFlow"}]}},
+    )
+    components = _section(render_routing_review(_plan(components=[chosen]), None, None), "components")
+
+    assert "1 activity can&#x27;t convert 1:1 (ExecuteDataFlow)." in components
+    assert "Enrich also recommends" not in components
 
 
 def _recorded(members: list[str], decision: str, outcome: str) -> dict[str, Any]:
