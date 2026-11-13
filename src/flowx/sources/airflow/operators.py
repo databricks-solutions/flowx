@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterable
 
 from flowx.models.ir import (
     Activity,
+    DbtCommandActivity,
     NotebookActivity,
     PlaceholderActivity,
     RunJobActivity,
@@ -31,7 +32,15 @@ from flowx.models.ir import (
     SparkPythonActivity,
     SqlActivity,
 )
-from flowx.sources.airflow import callable_notebook, dataproc, shell_environment, shell_tools, templating, teradata
+from flowx.sources.airflow import (
+    callable_notebook,
+    dataproc,
+    shell_dbt,
+    shell_environment,
+    shell_tools,
+    templating,
+    teradata,
+)
 from flowx.sources.airflow.template_files import find_template_file, read_template_file
 from flowx.utils import to_lowercase_key
 
@@ -132,6 +141,11 @@ class OperatorContext:
             Airflow analog of ADF's raw ARM JSON).
         template_search_paths: Directories Airflow searches for template files, in
             order: the DAG file's folder, then the DAG's ``template_searchpath``.
+        consumed_arguments: Arguments the builder represented beyond the operator's usual set, such
+            as a BashOperator ``cwd`` that names the dbt project of a dbt task.
+        source_root: The folder discover was pointed at, where a dbt project the task names by its source
+            machine path may be found by folder name.
+        disclosures: Audit transformations the builder records about how it translated the task.
     """
 
     task_id: str
@@ -143,6 +157,9 @@ class OperatorContext:
     call_source: str = ""
     default_args: dict[str, ast.expr] = field(default_factory=dict)
     template_search_paths: tuple[Path, ...] = ()
+    consumed_arguments: set[str] = field(default_factory=set)
+    disclosures: list[dict[str, Any]] = field(default_factory=list)
+    source_root: Path | None = None
 
 
 # --------------------------------------------------------------------------------------
@@ -674,6 +691,10 @@ def _shell_activity(ctx: OperatorContext, command_kwarg: str) -> Activity:
             f"flowx could not parse this {ctx.operator} command as shell (for example an unbalanced quote), so it "
             "cannot tell what the command runs; check and translate it manually.",
         )
+    if ctx.operator == "BashOperator" and (literal_str(ctx.kwargs.get("cwd")) is not None or "cwd" not in ctx.kwargs):
+        dbt = shell_dbt.parse(command, literal_str(ctx.kwargs.get("cwd")))
+        if dbt is not None:
+            return _dbt_command_activity(ctx, dbt)
     environment = shell_environment.environment_references(command)
     if environment:
         machine = "SSH host" if ctx.operator == "SSHOperator" else "Airflow worker"
@@ -721,6 +742,58 @@ def _shell_activity(ctx: OperatorContext, command_kwarg: str) -> Activity:
 
 def _variable_list(names: Iterable[str]) -> str:
     return ", ".join(f"${name}" for name in names)
+
+
+def _dbt_command_activity(ctx: OperatorContext, dbt: shell_dbt.ShellDbt) -> Activity:
+    """Builds a Databricks dbt task for a shell command that only runs dbt."""
+    if dbt.project_dir is None or not dbt.project_dir.startswith("/"):
+        reason = (
+            f"its project path {dbt.project_dir!r} is relative to a working directory flowx does not know; give "
+            "an absolute cwd, cd, or --project-dir"
+            if dbt.project_dir
+            else "the command does not cd into the project or pass --project-dir, and the task sets no cwd"
+        )
+        return _placeholder(
+            ctx,
+            f"This {ctx.operator} runs dbt, but flowx cannot tell which dbt project: {reason}. Name the project "
+            "folder, then translate the task to a dbt task.",
+            {"dbt_commands": dbt.commands},
+        )
+    local_project = shell_dbt.locate_project(dbt.project_dir, ctx.source_root)
+    if local_project is None:
+        searched = f" or as a {Path(dbt.project_dir).name!r} folder under {ctx.source_root}" if ctx.source_root else ""
+        return _placeholder(
+            ctx,
+            f"This {ctx.operator} runs dbt in project {dbt.project_dir}, which was not found at that path{searched} "
+            "where flowx ran. Add the dbt project to the folder discover reads, then re-run discover and convert.",
+            {"dbt_commands": dbt.commands, "dbt_project_dir": dbt.project_dir},
+        )
+    if "cwd" in ctx.kwargs:
+        ctx.consumed_arguments.add("cwd")
+    ctx.disclosures.append(
+        {
+            "code": "shell_dbt_lowered_to_dbt_task",
+            "task_key": ctx.task_key,
+            "executable": dbt.executable,
+            "commands": list(dbt.commands),
+            "project_dir": dbt.project_dir,
+            "local_project_dir": str(local_project),
+            "dropped_options": list(dbt.dropped_options),
+            "rationale": "dbt_task_runs_on_the_bundle_sql_warehouse",
+            "message": (
+                f"Task {ctx.task_id!r} runs its dbt commands as a Databricks dbt task on the bundle's SQL warehouse, "
+                f"which generates the dbt profile, using the dbt installed in the task in place of {dbt.executable}."
+                + (f" Dropped profile options: {', '.join(dbt.dropped_options)}." if dbt.dropped_options else "")
+            ),
+        }
+    )
+    return DbtCommandActivity(
+        name=ctx.task_id,
+        task_key=ctx.task_key,
+        commands=list(dbt.commands),
+        project_dir=str(local_project),
+        source_project_dir=dbt.project_dir,
+    )
 
 
 def _build_bash(ctx: OperatorContext) -> Activity:
@@ -1143,8 +1216,14 @@ _LOADER_KWARG_RATIONALES: dict[str, str] = {
 }
 
 
-def argument_classification(operator: str, kwargs: dict[str, ast.expr]) -> list[dict[str, str]]:
-    """Classifies every supplied operator argument and records why it is represented."""
+def argument_classification(
+    operator: str, kwargs: dict[str, ast.expr], builder_consumed: set[str] | frozenset[str] = frozenset()
+) -> list[dict[str, str]]:
+    """Classifies every supplied operator argument and records why it is represented.
+
+    *builder_consumed* names arguments the task's builder represented for this call, such as a
+    BashOperator ``cwd`` that became a dbt task's project.
+    """
     dataproc_name = dataproc.canonical_name(operator)
     if operator in FILE_SENSORS:
         adapter_consumed: frozenset[str] | None = _FILE_SENSOR_KWARGS
@@ -1160,6 +1239,9 @@ def argument_classification(operator: str, kwargs: dict[str, ast.expr]) -> list[
         if name in _LOADER_KWARG_RATIONALES:
             status = "consumed"
             rationale = _LOADER_KWARG_RATIONALES[name]
+        elif name in builder_consumed:
+            status = "consumed"
+            rationale = "operator_adapter"
         elif adapter_consumed is None:
             status = "preserved"
             rationale = "placeholder_raw_definition"

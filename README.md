@@ -198,6 +198,7 @@ Unlike the ADF path, an Airflow operator's path is decided **per instance** by w
 | Sensors — cross-DAG | `ExternalTaskSensor` (+ `…Async`) | Placeholder + gap | Agentic |
 | Sensors — time | `TimeSensor`, `TimeDeltaSensor` | Placeholder + gap | Agentic |
 | dbt | `DbtRun/Test/Seed/Snapshot/Build/DepsOperator`, Cosmos `DbtDag` / `DbtTaskGroup` | single `DbtFactoryActivity` (static explosion, or PyDABs via `--dbt-mode pydabs`) | Deterministic |
+| dbt (shell) | `BashOperator` that only runs dbt (`dbt run ...`, `$DBT_PATH snapshot ...`) | native `dbt_task` on the bundle's SQL warehouse | Deterministic |
 | Dataproc / Managed Spark | `DataprocSubmitJobOperator`, `DataprocCreateBatchOperator` (+ `ManagedSpark…` aliases) with `pyspark_job` / `pyspark_batch` | `spark_python_task` | Deterministic † |
 | Dataproc / Managed Spark | same, with `spark_job` / `spark_batch` | `spark_jar_task` (JARs as task libraries) | Deterministic † |
 | Dataproc / Managed Spark | same, with inline `spark_sql_job` | `sql_task` | Deterministic † |

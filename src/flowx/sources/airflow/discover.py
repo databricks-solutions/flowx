@@ -132,6 +132,7 @@ SUMMARY_DISCLOSURES = frozenset(
         "schedule_timezone_defaulted",
         "dag_id_not_static",
         "max_concurrent_runs_defaulted",
+        "shell_dbt_lowered_to_dbt_task",
     }
 )
 
@@ -166,7 +167,14 @@ _PROFILE_COLUMNS: tuple[str, ...] = (
 )
 
 _NATIVE_TYPES = frozenset(
-    {"NotebookActivity", "SparkPythonActivity", "SparkJarActivity", "SqlActivity", "RunJobActivity"}
+    {
+        "NotebookActivity",
+        "SparkPythonActivity",
+        "SparkJarActivity",
+        "SqlActivity",
+        "DbtCommandActivity",
+        "RunJobActivity",
+    }
 )
 _CONTROL_FLOW_TYPES = frozenset({"ForEachActivity"})
 

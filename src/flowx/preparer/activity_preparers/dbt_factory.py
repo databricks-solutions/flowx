@@ -17,6 +17,7 @@ import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from flowx.dbt.bundle_files import DBT_PACKAGES, tree_artifacts
 from flowx.dbt.manifest import explode_manifest
 from flowx.models.dab import DabNotebook, SetupTask
 from flowx.preparer.workflow_preparer import (
@@ -33,35 +34,18 @@ _RUNNER_RELATIVE_PATH = "notebooks/run_dbt_command.py"
 _DBT_PROJECT_RELATIVE_PATH = "dbt_project"
 _DBT_PROFILES_RELATIVE_PATH = "dbt_profiles"
 _DBT_FACTORY_VERSION = "0.3.5"
-_EXCLUDED_DBT_PATH_PARTS = {".git", ".venv", "__pycache__", "logs", "target"}
-
-
-def _tree_artifacts(source_root: Path, destination_root: str) -> list[DabNotebook]:
-    """Returns bundle artifacts for files beneath a local source directory."""
-    if not source_root.is_dir():
-        return []
-    return [
-        DabNotebook(
-            relative_path=(Path(destination_root) / source.relative_to(source_root)).as_posix(),
-            binary_content=source.read_bytes(),
-        )
-        for source in sorted(source_root.rglob("*"))
-        if source.is_file()
-        and not source.is_symlink()
-        and not (_EXCLUDED_DBT_PATH_PARTS & set(source.relative_to(source_root).parts))
-    ]
 
 
 def _dbt_source_artifacts(activity: DbtFactoryActivity) -> list[DabNotebook]:
     """Returns deployable project, profile, and manifest files available on the local filesystem."""
     project_dir = Path(activity.project_dir).expanduser()
     artifacts = (
-        _tree_artifacts(project_dir, _DBT_PROJECT_RELATIVE_PATH) if (project_dir / "dbt_project.yml").is_file() else []
+        tree_artifacts(project_dir, _DBT_PROJECT_RELATIVE_PATH) if (project_dir / "dbt_project.yml").is_file() else []
     )
 
     profiles_dir = Path(activity.profiles_dir).expanduser()
     if (profiles_dir / "profiles.yml").is_file():
-        artifacts.extend(_tree_artifacts(profiles_dir, _DBT_PROFILES_RELATIVE_PATH))
+        artifacts.extend(tree_artifacts(profiles_dir, _DBT_PROFILES_RELATIVE_PATH))
 
     manifest_path = Path(activity.manifest_path).expanduser() if activity.manifest_path else None
     if manifest_path and manifest_path.is_file():
@@ -92,9 +76,8 @@ def _pydabs_pyproject_source() -> str:
         "dependencies = [\n"
         '    "databricks-bundles>=1.0.0,<2.0.0",\n'
         f'    "databricks-dbt-factory=={_DBT_FACTORY_VERSION}",\n'
-        '    "dbt-databricks==1.12.2",\n'
-        '    "dbt-core==1.11.12",\n'
-        "]\n"
+        + "".join(f'    "{package}",\n' for package in DBT_PACKAGES)
+        + "]\n"
     )
 
 
@@ -281,10 +264,7 @@ def _node_task(node: dict[str, Any], activity: DbtFactoryActivity) -> dict[str, 
     """Builds one inner-job notebook task for a dbt node."""
     task: dict[str, Any] = {
         "task_key": node["task_key"],
-        "libraries": [
-            {"pypi": {"package": "dbt-databricks==1.12.2"}},
-            {"pypi": {"package": "dbt-core==1.11.12"}},
-        ],
+        "libraries": [{"pypi": {"package": package}} for package in DBT_PACKAGES],
         "notebook_task": {
             "notebook_path": f"../src/{_RUNNER_RELATIVE_PATH}",
             "base_parameters": {
@@ -417,7 +397,7 @@ def _pydabs_hook_source(activity: DbtFactoryActivity) -> str:
         "        'environment_key': 'Default',\n"
         "        'spec': {\n"
         "            'environment_version': '5',\n"
-        "            'dependencies': ['dbt-databricks==1.12.2', 'dbt-core==1.11.12'],\n"
+        f"            'dependencies': {list(DBT_PACKAGES)!r},\n"
         "        },\n"
         "    }\n"
         f"    resources.add_job({to_lowercase_key(activity.task_key + '_dbt')!r}, Job(\n"
