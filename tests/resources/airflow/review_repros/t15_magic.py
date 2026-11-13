@@ -6,5 +6,5 @@ set -e
 echo "quoted 'inner' \"esc\""
 python -c 'print("hi")'
 # MAGIC %sql
-aws s3 cp a s3://b/c
+cp a /tmp/c
 """)

@@ -114,6 +114,23 @@ def _strip_heredocs(command: str) -> str:
     return _HEREDOC.sub(lambda match: f"{match.group('rest')}\n", command)
 
 
+# Shell operators, longest first. shlex joins adjacent punctuation, so ``);`` arrives as one token.
+_OPERATORS = (">>", "<<", "&&", "||", ";;", "&>", ">&", "<&", "<>", ">|", "|&", ";", "&", "|", "(", ")", "<", ">")
+_OPERATOR_CHARACTERS = frozenset("();<>|&")
+
+
+def _split_operators(word: str) -> list[str]:
+    """Splits a run of shell punctuation such as ``);`` into its operators; any other word is returned whole."""
+    if not word or not set(word) <= _OPERATOR_CHARACTERS or word in _OPERATORS:
+        return [word]
+    operators: list[str] = []
+    while word:
+        operator = next(item for item in _OPERATORS if word.startswith(item))
+        operators.append(operator)
+        word = word[len(operator) :]
+    return operators
+
+
 def _shell_words(command: str) -> list[str] | None:
     """Splits a command into shell words and separators, with here-document bodies and comments removed.
 
@@ -130,7 +147,7 @@ def _shell_words(command: str) -> list[str] | None:
         return None
     words: list[str] = []
     in_comment = False
-    for word in raw_words:
+    for word in (operator for raw in raw_words for operator in _split_operators(raw)):
         if word == _LINE_BREAK:
             in_comment = False
             words.append(word)
@@ -246,6 +263,30 @@ def _utility_segments(command: str, *, lenient: bool = True) -> list[_Segment] |
                 return None
             found.extend(nested_found)
     return found
+
+
+def command_names(command: str) -> list[str] | None:
+    """Returns every command word a shell command runs, in order of first use, or None if it does not parse.
+
+    Includes the commands a shell runs with ``-c`` and an ``ssh`` remote command, and the text before an
+    unclosed Jinja tag when that is all that parses.
+    """
+    segments = _lenient_segments(command)
+    if segments is None:
+        return None
+    names: list[str] = []
+    for segment in segments:
+        nested = [_command_name_list(item) for item in _nested_commands(segment)]
+        if any(item is None for item in nested):
+            return None
+        for name in [segment.name, *(name for item in nested for name in item or [])]:
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _command_name_list(command: str) -> list[str] | None:
+    return command_names(command)
 
 
 def find_utilities(command: str) -> list[str]:

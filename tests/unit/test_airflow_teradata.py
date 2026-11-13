@@ -151,8 +151,9 @@ def test_trailing_space_runs_the_script_name_as_a_command(tmp_path: Path) -> Non
     pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='cleanup.sh ')")
 
     task = _task(pipeline)
-    assert isinstance(task, NotebookActivity)
-    assert "cleanup.sh" in (task.generated_source or "")
+    assert isinstance(task, PlaceholderActivity)
+    assert "teradata" not in task.raw_definition
+    assert task.raw_definition["unavailable_programs"] == ["cleanup.sh"]
 
 
 @pytest.mark.parametrize(
@@ -569,3 +570,7 @@ def test_unclosed_jinja_tag_does_not_hide_a_utility(command: str) -> None:
 )
 def test_parse_check_does_not_fall_back_before_unclosed_jinja(command: str, parses: bool) -> None:
     assert teradata.parses(command) is parses
+
+
+def test_subshell_holding_only_an_assignment_does_not_hide_a_utility() -> None:
+    assert teradata.find_utilities("(TOKEN=x); bteq < load.bteq") == ["bteq"]

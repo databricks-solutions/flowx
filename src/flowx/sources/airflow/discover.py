@@ -83,6 +83,7 @@ def build_inventory_dict(pipelines: list[Pipeline], source_dir: str) -> dict[str
                 "migration_status": pipeline.migration_status,
                 "coverage_pct": coverage,
                 "deterministic_coverage_pct": deterministic_coverage,
+                "ready_to_deploy": is_ready_to_deploy(pipeline),
                 "findings": pipeline.not_translatable,
                 "transformations": pipeline.audit.get("transformations", []),
             }
@@ -113,9 +114,40 @@ def build_inventory_dict(pipelines: list[Pipeline], source_dir: str) -> dict[str
             "excluded_count": excluded,
             "coverage_pct": coverage,
             "deterministic_coverage_pct": deterministic_coverage,
+            "ready_to_deploy_count": sum(1 for pipeline in pipelines if is_ready_to_deploy(pipeline)),
             "reconciliation_status": reconciliation_status,
         },
     }
+
+
+def is_ready_to_deploy(pipeline: Pipeline) -> bool:
+    """Returns whether a DAG converted fully: verified, with no gap, placeholder, or failure left."""
+    return pipeline.migration_status != "excluded" and pipeline.reconciliation_status in (None, "verified")
+
+
+# Disclosures that change how the job behaves, printed after the summary so they are read, not just stored.
+SUMMARY_DISCLOSURES = frozenset(
+    {
+        "schedule_paused_until_migration_completes",
+        "schedule_timezone_defaulted",
+        "dag_id_not_static",
+        "max_concurrent_runs_defaulted",
+    }
+)
+
+
+def print_disclosures(pipelines: list[Pipeline]) -> None:
+    """Prints each DAG's job-level disclosures, such as an assumed timezone or a paused schedule."""
+    notes = [
+        (pipeline.name, item["message"])
+        for pipeline in pipelines
+        for item in pipeline.audit.get("transformations", [])
+        if item.get("code") in SUMMARY_DISCLOSURES and item.get("message")
+    ]
+    if notes:
+        print("\nJob settings to review:")
+        for name, message in notes:
+            print(f"  - {name}: {message}")
 
 
 # Full profile column set the shared reporting.coverage / dashboard consume. Airflow has no
@@ -205,15 +237,17 @@ def main(argv: list[str] | None = None) -> int:
     summary = inventory["summary"]
     print("\nAirflow Discover Summary")
     print("========================")
-    print(f"DAGs parsed:        {summary['pipeline_count']}")
-    print(f"Total tasks:        {summary['activity_count']}")
-    print(f"  Deterministic:    {summary['deterministic_count']}")
-    print(f"  Agentic:          {summary['agentic_count']}")
-    print(f"  Failed:           {summary['failed_count']}")
-    print(f"  Excluded:         {summary['excluded_count']}")
-    print(f"Translation path:   {summary['coverage_pct']}%")
-    print(f"Deterministic:      {summary['deterministic_coverage_pct']}%")
-    print(f"Reconciliation:     {summary['reconciliation_status']}")
+    print(f"DAGs parsed:          {summary['pipeline_count']}")
+    print(f"  Ready to deploy:    {summary['ready_to_deploy_count']}  (verified, no gaps or placeholders)")
+    print(f"Total tasks:          {summary['activity_count']}")
+    print(f"  Converted:          {summary['deterministic_count']}  (deterministic; runs as translated)")
+    print(f"  Placeholders:       {summary['agentic_count']}  (agentic; must be translated before deploying)")
+    print(f"  Failed:             {summary['failed_count']}")
+    print(f"  Excluded:           {summary['excluded_count']}")
+    print(f"Converted:            {summary['deterministic_coverage_pct']}% of tasks")
+    print(f"Classified:           {summary['coverage_pct']}% of tasks (converted or placeholder; not readiness)")
+    print(f"Reconciliation:       {summary['reconciliation_status']}")
+    print_disclosures(pipelines)
     return 1 if any(pipeline.reconciliation_status == "failed" for pipeline in pipelines) else 0
 
 

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import ast
 import copy
+import os
 import re
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from flowx.sources.airflow import operators as ops
@@ -352,3 +355,79 @@ def _literal_argument_source(node: ast.expr) -> str | None:
         return repr(ast.literal_eval(node))
     except (ValueError, SyntaxError):
         return None
+
+
+_PATH_FUNCTIONS: dict[str, Callable[[str], str]] = {
+    "dirname": os.path.dirname,
+    "abspath": os.path.abspath,
+    "normpath": os.path.normpath,
+    "realpath": os.path.realpath,
+    "basename": os.path.basename,
+}
+
+
+def _dotted_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return f"{_dotted_name(node.value)}.{node.attr}"
+    return ""
+
+
+def _static_path(node: ast.expr, dag_file: Path | None) -> str | None:
+    """Evaluates a path expression built from literals and ``__file__``, or returns None.
+
+    Covers the usual ways a DAG names a folder beside itself: ``os.path.join(os.path.dirname(__file__),
+    "sql")``, ``Path(__file__).parent / "sql"``, and ``str(...)`` / ``os.fspath(...)`` around either, and
+    the ways it names itself after its file: ``os.path.basename(__file__).replace(".py", "")``,
+    ``os.path.splitext(os.path.basename(__file__))[0]``, and ``Path(__file__).stem``.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name) and node.id == "__file__":
+        return str(dag_file) if dag_file is not None else None
+    if isinstance(node, ast.Attribute) and node.attr in ("parent", "stem", "name"):
+        inner = _static_path(node.value, dag_file)
+        return str(getattr(Path(inner), node.attr)) if inner is not None else None
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Call)
+        and _dotted_name(node.value.func) in ("os.path.splitext", "path.splitext", "splitext")
+        and len(node.value.args) == 1
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, int)
+        and node.slice.value in (0, 1)
+    ):
+        inner = _static_path(node.value.args[0], dag_file)
+        return os.path.splitext(inner)[node.slice.value] if inner is not None else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left, right = _static_path(node.left, dag_file), _static_path(node.right, dag_file)
+        return str(Path(left) / right) if left is not None and right is not None else None
+    if not isinstance(node, ast.Call) or node.keywords:
+        return None
+    name = _dotted_name(node.func)
+    function = name.rsplit(".", 1)[-1]
+    if isinstance(node.func, ast.Attribute) and function == "replace" and len(node.args) == 2:
+        inner = _static_path(node.func.value, dag_file)
+        old, new = (ops.literal_str(argument) for argument in node.args)
+        return inner.replace(old, new) if inner is not None and old is not None and new is not None else None
+    if isinstance(node.func, ast.Attribute) and function in ("resolve", "absolute") and not node.args:
+        inner = _static_path(node.func.value, dag_file)
+        if inner is None:
+            return None
+        return str(Path(inner).resolve()) if function == "resolve" else str(Path(inner).absolute())
+    arguments = [_static_path(argument, dag_file) for argument in node.args]
+    if any(argument is None for argument in arguments):
+        return None
+    values = [argument for argument in arguments if argument is not None]
+    if function == "join" and name in ("os.path.join", "path.join", "join") and values:
+        return os.path.join(*values)
+    if (
+        function in _PATH_FUNCTIONS
+        and len(values) == 1
+        and name in (function, f"path.{function}", f"os.path.{function}")
+    ):
+        return _PATH_FUNCTIONS[function](values[0])
+    if name in ("Path", "pathlib.Path", "PurePath", "str", "os.fspath") and len(values) == 1:
+        return values[0]
+    return None

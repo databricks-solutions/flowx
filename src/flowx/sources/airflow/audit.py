@@ -110,6 +110,9 @@ class _SourceAuditor(ast.NodeVisitor):
         self.other_dag_variables = other_dag_variables
         self.occurrences: dict[tuple[str, int, int], int] = {}
         self.values: dict[str, Any] = {}
+        # Keys of module dict literals by name, kept current through item assignments, so a DAG's
+        # ``default_args=<name>`` is audited key by key.
+        self.dict_items: dict[str, dict[str, ast.expr]] = {}
         self.task_refs: dict[str, list[str]] = {}
         # Tasks built without a DAG of their own while a DAG variable is selected, kept only if wiring
         # reaches the DAG. Each instance gets a key; current_dagless maps a reference (a variable name or
@@ -179,6 +182,7 @@ class _SourceAuditor(ast.NodeVisitor):
             self.visit(statement)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        self._follow_dict_items(node)
         target = node.targets[0].id if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) else None
         if target:
             self.current_dagless.pop(target, None)
@@ -213,8 +217,101 @@ class _SourceAuditor(ast.NodeVisitor):
                 self.task_refs.pop(target, None)
         self.generic_visit(node)
 
+    def _follow_dict_items(self, node: ast.Assign) -> None:
+        self._follow_dict_calls(node.value)
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                items = _audited_dict_items(node.value, self.dict_items) if len(node.targets) == 1 else None
+                if items is None:
+                    self.dict_items.pop(target.id, None)
+                else:
+                    self.dict_items[target.id] = items
+            elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                key = target.slice
+                if target.value.id in self.dict_items and isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    self.dict_items[target.value.id] = {**self.dict_items[target.value.id], key.value: node.value}
+                else:
+                    self.dict_items.pop(target.value.id, None)
+            else:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name):
+                        self.dict_items.pop(name.id, None)
+        if isinstance(node.value, ast.Name) and node.value.id in self.dict_items:
+            self.dict_items.pop(node.value.id, None)
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.dict_items.pop(target.id, None)
+
+    def _follow_dict_calls(self, node: ast.AST) -> None:
+        for call in ast.walk(node):
+            if isinstance(call, ast.Call):
+                function = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", "")
+                if not (
+                    function in {"dict", "len", "list", "print", "repr", "sorted", "str", "deepcopy", "dumps"}
+                    or function in self.taskflow_defs
+                    or function.endswith(("Operator", "Sensor", "DAG", "TaskGroup", "Group"))
+                    or _is_operator(function)
+                ):
+                    for value in [*call.args, *(item.value for item in call.keywords if item.arg != "default_args")]:
+                        passed = value.value if isinstance(value, ast.Starred) else value
+                        if isinstance(passed, ast.Name):
+                            self.dict_items.pop(passed.id, None)
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in self.dict_items
+                and call.func.attr in {"update", "pop", "popitem", "setdefault", "clear"}
+            ):
+                self._follow_dict_method(call.func.value.id, call)
+
+    def _follow_dict_method(self, name: str, call: ast.Call) -> None:
+        """Follows ``update({...})``, ``update(key=value)``, and ``pop("key")``; any other change ends the tracking."""
+        key = call.args[0] if call.args else None
+        if (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "pop"
+            and isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and len(call.args) <= 2
+        ):
+            self.dict_items[name] = {item: value for item, value in self.dict_items[name].items() if item != key.value}
+            return
+        updated: dict[str, ast.expr] | None = None
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "update" and len(call.args) <= 1:
+            updated = _audited_dict_items(call.args[0], self.dict_items) if call.args else {}
+        if updated is None or not all(keyword.arg for keyword in call.keywords):
+            self.dict_items.pop(name, None)
+            return
+        updated.update({str(keyword.arg): keyword.value for keyword in call.keywords})
+        self.dict_items[name] = {**self.dict_items[name], **updated}
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None and isinstance(node.target, ast.Name):
+            self._follow_dict_items(ast.copy_location(ast.Assign(targets=[node.target], value=node.value), node))
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if isinstance(node.target, ast.Name):
+            self.dict_items.pop(node.target.id, None)
+        self.generic_visit(node)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        for target in node.targets:
+            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                key = target.slice
+                items = self.dict_items.get(target.value.id)
+                if items is not None and isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    self.dict_items[target.value.id] = {name: item for name, item in items.items() if name != key.value}
+                else:
+                    self.dict_items.pop(target.value.id, None)
+            elif isinstance(target, ast.Name):
+                self.dict_items.pop(target.id, None)
+        self.generic_visit(node)
+
     def visit_Expr(self, node: ast.Expr) -> None:
         value = node.value
+        self._follow_dict_calls(value)
         if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.RShift, ast.LShift)):
             self._audit_shift(value)
             return
@@ -465,17 +562,16 @@ class _SourceAuditor(ast.NodeVisitor):
         for keyword in call.keywords:
             if keyword.arg:
                 self.audit.settings.append(self._candidate("setting", "dag_setting", keyword.value, name=keyword.arg))
-                if keyword.arg == "default_args" and isinstance(keyword.value, ast.Dict):
-                    for key, value in zip(keyword.value.keys, keyword.value.values):
-                        if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                            self.audit.settings.append(
-                                self._candidate(
-                                    "setting",
-                                    "dag_default_arg",
-                                    value,
-                                    name=f"default_args.{key.value}",
-                                )
-                            )
+                if keyword.arg == "default_args":
+                    items = (
+                        self.dict_items.get(keyword.value.id)
+                        if isinstance(keyword.value, ast.Name)
+                        else _audited_dict_items(keyword.value, self.dict_items)
+                    )
+                    for key, value in (items or {}).items():
+                        self.audit.settings.append(
+                            self._candidate("setting", "dag_default_arg", value, name=f"default_args.{key}")
+                        )
 
 
 _TASK_DECORATORS = {
@@ -487,6 +583,27 @@ _TASK_DECORATORS = {
     "task.external_python",
 }
 _ALL_AIRFLOW_DECORATORS = {"dag", "task_group", *_TASK_DECORATORS}
+
+
+def _audited_dict_items(node: ast.expr, known: dict[str, dict[str, ast.expr]]) -> dict[str, ast.expr] | None:
+    """Returns the items of a string-keyed dict literal or ``dict(key=value)``, inlining known ``**`` spreads."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict" and not node.args:
+        if all(keyword.arg for keyword in node.keywords):
+            return {str(keyword.arg): keyword.value for keyword in node.keywords}
+        return None
+    if not isinstance(node, ast.Dict):
+        return None
+    items: dict[str, ast.expr] = {}
+    for key, value in zip(node.keys, node.values):
+        if key is None:
+            if not (isinstance(value, ast.Name) and value.id in known):
+                return None
+            items.update(known[value.id])
+        elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+            items[key.value] = value
+        else:
+            return None
+    return items
 
 
 def _aliases(module: ast.Module) -> dict[str, str]:

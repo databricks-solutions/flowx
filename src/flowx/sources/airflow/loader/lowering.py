@@ -15,8 +15,8 @@ from flowx.models.ir import (
     SqlActivity,
 )
 from flowx.sources.airflow import audit as source_audit
+from flowx.sources.airflow import imported_sources, templating
 from flowx.sources.airflow import operators as ops
-from flowx.sources.airflow import templating
 from flowx.sources.airflow.loader import logical_dates, reconcile
 from flowx.sources.airflow.loader.activity_templates import (
     _convert_activity_templates,
@@ -35,6 +35,7 @@ from flowx.sources.airflow.loader.graph import (
 from flowx.sources.airflow.loader.policy import (
     _job_email_notifications,
     _job_timeout_seconds,
+    job_max_concurrent_runs,
     template_search_directories,
 )
 from flowx.sources.airflow.loader.reconcile import _iter_placeholders, _semantic_finding
@@ -77,6 +78,7 @@ def _load_airflow_module(
     target_dag_variable: str | None = None,
     other_dag_variables: frozenset[str] = frozenset(),
     source_file: str | None = None,
+    source_root: Path | None = None,
 ) -> Pipeline:
     """Parses one isolated DAG declaration into a flowx Pipeline IR.
 
@@ -86,6 +88,8 @@ def _load_airflow_module(
             an inner job of per-node tasks) or ``"pydabs"`` (a deploy-time hook module).
         other_dag_variables: Variables of the module's other DAGs, so a task that names one with
             ``dag=`` stays out of this DAG.
+        source_root: The folder discover was pointed at. Imported project code is looked up from the DAG
+            folder up to this folder, and attached to the gaps that use it.
 
     Returns:
         A :class:`~flowx.models.ir.Pipeline`. Mapped operators become their IR
@@ -102,6 +106,8 @@ def _load_airflow_module(
     visitor.dag_file = dag_path.absolute()
     visitor.visit(module)
     functions = visitor.functions()
+    imports = imported_sources.import_table(module)
+    import_roots = imported_sources.search_roots(dag_path, source_root)
 
     # Prefix TaskGroup member keys with the group id (e.g. extract__run) so two tasks named
     # `run` in different groups don't collide.
@@ -174,6 +180,42 @@ def _load_airflow_module(
         elif schedule_gap is not None:
             visitor.unresolved_constructs.append((schedule_gap, schedule_node))
     has_schedule = schedule is not None
+    dag_id_disclosure: dict[str, Any] | None = None
+    if visitor.unresolved_dag_id is not None:
+        dag_id_disclosure = {
+            "code": "dag_id_not_static",
+            "expression": ast.unparse(visitor.unresolved_dag_id),
+            "job_name": visitor.dag_id or Path(dag_path).stem,
+            "rationale": "dag_id_named_after_the_dag_variable_or_file",
+            "message": (
+                "The DAG's dag_id is not a literal or a name built from __file__, so the job is named after "
+                "the DAG variable or file. Rename the job if Airflow resolves the dag_id differently."
+            ),
+        }
+    concurrency_disclosure: dict[str, Any] | None = None
+    if schedule is not None and "max_active_runs" not in visitor.dag_kwargs:
+        concurrency_disclosure = {
+            "code": "max_concurrent_runs_defaulted",
+            "rationale": "dag_declares_no_max_active_runs",
+            "message": (
+                "The DAG sets no max_active_runs, so Airflow allows the deployment's [core] "
+                "max_active_runs_per_dag runs at once (16 by default). The Databricks job keeps its default of one "
+                "run at a time, so a run that overlaps the next schedule delays it; set max_concurrent_runs to "
+                "allow overlap."
+            ),
+        }
+    timezone_disclosure: dict[str, Any] | None = None
+    if schedule is not None and "timezone_id" in schedule and visitor.timezone is None:
+        timezone_disclosure = {
+            "code": "schedule_timezone_defaulted",
+            "timezone_id": schedule["timezone_id"],
+            "rationale": "dag_declares_no_timezone",
+            "message": (
+                "The DAG sets no timezone or timezone-aware start_date, so Airflow schedules it in the "
+                "deployment's [core] default_timezone. flowx used UTC; set schedule.timezone_id if that "
+                "deployment uses another zone."
+            ),
+        }
 
     # Dummy/Empty operators are structural and can be removed after dependency rewiring.
     dropped = {var for var, (_, op, _) in visitor.operators.items() if op in ops.DUMMY_OPERATORS}
@@ -540,6 +582,9 @@ def _load_airflow_module(
         if isinstance(activity, PlaceholderActivity) and call_node is not None:
             raw_definition = dict(activity.raw_definition or {})
             raw_definition["bound_source"] = ast.unparse(call_node)
+            project_sources = imported_sources.imported_sources(call_node, imports, import_roots)
+            if project_sources:
+                raw_definition["imported_sources"] = project_sources
             activity.raw_definition = raw_definition
 
         if is_mapped:
@@ -750,7 +795,8 @@ def _load_airflow_module(
     parameters = [
         {"name": name, "default": _declared_param_default(name, visitor.dag_params)} for name in sorted(param_names)
     ] or None
-    tags = {"source": "airflow", "dag_id": visitor.dag_id or ""}
+    pipeline_name = visitor.dag_id or Path(dag_path).stem
+    tags = {"source": "airflow", "dag_id": pipeline_name}
     if visitor.catchup:
         # Airflow catchup=True has no DABs schedule setting; it maps to running a native Databricks
         # backfill, which overrides the reserved logical-date parameter per replayed window.
@@ -768,12 +814,13 @@ def _load_airflow_module(
     )
     expected_ir_edges = {(dependency.task_key, task.task_key) for task in tasks for dependency in task.depends_on or []}
     pipeline = Pipeline(
-        name=visitor.dag_id or Path(dag_path).stem,
+        name=pipeline_name,
         description=visitor.dag_description,
         tasks=tasks,
         parameters=parameters,
         schedule=schedule,
         timeout_seconds=_job_timeout_seconds(visitor),
+        max_concurrent_runs=job_max_concurrent_runs(visitor),
         email_notifications=_job_email_notifications(visitor),
         tags=tags,
     )
@@ -788,6 +835,14 @@ def _load_airflow_module(
         semantic_findings=semantic_findings,
         sensor_lift_proof=sensor_lift_proof,
         schedule_proof=schedule_proof,
+        timezone_disclosure=timezone_disclosure,
+        dag_id_disclosure=dag_id_disclosure,
+        concurrency_disclosure=concurrency_disclosure,
+        setting_sources={
+            name: records
+            for name, value in visitor.dag_kwargs.items()
+            if (records := imported_sources.imported_sources(value, imports, import_roots))
+        },
         argument_proofs=argument_proofs,
         collapse_proofs=dataproc_plan.proofs,
         logical_date_resolver=logical_date_resolver,

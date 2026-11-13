@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,7 @@ from flowx.sources.airflow.loader.ast_utils import (
     _sanitize_task_key,
     _span,
     _static_iteration_nodes,
+    _static_path,
 )
 from flowx.sources.airflow.loader.captures import EdgeCapture, TaskCapture, _TaskFlowTask
 from flowx.sources.airflow.loader.dispatch import (
@@ -82,6 +83,9 @@ class _DagVisitor(ast.NodeVisitor):
         self._resolved_callables: dict[str, tuple[str, ast.FunctionDef | None]] = {}
         self.helper_expansions: list[dict[str, Any]] = []
         self._constants: dict[str, Any] = {}
+        # Module dict literals by name, with the item assignments made to them, so a DAG's
+        # ``default_args=<name>`` reads the dict as it stood when the DAG was built.
+        self._dict_bindings: dict[str, ast.Dict] = {}
         self._task_bindings: dict[str, str | list[str]] = {}
         self._list_bindings: dict[str, list[str]] = {}
         self._capture_sequence = 0
@@ -102,6 +106,8 @@ class _DagVisitor(ast.NodeVisitor):
         self.calls: dict[str, ast.Call] = {}
         self.edges: list[tuple[str, str]] = []  # (upstream_var, downstream_var)
         self.dag_id: str | None = None
+        # The dag_id expression when the DAG gives one that cannot be evaluated statically.
+        self.unresolved_dag_id: ast.expr | None = None
         self.schedule_interval: str | None = None
         self.schedule_node: ast.expr | None = None
         self.timezone: str | None = None
@@ -212,7 +218,7 @@ class _DagVisitor(ast.NodeVisitor):
             }
             self._apply_dag_kwargs(dag_kwargs)
             if self.dag_id is None:
-                self.dag_id = ops.literal_str(dag_kwargs.get("dag_id")) or node.name
+                self.dag_id = self._static_dag_id(dag_kwargs.get("dag_id")) or node.name
         self._scope_stack.append(node)
         if is_dag_definition:
             self._dag_scope_depth += 1
@@ -233,6 +239,7 @@ class _DagVisitor(ast.NodeVisitor):
             self._claimed_statement_ids.add(id(node))
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        self._track_dict_assignment(node)
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call):
             var = node.targets[0].id
             if _construct_name(node.value.func, self._aliases) == "DAG":
@@ -256,6 +263,9 @@ class _DagVisitor(ast.NodeVisitor):
                     self._task_bindings[var] = internal_var
                     self._claimed_statement_ids.add(id(node))
                     return
+                if self._bind_file_path_constant(var, node.value):
+                    self._claimed_statement_ids.add(id(node))
+                    return
         elif len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             target = node.targets[0].id
             if isinstance(node.value, ast.Name):
@@ -265,6 +275,9 @@ class _DagVisitor(ast.NodeVisitor):
                     self._constants.pop(target, None)
                     self._claimed_statement_ids.add(id(node))
                     return
+            if self._bind_file_path_constant(target, node.value):
+                self._claimed_statement_ids.add(id(node))
+                return
             value = _safe_static_value(node.value, self._constants)
             if value is not _UNRESOLVED:
                 self._constants[target] = value
@@ -273,6 +286,140 @@ class _DagVisitor(ast.NodeVisitor):
                     self._list_bindings[target] = []
                 self._claimed_statement_ids.add(id(node))
                 return
+        self.generic_visit(node)
+
+    def _bind_file_path_constant(self, name: str, value: ast.expr) -> bool:
+        """Binds a name to a file name built from ``__file__``, such as a dag_id named after its file.
+
+        A full path is left unbound: it is where discover runs, not where the DAG ran, so it must not be
+        substituted into a task.
+        """
+        if not any(isinstance(node, ast.Name) and node.id == "__file__" for node in ast.walk(value)):
+            return False
+        path = _static_path(value, self.dag_file)
+        if path is None or "/" in path or "\\" in path:
+            return False
+        self._constants[name] = path
+        self._task_bindings.pop(name, None)
+        return True
+
+    def _track_dict_assignment(self, node: ast.Assign) -> None:
+        """Records a dict literal bound to a name, or an item assigned into one, for ``default_args``."""
+        self._follow_dict_calls(node.value)
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                dictionary = _dict_literal(node.value, self._dict_bindings) if len(node.targets) == 1 else None
+                if dictionary is None:
+                    self._dict_bindings.pop(target.id, None)
+                else:
+                    self._dict_bindings[target.id] = dictionary
+            elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                self._assign_dict_item(target.value.id, target.slice, node.value)
+            else:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name):
+                        self._dict_bindings.pop(name.id, None)
+        if isinstance(node.value, ast.Name) and node.value.id in self._dict_bindings:
+            # An alias shares the dict, so a later change through either name cannot be followed.
+            self._dict_bindings.pop(node.value.id, None)
+            self._constants.pop(node.value.id, None)
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self._dict_bindings.pop(target.id, None)
+
+    def _assign_dict_item(self, name: str, key: ast.expr, value: ast.expr) -> None:
+        dictionary = self._dict_bindings.get(name)
+        if dictionary is None:
+            self._constants.pop(name, None)
+            return
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            self._dict_bindings.pop(name, None)
+            self._constants.pop(name, None)
+            return
+        self._dict_bindings[name] = _with_dict_item(dictionary, key.value, value)
+        constant = self._constants.get(name)
+        static_value = _safe_static_value(value, self._constants)
+        if isinstance(constant, dict) and static_value is not _UNRESOLVED:
+            self._constants[name] = {**constant, key.value: static_value}
+        else:
+            self._constants.pop(name, None)
+
+    def _follow_dict_calls(self, node: ast.AST) -> None:
+        """Applies the changes an expression makes to tracked dicts, such as ``x.pop("k")``.
+
+        A tracked dict passed to a function may be changed there, so that ends its tracking, except as a
+        ``default_args=`` argument or to a builtin that only reads it.
+        """
+        for call in ast.walk(node):
+            if isinstance(call, ast.Call):
+                for name in _dict_arguments_passed(call, self._dict_bindings, self.taskflow_defs):
+                    self._dict_bindings.pop(name, None)
+                    self._constants.pop(name, None)
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in self._dict_bindings
+                and call.func.attr in _DICT_CHANGING_METHODS
+            ):
+                self._apply_dict_method(call.func.value.id, call)
+
+    def _apply_dict_method(self, name: str, call: ast.Call) -> None:
+        """Follows ``update({...})``, ``update(key=value)``, and ``pop("key")``; any other change ends the tracking."""
+        self._constants.pop(name, None)
+        key = call.args[0] if call.args else None
+        if (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "pop"
+            and isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and len(call.args) <= 2
+        ):
+            self._dict_bindings[name] = _without_dict_item(self._dict_bindings[name], key.value)
+            return
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "update" and len(call.args) <= 1:
+            items = _dict_literal(call.args[0], self._dict_bindings) if call.args else ast.Dict(keys=[], values=[])
+            if items is not None and all(keyword.arg for keyword in call.keywords):
+                dictionary = self._dict_bindings[name]
+                for key, item in zip(items.keys, items.values):
+                    assert isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    dictionary = _with_dict_item(dictionary, key.value, item)
+                for keyword in call.keywords:
+                    dictionary = _with_dict_item(dictionary, str(keyword.arg), keyword.value)
+                self._dict_bindings[name] = dictionary
+                return
+        self._dict_bindings.pop(name, None)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """Reads ``name: type = value`` like a plain assignment for dict tracking and constants."""
+        if node.value is not None and isinstance(node.target, ast.Name):
+            assignment = ast.copy_location(ast.Assign(targets=[node.target], value=node.value), node)
+            self._track_dict_assignment(assignment)
+            value = _safe_static_value(node.value, self._constants)
+            if value is _UNRESOLVED:
+                self._constants.pop(node.target.id, None)
+            else:
+                self._constants[node.target.id] = value
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if isinstance(node.target, ast.Name):
+            self._dict_bindings.pop(node.target.id, None)
+        self.generic_visit(node)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        for target in node.targets:
+            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                name = target.value.id
+                dictionary = self._dict_bindings.get(name)
+                key = target.slice
+                if dictionary is not None and isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    self._dict_bindings[name] = _without_dict_item(dictionary, key.value)
+                else:
+                    self._dict_bindings.pop(name, None)
+                self._constants.pop(name, None)
+            elif isinstance(target, ast.Name):
+                self._dict_bindings.pop(target.id, None)
         self.generic_visit(node)
 
     def _new_task_var(self, binding: str, node: ast.AST) -> str:
@@ -765,13 +912,26 @@ class _DagVisitor(ast.NodeVisitor):
 
     def _read_dag_kwargs(self, call: ast.Call) -> None:
         kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
-        positional_dag_id = ops.literal_str(call.args[0]) if call.args else None
-        self.dag_id = ops.literal_str(kwargs.get("dag_id")) or positional_dag_id
+        dag_id_node = kwargs.get("dag_id") or (_bind_constants(call.args[0], self._constants) if call.args else None)
+        self.dag_id = self._static_dag_id(dag_id_node)
         self._apply_dag_kwargs(kwargs)
         if self.airflow_generation == "1.10" and not {"schedule", "schedule_interval"} & kwargs.keys():
             self.unresolved_constructs.append(("ambiguous_airflow_1_10_default_schedule", call))
 
+    def _static_dag_id(self, node: ast.expr | None) -> str | None:
+        """Evaluates a dag_id given as a literal or built from ``__file__``, recording one it cannot evaluate."""
+        if node is None:
+            return None
+        file_name = _static_path(node, self.dag_file)
+        dag_id = ops.literal_str(node) or (file_name if file_name and "/" not in file_name else None)
+        if dag_id is None:
+            self.unresolved_dag_id = node
+        return dag_id
+
     def _apply_dag_kwargs(self, kwargs: dict[str, ast.expr]) -> None:
+        default_args = kwargs.get("default_args")
+        if isinstance(default_args, ast.Name) and default_args.id in self._dict_bindings:
+            kwargs = {**kwargs, "default_args": _bind_constants(self._dict_bindings[default_args.id], self._constants)}
         self.dag_kwargs.update(kwargs)
         self.captured_dag_settings.update(kwargs)
         self.schedule_node = kwargs.get("schedule_interval") or kwargs.get("schedule")
@@ -796,6 +956,8 @@ class _DagVisitor(ast.NodeVisitor):
             owner = self.default_args.get("owner")
             if owner is not None:
                 self.dag_owner = ops.literal_str(owner)
+            # Airflow takes the DAG timezone from a start_date in default_args when the DAG sets none.
+            self.timezone = self.timezone or _extract_timezone(self.default_args.get("start_date"))
         # params={...} supplies DAG parameter defaults; each value is a literal or a Param(default=...).
         params = kwargs.get("params")
         if isinstance(params, ast.Dict):
@@ -811,6 +973,7 @@ class _DagVisitor(ast.NodeVisitor):
         #   - shift chains: `a >> b >> c`, `a >> [b, c]`, `[a, b] >> c`, `a << b`
         #   - method calls: `a.set_upstream(b)` / `a.set_downstream([b, c])`
         value = node.value
+        self._follow_dict_calls(value)
         if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.RShift, ast.LShift)):
             before = len(self.edge_captures)
             self._collect_shift_chain(value)
@@ -1001,6 +1164,79 @@ class _DagVisitor(ast.NodeVisitor):
             self._add_edges(this_names, others, call)
         elif func.attr == "set_upstream":
             self._add_edges(others, this_names, call)
+
+
+# Dict methods that change the dict in place.
+_DICT_CHANGING_METHODS = frozenset({"update", "pop", "popitem", "setdefault", "clear"})
+# Airflow constructors, which store the arguments they are given.
+_CONSTRUCTOR_SUFFIXES = ("Operator", "Sensor", "DAG", "TaskGroup", "Group")
+# Builtins that read a dict passed to them without changing it.
+_DICT_READING_FUNCTIONS = frozenset({"dict", "len", "list", "print", "repr", "sorted", "str", "deepcopy", "dumps"})
+
+
+def _dict_arguments_passed(call: ast.Call, tracked: Collection[str], task_functions: Collection[str]) -> list[str]:
+    """Returns the tracked dicts a call passes to a function that may change them.
+
+    Building a DAG, operator, sensor, or task group, or invoking a TaskFlow task, only stores its arguments.
+    """
+    function = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", "")
+    if (
+        function in _DICT_READING_FUNCTIONS
+        or function in task_functions
+        or function.endswith(_CONSTRUCTOR_SUFFIXES)
+        or _is_task_construct(function)
+    ):
+        return []
+    values = [*call.args, *(keyword.value for keyword in call.keywords if keyword.arg != "default_args")]
+    passed = [value.value if isinstance(value, ast.Starred) else value for value in values]
+    return [value.id for value in passed if isinstance(value, ast.Name) and value.id in tracked]
+
+
+def _dict_literal(node: ast.expr, bindings: dict[str, ast.Dict]) -> ast.Dict | None:
+    """Returns a dict literal with string keys, or ``dict(key=value)``, as one flat dict.
+
+    A ``**name`` spread of a tracked dict is inlined. Returns None for anything else, including a spread
+    of an unknown value, since its keys cannot be known.
+    """
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict" and not node.args:
+        if not all(keyword.arg for keyword in node.keywords):
+            return None
+        return ast.Dict(
+            keys=[ast.Constant(value=keyword.arg) for keyword in node.keywords],
+            values=[keyword.value for keyword in node.keywords],
+        )
+    if not isinstance(node, ast.Dict):
+        return None
+    dictionary = ast.Dict(keys=[], values=[])
+    for key, value in zip(node.keys, node.values):
+        if key is None:
+            spread = bindings.get(value.id) if isinstance(value, ast.Name) else None
+            if spread is None:
+                return None
+            for spread_key, spread_value in zip(spread.keys, spread.values):
+                assert isinstance(spread_key, ast.Constant) and isinstance(spread_key.value, str)
+                dictionary = _with_dict_item(dictionary, spread_key.value, spread_value)
+        elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+            dictionary = _with_dict_item(dictionary, key.value, value)
+        else:
+            return None
+    return dictionary
+
+
+def _with_dict_item(dictionary: ast.Dict, key: str, value: ast.expr) -> ast.Dict:
+    """Returns a copy of a flat dict literal with *key* set to *value*."""
+    updated = _without_dict_item(dictionary, key)
+    return ast.Dict(keys=[*updated.keys, ast.Constant(value=key)], values=[*updated.values, value])
+
+
+def _without_dict_item(dictionary: ast.Dict, key: str) -> ast.Dict:
+    """Returns a copy of a flat dict literal without *key*."""
+    items = [
+        (existing, value)
+        for existing, value in zip(dictionary.keys, dictionary.values)
+        if not (isinstance(existing, ast.Constant) and existing.value == key)
+    ]
+    return ast.Dict(keys=[existing for existing, _ in items], values=[value for _, value in items])
 
 
 def _omits_dag(dag_argument: ast.expr | None) -> bool:
