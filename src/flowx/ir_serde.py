@@ -271,7 +271,7 @@ def activity_to_dict(task: Activity) -> dict[str, Any]:
         task_dict["libraries"] = task.libraries
     if task.parameter_approximations:
         task_dict["parameter_approximations"] = task.parameter_approximations
-    if task.motif_id:
+    if task.motif_id is not None:
         task_dict["motif_id"] = task.motif_id
     if task.data_reads:
         task_dict["data_reads"] = [data_asset_to_dict(asset) for asset in task.data_reads]
