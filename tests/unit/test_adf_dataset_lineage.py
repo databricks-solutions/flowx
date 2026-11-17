@@ -2732,10 +2732,11 @@ def test_a_literal_table_name_holding_a_dollar_brace_keeps_its_identity() -> Non
     )
 
 
-def test_an_empty_container_value_is_not_a_dynamic_container() -> None:
-    """A ``fileSystem`` of ``{}`` writes no container, so it gets no ``<P>@account`` store, as before."""
+@pytest.mark.parametrize("empty_container", [{}, {"type": "Expression", "value": ""}])
+def test_an_empty_container_value_is_not_a_dynamic_container(empty_container: dict) -> None:
+    """An empty ``fileSystem`` writes no container, so it gets no ``<P>@account`` store, as before."""
     definitions = _dynamic_container_definitions(ds_out="acctone")
-    definitions.datasets["ds_out"].properties["typeProperties"]["location"]["fileSystem"] = {}
+    definitions.datasets["ds_out"].properties["typeProperties"]["location"]["fileSystem"] = empty_container
     _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_out", produced=True), definitions)
 
     assert writes[0].signature == "FP[landing/orders]/FN[]"

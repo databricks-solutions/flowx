@@ -12,6 +12,7 @@ from flowx.sources.adf.dataset_identity import (
     backing_linked_service,
     dataset_props,
     effective_dataset_params,
+    expression_value,
     resolve_file_store,
     resolve_table_reference,
     resolve_table_store,
@@ -101,6 +102,6 @@ def resolve_dataset_store(
 def _writes_file_system(location: dict) -> bool:
     """``True`` when the location writes a file system, container or bucket at all, resolvable or not.
 
-    Empty values count as unwritten, as :func:`written_file_system` reads them.
+    An empty value counts as unwritten, bare or as the ``value`` of an Expression object.
     """
-    return any(location.get(key) for key in ("fileSystem", "container", "bucketName"))
+    return any(expression_value(location.get(key)) for key in ("fileSystem", "container", "bucketName"))
