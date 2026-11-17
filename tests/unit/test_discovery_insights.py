@@ -746,6 +746,32 @@ def test_mcp_enrich_inline_insights(monkeypatch, tmp_path: Path) -> None:
     assert "--insights-path" in captured["args"]
 
 
+def test_mcp_enrich_reads_inline_insights_sent_as_json_text(tmp_path: Path) -> None:
+    """Some MCP clients send an object argument as its JSON text; enrich records it as the object."""
+    server = pytest.importorskip("flowx.mcp.server")
+    path = _write_inventory(tmp_path, _inventory())
+
+    out = server._cmd_enrich({"output_dir": str(tmp_path), "insights": json.dumps(_valid_insights())})
+
+    assert out["ok"] is True, out["result"]
+    recorded = json.loads(path.read_text(encoding="utf-8"))["insights"]
+    assert recorded["overview"] == _valid_insights()["overview"]
+
+
+def test_mcp_enrich_reports_insights_text_that_is_not_json_as_a_violation(tmp_path: Path) -> None:
+    """Text that does not parse comes back as a violation the agent can fix, and the inventory is untouched."""
+    server = pytest.importorskip("flowx.mcp.server")
+    path = _write_inventory(tmp_path, _inventory())
+    original_bytes = path.read_bytes()
+
+    out = server._cmd_enrich({"output_dir": str(tmp_path), "insights": '{"overview": "unterminated'})
+
+    assert out["ok"] is False
+    assert len(out["result"]["violations"]) == 1
+    assert "insights is a string that is not valid JSON" in out["result"]["violations"][0]
+    assert path.read_bytes() == original_bytes
+
+
 def test_mcp_enrich_requires_exactly_one_source(tmp_path: Path) -> None:
     server = pytest.importorskip("flowx.mcp.server")
     both = server._cmd_enrich({"output_dir": str(tmp_path), "insights": {}, "insights_path": "x.json"})

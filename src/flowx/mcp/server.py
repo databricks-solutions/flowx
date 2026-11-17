@@ -369,6 +369,13 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
 
     if insights_path is not None:
         return _run(str(insights_path))
+    # Some MCP clients send an object argument as its JSON text; read it as the object it spells.
+    if isinstance(insights, str):
+        try:
+            insights = json.loads(insights)
+        except json.JSONDecodeError as error:
+            violation = f"insights is a string that is not valid JSON ({error}); send the insights as a JSON object"
+            return {"ok": False, "result": {"ok": False, "violations": [violation]}}
     with tempfile.TemporaryDirectory(prefix="flowx-insights-") as temporary:
         inline_path = Path(temporary) / "insights.json"
         inline_path.write_text(json.dumps(insights, indent=2), encoding="utf-8")
@@ -671,7 +678,8 @@ def build_server() -> FastMCP:
           metadata/source_graphs.json the same way package returns a bundle, for the agent to author against
           when it cannot read output_dir (ok is false, naming the file, when one is too large to return
           inline; pass one of the upload paths). apply: output_dir(req),
-          one of insights(inline object) | insights_path(req) — validate agent-authored discover insights
+          one of insights(inline object, or its JSON text) | insights_path(req) — validate agent-authored
+          discover insights
           against inventory.json, record them in agentic_insights.json, and rebuild inventory.json from
           source_graphs.json plus that document (one enrich per output_dir at a time absent a concurrent
           discover, idempotent). `ok`
