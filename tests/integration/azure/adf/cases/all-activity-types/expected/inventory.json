@@ -1,0 +1,178 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "dependencies": [],
+          "name": "copy",
+          "strategy": "deterministic",
+          "task_key": "copy",
+          "type": "Copy"
+        },
+        {
+          "dependencies": [],
+          "name": "notebook",
+          "strategy": "deterministic",
+          "task_key": "notebook",
+          "type": "DatabricksNotebook"
+        },
+        {
+          "dependencies": [],
+          "name": "spark-jar",
+          "strategy": "deterministic",
+          "task_key": "spark-jar",
+          "type": "DatabricksSparkJar"
+        },
+        {
+          "dependencies": [],
+          "name": "spark-python",
+          "strategy": "deterministic",
+          "task_key": "spark-python",
+          "type": "DatabricksSparkPython"
+        },
+        {
+          "dependencies": [],
+          "name": "databricks-job",
+          "strategy": "deterministic",
+          "task_key": "databricks-job",
+          "type": "DatabricksJob"
+        },
+        {
+          "dependencies": [],
+          "name": "lookup",
+          "strategy": "deterministic",
+          "task_key": "lookup",
+          "type": "Lookup"
+        },
+        {
+          "dependencies": [],
+          "name": "web",
+          "strategy": "deterministic",
+          "task_key": "web",
+          "type": "WebActivity"
+        },
+        {
+          "dependencies": [],
+          "name": "delete",
+          "strategy": "deterministic",
+          "task_key": "delete",
+          "type": "Delete"
+        },
+        {
+          "dependencies": [],
+          "name": "execute-child",
+          "strategy": "deterministic",
+          "task_key": "execute-child",
+          "type": "ExecutePipeline"
+        },
+        {
+          "dependencies": [],
+          "name": "wait",
+          "strategy": "deterministic",
+          "task_key": "wait",
+          "type": "Wait"
+        },
+        {
+          "dependencies": [],
+          "name": "set-variable",
+          "strategy": "deterministic",
+          "task_key": "set-variable",
+          "type": "SetVariable"
+        },
+        {
+          "dependencies": [],
+          "name": "append-variable",
+          "strategy": "deterministic",
+          "task_key": "append-variable",
+          "type": "AppendVariable"
+        },
+        {
+          "dependencies": [],
+          "name": "filter",
+          "strategy": "deterministic",
+          "task_key": "filter",
+          "type": "Filter"
+        },
+        {
+          "dependencies": [],
+          "name": "foreach",
+          "strategy": "deterministic",
+          "task_key": "foreach",
+          "type": "ForEach"
+        },
+        {
+          "dependencies": [],
+          "name": "foreach-wait",
+          "strategy": "deterministic",
+          "task_key": "foreach-wait",
+          "type": "Wait"
+        },
+        {
+          "dependencies": [],
+          "name": "if-condition",
+          "strategy": "deterministic",
+          "task_key": "if-condition",
+          "type": "IfCondition"
+        },
+        {
+          "dependencies": [],
+          "name": "true-wait",
+          "strategy": "deterministic",
+          "task_key": "true-wait",
+          "type": "Wait"
+        },
+        {
+          "dependencies": [],
+          "name": "false-wait",
+          "strategy": "deterministic",
+          "task_key": "false-wait",
+          "type": "Wait"
+        },
+        {
+          "dependencies": [],
+          "name": "switch",
+          "strategy": "deterministic",
+          "task_key": "switch",
+          "type": "Switch"
+        },
+        {
+          "dependencies": [],
+          "name": "case-wait",
+          "strategy": "deterministic",
+          "task_key": "case-wait",
+          "type": "Wait"
+        },
+        {
+          "dependencies": [],
+          "name": "default-wait",
+          "strategy": "deterministic",
+          "task_key": "default-wait",
+          "type": "Wait"
+        }
+      ],
+      "lineage": {
+        "control_edges": [
+          {
+            "resolved": false,
+            "source_workflow": "all-activity-types",
+            "target_workflow": "child-pipeline",
+            "via_task_key": "execute-child",
+            "wait_for_completion": true
+          }
+        ],
+        "data_edges": []
+      },
+      "name": "all-activity-types"
+    }
+  ],
+  "source": "adf",
+  "source_graphs_sha256": "aed42a087c7ae948c073612a63ff46ad9ab919d7eb1819339603b5f67c1c2b22",
+  "summary": {
+    "activity_count": 21,
+    "agentic_count": 0,
+    "coverage_pct": 100.0,
+    "deterministic_count": 21,
+    "pipeline_count": 1,
+    "unsupported_count": 0
+  }
+}

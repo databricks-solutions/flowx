@@ -30,6 +30,8 @@ This is the top-level orchestration skill. It runs the full migration pipeline:
 > `convert --merge-agentic --source airflow` is disabled. Airflow gaps follow their own
 > `flowx-resolve-airflow-gaps` path.
 
+0. **Extract** (ADF only, optional) — If the user has no export yet, get the factory's
+   definitions with `flowx-extract-metadata`
 1. **Discover** — Parse the source's definitions into a typed inventory
 2. **Enrich** *(default)* — Author the agentic `insights` layer over the inventory and merge it
    (`flowx-enrich`); skippable for a deterministic-only pass
@@ -206,10 +208,13 @@ At the start, ask for **only** these three:
 | Output directory | Single shared root for all flowx output (bundle + `metadata/`) | No | `./flowx_output` |
 | Flow | The full flow (enrich and a routing review), or a deterministic-only pass | No | full flow |
 
+If the user has no ADF export yet, run the `flowx-extract-metadata` skill first and use the
+`discover_path` it returns as the ADF source path.
+
 Example prompt:
 
 > To migrate your ADF pipelines, I need:
-> 1. Where are your ADF JSON exports? (UC volume path like `/Volumes/main/default/adf_export` or local directory)
+> 1. Where are your ADF JSON exports? (UC volume path like `/Volumes/main/default/adf_export` or local directory — or I can help you get them)
 > 2. Where should I write the output? (default: `./flowx_output/`)
 > 3. The full flow (enrich and a routing review), or a deterministic-only pass? (default: the full flow)
 

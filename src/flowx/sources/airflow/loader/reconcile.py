@@ -32,9 +32,10 @@ def _semantic_finding(
     message: str,
     task_key: str,
     capture_id: str,
+    severity: str = "gap",
     **details: Any,
 ) -> dict[str, Any]:
-    """Builds a stable gap finding for a captured task-level semantic limitation."""
+    """Builds a stable finding for a captured task-level semantic limitation (a gap unless stated)."""
     candidate = source_audit.AuditCandidate(
         kind="task_semantics",
         code=code,
@@ -48,7 +49,7 @@ def _semantic_finding(
     return source_audit.finding(
         source_file=source_file,
         code=code,
-        severity="gap",
+        severity=severity,
         message=message,
         candidate=candidate,
     )
@@ -74,6 +75,40 @@ def _iter_placeholders(tasks: list[Activity]) -> list[PlaceholderActivity]:
     return [placeholder for _, placeholder in _iter_placeholders_with_paths(tasks)]
 
 
+def _resolver_root_keys(tasks: list[Activity], consumer_keys: set[str]) -> set[str]:
+    """Returns the root tasks the date resolver must precede so every consumer runs after it.
+
+    Databricks applies a task's ``run_if`` to all of its dependencies, so an edge from the resolver
+    straight to a consumer would change that consumer's trigger rule. Roots have no dependencies and
+    therefore no ``run_if``; making the resolver their only upstream keeps every task's trigger rule
+    evaluated over exactly its captured upstreams, while each consumer still runs after the resolver.
+    """
+    by_key = {task.task_key: task for task in tasks}
+    top_level_of: dict[str, str] = {}
+    for task in tasks:
+        top_level_of[task.task_key] = task.task_key
+        pending = list(task.inner_activities) if isinstance(task, ForEachActivity) else []
+        while pending:
+            nested = pending.pop()
+            top_level_of[nested.task_key] = task.task_key
+            if isinstance(nested, ForEachActivity):
+                pending.extend(nested.inner_activities)
+
+    roots: set[str] = set()
+    visited: set[str] = set()
+    pending_keys = [top_level_of[key] for key in consumer_keys if key in top_level_of]
+    while pending_keys:
+        key = pending_keys.pop()
+        if key in visited or key not in by_key:
+            continue
+        visited.add(key)
+        upstreams = by_key[key].depends_on or []
+        if not upstreams:
+            roots.add(key)
+        pending_keys.extend(dependency.task_key for dependency in upstreams)
+    return roots
+
+
 def _reconcile_pipeline(
     pipeline: Pipeline,
     *,
@@ -89,6 +124,8 @@ def _reconcile_pipeline(
     argument_proofs: list[dict[str, Any]],
     expected_ir_edges: set[tuple[str, str]],
     placeholder_capture_ids: dict[int, str],
+    collapse_proofs: list[dict[str, Any]] | None = None,
+    logical_date_resolver: tuple[NotebookActivity, dict[str, Any]] | None = None,
 ) -> Pipeline:
     """Reconciles an independent source audit with captured graph and emitted IR."""
     findings: list[dict[str, Any]] = list(semantic_findings)
@@ -114,6 +151,7 @@ def _reconcile_pipeline(
         transformations.append(sensor_lift_proof)
     if schedule_proof is not None:
         transformations.append(schedule_proof)
+    transformations.extend(collapse_proofs or [])
     captured_task_count = len(visitor.operators) + len(visitor.taskflow_tasks) + len(visitor.taskgroup_calls)
 
     unresolved = list(audit.unresolved)
@@ -212,6 +250,38 @@ def _reconcile_pipeline(
                 code="unclaimed_dag_task",
                 severity="failed",
                 message="A task-producing call in the DAG body was not claimed by the capture pass.",
+                candidate=candidate,
+            )
+        )
+    # A task without a DAG of its own is only in the DAG because of an edge, so an adopted capture
+    # with no captured edge means the capture pass missed the wiring that adds it.
+    wired_capture_ids = {edge.upstream_id for edge in visitor.edge_captures} | {
+        edge.downstream_id for edge in visitor.edge_captures
+    }
+    unwired_adoption_keys: set[str] = set()
+    for capture_id in sorted(visitor.adopted_capture_ids - wired_capture_ids):
+        adopted_node = visitor.capture_source_nodes.get(capture_id)
+        task_key = var_to_task_key.get(capture_id, capture_id)
+        unwired_adoption_keys.add(task_key)
+        candidate = source_audit.AuditCandidate(
+            kind="task",
+            code="adopted_task_wiring_not_captured",
+            line=getattr(adopted_node, "lineno", 0),
+            column=getattr(adopted_node, "col_offset", 0),
+            occurrence=1,
+            end_line=getattr(adopted_node, "end_lineno", 0),
+            end_column=getattr(adopted_node, "end_col_offset", 0),
+            details={"capture_id": capture_id, "task_key": task_key},
+        )
+        findings.append(
+            source_audit.finding(
+                source_file=source_file,
+                code="adopted_task_wiring_not_captured",
+                severity="failed",
+                message=(
+                    "A task built without dag= joins this DAG through wiring, but the capture pass recorded "
+                    "none of that wiring, so its dependencies would be lost."
+                ),
                 candidate=candidate,
             )
         )
@@ -428,6 +498,11 @@ def _reconcile_pipeline(
                 ),
                 "setting": str(candidate.details.get("name")),
                 **({"target": disposition["target"]} if disposition.get("target") else {}),
+                **(
+                    {"unavailable_entries": disposition["unavailable_entries"]}
+                    if disposition.get("unavailable_entries")
+                    else {}
+                ),
                 "rationale": disposition["rationale"],
             }
         )
@@ -599,6 +674,19 @@ def _reconcile_pipeline(
             }
         )
 
+    if logical_date_resolver is not None:
+        # The synthetic resolver and its edges are added after the captured graph is reconciled; the
+        # ledger entry names every edge it introduces.
+        resolver, resolver_proof = logical_date_resolver
+        attached_roots = _resolver_root_keys(pipeline.tasks, set(resolver_proof["consumer_task_keys"]))
+        for task in pipeline.tasks:
+            if task.task_key in attached_roots:
+                task.depends_on = [Dependency(task_key=resolver.task_key)]
+        pipeline.tasks.insert(0, resolver)
+        resolver_proof["attached_root_task_keys"] = sorted(attached_roots)
+        resolver_proof["emitted_edges"] = [[resolver.task_key, root] for root in sorted(attached_roots)]
+        transformations.append(resolver_proof)
+
     blocking_gaps = [*unsupported_settings, *unresolved]
     placeholder_entries = [
         (
@@ -683,7 +771,7 @@ def _reconcile_pipeline(
     failed_findings = [item for item in findings if item["severity"] == "failed"]
     gap_findings = [item for item in findings if item["severity"] == "gap"]
     status = "failed" if failed_findings else "verified_with_gaps" if gap_findings else "verified"
-    failed_capture_keys = argument_failure_keys | set(missing_task_keys)
+    failed_capture_keys = argument_failure_keys | set(missing_task_keys) | unwired_adoption_keys
     agentic_captured_count = len(placeholders)
     deterministic_count = captured_task_count - len(failed_capture_keys) - agentic_captured_count
     agentic_count = agentic_captured_count + len(unresolved)

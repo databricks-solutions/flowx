@@ -43,6 +43,10 @@ SCHEMA_VERSION = "1"
 # ranked shortlist keeps the recommendation legible; an unbounded list is noise.
 MAX_RECOMMENDED_PATTERNS = 4
 
+# Cap on the characters in any one authored text value. One oversized insight would otherwise be
+# accepted and only fail later, as an inventory too large for enrich prepare to return inline.
+MAX_TEXT_FIELD_CHARS = 20_000
+
 # The confidence levels an ``inferred`` edge may carry.
 CONFIDENCE_LEVELS: tuple[str, ...] = ("high", "medium", "low")
 

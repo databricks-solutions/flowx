@@ -353,15 +353,11 @@ def _nodes_for_scope(activities: list[AdfActivity], definitions: AdfDefinitions)
     ``resolved=False`` in the inventory. Package has its own dependency checks, but they do not
     cover every case, so an edge flagged here may not be refused later.
     """
-    nodes = [_activity_to_node(activity, definitions) for activity in activities]
-    sibling_names = {node.task_key for node in nodes}
-    for node in nodes:
-        for dependency in node.dependencies:
-            dependency.resolved = dependency.upstream in sibling_names
-    return nodes
+    sibling_names = frozenset(activity.name for activity in activities)
+    return [_activity_to_node(activity, definitions, sibling_names) for activity in activities]
 
 
-def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> SourceNode:
+def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions, sibling_names: frozenset[str]) -> SourceNode:
     """Map one ADF activity to a discovery node (1:1, source-faithful).
 
     Fields are passed explicitly to each node class (rather than unpacking a
@@ -369,12 +365,17 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
     are resolved from the activity's dataset references, and an ``ExecutePipeline``
     records the child pipeline it invokes under the neutral control-edge marker;
     both apply to nested nodes too because the branch children below route back
-    through this function.
+    through this function. Each dependency is resolved when *sibling_names* (the
+    activities in the same pipeline or container branch) holds its upstream.
     """
     strategy = classify_activity(activity.type)
     concept = _CONCEPT_BY_TYPE.get(activity.type, CONCEPT_GAP)
     dependencies = [
-        SourceDependency(upstream=dependency.activity, conditions=list(dependency.dependency_conditions))
+        SourceDependency(
+            upstream=dependency.activity,
+            conditions=list(dependency.dependency_conditions),
+            resolved=dependency.activity in sibling_names,
+        )
         for dependency in (activity.depends_on or [])
     ]
     policy = _policy_to_spec(activity)

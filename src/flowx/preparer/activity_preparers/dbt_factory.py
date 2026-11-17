@@ -24,7 +24,7 @@ from flowx.preparer.workflow_preparer import (
     PreparedWorkflow,
     build_common_task_fields,
 )
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 if TYPE_CHECKING:
     from flowx.models.ir import DbtFactoryActivity
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 _RUNNER_RELATIVE_PATH = "notebooks/run_dbt_command.py"
 _DBT_PROJECT_RELATIVE_PATH = "dbt_project"
 _DBT_PROFILES_RELATIVE_PATH = "dbt_profiles"
-_DBT_FACTORY_VERSION = "0.3.3"
+_DBT_FACTORY_VERSION = "0.3.5"
 _EXCLUDED_DBT_PATH_PARTS = {".git", ".venv", "__pycache__", "logs", "target"}
 
 
@@ -215,6 +215,7 @@ def _pydabs_runner_notebook_source() -> str:
         "import shutil\n"
         "import tempfile\n"
         "from urllib.parse import urlparse\n\n"
+        "from databricks.sdk import WorkspaceClient\n"
         "from dbt.cli.main import dbtRunner\n\n"
         "dbutils.widgets.text('dbt_commands', '')\n"
         "dbutils.widgets.text('project_directory', '')\n"
@@ -225,12 +226,13 @@ def _pydabs_runner_notebook_source() -> str:
         "if not dbt_commands:\n"
         "    raise ValueError('dbt_commands parameter is required')\n"
         "commands = json.loads(dbt_commands)\n\n"
-        "context = dbutils.notebook.entry_point.getDbutils().notebook().getContext()\n"
-        "os.environ['DBT_ACCESS_TOKEN'] = context.apiToken().get()\n"
-        "api_url = context.apiUrl().get()\n"
-        "parsed_url = urlparse(api_url)\n"
-        "os.environ['DBT_HOST'] = parsed_url.netloc or parsed_url.path.strip('/')\n\n"
+        "workspace_client = WorkspaceClient()\n"
+        "os.environ['DBT_ACCESS_TOKEN'] = workspace_client.config.authenticate()['Authorization']"
+        ".removeprefix('Bearer ').strip()\n"
+        "_host = urlparse(workspace_client.config.host)\n"
+        "os.environ['DBT_HOST'] = _host.netloc or _host.path.strip('/')\n\n"
         "if project_directory:\n"
+        "    context = dbutils.notebook.entry_point.getDbutils().notebook().getContext()\n"
         "    notebook_dir = os.path.dirname('/Workspace' + context.notebookPath().get())\n"
         "    project_path = (\n"
         "        project_directory\n"
@@ -325,7 +327,7 @@ def _prepare_static(activity: DbtFactoryActivity, nodes: list[dict[str, Any]]) -
         setup_tasks=[],
     )
 
-    inner_job_key = normalize_task_key(inner_job_name)
+    inner_job_key = to_lowercase_key(inner_job_name)
     parent_task["run_job_task"] = {"job_id": f"${{resources.jobs.{inner_job_key}.id}}"}
 
     return PreparedActivity(task=parent_task, inner_workflows=[inner_workflow])
@@ -368,16 +370,16 @@ def _pydabs_hook_source(activity: DbtFactoryActivity) -> str:
         '"""PyDABs hook: build the dbt job from the live manifest at deploy time."""\n\n'
         "from databricks.bundles.core import Bundle, Resources\n"
         "from databricks.bundles.jobs import Job\n"
-        "from databricks_dbt_factory.DbtFactory import DbtFactory\n"
-        "from databricks_dbt_factory.DbtTask import DbtTaskOptions, TaskType\n"
-        "from databricks_dbt_factory.TaskFactory import (\n"
+        "from databricks_dbt_factory.dbt_factory import DbtFactory\n"
+        "from databricks_dbt_factory.dbt_task import DbtTaskOptions, TaskType\n"
+        "from databricks_dbt_factory.task_factory import (\n"
         "    DbtDependencyResolver,\n"
         "    ModelTaskFactory,\n"
         "    SeedTaskFactory,\n"
         "    SnapshotTaskFactory,\n"
         "    TestTaskFactory,\n"
         ")\n"
-        "from databricks_dbt_factory.Utils import read_dbt_manifest\n\n"
+        "from databricks_dbt_factory.utils import read_dbt_manifest\n\n"
         f"MANIFEST_PATH = {'src/dbt_project/target/manifest.json'!r}\n"
         f"PROJECT_DIR = {'../dbt_project'!r}\n"
         f"PROFILES_DIR = {'../dbt_profiles'!r}\n"
@@ -398,6 +400,9 @@ def _pydabs_hook_source(activity: DbtFactoryActivity) -> str:
         "        'snapshot': SnapshotTaskFactory,\n"
         "        'test': TestTaskFactory,\n"
         "    }\n"
+        "    unsupported = sorted(set(RESOURCE_TYPES) - set(factory_classes))\n"
+        "    if unsupported:\n"
+        "        raise ValueError(f'dbt-factory has no task factory for resource types: {unsupported}')\n"
         "    return {\n"
         "        name: factory_classes[name](resolver, options, DBT_OPTIONS[name])\n"
         "        for name in RESOURCE_TYPES\n"
@@ -415,8 +420,8 @@ def _pydabs_hook_source(activity: DbtFactoryActivity) -> str:
         "            'dependencies': ['dbt-databricks==1.12.2', 'dbt-core==1.11.12'],\n"
         "        },\n"
         "    }\n"
-        f"    resources.add_job({normalize_task_key(activity.task_key + '_dbt')!r}, Job(\n"
-        f"        name={normalize_task_key(activity.task_key + '_dbt')!r}, tasks=tasks, environments=[environment]\n"
+        f"    resources.add_job({to_lowercase_key(activity.task_key + '_dbt')!r}, Job(\n"
+        f"        name={to_lowercase_key(activity.task_key + '_dbt')!r}, tasks=tasks, environments=[environment]\n"
         "    ))\n"
         "    return resources\n"
     )
@@ -430,7 +435,7 @@ def _prepare_pydabs(activity: DbtFactoryActivity) -> PreparedActivity:
     ``python.resources`` entry pointing at the hook.
     """
     parent_task = build_common_task_fields(activity)
-    inner_job_key = normalize_task_key(f"{activity.task_key}_dbt")
+    inner_job_key = to_lowercase_key(f"{activity.task_key}_dbt")
     parent_task["run_job_task"] = {"job_id": f"${{resources.jobs.{inner_job_key}.id}}"}
 
     hook_relative_path = f"resources/{activity.task_key}_dbt_job.py"

@@ -22,6 +22,8 @@ _ARM_CALL_RE = re.compile(
     r"^\[\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\((?P<arguments>.*)\]$", re.DOTALL
 )
 _NESTED_CALL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*\(")
+# A whole SQL Server bracketed name, where "]]" inside stands for one "]".
+_BRACKETED_NAME_RE = re.compile(r"\[((?:[^\]]|\]\])*)\]")
 
 
 # ARM template functions (compared lower-cased, as ARM does). A bracketed call is an unevaluated ARM
@@ -85,7 +87,7 @@ def resolve_dataset_identity(
     if table:
         if not all(_is_physical(part) for part in (schema, table) if part):
             return None
-        qualified_table = f"{schema}.{table}" if schema else table
+        qualified_table = _canonical_table_name(f"{schema}.{table}" if schema else table)
         store = resolve_table_store(properties, definitions)
         return f"{store}/{qualified_table}" if store else None
     return _resolve_dataset_path(
@@ -94,6 +96,60 @@ def resolve_dataset_identity(
         effective_dataset_params(dataset_ref, properties),
         resolution_context,
     )
+
+
+def _canonical_table_name(qualified_name: str) -> str:
+    """*qualified_name* with SQL Server bracket quoting taken off wherever it changes nothing.
+
+    ``[dbo].[Orders]`` (a legacy ``tableName``) and ``schema=dbo, table=Orders`` name
+    one table, so both read ``dbo.Orders``. A bracketed part keeps its brackets only
+    when it needs them to stay one part (it holds a dot, a bracket, a double quote,
+    or edge spaces), written with ``]]`` for each ``]`` inside, so ``[a.b].c`` never
+    meets ``a.b.c``. Spaces around each dot are dropped, as SQL ignores them. Case
+    is left alone, and so is a double-quoted part, because in
+    PostgreSQL ``"Orders"`` and ``Orders`` are different tables. A name whose
+    brackets or quotes do not close is kept as written.
+    """
+    parts: list[str] = []
+    part_start = 0
+    closing_quote = ""
+    index = 0
+    while index < len(qualified_name):
+        character = qualified_name[index]
+        if closing_quote:
+            if character == closing_quote and qualified_name[index + 1 : index + 2] == closing_quote:
+                index += 1
+            elif character == closing_quote:
+                closing_quote = ""
+        elif character == "[":
+            closing_quote = "]"
+        elif character == '"':
+            closing_quote = '"'
+        elif character == ".":
+            parts.append(qualified_name[part_start:index])
+            part_start = index + 1
+        index += 1
+    if closing_quote:
+        return qualified_name
+    parts.append(qualified_name[part_start:])
+    return ".".join(_canonical_table_name_part(part) for part in parts)
+
+
+def _canonical_table_name_part(part: str) -> str:
+    """One dotted part of a table name, trimmed, with its brackets taken off when they change nothing.
+
+    SQL ignores spaces around the dot, so ``dbo .Orders`` reads ``dbo.Orders``. Only a
+    part that is exactly one bracketed name, its ``[`` closed by its last ``]``, loses
+    its brackets; anything else, such as ``[a]b]``, keeps them.
+    """
+    stripped = part.strip()
+    bracketed = _BRACKETED_NAME_RE.fullmatch(stripped)
+    if bracketed is None:
+        return stripped
+    name = bracketed.group(1).replace("]]", "]")
+    if not name or name != name.strip() or any(character in name for character in '.[]"'):
+        return "[" + name.replace("]", "]]") + "]"
+    return name
 
 
 def dataset_props(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> dict[str, Any] | None:
@@ -108,8 +164,14 @@ def _resolve_param_value(
     raw: Any,
     dataset_params: dict[str, Any],
     context: TranslationContext,
+    visited_parameters: frozenset[str] = frozenset(),
 ) -> str:
-    """Resolve a single ADF location / table field to a string."""
+    """Resolve a single ADF location / table field to a string.
+
+    A ``dataset().<name>`` that comes back round to itself through the defaults
+    (``a`` is ``@dataset().b`` and ``b`` is ``@dataset().a``) is unresolved, so it gives
+    ``""`` instead of recursing until Python gives up.
+    """
     if raw is None:
         return ""
     if isinstance(raw, dict) and raw.get("type") == "Expression":
@@ -124,7 +186,11 @@ def _resolve_param_value(
     match = DATASET_PARAMETER_RE.fullmatch(stripped[1:]) if stripped.startswith("@") else None
     if match:
         parameter_name = match.group(1)
-        return _resolve_param_value(dataset_params.get(parameter_name, ""), dataset_params, context)
+        if parameter_name in visited_parameters:
+            return ""
+        return _resolve_param_value(
+            dataset_params.get(parameter_name, ""), dataset_params, context, visited_parameters | {parameter_name}
+        )
 
     if "@{" in text:
         return resolve_interpolated_string(text, context)
@@ -297,14 +363,21 @@ def unparameterised_linked_service_name(dataset_props: dict[str, Any], definitio
     parameters, on its reference or in its own definition, may point somewhere else
     for each binding. A name that is not plain, such as an unevaluated
     ``[parameters('ls')]``, gives ``None`` too.
+
+    ADF names are not case-sensitive, so the name is spelled as the loaded linked
+    service spells it, whatever case the reference used; ``ls_sql`` and ``LS_SQL``
+    name one store. A linked service that is not in the export keeps the reference's
+    spelling.
     """
     linked_service_name, reference_parameters = _linked_service_reference(dataset_props)
     if not linked_service_name or reference_parameters:
         return None
     linked_service = definitions.get_linked_service(linked_service_name)
-    if linked_service is not None and linked_service.properties.get("parameters"):
+    if linked_service is None:
+        return linked_service_name
+    if linked_service.properties.get("parameters"):
         return None
-    return linked_service_name
+    return linked_service.name
 
 
 def resolve_file_store(
@@ -393,8 +466,10 @@ def _resolve_dataset_path(
 def _resolve_storage_account(linked_service: Any) -> str | None:
     """Pull a storage account name out of a linked service, if present.
 
-    Each of ``url``, ``sasUri`` and the connection string is read from its ``value``
-    when wrapped in an Expression or SecureString object (or an untyped one). The
+    The account is read from ``url``, then ``serviceEndpoint`` (a Blob linked service
+    that signs in with a service principal or managed identity), then ``sasUri``, then
+    the connection string. Each is read from its ``value`` when wrapped in an
+    Expression or SecureString object (or an untyped one). The
     whole value must be physical before the account is cut out of it: cutting first
     would drop the closing ``]`` of an ARM expression or the tail of an ``@{...}``
     and leave a fragment that looks literal. A storage account name is only letters
@@ -405,14 +480,15 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
         return None
     type_props = linked_service.properties.get("typeProperties") or linked_service.properties
 
-    url = expression_value(type_props.get("url")) or ""
-    if isinstance(url, str) and url:
-        if not _is_physical(url):
-            return None
-        host = url.replace("https://", "").split("/", 1)[0]
-        host_no_port = host.split(":", 1)[0]
-        if "." in host_no_port:
-            return _storage_account_name(host_no_port.split(".", 1)[0])
+    for endpoint_key in ("url", "serviceEndpoint"):
+        url = expression_value(type_props.get(endpoint_key)) or ""
+        if isinstance(url, str) and url:
+            if not _is_physical(url):
+                return None
+            host = url.replace("https://", "").split("/", 1)[0]
+            host_no_port = host.split(":", 1)[0]
+            if "." in host_no_port:
+                return _storage_account_name(host_no_port.split(".", 1)[0])
 
     sas_uri = expression_value(type_props.get("sasUri")) or ""
     if isinstance(sas_uri, str) and sas_uri:
@@ -437,23 +513,29 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
 
 
 def _storage_account_name(text: str) -> str | None:
-    """*text* when it can be a storage account name (letters and digits only), else ``None``."""
-    return text if _STORAGE_ACCOUNT_RE.fullmatch(text) else None
+    """*text*, lower-cased, when it can be a storage account name (letters and digits only), else ``None``.
+
+    Azure account names are lower case and host names ignore case, so ``ACCTONE``
+    and ``acctone`` are one account; lower-casing loses nothing.
+    """
+    return text.lower() if _STORAGE_ACCOUNT_RE.fullmatch(text) else None
 
 
 def _is_physical(value: str) -> bool:
     """Return ``True`` only when *value* is a literal (physical) identifier.
 
     A value is NOT physical when it still contains an unresolved marker -- a
-    DAB-ref placeholder (``{{`` ... ``}}``), a leftover ADF interpolation
-    fragment (``@{``), a bare ADF expression (starts with ``@``), or an ARM
+    DAB-ref placeholder (``{{`` ... ``}}``), a bundle variable (``${var.x}``, which
+    a global parameter becomes under ``bundle_variable`` resolution and is only known
+    at deploy time), a leftover ADF interpolation fragment (``@{``), a bare ADF
+    expression (starts with ``@``), or an ARM
     template expression the export left unevaluated (``[parameters('x')]``,
     ``[concat(...)]``). An ARM expression always opens with a function call, so
     bracket-quoted SQL names such as ``[dbo].[Orders]`` stay physical, and so
     does ARM's ``[[`` escape for a literal that starts with ``[``.
     """
     stripped = value.strip()
-    if "{{" in value or "@{" in value or stripped.startswith("@"):
+    if "{{" in value or "${var." in value or "@{" in value or stripped.startswith("@"):
         return False
     return not is_arm_expression(stripped)
 

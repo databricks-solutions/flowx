@@ -1,9 +1,9 @@
 """Unified CLI entry point that the flowx skills and MCP tools drive via subprocesses.
 
-Exposes stateless subcommands -- the ``discover``/``convert``/``package`` phase runners plus
+Exposes stateless subcommands -- the ``extract``/``discover``/``convert``/``package`` phase runners plus
 ``inspect``, ``modify``, ``resolve-agentic``, ``enrich``, ``route``, ``fill-agentic``, ``inputs``,
-``materialize-lookup``, ``workspace-paths``, ``record-results``, and ``install-dashboard`` -- so each
-agent turn runs as an independent process holding no session state across user prompts.
+``materialize-lookup``, ``workspace-paths``, ``record-results``, ``install-dashboard``, and ``deploy`` -- so
+each agent turn runs as an independent process holding no session state across user prompts.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         Exit code (0 on success, non-zero on usage or runtime errors).
     """
     raw_args = list(sys.argv[1:]) if argv is None else list(argv)
-    if raw_args and raw_args[0] in ("discover", "convert", "package"):
+    if raw_args and raw_args[0] in ("extract", "discover", "convert", "package", "profile"):
         # Phase runners are pure pass-through to the underlying phase CLI;
         # bypass argparse so forwarded --flags aren't misparsed at this level.
         return _run_phase(raw_args[0], raw_args[1:])
@@ -95,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_record_results(args)
     if args.command == "install-dashboard":
         return _run_install_dashboard(args)
+    if args.command == "deploy":
+        return _run_deploy(args)
     parser.print_help(sys.stderr)
     return 2
 
@@ -320,6 +322,23 @@ def _run_fill_agentic(args: argparse.Namespace) -> int:
         return 1
     _emit_json(result, args.out)
     return 0 if result.get("ok") else 1
+
+
+def _run_deploy(args: argparse.Namespace) -> int:
+    """Implements ``deploy``: deploy per-pipeline bundles in dependency order.
+
+    Local-CLI only — shells out to ``databricks bundle deploy`` / ``summary``, which are not
+    available on Databricks serverless / Genie Code. Returns the deployer's exit code.
+    """
+    from flowx.bundler.deployer import run as run_deploy
+
+    return run_deploy(
+        args.output_dir,
+        target=args.target,
+        profile=args.profile,
+        dry_run=args.dry_run,
+        allow_missing_deps=args.allow_missing_deps,
+    )
 
 
 def _run_record_results(args: argparse.Namespace) -> int:
@@ -798,11 +817,40 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Workspace folder for the dashboard (defaults to the current user's home).",
     )
 
-    # Unified phase runners: `adapter <phase> --source <name> -- <flags>` routes discover/convert
-    # to the named source's phase module. --source is required for those phases (no default);
-    # package is source-independent. --source-path (and each source's own alias, e.g.
+    deploy = subparsers.add_parser(
+        "deploy",
+        help="Deploy per-pipeline bundles in dependency order, wiring cross-bundle job ids (local CLI).",
+    )
+    deploy.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("./flowx_output"),
+        help="Directory holding the per-pipeline bundle subdirectories.",
+    )
+    deploy.add_argument("--target", type=str, default="dev", help="Bundle target to deploy (default: dev).")
+    deploy.add_argument("--profile", type=str, default=None, help="Databricks CLI profile for deploy and summary.")
+    deploy.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the dependency order and deploy commands without deploying.",
+    )
+    deploy.add_argument(
+        "--allow-missing-deps",
+        action="store_true",
+        help=(
+            "Order and attempt to deploy even when a bundle references a callee absent from the output "
+            "dir. The missing ${var.<callee>} is declared without a default, so that bundle's deploy "
+            "still fails until you supply the value manually (edit its databricks.yml default or "
+            "`databricks bundle deploy --var <callee>=<job_id>` per SETUP.md); this flag only unblocks "
+            "the ordering, not the deploy."
+        ),
+    )
+
+    # Unified phase runners: `adapter <phase> --source <name> -- <flags>` routes extract/discover/
+    # convert/profile to the named source's phase module. --source is required for those phases (no
+    # default); package is source-independent. --source-path (and each source's own alias, e.g.
     # --adf-source-path) normalise to --source-dir.
-    for _phase in ("discover", "convert", "package"):
+    for _phase in ("extract", "discover", "convert", "package", "profile"):
         _runner = subparsers.add_parser(
             _phase,
             help=f"Run the {_phase} phase (routes to the --source's phase module; forwards remaining flags).",
@@ -854,18 +902,19 @@ def _run_phase(phase: str, forward: list[str]) -> int:
 
     ``python -m flowx.adapter discover --source airflow --source-path X --output-dir Y`` runs
     ``flowx.sources.airflow.discover.main(["--source-dir", "X", "--output-dir", "Y"])`` in this same
-    interpreter -- no second ``python -m`` spawn.  ``--source`` is required for discover/convert
+    interpreter -- no second ``python -m`` spawn.  ``--source`` is required for extract/discover/convert/profile
     (no default: the user must choose a source); ``package`` is source-independent and always routes
     to the shared bundler.  The generic ``--source-path`` and each source's own alias normalise to
     the phase CLI's ``--source-dir``.
 
     Args:
-        phase: One of ``"discover"`` / ``"convert"`` / ``"package"``.
+        phase: One of ``"extract"`` / ``"discover"`` / ``"convert"`` / ``"package"`` / ``"profile"``.
         forward: Tokens after the phase name (flags for the phase CLI).
 
     Returns:
-        The phase's exit code (0 on success), or 2 when ``--source`` is missing
-        or names an unknown source.
+        The phase's exit code (0 on success), or 2 when ``--source`` is missing, names an
+        unknown source, or names a source that can't be extracted live (``extract``) or has no
+        profiler (``profile``).
     """
     import importlib
 
@@ -886,8 +935,21 @@ def _run_phase(phase: str, forward: list[str]) -> int:
         except KeyError as error:
             print(str(error), file=sys.stderr)
             return 2
-        module_path = source.discover_module if phase == "discover" else source.convert_module
-        aliases = {_SOURCE_PATH_FLAG: "--source-dir", source.source_path_flag: "--source-dir"}
+        if phase == "extract":
+            if source.extract_module is None:
+                print(f"live extraction is not supported for the {source_name} source", file=sys.stderr)
+                return 2
+            module_path = source.extract_module
+            aliases = {}
+        elif phase == "profile":
+            if source.profile_module is None:
+                print(f"profiling is not supported for the {source_name} source", file=sys.stderr)
+                return 2
+            module_path = source.profile_module
+            aliases = {_SOURCE_PATH_FLAG: "--source-dir", source.source_path_flag: "--source-dir"}
+        else:
+            module_path = source.discover_module if phase == "discover" else source.convert_module
+            aliases = {_SOURCE_PATH_FLAG: "--source-dir", source.source_path_flag: "--source-dir"}
 
     module = importlib.import_module(module_path)
 
@@ -1026,8 +1088,14 @@ def _run_modify(args: argparse.Namespace) -> int:
         print(f"Invalid --lookup-csv: {error}", file=sys.stderr)
         return 2
 
+    from flowx.motifs.collapsed_lookup_refs import repair_collapsed_lookup_references
+
     stamped_pipelines = [
-        _stamp_lookup_values_into_metadata_driven_motifs(apply_configuration(pipeline, configuration), lookup_values)
+        repair_collapsed_lookup_references(
+            _stamp_lookup_values_into_metadata_driven_motifs(
+                apply_configuration(pipeline, configuration), lookup_values
+            )
+        )
         for pipeline in pipelines
     ]
     # Prompt-time provisioning: create/reuse the Databricks notification destination for any non-email

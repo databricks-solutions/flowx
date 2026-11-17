@@ -1,0 +1,4 @@
+{"value": [
+  {"name": "AutoResolveIntegrationRuntime", "properties": {"type": "Managed"}},
+  {"name": "shir-1", "properties": {"type": "SelfHosted"}}
+]}

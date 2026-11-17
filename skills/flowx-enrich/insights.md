@@ -78,6 +78,8 @@ of those four keys yourself:
   `databricks_pattern` and `risk_if_ignored` (per pipeline) and `relationship_summary`,
   `databricks_pattern` and `risk_if_ignored` (per relationship) must be strings, and
   `conversion_notes` a list of strings.
+- **Text length.** No text value may exceed 20,000 characters (`overview`, `intent`, `evidence`, a
+  `cascade` step or any other); the violation names the field. Summarise rather than paste source code.
 - **`recommended_patterns`** (per pipeline and system-wide): **1–4** patterns. The validator enforces
   the count and that each has a non-empty `pattern` and `fit` and a boolean `simplification_pattern`;
   it does **not** enforce ordering. Set `simplification_pattern: true` **only** for a distinctive

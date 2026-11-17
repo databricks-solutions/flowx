@@ -47,8 +47,11 @@ def _convert_activity_templates(activity: Activity) -> set[str]:
         referenced |= {
             name
             for name in _WIDGET_GET.findall(generated)
-            if not name.startswith(templating.FLOWX_INTERNAL_PARAMETER_PREFIX)
-            or name.startswith(templating.FLOWX_AIRFLOW_PARAMETER_PREFIX)
+            if not name.startswith(templating.LOGICAL_DATE_BINDING_PREFIX)
+            and (
+                not name.startswith(templating.FLOWX_INTERNAL_PARAMETER_PREFIX)
+                or name.startswith(templating.FLOWX_AIRFLOW_PARAMETER_PREFIX)
+            )
         }
     return referenced
 
@@ -58,19 +61,23 @@ def _unresolved_activity_templates(activity: Activity) -> set[str]:
     unresolved: set[str] = set()
     for attribute in ("base_parameters", "job_parameters", "parameters", "sql", "generated_source"):
         unresolved |= templating.unresolved_jinja_expressions(getattr(activity, attribute, None))
+    # Generated source holds Python callable bodies that Airflow never renders, so only rendered fields
+    # are checked for statements and comments.
+    for attribute in ("base_parameters", "job_parameters", "parameters", "sql"):
+        unresolved |= templating.jinja_statements_or_comments(getattr(activity, attribute, None))
     return unresolved
 
 
-def _declared_param_default(name: str, dag_params: dict[str, Any], schedule: dict[str, object] | None) -> Any:
+def _declared_param_default(name: str, dag_params: dict[str, Any]) -> Any:
     """Returns the Databricks-required default for a declared job parameter.
 
-    A DAG ``params={...}`` default wins. A reserved macro-derived parameter gets its schedule-aware or
-    inline default so the value resolves at run time and native backfills can override logical dates.
-    Everything else defaults to an empty string.
+    A DAG ``params={...}`` default wins. A flowx-reserved parameter gets its run-time default (the
+    trigger instant and type for the date resolver, the run id). Everything else defaults to an empty
+    string.
     """
     if dag_params.get(name) is not None:
         return dag_params[name]
-    macro_default = templating.macro_param_default(name, schedule)
+    macro_default = templating.macro_param_default(name)
     if macro_default is not None:
         return macro_default
     return ""

@@ -6,6 +6,7 @@ keeping flowx to one tool stays under host tool-count caps such as Genie Code's 
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -65,6 +66,9 @@ sources route records deterministic decisions only; agentic decisions and fill_a
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
   flowx("package", {"output_dir": "...", "catalog": "main", "schema": "default"})
+To estimate current ADF spend (live Azure scan; needs the server's `azure` extra and Azure
+credentials in its environment):
+  flowx("profile", {"source": "adf", "output_dir": "...", "days": 30})
 For a reviewed Airflow leaf gap, call `resolve_agentic` with action `prepare`, then `stage` with
 provider-authored candidates, then `apply` with an explicit `accept_gap` allowlist.
 Deterministic-only shortcut, only when the user asks for no enrich and no routing: `migrate` runs
@@ -343,14 +347,21 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
     return {"ok": result.ok, "process": result.as_dict(), **extra}
 
 
+# What a hosted agent needs to author insights: the cleansed inventory plus the activity details
+# (the raw payloads) that live only in source_graphs.json. ADF discover writes both; Airflow writes no
+# source_graphs.json, so it is sent only when present.
+_ENRICH_AUTHORING_FILES = ("inventory.json", "source_graphs.json")
+
+
 def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
     """Validate agent-authored insights, record them in agentic_insights.json and rebuild inventory.json.
 
     ``action`` is ``"apply"`` (the default) or ``"prepare"``. ``prepare`` hands the agent what it
-    authors against -- ``metadata/inventory.json`` -- because a hosted agent cannot read the
-    server's ``output_dir``. It reuses :func:`_bundle_output`, so the file comes back inline under
-    ``bundle`` (size-bounded), or is uploaded to ``output_volume_path`` / ``output_workspace_path``
-    like a packaged bundle.
+    authors against -- ``metadata/inventory.json`` and, when discover wrote it, the activity details
+    in ``metadata/source_graphs.json`` -- because a hosted agent cannot read the server's
+    ``output_dir``. It reuses :func:`_bundle_output`, so the files come back inline under ``bundle``
+    (size-bounded), or are uploaded to ``output_volume_path`` / ``output_workspace_path`` like a
+    packaged bundle. When a file does not fit inline, ``ok`` is false and the error names it.
 
     ``apply`` accepts the insights either inline as ``insights`` (a JSON object) or via
     ``insights_path`` (a file the server can read); exactly one is required. Inline insights are
@@ -367,18 +378,28 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
     if action == "prepare":
         if insights is not None or insights_path is not None:
             return {"ok": False, "error": "enrich prepare takes no insights; send them with action apply."}
-        inventory_path = Path(output_dir) / "metadata" / "inventory.json"
+        metadata_dir = Path(output_dir) / "metadata"
+        inventory_path = metadata_dir / "inventory.json"
         if not inventory_path.is_file():
-            return {"ok": False, "error": f"No inventory.json under {inventory_path.parent}; run discover first."}
+            return {"ok": False, "error": f"No inventory.json under {metadata_dir}; run discover first."}
+        authoring_files = [metadata_dir / name for name in _ENRICH_AUTHORING_FILES]
         with tempfile.TemporaryDirectory(prefix="flowx-inventory-") as temporary:
-            copied_size = Path(shutil.copy(inventory_path, temporary)).stat().st_size
+            copied_sizes = {
+                path.name: Path(shutil.copy(path, temporary)).stat().st_size
+                for path in authoring_files
+                if path.is_file()
+            }
             delivered = _bundle_output(p, Path(temporary))
-        if "bundle" in delivered and "inventory.json" not in delivered["bundle"]["files"]:
+        left_out = [name for name in copied_sizes if "bundle" in delivered and name not in delivered["bundle"]["files"]]
+        if left_out:
+            sizes = " and ".join(f"{name} ({copied_sizes[name]} bytes)" for name in left_out)
+            verb = "is" if len(left_out) == 1 else "are"
             return {
                 "ok": False,
                 "error": (
-                    f"inventory.json ({copied_size} bytes) is too large to return inline; "
-                    "pass output_volume_path or output_workspace_path to have it uploaded there instead."
+                    f"{sizes} {verb} too large to return inline, where the files share one "
+                    f"{runner.INLINE_TREE_BYTES}-byte limit in total; "
+                    "pass output_volume_path or output_workspace_path to have them uploaded there instead."
                 ),
             }
         return {"ok": True, "output_dir": str(output_dir), **delivered}
@@ -393,6 +414,13 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
 
     if insights_path is not None:
         return _run(str(insights_path))
+    # Some MCP clients send an object argument as its JSON text; read it as the object it spells.
+    if isinstance(insights, str):
+        try:
+            insights = json.loads(insights)
+        except ValueError as error:
+            violation = f"insights is a string that is not valid JSON ({error}); send the insights as a JSON object"
+            return {"ok": False, "result": {"ok": False, "violations": [violation]}, "process": None}
     with tempfile.TemporaryDirectory(prefix="flowx-insights-") as temporary:
         inline_path = Path(temporary) / "insights.json"
         inline_path.write_text(json.dumps(insights, indent=2), encoding="utf-8")
@@ -656,7 +684,11 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
 
         # Interactive gate: on the first (answerless) call, hand the full option schema to the agent.
         if interactive and not answers:
-            options_schema = _pending_options(_cmd_inspect({"report_path": report_path}))
+            inspect_res = _cmd_inspect({"report_path": report_path})
+            if not inspect_res["ok"]:
+                steps["inspect"] = inspect_res
+                return {"ok": False, "status": "failed", "failed_phase": "inspect", "steps": steps}
+            options_schema = _pending_options(inspect_res)
             if options_schema:
                 return {
                     "ok": True,
@@ -705,6 +737,36 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
         cleanup()
 
 
+_PROFILE_TIMEOUT_HINT = (
+    "Narrow the scan with resource_group and/or factory_name or fewer days, "
+    "or run it from a notebook with `python -m flowx.adapter profile ...`."
+)
+
+
+def _cmd_profile(p: dict[str, Any]) -> dict[str, Any]:
+    output_dir = p.get("output_dir", "./flowx_output")
+    args: list[Any] = ["profile", "--source", _source_name(p), "--output-dir", output_dir]
+    for key in ("days", "subscription_id", "resource_group", "factory_name"):
+        if p.get(key):
+            args += [f"--{key.replace('_', '-')}", p[key]]
+    result = runner.run_adapter(args)
+    if result.returncode is None:
+        result = dataclasses.replace(result, stderr=f"{result.stderr}\n{_PROFILE_TIMEOUT_HINT}")
+    out = Path(output_dir)
+    if not result.ok:
+        return _phase_result(result, out)
+    report_paths = [out / "metadata" / "tco" / name for name in ("cost_comparison.md", "cost_comparison.csv")]
+    report_md, report_csv = [runner.read_text(path) for path in report_paths]
+    missing = [str(path) for path, text in zip(report_paths, (report_md, report_csv)) if text is None]
+    if missing:
+        return {
+            **_phase_result(result, out),
+            "ok": False,
+            "error": f"Profile exited 0 but did not write: {', '.join(missing)}",
+        }
+    return _phase_result(result, out, report_md=report_md, report_csv=report_csv)
+
+
 def _cmd_record_results(p: dict[str, Any]) -> dict[str, Any]:
     args: list[Any] = ["record-results", "--output-dir", p["output_dir"], "--results-table", p["results_table"]]
     if p.get("warehouse_id"):
@@ -740,6 +802,7 @@ _COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "workspace_paths": _cmd_workspace_paths,
     "package": _cmd_package,
     "migrate": _cmd_migrate,
+    "profile": _cmd_profile,
     "record_results": _cmd_record_results,
     "install_dashboard": _cmd_install_dashboard,
 }
@@ -770,10 +833,10 @@ def build_server() -> FastMCP:
         Call as ``flowx(command="<command>", parameters={...})``. Commands and their
         ``parameters`` keys (req = required; phases share ``output_dir``, default "./flowx_output").
         ``source`` ("adf" | "airflow") is **required** for discover/convert/migrate/inputs (and
-        workspace_paths); there is no default. It selects both the parser and which source-path key
-        applies: ADF reads adf_volume_path | adf_workspace_path | adf_definitions | adf_source_path,
-        Airflow reads ``airflow_source_path`` (a DAG .py file or directory). ``package`` is
-        source-independent (it consumes the translation report).
+        workspace_paths, profile); there is no default. It selects both the parser and which
+        source-path key applies: ADF reads adf_volume_path | adf_workspace_path | adf_definitions |
+        adf_source_path, Airflow reads ``airflow_source_path`` (a DAG .py file or directory).
+        ``package`` is source-independent (it consumes the translation report).
 
         - "inputs": phase(req: "discover"|"convert"|"package"), source(req for discover/convert) —
           list a phase's input prompts.
@@ -795,10 +858,12 @@ def build_server() -> FastMCP:
           review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "enrich": action(prepare | apply, default apply). prepare: output_dir, output_volume_path,
-          output_workspace_path — return metadata/inventory.json the same way package returns a
-          bundle, for the agent to author against when it cannot read output_dir (ok is false when it is
-          too large to return inline; pass one of the upload paths). apply: output_dir(req),
-          one of insights(inline object) | insights_path(req) — validate agent-authored discover insights
+          output_workspace_path — return metadata/inventory.json and, when present, the activity details in
+          metadata/source_graphs.json the same way package returns a bundle, for the agent to author against
+          when it cannot read output_dir (ok is false, naming the file, when one is too large to return
+          inline; pass one of the upload paths). apply: output_dir(req),
+          one of insights(inline object, or its JSON text) | insights_path(req) — validate agent-authored
+          discover insights
           against inventory.json, record them in agentic_insights.json, and rebuild inventory.json from
           source_graphs.json plus that document (one enrich per output_dir at a time absent a concurrent
           discover, idempotent). `ok`
@@ -806,7 +871,7 @@ def build_server() -> FastMCP:
           metadata/.enrich.lock) and both files are left untouched on failure. A lock a stopped enrich
           left behind is cleared locally by deleting it and running enrich again; on the hosted server,
           run discover again (it clears metadata/ and the lock), then prepare and apply. Author the insights by
-          reading inventory.json + the source artifacts first (source_graphs.json), setting
+          reading inventory.json + the source artifacts first (source_graphs.json, which prepare returns), setting
           `authored_against` (optional, checked when given) to its source_graphs_sha256 when it records one and
           leaving it out otherwise (see the flowx-enrich skill's insights.md).
         - "route": output_dir(req), at most one of plan(inline object) | plan_path, output_volume_path,
@@ -867,6 +932,15 @@ def build_server() -> FastMCP:
           run the phases one call at a time instead, passing the same source to discover and convert.
           Returns the full option schema once (status "needs_input") when configuration is available;
           re-call once with the complete answers to apply (see below).
+        - "profile": source(req: "adf"), output_dir, days(default 30), subscription_id, resource_group,
+          factory_name (only with resource_group) — live Azure scan estimating current ADF spend; returns
+          ``report_md`` and ``report_csv`` (metadata/tco/cost_comparison.md / .csv). Needs the server's
+          ``azure`` extra (else exit 2 with an install hint in ``process.stderr``) and Azure credentials
+          in its environment (AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID). Use it for
+          scoped scans (set resource_group and/or factory_name, keep days small); run
+          subscription-wide scans from a notebook, since they can outlast an MCP call. On timeout it
+          returns ok false, ``process.returncode`` null, no report, and a message in ``process.stderr``
+          saying how to narrow the scan.
         - "record_results": output_dir(req), results_table(req: catalog.schema.table), warehouse_id.
         - "install_dashboard": results_table(req), warehouse_id, dashboard_name, parent_path.
 

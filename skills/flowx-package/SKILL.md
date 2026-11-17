@@ -98,7 +98,25 @@ Ask the user for the following (provide defaults):
 | Bundle name | Name for the DABs project | derived from first pipeline name |
 | Target environments | Deployment targets to configure | `dev, staging, prod` |
 | Warehouse ID | SQL warehouse for SQL tasks (optional) | prompt if SQL tasks exist |
+| Packaging mode | How to lay out bundles for a multi-pipeline factory (`--packaging-mode`): `per-pipeline`, `single`, or `per-group`. See below. | `per-pipeline` |
 | Databricks CLI profile | Profile used to download workspace-resident notebooks / JARs / Python files (`--profile`). Required only when the bundle references absolute workspace paths. | resolved from `~/.databrickscfg` (auto-prompt if multiple) |
+
+**Packaging mode** (`--packaging-mode`, surfaced as the `packaging_mode` input) controls how a
+multi-pipeline migration is laid out. For a single-pipeline migration every mode is equivalent.
+
+- **`per-pipeline`** (default) — one Databricks Asset Bundle per ADF pipeline, each in its own
+  `<output_dir>/<pipeline>/` subdirectory. Cross-pipeline `ExecutePipeline` calls become
+  `${var.<callee>}` job-id references wired at deploy time.
+- **`single`** — every pipeline in one bundle at the output root. Intra-bundle `ExecutePipeline`
+  calls resolve directly via `${resources.jobs.<callee>.id}` (no deploy-time wiring needed).
+- **`per-group`** — pipelines grouped into bundles. By default (`--group-by inferred`) groups are
+  the connected components of the Run Pipeline call graph, so pipelines that call one another ship
+  together. Pass `--group-by spec --group-spec <path>` to use an explicit JSON/YAML mapping
+  (`{pipeline: group}` or `{group: [pipelines]}`); the `group_spec` input captures that path.
+
+Regardless of mode, a single top-level `DEPLOY.md` is written describing every bundle, its
+cross-bundle dependencies, and a suggested callees-first deploy order. Use the `flowx-deploy` skill
+(`python -m flowx.adapter deploy`) to deploy the bundles in that order automatically.
 
 Ask for the catalog and schema as **one free-text question**: "Which catalog and schema should the
 bundle target, as `catalog.schema`? (default `main.default`)". Split the answer at the dot between the
@@ -173,6 +191,8 @@ Execute the DAB writer:
   --catalog <catalog> \
   --schema <schema> \
   --bundle-name <bundle_name> \
+  [--packaging-mode per-pipeline|single|per-group] \
+  [--group-by inferred|spec] [--group-spec <path>] \
   [--profile <databricks-cli-profile>] \
   [--no-download-workspace-files] \
   [--keep-intermediates]
@@ -246,6 +266,7 @@ Show the user what was generated:
       create_secrets.py
       register_connections.py
   SETUP.md
+  DEPLOY.md                           # bundle layout + suggested deploy order (top level)
   metadata/                           # kept migration metadata (from discover + modify)
     inventory.json
     profile_report.csv
@@ -270,7 +291,7 @@ Emphasize that the user should review these scripts before running them, especia
 
 Briefly describe:
 - **databricks.yml** — The root bundle config with workspace, target environments (dev/staging/prod), and variable definitions. Variables are parameterized for environment-specific values (catalog, schema, warehouse).
-- **resources/*.yml** — One YAML file per Databricks Lakeflow Job (one per ADF pipeline). Each job contains tasks mapped from ADF activities, with dependencies matching the original ADF dependency chains.
+- **resources/*.yml** — One YAML file per Databricks Lakeflow Job. In `per-pipeline` mode each bundle holds one pipeline's job (plus any inner ForEach jobs); in `single`/`per-group` mode a bundle holds several pipelines' jobs side by side. Each job contains tasks mapped from ADF activities, with dependencies matching the original ADF dependency chains.
 - **src/notebooks/*.py** — Python notebooks for activities that translate to notebook_task. These contain the actual data movement or transformation logic.
 - **tests/*.py** — Skeleton test files for validating the migrated jobs.
 
@@ -303,6 +324,11 @@ Next Steps
 ```
 
 Recommend running `databricks bundle validate` first to catch any configuration issues before deployment.
+
+When the migration produced **multiple bundles** (`per-pipeline` or `per-group` mode), point the
+user at the top-level `DEPLOY.md` for the suggested callees-first deploy order, and recommend the
+`flowx-deploy` skill (`python -m flowx.adapter deploy --output-dir <output_dir>`) to deploy them in
+order and wire cross-bundle job ids automatically.
 
 ### Step 8 — (Optional) Persist coverage results and install a dashboard
 
@@ -361,7 +387,8 @@ All under the shared `<output_dir>`:
 | `resources/*.yml` | Job and pipeline YAML definitions; a file this package doesn't write again moves into `metadata/archive/<UTC time>/`, so a resource an earlier package wrote doesn't linger |
 | `src/notebooks/*.py` | Generated notebooks |
 | `src/setup/*.py` | Infrastructure setup scripts |
-| `SETUP.md` | Human-readable setup instructions |
+| `SETUP.md` | Human-readable setup instructions (one per bundle) |
+| `DEPLOY.md` | Top-level bundle layout + suggested deploy order (all packaging modes) |
 | `metadata/inventory.json` | Activity inventory (from discover) |
 | `metadata/profile_report.csv` | Per-pipeline complexity report (from profile) |
 | `metadata/<pipeline>.arm.json` | Verbatim original ADF/ARM source (from discover) |

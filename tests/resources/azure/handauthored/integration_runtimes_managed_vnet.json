@@ -1,0 +1,6 @@
+{"value": [
+  {"name": "managedvnetir", "properties": {"type": "Managed",
+    "managedVirtualNetwork": {"referenceName": "default", "type": "ManagedVirtualNetworkReference"},
+    "typeProperties": {"computeProperties": {"location": "AutoResolve", "pipelineExternalComputeScaleProperties": {"timeToLive": 60}}}}},
+  {"name": "plain-azure-ir", "properties": {"type": "Managed", "typeProperties": {"computeProperties": {"location": "West US"}}}}
+]}

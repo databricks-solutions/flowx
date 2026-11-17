@@ -74,6 +74,7 @@ from flowx.models.discovery import SOURCE_ADF, SourceGraph
 from flowx.models.insights import (
     CONFIDENCE_LEVELS,
     MAX_RECOMMENDED_PATTERNS,
+    MAX_TEXT_FIELD_CHARS,
     RELEASE_STATES,
     RELEASE_STATES_REQUIRING_SOURCE,
     SCHEMA_VERSION,
@@ -205,6 +206,7 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
         violations.append(f"unknown top-level key: {key!r}{hint}")
 
     violations.extend(_authored_against_violations(raw.get(_AUTHORED_AGAINST_KEY), inventory))
+    violations.extend(_text_length_violations(raw, ""))
 
     overview = raw.get("overview")
     if overview is not None and (not isinstance(overview, str) or not overview.strip()):
@@ -219,6 +221,31 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
     violations.extend(_validate_pipeline_insights(raw.get("pipeline_insights", []), names))
     violations.extend(_validate_relationships(raw.get("pipeline_relationships", []), names, control_triples))
     return violations
+
+
+def _text_length_violations(value: Any, location: str) -> list[str]:
+    """Report every text value under *value* longer than :data:`MAX_TEXT_FIELD_CHARS`, named by its path.
+
+    The walk covers every free-text field wherever it sits (overview, intent, evidence, a cascade step
+    and so on), so a field added to the schema later is capped too.
+    """
+    if isinstance(value, str):
+        if len(value) <= MAX_TEXT_FIELD_CHARS:
+            return []
+        return [f"{location}: text is {len(value)} characters; at most {MAX_TEXT_FIELD_CHARS} are allowed"]
+    if isinstance(value, dict):
+        return [
+            violation
+            for key, item in value.items()
+            for violation in _text_length_violations(item, f"{location}.{key}" if location else str(key))
+        ]
+    if isinstance(value, list):
+        return [
+            violation
+            for index, item in enumerate(value)
+            for violation in _text_length_violations(item, f"{location}[{index}]")
+        ]
+    return []
 
 
 def _authored_against_violations(authored_against: Any, inventory: dict[str, Any]) -> list[str]:
@@ -284,10 +311,17 @@ def _validate_relationships(
     names: set[str],
     control_triples: set[tuple[str, str, str]],
 ) -> list[str]:
-    """Validate the ``pipeline_relationships`` list: endpoints (FK) + each ``lineage_edge``."""
+    """Validate the ``pipeline_relationships`` list: endpoints (FK) + each ``lineage_edge``.
+
+    A pipeline cannot relate to itself (discovery never records a self-edge either), and one
+    relationship is given once. Two relationships are the same when they share both endpoints and the
+    edge's type and identity, so two control edges between one pair through different tasks are both
+    kept.
+    """
     if not isinstance(relationships, list):
         return ["'pipeline_relationships' must be a list"]
     violations: list[str] = []
+    first_index_by_relationship: dict[tuple[str, str, Any, Any], int] = {}
     for index, relationship in enumerate(relationships):
         loc = f"pipeline_relationships[{index}]"
         if not isinstance(relationship, dict):
@@ -306,9 +340,29 @@ def _validate_relationships(
                 violations.append(f"{loc}: {endpoint!r} must be a string, got {type(value).__name__}")
             elif value not in names and not resolves_control_edge:
                 violations.append(f"{loc}: {endpoint} {value!r} not in inventory")
+        if isinstance(from_pipeline, str) and from_pipeline and from_pipeline == to_pipeline:
+            violations.append(f"{loc}: a pipeline cannot relate to itself ({from_pipeline!r} to {from_pipeline!r})")
+        relationship_key = _relationship_key(from_pipeline, to_pipeline, edge)
+        if relationship_key is not None and relationship_key in first_index_by_relationship:
+            violations.append(
+                f"{loc}: duplicate relationship (already given at "
+                f"pipeline_relationships[{first_index_by_relationship[relationship_key]}]); give each one once"
+            )
+        elif relationship_key is not None:
+            first_index_by_relationship[relationship_key] = index
         violations.extend(_validate_optional_strings(relationship, _RELATIONSHIP_TEXT_FIELDS, loc))
         violations.extend(_validate_edge(edge, loc, from_pipeline, to_pipeline, resolves_control_edge))
     return violations
+
+
+def _relationship_key(from_pipeline: Any, to_pipeline: Any, edge: Any) -> tuple[str, str, Any, Any] | None:
+    """``(from, to, edge_type, edge_identity)`` for spotting a repeated relationship, or ``None`` when unreadable."""
+    if not (isinstance(from_pipeline, str) and isinstance(to_pipeline, str) and isinstance(edge, dict)):
+        return None
+    edge_type, edge_identity = edge.get("edge_type"), edge.get("edge_identity")
+    if not all(value is None or isinstance(value, str) for value in (edge_type, edge_identity)):
+        return None
+    return from_pipeline, to_pipeline, edge_type, edge_identity
 
 
 def _resolves_control_edge(

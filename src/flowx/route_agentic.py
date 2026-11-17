@@ -1279,26 +1279,26 @@ def _authored_buildable_violations(authored_pipelines: list[dict[str, Any]]) -> 
 def _bundle_folder_clashes(report: dict[str, Any], authored_names: list[Any]) -> list[str]:
     """Authored names that are empty, or share a bundle folder with another pipeline once normalised.
 
-    Package writes each pipeline of a multi-pipeline report to the folder ``normalize_task_key(name)``,
+    Package writes each pipeline of a multi-pipeline report to the folder ``to_lowercase_key(name)``,
     so ``Sales Load`` and ``Sales-Load`` would overwrite each other's bundle.
     """
-    from flowx.utils import normalize_task_key
+    from flowx.utils import to_lowercase_key
 
     clashes: list[str] = []
     folders: dict[str, list[str]] = {}
     for pipeline in _report_pipelines(report):
         name = pipeline.get("name")
         if isinstance(name, str) and name.strip():
-            folders.setdefault(normalize_task_key(name), []).append(name)
+            folders.setdefault(to_lowercase_key(name), []).append(name)
     for name in authored_names:
-        if not isinstance(name, str) or not normalize_task_key(name):
+        if not isinstance(name, str) or not to_lowercase_key(name):
             clashes.append(f"authored pipeline name {name!r} is empty; give every pipeline a name")
             continue
-        sharing = folders.get(normalize_task_key(name), [])
+        sharing = folders.get(to_lowercase_key(name), [])
         if len(sharing) > 1:
             others = sorted(set(sharing) - {name})
             clashes.append(
-                f"authored pipeline {name!r} shares the bundle folder {normalize_task_key(name)!r} with {others}; "
+                f"authored pipeline {name!r} shares the bundle folder {to_lowercase_key(name)!r} with {others}; "
                 "give each a distinct name"
             )
     return clashes
@@ -1489,7 +1489,7 @@ def validate_report_structurally(report: dict[str, Any]) -> Any:
     """
     from flowx.bundler.dab_writer import pipeline_dict_to_ir, write_bundle
     from flowx.preparer.workflow_preparer import prepare_workflow
-    from flowx.utils import normalize_task_key
+    from flowx.utils import to_lowercase_key
     from flowx.validate.bundle_invariants import BundleInvariantResult, check_bundle_dir
 
     pipelines = _report_pipelines(report)
@@ -1499,7 +1499,7 @@ def validate_report_structurally(report: dict[str, Any]) -> Any:
         for pipeline_dict in pipelines:
             pipeline, _skipped = pipeline_dict_to_ir(pipeline_dict)
             workflow = prepare_workflow(pipeline)
-            bundle_dir = root / normalize_task_key(pipeline.name) if len(pipelines) > 1 else root
+            bundle_dir = root / to_lowercase_key(pipeline.name) if len(pipelines) > 1 else root
             write_bundle(workflow, bundle_dir)
             findings.extend(check_bundle_dir(bundle_dir).findings)
     return BundleInvariantResult(findings=findings)

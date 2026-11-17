@@ -56,7 +56,8 @@ narrative.
 ## How to author (four steps)
 
 1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json` (on the hosted
-   MCP server, through `enrich` with `action="prepare"`; see below). Note every
+   MCP server, through `enrich` with `action="prepare"`, which also returns `source_graphs.json`; see
+   below). Note every
    pipeline `name` (these are the valid foreign keys), and each pipeline's `lineage` block — in
    particular `lineage.control_edges`, each `{source_workflow, target_workflow, via_task_key}`. A
    deterministic **control** relationship you annotate must match one of these exactly, and only an
@@ -68,7 +69,8 @@ narrative.
    `authored_against` by default, so enrich can refuse your insights if discover runs again before
    you submit them; when it records none, leave `authored_against` out.
 2. **Read the source artifacts** you need to form judgment: each activity's `raw` payload in
-   `metadata/source_graphs.json`, the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source.
+   `metadata/source_graphs.json` (on the hosted server, `bundle.files["source_graphs.json"]` from
+   `prepare`), the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source.
    The inventory carries no `raw` payloads. Read enough to state
    each pipeline's *intent* and the Databricks patterns that fit. Ground every recommended pattern in
    a **real, publicly-documented** Databricks capability; never invent a product name.
@@ -186,14 +188,15 @@ Run the **`setup`** skill first if you haven't. Both paths run the same validate
 
 - **MCP tool (Databricks Genie Code, or a local stdio registration):** call the single **`flowx`**
   tool with `command="enrich"`. On the hosted server you cannot read `output_dir`, so first read the
-  inventory with `action="prepare"`. It returns `metadata/inventory.json` inline as
-  `bundle.files["inventory.json"]`, the same way `package` returns a bundle; pass `output_volume_path`
-  or `output_workspace_path` to have a large inventory uploaded there as `inventory.json` instead. An
-  inventory too large to return inline makes `prepare` fail with `ok: false`, naming those two options. Then
-  record the insights (the default `action="apply"`) with either inline insights or a file:
+  inventory and the activity details with `action="prepare"`. It returns `metadata/inventory.json` inline
+  as `bundle.files["inventory.json"]` and, when discover wrote it (ADF does, Airflow does not),
+  `metadata/source_graphs.json` as `bundle.files["source_graphs.json"]`, the same way `package` returns a
+  bundle; pass `output_volume_path` or `output_workspace_path` to have them uploaded there instead. A file
+  too large to return inline makes `prepare` fail with `ok: false`, naming that file and those two
+  options. Then record the insights (the default `action="apply"`) with either inline insights or a file:
 
   ```
-  flowx(command="enrich", parameters={"output_dir": "<dir>", "action": "prepare"})   # read inventory.json
+  flowx(command="enrich", parameters={"output_dir": "<dir>", "action": "prepare"})   # read inventory.json + source_graphs.json
   flowx(command="enrich", parameters={"output_dir": "<dir>", "insights": { ... }})   # inline object
   flowx(command="enrich", parameters={"output_dir": "<dir>", "insights_path": "<file>"})
   ```

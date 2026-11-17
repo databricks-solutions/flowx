@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+python_bin=.venv/bin/python
+PYTHONPATH=src "${python_bin}" -m flowx.adapter convert --source adf --merge-agentic \
+  --report "${FLOWX_OUTPUT}/.work/translation_report.json" \
+  --agentic-results agentic_results
+

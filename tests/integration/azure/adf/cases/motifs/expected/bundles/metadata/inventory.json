@@ -1,0 +1,280 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "dependencies": [],
+          "name": "work",
+          "strategy": "deterministic",
+          "task_key": "work",
+          "type": "Wait"
+        },
+        {
+          "dependencies": [
+            {
+              "conditions": [
+                "Completed"
+              ],
+              "resolved": true,
+              "upstream": "work"
+            }
+          ],
+          "depends_on": [
+            "work"
+          ],
+          "name": "notify",
+          "strategy": "deterministic",
+          "task_key": "notify",
+          "type": "WebActivity"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "WebActivity 'notify' appears to be a notification call"
+          ],
+          "databricks_replacement": "task_with_notification",
+          "display_name": "Activity and Notify",
+          "member_task_keys": [
+            "work",
+            "notify"
+          ],
+          "motif_id": "activity_and_notify",
+          "source_type_hint": null
+        }
+      ],
+      "name": "motif-activity-and-notify"
+    },
+    {
+      "activities": [
+        {
+          "dependencies": [],
+          "name": "old-watermark",
+          "strategy": "deterministic",
+          "task_key": "old-watermark",
+          "type": "Lookup"
+        },
+        {
+          "dependencies": [],
+          "name": "new-watermark",
+          "strategy": "deterministic",
+          "task_key": "new-watermark",
+          "type": "Lookup"
+        },
+        {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "old-watermark"
+            },
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "new-watermark"
+            }
+          ],
+          "depends_on": [
+            "old-watermark",
+            "new-watermark"
+          ],
+          "name": "incremental-copy",
+          "strategy": "deterministic",
+          "task_key": "incremental-copy",
+          "type": "Copy"
+        },
+        {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "incremental-copy"
+            }
+          ],
+          "depends_on": [
+            "incremental-copy"
+          ],
+          "name": "update-watermark",
+          "strategy": "agentic",
+          "task_key": "update-watermark",
+          "type": "SqlServerStoredProcedure"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Lookup 'old-watermark' contains watermark-style query",
+            "Lookup 'new-watermark' contains watermark-style query",
+            "StoredProcedure 'update-watermark' updates watermark after Copy"
+          ],
+          "databricks_replacement": "auto_loader",
+          "display_name": "Incremental Load (Watermark)",
+          "member_task_keys": [
+            "old-watermark",
+            "new-watermark",
+            "incremental-copy",
+            "update-watermark"
+          ],
+          "motif_id": "incremental_load_watermark",
+          "source_type_hint": "database"
+        }
+      ],
+      "name": "motif-incremental-watermark"
+    },
+    {
+      "activities": [
+        {
+          "dependencies": [],
+          "name": "lookup-metadata",
+          "strategy": "deterministic",
+          "task_key": "lookup-metadata",
+          "type": "Lookup"
+        },
+        {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "lookup-metadata"
+            }
+          ],
+          "depends_on": [
+            "lookup-metadata"
+          ],
+          "name": "copy-each-table",
+          "strategy": "deterministic",
+          "task_key": "copy-each-table",
+          "type": "ForEach"
+        },
+        {
+          "dependencies": [],
+          "name": "dynamic-copy",
+          "strategy": "deterministic",
+          "task_key": "dynamic-copy",
+          "type": "Copy"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Lookup 'lookup-metadata' appears to read a control/metadata table"
+          ],
+          "databricks_replacement": "for_each_ingestion",
+          "display_name": "Metadata-Driven Bulk Copy",
+          "member_task_keys": [
+            "lookup-metadata",
+            "copy-each-table"
+          ],
+          "motif_id": "metadata_driven_bulk_copy",
+          "source_type_hint": "database"
+        }
+      ],
+      "name": "motif-metadata-bulk-copy"
+    },
+    {
+      "activities": [
+        {
+          "dependencies": [],
+          "name": "initial-request",
+          "strategy": "deterministic",
+          "task_key": "initial-request",
+          "type": "WebActivity"
+        },
+        {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "initial-request"
+            }
+          ],
+          "depends_on": [
+            "initial-request"
+          ],
+          "name": "paginate",
+          "strategy": "agentic",
+          "task_key": "paginate",
+          "type": "Until"
+        },
+        {
+          "dependencies": [],
+          "name": "page-request",
+          "strategy": "deterministic",
+          "task_key": "page-request",
+          "type": "WebActivity"
+        },
+        {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "page-request"
+            }
+          ],
+          "depends_on": [
+            "page-request"
+          ],
+          "name": "set-continuation",
+          "strategy": "deterministic",
+          "task_key": "set-continuation",
+          "type": "SetVariable"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Until child 'page-request' uses pagination",
+            "Until child 'set-continuation' uses pagination"
+          ],
+          "databricks_replacement": "python_rest_ingestion",
+          "display_name": "REST API Pagination",
+          "member_task_keys": [
+            "initial-request",
+            "paginate"
+          ],
+          "motif_id": "rest_api_pagination",
+          "source_type_hint": "rest_api"
+        }
+      ],
+      "name": "motif-rest-api-pagination"
+    }
+  ],
+  "source": "adf",
+  "source_graphs_sha256": "2e36e4ef680615c4fdc55566c95bfb8f41990b215143c1984fb01a2050dcee22",
+  "summary": {
+    "activity_count": 13,
+    "agentic_count": 2,
+    "coverage_pct": 100.0,
+    "deterministic_count": 11,
+    "pipeline_count": 4,
+    "unsupported_count": 0
+  }
+}

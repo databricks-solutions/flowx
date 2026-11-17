@@ -29,8 +29,8 @@ from flowx.bundler.inner_job_params import normalize_value
 from flowx.bundler.notebook_writer import content_signature, write_notebooks
 from flowx.bundler.prereqs_writer import ManualParameter, build_prereqs, render_setup_md
 from flowx.bundler.setup_generator import generate_setup_tasks
-from flowx.ir_serde import data_asset_from_dict, lineage_from_dict
-from flowx.models.dab import DabNotebook
+from flowx.lineage_serde import data_asset_from_dict, lineage_from_dict
+from flowx.models.dab import DabNotebook, SecretInstruction, SetupTask
 from flowx.models.ir import (
     Activity,
     AgenticComponentActivity,
@@ -65,14 +65,22 @@ from flowx.preparer.workspace_downloader import (
     prompt_for_auth_if_missing,
     set_profile,
 )
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 
 class _BundleYamlDumper(yaml.SafeDumper):
     """YAML dumper that leaves keys unquoted and only quotes values when needed."""
 
 
-# Module-level warnings collector — reset per write_bundle call.
+# Module-level accumulators (_bundle_warnings, _cross_bundle_variables, _neutralized_conditions,
+# _synthetic_default_parameters) are reset at the top of every write_bundle_group call and read at the
+# end of the same call. single / per-group modes invoke the writer in a loop over groups, but each
+# iteration resets first, so a prior group's state — even after a mid-write exception — never leaks
+# into the next: the reset, not the previous run's cleanup, guarantees a clean slate. This is safe only
+# for sequential writing; parallelising bundle writing would require threading this state through
+# instead. Kept module-level (a pre-existing pattern) to avoid re-plumbing every helper's signature.
+#
+# Module-level warnings collector — reset per write_bundle_group call.
 _bundle_warnings: list[str] = []
 
 # Cross-bundle ExecutePipeline refs seen while translating (variable_name -> target pipeline). Reset per
@@ -83,6 +91,11 @@ _cross_bundle_variables: dict[str, str] = {}
 # ({task_key, field, original_ref}). Reset per write_bundle call and surfaced in SETUP.md so a
 # neutralised (always-true) branch predicate is never silent.
 _neutralized_conditions: list[dict[str, str]] = []
+
+# Job parameters that had no ADF default and so were emitted with a synthetic ``default: ""`` to satisfy
+# the DAB schema. Reset per write_bundle_group call and surfaced in SETUP.md so an operator knows the
+# value was caller-supplied in ADF and a run that omits it receives "" rather than failing fast.
+_synthetic_default_parameters: list[dict[str, str]] = []
 
 _WIDGET_REFERENCE = re.compile(r"""dbutils\.widgets\.get\(\s*["']([^"']+)["']\s*\)""")
 _JOB_RESOURCE_ID_REFERENCE = re.compile(r"\$\{resources\.jobs\.([^.}]+)\.id\}")
@@ -96,7 +109,11 @@ def write_bundle(
     bundle_name: str | None = None,
     skipped_pipelines: list[str] | None = None,
 ) -> list[Path]:
-    """Writes all DAB files to output_dir.
+    """Writes all DAB files for a single workflow to output_dir.
+
+    Thin wrapper over :func:`write_bundle_group` for the one-pipeline-per-bundle case (the
+    ``per-pipeline`` packaging mode and every existing caller). Kept as the stable single-workflow
+    entry point; the group writer is byte-for-byte identical for a one-element group.
 
     Args:
         workflow: The PreparedWorkflow to serialize.
@@ -110,58 +127,349 @@ def write_bundle(
     Returns:
         List of absolute paths to all created files.
     """
-    # Reset module-level accumulators so successive write_bundle calls (CLI loops, tests) don't carry
-    # warnings or cross-bundle variables from one bundle into the next.
+    return write_bundle_group(
+        [workflow],
+        output_dir,
+        catalog=catalog,
+        schema=schema,
+        bundle_name=bundle_name,
+        skipped_pipelines=skipped_pipelines,
+    )
+
+
+def _dedupe_notebooks(notebooks: list[DabNotebook]) -> list[DabNotebook]:
+    """Returns *notebooks* with duplicate ``relative_path`` entries collapsed (first wins).
+
+    Guards against the same notebook appearing twice in one bundle's writelist — e.g. a workflow and
+    its inner ForEach job sharing a notebook object, or setup notebooks the generator emits once per
+    workflow (``create_secrets.py``). It does NOT dedupe two pipelines' same-named generated
+    notebooks in a multi-pipeline bundle: :func:`_namespace_bundle_artifacts` runs first and gives
+    each pipeline's notebooks a per-pipeline path prefix, so those never share a ``relative_path``
+    (that separation is deliberate — the two files can carry different, pipeline-specific content).
+    """
+    seen: set[str] = set()
+    unique: list[DabNotebook] = []
+    for notebook in notebooks:
+        if notebook.relative_path in seen:
+            continue
+        seen.add(notebook.relative_path)
+        unique.append(notebook)
+    return unique
+
+
+def _rewrite_task_string_values(tasks: list[dict[str, Any]], replacements: dict[str, str]) -> None:
+    """Replaces exact string values matching *replacements* anywhere in the task tree, in place.
+
+    Walks every task dict (descending into ``for_each_task.task`` bodies and nested dicts/lists) and
+    swaps any string equal to a key of *replacements* for its mapped value. Used to keep notebook /
+    python-file paths and ``run_job_task`` job-id refs in sync after a namespacing rename, without
+    hard-coding every field name (``notebook_path``, ``python_file``, ``job_id``, …).
+
+    Trade-off: matching is by exact string value, not by field, so a non-path field whose value
+    happens to equal a renamed notebook path (e.g. a ``base_parameters`` entry that genuinely passes a
+    notebook path) is rewritten too. That is intentional — if a parameter carries the path, it should
+    track the rename — and it only fires on an exact whole-string match, so free text merely mentioning
+    a path (``"see ../src/notebooks/x.py"``) is left untouched.
+    """
+    if not replacements:
+        return
+
+    def visit(node: Any) -> Any:
+        if isinstance(node, str):
+            return replacements.get(node, node)
+        if isinstance(node, dict):
+            for key, value in node.items():
+                node[key] = visit(value)
+            return node
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                node[index] = visit(item)
+            return node
+        return node
+
+    for task in tasks:
+        visit(task)
+
+
+def _namespace_pydabs_hooks(
+    nested_workflows: list[PreparedWorkflow],
+    prefix: str,
+    replacements: dict[str, str],
+    *,
+    relocate_dbt_sources: bool,
+) -> None:
+    """Namespaces dbt-factory PyDABs hook modules by *prefix*, in place (shared by both namespacers).
+
+    A hook is imported by dotted path from ``python.resources`` (built from ``hook_module``), so it is
+    namespaced by *module* (``resources.<prefix>__<module>``), not by directory — the file is renamed
+    and ``hook_module`` / ``job_key`` / the ``${resources.jobs.X.id}`` ref / the job key the body
+    registers are remapped to match.
+
+    *relocate_dbt_sources* (DAG-combine path only, which prepends ``<prefix>/`` to every source file)
+    also rewrites the hook's ``manifest_path`` and dbt project/profile references to ``src/<prefix>/…``.
+    """
+    hooks: dict[str, tuple[str, str, str]] = {}
+    for nested in nested_workflows:
+        for setup_task in nested.setup_tasks:
+            if setup_task.type != "pydabs_dbt_factory":
+                continue
+            module_name = str(setup_task.config["hook_module"]).removeprefix("resources.")
+            namespaced_module = to_lowercase_key(f"{prefix}__{module_name}")
+            old_job_key = str(setup_task.config["job_key"])
+            new_job_key = to_lowercase_key(f"{prefix}__{old_job_key}")
+            hooks[f"resources/{module_name}.py"] = (f"resources/{namespaced_module}.py", old_job_key, new_job_key)
+            setup_task.config["hook_module"] = f"resources.{namespaced_module}"
+            setup_task.config["job_key"] = new_job_key
+            if relocate_dbt_sources:
+                setup_task.config["manifest_path"] = f"src/{prefix}/dbt_project/target/manifest.json"
+            replacements[f"${{resources.jobs.{old_job_key}.id}}"] = f"${{resources.jobs.{new_job_key}.id}}"
+
+    for nested in nested_workflows:
+        for notebook in nested.notebooks:
+            if notebook.relative_path not in hooks:
+                continue
+            new_path, old_job_key, new_job_key = hooks[notebook.relative_path]
+            notebook.relative_path = new_path
+            notebook.content = notebook.content.replace(old_job_key, new_job_key)
+            if relocate_dbt_sources:
+                notebook.content = notebook.content.replace("src/notebooks/", f"src/{prefix}/notebooks/")
+                notebook.content = notebook.content.replace("src/dbt_project", f"src/{prefix}/dbt_project")
+                notebook.content = notebook.content.replace("src/dbt_profiles", f"src/{prefix}/dbt_profiles")
+
+
+def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None:
+    """Namespaces a workflow's notebooks and inner ForEach job keys by *prefix*, in place.
+
+    When several pipelines share one bundle (``single`` / ``per-group`` modes), their notebook file
+    paths (derived from activity names) and inner ForEach job keys (``<task_key>_inner_tasks``,
+    unique only within a pipeline) can collide in the shared ``resources/`` and ``src/`` dirs — two
+    pipelines writing the same path, the second silently overwriting the first while both jobs still
+    reference it. Prefixing every such artifact with the owning pipeline key makes them unique.
+
+    Rewrites, consistently:
+      * each notebook ``relative_path`` (``notebooks/x.py`` -> ``notebooks/<prefix>/x.py``) and every
+        ``../src/notebooks/x.py`` task reference to it;
+      * each inner ForEach job ``name`` (so its resource key becomes ``<prefix>__<key>``) and every
+        ``${resources.jobs.<key>.id}`` ref to it.
+
+    Pipeline-level job keys are NOT namespaced: pipeline names are unique within a migration, so they
+    never collide, and namespacing them would break cross-bundle ``${var.<callee>}`` wiring.
+    """
+    replacements: dict[str, str] = {}
+
+    # 0. dbt-factory hook modules (dbt source trees are not relocated on this path).
+    _namespace_pydabs_hooks([workflow, *workflow.inner_workflows], prefix, replacements, relocate_dbt_sources=False)
+
+    # 1. Inner ForEach job keys: rename inner.name, map old resources.jobs ref -> new.
+    seen_new_keys: dict[str, str] = {}
+    for inner in workflow.inner_workflows:
+        old_key = to_lowercase_key(inner.name)
+        inner.name = f"{prefix}__{inner.name}"
+        new_key = to_lowercase_key(inner.name)
+        # to_lowercase_key collapses the "__" separator to "_", so a pipeline name containing "__"
+        # could make two inner jobs land on the same namespaced key (e.g. prefix "a" + inner "b__c" vs
+        # prefix "a__b" + inner "c" both -> "a_b_c"), silently overwriting one resource file. Refuse
+        # rather than ship a corrupt bundle — this requires pathological ADF names but is cheap to catch.
+        if new_key in seen_new_keys:
+            raise ValueError(
+                f"Namespacing inner ForEach jobs under prefix '{prefix}' produced a duplicate resource "
+                f"key '{new_key}' (from inner jobs '{seen_new_keys[new_key]}' and '{inner.name}'). "
+                "Rename the offending pipeline/activity so keys don't collide after normalization."
+            )
+        seen_new_keys[new_key] = inner.name
+        if old_key != new_key:
+            replacements[f"${{resources.jobs.{old_key}.id}}"] = f"${{resources.jobs.{new_key}.id}}"
+
+    # 2. Notebook paths: prefix each unique relative_path with the pipeline key as a subdirectory.
+    for wf in (workflow, *workflow.inner_workflows):
+        for notebook in wf.notebooks:
+            old_path = notebook.relative_path
+            # Bundle-root Python resources — the dbt hook modules namespaced in step 0, the resources
+            # package marker, pyproject.toml — import by path from the root, so leave them in place.
+            # Authored files at such paths are written below src/ like any other, so they are namespaced.
+            if _is_bundle_root_artifact(notebook):
+                continue
+            new_path = _prefixed_notebook_relative_path(old_path, prefix)
+            if old_path != new_path:
+                notebook.relative_path = new_path
+                replacements[f"../src/{old_path}"] = f"../src/{new_path}"
+                # Some generated bodies reference their own bundle-relative path (e.g. the Spark-Python
+                # placeholder's `databricks fs cp ... src/<path>` download hint). Rewrite that too so an
+                # operator following the instruction downloads to where the task now looks.
+                if f"src/{old_path}" in notebook.content:
+                    notebook.content = notebook.content.replace(f"src/{old_path}", f"src/{new_path}")
+
+    # 3. Rewrite every matching ref across the parent and inner task trees.
+    for wf in (workflow, *workflow.inner_workflows):
+        _rewrite_task_string_values(wf.tasks, replacements)
+
+
+def _prefixed_notebook_relative_path(relative_path: str, prefix: str) -> str:
+    """Inserts *prefix* as a subdirectory under the top-level segment of a notebook relative path.
+
+    ``notebooks/copy_data.py`` -> ``notebooks/<prefix>/copy_data.py``. Idempotent for these real
+    (slashed) paths: a double-apply is a no-op (``tail`` already starts with ``<prefix>/``) rather than
+    nesting ``notebooks/<prefix>/<prefix>/…``.
+
+    A path with no ``/`` (``x.py`` -> ``<prefix>/x.py``) is a defensive fallback — every notebook this
+    codebase emits is under a category dir (``notebooks/``, ``lib/``, ``src/…``), so it does not occur
+    in practice. Only the trivial ``relative_path == prefix`` re-apply is guarded there; nesting on a
+    slash-less re-apply is not, because distinguishing a once-prefixed ``<prefix>/x.py`` from a genuine
+    first-time slashed path whose head equals the prefix (a pipeline literally named ``notebooks``) is
+    ambiguous — and skipping a genuine path would defeat the namespacing this function exists to do.
+    """
+    head, sep, tail = relative_path.partition("/")
+    if not sep:
+        if relative_path == prefix:
+            return relative_path
+        return f"{prefix}/{relative_path}"
+    if tail.startswith(f"{prefix}/"):
+        return relative_path
+    return f"{head}/{prefix}/{tail}"
+
+
+def write_bundle_group(
+    workflows: list[PreparedWorkflow],
+    output_dir: Path,
+    catalog: str = "main",
+    schema: str = "default",
+    bundle_name: str | None = None,
+    skipped_pipelines: list[str] | None = None,
+) -> list[Path]:
+    """Writes one DAB bundle holding every workflow in *workflows*.
+
+    Each workflow contributes its own job resource file (plus its inner ForEach job files and any
+    Lakeflow pipeline resources) into the bundle's shared ``resources/`` directory, exactly as the
+    per-pipeline path does — a bundle with several pipelines is just several job resources under one
+    ``databricks.yml``, reusing the same machinery that already emits a parent job plus its inner
+    ForEach jobs. Generated notebooks, setup notebooks, secrets, and the SETUP.md prerequisites are
+    unioned (and de-duplicated) across the group so shared code and setup scripts appear once.
+
+    A ``run_job_task`` targeting a pipeline that is *also* in this group keeps its
+    ``${resources.jobs.X.id}`` ref (resolves within the bundle); one targeting a pipeline in another
+    bundle is rewritten to ``${var.X}`` and wired at deploy time — the cross-bundle set is simply
+    every pipeline/inner job key in the group.
+
+    Args:
+        workflows: The PreparedWorkflows to co-locate in one bundle (>= 1).
+        output_dir: Root directory for the bundle output.
+        catalog: Default target catalog name.
+        schema: Default target schema name.
+        bundle_name: Bundle name (defaults to the first workflow's resource key).
+
+    Returns:
+        List of absolute paths to all created files.
+    """
+    # Reset module-level accumulators so successive write_bundle_group calls (CLI loops, tests) don't
+    # carry warnings or cross-bundle variables from one bundle into the next.
     _bundle_warnings.clear()
     _cross_bundle_variables.clear()
     _neutralized_conditions.clear()
+    _synthetic_default_parameters.clear()
 
-    _check_agentic_file_collisions(workflow, catalog, schema)
-    workflow = copy.deepcopy(workflow)
+    if not workflows:
+        raise ValueError("write_bundle_group requires at least one workflow")
+
+    # Deep-copy the input so writing a bundle never mutates the caller's PreparedWorkflows. This
+    # matters because several steps below rewrite the task dicts in place — namespacing and the
+    # cross-bundle rewrite that turns ${resources.jobs.X.id} into ${var.X_job_id} — which would erase
+    # the Run Pipeline edges pipeline_graph reads. Without the copy, correctness of the caller's
+    # dependency graph / DEPLOY.md order would silently depend on it being computed before this call
+    # (main() does, but that is an unenforceable ordering trap). Copying makes the writer a pure sink:
+    # callers can build the graph before or after writing, in any order.
+    workflows = [copy.deepcopy(workflow) for workflow in workflows]
+
+    # When >1 pipeline shares this bundle, namespace each pipeline's notebooks and inner ForEach job
+    # keys by its pipeline key so activity-derived paths / inner-job keys (unique only within a
+    # pipeline) can't collide in the shared resources/ and src/ dirs. Single-pipeline bundles are left
+    # untouched, so the per-pipeline path stays byte-for-byte identical.
+    if len(workflows) > 1:
+        for workflow in workflows:
+            _namespace_bundle_artifacts(workflow, to_lowercase_key(workflow.name))
+    _check_agentic_file_collisions(workflows, catalog, schema)
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     created_files: list[Path] = []
-    resource_key = normalize_task_key(workflow.name)
-    effective_name = bundle_name or resource_key
-    known_bundle_jobs = _known_bundle_job_keys(workflow, resource_key)
-    _rewrite_cross_bundle_job_references(workflow, known_bundle_jobs)
+    effective_name = bundle_name or to_lowercase_key(workflows[0].name)
 
-    # Bind clusters across the parent and inner workflows up front to decide whether databricks.yml needs
+    # Bind clusters across every workflow (parent + inner) up front to decide whether databricks.yml needs
     # cluster tunables at all. Binding is idempotent, so _build_job_resource re-checking these is harmless.
-    _bind_cluster_to_notebook_tasks(workflow.tasks)
-    for inner in workflow.inner_workflows:
-        _bind_cluster_to_notebook_tasks(inner.tasks)
-    bundle_uses_classic_cluster = _any_task_uses_classic_cluster(workflow.tasks) or any(
-        _any_task_uses_classic_cluster(inner.tasks) for inner in workflow.inner_workflows
-    )
+    bundle_uses_classic_cluster = False
+    for workflow in workflows:
+        _bind_cluster_to_notebook_tasks(workflow.tasks)
+        for inner in workflow.inner_workflows:
+            _bind_cluster_to_notebook_tasks(inner.tasks)
+        if _any_task_uses_classic_cluster(workflow.tasks) or any(
+            _any_task_uses_classic_cluster(inner.tasks) for inner in workflow.inner_workflows
+        ):
+            bundle_uses_classic_cluster = True
 
-    pipeline_resources = _collect_pipeline_resources(workflow)
+    # Rewrite run_job_task refs to sibling-bundle jobs (${resources.jobs.X.id} where X is not a job in
+    # this bundle) into ${var.X_job_id}, registering each so _build_databricks_yml declares the variable.
+    # The "known" set is every pipeline + inner + dbt-factory job key across the whole group, so
+    # intra-group calls stay as direct ${resources.jobs.X.id} refs. Must run before databricks.yml /
+    # resource YAML are written below, or the ref points at a non-existent node and deploy fails.
+    known_bundle_jobs: set[str] = set()
+    for workflow in workflows:
+        known_bundle_jobs |= _known_bundle_job_keys(workflow, to_lowercase_key(workflow.name))
+    for workflow in workflows:
+        _rewrite_cross_bundle_job_references(workflow, known_bundle_jobs)
+
+    pipeline_resources = _collect_pipeline_resources(workflows)
     _check_pipeline_resource_keys(pipeline_resources, known_bundle_jobs)
-    environments = _collect_environments(workflow)
-    _check_environment_keys(environments, workflow)
-    _check_authored_file_references(workflow, environments, catalog, schema)
+    environments_by_workflow: list[list[dict[str, Any]]] = []
+    for workflow in workflows:
+        environments = _collect_environments(workflow)
+        _check_environment_keys(environments, workflow)
+        environments_by_workflow.append(environments)
+    all_environments = [environment for environments in environments_by_workflow for environment in environments]
+    _check_authored_file_references(workflows, all_environments, catalog, schema)
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
-    # sql_task references ${var.warehouse_id}; declare it (no default -> user supplies at deploy).
-    if _bundle_uses_sql_task(workflow):
+    # sql_task references ${var.warehouse_id}; declare it once if any workflow in the group uses one
+    # (no default -> user supplies at deploy).
+    if any(_bundle_uses_sql_task(workflow) for workflow in workflows):
         pipeline_variable_declarations.setdefault(
             "warehouse_id", {"description": "SQL warehouse id for sql_task queries"}
         )
-    for name, declaration in _build_authored_variable_declarations(workflow, environments).items():
+    for name, declaration in _build_authored_variable_declarations(workflows, all_environments).items():
         pipeline_variable_declarations.setdefault(name, declaration)
 
-    hoisted_global_variables = _collect_hoisted_global_variables(workflow)
-    extra_variable_declarations = {**pipeline_variable_declarations, **hoisted_global_variables}
+    # Hoisted factory globals become bundle variables. Collected per workflow (each call also merges the
+    # workflow's inner ForEach jobs): the bundle-scoped surfaces — databricks.yml ``variables:`` and
+    # SETUP.md — declare the UNION across every workflow in the group, while each individual job resource
+    # (in the loop below) gets only its own workflow's globals. For a single-workflow bundle the union
+    # equals that one workflow's set, so per-pipeline output is unchanged.
+    hoisted_globals_by_workflow: list[set[str]] = []
+    hoisted_global_union: dict[str, Any] = {}
+    for workflow in workflows:
+        wf_hoisted = _collect_hoisted_global_variables(workflow)
+        hoisted_globals_by_workflow.append(set(wf_hoisted))
+        for name, declaration in wf_hoisted.items():
+            if name in hoisted_global_union and hoisted_global_union[name] != declaration:
+                _warn(name, "factory global declared with conflicting definitions across grouped pipelines; last wins.")
+            hoisted_global_union[name] = declaration
+    extra_variable_declarations = {**pipeline_variable_declarations, **hoisted_global_union}
 
     # dbt-factory PyDABs hooks: each `resources.<key>_dbt_job:load_resources` module must be
     # registered under the `python.resources` block so `bundle deploy` runs it to build the dbt job.
-    pydabs_resource_entries = _collect_pydabs_resource_entries(workflow)
+    # Union across every workflow in the group.
+    pydabs_resource_entries: list[str] = []
+    for workflow in workflows:
+        for entry in _collect_pydabs_resource_entries(workflow):
+            if entry not in pydabs_resource_entries:
+                pydabs_resource_entries.append(entry)
 
-    # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id
-    #    defaults come from the ADF linked-service configs; when every task is serverless, they're omitted.
+    # 1. Write databricks.yml. When any task runs on classic compute, spark_version / node_type_id are
+    #    declared: required for Airflow bundles, defaulted from the ADF linked-service configs for ADF;
+    #    when every task is serverless, they're omitted. Union the cluster hints across every workflow in
+    #    the group so a multi-pipeline bundle gets one consensus default pair.
+    all_cluster_hints: list[dict[str, Any]] = []
+    for workflow in workflows:
+        all_cluster_hints.extend(workflow.cluster_hints)
     databricks_yml_path = output_dir / "databricks.yml"
-    inferred_spark_version, inferred_node_type_id = _infer_bundle_cluster_defaults(workflow)
+    inferred_spark_version, inferred_node_type_id = _cluster_hint_consensus(all_cluster_hints)
     databricks_yml_dict = _build_databricks_yml(
         effective_name,
         catalog,
@@ -169,6 +477,7 @@ def write_bundle(
         spark_version=inferred_spark_version,
         node_type_id=inferred_node_type_id,
         include_cluster_variables=bundle_uses_classic_cluster,
+        require_cluster_variables=workflow.source == "airflow",
         extra_variables=extra_variable_declarations,
         pydabs_resources=pydabs_resource_entries,
     )
@@ -184,50 +493,57 @@ def write_bundle(
     )
     created_files.append(databricks_yml_path.resolve())
 
-    # 2. Write job resource YAML. Strip broken base_parameters from existing-notebook tasks first —
-    #    they're surfaced in SETUP.md further down and shouldn't ship in the YAML as malformed values.
-    manual_parameters: list[ManualParameter] = _extract_manual_parameters_from_existing_notebook_tasks(workflow.tasks)
-    for inner in workflow.inner_workflows:
-        manual_parameters.extend(_extract_manual_parameters_from_existing_notebook_tasks(inner.tasks))
-
+    # 2. Write one job resource YAML per workflow (plus its inner ForEach job files) into the shared
+    #    resources/ dir. Strip broken base_parameters from existing-notebook tasks first — they're
+    #    surfaced in SETUP.md further down and shouldn't ship in the YAML as malformed values.
+    manual_parameters: list[ManualParameter] = []
     resources_dir = output_dir / "resources"
     resources_dir.mkdir(parents=True, exist_ok=True)
-    job_yml_path = resources_dir / f"{resource_key}.yml"
-    hoisted_global_names = set(hoisted_global_variables)
-    job_resource = _build_job_resource(
-        workflow, resource_key, hoisted_globals=hoisted_global_names, environments=environments
-    )
-    job_yml_path.write_text(
-        yaml.dump(
-            job_resource, default_flow_style=False, sort_keys=False, allow_unicode=True, Dumper=_BundleYamlDumper
-        ),
-        encoding="utf-8",
-    )
-    created_files.append(job_yml_path.resolve())
+    for index, workflow in enumerate(workflows):
+        resource_key = to_lowercase_key(workflow.name)
+        # Each job resource (parent + its inner ForEach jobs) gets only this workflow's hoisted globals,
+        # not the group-wide union, so a widget is bound to ${var.X} only in the pipelines that declare X.
+        wf_hoisted_globals = hoisted_globals_by_workflow[index]
+        environments = environments_by_workflow[index]
+        manual_parameters.extend(_extract_manual_parameters_from_existing_notebook_tasks(workflow.tasks))
+        for inner in workflow.inner_workflows:
+            manual_parameters.extend(_extract_manual_parameters_from_existing_notebook_tasks(inner.tasks))
 
-    # Write inner workflows as additional resource files. Inner tasks reuse notebooks from the parent's
-    # list, so pass those in for the inner job's widget auto-augmentation.
-    for inner in workflow.inner_workflows:
-        inner_key = normalize_task_key(inner.name)
-        inner_yml_path = resources_dir / f"{inner_key}.yml"
-        inner_resource = _build_job_resource(
-            inner,
-            inner_key,
-            extra_notebooks_for_augment=workflow.notebooks,
-            hoisted_globals=hoisted_global_names,
-            environments=environments,
+        job_yml_path = resources_dir / f"{resource_key}.yml"
+        job_resource = _build_job_resource(
+            workflow, resource_key, hoisted_globals=wf_hoisted_globals, environments=environments
         )
-        inner_yml_path.write_text(
+        job_yml_path.write_text(
             yaml.dump(
-                inner_resource,
-                default_flow_style=False,
-                sort_keys=False,
-                allow_unicode=True,
-                Dumper=_BundleYamlDumper,
+                job_resource, default_flow_style=False, sort_keys=False, allow_unicode=True, Dumper=_BundleYamlDumper
             ),
             encoding="utf-8",
         )
-        created_files.append(inner_yml_path.resolve())
+        created_files.append(job_yml_path.resolve())
+
+        # Write inner workflows as additional resource files. Inner tasks reuse notebooks from the parent's
+        # list, so pass those in for the inner job's widget auto-augmentation.
+        for inner in workflow.inner_workflows:
+            inner_key = to_lowercase_key(inner.name)
+            inner_yml_path = resources_dir / f"{inner_key}.yml"
+            inner_resource = _build_job_resource(
+                inner,
+                inner_key,
+                extra_notebooks_for_augment=workflow.notebooks,
+                hoisted_globals=wf_hoisted_globals,
+                environments=environments,
+            )
+            inner_yml_path.write_text(
+                yaml.dump(
+                    inner_resource,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                    Dumper=_BundleYamlDumper,
+                ),
+                encoding="utf-8",
+            )
+            created_files.append(inner_yml_path.resolve())
 
     # 2b. Write Lakeflow pipeline resources (Lakeflow Connect ingestion defs from the Copy preparer's LFC
     #     branch). Each lives in its own YAML so the bundle parser merges them via the ``include`` glob.
@@ -245,10 +561,17 @@ def write_bundle(
         )
         created_files.append(resource_yml_path.resolve())
 
-    # 3. Write generated notebooks. PyDABs hook modules (relative_path under ``resources/``) are
-    #    Python resources the bundle imports as ``resources.<module>`` from the bundle root, so they
-    #    go to output_dir; all other generated notebooks go under ``src/``.
+    # 3. Write generated notebooks (union of every workflow's + inner ForEach jobs'; dedupe drops repeats
+    #    of the same path — see _dedupe_notebooks). PyDABs hook modules (relative_path under ``resources/``)
+    #    and pyproject.toml are Python resources the bundle imports from its root, so they go to
+    #    output_dir; every other generated notebook goes under ``src/``.
     src_dir = output_dir / "src"
+    generated_notebooks: list[DabNotebook] = []
+    for workflow in workflows:
+        generated_notebooks.extend(workflow.notebooks)
+        for inner in workflow.inner_workflows:
+            generated_notebooks.extend(inner.notebooks)
+    generated_notebooks = _dedupe_notebooks(generated_notebooks)
 
     def _write_generated(notebooks: list[DabNotebook]) -> None:
         root_artifacts = [notebook for notebook in notebooks if _is_bundle_root_artifact(notebook)]
@@ -258,84 +581,52 @@ def write_bundle(
         if root_artifacts:
             created_files.extend(write_notebooks(root_artifacts, output_dir))
 
-    if workflow.notebooks:
-        _write_generated(workflow.notebooks)
+    if generated_notebooks:
+        _write_generated(generated_notebooks)
 
     # 4. Generate and write setup notebooks (create-scope, create-volume, etc.) — the executable
-    #    provisioning artifacts; SETUP.md (below) is the human-readable companion.
+    #    provisioning artifacts; SETUP.md (below) is the human-readable companion. Generate once over the
+    #    unioned secrets/setup tasks so a bundle with several pipelines has one consolidated setup/ dir.
+    all_secrets = [secret for workflow in workflows for secret in _iter_workflow_secrets(workflow)]
+    all_setup_tasks = [task for workflow in workflows for task in _iter_workflow_setup_tasks(workflow)]
     setup_notebooks: list[DabNotebook] = generate_setup_tasks(
-        secrets=workflow.secrets,
-        setup_tasks=workflow.setup_tasks,
+        secrets=all_secrets,
+        setup_tasks=all_setup_tasks,
         catalog=catalog,
         schema=schema,
     )
     if setup_notebooks:
-        created_files.extend(write_notebooks(setup_notebooks, src_dir))
+        created_files.extend(write_notebooks(_dedupe_notebooks(setup_notebooks), src_dir))
 
-    # Collect notebooks from inner workflows
-    for inner in workflow.inner_workflows:
-        if inner.notebooks:
-            _write_generated(inner.notebooks)
-        inner_setup = generate_setup_tasks(
-            secrets=inner.secrets,
-            setup_tasks=inner.setup_tasks,
-            catalog=catalog,
-            schema=schema,
-        )
-        if inner_setup:
-            created_files.extend(write_notebooks(inner_setup, src_dir))
+    # 5. Build one SETUP.md for the whole bundle — a root-level, human-readable summary of every external
+    #    step needed before ``bundle run``. Additive to the setup/ notebooks above (the executable path).
+    #    Unions every workflow (parent + inner ForEach jobs) so a multi-pipeline bundle gets one SETUP.md.
+    all_notebooks: list[DabNotebook] = list(generated_notebooks)
+    all_tasks: list[dict[str, Any]] = []
+    parameter_approximations: list[Any] = []
+    rollup_configs: list[dict[str, Any]] = []
+    dynamic_dispatch_configs: list[dict[str, Any]] = []
+    unresolved_library_configs: list[dict[str, Any]] = []
+    manual_variable_init_configs: list[dict[str, Any]] = []
+    manual_schedule_time_of_day_configs: list[dict[str, Any]] = []
+    manual_credential_configs: list[dict[str, Any]] = []
+    airflow_backfill_configs: list[dict[str, Any]] = []
+    pydabs_dbt_factory_configs: list[dict[str, Any]] = []
+    for workflow in workflows:
+        for wf in (workflow, *workflow.inner_workflows):
+            all_tasks.extend(wf.tasks)
+            parameter_approximations.extend(wf.parameter_approximations)
+            rollup_configs.extend(t.config for t in wf.setup_tasks if t.type == "manual_variable_rollup")
+            dynamic_dispatch_configs.extend(t.config for t in wf.setup_tasks if t.type == "dynamic_notebook_dispatch")
+            unresolved_library_configs.extend(t.config for t in wf.setup_tasks if t.type == "unresolved_library")
+            manual_variable_init_configs.extend(t.config for t in wf.setup_tasks if t.type == "manual_variable_init")
+            manual_schedule_time_of_day_configs.extend(
+                t.config for t in wf.setup_tasks if t.type == "manual_schedule_time_of_day"
+            )
+            manual_credential_configs.extend(t.config for t in wf.setup_tasks if t.type == "manual_credential")
+            airflow_backfill_configs.extend(t.config for t in wf.setup_tasks if t.type == "airflow_backfill")
+            pydabs_dbt_factory_configs.extend(t.config for t in wf.setup_tasks if t.type == "pydabs_dbt_factory")
 
-    # 5. Build SETUP.md — a root-level, human-readable summary of every external step needed before
-    #    ``bundle run``. Additive to the setup/ notebooks above (those are the executable path).
-    all_notebooks = list(workflow.notebooks)
-    for inner in workflow.inner_workflows:
-        all_notebooks.extend(inner.notebooks)
-    all_tasks = list(workflow.tasks)
-    for inner in workflow.inner_workflows:
-        all_tasks.extend(inner.tasks)
-    parameter_approximations = list(workflow.parameter_approximations)
-    for inner in workflow.inner_workflows:
-        parameter_approximations.extend(inner.parameter_approximations)
-    known_bundle_jobs = _known_bundle_job_keys(workflow, resource_key)
-    # manual_parameters was collected above (before YAML emission) so broken values are stripped on disk too.
-    # VAREX3-003: manual_variable_rollup SetupTasks from workflow_preparer surface in SETUP.md so the user
-    # knows where to add a roll-up notebook.
-    rollup_configs = [task.config for task in workflow.setup_tasks if task.type == "manual_variable_rollup"]
-    for inner in workflow.inner_workflows:
-        rollup_configs.extend(task.config for task in inner.setup_tasks if task.type == "manual_variable_rollup")
-    dynamic_dispatch_configs = [
-        task.config for task in workflow.setup_tasks if task.type == "dynamic_notebook_dispatch"
-    ]
-    unresolved_library_configs = [task.config for task in workflow.setup_tasks if task.type == "unresolved_library"]
-    manual_variable_init_configs = [task.config for task in workflow.setup_tasks if task.type == "manual_variable_init"]
-    manual_schedule_time_of_day_configs = [
-        task.config for task in workflow.setup_tasks if task.type == "manual_schedule_time_of_day"
-    ]
-    manual_credential_configs = [task.config for task in workflow.setup_tasks if task.type == "manual_credential"]
-    airflow_backfill_configs = [task.config for task in workflow.setup_tasks if task.type == "airflow_backfill"]
-    pydabs_dbt_factory_configs = [task.config for task in workflow.setup_tasks if task.type == "pydabs_dbt_factory"]
-    for inner in workflow.inner_workflows:
-        pydabs_dbt_factory_configs.extend(
-            task.config for task in inner.setup_tasks if task.type == "pydabs_dbt_factory"
-        )
-        dynamic_dispatch_configs.extend(
-            task.config for task in inner.setup_tasks if task.type == "dynamic_notebook_dispatch"
-        )
-        unresolved_library_configs.extend(
-            task.config for task in inner.setup_tasks if task.type == "unresolved_library"
-        )
-        manual_variable_init_configs.extend(
-            task.config for task in inner.setup_tasks if task.type == "manual_variable_init"
-        )
-        manual_schedule_time_of_day_configs.extend(
-            task.config for task in inner.setup_tasks if task.type == "manual_schedule_time_of_day"
-        )
-        manual_credential_configs.extend(task.config for task in inner.setup_tasks if task.type == "manual_credential")
-    # LSC3-006: union typed SecretInstructions (workflow + inner) with notebook-scanned scopes so SETUP.md
-    # and create_secrets.py reference the same set of (scope, key) pairs.
-    all_secret_instructions = list(workflow.secrets)
-    for inner in workflow.inner_workflows:
-        all_secret_instructions.extend(inner.secrets)
     prereqs = build_prereqs(
         notebooks=all_notebooks,
         tasks=all_tasks,
@@ -344,23 +635,29 @@ def write_bundle(
         manual_parameters=manual_parameters,
         parameter_approximations=parameter_approximations,
         manual_variable_rollups=rollup_configs,
-        secret_instructions=all_secret_instructions,
+        secret_instructions=all_secrets,
         dynamic_notebook_dispatches=dynamic_dispatch_configs,
         unresolved_libraries=unresolved_library_configs,
         manual_variable_inits=manual_variable_init_configs,
         manual_schedule_time_of_day=manual_schedule_time_of_day_configs,
         manual_credentials=manual_credential_configs,
         neutralized_conditions=list(_neutralized_conditions),
-        hoisted_global_variables=hoisted_global_variables,
+        hoisted_global_variables=hoisted_global_union,
         pydabs_dbt_factories=pydabs_dbt_factory_configs,
         airflow_backfills=airflow_backfill_configs,
         skipped_pipelines=list(skipped_pipelines or []),
+        required_variables={
+            name: declaration["description"]
+            for name, declaration in databricks_yml_dict.get("variables", {}).items()
+            if name in _CLUSTER_VARIABLES and "default" not in declaration
+        },
+        synthetic_default_parameters=list(_synthetic_default_parameters),
     )
     setup_path = output_dir / "SETUP.md"
     setup_path.write_text(render_setup_md(prereqs, bundle_name=effective_name), encoding="utf-8")
     created_files.append(setup_path.resolve())
 
-    # 5. Write warnings file if any warnings were collected
+    # 6. Write warnings file if any warnings were collected
     if _bundle_warnings:
         warnings_path = output_dir / "WARNINGS.md"
         lines = [
@@ -375,6 +672,29 @@ def write_bundle(
         created_files.append(warnings_path.resolve())
 
     return created_files
+
+
+def _iter_prepared_workflows(workflows: list[PreparedWorkflow]) -> Iterator[PreparedWorkflow]:
+    """Yields each workflow of the group followed by its inner ForEach jobs."""
+    for workflow in workflows:
+        yield workflow
+        yield from workflow.inner_workflows
+
+
+def _iter_workflow_secrets(workflow: PreparedWorkflow) -> list[SecretInstruction]:
+    """Returns a workflow's own secrets plus its inner ForEach jobs' secrets (LSC3-006 union)."""
+    secrets = list(workflow.secrets)
+    for inner in workflow.inner_workflows:
+        secrets.extend(inner.secrets)
+    return secrets
+
+
+def _iter_workflow_setup_tasks(workflow: PreparedWorkflow) -> list[SetupTask]:
+    """Returns a workflow's own setup tasks plus its inner ForEach jobs' setup tasks."""
+    tasks = list(workflow.setup_tasks)
+    for inner in workflow.inner_workflows:
+        tasks.extend(inner.setup_tasks)
+    return tasks
 
 
 def _default_report_path(output_dir: Path) -> Path:
@@ -579,7 +899,7 @@ def _live_report_failures(
 
 
 # The bundle folders the latest package wrote, kept under metadata/: "." for one bundle at the top of the
-# output folder, otherwise one folder per pipeline named by normalize_task_key.
+# output folder, otherwise one folder per pipeline named by to_lowercase_key.
 PACKAGED_BUNDLES_FILENAME = "packaged_bundles.json"
 # What a bundle at the top of the output folder holds besides metadata/.
 _TOP_LEVEL_BUNDLE_ENTRIES = ("databricks.yml", "SETUP.md", "WARNINGS.md", "resources", "src")
@@ -618,7 +938,7 @@ def read_packaged_bundles(output_dir: Path) -> list[str]:
 
 def _is_bundle_folder_name(name: Any) -> bool:
     """Whether ``name`` is "." or a folder name package gives a pipeline's bundle."""
-    return isinstance(name, str) and (name == "." or (bool(name) and normalize_task_key(name) == name))
+    return isinstance(name, str) and (name == "." or (bool(name) and to_lowercase_key(name) == name))
 
 
 def _archive_stale_bundles(output_dir: Path, bundle_dirs: list[Path], previous_bundles: list[str]) -> Path | None:
@@ -792,6 +1112,168 @@ def _write_route_audit(output_dir: Path, report_path: Path | None = None) -> Pat
     return audit_path
 
 
+PACKAGING_MODES = ("per-pipeline", "single", "per-group")
+
+
+def _load_group_spec(path: Path) -> dict[str, str]:
+    """Loads a user-specified pipeline->group map for ``per-group`` grouping.
+
+    Accepts JSON or YAML. Two shapes are supported:
+
+    - ``{"<pipeline>": "<group>", ...}`` — a flat pipeline-to-group map.
+    - ``{"<group>": ["<pipeline>", ...], ...}`` — a group-to-pipelines map (a list value).
+
+    Pipeline names are normalized with :func:`to_lowercase_key` so the spec can use either the ADF
+    display name or the resource key. Returns a ``{pipeline_key: group_name}`` map.
+    """
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"Group spec {path} must be a mapping, got {type(raw).__name__}.")
+    mapping: dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(value, list):
+            for pipeline in value:
+                mapping[to_lowercase_key(str(pipeline))] = str(key)
+        else:
+            mapping[to_lowercase_key(str(key))] = str(value)
+    return mapping
+
+
+def _group_workflows(
+    workflows: list[PreparedWorkflow],
+    *,
+    mode: str,
+    group_by: str = "inferred",
+    group_spec: dict[str, str] | None = None,
+    bundle_name: str | None = None,
+    pipeline_deps: dict[str, set[str]] | None = None,
+) -> list[tuple[str, list[PreparedWorkflow]]]:
+    """Maps workflows to bundles per the packaging *mode*.
+
+    Args:
+        workflows: Prepared workflows loaded from the translation report.
+        mode: One of :data:`PACKAGING_MODES`.
+        group_by: For ``per-group`` only — ``"inferred"`` (connected components of the Run Pipeline
+            call graph) or ``"spec"`` (honor *group_spec*).
+        group_spec: For ``per-group`` + ``group_by="spec"`` — ``{pipeline_key: group_name}``.
+        bundle_name: Optional bundle name; used to name the single bundle in ``single`` mode.
+        pipeline_deps: Precomputed Run Pipeline dependency graph (from
+            :func:`flowx.bundler.pipeline_graph.build_pipeline_dependencies`). Passed in by ``main``
+            so the ``per-group inferred`` branch reuses it instead of rescanning every task tree;
+            computed on demand when omitted (e.g. direct callers/tests).
+
+    Returns:
+        A list of ``(bundle_dir_name, [workflows])`` tuples, one per bundle to write. Bundle dir
+        names are normalized and deterministic. For a single workflow this collapses to one bundle
+        regardless of mode.
+    """
+    if not workflows:
+        return []
+
+    by_key = {to_lowercase_key(wf.name): wf for wf in workflows}
+    # Every downstream keying (grouping, resource filenames, ${resources.jobs.X.id} refs, the pipeline
+    # graph) assumes each pipeline has a unique normalized key. Two pipeline names that collapse to the
+    # same key (e.g. "Load Sales" and "load-sales") would silently drop one here and from every mode's
+    # output. Fail loudly instead so the collision is fixed at the source rather than shipped incomplete.
+    if len(by_key) != len(workflows):
+        from collections import Counter
+
+        counts = Counter(to_lowercase_key(wf.name) for wf in workflows)
+        dupes = sorted(key for key, count in counts.items() if count > 1)
+        raise ValueError(
+            "Pipeline names collide on normalized key(s): "
+            + ", ".join(dupes)
+            + ". Rename the offending pipelines so each maps to a unique resource key."
+        )
+
+    if mode == "single" or len(workflows) == 1:
+        name = to_lowercase_key(bundle_name) if bundle_name else to_lowercase_key(workflows[0].name)
+        if mode == "single" and not bundle_name and len(workflows) > 1:
+            name = "flowx_bundle"
+        return [(name, list(workflows))]
+
+    if mode == "per-pipeline":
+        return [(key, [wf]) for key, wf in by_key.items()]
+
+    if mode == "per-group":
+        from flowx.bundler.pipeline_graph import (
+            PipelineCycleError,
+            build_pipeline_dependencies,
+            connected_components,
+            topo_order,
+        )
+
+        if group_by == "spec":
+            if not group_spec:
+                raise ValueError("per-group with --group-by spec requires a --group-spec file.")
+            explicit_groups = {to_lowercase_key(g) for g in group_spec.values()}
+            groups: dict[str, list[PreparedWorkflow]] = {}
+            for key, wf in by_key.items():
+                if key in group_spec:
+                    group_name = to_lowercase_key(group_spec[key])
+                else:
+                    # Pipelines absent from the spec become their own single-pipeline bundle. Guard
+                    # against a pipeline's own key colliding with an explicit group name, which would
+                    # silently merge it into that group's bundle.
+                    group_name = to_lowercase_key(key)
+                    if group_name in explicit_groups:
+                        raise ValueError(
+                            f"Pipeline '{wf.name}' is absent from the group spec, so it would form its "
+                            f"own bundle named '{group_name}', which collides with an explicit group "
+                            "name. Add it to the spec or rename the group."
+                        )
+                groups.setdefault(group_name, []).append(wf)
+            return [(name, groups[name]) for name in sorted(groups)]
+
+        # Inferred: connected components of the Run Pipeline call graph. Reuse the graph main already
+        # computed when provided, so a full package run scans the task trees only once.
+        deps = pipeline_deps if pipeline_deps is not None else build_pipeline_dependencies(workflows)
+        # Callees-first order across the whole migration; used to pick each component's callee root as
+        # the bundle name. Falls back to alphabetical when the graph is cyclic (no valid topo order).
+        try:
+            order_rank = {key: rank for rank, key in enumerate(topo_order(deps))}
+        except PipelineCycleError:
+            order_rank = {}
+        result: list[tuple[str, list[PreparedWorkflow]]] = []
+        for component in connected_components(deps):
+            members = [by_key[key] for key in component if key in by_key]
+            # Name the bundle after the component's callee root: the member that comes earliest in
+            # callees-first topo order (deploys first, others depend on it). Ties / cyclic graphs fall
+            # back to the alphabetically-first member (component is already sorted for determinism).
+            root = min(component, key=lambda key: (order_rank.get(key, 0), key))
+            result.append((root, members))
+        return result
+
+    raise ValueError(f"Unknown packaging mode: {mode!r}. Expected one of {PACKAGING_MODES}.")
+
+
+def _render_deploy_md_for_run(
+    written_groups: list[tuple[str, list[PreparedWorkflow]]],
+    pipeline_deps: dict[str, set[str]],
+    *,
+    single_bundle: bool,
+    packaging_mode: str,
+) -> str:
+    """Builds DEPLOY.md from the workflows written this run (bridges to :mod:`deploy_writer`).
+
+    *pipeline_deps* is the Run Pipeline graph from :func:`build_pipeline_dependencies`. write_bundle_group
+    works on a deep copy of its input, so the graph can be built before or after writing; passing it in
+    (rather than re-deriving it here from *written_groups*) just avoids scanning the task trees twice.
+    """
+    from flowx.bundler.deploy_writer import render_deploy_md
+
+    groups = [
+        (group_name, [to_lowercase_key(wf.name) for wf in group_workflows])
+        for group_name, group_workflows in written_groups
+    ]
+    return render_deploy_md(
+        groups,
+        pipeline_deps,
+        single_bundle=single_bundle,
+        packaging_mode=packaging_mode,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Package-phase entry point for DAB bundle generation.
 
@@ -860,6 +1342,36 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Keep the transient .work/ folder (translation report + IR) instead of pruning it.",
     )
+    parser.add_argument(
+        "--packaging-mode",
+        type=str,
+        choices=PACKAGING_MODES,
+        default="per-pipeline",
+        help=(
+            "How to lay out bundles for a multi-pipeline migration: 'per-pipeline' (default, one "
+            "bundle per pipeline), 'single' (all pipelines in one bundle), or 'per-group' (group "
+            "pipelines into bundles — see --group-by)."
+        ),
+    )
+    parser.add_argument(
+        "--group-by",
+        type=str,
+        choices=("inferred", "spec"),
+        default="inferred",
+        help=(
+            "For --packaging-mode per-group: 'inferred' groups pipelines by their Run Pipeline "
+            "(ExecutePipeline) call graph; 'spec' uses the mapping in --group-spec."
+        ),
+    )
+    parser.add_argument(
+        "--group-spec",
+        type=Path,
+        default=None,
+        help=(
+            "For --packaging-mode per-group --group-by spec: JSON/YAML file mapping pipelines to "
+            "group names ({pipeline: group} or {group: [pipelines]})."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.report is None:
@@ -926,86 +1438,154 @@ def main(argv: list[str] | None = None) -> int:
         print("No translated pipelines found in the report.", file=sys.stderr)
         return 1
 
-    shared_airflow_bundle = len(workflows) > 1 and all(workflow.source == "airflow" for workflow in workflows)
     from flowx.validate.bundle_invariants import check_bundle_dir, format_result
 
-    # Render and validate away from the destination. This keeps a reconciliation or structural
-    # failure from leaving a partially-written bundle in the migration directory.
-    args.output_dir.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".flowx-preflight-", dir=args.output_dir.parent) as temporary:
-        staging_root = Path(temporary)
-        if shared_airflow_bundle:
-            write_bundle(
-                workflow=_combine_airflow_workflows(workflows),
+    # Airflow migrations with >1 DAG collapse into a single combined bundle (each DAG becomes a job in
+    # one bundle); ADF and single-DAG runs go through the configurable packaging modes below.
+    shared_airflow_bundle = len(workflows) > 1 and all(workflow.source == "airflow" for workflow in workflows)
+
+    all_created: list[Path] = []
+    bundle_dirs: list[Path] = []
+
+    if shared_airflow_bundle:
+        combined_name = args.bundle_name or to_lowercase_key(args.output_dir.name)
+        # Render + validate away from the destination first, so a structural failure never leaves a
+        # partially-written bundle in the migration directory.
+        args.output_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".flowx-preflight-", dir=args.output_dir.parent) as temporary:
+            staging_root = Path(temporary)
+            write_bundle_group(
+                [_combine_airflow_workflows(workflows)],
                 output_dir=staging_root,
                 catalog=args.catalog,
                 schema=args.schema,
-                bundle_name=args.bundle_name or normalize_task_key(args.output_dir.name),
+                bundle_name=combined_name,
             )
-            staged_dirs = [staging_root]
-        else:
-            staged_dirs = []
-            for workflow in workflows:
-                workflow_dir = staging_root / normalize_task_key(workflow.name) if len(workflows) > 1 else staging_root
-                write_bundle(
-                    workflow=workflow,
-                    output_dir=workflow_dir,
-                    catalog=args.catalog,
-                    schema=args.schema,
-                    bundle_name=args.bundle_name if len(workflows) == 1 else None,
-                )
-                staged_dirs.append(workflow_dir)
-        preflight_violations = 0
-        for bundle_dir in staged_dirs:
-            result = check_bundle_dir(bundle_dir)
+            result = check_bundle_dir(staging_root)
             if not result.ok or result.warnings:
                 print(format_result(result), file=sys.stderr)
-            preflight_violations += len(result.violations)
-        if preflight_violations:
-            print(
-                f"Error: package preflight found {preflight_violations} bundle-invariant violation(s); "
-                "no bundle files were written.",
-                file=sys.stderr,
-            )
-            return 1
-
-    bundle_dirs = (
-        [args.output_dir]
-        if shared_airflow_bundle or len(workflows) == 1
-        else [args.output_dir / normalize_task_key(workflow.name) for workflow in workflows]
-    )
-    _archive_stale_bundles(args.output_dir, bundle_dirs, previous_bundles)
-
-    all_created: list[Path] = []
-    if shared_airflow_bundle:
-        combined = _combine_airflow_workflows(workflows)
+            if result.violations:
+                print(
+                    f"Error: package preflight found {len(result.violations)} bundle-invariant "
+                    "violation(s); no bundle files were written.",
+                    file=sys.stderr,
+                )
+                return 1
+        # Clear the bundle folders an earlier package recorded and this one will not write, before
+        # anything lands in the output folder.
+        _archive_stale_bundles(args.output_dir, [args.output_dir], previous_bundles)
         all_created.extend(
-            write_bundle(
-                workflow=combined,
+            write_bundle_group(
+                [_combine_airflow_workflows(workflows)],
                 output_dir=args.output_dir,
                 catalog=args.catalog,
                 schema=args.schema,
-                bundle_name=args.bundle_name or normalize_task_key(args.output_dir.name),
+                bundle_name=combined_name,
                 skipped_pipelines=skipped_pipelines,
             )
         )
+        bundle_dirs = [args.output_dir]
         print(f"  [1/1] {len(workflows)} Airflow DAG jobs: {len(all_created)} files")
     else:
-        for index, workflow in enumerate(workflows):
-            workflow_dir = (
-                args.output_dir / normalize_task_key(workflow.name) if len(workflows) > 1 else args.output_dir
+        group_spec: dict[str, str] | None = None
+        if args.group_spec is not None:
+            if not args.group_spec.exists():
+                print(f"Error: group spec file not found: {args.group_spec}", file=sys.stderr)
+                return 1
+            group_spec = _load_group_spec(args.group_spec)
+
+        # Build the Run Pipeline dependency graph once and thread it into grouping and DEPLOY.md.
+        # write_bundle_group works on a deep copy, so the graph is valid regardless of call order;
+        # computing it here just scans the task trees once.
+        from flowx.bundler.pipeline_graph import build_pipeline_dependencies
+
+        pipeline_deps = build_pipeline_dependencies(workflows)
+
+        try:
+            groups = _group_workflows(
+                workflows,
+                mode=args.packaging_mode,
+                group_by=args.group_by,
+                group_spec=group_spec,
+                bundle_name=args.bundle_name,
+                pipeline_deps=pipeline_deps,
             )
-            effective_bundle_name = args.bundle_name if len(workflows) == 1 else None
-            created = write_bundle(
-                workflow=workflow,
-                output_dir=workflow_dir,
-                catalog=args.catalog,
-                schema=args.schema,
-                bundle_name=effective_bundle_name,
-                skipped_pipelines=skipped_pipelines,
-            )
-            all_created.extend(created)
-            print(f"  [{index + 1}/{len(workflows)}] {workflow.name}: {len(created)} files")
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
+        # A single bundle (single mode, or only one pipeline) lands at the output dir root; multiple
+        # bundles each get their own subdirectory named after the group.
+        single_bundle = len(groups) == 1
+
+        def _write_groups(target_root: Path, *, announce: bool) -> tuple[list[Path], list[Path]]:
+            """Writes every group bundle under *target_root*; returns (created_files, bundle_dirs)."""
+            created_all: list[Path] = []
+            dirs: list[Path] = []
+            for index, (group_name, group_workflows) in enumerate(groups):
+                # Name the bundle after group_name (e.g. "flowx_bundle"), not the first pipeline, so the
+                # workspace path is .bundle/<group>/dev for a bundle holding many pipelines.
+                b_dir = target_root if single_bundle else target_root / group_name
+                created = write_bundle_group(
+                    group_workflows,
+                    output_dir=b_dir,
+                    catalog=args.catalog,
+                    schema=args.schema,
+                    bundle_name=group_name,
+                    skipped_pipelines=skipped_pipelines,
+                )
+                created_all.extend(created)
+                dirs.append(b_dir)
+                if announce:
+                    names = ", ".join(wf.name for wf in group_workflows)
+                    print(f"  [{index + 1}/{len(groups)}] {group_name} ({names}): {len(created)} files")
+            return created_all, dirs
+
+        # Render + validate in a temp dir first, so a structural failure never leaves a partially
+        # written bundle in the migration directory.
+        args.output_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".flowx-preflight-", dir=args.output_dir.parent) as temporary:
+            try:
+                _, staged_dirs = _write_groups(Path(temporary), announce=False)
+            except ValueError as exc:
+                # e.g. the inner-ForEach-key collision guard in _namespace_bundle_artifacts. Surface it
+                # as a clean message + exit code rather than a raw traceback. Caught here in the temp-dir
+                # preflight so nothing is written to the destination.
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            preflight_violations = 0
+            for staged_dir in staged_dirs:
+                result = check_bundle_dir(staged_dir)
+                if not result.ok or result.warnings:
+                    print(format_result(result), file=sys.stderr)
+                preflight_violations += len(result.violations)
+            if preflight_violations:
+                print(
+                    f"Error: package preflight found {preflight_violations} bundle-invariant "
+                    "violation(s); no bundle files were written.",
+                    file=sys.stderr,
+                )
+                return 1
+
+        _archive_stale_bundles(
+            args.output_dir,
+            [args.output_dir] if single_bundle else [args.output_dir / group_name for group_name, _ in groups],
+            previous_bundles,
+        )
+        group_created, bundle_dirs = _write_groups(args.output_dir, announce=True)
+        all_created.extend(group_created)
+
+        # Write a top-level DEPLOY.md documenting every bundle, its cross-bundle deps, and deploy order.
+        deploy_md = _render_deploy_md_for_run(
+            [(group_name, group_workflows) for group_name, group_workflows in groups],
+            pipeline_deps,
+            single_bundle=single_bundle,
+            packaging_mode=args.packaging_mode,
+        )
+        deploy_path = args.output_dir / "DEPLOY.md"
+        deploy_path.write_text(deploy_md, encoding="utf-8")
+        all_created.append(deploy_path.resolve())
+        print(f"  DEPLOY.md: deploy order for {len(groups)} bundle(s)")
 
     _archive_stale_outputs(args.output_dir, bundle_dirs, all_created)
 
@@ -1039,12 +1619,33 @@ def main(argv: list[str] | None = None) -> int:
             "fix before `databricks bundle validate`.",
             file=sys.stderr,
         )
+    required = sorted(
+        {name for bundle_dir in bundle_dirs for name in _required_cluster_variables_in(bundle_dir / "databricks.yml")}
+    )
     print("\nNext steps:")
     print("  1. Review the generated notebooks in src/")
     print("  2. Run the setup notebooks to create secrets and volumes")
-    print("  3. Validate the bundle: databricks bundle validate")
-    print("  4. Deploy: databricks bundle deploy -t dev")
+    if required:
+        print(f"  3. Supply the required bundle variables ({', '.join(required)}); see SETUP.md")
+        print("  4. Validate the bundle: databricks bundle validate")
+        print("  5. Deploy: databricks bundle deploy -t dev")
+    else:
+        print("  3. Validate the bundle: databricks bundle validate")
+        print("  4. Deploy: databricks bundle deploy -t dev")
     return 1 if invariant_violations else 0
+
+
+def _required_cluster_variables_in(databricks_yml: Path) -> set[str]:
+    """Returns the required cluster variables a written ``databricks.yml`` declares."""
+    if not databricks_yml.is_file():
+        return set()
+    config = yaml.safe_load(databricks_yml.read_text(encoding="utf-8")) or {}
+    variables = config.get("variables") or {}
+    return {
+        name
+        for name in _CLUSTER_VARIABLES
+        if isinstance(variables.get(name), dict) and "default" not in variables[name]
+    }
 
 
 def _combine_airflow_workflows(workflows: list[PreparedWorkflow]) -> PreparedWorkflow:
@@ -1076,10 +1677,10 @@ def _rewrite_cross_bundle_job_references(workflow: PreparedWorkflow, known_bundl
             target_job = match.group(1)
             if target_job in known_bundle_jobs:
                 continue
-            variable_name = f"{normalize_task_key(target_job)}_job_id"
+            variable_name = f"{to_lowercase_key(target_job)}_job_id"
             suffix = 2
             while variable_name in _cross_bundle_variables and _cross_bundle_variables[variable_name] != target_job:
-                variable_name = f"{normalize_task_key(target_job)}_job_id_{suffix}"
+                variable_name = f"{to_lowercase_key(target_job)}_job_id_{suffix}"
                 suffix += 1
             _cross_bundle_variables[variable_name] = target_job
             run_job["job_id"] = f"${{var.{variable_name}}}"
@@ -1087,7 +1688,7 @@ def _rewrite_cross_bundle_job_references(workflow: PreparedWorkflow, known_bundl
 
 def _known_bundle_job_keys(workflow: PreparedWorkflow, resource_key: str) -> set[str]:
     """Returns static and Python-generated job resource keys owned by this bundle."""
-    keys = {resource_key} | {normalize_task_key(inner.name) for inner in workflow.inner_workflows}
+    keys = {resource_key} | {to_lowercase_key(inner.name) for inner in workflow.inner_workflows}
     for current in [workflow, *workflow.inner_workflows]:
         keys.update(
             str(setup_task.config["job_key"])
@@ -1097,18 +1698,19 @@ def _known_bundle_job_keys(workflow: PreparedWorkflow, resource_key: str) -> set
     return keys
 
 
-def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, schema: str) -> None:
+def _check_agentic_file_collisions(workflows: list[PreparedWorkflow], catalog: str, schema: str) -> None:
     """Refuse an agent-authored file whose path another file below ``src`` uses with different content.
 
-    The notebook writer gives a clashing file a ``__N`` suffix, and setup notebooks are written later and
-    replace whatever is there, but every task still points at the original path, so one task would run the
-    other file's code. Paths that differ only in letter case are one file on macOS and Windows, and a file
-    path cannot also be a directory another file lives in, so an authored path that clashes that way fails
-    too.
+    Every workflow in the bundle writes into the same ``src`` directory, so the check spans the whole
+    group, after namespacing has given each pipeline's files their final paths. The bundle keeps only
+    the first file at a repeated path, and setup notebooks are written later and replace whatever is
+    there, but every task still points at the original path, so one task would run the other file's code.
+    Paths that differ only in letter case are one file on macOS and Windows, and a file path cannot also
+    be a directory another file lives in, so an authored path that clashes that way fails too.
     """
     authored_paths: set[str] = set()
     signatures_by_path: dict[str, set[object]] = {}
-    for notebook in _bundle_files(workflow, catalog, schema):
+    for notebook in _bundle_files(workflows, catalog, schema):
         if notebook.authored:
             authored_paths.add(notebook.relative_path)
         elif _is_bundle_root_artifact(notebook):
@@ -1143,17 +1745,21 @@ def _check_agentic_file_collisions(workflow: PreparedWorkflow, catalog: str, sch
             )
 
 
-def _bundle_files(workflow: PreparedWorkflow, catalog: str, schema: str) -> list[DabNotebook]:
-    """Return every generated, authored and setup file the bundle writer writes for *workflow* and its inner jobs."""
-    files: list[DabNotebook] = []
-    for prepared in [workflow, *workflow.inner_workflows]:
-        files.extend(prepared.notebooks)
-        files.extend(
-            generate_setup_tasks(
-                secrets=prepared.secrets, setup_tasks=prepared.setup_tasks, catalog=catalog, schema=schema
-            )
-        )
-    return files
+def _bundle_files(workflows: list[PreparedWorkflow], catalog: str, schema: str) -> list[DabNotebook]:
+    """Return every generated, authored and setup file the bundle writer writes for *workflows* and their inner jobs."""
+    setup_notebooks = generate_setup_tasks(
+        secrets=[secret for workflow in workflows for secret in _iter_workflow_secrets(workflow)],
+        setup_tasks=[task for workflow in workflows for task in _iter_workflow_setup_tasks(workflow)],
+        catalog=catalog,
+        schema=schema,
+    )
+    generated_notebooks = [
+        notebook
+        for workflow in workflows
+        for prepared in (workflow, *workflow.inner_workflows)
+        for notebook in prepared.notebooks
+    ]
+    return [*generated_notebooks, *setup_notebooks]
 
 
 _TASK_FILE_PATH_FIELDS = (
@@ -1203,7 +1809,7 @@ def _is_bundle_relative_path(reference: Any) -> bool:
 
 
 def _check_authored_file_references(
-    workflow: PreparedWorkflow, environments: list[dict[str, Any]], catalog: str, schema: str
+    workflows: list[PreparedWorkflow], environments: list[dict[str, Any]], catalog: str, schema: str
 ) -> None:
     """Fail when an authored task or environment names a bundle file that the bundle does not write.
 
@@ -1221,10 +1827,10 @@ def _check_authored_file_references(
     """
     written_paths = {
         notebook.relative_path if _is_bundle_root_artifact(notebook) else f"src/{notebook.relative_path}"
-        for notebook in _bundle_files(workflow, catalog, schema)
+        for notebook in _bundle_files(workflows, catalog, schema)
     }
     references: list[tuple[str, str]] = []
-    for current in [workflow, *workflow.inner_workflows]:
+    for current in _iter_prepared_workflows(workflows):
         for task in _iter_tasks_recursively(current.tasks):
             if task.get("_authored"):
                 references.extend(
@@ -1280,39 +1886,16 @@ def _is_bundle_root_artifact(notebook: DabNotebook) -> bool:
 def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
     """Namespaces generated source files by DAG while preserving workspace paths."""
     cloned = copy.deepcopy(workflow)
-    prefix = normalize_task_key(cloned.name)
+    prefix = to_lowercase_key(cloned.name)
     replacements: dict[str, str] = {}
-    pydabs_hooks: dict[str, tuple[str, str, str]] = {}
 
     nested_workflows = [cloned, *cloned.inner_workflows]
+    # dbt-factory hooks; this path relocates source files under <prefix>/, so relocate dbt refs too.
+    _namespace_pydabs_hooks(nested_workflows, prefix, replacements, relocate_dbt_sources=True)
     for nested in nested_workflows:
-        for setup_task in nested.setup_tasks:
-            if setup_task.type != "pydabs_dbt_factory":
-                continue
-            module = str(setup_task.config["hook_module"])
-            module_name = module.removeprefix("resources.")
-            namespaced_module_name = normalize_task_key(f"{prefix}__{module_name}")
-            namespaced_module = f"resources.{namespaced_module_name}"
-            original_job_key = str(setup_task.config["job_key"])
-            namespaced_job_key = normalize_task_key(f"{prefix}__{original_job_key}")
-            original_hook_path = f"resources/{module_name}.py"
-            namespaced_hook_path = f"resources/{namespaced_module_name}.py"
-            pydabs_hooks[original_hook_path] = (namespaced_hook_path, original_job_key, namespaced_job_key)
-            setup_task.config["hook_module"] = namespaced_module
-            setup_task.config["job_key"] = namespaced_job_key
-            setup_task.config["manifest_path"] = f"src/{prefix}/dbt_project/target/manifest.json"
-            replacements[f"${{resources.jobs.{original_job_key}.id}}"] = f"${{resources.jobs.{namespaced_job_key}.id}}"
-
         for notebook in nested.notebooks:
             original_path = notebook.relative_path
-            if original_path in pydabs_hooks:
-                namespaced_path, original_job_key, namespaced_job_key = pydabs_hooks[original_path]
-                notebook.relative_path = namespaced_path
-                notebook.content = notebook.content.replace(original_job_key, namespaced_job_key)
-                notebook.content = notebook.content.replace("src/notebooks/", f"src/{prefix}/notebooks/")
-                notebook.content = notebook.content.replace("src/dbt_project", f"src/{prefix}/dbt_project")
-                notebook.content = notebook.content.replace("src/dbt_profiles", f"src/{prefix}/dbt_profiles")
-                continue
+            # Hook modules (renamed above) + pyproject.toml import by path from the root; leave them.
             if _is_bundle_root_artifact(notebook):
                 continue
             notebook.relative_path = f"{prefix}/{original_path}"
@@ -1320,11 +1903,10 @@ def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
             replacements[f"src/{original_path}"] = f"src/{notebook.relative_path}"
 
     for inner in cloned.inner_workflows:
-        original_key = normalize_task_key(inner.name)
+        original_key = to_lowercase_key(inner.name)
         inner.name = f"{prefix}__{inner.name}"
-        replacements[f"${{resources.jobs.{original_key}.id}}"] = (
-            f"${{resources.jobs.{normalize_task_key(inner.name)}.id}}"
-        )
+        new_key = to_lowercase_key(inner.name)
+        replacements[f"${{resources.jobs.{original_key}.id}}"] = f"${{resources.jobs.{new_key}.id}}"
 
     _replace_strings(cloned.tasks, replacements)
     for inner in cloned.inner_workflows:
@@ -1352,9 +1934,6 @@ def _warn(task_key: str, message: str) -> None:
     """Record a translation warning for the current bundle."""
     _bundle_warnings.append(f"- **{task_key}**: {message}")
 
-
-_DEFAULT_SPARK_VERSION = "15.4.x-scala2.12"
-_DEFAULT_NODE_TYPE_ID = "Standard_DS3_v2"
 
 # C-29 (NB-ITER4-002): anchor on the canonical DBR version shape (e.g. "15.4.x-photon-scala2.12") so
 # unresolved ADF expressions like @if(equals(item()?.photon,true),...) fall through to the safe default
@@ -1385,28 +1964,33 @@ def _is_valid_node_type_id(value: Any) -> bool:
     return True
 
 
-def _infer_bundle_cluster_defaults(workflow: PreparedWorkflow) -> tuple[str, str]:
-    """Derive ``spark_version`` and ``node_type_id`` defaults from task clusters.
+_DEFAULT_SPARK_VERSION = "15.4.x-scala2.12"
+_DEFAULT_NODE_TYPE_ID = "Standard_DS3_v2"
+
+
+def _cluster_hint_consensus(cluster_hints: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    """Most-common valid ``spark_version`` / ``node_type_id`` across a (possibly multi-workflow) hint list.
+
+    Returns ``None`` for a field when no hint named a usable value. Callers decide what that means:
+    the ADF default branch of :func:`_build_databricks_yml` falls back to ``_DEFAULT_SPARK_VERSION`` /
+    ``_DEFAULT_NODE_TYPE_ID``, while the Airflow required variables simply omit the source suggestion.
 
     Args:
-        workflow: The prepared workflow being written.
+        cluster_hints: The union of every member workflow's ``cluster_hints``.
 
     Returns:
-        ``(spark_version, node_type_id)`` strings.
+        ``(spark_version, node_type_id)``, each ``None`` when no hint named a usable value.
     """
     from collections import Counter
 
-    # C-29 (NB-ITER4-002): filter out unparseable spark_version / node_type_id hints before Counter so
-    # unresolved ADF expressions don't land as the bundle default and break ``databricks bundle deploy``.
+    # C-29 (NB-ITER4-002): unresolved ADF expressions are not usable suggestions.
     spark_versions = [
-        hint["spark_version"] for hint in workflow.cluster_hints if _is_valid_spark_version(hint.get("spark_version"))
+        hint["spark_version"] for hint in cluster_hints if _is_valid_spark_version(hint.get("spark_version"))
     ]
-    node_types = [
-        hint["node_type_id"] for hint in workflow.cluster_hints if _is_valid_node_type_id(hint.get("node_type_id"))
-    ]
+    node_types = [hint["node_type_id"] for hint in cluster_hints if _is_valid_node_type_id(hint.get("node_type_id"))]
 
-    spark_version = Counter(spark_versions).most_common(1)[0][0] if spark_versions else _DEFAULT_SPARK_VERSION
-    node_type_id = Counter(node_types).most_common(1)[0][0] if node_types else _DEFAULT_NODE_TYPE_ID
+    spark_version = Counter(spark_versions).most_common(1)[0][0] if spark_versions else None
+    node_type_id = Counter(node_types).most_common(1)[0][0] if node_types else None
     return spark_version, node_type_id
 
 
@@ -1440,7 +2024,11 @@ def _infer_bundle_cluster_extras(workflow: PreparedWorkflow) -> dict[str, Any]:
         "spark_conf",
     )
     for key in extra_keys:
-        values = [hint[key] for hint in workflow.cluster_hints if hint.get(key)]
+        values = [
+            hint[key]
+            for hint in workflow.cluster_hints
+            if hint.get(key) or (key == "num_workers" and hint.get(key) == 0)
+        ]
         if not values:
             continue
         # Use string repr to dedupe non-hashable dict entries while still
@@ -1456,14 +2044,41 @@ def _infer_bundle_cluster_extras(workflow: PreparedWorkflow) -> dict[str, Any]:
     return extras
 
 
+def required_cluster_variables(
+    *, spark_version: str | None = None, node_type_id: str | None = None
+) -> dict[str, dict[str, str]]:
+    """Declares ``node_type_id`` and ``spark_version`` as required bundle variables with no default.
+
+    Node types are cloud-specific and runtimes are workspace-specific, so flowx never picks one.
+    ``databricks bundle validate`` reports both until the user supplies them. A value the source
+    pipelines configured is mentioned in the description as a starting point.
+    """
+    node_description = (
+        "Required. A node type supported by the target workspace's cloud for the job clusters "
+        "(for example i3.xlarge on AWS, Standard_D4ds_v5 on Azure, n2-standard-4 on GCP)."
+    )
+    if node_type_id:
+        node_description += f" The source pipelines used {node_type_id}."
+    runtime_description = (
+        "Required. A Databricks Runtime version supported by the target workspace for the job clusters."
+    )
+    if spark_version:
+        runtime_description += f" The source pipelines used {spark_version}."
+    return {
+        "node_type_id": {"description": node_description},
+        "spark_version": {"description": runtime_description},
+    }
+
+
 def _build_databricks_yml(
     bundle_name: str,
     catalog: str,
     schema: str,
     *,
-    spark_version: str = _DEFAULT_SPARK_VERSION,
-    node_type_id: str = _DEFAULT_NODE_TYPE_ID,
+    spark_version: str | None = None,
+    node_type_id: str | None = None,
     include_cluster_variables: bool = True,
+    require_cluster_variables: bool = True,
     extra_variables: dict[str, Any] | None = None,
     pydabs_resources: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -1473,14 +2088,17 @@ def _build_databricks_yml(
         bundle_name: Name for the bundle.
         catalog: Default target catalog.
         schema: Default target schema.
-        spark_version: DBR version for the default job_cluster.  Callers
-            typically derive this from :func:`_infer_bundle_cluster_defaults`.
-        node_type_id: Instance type for the default job_cluster.
+        spark_version: The Databricks Runtime the source configured, shown as a suggestion in the
+            variable description. Callers derive it from :func:`_cluster_hint_consensus`.
+        node_type_id: The node type the source configured, shown the same way.
         include_cluster_variables: When True, declares ``spark_version`` and
-            ``node_type_id`` variables for the default job_cluster.  Set to
+            ``node_type_id`` for the job clusters.  Set to
             False when no task in the bundle uses classic compute (every
             generated notebook runs on serverless), so the bundle stays
             free of unused tunables.
+        require_cluster_variables: When True, the two variables are required (no default) and a
+            source value only appears in their descriptions. When False they default to the
+            source value, as ADF bundles do.
         extra_variables: Additional variable declarations (name -> DAB
             declaration dict) to merge into the ``variables`` block, e.g.
             the source-side variables a Lakeflow Connect pipeline references.
@@ -1501,17 +2119,19 @@ def _build_databricks_yml(
             "default": schema,
         },
     }
-    if include_cluster_variables:
+    if include_cluster_variables and require_cluster_variables:
+        variables.update(required_cluster_variables(spark_version=spark_version, node_type_id=node_type_id))
+    elif include_cluster_variables:
         variables["node_type_id"] = {
             "description": (
                 "Instance type for the default job_cluster — override per cloud "
                 "(e.g. i3.xlarge on AWS, n1-standard-4 on GCP)."
             ),
-            "default": node_type_id,
+            "default": node_type_id or _DEFAULT_NODE_TYPE_ID,
         }
         variables["spark_version"] = {
             "description": "Databricks Runtime for the default job_cluster.",
-            "default": spark_version,
+            "default": spark_version or _DEFAULT_SPARK_VERSION,
         }
     for name, declaration in (extra_variables or {}).items():
         variables.setdefault(name, declaration)
@@ -1591,6 +2211,11 @@ def _build_default_job_clusters(
     return [builder() for key, builder in builders if key in needed_keys]
 
 
+# The single-node cluster settings that need no compute ``kind``; ``is_single_node`` requires
+# ``kind: CLASSIC_PREVIEW``.
+_SINGLE_NODE_SPARK_CONF = {"spark.databricks.cluster.profile": "singleNode", "spark.master": "local[*]"}
+
+
 def _build_default_cluster(extras: dict[str, Any] | None = None) -> dict[str, Any]:
     """Builds the multi-purpose default job_cluster used for legacy bindings.
 
@@ -1599,8 +2224,9 @@ def _build_default_cluster(extras: dict[str, Any] | None = None) -> dict[str, An
             merge into ``new_cluster`` (num_workers, driver_node_type_id,
             spark_env_vars, custom_tags, init_scripts, cluster_log_conf,
             spark_conf, data_security_mode).  ``num_workers`` overrides the
-            default single-worker value and ``data_security_mode`` overrides
-            the default ``SINGLE_USER`` value when supplied.
+            default single-worker value (zero workers adds the single-node
+            Spark profile and tag) and ``data_security_mode`` overrides the default
+            ``SINGLE_USER`` value when supplied.
 
     Returns:
         Cluster definition with the mined (or default single) worker count
@@ -1617,6 +2243,9 @@ def _build_default_cluster(extras: dict[str, Any] | None = None) -> dict[str, An
     if extras:
         for key, value in extras.items():
             new_cluster[key] = value
+    if new_cluster["num_workers"] == 0:
+        new_cluster["spark_conf"] = {**new_cluster.get("spark_conf", {}), **_SINGLE_NODE_SPARK_CONF}
+        new_cluster["custom_tags"] = {**new_cluster.get("custom_tags", {}), "ResourceClass": "SingleNode"}
     return {
         "job_cluster_key": DEFAULT_JOB_CLUSTER_KEY,
         "new_cluster": new_cluster,
@@ -1662,27 +2291,29 @@ def _build_multi_node_cluster() -> dict[str, Any]:
     }
 
 
-def _collect_pipeline_resources(workflow: PreparedWorkflow) -> list[dict[str, Any]]:
-    """Returns every Lakeflow pipeline resource carried by *workflow* and its inner jobs.
+def _collect_pipeline_resources(workflows: list[PreparedWorkflow]) -> list[dict[str, Any]]:
+    """Returns every Lakeflow pipeline resource carried by *workflows* and their inner jobs.
 
     Args:
-        workflow: The prepared workflow being written.
+        workflows: The prepared workflows being written into one bundle.
 
     Returns:
         Flat list of pipeline-resource dicts (each exactly ``resource_key``
         and ``definition``), including entries from inner workflows. A
-        resource declared more than once with the same key and definition
-        appears once, so it is written once.
+        resource declared more than once with the same key and definition,
+        by one workflow or by several in the bundle, appears once, so it is
+        written once.
     """
     resources: list[dict[str, Any]] = []
-    for current in [workflow, *workflow.inner_workflows]:
-        for resource in current.pipeline_resources:
-            if not any(
-                existing["resource_key"] == resource["resource_key"]
-                and existing["definition"] == resource["definition"]
-                for existing in resources
-            ):
-                resources.append(resource)
+    for workflow in workflows:
+        for current in [workflow, *workflow.inner_workflows]:
+            for resource in current.pipeline_resources:
+                if not any(
+                    existing["resource_key"] == resource["resource_key"]
+                    and existing["definition"] == resource["definition"]
+                    for existing in resources
+                ):
+                    resources.append(resource)
     return resources
 
 
@@ -1775,9 +2406,10 @@ def _collect_pydabs_resource_entries(workflow: PreparedWorkflow) -> list[str]:
             if task.type == "pydabs_dbt_factory":
                 module = task.config.get("hook_module")
                 if module:
-                    entries.append(f"{module}:load_resources")
-    # De-dup while preserving order.
-    return list(dict.fromkeys(entries))
+                    entry = f"{module}:load_resources"
+                    if entry not in entries:
+                        entries.append(entry)
+    return entries
 
 
 def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
@@ -1797,7 +2429,8 @@ def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
 # Bundle variable names may also hold hyphens between other characters, as in ``${var.cluster-id}``.
 _VAR_REFERENCE_RE = re.compile(r"\$\{var\.([A-Za-z_][A-Za-z0-9_]*(?:-+[A-Za-z0-9_]+)*)\}")
 
-_BUILTIN_BUNDLE_VARIABLES = frozenset({"catalog", "schema", "node_type_id", "spark_version"})
+_CLUSTER_VARIABLES = frozenset({"node_type_id", "spark_version"})
+_BUILTIN_BUNDLE_VARIABLES = frozenset({"catalog", "schema"}) | _CLUSTER_VARIABLES
 
 
 def _collect_variable_references(value: Any) -> set[str]:
@@ -1881,7 +2514,7 @@ def _build_pipeline_variable_declarations(
 
 
 def _build_authored_variable_declarations(
-    workflow: PreparedWorkflow, environments: list[dict[str, Any]]
+    workflows: list[PreparedWorkflow], environments: list[dict[str, Any]]
 ) -> dict[str, Any]:
     """Returns ``variables:`` declarations for every ``${var.…}`` an agent-authored task or environment references.
 
@@ -1891,7 +2524,7 @@ def _build_authored_variable_declarations(
     default for the user to fill in; a variable the bundle already declares keeps its declaration.
     """
     referenced = _collect_variable_references(environments)
-    for current in [workflow, *workflow.inner_workflows]:
+    for current in _iter_prepared_workflows(workflows):
         for task in _iter_tasks_recursively(current.tasks):
             if task.get("_authored"):
                 referenced |= _collect_variable_references(task)
@@ -2125,7 +2758,9 @@ def _rewrite_post_branch_dependencies(tasks: list[dict[str, Any]]) -> None:
                 seen_keys.add(key)
                 deduped.append(dep)
             task["depends_on"] = deduped
-            task.setdefault("run_if", "AT_LEAST_ONE_SUCCESS")
+            # The untaken branch's terminals are SKIPPED, so NONE_FAILED lets the join run yet still propagates a
+            # taken-branch failure (ADF dependsOn [Succeeded]); AT_LEAST_ONE_SUCCESS let a sibling success mask it.
+            task.setdefault("run_if", "NONE_FAILED")
 
 
 _TASK_VALUE_REF = re.compile(r"\{\{tasks\.([^.]+)\.values\.[^}]+\}\}")
@@ -2407,6 +3042,10 @@ def _build_job_resource(
         # field keeps both bundle paths byte-identical and matches the Databricks job-parameter schema.
         seen_param_names: set[str | None] = set()
         normalized_parameters: list[dict[str, Any]] = []
+        # Names that got a synthetic "" default this pass. Deferred to _synthetic_default_parameters
+        # until AFTER any trigger parameter_overrides run below, so a param a trigger pins to a real
+        # value is not still reported in SETUP.md as "receives an empty string".
+        synthetic_default_names: list[str] = []
         for parameter in workflow.parameters:
             name = parameter.get("name")
             if name in seen_param_names:
@@ -2414,7 +3053,18 @@ def _build_job_resource(
             seen_param_names.add(name)
             entry: dict[str, Any] = {"name": name}
             default = parameter.get("default")
-            entry["default"] = default if isinstance(default, str) else json.dumps(default)
+            if default is None:
+                # A DAB job parameter requires a ``default``; ADF params without one (defaulted by the
+                # caller at ExecutePipeline/trigger time) get an empty string so `bundle deploy` doesn't
+                # reject the missing field. Record it so SETUP.md surfaces the synthetic default rather
+                # than silently substituting "" — a run that forgets to override it will otherwise see ""
+                # instead of failing fast.
+                entry["default"] = ""
+                synthetic_default_names.append(str(name))
+            else:
+                # Databricks job-parameter defaults are strings; pass strings through and JSON-encode
+                # everything else (numbers / bools / arrays / objects) so the YAML carries a valid default.
+                entry["default"] = default if isinstance(default, str) else json.dumps(default)
             normalized_parameters.append(entry)
         job_def["parameters"] = normalized_parameters
 
@@ -2430,6 +3080,14 @@ def _build_job_resource(
                 if entry.get("name") in overrides:
                     override = overrides[entry["name"]]
                     entry["default"] = override if isinstance(override, str) else json.dumps(override)
+
+    # Now that trigger overrides have been applied, surface only the params still carrying a synthetic
+    # "" default (a trigger-pinned param now has a real default and no longer needs operator attention).
+    if workflow.parameters and synthetic_default_names:
+        pinned = set((getattr(workflow, "schedule", None) or {}).get("parameter_overrides") or {})
+        for name in synthetic_default_names:
+            if name not in pinned:
+                _synthetic_default_parameters.append({"job": resource_key, "name": name})
 
     return {
         "resources": {
@@ -2712,7 +3370,9 @@ def _pipeline_dict_to_workflow(pipeline_dict: dict[str, Any]) -> PreparedWorkflo
     """
     pipeline, _parameters = pipeline_dict_to_ir(pipeline_dict)
     # prepare_workflow already carries pipeline.parameters onto the workflow, so re-extending here would
-    # duplicate every job parameter (the same dict twice -> a duplicate ``region`` entry in YAML).
+    # duplicate every job parameter (the same dict twice -> a duplicate ``region`` entry in YAML).  It
+    # also runs the collapsed-Lookup reference repair, so this report path and the in-process path share
+    # one implementation and produce identical bundles.
     return prepare_workflow(pipeline)
 
 
@@ -2789,6 +3449,7 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         reconciliation_status=pipeline_dict.get("reconciliation_status"),
         migration_status=pipeline_dict.get("migration_status", "included"),
         audit=dict(pipeline_dict.get("audit") or {}),
+        synthesized_variable_init_keys=frozenset(pipeline_dict.get("synthesized_variable_init_keys") or ()),
         lineage=lineage_from_dict(raw_lineage) if raw_lineage else None,
     )
     return pipeline, parameters
@@ -2962,6 +3623,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             **base,
             main_class_name=task_ir.get("main_class_name", ""),
             parameters=task_ir.get("parameters"),
+            keep_remote_artifacts=bool(task_ir.get("keep_remote_artifacts")),
         )
     if task_type == "SparkPythonActivity":
         return SparkPythonActivity(
@@ -2969,6 +3631,7 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             python_file=task_ir.get("python_file", ""),
             parameters=task_ir.get("parameters"),
             generated_source=task_ir.get("generated_source"),
+            keep_remote_artifacts=bool(task_ir.get("keep_remote_artifacts")),
         )
     if task_type == "ExecutePipelineActivity":
         return ExecutePipelineActivity(

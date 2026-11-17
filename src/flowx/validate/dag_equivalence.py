@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 
 from flowx.models.adf_ast import AdfPipeline
 from flowx.models.ir import MotifActivity, Pipeline
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 _DEFAULT_OUTCOME = "Succeeded"
 # Task-key prefixes of synthesised variable-initialiser tasks the translator injects (engine
@@ -209,7 +209,7 @@ def check_dag_equivalence(adf: AdfPipeline, ir: Pipeline) -> DagEquivalenceResul
     # Any ADF activity with no corresponding IR task at all -> sentinel block.
     # The label is absent from ``ir_blocks`` so it surfaces as ``missing_node``.
     for name in adf_names:
-        block_of_name.setdefault(name, normalize_task_key(name))
+        block_of_name.setdefault(name, to_lowercase_key(name))
 
     adf_blocks = set(block_of_name.values())
 

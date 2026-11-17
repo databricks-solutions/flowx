@@ -159,7 +159,9 @@ def _sample_graph() -> SourceGraph:
                 concept=CONCEPT_LOOP,
                 source=SOURCE_ADF,
                 native_type="ForEach",
-                dependencies=[SourceDependency(upstream="copy_orders", conditions=["Succeeded", "Skipped"])],
+                dependencies=[
+                    SourceDependency(upstream="copy_orders", conditions=["Succeeded", "Skipped"], resolved=True)
+                ],
                 branches={
                     "body": [
                         SourceNode(
@@ -392,3 +394,9 @@ def test_lineage_types_live_in_one_shared_module_and_ir_still_exports_them():
         assert getattr(ir, name) is getattr(shared, name)
     assert discovery.DataAsset is shared.DataAsset
     assert discovery.Lineage is shared.Lineage
+
+
+def test_a_dependency_must_say_whether_it_resolved() -> None:
+    """A mapper that forgets ``resolved`` fails here instead of reporting a missing upstream as resolved."""
+    with pytest.raises(TypeError, match="resolved"):
+        SourceDependency(upstream="a")  # type: ignore[call-arg]
