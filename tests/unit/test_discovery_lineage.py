@@ -264,7 +264,7 @@ def test_writer_that_runs_after_the_reader_still_gets_an_edge() -> None:
     """The match ignores run order, so a writer downstream of the reader still pairs with it."""
     reader = _node("reader", reads=[DataAsset(signature="ds", identity="x.y")])
     writer = _node("writer", writes=[DataAsset(signature="ds", identity="x.y")])
-    writer.dependencies = [SourceDependency(upstream="reader")]
+    writer.dependencies = [SourceDependency(upstream="reader", resolved=True)]
     edges = build_graph_lineage(_graph(reader, writer), known_workflows=()).data_edges
     assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [("writer", "reader")]
 

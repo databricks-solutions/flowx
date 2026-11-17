@@ -107,7 +107,7 @@ def test_activity_entry_carries_legacy_and_additive_fields() -> None:
                 "b",
                 "Copy",
                 "deterministic",
-                deps=[SourceDependency(upstream="a", conditions=["Succeeded", "Skipped"])],
+                deps=[SourceDependency(upstream="a", conditions=["Succeeded", "Skipped"], resolved=True)],
             ),
         ],
     )
