@@ -313,7 +313,8 @@ def resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefinitio
     """Name the store that holds a dataset's table, or ``None`` when it is not provable.
 
     Uses the literal ``server`` (plus ``database`` when given) from the backing
-    linked service's properties or plaintext connection string, exactly as written.
+    linked service's properties or plaintext connection string. The server is a host
+    name, which ignores case, so it is lower-cased; the database keeps its case.
     A ``server`` or ``database`` wrapped in an Expression or SecureString object (or
     an untyped one with a ``value``) is read from its ``value`` and checked like a
     plain string. Neither name can hold ``*``, so one that does is a masked secret
@@ -351,7 +352,7 @@ def resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefinitio
     ):
         return None
     if server:
-        return "/".join(part.strip() for part in store_parts)
+        return "/".join(part.strip() for part in (server.lower(), database) if part)
     return unparameterised_linked_service_name(dataset_props, definitions)
 
 

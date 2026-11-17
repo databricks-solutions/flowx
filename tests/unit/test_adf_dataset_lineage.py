@@ -1039,6 +1039,21 @@ def test_storage_account_in_any_case_gives_the_lower_case_identity(type_properti
 
 
 @pytest.mark.parametrize(
+    ("type_properties", "identity"),
+    [
+        ({"server": "MyServer.Database.Windows.Net", "database": "Sales"}, "myserver.database.windows.net/Sales"),
+        (
+            {"connectionString": "Server=tcp:MYSERVER.database.windows.net,1433;Database=Sales;"},
+            "tcp:myserver.database.windows.net,1433/Sales",
+        ),
+    ],
+)
+def test_sql_server_in_any_case_gives_the_lower_case_identity(type_properties: dict, identity: str) -> None:
+    """A SQL server is a host name, so its case does not split the identity; the database keeps its case."""
+    assert _sql_store_identity(type_properties) == f"{identity}/dbo.Orders"
+
+
+@pytest.mark.parametrize(
     ("key", "unreadable"),
     [
         ("folderPath", {"type": "NotAnAdfWrapper", "value": "secret/path"}),
