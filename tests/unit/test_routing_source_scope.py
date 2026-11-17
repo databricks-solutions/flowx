@@ -31,16 +31,18 @@ def _node(task_key: str, strategy: str) -> SourceNode:
 
 
 def _inventory(source: str | None) -> dict[str, Any]:
-    """One fully deterministic DAG and one DAG with an agentic gap."""
+    """One fully deterministic DAG and one DAG with an agentic gap, recorded as *source* (no source when None)."""
     graphs = [
         SourceGraph(
             name="chain_dag", source="airflow", tasks=[_node("a", "deterministic"), _node("b", "deterministic")]
         ),
         SourceGraph(name="gap_dag", source="airflow", tasks=[_node("c", "agentic")]),
     ]
-    inventory = build_source_inventory(graphs, source=source or "adf", source_dir="/tmp/dags")
+    inventory = build_source_inventory(graphs, source="airflow", source_dir="/tmp/dags")
     if source is None:
         del inventory["source"]
+    else:
+        inventory["source"] = source
     return inventory
 
 

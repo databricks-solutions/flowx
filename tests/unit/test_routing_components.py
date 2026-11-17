@@ -25,7 +25,7 @@ def _node(task_key: str, native_type: str = "Notebook", *, strategy: str = "dete
         source_id=task_key,
         task_key=task_key,
         concept=CONCEPT_NOTEBOOK,
-        source="unit",
+        source="adf",
         name=task_key,
         native_type=native_type,
         properties={STRATEGY_PROPERTY: strategy},
@@ -37,7 +37,7 @@ def _graph(name: str, *, edges: list[ControlEdge] | None = None, nodes: list[Sou
     """A one-node graph named *name*, optionally carrying control edges to other graphs."""
     return SourceGraph(
         name=name,
-        source="unit",
+        source="adf",
         tasks=nodes if nodes is not None else [_node(f"{name}_task")],
         lineage=Lineage(control_edges=edges or []),
     )

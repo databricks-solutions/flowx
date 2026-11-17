@@ -41,7 +41,7 @@ def _node(task_key: str, native_type: str, *, strategy: str = "deterministic") -
         source_id=task_key,
         task_key=task_key,
         concept=CONCEPT_NOTEBOOK,
-        source="unit",
+        source="adf",
         name=task_key,
         native_type=native_type,
         properties={STRATEGY_PROPERTY: strategy},
@@ -57,14 +57,14 @@ def _inventory() -> dict[str, Any]:
     """
     parent = SourceGraph(
         name="parent",
-        source="unit",
+        source="adf",
         tasks=[_node("call_child", "ExecutePipeline")],
         lineage=Lineage(
             control_edges=[ControlEdge(source_workflow="parent", target_workflow="child", via_task_key="call_child")]
         ),
     )
-    child = SourceGraph(name="child", source="unit", tasks=[_node("copy_orders", "Copy")])
-    solo = SourceGraph(name="solo", source="unit", tasks=[_node("load", "Notebook")])
+    child = SourceGraph(name="child", source="adf", tasks=[_node("copy_orders", "Copy")])
+    solo = SourceGraph(name="solo", source="adf", tasks=[_node("load", "Notebook")])
     inventory = build_source_inventory([parent, child, solo], source="adf", source_dir="/tmp/src")
     inventory["insights"] = {
         "inventory_sha256": inventory_fingerprint(inventory),
