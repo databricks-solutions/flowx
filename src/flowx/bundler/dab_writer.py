@@ -5,13 +5,12 @@ from __future__ import annotations
 import argparse
 import copy
 import dataclasses
-import fnmatch
 import json
 import posixpath
 import re
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -251,13 +250,13 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
         and every ``../src/notebooks/x.py`` task reference to it;
       * each agent-authored file as one tree under the prefix (``pkg/mod.py`` -> ``<prefix>/pkg/mod.py``),
         so files that import or read each other by relative path still find each other, and every
-        ``../src/`` reference to it, a folder holding it or a glob matching it, in the tasks, the job
-        environments and the pipeline resources. Authored file content is never edited;
+        reference into ``src/`` that names it, a folder holding it or a glob matching it, in the tasks,
+        the job environments and the pipeline resources. Authored file content is never edited;
       * each inner ForEach job ``name`` (so its resource key becomes ``<prefix>__<key>``) and every
-        ``${resources.jobs.<key>.id}`` ref to it;
-      * each pipeline resource key (``<key>`` -> ``<prefix>_<key>``) and every
-        ``${resources.pipelines.<key>.`` ref to it, so two pipelines whose same-named activities each
-        emit a pipeline resource (a Lakeflow Connect copy, a component) keep one resource each.
+        ``${resources.jobs.<key>.id}`` ref to it.
+
+    Pipeline resource keys that clash across the bundle are prefixed afterwards, over the whole group,
+    by :func:`_prefix_clashing_pipeline_keys`.
 
     Pipeline-level job keys are NOT namespaced: pipeline names are unique within a migration, so they
     never collide, and namespacing them would break cross-bundle ``${var.<callee>}`` wiring.
@@ -287,25 +286,14 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
         if old_key != new_key:
             replacements[f"${{resources.jobs.{old_key}.id}}"] = f"${{resources.jobs.{new_key}.id}}"
 
-    # 1b. Pipeline resource keys: two pipelines' same-named activities emit the same key.
-    pipeline_keys: dict[str, str] = {}
-    for wf in (workflow, *workflow.inner_workflows):
-        renamed_resources = []
-        for resource in wf.pipeline_resources:
-            old_key = resource["resource_key"]
-            new_key = pipeline_keys.setdefault(old_key, to_lowercase_key(f"{prefix}__{old_key}"))
-            renamed_resources.append({**resource, "resource_key": new_key})
-        wf.pipeline_resources = renamed_resources
-    pipeline_references = {
-        f"${{resources.pipelines.{old_key}.": f"${{resources.pipelines.{new_key}."
-        for old_key, new_key in pipeline_keys.items()
-    }
-
     # 2. Notebook paths: prefix each unique relative_path with the pipeline key as a subdirectory.
     authored_paths: set[str] = set()
+    generated_paths: set[str] = set()
     for wf in (workflow, *workflow.inner_workflows):
         for notebook in wf.notebooks:
             old_path = notebook.relative_path
+            if not notebook.authored:
+                generated_paths.add(old_path)
             if notebook.authored:
                 # Authored files are written as given, so only their place moves, as one tree.
                 authored_paths.add(old_path)
@@ -325,50 +313,176 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
                 if f"src/{old_path}" in notebook.content:
                     notebook.content = notebook.content.replace(f"src/{old_path}", f"src/{new_path}")
 
-    # 3. Rewrite every matching ref across the parent and inner task trees, and the authored-file and
-    #    pipeline refs in the environments and pipeline resources too.
-    for wf in (workflow, *workflow.inner_workflows):
-        _rewrite_task_string_values(wf.tasks, replacements)
-        for structure in (wf.tasks, wf.environments, wf.pipeline_resources):
-            _replace_strings(structure, pipeline_references)
-            _rewrite_authored_file_references(structure, authored_paths, prefix)
+    # 3. Rewrite every matching ref across the parent and inner tasks, environments and pipeline
+    #    resources. Authored refs go first, so an authored task keeps its own file even when a generated
+    #    notebook once had the same path.
+    structures = [
+        structure
+        for wf in (workflow, *workflow.inner_workflows)
+        for structure in (wf.tasks, wf.environments, wf.pipeline_resources)
+    ]
+    _rewrite_moved_file_references(structures, authored_paths, generated_paths, prefix)
+    for structure in structures:
+        _rewrite_task_string_values(structure, replacements)
 
 
-_BUNDLE_SOURCE_REFERENCE = "../src/"
+def _map_strings(structures: list[Any], function: Callable[[str], str]) -> None:
+    """Replace every string in *structures* with ``function(string)``, in place, visiting each container once.
 
-
-def _rewrite_authored_file_references(value: Any, authored_paths: set[str], prefix: str) -> Any:
-    """Point every ``../src/`` reference to a moved authored file at its new place, in place.
-
-    A string counts when, after ``../src/``, it is an authored file's old path, a folder holding one
-    (a pipeline's ``root_path``, say), or a glob matching one (``dist/*.whl``, ``dataflows/**``). Only
-    whole string values are rewritten, as for task paths, so free text that mentions a path is left alone.
+    A pipeline and its inner ForEach workflows can share one dict or list, so each container is
+    visited once, and a value is never rewritten twice.
     """
-    if isinstance(value, dict):
-        for key, item in value.items():
-            value[key] = _rewrite_authored_file_references(item, authored_paths, prefix)
-        return value
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            value[index] = _rewrite_authored_file_references(item, authored_paths, prefix)
-        return value
-    if isinstance(value, str) and value.startswith(_BUNDLE_SOURCE_REFERENCE):
-        reference = value.removeprefix(_BUNDLE_SOURCE_REFERENCE)
-        if _names_authored_file(reference, authored_paths):
-            return f"{_BUNDLE_SOURCE_REFERENCE}{prefix}/{reference}"
-    return value
+    seen: set[int] = set()
+
+    def visit(node: Any) -> Any:
+        if isinstance(node, str):
+            return function(node)
+        if isinstance(node, (dict, list)):
+            if id(node) in seen:
+                return node
+            seen.add(id(node))
+            items = node.items() if isinstance(node, dict) else enumerate(node)
+            for key, item in list(items):
+                node[key] = visit(item)
+        return node
+
+    for structure in structures:
+        visit(structure)
 
 
-def _names_authored_file(reference: str, authored_paths: set[str]) -> bool:
-    """Whether a ``src``-relative *reference* is an authored file, a folder holding one, or a glob matching one."""
+def _src_relative_reference(value: str) -> str | None:
+    """The ``src``-relative part of a dot-relative reference from ``resources/`` into ``src/``, else ``None``.
+
+    ``../src/a.py``, ``./../src/a.py`` and ``../src/./a.py`` all give ``a.py``. A trailing ``/`` is kept,
+    so a folder reference stays a folder reference.
+    """
+    if not _is_dot_relative(value):
+        return None
+    normalised = posixpath.normpath(posixpath.join("resources", value))
+    if not normalised.startswith("src/"):
+        return None
+    return normalised.removeprefix("src/") + ("/" if value.endswith("/") else "")
+
+
+def _reference_covers(reference: str, path: str) -> bool:
+    """Whether a ``src``-relative *reference* is *path*, a folder holding it, or a glob matching it."""
     folder = reference.rstrip("/")
-    is_glob = any(character in reference for character in "*?[")
-    return any(
-        path == reference
-        or (bool(folder) and path.startswith(f"{folder}/"))
-        or (is_glob and fnmatch.fnmatchcase(path, reference))
-        for path in authored_paths
-    )
+    if path == folder or (bool(folder) and path.startswith(f"{folder}/")):
+        return True
+    return _is_glob(reference) and _glob_matches(path, reference)
+
+
+def _rewrite_moved_file_references(
+    structures: list[Any], moved_paths: set[str], unmoved_paths: set[str], prefix: str
+) -> None:
+    """Point every reference into ``src/`` that covers a moved file at the file's new place, ``<prefix>/<path>``.
+
+    A reference counts when it is a whole string value that resolves from ``resources/`` into ``src/``
+    and names a moved file, a folder holding one (a pipeline's ``root_path``, say), or a glob matching
+    one (``dist/*.whl``, ``dataflows/**``). Free text that mentions a path is left alone.
+
+    Raises:
+        ValueError: A folder or glob covers both moved files and *unmoved_paths*, files this
+            namespacing puts somewhere else, so no single rewrite keeps all of them.
+    """
+    if not moved_paths:
+        return
+
+    def rewrite(value: str) -> str:
+        reference = _src_relative_reference(value)
+        if reference is None or not any(_reference_covers(reference, path) for path in moved_paths):
+            return value
+        if any(_reference_covers(reference, path) for path in unmoved_paths):
+            raise ValueError(
+                f"{value!r} covers both agent-authored files and generated files, which a bundle shared "
+                "by several pipelines keeps in different folders; point it at the component's own files"
+            )
+        return f"../src/{prefix}/{reference}"
+
+    _map_strings(structures, rewrite)
+
+
+def _is_glob(reference: str) -> bool:
+    """Whether a path *reference* is a glob pattern."""
+    return any(character in reference for character in "*?[")
+
+
+def _glob_matches(path: str, pattern: str) -> bool:
+    """Whether the slash-separated *path* matches the glob *pattern* the way bundle globs do.
+
+    ``*``, ``?`` and ``[...]`` stay within one folder, ``**/`` spans any number of folders including
+    none, and a trailing ``**`` matches everything below.
+    """
+    regex_parts: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            regex_parts.append("(?:[^/]+/)*")
+            index += 3
+        elif pattern.startswith("**", index):
+            regex_parts.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            regex_parts.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            regex_parts.append("[^/]")
+            index += 1
+        elif pattern[index] == "[" and "]" in pattern[index + 1 :]:
+            end = pattern.index("]", index + 1)
+            character_class = pattern[index + 1 : end]
+            if character_class.startswith("!"):
+                character_class = "^" + character_class[1:]
+            regex_parts.append(f"[{character_class.replace(chr(92), chr(92) * 2)}]")
+            index = end + 1
+        else:
+            regex_parts.append(re.escape(pattern[index]))
+            index += 1
+    return re.fullmatch("".join(regex_parts), path) is not None
+
+
+_PIPELINE_RESOURCE_REFERENCE = re.compile(r"\$\{resources\.pipelines\.([a-z0-9_]+)\.")
+
+
+def _prefix_clashing_pipeline_keys(workflows: list[PreparedWorkflow]) -> None:
+    """Prefix a pipeline resource key with its pipeline when pipelines in one bundle use it for different things.
+
+    Pipeline resource keys come from activity names, which are unique only within one pipeline, so two
+    pipelines sharing a bundle can each emit a resource under one key (two same-named Lakeflow Connect
+    copies, say). A key that two definitions share becomes ``<pipeline>_<key>`` in each pipeline that
+    owns it, and every ``${resources.pipelines.<key>.`` reference in that pipeline follows, each matched
+    once. A resource that several pipelines declare identically keeps its key, so it is still written once.
+    """
+    definitions_by_key: dict[str, list[Any]] = {}
+    for workflow in workflows:
+        for current in (workflow, *workflow.inner_workflows):
+            for resource in current.pipeline_resources:
+                definitions = definitions_by_key.setdefault(resource["resource_key"], [])
+                if resource["definition"] not in definitions:
+                    definitions.append(resource["definition"])
+    clashing_keys = {key for key, definitions in definitions_by_key.items() if len(definitions) > 1}
+    if not clashing_keys:
+        return
+    for workflow in workflows:
+        nested = (workflow, *workflow.inner_workflows)
+        owned_keys = {resource["resource_key"] for current in nested for resource in current.pipeline_resources}
+        prefix = to_lowercase_key(workflow.name)
+        renamed = {key: to_lowercase_key(f"{prefix}__{key}") for key in clashing_keys & owned_keys}
+        if not renamed:
+            continue
+        for current in nested:
+            current.pipeline_resources = [
+                {**resource, "resource_key": renamed.get(resource["resource_key"], resource["resource_key"])}
+                for resource in current.pipeline_resources
+            ]
+
+        def rename(value: str) -> str:
+            return _PIPELINE_RESOURCE_REFERENCE.sub(
+                lambda match: f"${{resources.pipelines.{renamed.get(match.group(1), match.group(1))}.", value
+            )
+
+        _map_strings([part for current in nested for part in (current.tasks, current.environments)], rename)
+        _map_strings([current.pipeline_resources for current in nested], rename)
 
 
 def _prefixed_notebook_relative_path(relative_path: str, prefix: str) -> str:
@@ -451,8 +565,13 @@ def write_bundle_group(
     # pipeline) can't collide in the shared resources/ and src/ dirs. Single-pipeline bundles are left
     # untouched, so the per-pipeline path stays byte-for-byte identical.
     if len(workflows) > 1:
+        # Namespacing moves authored and generated files to different folders, so check each pipeline's
+        # own files first, as its own bundle would.
+        for workflow in workflows:
+            _check_agentic_file_collisions([workflow], catalog, schema)
         for workflow in workflows:
             _namespace_bundle_artifacts(workflow, to_lowercase_key(workflow.name))
+        _prefix_clashing_pipeline_keys(workflows)
     _check_agentic_file_collisions(workflows, catalog, schema)
 
     output_dir = Path(output_dir)
@@ -1284,6 +1403,7 @@ def _required_cluster_variables_in(databricks_yml: Path) -> set[str]:
 def _combine_airflow_workflows(workflows: list[PreparedWorkflow]) -> PreparedWorkflow:
     """Combines Airflow DAG workflows into one bundle containing one job per DAG."""
     namespaced = [_namespace_workflow_assets(workflow) for workflow in workflows]
+    _prefix_clashing_pipeline_keys(namespaced)
     primary = namespaced[0]
     inner_workflows = list(primary.inner_workflows)
     for workflow in namespaced[1:]:
@@ -1458,7 +1578,7 @@ def _check_authored_file_references(
     only when it starts that way or names a ``.yaml`` or ``.yml`` file, since anything else is a
     workspace base environment. In a pipeline resource, each library's ``notebook`` and ``file``
     path, ``glob`` include, ``jar`` and ``whl`` counts. A glob such as ``../src/dist/*.whl`` must
-    match at least one file, and a ``**`` glob may match at any depth.
+    match at least one file (``**/`` spans any number of folders), and a folder must hold one.
 
     Raises:
         ValueError: An authored task, a component environment or a pipeline library names a
@@ -1512,16 +1632,11 @@ def _check_authored_file_references(
             )
     for owner, reference in references:
         bundle_path = posixpath.normpath(posixpath.join("resources", reference))
-        if "**" in reference:
-            provided = any(fnmatch.fnmatchcase(path, bundle_path) for path in written_paths)
-        elif any(character in reference for character in "*?["):
-            pattern_depth = len(PurePosixPath(bundle_path).parts)
-            provided = any(
-                len(PurePosixPath(path).parts) == pattern_depth and PurePosixPath(path).match(bundle_path)
-                for path in written_paths
-            )
+        if _is_glob(reference):
+            provided = any(_glob_matches(path, bundle_path) for path in written_paths)
         else:
-            provided = bundle_path in written_paths
+            # A folder counts when the bundle writes a file below it (a dependency on a project folder, say).
+            provided = any(path == bundle_path or path.startswith(f"{bundle_path}/") for path in written_paths)
         if not provided:
             raise ValueError(
                 f"{owner} names {reference!r}, which no file in the bundle provides; add it to the "
@@ -1546,6 +1661,7 @@ def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
     replacements: dict[str, str] = {}
 
     nested_workflows = [cloned, *cloned.inner_workflows]
+    moved_paths: set[str] = set()
     # dbt-factory hooks; this path relocates source files under <prefix>/, so relocate dbt refs too.
     _namespace_pydabs_hooks(nested_workflows, prefix, replacements, relocate_dbt_sources=True)
     for nested in nested_workflows:
@@ -1555,6 +1671,7 @@ def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
             if _is_bundle_root_artifact(notebook):
                 continue
             notebook.relative_path = f"{prefix}/{original_path}"
+            moved_paths.add(original_path)
             replacements[f"../src/{original_path}"] = f"../src/{notebook.relative_path}"
             replacements[f"src/{original_path}"] = f"src/{notebook.relative_path}"
 
@@ -1567,6 +1684,13 @@ def _namespace_workflow_assets(workflow: PreparedWorkflow) -> PreparedWorkflow:
     _replace_strings(cloned.tasks, replacements)
     for inner in cloned.inner_workflows:
         _replace_strings(inner.tasks, replacements)
+    # Every source file moved under <prefix>/ together, so a folder or glob still covers the same files.
+    _rewrite_moved_file_references(
+        [part for nested in nested_workflows for part in (nested.environments, nested.pipeline_resources)],
+        moved_paths,
+        set(),
+        prefix,
+    )
     return cloned
 
 
@@ -2014,8 +2138,6 @@ def _collect_environments(workflow: PreparedWorkflow) -> list[dict[str, Any]]:
         for environment in current.environments:
             if environment not in environments:
                 environments.append(environment)
-    # TODO: a combined multi-DAG bundle renames authored files below src/<dag>/, but only task paths are
-    # rewritten, so a ``../src/<path>`` dependency in an environment spec keeps pointing at the old location.
     return environments
 
 

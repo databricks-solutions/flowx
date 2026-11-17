@@ -633,3 +633,56 @@ def test_same_named_lakeflow_connect_copies_in_a_group_bundle_each_keep_their_ow
         assert resource_key.startswith(pipeline)
         destination = pipelines[resource_key]["ingestion_definition"]["objects"][0]["table"]["destination_table"]
         assert destination == table
+
+
+def test_an_identical_pipeline_resource_in_two_grouped_pipelines_is_still_written_once(tmp_path):
+    """Only keys that two different definitions share are prefixed, so a shared resource keeps one pipeline."""
+
+    def workflow(pipeline: str) -> PreparedWorkflow:
+        return PreparedWorkflow(
+            name=pipeline,
+            tasks=[{"task_key": "ingest", "pipeline_task": {"pipeline_id": "${resources.pipelines.shared.id}"}}],
+            notebooks=[],
+            secrets=[],
+            setup_tasks=[],
+            pipeline_resources=[{"resource_key": "shared", "definition": {"name": "shared"}}],
+        )
+
+    write_bundle_group([workflow("pipe_a"), workflow("pipe_b")], tmp_path, bundle_name="combined")
+
+    assert sorted(path.name for path in (tmp_path / "resources").glob("*shared*.yml")) == ["shared.yml"]
+    for pipeline in ("pipe_a", "pipe_b"):
+        job = yaml.safe_load((tmp_path / "resources" / f"{pipeline}.yml").read_text(encoding="utf-8"))
+        assert job["resources"]["jobs"][pipeline]["tasks"][0]["pipeline_task"]["pipeline_id"] == (
+            "${resources.pipelines.shared.id}"
+        )
+
+
+def test_each_pipeline_reference_is_renamed_once_even_when_a_new_key_is_another_old_one():
+    """Key "x" becomes "p_x" in pipeline "p"; a reference to "x" must not then be renamed again to "p_p_x"."""
+    from flowx.bundler.dab_writer import _prefix_clashing_pipeline_keys
+
+    def workflow(name: str, definition_tag: str) -> PreparedWorkflow:
+        return PreparedWorkflow(
+            name=name,
+            tasks=[
+                {"task_key": "one", "pipeline_task": {"pipeline_id": "${resources.pipelines.x.id}"}},
+                {"task_key": "two", "pipeline_task": {"pipeline_id": "${resources.pipelines.p_x.id}"}},
+            ],
+            notebooks=[],
+            secrets=[],
+            setup_tasks=[],
+            pipeline_resources=[
+                {"resource_key": "x", "definition": {"name": f"x_{definition_tag}"}},
+                {"resource_key": "p_x", "definition": {"name": f"p_x_{definition_tag}"}},
+            ],
+        )
+
+    first, second = workflow("p", "first"), workflow("q", "second")
+    _prefix_clashing_pipeline_keys([first, second])
+
+    assert [task["pipeline_task"]["pipeline_id"] for task in first.tasks] == [
+        "${resources.pipelines.p_x.id}",
+        "${resources.pipelines.p_p_x.id}",
+    ]
+    assert [resource["resource_key"] for resource in first.pipeline_resources] == ["p_x", "p_p_x"]
