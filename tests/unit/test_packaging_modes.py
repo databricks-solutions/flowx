@@ -593,6 +593,6 @@ def test_authored_files_at_root_artifact_paths_are_namespaced_in_a_group_bundle(
 
     write_bundle_group([authored_wf("pipe_a"), authored_wf("pipe_b")], tmp_path, bundle_name="combined")
 
-    assert json.loads((tmp_path / "src/resources/pipe_a/config.json").read_text()) == {"pipeline": "pipe_a"}
-    assert json.loads((tmp_path / "src/resources/pipe_b/config.json").read_text()) == {"pipeline": "pipe_b"}
+    assert json.loads((tmp_path / "src/pipe_a/resources/config.json").read_text()) == {"pipeline": "pipe_a"}
+    assert json.loads((tmp_path / "src/pipe_b/resources/config.json").read_text()) == {"pipeline": "pipe_b"}
     assert not (tmp_path / "src/resources/config.json").exists()
