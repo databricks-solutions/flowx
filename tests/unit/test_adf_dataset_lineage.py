@@ -1474,6 +1474,39 @@ def test_same_folder_shape_on_one_container_of_a_hidden_account_still_joins() ->
     ]
 
 
+def test_a_linked_service_referenced_in_another_case_qualifies_one_file_store() -> None:
+    """``ls_azure_blob`` and ``LS_AZURE_BLOB`` are one linked service, so the store qualifier is spelled one way."""
+    definitions = _vaulted_blob_definitions(ds_out="staging", ds_in="staging")
+    definitions.datasets["ds_in"].properties["linkedServiceName"] = {"referenceName": "LS_AZURE_BLOB"}
+    _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[staging@ls_azure_blob]/FP[landing/<P>]/FN[]")
+    ]
+
+
+def test_a_linked_service_referenced_in_another_case_gives_one_table_identity() -> None:
+    """A Key Vault SQL service referenced as ``ls_sql`` and as ``LS_SQL`` names one store, spelled as it is defined."""
+    key_vault_connection = {
+        "type": "AzureKeyVaultSecret",
+        "store": {"referenceName": "kv", "type": "LinkedServiceReference"},
+        "secretName": "sql",
+    }
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_lower": _table_dataset("ds_lower", schema="dbo", table="Orders", linked_service="ls_sql"),
+            "ds_upper": _table_dataset("ds_upper", schema="dbo", table="Orders", linked_service="LS_SQL"),
+        },
+        linked_services={"ls_sql": _sql_linked_service("ls_sql", connection_string=key_vault_connection)},
+    )
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_lower"), definitions) == "ls_sql/dbo.Orders"
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_upper"), definitions) == "ls_sql/dbo.Orders"
+
+
 def _unprovable_store_definitions(
     location_type: str, file_system_key: str, linked_service: str, **file_systems: str
 ) -> AdfDefinitions:

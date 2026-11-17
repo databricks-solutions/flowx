@@ -297,14 +297,21 @@ def unparameterised_linked_service_name(dataset_props: dict[str, Any], definitio
     parameters, on its reference or in its own definition, may point somewhere else
     for each binding. A name that is not plain, such as an unevaluated
     ``[parameters('ls')]``, gives ``None`` too.
+
+    ADF names are not case-sensitive, so the name is spelled as the loaded linked
+    service spells it, whatever case the reference used; ``ls_sql`` and ``LS_SQL``
+    name one store. A linked service that is not in the export keeps the reference's
+    spelling.
     """
     linked_service_name, reference_parameters = _linked_service_reference(dataset_props)
     if not linked_service_name or reference_parameters:
         return None
     linked_service = definitions.get_linked_service(linked_service_name)
-    if linked_service is not None and linked_service.properties.get("parameters"):
+    if linked_service is None:
+        return linked_service_name
+    if linked_service.properties.get("parameters"):
         return None
-    return linked_service_name
+    return linked_service.name
 
 
 def resolve_file_store(
