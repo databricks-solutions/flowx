@@ -976,6 +976,20 @@ def test_storage_account_that_is_not_letters_and_digits_names_no_account(type_pr
 
 
 @pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"url": "https://ACCTONE.dfs.core.windows.net"},
+        {"serviceEndpoint": "https://AcctOne.blob.core.windows.net/"},
+        {"sasUri": "https://ACCTONE.blob.core.windows.net/?sv=2022-11-02"},
+        {"connectionString": "DefaultEndpointsProtocol=https;AccountName=ACCTONE;EndpointSuffix=core.windows.net"},
+    ],
+)
+def test_storage_account_in_any_case_gives_the_lower_case_identity(type_properties: dict) -> None:
+    """Host names ignore case, so an upper-case account is the same account; the path keeps its own case."""
+    assert _storage_account_identity(type_properties) == "abfss://raw@acctone.dfs.core.windows.net/in/orders.csv"
+
+
+@pytest.mark.parametrize(
     ("key", "unreadable"),
     [
         ("folderPath", {"type": "NotAnAdfWrapper", "value": "secret/path"}),
@@ -1430,7 +1444,7 @@ def test_same_folder_shape_on_the_same_store_still_joins_by_signature() -> None:
 
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert [(edge.match_kind, edge.match_key) for edge in edges] == [
-        ("signature", "ST[sales@acctA]/FP[landing/<P>]/FN[]")
+        ("signature", "ST[sales@accta]/FP[landing/<P>]/FN[]")
     ]
 
 
@@ -1834,8 +1848,8 @@ def test_datasets_that_wrap_the_same_folder_value_in_different_folders_never_joi
     silver_reads, _ = activity_data_assets(_orders_copy("ReadSilver", dataset="ds_silver", produced=False), definitions)
 
     assert bronze_writes[0].identity is None and silver_reads[0].identity is None
-    assert bronze_writes[0].signature == "ST[sales@acctA]/FP[bronze/orders]/FN[]"
-    assert silver_reads[0].signature == "ST[sales@acctA]/FP[silver/orders]/FN[]"
+    assert bronze_writes[0].signature == "ST[sales@accta]/FP[bronze/orders]/FN[]"
+    assert silver_reads[0].signature == "ST[sales@accta]/FP[silver/orders]/FN[]"
     edges = data_edges_from_endpoints(
         [("WriteBronze", asset) for asset in bronze_writes], [("ReadSilver", asset) for asset in silver_reads]
     )
@@ -1852,7 +1866,7 @@ def test_datasets_that_wrap_the_same_folder_value_in_one_folder_still_join() -> 
 
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert [(edge.match_kind, edge.match_key) for edge in edges] == [
-        ("signature", "ST[sales@acctA]/FP[bronze/orders]/FN[]")
+        ("signature", "ST[sales@accta]/FP[bronze/orders]/FN[]")
     ]
 
 
@@ -1866,8 +1880,8 @@ def test_interpolated_dataset_folders_keep_their_own_literal_text() -> None:
     )
     silver_reads, _ = activity_data_assets(_orders_copy("ReadSilver", dataset="ds_silver", produced=False), definitions)
 
-    assert bronze_writes[0].signature == "ST[sales@acctA]/FP[bronze/orders]/FN[]"
-    assert silver_reads[0].signature == "ST[sales@acctA]/FP[silver/orders]/FN[]"
+    assert bronze_writes[0].signature == "ST[sales@accta]/FP[bronze/orders]/FN[]"
+    assert silver_reads[0].signature == "ST[sales@accta]/FP[silver/orders]/FN[]"
 
 
 def _folder_binding_copy(name: str, *, dataset: str, folder_path: str, produced: bool) -> AdfActivity:
@@ -1896,8 +1910,8 @@ def test_folder_signature_keeps_where_each_runtime_value_sits() -> None:
         definitions,
     )
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
-    assert reads[0].signature == "ST[sales@acctA]/FP[<P>/landing]/FN[]"
+    assert writes[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[]"
+    assert reads[0].signature == "ST[sales@accta]/FP[<P>/landing]/FN[]"
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert edges == []
 
@@ -1914,7 +1928,7 @@ def test_a_dataset_whose_parameters_are_not_a_map_does_not_crash() -> None:
     reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_odd", produced=False), definitions)
 
     assert reads[0].identity is None
-    assert reads[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert reads[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[]"
 
 
 def test_call_site_parameters_that_are_not_a_map_do_not_crash() -> None:
@@ -1962,8 +1976,8 @@ def test_a_quoted_interpolation_marker_inside_a_whole_expression_stays_literal_t
         definitions,
     )
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[foo/@{left}]/FN[]"
-    assert reads[0].signature == "ST[sales@acctA]/FP[foo/@{right}]/FN[]"
+    assert writes[0].signature == "ST[sales@accta]/FP[foo/@{left}]/FN[]"
+    assert reads[0].signature == "ST[sales@accta]/FP[foo/@{right}]/FN[]"
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert edges == []
 
@@ -2005,8 +2019,8 @@ def test_a_system_runtime_value_in_a_folder_is_a_slot_not_nothing(runtime_value:
         AdfActivity(name="Read", type="Copy", inputs=[_reference("ds_in", "landing")]), definitions
     )
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
-    assert reads[0].signature == "ST[sales@acctA]/FP[landing]/FN[]"
+    assert writes[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[]"
+    assert reads[0].signature == "ST[sales@accta]/FP[landing]/FN[]"
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert edges == []
 
@@ -2069,8 +2083,8 @@ def test_any_runtime_function_in_a_folder_is_one_slot(folder_path: str) -> None:
     definitions = _sales_definitions(ds_out="@dataset().folderPath", ds_in="@dataset().folderPath")
     written, read, edges = _write_then_read(definitions, written=("ds_out", folder_path), read=("ds_in", "landing"))
 
-    assert written == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
-    assert read == "ST[sales@acctA]/FP[landing]/FN[]"
+    assert written == "ST[sales@accta]/FP[landing/<P>]/FN[]"
+    assert read == "ST[sales@accta]/FP[landing]/FN[]"
     assert edges == []
 
 
@@ -2100,8 +2114,8 @@ def test_a_bound_value_keeps_its_own_slash_when_spliced_into_the_folder(rooted_f
         definitions, written=("ds_rooted", "orders"), read=("ds_plain", "bronzeorders")
     )
 
-    assert written == "ST[sales@acctA]/FP[bronze/orders]/FN[]"
-    assert read == "ST[sales@acctA]/FP[bronzeorders]/FN[]"
+    assert written == "ST[sales@accta]/FP[bronze/orders]/FN[]"
+    assert read == "ST[sales@accta]/FP[bronzeorders]/FN[]"
     assert edges == []
 
 
@@ -2111,7 +2125,7 @@ def test_a_bound_root_links_to_the_same_folder_spelled_with_a_literal_root(roote
     definitions = _rooted_definitions(rooted_folder, ds_bronze="@concat('bronze/', dataset().folderPath)")
     _, _, edges = _write_then_read(definitions, written=("ds_rooted", "orders"), read=("ds_bronze", "orders"))
 
-    assert edges == [("signature", "ST[sales@acctA]/FP[bronze/orders]/FN[]")]
+    assert edges == [("signature", "ST[sales@accta]/FP[bronze/orders]/FN[]")]
 
 
 def test_a_subscript_is_one_slot_so_its_key_never_becomes_folder_text() -> None:
@@ -2123,8 +2137,8 @@ def test_a_subscript_is_one_slot_so_its_key_never_becomes_folder_text() -> None:
         read=("ds_in", "@concat('raw/', item().region, 'zone')"),
     )
 
-    assert written == "ST[sales@acctA]/FP[raw/<P>]/FN[]"
-    assert read == "ST[sales@acctA]/FP[raw/<P>zone]/FN[]"
+    assert written == "ST[sales@accta]/FP[raw/<P>]/FN[]"
+    assert read == "ST[sales@accta]/FP[raw/<P>zone]/FN[]"
     assert edges == []
 
 
@@ -2136,7 +2150,7 @@ def test_an_interpolated_folder_links_like_its_concat_spelling(read_folder: str)
         definitions, written=("ds_out", "landing/@{pipeline().parameters.run}"), read=("ds_in", read_folder)
     )
 
-    assert edges == [("signature", "ST[sales@acctA]/FP[landing/<P>]/FN[]")]
+    assert edges == [("signature", "ST[sales@accta]/FP[landing/<P>]/FN[]")]
 
 
 def test_a_folder_that_is_only_a_formatted_date_gets_no_signature() -> None:
@@ -2187,7 +2201,7 @@ def test_a_function_over_a_bound_folder_is_a_keyed_slot_not_folder_text() -> Non
     )
     written, read, edges = _write_then_read(definitions, written=("ds_out", "orders"), read=("ds_in", "bronze/orders"))
 
-    assert written == "ST[sales@acctA]/FP[bronze/<P:tolower('orders')>]/FN[]"
+    assert written == "ST[sales@accta]/FP[bronze/<P:tolower('orders')>]/FN[]"
     assert edges == []
 
 
@@ -2233,7 +2247,7 @@ def test_a_function_over_different_bound_file_names_never_links() -> None:
     reads, _ = activity_data_assets(_file_copy("Read", dataset="ds_in", file_name="B", produced=False), definitions)
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:tolower('A')>.csv]"
+    assert writes[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[<P:tolower('A')>.csv]"
     assert edges == []
 
 
@@ -2267,7 +2281,7 @@ def test_a_function_over_the_same_bound_file_name_still_links() -> None:
     reads, _ = activity_data_assets(AdfActivity(name="Read", type="Copy", inputs=[reference["ds_in"]]), definitions)
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
 
-    assert [edge.match_key for edge in edges] == ["ST[sales@acctA]/FP[landing/<P>]/FN[<P:tolower('A')>.csv]"]
+    assert [edge.match_key for edge in edges] == ["ST[sales@accta]/FP[landing/<P>]/FN[<P:tolower('A')>.csv]"]
 
 
 def test_a_file_name_that_is_only_a_function_over_a_bound_value_keeps_its_key() -> None:
@@ -2304,7 +2318,7 @@ def test_a_file_name_that_is_only_a_function_over_a_bound_value_keeps_its_key() 
     )
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:tolower('A')>]"
+    assert writes[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[<P:tolower('A')>]"
     assert edges == []
 
 
@@ -2347,7 +2361,7 @@ def test_an_apostrophe_in_a_bound_value_never_merges_two_keyed_slots() -> None:
     definitions = _sales_definitions(ds_out=wrapped_folder, ds_in=wrapped_folder)
     written, read, edges = _write_then_read(definitions, written=("ds_out", "O'Brien"), read=("ds_in", "O' Brien"))
 
-    assert written == "ST[sales@acctA]/FP[bronze/<P:tolower('O''Brien')>]/FN[]"
+    assert written == "ST[sales@accta]/FP[bronze/<P:tolower('O''Brien')>]/FN[]"
     assert written != read
     assert edges == []
 
@@ -2359,7 +2373,7 @@ def test_a_closing_brace_inside_quoted_text_does_not_end_an_interpolation_block(
         definitions, written=("ds_out", "x/@{concat('}', item().x)}/y"), read=("ds_in", "x/y")
     )
 
-    assert written == "ST[sales@acctA]/FP[x/}<P>/y]/FN[]"
+    assert written == "ST[sales@accta]/FP[x/}<P>/y]/FN[]"
 
 
 def test_an_escaped_at_sign_is_literal_folder_text() -> None:
@@ -2367,7 +2381,7 @@ def test_an_escaped_at_sign_is_literal_folder_text() -> None:
     definitions = _sales_definitions(ds_out="@dataset().folderPath", ds_in="@dataset().folderPath")
     written, read, edges = _write_then_read(definitions, written=("ds_out", "@@landing"), read=("ds_in", "@@landing"))
 
-    assert written == "ST[sales@acctA]/FP[@landing]/FN[]"
+    assert written == "ST[sales@accta]/FP[@landing]/FN[]"
     assert edges == [("signature", written)]
 
 
@@ -2379,8 +2393,8 @@ def test_a_number_in_an_expression_is_literal_folder_text(year_folder: str) -> N
         definitions, written=("ds_out", year_folder), read=("ds_in", "landing/@{item().year}")
     )
 
-    assert written == "ST[sales@acctA]/FP[landing/2024]/FN[]"
-    assert read == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert written == "ST[sales@accta]/FP[landing/2024]/FN[]"
+    assert read == "ST[sales@accta]/FP[landing/<P>]/FN[]"
     assert edges == []
 
 
@@ -2392,7 +2406,7 @@ def test_function_names_in_a_keyed_slot_ignore_case_as_adf_does() -> None:
     )
     written, read, edges = _write_then_read(definitions, written=("ds_out", "Orders"), read=("ds_in", "Orders"))
 
-    assert written == read == "ST[sales@acctA]/FP[bronze/<P:tolower('Orders')>]/FN[]"
+    assert written == read == "ST[sales@accta]/FP[bronze/<P:tolower('Orders')>]/FN[]"
     assert edges == [("signature", written)]
 
 
@@ -2424,7 +2438,7 @@ def test_an_empty_bound_value_adds_nothing_to_the_folder() -> None:
         definitions, written=("ds_sub", "landing/"), read=("ds_plain", "@concat('landing/', item().day)")
     )
 
-    assert written == "ST[sales@acctA]/FP[landing]/FN[]"
+    assert written == "ST[sales@accta]/FP[landing]/FN[]"
     assert literal_edges == [("signature", written)]
     assert runtime_edges == []
 
@@ -2435,7 +2449,7 @@ def test_an_unreadable_bound_value_is_a_runtime_slot(sub_default: object) -> Non
     definitions = _subfolder_definitions("@concat(dataset().folderPath, dataset().sub)", ds_sub=sub_default)
     written, _, edges = _write_then_read(definitions, written=("ds_sub", "landing/"), read=("ds_plain", "landing"))
 
-    assert written == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert written == "ST[sales@accta]/FP[landing/<P>]/FN[]"
     assert edges == []
 
 
@@ -2449,8 +2463,8 @@ def test_a_function_over_an_unreadable_bound_value_never_shares_a_key_with_an_em
         definitions, written=("ds_unknown", "landing"), read=("ds_empty", "landing")
     )
 
-    assert written == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
-    assert read == "ST[sales@acctA]/FP[landing/<P:tolower('')>]/FN[]"
+    assert written == "ST[sales@accta]/FP[landing/<P>]/FN[]"
+    assert read == "ST[sales@accta]/FP[landing/<P:tolower('')>]/FN[]"
     assert edges == []
 
 
@@ -2503,7 +2517,7 @@ def test_a_folder_bound_through_any_parameter_name_gets_the_same_signature_as_fo
     _, writes = activity_data_assets(_copy("Write", dataset="ds_out", produced=True), definitions)
     reads, _ = activity_data_assets(_copy("Read", dataset="ds_in", produced=False), definitions)
 
-    assert writes[0].signature == reads[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert writes[0].signature == reads[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[]"
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [("Write", "Read")]
 

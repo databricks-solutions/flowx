@@ -447,8 +447,12 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
 
 
 def _storage_account_name(text: str) -> str | None:
-    """*text* when it can be a storage account name (letters and digits only), else ``None``."""
-    return text if _STORAGE_ACCOUNT_RE.fullmatch(text) else None
+    """*text*, lower-cased, when it can be a storage account name (letters and digits only), else ``None``.
+
+    Azure account names are lower case and host names ignore case, so ``ACCTONE``
+    and ``acctone`` are one account; lower-casing loses nothing.
+    """
+    return text.lower() if _STORAGE_ACCOUNT_RE.fullmatch(text) else None
 
 
 def _is_physical(value: str) -> bool:
