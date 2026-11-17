@@ -9,6 +9,7 @@ all, exactly as it will see it in production.
 from __future__ import annotations
 
 import copy
+import functools
 import json
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ from flowx.models.insights import (
     SystemRecommendation,
 )
 from flowx.models.ir import ControlEdge, Lineage
+from flowx.sources.adf.loader import main as adf_discover_main
 
 # --------------------------------------------------------------------------- #
 # Fixtures: a two-pipeline factory where "parent" invokes "child" via a proven
@@ -707,6 +709,36 @@ def test_mcp_enrich_prepare_returns_the_inventory_an_agent_authors_against(tmp_p
     assert json.loads(prepared["bundle"]["files"]["inventory.json"]) == json.loads(inventory_path.read_text())
 
 
+def _discover_adf_fixtures(output_dir: Path) -> None:
+    """Run a real ADF discover over the repo fixtures into *output_dir*."""
+    fixtures = Path(__file__).resolve().parents[1] / "resources" / "json"
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(output_dir)]) == 0
+
+
+def test_mcp_enrich_prepare_returns_the_activity_details_beside_the_cleansed_inventory(tmp_path: Path) -> None:
+    """The agent needs each activity's details to author insights, and those live only in source_graphs.json."""
+    server = pytest.importorskip("flowx.mcp.server")
+    _discover_adf_fixtures(tmp_path)
+
+    files = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})["bundle"]["files"]
+
+    assert sorted(files) == ["inventory.json", "source_graphs.json"]
+    assert "typeProperties" not in files["inventory.json"]
+    assert "typeProperties" in files["source_graphs.json"]
+    assert files["source_graphs.json"] == (tmp_path / "metadata" / "source_graphs.json").read_text(encoding="utf-8")
+
+
+def test_mcp_enrich_prepare_without_source_graphs_returns_the_inventory_alone(tmp_path: Path) -> None:
+    """Airflow discover writes no source_graphs.json, so prepare returns the inventory alone, as before."""
+    server = pytest.importorskip("flowx.mcp.server")
+    _write_inventory(tmp_path, _inventory())
+
+    prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+
+    assert prepared["ok"] is True
+    assert list(prepared["bundle"]["files"]) == ["inventory.json"]
+
+
 def test_mcp_enrich_prepare_returns_inventory_even_when_arm_provenance_fills_the_inline_bound(tmp_path: Path) -> None:
     """A factory of large PL_* pipelines must not push inventory.json out of the size-bounded response."""
     server = pytest.importorskip("flowx.mcp.server")
@@ -740,10 +772,32 @@ def test_mcp_enrich_prepare_fails_when_the_inventory_is_too_large_to_return_inli
     assert "output_volume_path" in prepared["error"] and "output_workspace_path" in prepared["error"]
 
 
-def test_mcp_enrich_prepare_uploads_only_the_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_enrich_prepare_fails_naming_source_graphs_when_only_it_is_past_the_inline_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the inventory fits but source_graphs.json does not, the error names source_graphs.json."""
+    server = pytest.importorskip("flowx.mcp.server")
+    runner = pytest.importorskip("flowx.mcp.runner")
+    _discover_adf_fixtures(tmp_path)
+    inventory_size = (tmp_path / "metadata" / "inventory.json").stat().st_size
+    monkeypatch.setattr(runner, "read_tree", functools.partial(runner.read_tree, max_total_bytes=inventory_size + 10))
+
+    prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+
+    assert prepared["ok"] is False
+    assert "source_graphs.json" in prepared["error"] and "inventory.json" not in prepared["error"]
+    assert "output_volume_path" in prepared["error"] and "output_workspace_path" in prepared["error"]
+
+
+def test_mcp_enrich_prepare_uploads_only_the_inventory_and_source_graphs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An upload path gets inventory.json and source_graphs.json, never the ARM provenance copies."""
     server = pytest.importorskip("flowx.mcp.server")
     runner = pytest.importorskip("flowx.mcp.runner")
     inventory_path = _write_inventory(tmp_path, _inventory())
+    graphs_path = inventory_path.parent / "source_graphs.json"
+    graphs_path.write_text('{"contract_version": "1", "graphs": []}', encoding="utf-8")
     (inventory_path.parent / "PL_Orders.arm.json").write_text("{}", encoding="utf-8")
     uploaded: dict[str, str] = {}
 
@@ -760,8 +814,11 @@ def test_mcp_enrich_prepare_uploads_only_the_inventory(tmp_path: Path, monkeypat
     )
 
     assert prepared["ok"] is True
-    assert prepared["bundle_uploaded"]["files"] == ["inventory.json"]
-    assert uploaded == {"inventory.json": inventory_path.read_text(encoding="utf-8")}
+    assert prepared["bundle_uploaded"]["files"] == ["inventory.json", "source_graphs.json"]
+    assert uploaded == {
+        "inventory.json": inventory_path.read_text(encoding="utf-8"),
+        "source_graphs.json": graphs_path.read_text(encoding="utf-8"),
+    }
 
 
 def test_mcp_enrich_prepare_and_action_errors(tmp_path: Path) -> None:
