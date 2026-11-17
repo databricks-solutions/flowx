@@ -353,8 +353,9 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
             return {
                 "ok": False,
                 "error": (
-                    f"{sizes} {verb} too large to return inline; "
-                    "pass output_volume_path or output_workspace_path to have it uploaded there instead."
+                    f"{sizes} {verb} too large to return inline, where the files share one "
+                    f"{runner.INLINE_TREE_BYTES}-byte limit in total; "
+                    "pass output_volume_path or output_workspace_path to have them uploaded there instead."
                 ),
             }
         return {"ok": True, "output_dir": str(output_dir), **delivered}
@@ -373,9 +374,9 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
     if isinstance(insights, str):
         try:
             insights = json.loads(insights)
-        except json.JSONDecodeError as error:
+        except ValueError as error:
             violation = f"insights is a string that is not valid JSON ({error}); send the insights as a JSON object"
-            return {"ok": False, "result": {"ok": False, "violations": [violation]}}
+            return {"ok": False, "result": {"ok": False, "violations": [violation]}, "process": None}
     with tempfile.TemporaryDirectory(prefix="flowx-insights-") as temporary:
         inline_path = Path(temporary) / "insights.json"
         inline_path.write_text(json.dumps(insights, indent=2), encoding="utf-8")
