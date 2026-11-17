@@ -4,16 +4,17 @@ Kept separate from :mod:`flowx.ir_serde` on purpose: ``ir_serde`` owns the
 ``translation_report.json`` convert->package contract for the Databricks IR, and
 the discovery graph is a different model with a different lifecycle. The graph and
 node shapes are this module's own; the data-asset and lineage shapes come from
-``ir_serde`` (see below), so changing those also changes ``source_graphs.json``.
+:mod:`flowx.lineage_serde` (see below), so changing those also changes ``source_graphs.json``.
 It also owns the persisted ``metadata/source_graphs.json`` envelope
 (:func:`source_graphs_document`), versioned and content-hashed, so every source's
 discover phase writes the same file and a later phase can read the graphs back
 without going to the source again.
 
-The data-asset and lineage (de)serialisers are reused from ``ir_serde``
+The data-asset and lineage (de)serialisers come from :mod:`flowx.lineage_serde`
 (``data_asset_to_dict`` / ``data_asset_from_dict`` and ``lineage_to_dict`` /
-``lineage_from_dict``), so each shape has one definition shared by the lineage
-substrate and the discovery graph. A data asset describes what a task reads or
+``lineage_from_dict``), which ``ir_serde`` uses too, so each shape has one definition
+shared by the translation report and the discovery graph without discovery depending
+on the IR's serialiser. A data asset describes what a task reads or
 writes on a best-effort basis, not only physical tables; see
 :class:`~flowx.models.lineage.DataAsset`.
 
@@ -30,7 +31,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from flowx.ir_serde import data_asset_from_dict, data_asset_to_dict, lineage_from_dict, lineage_to_dict
+from flowx.lineage_serde import data_asset_from_dict, data_asset_to_dict, lineage_from_dict, lineage_to_dict
 from flowx.models.discovery import (
     ContainerNode,
     GapNode,

@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from flowx.discovery_lineage import walk_nodes
-from flowx.ir_serde import lineage_to_dict
+from flowx.lineage_serde import lineage_to_dict
 from flowx.models.discovery import SourceGraph, SourceNode
 from flowx.models.lineage import MotifAnnotation
 
