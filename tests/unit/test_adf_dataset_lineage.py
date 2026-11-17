@@ -2728,3 +2728,12 @@ def test_a_bundle_variable_placeholder_never_becomes_a_table_identity() -> None:
     )
 
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_global"), definitions, context) is None
+
+
+def test_an_empty_container_value_is_not_a_dynamic_container() -> None:
+    """A ``fileSystem`` of ``{}`` writes no container, so it gets no ``<P>@account`` store, as before."""
+    definitions = _dynamic_container_definitions(ds_out="acctone")
+    definitions.datasets["ds_out"].properties["typeProperties"]["location"]["fileSystem"] = {}
+    _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_out", produced=True), definitions)
+
+    assert writes[0].signature == "FP[landing/orders]/FN[]"

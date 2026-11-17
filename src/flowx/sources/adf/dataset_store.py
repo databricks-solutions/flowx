@@ -99,5 +99,8 @@ def resolve_dataset_store(
 
 
 def _writes_file_system(location: dict) -> bool:
-    """``True`` when the location writes a file system, container or bucket at all, resolvable or not."""
-    return any(location.get(key) not in (None, "") for key in ("fileSystem", "container", "bucketName"))
+    """``True`` when the location writes a file system, container or bucket at all, resolvable or not.
+
+    Empty values count as unwritten, as :func:`written_file_system` reads them.
+    """
+    return any(location.get(key) for key in ("fileSystem", "container", "bucketName"))
