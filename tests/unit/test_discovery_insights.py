@@ -222,6 +222,63 @@ def test_control_edge_not_matching_inventory_lineage() -> None:
     assert any("does not resolve to a lineage edge from 'parent' to 'child'" in v for v in violations)
 
 
+def test_a_relationship_from_a_pipeline_to_itself_is_a_violation() -> None:
+    raw = _valid_insights()
+    raw["pipeline_relationships"][1]["to_pipeline"] = "child"
+
+    violations = validate_insights(raw, _inventory())
+
+    assert any("pipeline_relationships[1]: a pipeline cannot relate to itself" in v for v in violations)
+
+
+def test_the_same_relationship_given_twice_is_a_violation(tmp_path: Path) -> None:
+    raw = _valid_insights()
+    raw["pipeline_relationships"].append(copy.deepcopy(raw["pipeline_relationships"][1]))
+    path = _write_inventory(tmp_path, _inventory())
+    original_bytes = path.read_bytes()
+
+    violations = validate_insights(raw, _inventory())
+    result = enrich_inventory(tmp_path, insights=raw)
+
+    assert any(
+        "pipeline_relationships[2]: duplicate relationship (already given at pipeline_relationships[1])" in v
+        for v in violations
+    )
+    assert result["ok"] is False
+    assert path.read_bytes() == original_bytes
+
+
+def test_two_control_edges_between_one_pair_through_different_tasks_are_both_kept() -> None:
+    parent = SourceGraph(
+        name="parent",
+        source="unit",
+        tasks=[
+            _node("call_child", "ExecutePipeline", CONCEPT_RUN_WORKFLOW),
+            _node("call_child_again", "ExecutePipeline", CONCEPT_RUN_WORKFLOW),
+        ],
+        lineage=Lineage(
+            control_edges=[
+                ControlEdge(source_workflow="parent", target_workflow="child", via_task_key="call_child"),
+                ControlEdge(source_workflow="parent", target_workflow="child", via_task_key="call_child_again"),
+            ]
+        ),
+    )
+    child = SourceGraph(name="child", source="unit", tasks=[_node("load", "Notebook")])
+    inventory = build_source_inventory([parent, child], source="unit", source_dir="/tmp/src")
+    raw = {
+        "pipeline_relationships": [
+            {
+                "from_pipeline": "parent",
+                "to_pipeline": "child",
+                "lineage_edge": {"edge_type": "control", "edge_identity": task_key},
+            }
+            for task_key in ("call_child", "call_child_again")
+        ]
+    }
+
+    assert validate_insights(raw, inventory) == []
+
+
 def test_control_edge_with_wrong_endpoints_does_not_resolve() -> None:
     raw = _valid_insights()
     # The via_task_key is real, but between parent->child, not child->sibling.
