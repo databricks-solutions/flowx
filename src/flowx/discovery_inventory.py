@@ -60,7 +60,13 @@ def build_source_inventory(
     children are listed depth-first after their container. A node whose
     ``inventory_visible`` property is exactly ``False`` (for example an Airflow
     TaskGroup kept only for structure) is left out of the list and the counts,
-    while its children are still listed.
+    while its children are still listed. Only that node's own entry goes: other
+    activities' ``depends_on`` and ``dependencies``, the ``lineage`` block and motif
+    ``member_task_keys`` are written as the graph has them, so a hidden node they name
+    would dangle. A mapper that hides a node must therefore not name it anywhere else
+    in the graph, remapping such references itself (for example to the group's
+    visible children); the builder does not drop them, since a silently dropped
+    upstream reads as no upstream at all.
 
     A graph with derived lineage gives its pipeline entry a ``lineage`` block with
     its ``control_edges`` and ``data_edges``. Detected motifs are not in that block;
