@@ -596,3 +596,40 @@ def test_authored_files_at_root_artifact_paths_are_namespaced_in_a_group_bundle(
     assert json.loads((tmp_path / "src/pipe_a/resources/config.json").read_text()) == {"pipeline": "pipe_a"}
     assert json.loads((tmp_path / "src/pipe_b/resources/config.json").read_text()) == {"pipeline": "pipe_b"}
     assert not (tmp_path / "src/resources/config.json").exists()
+
+
+def test_same_named_lakeflow_connect_copies_in_a_group_bundle_each_keep_their_own_pipeline(tmp_path):
+    """Two pipelines with a same-named Lakeflow Connect copy each get their own pipeline resource and task ref."""
+    from flowx.adapter import TranslationConfiguration, apply_configuration
+
+    def lakeflow_copy_workflow(pipeline: str, table: str) -> PreparedWorkflow:
+        copy_activity = CopyActivity(
+            name="copy_orders",
+            task_key="copy_orders",
+            source_type="AzureSqlSource",
+            sink_type="DeltaSink",
+            sink_format="delta",
+            sink_properties={"table": table},
+        )
+        stamped = apply_configuration(
+            Pipeline(name=pipeline, tasks=[copy_activity]),
+            TranslationConfiguration(use_lakeflow_connectors="lakeflow_connect"),
+        )
+        return prepare_workflow(stamped)
+
+    write_bundle_group(
+        [lakeflow_copy_workflow("pipe_a", "raw.orders_a"), lakeflow_copy_workflow("pipe_b", "raw.orders_b")],
+        tmp_path,
+        bundle_name="combined",
+    )
+
+    pipelines = {}
+    for resource_file in (tmp_path / "resources").glob("*.yml"):
+        pipelines.update(yaml.safe_load(resource_file.read_text(encoding="utf-8"))["resources"].get("pipelines", {}))
+    for pipeline, table in (("pipe_a", "raw.orders_a"), ("pipe_b", "raw.orders_b")):
+        job = yaml.safe_load((tmp_path / "resources" / f"{pipeline}.yml").read_text(encoding="utf-8"))
+        pipeline_reference = job["resources"]["jobs"][pipeline]["tasks"][0]["pipeline_task"]["pipeline_id"]
+        resource_key = pipeline_reference.removeprefix("${resources.pipelines.").removesuffix(".id}")
+        assert resource_key.startswith(pipeline)
+        destination = pipelines[resource_key]["ingestion_definition"]["objects"][0]["table"]["destination_table"]
+        assert destination == table

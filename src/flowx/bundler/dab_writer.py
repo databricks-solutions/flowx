@@ -254,7 +254,10 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
         ``../src/`` reference to it, a folder holding it or a glob matching it, in the tasks, the job
         environments and the pipeline resources. Authored file content is never edited;
       * each inner ForEach job ``name`` (so its resource key becomes ``<prefix>__<key>``) and every
-        ``${resources.jobs.<key>.id}`` ref to it.
+        ``${resources.jobs.<key>.id}`` ref to it;
+      * each pipeline resource key (``<key>`` -> ``<prefix>_<key>``) and every
+        ``${resources.pipelines.<key>.`` ref to it, so two pipelines whose same-named activities each
+        emit a pipeline resource (a Lakeflow Connect copy, a component) keep one resource each.
 
     Pipeline-level job keys are NOT namespaced: pipeline names are unique within a migration, so they
     never collide, and namespacing them would break cross-bundle ``${var.<callee>}`` wiring.
@@ -284,6 +287,20 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
         if old_key != new_key:
             replacements[f"${{resources.jobs.{old_key}.id}}"] = f"${{resources.jobs.{new_key}.id}}"
 
+    # 1b. Pipeline resource keys: two pipelines' same-named activities emit the same key.
+    pipeline_keys: dict[str, str] = {}
+    for wf in (workflow, *workflow.inner_workflows):
+        renamed_resources = []
+        for resource in wf.pipeline_resources:
+            old_key = resource["resource_key"]
+            new_key = pipeline_keys.setdefault(old_key, to_lowercase_key(f"{prefix}__{old_key}"))
+            renamed_resources.append({**resource, "resource_key": new_key})
+        wf.pipeline_resources = renamed_resources
+    pipeline_references = {
+        f"${{resources.pipelines.{old_key}.": f"${{resources.pipelines.{new_key}."
+        for old_key, new_key in pipeline_keys.items()
+    }
+
     # 2. Notebook paths: prefix each unique relative_path with the pipeline key as a subdirectory.
     authored_paths: set[str] = set()
     for wf in (workflow, *workflow.inner_workflows):
@@ -308,11 +325,12 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
                 if f"src/{old_path}" in notebook.content:
                     notebook.content = notebook.content.replace(f"src/{old_path}", f"src/{new_path}")
 
-    # 3. Rewrite every matching ref across the parent and inner task trees, and the authored-file refs
-    #    in the environments and pipeline resources too.
+    # 3. Rewrite every matching ref across the parent and inner task trees, and the authored-file and
+    #    pipeline refs in the environments and pipeline resources too.
     for wf in (workflow, *workflow.inner_workflows):
         _rewrite_task_string_values(wf.tasks, replacements)
         for structure in (wf.tasks, wf.environments, wf.pipeline_resources):
+            _replace_strings(structure, pipeline_references)
             _rewrite_authored_file_references(structure, authored_paths, prefix)
 
 
