@@ -573,3 +573,26 @@ class TestPrefixedNotebookRelativePath:
 
     def test_slashless_path_prefixed_once(self):
         assert _prefixed_notebook_relative_path("x.py", "pre") == "pre/x.py"
+
+
+def test_authored_files_at_root_artifact_paths_are_namespaced_in_a_group_bundle(tmp_path):
+    """An authored ``resources/config.json`` lives below ``src``, so each grouped pipeline gets its own copy."""
+
+    def authored_wf(pipeline: str) -> PreparedWorkflow:
+        return PreparedWorkflow(
+            name=pipeline,
+            tasks=[{"task_key": "wait", "condition_task": {"op": "EQUAL_TO", "left": "1", "right": "1"}}],
+            notebooks=[
+                DabNotebook(
+                    relative_path="resources/config.json", content=f'{{"pipeline": "{pipeline}"}}\n', authored=True
+                )
+            ],
+            secrets=[],
+            setup_tasks=[],
+        )
+
+    write_bundle_group([authored_wf("pipe_a"), authored_wf("pipe_b")], tmp_path, bundle_name="combined")
+
+    assert json.loads((tmp_path / "src/resources/pipe_a/config.json").read_text()) == {"pipeline": "pipe_a"}
+    assert json.loads((tmp_path / "src/resources/pipe_b/config.json").read_text()) == {"pipeline": "pipe_b"}
+    assert not (tmp_path / "src/resources/config.json").exists()

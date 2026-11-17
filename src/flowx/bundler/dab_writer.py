@@ -285,7 +285,8 @@ def _namespace_bundle_artifacts(workflow: PreparedWorkflow, prefix: str) -> None
             old_path = notebook.relative_path
             # Bundle-root Python resources — the dbt hook modules namespaced in step 0, the resources
             # package marker, pyproject.toml — import by path from the root, so leave them in place.
-            if old_path.startswith("resources/") or old_path == "pyproject.toml":
+            # Authored files at such paths are written below src/ like any other, so they are namespaced.
+            if _is_bundle_root_artifact(notebook):
                 continue
             new_path = _prefixed_notebook_relative_path(old_path, prefix)
             if old_path != new_path:
@@ -422,12 +423,8 @@ def write_bundle_group(
         environments = _collect_environments(workflow)
         _check_environment_keys(environments, workflow)
         environments_by_workflow.append(environments)
-    _check_authored_file_references(
-        workflows,
-        [environment for environments in environments_by_workflow for environment in environments],
-        catalog,
-        schema,
-    )
+    all_environments = [environment for environments in environments_by_workflow for environment in environments]
+    _check_authored_file_references(workflows, all_environments, catalog, schema)
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
     # sql_task references ${var.warehouse_id}; declare it once if any workflow in the group uses one
     # (no default -> user supplies at deploy).
@@ -435,9 +432,7 @@ def write_bundle_group(
         pipeline_variable_declarations.setdefault(
             "warehouse_id", {"description": "SQL warehouse id for sql_task queries"}
         )
-    for name, declaration in _build_authored_variable_declarations(
-        workflows, [environment for environments in environments_by_workflow for environment in environments]
-    ).items():
+    for name, declaration in _build_authored_variable_declarations(workflows, all_environments).items():
         pipeline_variable_declarations.setdefault(name, declaration)
 
     # Hoisted factory globals become bundle variables. Collected per workflow (each call also merges the
