@@ -455,6 +455,24 @@ def test_tumbling_window_trigger_expression_from_type_properties() -> None:
     assert schedule.expression == {"frequency": "Hour", "interval": 1, "startTime": "2024-01-01T00:00:00Z"}
 
 
+def test_tumbling_window_trigger_attaches_through_its_singular_pipeline_reference() -> None:
+    """A real tumbling-window trigger names its one pipeline under ``pipeline``, with no ``pipelines`` list."""
+    trigger = {
+        "name": "tr_tumble",
+        "properties": {
+            "type": "TumblingWindowTrigger",
+            "typeProperties": {"frequency": "Hour", "interval": 1, "startTime": "2024-01-01T00:00:00Z"},
+            "pipeline": {"pipelineReference": {"referenceName": "pl_sched", "type": "PipelineReference"}},
+        },
+    }
+    graphs = adf_definitions_to_source_graphs(_definitions_with_trigger(trigger))
+
+    schedule = graphs[0].schedule
+    assert schedule is not None
+    assert schedule.kind == "interval"
+    assert schedule.extensions["trigger_name"] == "tr_tumble"
+
+
 def test_unreferenced_pipeline_has_no_schedule() -> None:
     """A pipeline no trigger references keeps ``schedule is None``."""
     trigger = {
