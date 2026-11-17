@@ -175,8 +175,14 @@ def _resolve_param_value(
     raw: Any,
     dataset_params: dict[str, Any],
     context: TranslationContext,
+    visited_parameters: frozenset[str] = frozenset(),
 ) -> str:
-    """Resolve a single ADF location / table field to a string."""
+    """Resolve a single ADF location / table field to a string.
+
+    A ``dataset().<name>`` that comes back round to itself through the defaults
+    (``a`` is ``@dataset().b`` and ``b`` is ``@dataset().a``) is unresolved, so it gives
+    ``""`` instead of recursing until Python gives up.
+    """
     if raw is None:
         return ""
     if isinstance(raw, dict) and raw.get("type") == "Expression":
@@ -191,7 +197,11 @@ def _resolve_param_value(
     match = DATASET_PARAMETER_RE.fullmatch(stripped[1:]) if stripped.startswith("@") else None
     if match:
         parameter_name = match.group(1)
-        return _resolve_param_value(dataset_params.get(parameter_name, ""), dataset_params, context)
+        if parameter_name in visited_parameters:
+            return ""
+        return _resolve_param_value(
+            dataset_params.get(parameter_name, ""), dataset_params, context, visited_parameters | {parameter_name}
+        )
 
     if "@{" in text:
         return resolve_interpolated_string(text, context)

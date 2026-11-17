@@ -22,7 +22,8 @@ from flowx.models.adf_ast import (
     AdfLinkedService,
 )
 from flowx.sources.adf.dataset_lineage import activity_data_assets, resolve_dataset_identity
-from flowx.sources.adf.loader import load_adf_definitions
+from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
+from flowx.sources.adf.loader import _parse_pipeline_json, load_adf_definitions
 
 FIXTURES_DIR = Path(__file__).parent.parent / "resources" / "json"
 
@@ -2649,3 +2650,40 @@ def test_a_legacy_dataset_folder_is_never_replaced_by_the_call_site_folder() -> 
 
     assert writes[0].signature == reads[0].signature == ""
     assert data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads]) == []
+
+
+def _cyclic_defaults_definitions() -> AdfDefinitions:
+    """A table dataset read as ``@dataset().a``, whose defaults send ``a`` to ``b`` and ``b`` back to ``a``."""
+    dataset = AdfDataset(
+        name="ds_cycle",
+        type="AzureSqlTable",
+        properties={
+            "linkedServiceName": {"referenceName": "ls_sql"},
+            "parameters": {
+                "a": {"type": "string", "defaultValue": "@dataset().b"},
+                "b": {"type": "string", "defaultValue": "@dataset().a"},
+            },
+            "typeProperties": {"schema": "dbo", "table": {"value": "@dataset().a", "type": "Expression"}},
+        },
+    )
+    lookup = {
+        "name": "Lookup1",
+        "type": "Lookup",
+        "typeProperties": {"source": {"type": "AzureSqlSource"}, "dataset": {"referenceName": "ds_cycle"}},
+    }
+    pipeline = _parse_pipeline_json({"name": "pl", "properties": {"activities": [lookup]}})
+    return AdfDefinitions(pipelines=[pipeline], datasets={"ds_cycle": dataset})
+
+
+def test_dataset_defaults_that_refer_to_each_other_give_no_identity() -> None:
+    """A cycle through dataset defaults never resolves, so the table has no identity rather than a crash."""
+    definitions = _cyclic_defaults_definitions()
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_cycle"), definitions) is None
+
+
+def test_dataset_defaults_that_refer_to_each_other_do_not_stop_discovery() -> None:
+    """One malformed dataset must not abort the whole discover run."""
+    graphs = adf_definitions_to_source_graphs(_cyclic_defaults_definitions())
+
+    assert [graph.name for graph in graphs] == ["pl"]
