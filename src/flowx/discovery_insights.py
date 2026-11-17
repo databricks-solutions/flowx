@@ -74,6 +74,7 @@ from flowx.models.discovery import SOURCE_ADF, SourceGraph
 from flowx.models.insights import (
     CONFIDENCE_LEVELS,
     MAX_RECOMMENDED_PATTERNS,
+    MAX_TEXT_FIELD_CHARS,
     RELEASE_STATES,
     RELEASE_STATES_REQUIRING_SOURCE,
     SCHEMA_VERSION,
@@ -205,6 +206,7 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
         violations.append(f"unknown top-level key: {key!r}{hint}")
 
     violations.extend(_authored_against_violations(raw.get(_AUTHORED_AGAINST_KEY), inventory))
+    violations.extend(_text_length_violations(raw, ""))
 
     overview = raw.get("overview")
     if overview is not None and (not isinstance(overview, str) or not overview.strip()):
@@ -219,6 +221,31 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
     violations.extend(_validate_pipeline_insights(raw.get("pipeline_insights", []), names))
     violations.extend(_validate_relationships(raw.get("pipeline_relationships", []), names, control_triples))
     return violations
+
+
+def _text_length_violations(value: Any, loc: str) -> list[str]:
+    """Report every text value under *value* longer than :data:`MAX_TEXT_FIELD_CHARS`, named by its path.
+
+    The walk covers every free-text field wherever it sits (overview, intent, evidence, a cascade step
+    and so on), so a field added to the schema later is capped too.
+    """
+    if isinstance(value, str):
+        if len(value) <= MAX_TEXT_FIELD_CHARS:
+            return []
+        return [f"{loc}: text is {len(value)} characters; at most {MAX_TEXT_FIELD_CHARS} are allowed"]
+    if isinstance(value, dict):
+        return [
+            violation
+            for key, item in value.items()
+            for violation in _text_length_violations(item, f"{loc}.{key}" if loc else str(key))
+        ]
+    if isinstance(value, list):
+        return [
+            violation
+            for index, item in enumerate(value)
+            for violation in _text_length_violations(item, f"{loc}[{index}]")
+        ]
+    return []
 
 
 def _authored_against_violations(authored_against: Any, inventory: dict[str, Any]) -> list[str]:

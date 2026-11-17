@@ -279,6 +279,51 @@ def test_two_control_edges_between_one_pair_through_different_tasks_are_both_kep
     assert validate_insights(raw, inventory) == []
 
 
+def test_a_text_value_at_the_cap_is_accepted() -> None:
+    raw = _valid_insights()
+    raw["pipeline_insights"][0]["intent"] = "x" * 20_000
+
+    assert validate_insights(raw, _inventory()) == []
+
+
+@pytest.mark.parametrize(
+    ("field_keys", "field_path"),
+    [
+        (("pipeline_insights", 0, "intent"), "pipeline_insights[0].intent"),
+        (("overview",), "overview"),
+        (("pipeline_relationships", 1, "lineage_edge", "evidence"), "pipeline_relationships[1].lineage_edge.evidence"),
+        (("system_recommendation", "cascade", 0), "system_recommendation.cascade[0]"),
+        (("pipeline_insights", 0, "conversion_notes", 0), "pipeline_insights[0].conversion_notes[0]"),
+    ],
+)
+def test_a_text_value_over_the_cap_is_a_violation_naming_the_field(
+    field_keys: tuple[str | int, ...], field_path: str
+) -> None:
+    raw = _valid_insights()
+    container: Any = raw
+    for key in field_keys[:-1]:
+        container = container[key]
+    container[field_keys[-1]] = "x" * 20_001
+
+    violations = validate_insights(raw, _inventory())
+
+    assert f"{field_path}: text is 20001 characters; at most 20000 are allowed" in violations
+
+
+def test_enrich_refuses_an_oversized_insight_before_it_reaches_the_inventory(tmp_path: Path) -> None:
+    """A 3 MB intent used to be recorded and only fail at the next prepare, blaming the inventory size."""
+    path = _write_inventory(tmp_path, _inventory())
+    original_bytes = path.read_bytes()
+    raw = _valid_insights()
+    raw["pipeline_insights"][0]["intent"] = "x" * 3_000_000
+
+    result = enrich_inventory(tmp_path, insights=raw)
+
+    assert result["ok"] is False
+    assert any("pipeline_insights[0].intent: text is 3000000 characters" in v for v in result["violations"])
+    assert path.read_bytes() == original_bytes
+
+
 def test_control_edge_with_wrong_endpoints_does_not_resolve() -> None:
     raw = _valid_insights()
     # The via_task_key is real, but between parent->child, not child->sibling.
