@@ -814,7 +814,19 @@ def test_mcp_enrich_reports_insights_text_that_is_not_json_as_a_violation(tmp_pa
     assert out["ok"] is False
     assert len(out["result"]["violations"]) == 1
     assert "insights is a string that is not valid JSON" in out["result"]["violations"][0]
+    assert out["process"] is None
     assert path.read_bytes() == original_bytes
+
+
+def test_mcp_enrich_reports_insights_text_json_cannot_read_as_a_violation(tmp_path: Path) -> None:
+    """An integer literal past Python's digit limit raises a plain ValueError, which is still a violation."""
+    server = pytest.importorskip("flowx.mcp.server")
+    _write_inventory(tmp_path, _inventory())
+
+    out = server._cmd_enrich({"output_dir": str(tmp_path), "insights": '{"overview": ' + "9" * 5_000 + "}"})
+
+    assert out["ok"] is False
+    assert "insights is a string that is not valid JSON" in out["result"]["violations"][0]
 
 
 def test_mcp_enrich_requires_exactly_one_source(tmp_path: Path) -> None:
@@ -914,6 +926,7 @@ def test_mcp_enrich_prepare_fails_naming_source_graphs_when_only_it_is_past_the_
 
     assert prepared["ok"] is False
     assert "source_graphs.json" in prepared["error"] and "inventory.json" not in prepared["error"]
+    assert "share one 2000000-byte limit in total" in prepared["error"]
     assert "output_volume_path" in prepared["error"] and "output_workspace_path" in prepared["error"]
 
 

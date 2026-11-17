@@ -223,7 +223,7 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
     return violations
 
 
-def _text_length_violations(value: Any, loc: str) -> list[str]:
+def _text_length_violations(value: Any, location: str) -> list[str]:
     """Report every text value under *value* longer than :data:`MAX_TEXT_FIELD_CHARS`, named by its path.
 
     The walk covers every free-text field wherever it sits (overview, intent, evidence, a cascade step
@@ -232,18 +232,18 @@ def _text_length_violations(value: Any, loc: str) -> list[str]:
     if isinstance(value, str):
         if len(value) <= MAX_TEXT_FIELD_CHARS:
             return []
-        return [f"{loc}: text is {len(value)} characters; at most {MAX_TEXT_FIELD_CHARS} are allowed"]
+        return [f"{location}: text is {len(value)} characters; at most {MAX_TEXT_FIELD_CHARS} are allowed"]
     if isinstance(value, dict):
         return [
             violation
             for key, item in value.items()
-            for violation in _text_length_violations(item, f"{loc}.{key}" if loc else str(key))
+            for violation in _text_length_violations(item, f"{location}.{key}" if location else str(key))
         ]
     if isinstance(value, list):
         return [
             violation
             for index, item in enumerate(value)
-            for violation in _text_length_violations(item, f"{loc}[{index}]")
+            for violation in _text_length_violations(item, f"{location}[{index}]")
         ]
     return []
 
