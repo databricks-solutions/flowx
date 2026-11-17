@@ -456,7 +456,17 @@ def _fill_solo(output_dir: Path) -> None:
     assert adapter_main([*fill, str(authored_path)]) == 0
 
 
-_MANAGED_ROOTS = ("metadata", WORK_DIRNAME, "resources", "src", "setup", "databricks.yml", "SETUP.md", "WARNINGS.md")
+_MANAGED_ROOTS = (
+    "metadata",
+    WORK_DIRNAME,
+    "resources",
+    "src",
+    "setup",
+    "databricks.yml",
+    "SETUP.md",
+    "WARNINGS.md",
+    "DEPLOY.md",
+)
 
 
 def _managed_files(output_dir: Path) -> dict[str, bytes]:
