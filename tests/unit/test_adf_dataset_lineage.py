@@ -684,6 +684,8 @@ def _orders_identity(type_properties: dict) -> str | None:
         ({"tableName": "[dbo].[Order Details]"}, {"schema": "dbo", "table": "Order Details"}),
         ({"tableName": "[dbo].[a]]b]"}, {"schema": "dbo", "table": "[a]]b]"}),
         ({"tableName": "[sales.eu].[Orders]"}, {"schema": "[sales.eu]", "table": "Orders"}),
+        ({"tableName": "dbo. [Orders]"}, {"schema": "dbo ", "table": "Orders"}),
+        ({"tableName": "[dbo] .Orders"}, {"tableName": "dbo.Orders"}),
     ],
 )
 def test_bracket_quoting_that_changes_nothing_gives_the_same_table_identity(bracketed: dict, plain: dict) -> None:

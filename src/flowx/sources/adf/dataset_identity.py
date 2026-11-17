@@ -22,6 +22,8 @@ _ARM_CALL_RE = re.compile(
     r"^\[\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\((?P<arguments>.*)\]$", re.DOTALL
 )
 _NESTED_CALL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*\(")
+# A whole SQL Server bracketed name, where "]]" inside stands for one "]".
+_BRACKETED_NAME_RE = re.compile(r"\[((?:[^\]]|\]\])*)\]")
 
 
 # ARM template functions (compared lower-cased, as ARM does). A bracketed call is an unevaluated ARM
@@ -103,7 +105,8 @@ def _canonical_table_name(qualified_name: str) -> str:
     one table, so both read ``dbo.Orders``. A bracketed part keeps its brackets only
     when it needs them to stay one part (it holds a dot, a bracket, a double quote,
     or edge spaces), written with ``]]`` for each ``]`` inside, so ``[a.b].c`` never
-    meets ``a.b.c``. Case is left alone, and so is a double-quoted part, because in
+    meets ``a.b.c``. Spaces around each dot are dropped, as SQL ignores them. Case
+    is left alone, and so is a double-quoted part, because in
     PostgreSQL ``"Orders"`` and ``Orders`` are different tables. A name whose
     brackets or quotes do not close is kept as written.
     """
@@ -133,31 +136,17 @@ def _canonical_table_name(qualified_name: str) -> str:
 
 
 def _canonical_table_name_part(part: str) -> str:
-    """One dotted part of a table name with its brackets taken off when they change nothing.
+    """One dotted part of a table name, trimmed, with its brackets taken off when they change nothing.
 
-    The part must be exactly one bracketed name, its first ``[`` closed by its last
-    ``]``; anything else, such as ``[a]b]``, is kept as written.
+    SQL ignores spaces around the dot, so ``dbo .Orders`` reads ``dbo.Orders``. Only a
+    part that is exactly one bracketed name, its ``[`` closed by its last ``]``, loses
+    its brackets; anything else, such as ``[a]b]``, keeps them.
     """
     stripped = part.strip()
-    if not stripped.startswith("["):
-        return part
-    name_characters: list[str] = []
-    index = 1
-    while index < len(stripped):
-        character = stripped[index]
-        if character == "]" and stripped[index + 1 : index + 2] == "]":
-            name_characters.append("]")
-            index += 2
-            continue
-        if character == "]":
-            if index != len(stripped) - 1:
-                return part
-            break
-        name_characters.append(character)
-        index += 1
-    else:
-        return part
-    name = "".join(name_characters)
+    bracketed = _BRACKETED_NAME_RE.fullmatch(stripped)
+    if bracketed is None:
+        return stripped
+    name = bracketed.group(1).replace("]]", "]")
     if not name or name != name.strip() or any(character in name for character in '.[]"'):
         return "[" + name.replace("]", "]]") + "]"
     return name
