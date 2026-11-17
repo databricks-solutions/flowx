@@ -72,7 +72,14 @@ def build_source_inventory(
     Returns:
         A JSON-friendly dict with ``source``, ``source_dir``, ``pipelines`` and
         ``summary`` keys, plus ``source_graphs_sha256`` when given.
+
+    Raises:
+        ValueError: A graph's ``source`` differs from *source*, as the
+            ``source_graphs.json`` reader and writer also refuse.
     """
+    foreign = sorted({graph.source for graph in graphs if graph.source != source})
+    if foreign:
+        raise ValueError(f"inventory for source {source!r} was given graphs from another source: {foreign}")
     pipeline_entries: list[dict[str, Any]] = []
     deterministic = 0
     agentic = 0
