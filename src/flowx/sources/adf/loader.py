@@ -1058,7 +1058,7 @@ def write_pipeline_arm(definitions: AdfDefinitions, metadata_dir: Path) -> list[
 
 # flowx-managed entries under the shared output_dir, cleared at the start of each fresh run.
 _MANAGED_OUTPUT_DIRS: tuple[str, ...] = ("metadata", ".work", "resources", "src", "setup")
-_MANAGED_OUTPUT_FILES: tuple[str, ...] = ("databricks.yml", "SETUP.md", "WARNINGS.md")
+_MANAGED_OUTPUT_FILES: tuple[str, ...] = ("databricks.yml", "SETUP.md", "WARNINGS.md", "DEPLOY.md")
 # Earlier runs' outputs are moved here (under metadata/, which package keeps) instead of deleted.
 ARCHIVE_DIRNAME = "archive"
 ARCHIVE_RECORD_FILENAME = "archive.json"
@@ -1073,7 +1073,7 @@ def clear_stale_outputs(output_dir: Path) -> Path | None:
     pipelines' source ARM and generated notebooks in the packaged bundle.
 
     Nothing is deleted: everything this run would remove (the plan, the review page, the insights,
-    the route baseline, the agent's fills, the bundle, and the per-pipeline bundle folders package
+    the route baseline, the agent's fills, the bundle, its ``DEPLOY.md``, and the bundle folders package
     recorded in ``metadata/packaged_bundles.json``) moves into
     ``metadata/archive/<UTC time>/`` under its own relative path, with an ``archive.json`` that
     records what moved, from where and when, so an earlier run can still be audited. Earlier
