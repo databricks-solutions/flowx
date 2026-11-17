@@ -308,6 +308,32 @@ def test_discover_prints_the_inventory_activity_count_labelled_raw_including_nes
     assert f"Total activities:     {activity_count}  (raw activities, incl. nested)" in capsys.readouterr().out
 
 
+def test_discover_describes_convert_total_as_top_level_activities_before_collapse(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The console note matches what convert counts, and no longer promises a smaller post-collapse number."""
+    _run_discover(tmp_path)
+    output = capsys.readouterr().out
+
+    assert "(convert counts only top-level activities, before any motif collapse, so its total will differ)" in output
+    assert "expect fewer" not in output
+
+
+def test_convert_total_counts_top_level_activities_before_motif_collapse() -> None:
+    """What the discover note says: convert's total is the top-level activity count, not the collapsed task count."""
+    from flowx.models.ir import MotifActivity
+    from flowx.sources.adf.translate import translate_pipeline
+
+    definitions = load_adf_definitions(FIXTURES_DIR)
+    pipeline = next(pipeline for pipeline in definitions.pipelines if pipeline.name == "pipeline_complex_etl")
+    report = translate_pipeline(pipeline, definitions)
+
+    total = report.deterministic_count + report.agentic_count + report.unsupported_count
+    assert any(isinstance(task, MotifActivity) for task in report.pipeline.tasks)
+    assert total == len(pipeline.activities)
+    assert total != len(report.pipeline.tasks)
+
+
 def test_a_motif_detected_twice_is_counted_once_in_the_graph_and_the_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     """The profile report and the saved graph read one de-duplicated list, so their motif counts agree."""
     from flowx.motifs import detector
