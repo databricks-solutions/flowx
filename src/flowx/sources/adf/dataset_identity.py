@@ -393,8 +393,10 @@ def _resolve_dataset_path(
 def _resolve_storage_account(linked_service: Any) -> str | None:
     """Pull a storage account name out of a linked service, if present.
 
-    Each of ``url``, ``sasUri`` and the connection string is read from its ``value``
-    when wrapped in an Expression or SecureString object (or an untyped one). The
+    The account is read from ``url``, then ``serviceEndpoint`` (a Blob linked service
+    that signs in with a service principal or managed identity), then ``sasUri``, then
+    the connection string. Each is read from its ``value`` when wrapped in an
+    Expression or SecureString object (or an untyped one). The
     whole value must be physical before the account is cut out of it: cutting first
     would drop the closing ``]`` of an ARM expression or the tail of an ``@{...}``
     and leave a fragment that looks literal. A storage account name is only letters
@@ -405,14 +407,15 @@ def _resolve_storage_account(linked_service: Any) -> str | None:
         return None
     type_props = linked_service.properties.get("typeProperties") or linked_service.properties
 
-    url = expression_value(type_props.get("url")) or ""
-    if isinstance(url, str) and url:
-        if not _is_physical(url):
-            return None
-        host = url.replace("https://", "").split("/", 1)[0]
-        host_no_port = host.split(":", 1)[0]
-        if "." in host_no_port:
-            return _storage_account_name(host_no_port.split(".", 1)[0])
+    for endpoint_key in ("url", "serviceEndpoint"):
+        url = expression_value(type_props.get(endpoint_key)) or ""
+        if isinstance(url, str) and url:
+            if not _is_physical(url):
+                return None
+            host = url.replace("https://", "").split("/", 1)[0]
+            host_no_port = host.split(":", 1)[0]
+            if "." in host_no_port:
+                return _storage_account_name(host_no_port.split(".", 1)[0])
 
     sas_uri = expression_value(type_props.get("sasUri")) or ""
     if isinstance(sas_uri, str) and sas_uri:

@@ -749,6 +749,56 @@ def test_blob_and_adls_gen2_reach_the_same_files_on_the_same_account(
     )
 
 
+def test_a_blob_service_endpoint_names_the_account_and_links_to_an_adls_reader() -> None:
+    """A managed-identity Blob linked service names its account in ``serviceEndpoint``, so it links to ADLS Gen2."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_blob": _azure_storage_dataset("ds_blob", connector="blob", container="sales", linked_service="ls_blob"),
+            "ds_adls": _azure_storage_dataset("ds_adls", connector="adls", container="sales", linked_service="ls_adls"),
+        },
+        linked_services={
+            "ls_blob": AdfLinkedService(
+                name="ls_blob",
+                type="AzureBlobStorage",
+                properties={
+                    "typeProperties": {
+                        "serviceEndpoint": "https://acct.blob.core.windows.net/",
+                        "accountKind": "StorageV2",
+                    }
+                },
+            ),
+            "ls_adls": _azure_storage_linked_service("ls_adls", connector="adls", account="acct"),
+        },
+    )
+    write = AdfActivity(name="WriteBlob", type="Copy", outputs=[AdfDatasetReference(reference_name="ds_blob")])
+    read = AdfActivity(name="ReadAdls", type="Copy", inputs=[AdfDatasetReference(reference_name="ds_adls")])
+    _, writes = activity_data_assets(write, definitions)
+    reads, _ = activity_data_assets(read, definitions)
+
+    edges = data_edges_from_endpoints(
+        [("WriteBlob", asset) for asset in writes], [("ReadAdls", asset) for asset in reads]
+    )
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("identity", "abfss://sales@acct.dfs.core.windows.net/landing/orders.csv")
+    ]
+
+
+@pytest.mark.parametrize(
+    "service_endpoint",
+    [
+        "https://@{linkedService().accountName}.blob.core.windows.net/",
+        "@linkedService().endpoint",
+        "[concat('https://', parameters('storageAccountName'), '.blob.core.windows.net/')]",
+        {"type": "Expression", "value": "@linkedService().endpoint"},
+        {"type": "SecureString", "value": "https://*****.blob.core.windows.net/"},
+    ],
+)
+def test_an_unprovable_blob_service_endpoint_names_no_account(service_endpoint: object) -> None:
+    """A parameterised, unevaluated or masked ``serviceEndpoint`` is checked like ``url`` and names no account."""
+    assert _storage_account_identity({"serviceEndpoint": service_endpoint}) is None
+
+
 def test_arm_expression_storage_url_has_no_path_identity() -> None:
     """An unevaluated ARM ``url`` is checked whole, so a cut-off fragment never stands in for the account."""
     arm_lake = AdfLinkedService(
