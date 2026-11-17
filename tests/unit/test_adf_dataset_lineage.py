@@ -2608,30 +2608,37 @@ def test_dataset_parameter_text_inside_quotes_is_not_a_parameter_the_folder_read
     assert writes[0].signature == ""
 
 
-def _legacy_blob_dataset(name: str, *, folder_prefix: str) -> AdfDataset:
-    """A legacy ``AzureBlob`` dataset: folder and file written straight under ``typeProperties``, no ``location``."""
+def _legacy_blob_dataset(name: str, *, folder_prefix: str, location: dict | None) -> AdfDataset:
+    """A legacy ``AzureBlob`` dataset: folder and file written straight under ``typeProperties``.
+
+    *location*, when given, is a ``location`` object that sets no folder or file of its own.
+    """
+    type_properties: dict = {
+        "folderPath": {"value": f"@concat('{folder_prefix}/', dataset().folderPath)", "type": "Expression"},
+        "fileName": "orders.csv",
+        "format": {"type": "TextFormat"},
+    }
+    if location is not None:
+        type_properties["location"] = location
     return AdfDataset(
         name=name,
         type="AzureBlob",
         properties={
             "linkedServiceName": {"referenceName": "ls_blob"},
             "parameters": {"folderPath": {"type": "string"}},
-            "typeProperties": {
-                "folderPath": {"value": f"@concat('{folder_prefix}/', dataset().folderPath)", "type": "Expression"},
-                "fileName": "orders.csv",
-                "format": {"type": "TextFormat"},
-            },
+            "typeProperties": type_properties,
         },
     )
 
 
-def test_a_legacy_dataset_folder_is_never_replaced_by_the_call_site_folder() -> None:
+@pytest.mark.parametrize("location", [None, {}, {"type": "AzureBlobStorageLocation"}])
+def test_a_legacy_dataset_folder_is_never_replaced_by_the_call_site_folder(location: dict | None) -> None:
     """Legacy ``bronze/orders`` and ``silver/orders`` datasets get no signature, so they never join on ``orders``."""
     definitions = AdfDefinitions(
         pipelines=[],
         datasets={
-            "ds_bronze": _legacy_blob_dataset("ds_bronze", folder_prefix="bronze"),
-            "ds_silver": _legacy_blob_dataset("ds_silver", folder_prefix="silver"),
+            "ds_bronze": _legacy_blob_dataset("ds_bronze", folder_prefix="bronze", location=location),
+            "ds_silver": _legacy_blob_dataset("ds_silver", folder_prefix="silver", location=location),
         },
         linked_services={
             "ls_blob": AdfLinkedService(

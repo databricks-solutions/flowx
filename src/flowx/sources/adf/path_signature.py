@@ -60,14 +60,15 @@ def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions
     borrowing the call site's. An untyped object is read by its ``value``.
 
     A legacy dataset (such as ``AzureBlob``) writes ``folderPath`` or ``fileName``
-    straight under ``typeProperties`` with no ``location``. That shape is not read
-    yet, so it gives ``None`` too, rather than borrowing the call site's folder.
+    straight under ``typeProperties``, with no ``location`` or one that sets neither.
+    That shape is not read yet, so it gives ``None`` too, rather than borrowing the
+    call site's folder.
     """
     call_site = call_site_parameters(dataset_ref)
     properties = dataset_props(dataset_ref, definitions) or {}
     type_props = properties.get("typeProperties") or properties
     written_location = type_props.get("location")
-    if written_location is None and any(type_props.get(key) not in (None, "") for key in ("folderPath", "fileName")):
+    if _uses_legacy_location(type_props, written_location):
         return None
     location: dict[str, Any] = written_location if isinstance(written_location, dict) else {}
     written_values = {key: expression_value(location.get(key)) for key in ("folderPath", "fileName")}
@@ -95,6 +96,14 @@ def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions
     file_shape = _shape_of("fileName", require_physical=False)
     names_a_file = file_shape and (_has_literal_anchor(file_shape) or "<P:" in file_shape)
     return f"FP[{folder_shape}]/FN[{file_shape if names_a_file else ''}]"
+
+
+def _uses_legacy_location(type_props: dict[str, Any], written_location: Any) -> bool:
+    """``True`` when the folder or file name sits straight under ``typeProperties`` and no ``location`` sets one."""
+    path_keys = ("folderPath", "fileName")
+    if not any(expression_value(type_props.get(key)) for key in path_keys):
+        return False
+    return not (isinstance(written_location, dict) and any(written_location.get(key) for key in path_keys))
 
 
 def _passes_anchored_folder(value: Any) -> bool:
