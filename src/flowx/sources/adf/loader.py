@@ -553,7 +553,7 @@ def _parse_trigger_json(data: dict[str, Any], *, fallback_name: str = "unknown")
     trigger_type = props.get("type", "Unknown")
     trigger_pipelines = props.get("pipelines")
     # A tumbling-window trigger references its one pipeline under the singular "pipeline" key.
-    if trigger_pipelines is None and isinstance(props.get("pipeline"), dict):
+    if not trigger_pipelines and isinstance(props.get("pipeline"), dict):
         trigger_pipelines = [props["pipeline"]]
 
     return AdfTrigger(

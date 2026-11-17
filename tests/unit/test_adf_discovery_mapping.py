@@ -455,9 +455,10 @@ def test_tumbling_window_trigger_expression_from_type_properties() -> None:
     assert schedule.expression == {"frequency": "Hour", "interval": 1, "startTime": "2024-01-01T00:00:00Z"}
 
 
-def test_tumbling_window_trigger_attaches_through_its_singular_pipeline_reference() -> None:
-    """A real tumbling-window trigger names its one pipeline under ``pipeline``, with no ``pipelines`` list."""
-    trigger = {
+@pytest.mark.parametrize("pipelines_list", [None, []])
+def test_tumbling_window_trigger_attaches_through_its_singular_pipeline_reference(pipelines_list: list | None) -> None:
+    """A real tumbling-window trigger names its one pipeline under ``pipeline``, with no (or an empty) ``pipelines``."""
+    trigger: dict = {
         "name": "tr_tumble",
         "properties": {
             "type": "TumblingWindowTrigger",
@@ -465,6 +466,8 @@ def test_tumbling_window_trigger_attaches_through_its_singular_pipeline_referenc
             "pipeline": {"pipelineReference": {"referenceName": "pl_sched", "type": "PipelineReference"}},
         },
     }
+    if pipelines_list is not None:
+        trigger["properties"]["pipelines"] = pipelines_list
     graphs = adf_definitions_to_source_graphs(_definitions_with_trigger(trigger))
 
     schedule = graphs[0].schedule
