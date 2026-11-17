@@ -899,7 +899,8 @@ def _live_report_failures(
 
 
 # The bundle folders the latest package wrote, kept under metadata/: "." for one bundle at the top of the
-# output folder, otherwise one folder per pipeline named by to_lowercase_key.
+# output folder, otherwise one folder per bundle (per pipeline, or per group under --packaging-mode
+# per-group) named by to_lowercase_key.
 PACKAGED_BUNDLES_FILENAME = "packaged_bundles.json"
 # What a bundle at the top of the output folder holds besides metadata/.
 _TOP_LEVEL_BUNDLE_ENTRIES = ("databricks.yml", "SETUP.md", "WARNINGS.md", "resources", "src")
@@ -909,7 +910,7 @@ def read_packaged_bundles(output_dir: Path) -> list[str]:
     """The bundle folders the latest package recorded in ``metadata/packaged_bundles.json``; empty when none.
 
     The record is ``{"bundles": [...]}``, each entry ``"."`` for a bundle at the top of the output folder
-    or the folder name package gives a pipeline's bundle. Anything else (a path, a non-string, another
+    or the folder name package gives a bundle. Anything else (a path, a non-string, another
     key) is refused, so the record can never point package or discover at a folder outside the bundles
     package wrote.
 
@@ -937,7 +938,7 @@ def read_packaged_bundles(output_dir: Path) -> list[str]:
 
 
 def _is_bundle_folder_name(name: Any) -> bool:
-    """Whether ``name`` is "." or a folder name package gives a pipeline's bundle."""
+    """Whether ``name`` is "." or a folder name package gives a bundle."""
     return isinstance(name, str) and (name == "." or (bool(name) and to_lowercase_key(name) == name))
 
 

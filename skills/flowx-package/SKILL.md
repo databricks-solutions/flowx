@@ -217,7 +217,8 @@ Where:
   added by hand) is moved into `metadata/archive/<UTC time>/` with an `archive.json`, so it no longer
   deploys and is kept for audit. The files package does write again are overwritten.
 - Package records the bundle folders it wrote in `metadata/packaged_bundles.json` (`"."` for one bundle
-  at the top of the output folder, otherwise one folder per pipeline). Once its preflight passes and
+  at the top of the output folder, otherwise one folder per bundle: per pipeline, or per group under
+  `--packaging-mode per-group`). Once its preflight passes and
   before it writes anything, the next package moves every recorded folder it will not write into
   `metadata/archive/<UTC time>/`: a pipeline an agentic unit replaced under a new name, the per-pipeline
   folders when a convert narrows to one pipeline, or the top-level bundle when it widens again. So a new
