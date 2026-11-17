@@ -1,0 +1,6 @@
+{
+  "bundles": [
+    "child_pipeline",
+    "complex_orchestration"
+  ]
+}
