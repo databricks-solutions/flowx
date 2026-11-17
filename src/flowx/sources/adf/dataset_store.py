@@ -52,8 +52,14 @@ def resolve_dataset_store(
 
     ``location_names_store`` says whether the location tells its store apart at all,
     provable or not: a literal file system, container or bucket, or one of those
-    linked-service locations. A parameterised file system names no store. A masked
-    one (holding ``*``) names a store that cannot be proven, so it gives ``(None, True)``.
+    linked-service locations. A masked file system (holding ``*``) names a store that
+    cannot be proven, so it gives ``(None, True)``.
+
+    A file system that is written but only known at run time (``@dataset().fs`` bound
+    to a pipeline parameter, say) still sits inside a known account, so the store is
+    ``<P>@<account>``, or ``<P>@<linked service name>`` when the account is hidden.
+    Two such datasets then join only within one account. When neither the account nor
+    a plain linked service is known, the location names no store.
     """
     properties = dataset_props(dataset_ref, definitions)
     if properties is None:
@@ -63,6 +69,7 @@ def resolve_dataset_store(
     file_system: str | None = None
     account: str | None = None
     location_names_store = False
+    file_system_is_dynamic = False
     if isinstance(location, dict):
         location_type = location.get("type")
         location_names_store = (
@@ -76,12 +83,21 @@ def resolve_dataset_store(
             if file_system is None and "*" in written_file_system(location, dataset_params, context):
                 return None, True
             location_names_store = file_system is not None
+            file_system_is_dynamic = file_system is None and _writes_file_system(location)
     _, table = resolve_table_reference(dataset_ref, properties, context)
     if table:
         return resolve_table_store(properties, definitions), location_names_store
+    if file_system_is_dynamic:
+        known_boundary = account or unparameterised_linked_service_name(properties, definitions)
+        return (f"<P>@{known_boundary}", True) if known_boundary else (None, False)
     if not location_names_store:
         return None, False
     if file_system is None:
         return unparameterised_linked_service_name(properties, definitions), True
     store = account or unparameterised_linked_service_name(properties, definitions)
     return (f"{file_system}@{store}" if store else None), True
+
+
+def _writes_file_system(location: dict) -> bool:
+    """``True`` when the location writes a file system, container or bucket at all, resolvable or not."""
+    return any(location.get(key) not in (None, "") for key in ("fileSystem", "container", "bucketName"))

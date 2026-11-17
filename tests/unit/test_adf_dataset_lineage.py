@@ -1507,6 +1507,78 @@ def test_parameterised_file_system_on_an_unprovable_store_keeps_its_unqualified_
     assert [(edge.match_kind, edge.match_key) for edge in edges] == [("signature", "FP[landing/<P>]/FN[]")]
 
 
+def _dynamic_container_definitions(**accounts: str) -> AdfDefinitions:
+    """One dataset per entry whose container and folder are both dataset parameters, on account ``accounts[name]``."""
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name, file_system="@dataset().fs", folder_path="@dataset().folderPath", linked_service=f"ls_{account}"
+            )
+            for name, account in accounts.items()
+        },
+        linked_services={
+            f"ls_{account}": _adls_linked_service(f"ls_{account}", account=account) for account in accounts.values()
+        },
+    )
+
+
+def _dynamic_container_copy(name: str, *, dataset: str, produced: bool) -> AdfActivity:
+    """A Copy that binds the container to a pipeline parameter and the folder to ``landing/orders``."""
+    reference = AdfDatasetReference(
+        reference_name=dataset,
+        parameters={"fs": "@pipeline().parameters.container", "folderPath": "landing/orders"},
+    )
+    if produced:
+        return AdfActivity(name=name, type="Copy", outputs=[reference])
+    return AdfActivity(name=name, type="Copy", inputs=[reference])
+
+
+def test_dynamic_containers_on_different_accounts_do_not_join_by_signature() -> None:
+    """A run-time container on ``acctone`` and one on ``accttwo`` are still on different accounts, so no edge."""
+    definitions = _dynamic_container_definitions(ds_one="acctone", ds_two="accttwo")
+    _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_one", produced=True), definitions)
+    reads, _ = activity_data_assets(_dynamic_container_copy("R", dataset="ds_two", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads])
+    assert edges == []
+
+
+def test_dynamic_containers_on_one_account_join_on_that_account() -> None:
+    """Two run-time containers on the same account keep their signature edge, qualified by the account."""
+    definitions = _dynamic_container_definitions(ds_out="acctone", ds_in="acctone")
+    _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_dynamic_container_copy("R", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[<P>@acctone]/FP[landing/orders]/FN[]")
+    ]
+
+
+def test_dynamic_container_on_a_hidden_account_joins_on_the_linked_service() -> None:
+    """With the account in Key Vault, a plain linked service name is the boundary a run-time container sits in."""
+    vaulted_blob = load_adf_definitions(FIXTURES_DIR).get_linked_service("ls_azure_blob")
+    assert vaulted_blob is not None
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name, file_system="@dataset().fs", folder_path="@dataset().folderPath", linked_service="ls_azure_blob"
+            )
+            for name in ("ds_out", "ds_in")
+        },
+        linked_services={"ls_azure_blob": vaulted_blob},
+    )
+    _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_dynamic_container_copy("R", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[<P>@ls_azure_blob]/FP[landing/orders]/FN[]")
+    ]
+
+
 def test_arm_expression_linked_service_name_never_qualifies_an_identity() -> None:
     """A linked service named by an unevaluated ARM expression is not a plain name, so it gives no table identity."""
     definitions = _definitions(
