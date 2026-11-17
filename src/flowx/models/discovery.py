@@ -119,12 +119,14 @@ class SourceDependency:
             ``["Succeeded", "Skipped"]``); empty when unconditional.
         resolved: ``False`` when no node in the same workflow scope (for example the
             same pipeline, container or DAG) has the upstream's name, such as a missing
-            or misspelled upstream. The edge is kept, not dropped.
+            or misspelled upstream. The edge is kept, not dropped. It has no default on
+            purpose: each source mapper must say whether it resolved the edge, so one
+            that forgets cannot report a missing upstream as resolved.
     """
 
     upstream: str
     conditions: list[str] = field(default_factory=list)
-    resolved: bool = True
+    resolved: bool
 
 
 @dataclass(slots=True, kw_only=True)

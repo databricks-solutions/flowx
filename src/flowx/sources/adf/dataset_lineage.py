@@ -132,8 +132,9 @@ def _dataset_ref_to_asset(
         return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))
     identity = resolve_dataset_identity(dataset_ref, definitions, context)
     if identity is not None:
-        # Mirror the identity into the signature so the weak tier never joins a
-        # resolved asset to an unresolved one that merely shares a physical value.
+        # Mirror the identity into the signature: the weak tier joins a resolved asset to an
+        # unresolved one only when they share that identity as their signature, never a
+        # dataset name or folder shape (see lineage._match_assets).
         return DataAsset(signature=identity, identity=identity, asset_type=_asset_type(dataset_ref, definitions))
     folder_signature = path_signature(dataset_ref, definitions)
     if folder_signature is not None:

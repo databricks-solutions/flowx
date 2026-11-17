@@ -34,17 +34,17 @@ from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.sources.adf.loader import main as adf_discover_main
 
 
-def _graphs() -> list[SourceGraph]:
+def _graphs(source: str = "adf") -> list[SourceGraph]:
     node = SourceNode(
         source_id="load",
         task_key="load",
         concept=CONCEPT_NOTEBOOK,
-        source="adf",
+        source=source,
         name="load",
         native_type="DatabricksNotebook",
         properties={STRATEGY_PROPERTY: "deterministic"},
     )
-    return [SourceGraph(name="orders", source="adf", tasks=[node])]
+    return [SourceGraph(name="orders", source=source, tasks=[node])]
 
 
 def _discover(output_dir: Path) -> Path:
@@ -152,7 +152,7 @@ def test_inventory_without_a_recorded_graph_hash_still_enriches(tmp_path: Path) 
     """An inventory from a source that does not persist graphs yet has nothing to check."""
     metadata = tmp_path / "metadata"
     metadata.mkdir(parents=True)
-    inventory = build_source_inventory(_graphs(), source="airflow", source_dir="/dags")
+    inventory = build_source_inventory(_graphs("airflow"), source="airflow", source_dir="/dags")
     (metadata / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
 
     result = enrich_inventory(tmp_path, insights=_insights())
@@ -208,7 +208,7 @@ def test_insights_without_authored_against_are_recorded_with_the_library_stamped
 
 
 def test_authored_against_is_refused_when_the_inventory_records_no_graph_hash() -> None:
-    inventory = build_source_inventory(_graphs(), source="airflow", source_dir="/dags")
+    inventory = build_source_inventory(_graphs("airflow"), source="airflow", source_dir="/dags")
 
     violations = validate_insights({**_insights(), "authored_against": "a-placeholder"}, inventory)
 

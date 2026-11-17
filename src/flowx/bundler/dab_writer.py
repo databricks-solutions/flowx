@@ -28,7 +28,7 @@ from flowx.bundler.inner_job_params import normalize_value
 from flowx.bundler.notebook_writer import content_signature, write_notebooks
 from flowx.bundler.prereqs_writer import ManualParameter, build_prereqs, render_setup_md
 from flowx.bundler.setup_generator import generate_setup_tasks
-from flowx.ir_serde import data_asset_from_dict, lineage_from_dict
+from flowx.lineage_serde import data_asset_from_dict, lineage_from_dict
 from flowx.models.dab import DabNotebook, SecretInstruction, SetupTask
 from flowx.models.ir import (
     Activity,
