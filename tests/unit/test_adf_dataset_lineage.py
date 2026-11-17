@@ -2730,6 +2730,16 @@ def test_a_bundle_variable_placeholder_never_becomes_a_table_identity() -> None:
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_global"), definitions, context) is None
 
 
+def test_a_literal_table_name_holding_a_dollar_brace_keeps_its_identity() -> None:
+    """Only the ``${var.`` placeholder flowx writes is unresolved; other ``${`` text in a literal name is just text."""
+    definitions = _definitions(ds_costs=_table_dataset("ds_costs", schema="dbo", table="costs_${region}"))
+
+    assert (
+        resolve_dataset_identity(AdfDatasetReference(reference_name="ds_costs"), definitions)
+        == "ls_sql/dbo.costs_${region}"
+    )
+
+
 def test_an_empty_container_value_is_not_a_dynamic_container() -> None:
     """A ``fileSystem`` of ``{}`` writes no container, so it gets no ``<P>@account`` store, as before."""
     definitions = _dynamic_container_definitions(ds_out="acctone")

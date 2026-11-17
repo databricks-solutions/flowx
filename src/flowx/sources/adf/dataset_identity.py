@@ -536,7 +536,7 @@ def _is_physical(value: str) -> bool:
     does ARM's ``[[`` escape for a literal that starts with ``[``.
     """
     stripped = value.strip()
-    if "{{" in value or "${" in value or "@{" in value or stripped.startswith("@"):
+    if "{{" in value or "${var." in value or "@{" in value or stripped.startswith("@"):
         return False
     return not is_arm_expression(stripped)
 
