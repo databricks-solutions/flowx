@@ -115,7 +115,7 @@ spark-submit \
 job_clusters:
   - job_cluster_key: etl-cluster
     new_cluster:
-      spark_version: "15.4.x-scala2.12"
+      spark_version: ${var.spark_version}
       node_type_id: ${var.node_type_id}
       autoscale:
         min_workers: 5

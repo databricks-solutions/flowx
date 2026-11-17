@@ -1,0 +1,1 @@
+{"name":"motif-activity-and-notify","properties":{"activities":[{"name":"work","type":"Wait","typeProperties":{"waitTimeInSeconds":1}},{"name":"notify","type":"WebActivity","dependsOn":[{"activity":"work","dependencyConditions":["Completed"]}],"typeProperties":{"url":"https://example.invalid/notify","method":"POST","body":{"status":"complete"}}}]}}

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from flowx.models.ir import TranslationContext
 from flowx.parser.expression_parser import resolve_expression, resolve_interpolated_string
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 if TYPE_CHECKING:
     from flowx.models.ir import ExecutePipelineActivity
@@ -46,7 +46,7 @@ def prepare(activity: ExecutePipelineActivity, *, scope: str = "") -> PreparedAc
         A PreparedActivity containing the run_job_task dict.
     """
     task = build_common_task_fields(activity)
-    resource_key = normalize_task_key(activity.pipeline_name)
+    resource_key = to_lowercase_key(activity.pipeline_name)
     task["run_job_task"] = {
         "job_id": f"${{resources.jobs.{resource_key}.id}}",
     }

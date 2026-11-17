@@ -1,0 +1,25 @@
+{
+  "name": "all-activity-types",
+  "properties": {
+    "parameters": {"items": {"type": "Array", "defaultValue": ["one"]}},
+    "variables": {"status": {"type": "String", "defaultValue": "new"}, "results": {"type": "Array"}},
+    "activities": [
+      {"name": "copy", "type": "Copy", "typeProperties": {"source": {"type": "DelimitedTextSource"}, "sink": {"type": "ParquetSink"}}, "inputs": [{"referenceName": "csv-adls", "type": "DatasetReference"}], "outputs": [{"referenceName": "parquet-adls", "type": "DatasetReference"}]},
+      {"name": "notebook", "type": "DatabricksNotebook", "typeProperties": {"notebookPath": "/Shared/flowx/integration"}, "linkedServiceName": {"referenceName": "databricks-parameterized", "type": "LinkedServiceReference"}},
+      {"name": "spark-jar", "type": "DatabricksSparkJar", "typeProperties": {"mainClassName": "com.example.Integration", "parameters": []}, "linkedServiceName": {"referenceName": "databricks-parameterized", "type": "LinkedServiceReference"}},
+      {"name": "spark-python", "type": "DatabricksSparkPython", "typeProperties": {"pythonFile": "dbfs:/flowx/integration.py", "parameters": []}, "linkedServiceName": {"referenceName": "databricks-parameterized", "type": "LinkedServiceReference"}},
+      {"name": "databricks-job", "type": "DatabricksJob", "typeProperties": {"jobId": "1", "jobParameters": {}}},
+      {"name": "lookup", "type": "Lookup", "typeProperties": {"source": {"type": "AzureSqlSource", "sqlReaderQuery": "SELECT 1 AS value"}, "dataset": {"referenceName": "azure-sql-table", "type": "DatasetReference"}, "firstRowOnly": true}},
+      {"name": "web", "type": "WebActivity", "typeProperties": {"url": "https://example.invalid/flowx", "method": "GET"}},
+      {"name": "delete", "type": "Delete", "typeProperties": {"dataset": {"referenceName": "json-adls", "type": "DatasetReference"}, "enableLogging": false}},
+      {"name": "execute-child", "type": "ExecutePipeline", "typeProperties": {"pipeline": {"referenceName": "child-pipeline", "type": "PipelineReference"}, "waitOnCompletion": true}},
+      {"name": "wait", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}},
+      {"name": "set-variable", "type": "SetVariable", "typeProperties": {"variableName": "status", "value": "running"}},
+      {"name": "append-variable", "type": "AppendVariable", "typeProperties": {"variableName": "results", "value": "ok"}},
+      {"name": "filter", "type": "Filter", "typeProperties": {"items": {"value": "@pipeline().parameters.items", "type": "Expression"}, "condition": {"value": "@not(empty(item()))", "type": "Expression"}}},
+      {"name": "foreach", "type": "ForEach", "typeProperties": {"items": {"value": "@pipeline().parameters.items", "type": "Expression"}, "activities": [{"name": "foreach-wait", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}]}},
+      {"name": "if-condition", "type": "IfCondition", "typeProperties": {"expression": {"value": "@equals(1,1)", "type": "Expression"}, "ifTrueActivities": [{"name": "true-wait", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}], "ifFalseActivities": [{"name": "false-wait", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}]}},
+      {"name": "switch", "type": "Switch", "typeProperties": {"on": {"value": "@variables('status')", "type": "Expression"}, "cases": [{"value": "running", "activities": [{"name": "case-wait", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}]}], "defaultActivities": [{"name": "default-wait", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}]}}
+    ]
+  }
+}

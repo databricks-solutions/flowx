@@ -1,0 +1,22 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "name": "child-notebook",
+          "strategy": "deterministic",
+          "type": "DatabricksNotebook"
+        }
+      ],
+      "name": "child-pipeline"
+    }
+  ],
+  "summary": {
+    "activity_count": 1,
+    "agentic_count": 0,
+    "coverage_pct": 100.0,
+    "deterministic_count": 1,
+    "pipeline_count": 1,
+    "unsupported_count": 0
+  }
+}

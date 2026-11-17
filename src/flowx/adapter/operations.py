@@ -138,8 +138,9 @@ def collect_workspace_artifact_paths(report_path: Path) -> list[str]:
     """Returns absolute workspace and DBFS paths referenced by a translation report.
 
     Args:
-        report_path: Path to a translation report (single pipeline IR or
-            an aggregated translation report).
+        report_path: Path to a translation report (single pipeline IR, a
+            multi-pipeline ``{"pipelines": [...]}`` report, or an aggregated
+            translation report).
 
     Returns:
         List of paths the bundle would need to download to be
@@ -160,6 +161,9 @@ def collect_workspace_artifact_paths(report_path: Path) -> list[str]:
     for translation in report.get("translations") or []:
         ir = translation.get("ir") or {}
         _walk_workspace_paths(ir.get("tasks"), candidates)
+    for pipeline in report.get("pipelines") or []:
+        if isinstance(pipeline, dict):
+            _walk_workspace_paths(pipeline.get("tasks"), candidates)
     return candidates
 
 
