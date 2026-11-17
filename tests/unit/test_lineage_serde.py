@@ -25,10 +25,20 @@ def _imported_modules(path: Path) -> set[str]:
     return imported
 
 
-@pytest.mark.parametrize("module", ["discovery_serde.py", "discovery_inventory.py", "lineage_serde.py"])
-def test_discovery_and_lineage_serialisers_do_not_depend_on_the_ir_serialiser(module: str) -> None:
+_DISCOVERY_MODULES = sorted(
+    {
+        *SOURCE_ROOT.glob("discovery*.py"),
+        SOURCE_ROOT / "lineage_serde.py",
+        SOURCE_ROOT / "models" / "discovery.py",
+        *SOURCE_ROOT.glob("sources/*/discovery_mapping.py"),
+    }
+)
+
+
+@pytest.mark.parametrize("module", _DISCOVERY_MODULES, ids=lambda path: str(path.relative_to(SOURCE_ROOT)))
+def test_discovery_and_lineage_serialisers_do_not_depend_on_the_ir_serialiser(module: Path) -> None:
     """Discovery reads and writes lineage through lineage_serde, not through the IR's serialiser."""
-    assert "flowx.ir_serde" not in _imported_modules(SOURCE_ROOT / module)
+    assert "flowx.ir_serde" not in _imported_modules(module)
 
 
 @pytest.mark.parametrize("name", ["data_asset_to_dict", "data_asset_from_dict", "lineage_to_dict", "lineage_from_dict"])
