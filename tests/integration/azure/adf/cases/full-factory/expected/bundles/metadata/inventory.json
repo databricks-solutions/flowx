@@ -3,233 +3,388 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "data-flow",
           "strategy": "agentic",
+          "task_key": "data-flow",
           "type": "ExecuteDataFlow"
         },
         {
+          "dependencies": [],
           "name": "until",
           "strategy": "agentic",
+          "task_key": "until",
           "type": "Until"
         },
         {
+          "dependencies": [],
           "name": "until-wait",
           "strategy": "deterministic",
+          "task_key": "until-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "stored-procedure",
           "strategy": "agentic",
+          "task_key": "stored-procedure",
           "type": "SqlServerStoredProcedure"
         },
         {
+          "dependencies": [],
           "name": "azure-function",
           "strategy": "agentic",
+          "task_key": "azure-function",
           "type": "AzureFunction"
         },
         {
+          "dependencies": [],
           "name": "webhook",
           "strategy": "agentic",
+          "task_key": "webhook",
           "type": "WebHook"
         },
         {
+          "dependencies": [],
           "name": "custom",
           "strategy": "agentic",
+          "task_key": "custom",
           "type": "Custom"
         },
         {
+          "dependencies": [],
           "name": "ssis",
           "strategy": "agentic",
+          "task_key": "ssis",
           "type": "ExecuteSSISPackage"
         },
         {
+          "dependencies": [],
           "name": "azure-ml",
           "strategy": "agentic",
+          "task_key": "azure-ml",
           "type": "AzureMLExecutePipeline"
         },
         {
+          "dependencies": [],
           "name": "get-metadata",
           "strategy": "agentic",
+          "task_key": "get-metadata",
           "type": "GetMetadata"
         },
         {
+          "dependencies": [],
           "name": "validation",
           "strategy": "agentic",
+          "task_key": "validation",
           "type": "Validation"
         },
         {
+          "dependencies": [],
           "name": "script",
           "strategy": "agentic",
+          "task_key": "script",
           "type": "Script"
         },
         {
+          "dependencies": [],
           "name": "fail",
           "strategy": "agentic",
+          "task_key": "fail",
           "type": "Fail"
         }
       ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
       "name": "agentic-activities"
     },
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "copy",
           "strategy": "deterministic",
+          "task_key": "copy",
           "type": "Copy"
         },
         {
+          "dependencies": [],
           "name": "notebook",
           "strategy": "deterministic",
+          "task_key": "notebook",
           "type": "DatabricksNotebook"
         },
         {
+          "dependencies": [],
           "name": "spark-jar",
           "strategy": "deterministic",
+          "task_key": "spark-jar",
           "type": "DatabricksSparkJar"
         },
         {
+          "dependencies": [],
           "name": "spark-python",
           "strategy": "deterministic",
+          "task_key": "spark-python",
           "type": "DatabricksSparkPython"
         },
         {
+          "dependencies": [],
           "name": "databricks-job",
           "strategy": "deterministic",
+          "task_key": "databricks-job",
           "type": "DatabricksJob"
         },
         {
+          "dependencies": [],
           "name": "lookup",
           "strategy": "deterministic",
+          "task_key": "lookup",
           "type": "Lookup"
         },
         {
+          "dependencies": [],
           "name": "web",
           "strategy": "deterministic",
+          "task_key": "web",
           "type": "WebActivity"
         },
         {
+          "dependencies": [],
           "name": "delete",
           "strategy": "deterministic",
+          "task_key": "delete",
           "type": "Delete"
         },
         {
+          "dependencies": [],
           "name": "execute-child",
           "strategy": "deterministic",
+          "task_key": "execute-child",
           "type": "ExecutePipeline"
         },
         {
+          "dependencies": [],
           "name": "wait",
           "strategy": "deterministic",
+          "task_key": "wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "set-variable",
           "strategy": "deterministic",
+          "task_key": "set-variable",
           "type": "SetVariable"
         },
         {
+          "dependencies": [],
           "name": "append-variable",
           "strategy": "deterministic",
+          "task_key": "append-variable",
           "type": "AppendVariable"
         },
         {
+          "dependencies": [],
           "name": "filter",
           "strategy": "deterministic",
+          "task_key": "filter",
           "type": "Filter"
         },
         {
+          "dependencies": [],
           "name": "foreach",
           "strategy": "deterministic",
+          "task_key": "foreach",
           "type": "ForEach"
         },
         {
+          "dependencies": [],
           "name": "foreach-wait",
           "strategy": "deterministic",
+          "task_key": "foreach-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "if-condition",
           "strategy": "deterministic",
+          "task_key": "if-condition",
           "type": "IfCondition"
         },
         {
+          "dependencies": [],
           "name": "true-wait",
           "strategy": "deterministic",
+          "task_key": "true-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "false-wait",
           "strategy": "deterministic",
+          "task_key": "false-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "switch",
           "strategy": "deterministic",
+          "task_key": "switch",
           "type": "Switch"
         },
         {
+          "dependencies": [],
           "name": "case-wait",
           "strategy": "deterministic",
+          "task_key": "case-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "default-wait",
           "strategy": "deterministic",
+          "task_key": "default-wait",
           "type": "Wait"
         }
       ],
+      "lineage": {
+        "control_edges": [
+          {
+            "resolved": true,
+            "source_workflow": "all-activity-types",
+            "target_workflow": "child-pipeline",
+            "via_task_key": "execute-child",
+            "wait_for_completion": true
+          }
+        ],
+        "data_edges": []
+      },
       "name": "all-activity-types"
     },
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "child-notebook",
           "strategy": "deterministic",
+          "task_key": "child-notebook",
           "type": "DatabricksNotebook"
         }
       ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
       "name": "child-pipeline"
     },
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "launch-child",
           "strategy": "deterministic",
+          "task_key": "launch-child",
           "type": "ExecutePipeline"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "launch-child"
+            }
+          ],
           "depends_on": [
             "launch-child"
           ],
           "name": "mixed-script",
           "strategy": "agentic",
+          "task_key": "mixed-script",
           "type": "Script"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "mixed-script"
+            }
+          ],
           "depends_on": [
             "mixed-script"
           ],
           "name": "complete",
           "strategy": "deterministic",
+          "task_key": "complete",
           "type": "SetVariable"
         }
       ],
+      "lineage": {
+        "control_edges": [
+          {
+            "resolved": true,
+            "source_workflow": "complex-orchestration",
+            "target_workflow": "child-pipeline",
+            "via_task_key": "launch-child",
+            "wait_for_completion": true
+          }
+        ],
+        "data_edges": []
+      },
       "name": "complex-orchestration"
     },
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "work",
           "strategy": "deterministic",
+          "task_key": "work",
           "type": "Wait"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Completed"
+              ],
+              "resolved": true,
+              "upstream": "work"
+            }
+          ],
           "depends_on": [
             "work"
           ],
           "name": "notify",
           "strategy": "deterministic",
+          "task_key": "notify",
           "type": "WebActivity"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "WebActivity 'notify' appears to be a notification call"
+          ],
+          "databricks_replacement": "task_with_notification",
+          "display_name": "Activity and Notify",
+          "member_task_keys": [
+            "work",
+            "notify"
+          ],
+          "motif_id": "activity_and_notify",
+          "source_type_hint": null
         }
       ],
       "name": "motif-activity-and-notify"
@@ -237,31 +392,85 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "old-watermark",
           "strategy": "deterministic",
+          "task_key": "old-watermark",
           "type": "Lookup"
         },
         {
+          "dependencies": [],
           "name": "new-watermark",
           "strategy": "deterministic",
+          "task_key": "new-watermark",
           "type": "Lookup"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "old-watermark"
+            },
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "new-watermark"
+            }
+          ],
           "depends_on": [
             "old-watermark",
             "new-watermark"
           ],
           "name": "incremental-copy",
           "strategy": "deterministic",
+          "task_key": "incremental-copy",
           "type": "Copy"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "incremental-copy"
+            }
+          ],
           "depends_on": [
             "incremental-copy"
           ],
           "name": "update-watermark",
           "strategy": "agentic",
+          "task_key": "update-watermark",
           "type": "SqlServerStoredProcedure"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Lookup 'old-watermark' contains watermark-style query",
+            "Lookup 'new-watermark' contains watermark-style query",
+            "StoredProcedure 'update-watermark' updates watermark after Copy"
+          ],
+          "databricks_replacement": "auto_loader",
+          "display_name": "Incremental Load (Watermark)",
+          "member_task_keys": [
+            "old-watermark",
+            "new-watermark",
+            "incremental-copy",
+            "update-watermark"
+          ],
+          "motif_id": "incremental_load_watermark",
+          "source_type_hint": "database"
         }
       ],
       "name": "motif-incremental-watermark"
@@ -269,22 +478,55 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "lookup-metadata",
           "strategy": "deterministic",
+          "task_key": "lookup-metadata",
           "type": "Lookup"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "lookup-metadata"
+            }
+          ],
           "depends_on": [
             "lookup-metadata"
           ],
           "name": "copy-each-table",
           "strategy": "deterministic",
+          "task_key": "copy-each-table",
           "type": "ForEach"
         },
         {
+          "dependencies": [],
           "name": "dynamic-copy",
           "strategy": "deterministic",
+          "task_key": "dynamic-copy",
           "type": "Copy"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Lookup 'lookup-metadata' appears to read a control/metadata table"
+          ],
+          "databricks_replacement": "for_each_ingestion",
+          "display_name": "Metadata-Driven Bulk Copy",
+          "member_task_keys": [
+            "lookup-metadata",
+            "copy-each-table"
+          ],
+          "motif_id": "metadata_driven_bulk_copy",
+          "source_type_hint": "database"
         }
       ],
       "name": "motif-metadata-bulk-copy"
@@ -292,35 +534,81 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "initial-request",
           "strategy": "deterministic",
+          "task_key": "initial-request",
           "type": "WebActivity"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "initial-request"
+            }
+          ],
           "depends_on": [
             "initial-request"
           ],
           "name": "paginate",
           "strategy": "agentic",
+          "task_key": "paginate",
           "type": "Until"
         },
         {
+          "dependencies": [],
           "name": "page-request",
           "strategy": "deterministic",
+          "task_key": "page-request",
           "type": "WebActivity"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "page-request"
+            }
+          ],
           "depends_on": [
             "page-request"
           ],
           "name": "set-continuation",
           "strategy": "deterministic",
+          "task_key": "set-continuation",
           "type": "SetVariable"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Until child 'page-request' uses pagination",
+            "Until child 'set-continuation' uses pagination"
+          ],
+          "databricks_replacement": "python_rest_ingestion",
+          "display_name": "REST API Pagination",
+          "member_task_keys": [
+            "initial-request",
+            "paginate"
+          ],
+          "motif_id": "rest_api_pagination",
+          "source_type_hint": "rest_api"
         }
       ],
       "name": "motif-rest-api-pagination"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "a9e2dddc7f8136be498ec38ca418e1845de0ee7c7bfd08e273a60c074b2800e5",
   "summary": {
     "activity_count": 51,
     "agentic_count": 15,

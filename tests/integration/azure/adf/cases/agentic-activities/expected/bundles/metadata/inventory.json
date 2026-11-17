@@ -3,74 +3,106 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "data-flow",
           "strategy": "agentic",
+          "task_key": "data-flow",
           "type": "ExecuteDataFlow"
         },
         {
+          "dependencies": [],
           "name": "until",
           "strategy": "agentic",
+          "task_key": "until",
           "type": "Until"
         },
         {
+          "dependencies": [],
           "name": "until-wait",
           "strategy": "deterministic",
+          "task_key": "until-wait",
           "type": "Wait"
         },
         {
+          "dependencies": [],
           "name": "stored-procedure",
           "strategy": "agentic",
+          "task_key": "stored-procedure",
           "type": "SqlServerStoredProcedure"
         },
         {
+          "dependencies": [],
           "name": "azure-function",
           "strategy": "agentic",
+          "task_key": "azure-function",
           "type": "AzureFunction"
         },
         {
+          "dependencies": [],
           "name": "webhook",
           "strategy": "agentic",
+          "task_key": "webhook",
           "type": "WebHook"
         },
         {
+          "dependencies": [],
           "name": "custom",
           "strategy": "agentic",
+          "task_key": "custom",
           "type": "Custom"
         },
         {
+          "dependencies": [],
           "name": "ssis",
           "strategy": "agentic",
+          "task_key": "ssis",
           "type": "ExecuteSSISPackage"
         },
         {
+          "dependencies": [],
           "name": "azure-ml",
           "strategy": "agentic",
+          "task_key": "azure-ml",
           "type": "AzureMLExecutePipeline"
         },
         {
+          "dependencies": [],
           "name": "get-metadata",
           "strategy": "agentic",
+          "task_key": "get-metadata",
           "type": "GetMetadata"
         },
         {
+          "dependencies": [],
           "name": "validation",
           "strategy": "agentic",
+          "task_key": "validation",
           "type": "Validation"
         },
         {
+          "dependencies": [],
           "name": "script",
           "strategy": "agentic",
+          "task_key": "script",
           "type": "Script"
         },
         {
+          "dependencies": [],
           "name": "fail",
           "strategy": "agentic",
+          "task_key": "fail",
           "type": "Fail"
         }
       ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
       "name": "agentic-activities"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "ec62e9c084f71eef4e2dec68e94fa2b3d316d20da965ef86056359b2c934742e",
   "summary": {
     "activity_count": 13,
     "agentic_count": 12,
