@@ -58,11 +58,17 @@ def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions
     location folder or file name the code cannot read (a list, or an object of a type
     other than Expression or SecureString) is unknown, so it gives ``None`` rather than
     borrowing the call site's. An untyped object is read by its ``value``.
+
+    A legacy dataset (such as ``AzureBlob``) writes ``folderPath`` or ``fileName``
+    straight under ``typeProperties`` with no ``location``. That shape is not read
+    yet, so it gives ``None`` too, rather than borrowing the call site's folder.
     """
     call_site = call_site_parameters(dataset_ref)
     properties = dataset_props(dataset_ref, definitions) or {}
     type_props = properties.get("typeProperties") or properties
     written_location = type_props.get("location")
+    if written_location is None and any(type_props.get(key) not in (None, "") for key in ("folderPath", "fileName")):
+        return None
     location: dict[str, Any] = written_location if isinstance(written_location, dict) else {}
     written_values = {key: expression_value(location.get(key)) for key in ("folderPath", "fileName")}
     if any(value is not None and not isinstance(value, str) for value in written_values.values()):

@@ -2460,3 +2460,51 @@ def test_dataset_parameter_text_inside_quotes_is_not_a_parameter_the_folder_read
     _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference]), definitions)
 
     assert writes[0].signature == ""
+
+
+def _legacy_blob_dataset(name: str, *, folder_prefix: str) -> AdfDataset:
+    """A legacy ``AzureBlob`` dataset: folder and file written straight under ``typeProperties``, no ``location``."""
+    return AdfDataset(
+        name=name,
+        type="AzureBlob",
+        properties={
+            "linkedServiceName": {"referenceName": "ls_blob"},
+            "parameters": {"folderPath": {"type": "string"}},
+            "typeProperties": {
+                "folderPath": {"value": f"@concat('{folder_prefix}/', dataset().folderPath)", "type": "Expression"},
+                "fileName": "orders.csv",
+                "format": {"type": "TextFormat"},
+            },
+        },
+    )
+
+
+def test_a_legacy_dataset_folder_is_never_replaced_by_the_call_site_folder() -> None:
+    """Legacy ``bronze/orders`` and ``silver/orders`` datasets get no signature, so they never join on ``orders``."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_bronze": _legacy_blob_dataset("ds_bronze", folder_prefix="bronze"),
+            "ds_silver": _legacy_blob_dataset("ds_silver", folder_prefix="silver"),
+        },
+        linked_services={
+            "ls_blob": AdfLinkedService(
+                name="ls_blob", type="AzureBlobStorage", properties={"typeProperties": {"connectionString": "*****"}}
+            )
+        },
+    )
+    write = AdfActivity(
+        name="W",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_bronze", parameters={"folderPath": "orders"})],
+    )
+    read = AdfActivity(
+        name="R",
+        type="Copy",
+        inputs=[AdfDatasetReference(reference_name="ds_silver", parameters={"folderPath": "orders"})],
+    )
+    _, writes = activity_data_assets(write, definitions)
+    reads, _ = activity_data_assets(read, definitions)
+
+    assert writes[0].signature == reads[0].signature == ""
+    assert data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads]) == []
