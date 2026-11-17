@@ -303,14 +303,21 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
     return {"ok": result.ok, "process": result.as_dict(), **extra}
 
 
+# What a hosted agent needs to author insights: the cleansed inventory plus the activity details
+# (the raw payloads) that live only in source_graphs.json. ADF discover writes both; Airflow writes no
+# source_graphs.json, so it is sent only when present.
+_ENRICH_AUTHORING_FILES = ("inventory.json", "source_graphs.json")
+
+
 def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
     """Validate agent-authored insights, record them in agentic_insights.json and rebuild inventory.json.
 
     ``action`` is ``"apply"`` (the default) or ``"prepare"``. ``prepare`` hands the agent what it
-    authors against -- ``metadata/inventory.json`` -- because a hosted agent cannot read the
-    server's ``output_dir``. It reuses :func:`_bundle_output`, so the file comes back inline under
-    ``bundle`` (size-bounded), or is uploaded to ``output_volume_path`` / ``output_workspace_path``
-    like a packaged bundle.
+    authors against -- ``metadata/inventory.json`` and, when discover wrote it, the activity details
+    in ``metadata/source_graphs.json`` -- because a hosted agent cannot read the server's
+    ``output_dir``. It reuses :func:`_bundle_output`, so the files come back inline under ``bundle``
+    (size-bounded), or are uploaded to ``output_volume_path`` / ``output_workspace_path`` like a
+    packaged bundle. When a file does not fit inline, ``ok`` is false and the error names it.
 
     ``apply`` accepts the insights either inline as ``insights`` (a JSON object) or via
     ``insights_path`` (a file the server can read); exactly one is required. Inline insights are
@@ -327,17 +334,26 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
     if action == "prepare":
         if insights is not None or insights_path is not None:
             return {"ok": False, "error": "enrich prepare takes no insights; send them with action apply."}
-        inventory_path = Path(output_dir) / "metadata" / "inventory.json"
+        metadata_dir = Path(output_dir) / "metadata"
+        inventory_path = metadata_dir / "inventory.json"
         if not inventory_path.is_file():
-            return {"ok": False, "error": f"No inventory.json under {inventory_path.parent}; run discover first."}
+            return {"ok": False, "error": f"No inventory.json under {metadata_dir}; run discover first."}
+        authoring_files = [metadata_dir / name for name in _ENRICH_AUTHORING_FILES]
         with tempfile.TemporaryDirectory(prefix="flowx-inventory-") as temporary:
-            copied_size = Path(shutil.copy(inventory_path, temporary)).stat().st_size
+            copied_sizes = {
+                path.name: Path(shutil.copy(path, temporary)).stat().st_size
+                for path in authoring_files
+                if path.is_file()
+            }
             delivered = _bundle_output(p, Path(temporary))
-        if "bundle" in delivered and "inventory.json" not in delivered["bundle"]["files"]:
+        left_out = [name for name in copied_sizes if "bundle" in delivered and name not in delivered["bundle"]["files"]]
+        if left_out:
+            sizes = " and ".join(f"{name} ({copied_sizes[name]} bytes)" for name in left_out)
+            verb = "is" if len(left_out) == 1 else "are"
             return {
                 "ok": False,
                 "error": (
-                    f"inventory.json ({copied_size} bytes) is too large to return inline; "
+                    f"{sizes} {verb} too large to return inline; "
                     "pass output_volume_path or output_workspace_path to have it uploaded there instead."
                 ),
             }
@@ -353,6 +369,13 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
 
     if insights_path is not None:
         return _run(str(insights_path))
+    # Some MCP clients send an object argument as its JSON text; read it as the object it spells.
+    if isinstance(insights, str):
+        try:
+            insights = json.loads(insights)
+        except json.JSONDecodeError as error:
+            violation = f"insights is a string that is not valid JSON ({error}); send the insights as a JSON object"
+            return {"ok": False, "result": {"ok": False, "violations": [violation]}}
     with tempfile.TemporaryDirectory(prefix="flowx-insights-") as temporary:
         inline_path = Path(temporary) / "insights.json"
         inline_path.write_text(json.dumps(insights, indent=2), encoding="utf-8")
@@ -651,10 +674,12 @@ def build_server() -> FastMCP:
           review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "enrich": action(prepare | apply, default apply). prepare: output_dir, output_volume_path,
-          output_workspace_path — return metadata/inventory.json the same way package returns a
-          bundle, for the agent to author against when it cannot read output_dir (ok is false when it is
-          too large to return inline; pass one of the upload paths). apply: output_dir(req),
-          one of insights(inline object) | insights_path(req) — validate agent-authored discover insights
+          output_workspace_path — return metadata/inventory.json and, when present, the activity details in
+          metadata/source_graphs.json the same way package returns a bundle, for the agent to author against
+          when it cannot read output_dir (ok is false, naming the file, when one is too large to return
+          inline; pass one of the upload paths). apply: output_dir(req),
+          one of insights(inline object, or its JSON text) | insights_path(req) — validate agent-authored
+          discover insights
           against inventory.json, record them in agentic_insights.json, and rebuild inventory.json from
           source_graphs.json plus that document (one enrich per output_dir at a time absent a concurrent
           discover, idempotent). `ok`
@@ -662,7 +687,7 @@ def build_server() -> FastMCP:
           metadata/.enrich.lock) and both files are left untouched on failure. A lock a stopped enrich
           left behind is cleared locally by deleting it and running enrich again; on the hosted server,
           run discover again (it clears metadata/ and the lock), then prepare and apply. Author the insights by
-          reading inventory.json + the source artifacts first (source_graphs.json), setting
+          reading inventory.json + the source artifacts first (source_graphs.json, which prepare returns), setting
           `authored_against` (optional, checked when given) to its source_graphs_sha256 when it records one and
           leaving it out otherwise (see the flowx-enrich skill's insights.md).
         - "inspect": report_path(req) — return the full translation-option schema (every option with

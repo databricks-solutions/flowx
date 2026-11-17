@@ -9,6 +9,7 @@ all, exactly as it will see it in production.
 from __future__ import annotations
 
 import copy
+import functools
 import json
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ from flowx.models.insights import (
     SystemRecommendation,
 )
 from flowx.models.ir import ControlEdge, Lineage
+from flowx.sources.adf.loader import main as adf_discover_main
 
 # --------------------------------------------------------------------------- #
 # Fixtures: a two-pipeline factory where "parent" invokes "child" via a proven
@@ -218,6 +220,108 @@ def test_control_edge_not_matching_inventory_lineage() -> None:
     raw["pipeline_relationships"][0]["lineage_edge"]["edge_identity"] = "not_a_real_task"
     violations = validate_insights(raw, _inventory())
     assert any("does not resolve to a lineage edge from 'parent' to 'child'" in v for v in violations)
+
+
+def test_a_relationship_from_a_pipeline_to_itself_is_a_violation() -> None:
+    raw = _valid_insights()
+    raw["pipeline_relationships"][1]["to_pipeline"] = "child"
+
+    violations = validate_insights(raw, _inventory())
+
+    assert any("pipeline_relationships[1]: a pipeline cannot relate to itself" in v for v in violations)
+
+
+def test_the_same_relationship_given_twice_is_a_violation(tmp_path: Path) -> None:
+    raw = _valid_insights()
+    raw["pipeline_relationships"].append(copy.deepcopy(raw["pipeline_relationships"][1]))
+    path = _write_inventory(tmp_path, _inventory())
+    original_bytes = path.read_bytes()
+
+    violations = validate_insights(raw, _inventory())
+    result = enrich_inventory(tmp_path, insights=raw)
+
+    assert any(
+        "pipeline_relationships[2]: duplicate relationship (already given at pipeline_relationships[1])" in v
+        for v in violations
+    )
+    assert result["ok"] is False
+    assert path.read_bytes() == original_bytes
+
+
+def test_two_control_edges_between_one_pair_through_different_tasks_are_both_kept() -> None:
+    parent = SourceGraph(
+        name="parent",
+        source="unit",
+        tasks=[
+            _node("call_child", "ExecutePipeline", CONCEPT_RUN_WORKFLOW),
+            _node("call_child_again", "ExecutePipeline", CONCEPT_RUN_WORKFLOW),
+        ],
+        lineage=Lineage(
+            control_edges=[
+                ControlEdge(source_workflow="parent", target_workflow="child", via_task_key="call_child"),
+                ControlEdge(source_workflow="parent", target_workflow="child", via_task_key="call_child_again"),
+            ]
+        ),
+    )
+    child = SourceGraph(name="child", source="unit", tasks=[_node("load", "Notebook")])
+    inventory = build_source_inventory([parent, child], source="unit", source_dir="/tmp/src")
+    raw = {
+        "pipeline_relationships": [
+            {
+                "from_pipeline": "parent",
+                "to_pipeline": "child",
+                "lineage_edge": {"edge_type": "control", "edge_identity": task_key},
+            }
+            for task_key in ("call_child", "call_child_again")
+        ]
+    }
+
+    assert validate_insights(raw, inventory) == []
+
+
+def test_a_text_value_at_the_cap_is_accepted() -> None:
+    raw = _valid_insights()
+    raw["pipeline_insights"][0]["intent"] = "x" * 20_000
+
+    assert validate_insights(raw, _inventory()) == []
+
+
+@pytest.mark.parametrize(
+    ("field_keys", "field_path"),
+    [
+        (("pipeline_insights", 0, "intent"), "pipeline_insights[0].intent"),
+        (("overview",), "overview"),
+        (("pipeline_relationships", 1, "lineage_edge", "evidence"), "pipeline_relationships[1].lineage_edge.evidence"),
+        (("system_recommendation", "cascade", 0), "system_recommendation.cascade[0]"),
+        (("pipeline_insights", 0, "conversion_notes", 0), "pipeline_insights[0].conversion_notes[0]"),
+    ],
+)
+def test_a_text_value_over_the_cap_is_a_violation_naming_the_field(
+    field_keys: tuple[str | int, ...], field_path: str
+) -> None:
+    raw = _valid_insights()
+    container: Any = raw
+    for key in field_keys[:-1]:
+        container = container[key]
+    container[field_keys[-1]] = "x" * 20_001
+
+    violations = validate_insights(raw, _inventory())
+
+    assert f"{field_path}: text is 20001 characters; at most 20000 are allowed" in violations
+
+
+def test_enrich_refuses_an_oversized_insight_before_it_reaches_the_inventory(tmp_path: Path) -> None:
+    """A 3 MB intent used to be recorded and only fail at the next prepare, blaming the inventory size."""
+    path = _write_inventory(tmp_path, _inventory())
+    original_bytes = path.read_bytes()
+    raw = _valid_insights()
+    raw["pipeline_insights"][0]["intent"] = "x" * 3_000_000
+
+    result = enrich_inventory(tmp_path, insights=raw)
+
+    assert result["ok"] is False
+    assert any("pipeline_insights[0].intent: text is 3000000 characters" in v for v in result["violations"])
+    assert path.read_bytes() == original_bytes
 
 
 def test_control_edge_with_wrong_endpoints_does_not_resolve() -> None:
@@ -687,6 +791,32 @@ def test_mcp_enrich_inline_insights(monkeypatch, tmp_path: Path) -> None:
     assert "--insights-path" in captured["args"]
 
 
+def test_mcp_enrich_reads_inline_insights_sent_as_json_text(tmp_path: Path) -> None:
+    """Some MCP clients send an object argument as its JSON text; enrich records it as the object."""
+    server = pytest.importorskip("flowx.mcp.server")
+    path = _write_inventory(tmp_path, _inventory())
+
+    out = server._cmd_enrich({"output_dir": str(tmp_path), "insights": json.dumps(_valid_insights())})
+
+    assert out["ok"] is True, out["result"]
+    recorded = json.loads(path.read_text(encoding="utf-8"))["insights"]
+    assert recorded["overview"] == _valid_insights()["overview"]
+
+
+def test_mcp_enrich_reports_insights_text_that_is_not_json_as_a_violation(tmp_path: Path) -> None:
+    """Text that does not parse comes back as a violation the agent can fix, and the inventory is untouched."""
+    server = pytest.importorskip("flowx.mcp.server")
+    path = _write_inventory(tmp_path, _inventory())
+    original_bytes = path.read_bytes()
+
+    out = server._cmd_enrich({"output_dir": str(tmp_path), "insights": '{"overview": "unterminated'})
+
+    assert out["ok"] is False
+    assert len(out["result"]["violations"]) == 1
+    assert "insights is a string that is not valid JSON" in out["result"]["violations"][0]
+    assert path.read_bytes() == original_bytes
+
+
 def test_mcp_enrich_requires_exactly_one_source(tmp_path: Path) -> None:
     server = pytest.importorskip("flowx.mcp.server")
     both = server._cmd_enrich({"output_dir": str(tmp_path), "insights": {}, "insights_path": "x.json"})
@@ -705,6 +835,36 @@ def test_mcp_enrich_prepare_returns_the_inventory_an_agent_authors_against(tmp_p
     assert prepared["ok"] is True
     assert prepared["output_dir"] == str(tmp_path)
     assert json.loads(prepared["bundle"]["files"]["inventory.json"]) == json.loads(inventory_path.read_text())
+
+
+def _discover_adf_fixtures(output_dir: Path) -> None:
+    """Run a real ADF discover over the repo fixtures into *output_dir*."""
+    fixtures = Path(__file__).resolve().parents[1] / "resources" / "json"
+    assert adf_discover_main(["--source-dir", str(fixtures), "--output-dir", str(output_dir)]) == 0
+
+
+def test_mcp_enrich_prepare_returns_the_activity_details_beside_the_cleansed_inventory(tmp_path: Path) -> None:
+    """The agent needs each activity's details to author insights, and those live only in source_graphs.json."""
+    server = pytest.importorskip("flowx.mcp.server")
+    _discover_adf_fixtures(tmp_path)
+
+    files = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})["bundle"]["files"]
+
+    assert sorted(files) == ["inventory.json", "source_graphs.json"]
+    assert "typeProperties" not in files["inventory.json"]
+    assert "typeProperties" in files["source_graphs.json"]
+    assert files["source_graphs.json"] == (tmp_path / "metadata" / "source_graphs.json").read_text(encoding="utf-8")
+
+
+def test_mcp_enrich_prepare_without_source_graphs_returns_the_inventory_alone(tmp_path: Path) -> None:
+    """Airflow discover writes no source_graphs.json, so prepare returns the inventory alone, as before."""
+    server = pytest.importorskip("flowx.mcp.server")
+    _write_inventory(tmp_path, _inventory())
+
+    prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+
+    assert prepared["ok"] is True
+    assert list(prepared["bundle"]["files"]) == ["inventory.json"]
 
 
 def test_mcp_enrich_prepare_returns_inventory_even_when_arm_provenance_fills_the_inline_bound(tmp_path: Path) -> None:
@@ -740,10 +900,32 @@ def test_mcp_enrich_prepare_fails_when_the_inventory_is_too_large_to_return_inli
     assert "output_volume_path" in prepared["error"] and "output_workspace_path" in prepared["error"]
 
 
-def test_mcp_enrich_prepare_uploads_only_the_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_enrich_prepare_fails_naming_source_graphs_when_only_it_is_past_the_inline_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the inventory fits but source_graphs.json does not, the error names source_graphs.json."""
+    server = pytest.importorskip("flowx.mcp.server")
+    runner = pytest.importorskip("flowx.mcp.runner")
+    _discover_adf_fixtures(tmp_path)
+    inventory_size = (tmp_path / "metadata" / "inventory.json").stat().st_size
+    monkeypatch.setattr(runner, "read_tree", functools.partial(runner.read_tree, max_total_bytes=inventory_size + 10))
+
+    prepared = server._cmd_enrich({"output_dir": str(tmp_path), "action": "prepare"})
+
+    assert prepared["ok"] is False
+    assert "source_graphs.json" in prepared["error"] and "inventory.json" not in prepared["error"]
+    assert "output_volume_path" in prepared["error"] and "output_workspace_path" in prepared["error"]
+
+
+def test_mcp_enrich_prepare_uploads_only_the_inventory_and_source_graphs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An upload path gets inventory.json and source_graphs.json, never the ARM provenance copies."""
     server = pytest.importorskip("flowx.mcp.server")
     runner = pytest.importorskip("flowx.mcp.runner")
     inventory_path = _write_inventory(tmp_path, _inventory())
+    graphs_path = inventory_path.parent / "source_graphs.json"
+    graphs_path.write_text('{"contract_version": "1", "graphs": []}', encoding="utf-8")
     (inventory_path.parent / "PL_Orders.arm.json").write_text("{}", encoding="utf-8")
     uploaded: dict[str, str] = {}
 
@@ -760,8 +942,11 @@ def test_mcp_enrich_prepare_uploads_only_the_inventory(tmp_path: Path, monkeypat
     )
 
     assert prepared["ok"] is True
-    assert prepared["bundle_uploaded"]["files"] == ["inventory.json"]
-    assert uploaded == {"inventory.json": inventory_path.read_text(encoding="utf-8")}
+    assert prepared["bundle_uploaded"]["files"] == ["inventory.json", "source_graphs.json"]
+    assert uploaded == {
+        "inventory.json": inventory_path.read_text(encoding="utf-8"),
+        "source_graphs.json": graphs_path.read_text(encoding="utf-8"),
+    }
 
 
 def test_mcp_enrich_prepare_and_action_errors(tmp_path: Path) -> None:
