@@ -1,0 +1,139 @@
+---
+name: flowx-profile
+description: >
+  Estimate what an Azure Data Factory estate costs today: a live scan of the factories' recent
+  pipeline and activity runs, priced at Azure list rates and reconciled against Azure-billed
+  actuals from Cost Management. Writes a cost report under metadata/tco/. Independent of the
+  discover/convert/package phases.
+triggers:
+  - "profile ADF cost"
+  - "ADF TCO"
+  - "estimate ADF spend"
+  - "what does our ADF cost"
+  - "ADF cost report"
+  - "profile data factory"
+---
+
+# Profile Current ADF Spend
+
+Scan Azure Data Factory **live** and estimate its current spend: every pipeline run and activity
+run in the last N days (default 30) is priced with the Azure Retail Prices list rates for the
+factory's region, then compared with what Azure actually billed (Cost Management). The result is
+the source-side "what does ADF cost today" number for a migration evaluation.
+
+This phase stands alone: it talks to Azure directly, does **not** read `metadata/inventory.json`,
+and does not require `discover` to have run first. Only the `adf` source has a profiler —
+`--source airflow` is rejected with "profiling is not supported for the airflow source".
+
+## Step 1 — Install the optional Azure dependencies
+
+The Azure SDK stack is an optional extra so the other phases never need it. Run the **`setup`**
+skill first if there is no venv yet (answering **yes** to its live Azure features question runs
+`bootstrap.sh --source-deps azure`, which installs the extra for you), or add the extra to an
+existing venv:
+
+```bash
+PY="$(cat <plugin_dir>/.migration-venv)"
+"$PY" -m pip install 'azure-identity>=1.17'
+```
+
+(From a source checkout, `pip install -e '.[azure]'` is equivalent; it's the same extra `flowx extract`
+uses.) Without it, the phase exits with code 2 and the same install hint.
+
+## Step 2 — Give it Azure credentials
+
+The profiler uses `DefaultAzureCredential`, so the code path is identical everywhere — only the
+setup differs. Pick the row that matches where you are running:
+
+| Where you run | How to authenticate |
+|---|---|
+| Claude Code / local laptop | `az login` (a browser opens), or `az login --use-device-code`. A service principal via env vars also works. |
+| Genie Code / Databricks serverless notebook | A **service principal** from the customer's Azure tenant, stored in a Databricks **secret scope** and exported as env vars (recipe below). There is no browser or `az` CLI there, and the workspace's own identity belongs to the wrong tenant. |
+| Headless / CI | Set the `AZURE_*` service principal env vars below (or, in a notebook, read them from a secret scope, as `extract` does). |
+
+Service principal env vars: `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`.
+
+**Secret scope recipe (Genie Code / serverless).** One-time, from a machine with the Databricks CLI:
+
+```bash
+databricks secrets create-scope flowx-profiler --profile <workspace-profile>
+databricks secrets put-secret flowx-profiler azure-client-id     --string-value "<appId>"    --profile <workspace-profile>
+databricks secrets put-secret flowx-profiler azure-client-secret --string-value "<password>" --profile <workspace-profile>
+databricks secrets put-secret flowx-profiler azure-tenant-id     --string-value "<tenant>"   --profile <workspace-profile>
+```
+
+Then, in the notebook before running the phase:
+
+```python
+import os
+os.environ["AZURE_CLIENT_ID"] = dbutils.secrets.get("flowx-profiler", "azure-client-id")
+os.environ["AZURE_CLIENT_SECRET"] = dbutils.secrets.get("flowx-profiler", "azure-client-secret")
+os.environ["AZURE_TENANT_ID"] = dbutils.secrets.get("flowx-profiler", "azure-tenant-id")
+```
+
+Serverless egress to `management.azure.com` and `prices.azure.com` must be allowed. If the
+workspace blocks it, run the profile locally instead. An authentication failure exits with code 2
+and names both setup paths above.
+
+The roles the identity needs are in `sources/adf.md`.
+
+## Step 3 — Run the phase
+
+```bash
+export PYTHONPATH="<plugin_dir>/src"
+"$PY" -m flowx.adapter profile --source adf --output-dir <output_dir> \
+  [--days 30] [--subscription-id <id>] [--resource-group <rg> [--factory-name <name>]]
+```
+
+Scope flags:
+
+- `--subscription-id` limits the scan to one subscription.
+- `--resource-group` limits it to one resource group.
+- `--factory-name` narrows to one factory and requires `--resource-group`; using it alone exits with code 2.
+- `--days` sets the window (default 30). ADF keeps pipeline runs for only 45 days. A longer window
+  adds no ADF run history but adds Cost Management data. This over-estimates per-run costs.
+
+Over MCP (Genie Code), call `flowx(command="profile", parameters={"source": "adf", "output_dir":
+"...", "days": 30, ...})` with the same scope keys (`subscription_id`, `resource_group`,
+`factory_name`). The app needs the Azure deps (deploy it with `source_deps=azure` or
+`SOURCE_DEPS=azure`; see the `setup` skill) and the service principal env vars above; on success the
+result carries the report as `report_md` and `report_csv`.
+
+MCP `profile` is for scoped scans: set `resource_group` and/or `factory_name` and keep `days` small.
+The scan makes about one REST call per pipeline run, so a subscription-wide scan can take hours,
+longer than an MCP call can wait. Run subscription-wide scans from a notebook with
+`python -m flowx.adapter profile ...` (Step 3) instead.
+
+If the MCP call runs past `FLOWX_MCP_TIMEOUT` (default 1800 s), it returns `ok: false` with no
+report and a message in `process.stderr` saying how to narrow the scan.
+
+## Output
+
+Written to `<output_dir>/metadata/tco/` and **overwritten** on every run, so there is always
+exactly one current report:
+
+| File | Contents |
+|---|---|
+| `metadata/tco/cost_comparison.csv` | One table with a level column: factory estimates and actuals, and pipeline estimates |
+| `metadata/tco/cost_comparison.md` | The same, plus profiling context (window, region, pricing source), a per-subscription summary, any Cost Management access issues, and a Warnings section listing every scan warning (missing roles, price fallback, incomplete billing) when there are any |
+
+How to read it:
+
+- **Estimates** are list/retail rates before discounts, reserved capacity, or enterprise agreements.
+- **Actual compute** counts only billed rows whose meter subcategory is `Azure Data Factory v2`
+  (ADF's compute/orchestration meter) or `Azure Data Factory v2 Data Flow - <tier>` (Mapping Data
+  Flow vCores). Infrastructure meters (Managed Airflow, Private Link, …) and wrangling data flows
+  are left out so the comparison is like-for-like.
+- **Pipeline rows** are estimates only. Azure bills per factory unless per-pipeline billing is
+  enabled in Factory Settings.
+
+**Notes:**
+
+- ADF Datasets are intentionally not scanned: they are definitions only and have no runtime meter, so
+  they add no cost.
+- Nothing outside `metadata/tco/` is touched. `discover`'s `metadata/profile_report.csv` is a
+  different report (pipeline complexity) and is left alone.
+
+## Reference
+
+- `sources/adf.md` — required Azure roles, what each one unlocks, and known estimate limitations

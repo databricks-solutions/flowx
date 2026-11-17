@@ -1,0 +1,1 @@
+{"name":"csv-adls","properties":{"type":"DelimitedText","linkedServiceName":{"referenceName":"adls-gen2","type":"LinkedServiceReference"},"typeProperties":{"location":{"type":"AzureBlobFSLocation","fileSystem":"raw","folderPath":"csv","fileName":"input.csv"},"columnDelimiter":",","firstRowAsHeader":true}}}

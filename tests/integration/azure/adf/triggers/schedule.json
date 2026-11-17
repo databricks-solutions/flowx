@@ -1,0 +1,1 @@
+{"name":"schedule","properties":{"runtimeState":"Stopped","type":"ScheduleTrigger","typeProperties":{"recurrence":{"frequency":"Day","interval":1,"startTime":"2026-01-01T00:00:00Z","timeZone":"UTC"}},"pipelines":[{"pipelineReference":{"referenceName":"complex-orchestration","type":"PipelineReference"}}]}}
