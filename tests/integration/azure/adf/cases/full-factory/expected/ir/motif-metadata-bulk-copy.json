@@ -1,0 +1,38 @@
+{
+  "audit": {},
+  "migration_status": "included",
+  "name": "motif-metadata-bulk-copy",
+  "not_translatable": [],
+  "parameters": null,
+  "reconciliation_status": null,
+  "schedule": null,
+  "tags": {
+    "pipeline": "motif-metadata-bulk-copy",
+    "source": "adf"
+  },
+  "tasks": [
+    {
+      "confidence_notes": [
+        "Lookup 'lookup-metadata' appears to read a control/metadata table"
+      ],
+      "databricks_replacement": "for_each_ingestion",
+      "description": "Collapsed motif: Metadata-Driven Bulk Copy. Replaces 2 ADF activities with for_each_ingestion.",
+      "display_name": "Metadata-Driven Bulk Copy",
+      "matched_activity_names": [
+        "lookup-metadata",
+        "copy-each-table"
+      ],
+      "motif_config": {
+        "lookup_query": "SELECT schema_name, table_name FROM dbo.copy_config",
+        "lookup_scope": "lookup-metadata",
+        "lookup_source_type": "AzureSqlSource"
+      },
+      "motif_id": "metadata_driven_bulk_copy",
+      "name": "Metadata-Driven Bulk Copy",
+      "notebook_template": "metadata_bulk_copy.py",
+      "source_type_hint": "database",
+      "task_key": "motif_metadata_driven_bulk_copy",
+      "type": "MotifActivity"
+    }
+  ]
+}

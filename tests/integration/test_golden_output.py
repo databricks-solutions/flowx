@@ -30,10 +30,6 @@ adf_translation_gap = pytest.mark.xfail(
     strict=False,
 )
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 FIXTURES_DIR = pytest.importorskip("pathlib").Path(__file__).parent.parent / "resources" / "json"
 
 _PL_TEST_NAMES = [
@@ -54,7 +50,6 @@ _PL_TEST_NAMES = [
     "pl_test_filter_coverage",
 ]
 
-# Forbidden patterns that must NEVER appear in base_parameters values
 FORBIDDEN_PATTERNS = [
     "__import__",
     "dbutils.jobs.taskValues.get",
@@ -62,7 +57,6 @@ FORBIDDEN_PATTERNS = [
     "exec(",
 ]
 
-# ADF expression patterns that should be resolved before reaching parameters
 ADF_EXPRESSION_RE = re.compile(r"@(?:activity|pipeline|variables|item|concat|equals|greater|utcNow)\(")
 DAB_REF_RE = re.compile(r"\{\{[a-zA-Z0-9_.]+\}\}")
 
@@ -117,11 +111,6 @@ def _strip_magic(content: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Structural tests across all 15 pipelines
-# ---------------------------------------------------------------------------
 
 
 class TestAllPipelinesLoad:
@@ -231,11 +220,6 @@ class TestNotebookValidity:
                     ast.parse(python_code)
                 except SyntaxError as exc:
                     pytest.fail(f"{name}/{nb_file.relative_to(path)}: syntax error: {exc}")
-
-
-# ---------------------------------------------------------------------------
-# Pipeline-specific structural assertions
-# ---------------------------------------------------------------------------
 
 
 class TestCopyCoverage:
@@ -505,11 +489,6 @@ class TestSparkPythonCoverage:
             pytest.skip("pl_test_sparkpython_coverage not in prepared_workflows")
         py_tasks = [t for t in wf.tasks if "spark_python_task" in t]
         assert len(py_tasks) >= 1
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _collect_all_task_keys(tasks: list[dict]) -> list[str]:

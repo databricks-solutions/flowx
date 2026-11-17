@@ -1,0 +1,9 @@
+pipeline,activities,datasets,linked_services,collapsible_patterns,databricks_native_activities,control_flow_activities,other_activities,complexity_score,complexity_size
+agentic-activities,13,1,4,0,0,2,11,42,XL
+all-activity-types,21,4,3,0,4,12,5,50,XL
+child-pipeline,1,0,1,0,1,0,0,2,S
+complex-orchestration,3,0,1,0,0,1,2,9,M
+motif-activity-and-notify,2,0,0,1,0,1,1,6,M
+motif-incremental-watermark,4,2,2,1,0,0,4,17,L
+motif-metadata-bulk-copy,3,2,2,1,0,1,2,13,M
+motif-rest-api-pagination,4,0,0,1,0,2,2,11,M

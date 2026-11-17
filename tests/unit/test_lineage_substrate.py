@@ -515,6 +515,31 @@ def test_a_motif_activity_saved_without_a_motif_id_reads_back_as_unknown():
     assert reloaded.tasks[0].motif_id == "unknown"
 
 
+def test_an_empty_motif_id_survives_a_round_trip_and_an_untagged_task_writes_none():
+    """Only a missing ``motif_id`` is left out of the saved task; an empty one is kept as written."""
+    pipeline = Pipeline(
+        name="p",
+        tasks=[
+            MotifActivity(
+                name="motif",
+                task_key="motif",
+                motif_id="",
+                display_name="motif",
+                databricks_replacement="notebook",
+                matched_activity_names=[],
+            ),
+            _notebook("n"),
+        ],
+    )
+    saved = json.loads(json.dumps(pipeline_to_dict(pipeline)))
+
+    assert saved["tasks"][0]["motif_id"] == ""
+    assert "motif_id" not in saved["tasks"][1]
+    reloaded, _ = pipeline_dict_to_ir(saved)
+    assert reloaded.tasks[0].motif_id == ""
+    assert reloaded.tasks[1].motif_id is None
+
+
 def test_lineage_block_always_emits_lists_never_null():
     """An attached empty lineage serialises its edge collections as lists, not null."""
     pipeline = with_lineage(Pipeline(name="p", tasks=[_notebook("n")]), Lineage())

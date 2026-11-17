@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from flowx.models.ir import ExpressionResult, TranslationContext
+from flowx.utils import to_case_preserving_key
 
 _ITEM_RE = re.compile(r"item\(\s*\)$", re.IGNORECASE)
 
@@ -501,8 +502,7 @@ def _resolve_activity_output(expr: str) -> ExpressionResult | None:
     if match is None:
         return None
     activity_name = match.group(1)
-    task_key = re.sub(r"[^a-zA-Z0-9_-]", "_", activity_name)
-    task_key = re.sub(r"_+", "_", task_key).strip("_") or "unnamed"
+    task_key = to_case_preserving_key(activity_name)
 
     property_path = match.group(2) or ""
     if property_path:

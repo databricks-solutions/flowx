@@ -10,7 +10,7 @@ from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY, MULTI_NODE_JOB_CLUS
 from flowx.models.dab import DabNotebook, ParameterApproximation
 from flowx.models.ir import AgenticComponentActivity
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
-from flowx.utils import normalize_task_key
+from flowx.utils import to_lowercase_key
 
 # flowx owns a task's identity, its upstream wiring, and its run policy; these come from
 # the activity itself, so an authored task fragment may only say what the task runs.
@@ -158,7 +158,7 @@ def _check_resource(task_key: str, resource: object) -> None:
             f"Agentic component {task_key!r} resource {resource!r} must be a mapping with resource_key and definition"
         )
     resource_key = resource.get("resource_key")
-    if not isinstance(resource_key, str) or not resource_key or resource_key != normalize_task_key(resource_key):
+    if not isinstance(resource_key, str) or not resource_key or resource_key != to_lowercase_key(resource_key):
         raise ValueError(
             f"Agentic component {task_key!r} resource key {resource_key!r} must be a plain identifier "
             "of lowercase letters, digits, and single underscores"
