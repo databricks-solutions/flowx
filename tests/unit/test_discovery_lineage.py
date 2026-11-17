@@ -86,13 +86,24 @@ def test_signature_tier_when_identity_unresolved() -> None:
 def test_signature_tier_with_one_resolved_side_claims_no_identity() -> None:
     """A signature match where only one endpoint resolved stays a weak match with no identity."""
     graph = _graph(
-        _node("writer", writes=[DataAsset(signature="shared", identity="curated.orders")]),
-        _node("reader", reads=[DataAsset(signature="shared")]),
+        _node("writer", writes=[DataAsset(signature="curated.orders", identity="curated.orders")]),
+        _node("reader", reads=[DataAsset(signature="curated.orders")]),
     )
     edges = build_graph_lineage(graph, known_workflows=()).data_edges
     assert len(edges) == 1
     assert edges[0].match_kind == "signature"
     assert edges[0].identity is None
+
+
+@pytest.mark.parametrize("resolved_side", ["writer", "reader"])
+def test_one_resolved_side_does_not_link_on_its_own_shared_signature(resolved_side: str) -> None:
+    """A resolved asset whose signature is a shared dataset name never links to an unresolved one by that name."""
+    resolved = DataAsset(signature="ds_generic", identity="curated.orders")
+    unresolved = DataAsset(signature="ds_generic")
+    writer_asset, reader_asset = (resolved, unresolved) if resolved_side == "writer" else (unresolved, resolved)
+    graph = _graph(_node("writer", writes=[writer_asset]), _node("reader", reads=[reader_asset]))
+
+    assert build_graph_lineage(graph, known_workflows=()).data_edges == []
 
 
 def test_distinct_identities_do_not_fall_back_to_signature() -> None:

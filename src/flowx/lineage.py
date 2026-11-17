@@ -169,7 +169,11 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
       *not* fall through to a signature match, which would invent edges. An empty
       identity counts as unresolved.
     - **signature** -- when at least one identity is unresolved, fall back to the
-      neutral descriptor and match on equal, non-empty signatures.
+      neutral descriptor. With both unresolved, equal non-empty signatures match.
+      With only one resolved, the unresolved side's signature must equal the
+      resolved side's *identity*: the resolved side's own signature may be a shared
+      name (a generic dataset used by many activities), so matching on it would
+      link activities that touch different data.
 
     In both tiers, when both sides name their ``asset_type`` and the types differ
     (compared exactly), they are different things, so they do not match.
@@ -183,8 +187,12 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
         if producer.identity == consumer.identity:
             return "identity", producer.identity, producer.identity
         return None
+    # A signature match proves nothing physical, so it never claims either side's identity.
+    resolved_identity = producer.identity or consumer.identity
+    if resolved_identity:
+        unresolved_signature = consumer.signature if producer.identity else producer.signature
+        return ("signature", resolved_identity, None) if unresolved_signature == resolved_identity else None
     if producer.signature and producer.signature == consumer.signature:
-        # A signature match proves nothing physical, so it never claims either side's identity.
         return "signature", producer.signature, None
     return None
 
