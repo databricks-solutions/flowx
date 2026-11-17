@@ -1519,6 +1519,10 @@ def main(argv: list[str] | None = None) -> int:
         # bundles each get their own subdirectory named after the group.
         single_bundle = len(groups) == 1
 
+        def _group_bundle_dir(target_root: Path, group_name: str) -> Path:
+            """Where a group's bundle goes under *target_root*: the root itself for a single bundle."""
+            return target_root if single_bundle else target_root / group_name
+
         def _write_groups(target_root: Path, *, announce: bool) -> tuple[list[Path], list[Path]]:
             """Writes every group bundle under *target_root*; returns (created_files, bundle_dirs)."""
             created_all: list[Path] = []
@@ -1526,7 +1530,7 @@ def main(argv: list[str] | None = None) -> int:
             for index, (group_name, group_workflows) in enumerate(groups):
                 # Name the bundle after group_name (e.g. "flowx_bundle"), not the first pipeline, so the
                 # workspace path is .bundle/<group>/dev for a bundle holding many pipelines.
-                b_dir = target_root if single_bundle else target_root / group_name
+                b_dir = _group_bundle_dir(target_root, group_name)
                 created = write_bundle_group(
                     group_workflows,
                     output_dir=b_dir,
@@ -1570,7 +1574,7 @@ def main(argv: list[str] | None = None) -> int:
 
         _archive_stale_bundles(
             args.output_dir,
-            [args.output_dir] if single_bundle else [args.output_dir / group_name for group_name, _ in groups],
+            [_group_bundle_dir(args.output_dir, group_name) for group_name, _ in groups],
             previous_bundles,
         )
         group_created, bundle_dirs = _write_groups(args.output_dir, announce=True)
