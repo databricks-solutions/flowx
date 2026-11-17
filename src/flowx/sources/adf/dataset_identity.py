@@ -85,7 +85,7 @@ def resolve_dataset_identity(
     if table:
         if not all(_is_physical(part) for part in (schema, table) if part):
             return None
-        qualified_table = f"{schema}.{table}" if schema else table
+        qualified_table = _canonical_table_name(f"{schema}.{table}" if schema else table)
         store = resolve_table_store(properties, definitions)
         return f"{store}/{qualified_table}" if store else None
     return _resolve_dataset_path(
@@ -94,6 +94,73 @@ def resolve_dataset_identity(
         effective_dataset_params(dataset_ref, properties),
         resolution_context,
     )
+
+
+def _canonical_table_name(qualified_name: str) -> str:
+    """*qualified_name* with SQL Server bracket quoting taken off wherever it changes nothing.
+
+    ``[dbo].[Orders]`` (a legacy ``tableName``) and ``schema=dbo, table=Orders`` name
+    one table, so both read ``dbo.Orders``. A bracketed part keeps its brackets only
+    when it needs them to stay one part (it holds a dot, a bracket, a double quote,
+    or edge spaces), written with ``]]`` for each ``]`` inside, so ``[a.b].c`` never
+    meets ``a.b.c``. Case is left alone, and so is a double-quoted part, because in
+    PostgreSQL ``"Orders"`` and ``Orders`` are different tables. A name whose
+    brackets or quotes do not close is kept as written.
+    """
+    parts: list[str] = []
+    part_start = 0
+    closing_quote = ""
+    index = 0
+    while index < len(qualified_name):
+        character = qualified_name[index]
+        if closing_quote:
+            if character == closing_quote and qualified_name[index + 1 : index + 2] == closing_quote:
+                index += 1
+            elif character == closing_quote:
+                closing_quote = ""
+        elif character == "[":
+            closing_quote = "]"
+        elif character == '"':
+            closing_quote = '"'
+        elif character == ".":
+            parts.append(qualified_name[part_start:index])
+            part_start = index + 1
+        index += 1
+    if closing_quote:
+        return qualified_name
+    parts.append(qualified_name[part_start:])
+    return ".".join(_canonical_table_name_part(part) for part in parts)
+
+
+def _canonical_table_name_part(part: str) -> str:
+    """One dotted part of a table name with its brackets taken off when they change nothing.
+
+    The part must be exactly one bracketed name, its first ``[`` closed by its last
+    ``]``; anything else, such as ``[a]b]``, is kept as written.
+    """
+    stripped = part.strip()
+    if not stripped.startswith("["):
+        return part
+    name_characters: list[str] = []
+    index = 1
+    while index < len(stripped):
+        character = stripped[index]
+        if character == "]" and stripped[index + 1 : index + 2] == "]":
+            name_characters.append("]")
+            index += 2
+            continue
+        if character == "]":
+            if index != len(stripped) - 1:
+                return part
+            break
+        name_characters.append(character)
+        index += 1
+    else:
+        return part
+    name = "".join(name_characters)
+    if not name or name != name.strip() or any(character in name for character in '.[]"'):
+        return "[" + name.replace("]", "]]") + "]"
+    return name
 
 
 def dataset_props(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> dict[str, Any] | None:

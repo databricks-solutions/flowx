@@ -617,7 +617,10 @@ def test_unevaluated_arm_expressions_never_become_identities() -> None:
 
 
 def test_bracket_quoted_sql_names_keep_their_identity() -> None:
-    """Bracket-quoted SQL names are literal table names, not ARM expressions, so they keep their identity."""
+    """Bracket-quoted SQL names are literal table names, not ARM expressions, so they keep their identity.
+
+    The identity drops brackets that change nothing, so it reads as the plain name would.
+    """
     definitions = AdfDefinitions(
         pipelines=[],
         datasets={
@@ -639,11 +642,11 @@ def test_bracket_quoted_sql_names_keep_their_identity() -> None:
     )
     assert (
         resolve_dataset_identity(AdfDatasetReference(reference_name="ds_legacy"), definitions)
-        == "sql.example.net/[dbo].[Orders]"
+        == "sql.example.net/dbo.Orders"
     )
     assert (
         resolve_dataset_identity(AdfDatasetReference(reference_name="ds_spaced"), definitions)
-        == "sql.example.net/dbo.[Order Details]"
+        == "sql.example.net/dbo.Order Details"
     )
 
 
@@ -653,8 +656,49 @@ def test_a_bracket_quoted_table_name_with_parentheses_keeps_its_identity(table: 
     definitions = _definitions(ds_sales=_table_dataset("ds_sales", schema="dbo", table=table))
 
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_sales"), definitions) == (
-        f"ls_sql/dbo.{table}"
+        f"ls_sql/dbo.{table[1:-1]}"
     )
+
+
+def _orders_identity(type_properties: dict) -> str | None:
+    """The identity of a SQL dataset with *type_properties* on linked service ``ls_sql``."""
+    definitions = _definitions(
+        ds_orders=AdfDataset(
+            name="ds_orders",
+            type="AzureSqlTable",
+            properties={"typeProperties": type_properties, "linkedServiceName": {"referenceName": "ls_sql"}},
+        )
+    )
+    return resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orders"), definitions)
+
+
+@pytest.mark.parametrize(
+    ("bracketed", "plain"),
+    [
+        ({"tableName": "[dbo].[Orders]"}, {"schema": "dbo", "table": "Orders"}),
+        ({"tableName": "[dbo].Orders"}, {"tableName": "dbo.Orders"}),
+        ({"schema": "[dbo]", "table": "[Orders]"}, {"schema": "dbo", "table": "Orders"}),
+        ({"tableName": "[dbo].[Order Details]"}, {"schema": "dbo", "table": "Order Details"}),
+        ({"tableName": "[dbo].[a]]b]"}, {"schema": "dbo", "table": "[a]]b]"}),
+        ({"tableName": "[sales.eu].[Orders]"}, {"schema": "[sales.eu]", "table": "Orders"}),
+    ],
+)
+def test_bracket_quoting_that_changes_nothing_gives_the_same_table_identity(bracketed: dict, plain: dict) -> None:
+    """``[dbo].[Orders]`` and ``schema=dbo, table=Orders`` name one table, so they share one identity."""
+    assert _orders_identity(bracketed) == _orders_identity(plain) is not None
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ({"tableName": "[dbo].[Orders]"}, {"tableName": "[dbo].[orders]"}),
+        ({"tableName": "[sales.eu].[Orders]"}, {"tableName": "sales.eu.Orders"}),
+        ({"tableName": '"dbo"."Orders"'}, {"schema": "dbo", "table": "Orders"}),
+    ],
+)
+def test_table_names_that_may_differ_keep_different_identities(first: dict, second: dict) -> None:
+    """Case is kept, a dot inside brackets stays inside one part, and double quotes are left as written."""
+    assert _orders_identity(first) != _orders_identity(second)
 
 
 @pytest.mark.parametrize(
