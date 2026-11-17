@@ -1908,6 +1908,9 @@ def test_folder_and_dot_relative_dependencies_follow_their_authored_files_in_a_s
         ("src/dist/x/a.whl", "src/dist/*.whl", False),
         ("src/a1.py", "src/a[0-9].py", True),
         ("src/ab.py", "src/a?.py", True),
+        ("src/a/x/b.py", "src/a**b.py", False),
+        ("src/foo/bar.py", "src/foo[!a]bar.py", False),
+        ("src/].py", "src/[]].py", True),
     ],
 )
 def test_bundle_globs_match_one_folder_per_star_and_any_number_for_two(path, pattern, matches):
@@ -1922,3 +1925,55 @@ def test_a_glob_with_a_double_star_matches_a_file_at_no_depth_in_the_reference_c
     write_bundle(prepare_workflow(Pipeline(name="custom", tasks=[activity])), tmp_path)
 
     assert (tmp_path / "src" / "transform.py").is_file()
+
+
+def test_a_reference_to_the_whole_src_folder_follows_a_component_into_its_folder(tmp_path):
+    """``../src`` names every file below src, so in a shared bundle it becomes the pipeline's own folder."""
+
+    def workflow(pipeline):
+        return PreparedWorkflow(
+            name=pipeline,
+            tasks=[
+                {"task_key": "run", "pipeline_task": {"pipeline_id": f"${{resources.pipelines.{pipeline}_flow.id}}"}}
+            ],
+            notebooks=[DabNotebook(relative_path="transform.py", content=f"# {pipeline}\n", authored=True)],
+            secrets=[],
+            setup_tasks=[],
+            pipeline_resources=[
+                {"resource_key": f"{pipeline}_flow", "definition": {"name": pipeline, "root_path": "../src"}}
+            ],
+        )
+
+    write_bundle_group([workflow("pipe_a"), workflow("pipe_b")], tmp_path, bundle_name="combined")
+
+    pipelines = _pipelines_in(tmp_path)
+    assert pipelines["pipe_a_flow"]["root_path"] == "../src/pipe_a"
+    assert pipelines["pipe_b_flow"]["root_path"] == "../src/pipe_b"
+
+
+def test_a_bundle_root_file_does_not_count_as_a_generated_src_file(tmp_path):
+    """A generated root pyproject.toml is not below src, so an authored src/pyproject.toml is not a mixed reference."""
+
+    def workflow(pipeline):
+        return PreparedWorkflow(
+            name=pipeline,
+            tasks=[
+                {"task_key": "run", "pipeline_task": {"pipeline_id": f"${{resources.pipelines.{pipeline}_flow.id}}"}}
+            ],
+            notebooks=[
+                DabNotebook(relative_path="pyproject.toml", content="[project]\nname = 'bundle'\n"),
+                DabNotebook(relative_path="pyproject.toml", content=f"[project]\nname = '{pipeline}'\n", authored=True),
+            ],
+            secrets=[],
+            setup_tasks=[],
+            pipeline_resources=[
+                {
+                    "resource_key": f"{pipeline}_flow",
+                    "definition": {"name": pipeline, "libraries": [{"file": {"path": "../src/pyproject.toml"}}]},
+                }
+            ],
+        )
+
+    write_bundle_group([workflow("pipe_a"), workflow("pipe_b")], tmp_path, bundle_name="combined")
+
+    assert _pipelines_in(tmp_path)["pipe_a_flow"]["libraries"][0]["file"]["path"] == "../src/pipe_a/pyproject.toml"

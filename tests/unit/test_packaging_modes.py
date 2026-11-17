@@ -659,7 +659,7 @@ def test_an_identical_pipeline_resource_in_two_grouped_pipelines_is_still_writte
 
 
 def test_each_pipeline_reference_is_renamed_once_even_when_a_new_key_is_another_old_one():
-    """Key "x" becomes "p_x" in pipeline "p"; a reference to "x" must not then be renamed again to "p_p_x"."""
+    """In pipeline "p", "x" cannot become "p_x", which is taken, and no reference is renamed twice."""
     from flowx.bundler.dab_writer import _prefix_clashing_pipeline_keys
 
     def workflow(name: str, definition_tag: str) -> PreparedWorkflow:
@@ -682,7 +682,7 @@ def test_each_pipeline_reference_is_renamed_once_even_when_a_new_key_is_another_
     _prefix_clashing_pipeline_keys([first, second])
 
     assert [task["pipeline_task"]["pipeline_id"] for task in first.tasks] == [
-        "${resources.pipelines.p_x.id}",
+        "${resources.pipelines.p_x_2.id}",
         "${resources.pipelines.p_p_x.id}",
     ]
-    assert [resource["resource_key"] for resource in first.pipeline_resources] == ["p_x", "p_p_x"]
+    assert [resource["resource_key"] for resource in first.pipeline_resources] == ["p_x_2", "p_p_x"]
