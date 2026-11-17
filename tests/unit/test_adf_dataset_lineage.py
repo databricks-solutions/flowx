@@ -10,6 +10,7 @@ index 0.
 from __future__ import annotations
 
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -21,6 +22,7 @@ from flowx.models.adf_ast import (
     AdfDefinitions,
     AdfLinkedService,
 )
+from flowx.models.ir import TranslationContext
 from flowx.sources.adf.dataset_lineage import activity_data_assets, resolve_dataset_identity
 from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
 from flowx.sources.adf.loader import _parse_pipeline_json, load_adf_definitions
@@ -2687,3 +2689,25 @@ def test_dataset_defaults_that_refer_to_each_other_do_not_stop_discovery() -> No
     graphs = adf_definitions_to_source_graphs(_cyclic_defaults_definitions())
 
     assert [graph.name for graph in graphs] == ["pl"]
+
+
+def test_a_bundle_variable_placeholder_never_becomes_a_table_identity() -> None:
+    """Under ``bundle_variable`` resolution a global parameter becomes ``${var.table}``, known only at deploy time."""
+    definitions = _definitions(
+        ds_global=AdfDataset(
+            name="ds_global",
+            type="AzureSqlTable",
+            properties={
+                "linkedServiceName": {"referenceName": "ls_sql"},
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": {"value": "@pipeline().globalParameters.table", "type": "Expression"},
+                },
+            },
+        )
+    )
+    context = TranslationContext(
+        global_parameters=MappingProxyType({"table": "Orders"}), global_parameter_resolution="bundle_variable"
+    )
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_global"), definitions, context) is None

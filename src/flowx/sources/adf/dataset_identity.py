@@ -536,15 +536,17 @@ def _is_physical(value: str) -> bool:
     """Return ``True`` only when *value* is a literal (physical) identifier.
 
     A value is NOT physical when it still contains an unresolved marker -- a
-    DAB-ref placeholder (``{{`` ... ``}}``), a leftover ADF interpolation
-    fragment (``@{``), a bare ADF expression (starts with ``@``), or an ARM
+    DAB-ref placeholder (``{{`` ... ``}}``), a bundle variable (``${var.x}``, which
+    a global parameter becomes under ``bundle_variable`` resolution and is only known
+    at deploy time), a leftover ADF interpolation fragment (``@{``), a bare ADF
+    expression (starts with ``@``), or an ARM
     template expression the export left unevaluated (``[parameters('x')]``,
     ``[concat(...)]``). An ARM expression always opens with a function call, so
     bracket-quoted SQL names such as ``[dbo].[Orders]`` stay physical, and so
     does ARM's ``[[`` escape for a literal that starts with ``[``.
     """
     stripped = value.strip()
-    if "{{" in value or "@{" in value or stripped.startswith("@"):
+    if "{{" in value or "${" in value or "@{" in value or stripped.startswith("@"):
         return False
     return not is_arm_expression(stripped)
 
