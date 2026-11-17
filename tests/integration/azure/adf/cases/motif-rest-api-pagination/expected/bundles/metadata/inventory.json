@@ -1,0 +1,89 @@
+{
+  "pipelines": [
+    {
+      "activities": [
+        {
+          "dependencies": [],
+          "name": "initial-request",
+          "strategy": "deterministic",
+          "task_key": "initial-request",
+          "type": "WebActivity"
+        },
+        {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "initial-request"
+            }
+          ],
+          "depends_on": [
+            "initial-request"
+          ],
+          "name": "paginate",
+          "strategy": "agentic",
+          "task_key": "paginate",
+          "type": "Until"
+        },
+        {
+          "dependencies": [],
+          "name": "page-request",
+          "strategy": "deterministic",
+          "task_key": "page-request",
+          "type": "WebActivity"
+        },
+        {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "page-request"
+            }
+          ],
+          "depends_on": [
+            "page-request"
+          ],
+          "name": "set-continuation",
+          "strategy": "deterministic",
+          "task_key": "set-continuation",
+          "type": "SetVariable"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Until child 'page-request' uses pagination",
+            "Until child 'set-continuation' uses pagination"
+          ],
+          "databricks_replacement": "python_rest_ingestion",
+          "display_name": "REST API Pagination",
+          "member_task_keys": [
+            "initial-request",
+            "paginate"
+          ],
+          "motif_id": "rest_api_pagination",
+          "source_type_hint": "rest_api"
+        }
+      ],
+      "name": "motif-rest-api-pagination"
+    }
+  ],
+  "source": "adf",
+  "source_graphs_sha256": "70ed04d8f5e705e613d91a1e111692c3600bde0a17c7dad68ad8a2b1f46517b1",
+  "summary": {
+    "activity_count": 4,
+    "agentic_count": 1,
+    "coverage_pct": 100.0,
+    "deterministic_count": 3,
+    "pipeline_count": 1,
+    "unsupported_count": 0
+  }
+}

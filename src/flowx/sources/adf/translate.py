@@ -52,6 +52,7 @@ from flowx.sources.adf.translators import (
     wait,
     web_activity,
 )
+from flowx.utils import to_case_preserving_key
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,7 @@ def translate_pipeline(
 
     # C-05 (VAREX-002): synthesise init SetVariable tasks for variables with a defaultValue, seeding
     # variable_cache so @variables('X') resolves to the init task's value instead of a self-referential dangler.
-    init_variable_activities, context = _build_variable_init_activities(pipeline, context)
+    init_variable_activities, context, synthesized_init_keys = _build_variable_init_activities(pipeline, context)
     translated_activities: list[Activity] = list(init_variable_activities)
 
     sorted_activities = _topological_visit(pipeline.activities)
@@ -182,6 +183,7 @@ def translate_pipeline(
         tasks=translated_activities,
         tags={"source": "adf", "pipeline": pipeline.name},
         schedule=schedule,
+        synthesized_variable_init_keys=synthesized_init_keys,
     )
 
     # Whole-IR expression rewrite: catches @{...} tokens the per-activity translators missed (raw SQL
@@ -771,7 +773,7 @@ def _normalize_timezone(tz: Any) -> str:
 def _build_variable_init_activities(
     pipeline: AdfPipeline,
     context: TranslationContext,
-) -> tuple[list[Activity], TranslationContext]:
+) -> tuple[list[Activity], TranslationContext, frozenset[str]]:
     """Synthesise init SetVariable IR tasks for variables carrying defaultValue.
 
     C-05 (VAREX-002): without an explicit ADF SetVariable activity, a
@@ -780,13 +782,18 @@ def _build_variable_init_activities(
     ``{{tasks.X.values.X}}`` reference.  This helper emits an init task
     per default-valued variable so the variable_cache carries a real
     setter task_key.
+
+    Also returns the exact set of synthesised init task keys so the
+    package-time pruning in :func:`prepare_workflow` can identify these tasks
+    explicitly and never act on a customer-authored task.
     """
     from flowx.parser.expression_parser import resolve_expression
 
     if not pipeline.variables:
-        return [], context
+        return [], context, frozenset()
 
     init_tasks: list[Activity] = []
+    init_keys: set[str] = set()
     for var_name, var_def in pipeline.variables.items():
         default = var_def.default_value
         if default is None:
@@ -795,7 +802,7 @@ def _build_variable_init_activities(
             return_default = True
         if not return_default:
             continue
-        task_key = f"_init_{_sanitize_task_key(var_name)}"
+        task_key = f"_init_{to_case_preserving_key(var_name)}"
         expr_result = resolve_expression(default, context)
         if expr_result is not None:
             variable_value = expr_result.value
@@ -832,12 +839,13 @@ def _build_variable_init_activities(
             required_parameters=required_parameters,
         )
         init_tasks.append(init_activity)
+        init_keys.add(task_key)
         # Register the synthesised setter so @variables('X') resolves to {{tasks._init_X.values.X}}; when
         # the value is itself a DAB ref (e.g. @utcNow()), inline it directly.
         dab_ref_value = variable_value if value_kind == "dab_ref" else None
         context = context.with_variable(var_name, task_key, dab_ref_value=dab_ref_value)
         context = context.with_activity(init_activity.name, init_activity)
-    return init_tasks, context
+    return init_tasks, context, frozenset(init_keys)
 
 
 def _topological_visit(activities: list[AdfActivity]) -> list[AdfActivity]:
@@ -905,7 +913,7 @@ def _build_base_kwargs(
         Dictionary with keys: ``name``, ``task_key``, ``timeout_seconds``,
         ``max_retries``, ``depends_on``, ``cluster``.
     """
-    task_key = _sanitize_task_key(activity.name)
+    task_key = to_case_preserving_key(activity.name)
 
     timeout_seconds: int | None = None
     if activity.policy and activity.policy.timeout:
@@ -926,7 +934,7 @@ def _build_base_kwargs(
             outcome = _map_dependency_conditions(dependency.dependency_conditions)
             depends_on.append(
                 Dependency(
-                    task_key=_sanitize_task_key(dependency.activity),
+                    task_key=to_case_preserving_key(dependency.activity),
                     outcome=outcome,
                 )
             )
@@ -960,21 +968,6 @@ def _build_base_kwargs(
         "cluster": cluster,
         "existing_cluster_id": existing_cluster_id,
     }
-
-
-def _sanitize_task_key(name: str) -> str:
-    """Converts an ADF activity name to a valid Databricks task key.
-
-    Args:
-        name: ADF activity name.
-
-    Returns:
-        Sanitised task key string.
-    """
-    key = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-    key = re.sub(r"_+", "_", key)
-    key = key.strip("_")
-    return key or "unnamed"
 
 
 def _map_dependency_conditions(conditions: list[str] | None) -> str | None:
@@ -1402,7 +1395,7 @@ def main(argv: list[str] | None = None) -> int:
         total_agentic += report.agentic_count
         total_unsupported += report.unsupported_count
 
-        pipeline_file = work_dir / f"{_sanitize_task_key(pipeline.name)}.json"
+        pipeline_file = work_dir / f"{to_case_preserving_key(pipeline.name)}.json"
         pipeline_dict = ir_serde.pipeline_to_dict(report.pipeline)
         pipeline_file.write_text(json.dumps(pipeline_dict, indent=2, default=str), encoding="utf-8")
         logger.info("Wrote pipeline IR to %s", pipeline_file)
@@ -1410,7 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Write debug IR if requested
         if args.debug:
-            debug_file = work_dir / f"{_sanitize_task_key(pipeline.name)}.debug.json"
+            debug_file = work_dir / f"{to_case_preserving_key(pipeline.name)}.debug.json"
             debug_dict = ir_serde.pipeline_to_debug_dict(report.pipeline)
             debug_file.write_text(json.dumps(debug_dict, indent=2, default=str), encoding="utf-8")
             logger.info("Wrote debug IR to %s", debug_file)

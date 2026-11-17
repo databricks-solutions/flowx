@@ -7,11 +7,15 @@ import json
 import yaml
 
 from flowx.bundler.dab_writer import (
+    _infer_bundle_cluster_extras,
     _load_report,
     write_bundle,
+    write_bundle_group,
 )
-from flowx.bundler.dab_writer import main as dab_main
-from flowx.models.dab import SecretInstruction, SetupTask
+from flowx.bundler.dab_writer import (
+    main as dab_main,
+)
+from flowx.models.dab import DabNotebook, SecretInstruction, SetupTask
 from flowx.models.ir import (
     CopyActivity,
     IfConditionActivity,
@@ -924,21 +928,36 @@ class TestStripDanglingTaskValueRefs:
         assert "`branch`" in md
 
     def test_airflow_backfill_renders_setup_section(self):
-        # An Airflow catchup=True DAG surfaces a native-backfill section in SETUP.md so the
-        # run_date override path is documented rather than silently lost.
+        # A DAG that resolves Airflow logical dates documents which trigger-instant parameters a
+        # native backfill must override, so replayed windows get the same previous-interval shift.
         from flowx.bundler.prereqs_writer import build_prereqs, render_setup_md
 
         prereqs = build_prereqs(
             notebooks=[],
             tasks=[],
             known_bundle_jobs=set(),
-            airflow_backfills=[{"pipeline": "daily_etl"}],
+            airflow_backfills=[{"pipeline": "daily_etl", "catchup": True, "date_resolver": True}],
         )
         assert not prereqs.is_empty()
         md = render_setup_md(prereqs, bundle_name="b")
-        assert "Backfill (Airflow catchup)" in md
-        assert "{{backfill.iso_date}}" in md
-        assert "`daily_etl`" in md
+        assert "## Backfill and Airflow logical dates" in md
+        assert "override `__flowx_airflow_trigger_time` with `{{backfill.iso_datetime}}`" in md
+        assert "set `__flowx_airflow_trigger_type` to `periodic`" in md
+        assert "{{backfill.iso_date}}" not in md
+        assert "- `daily_etl` (catchup=True, resolves Airflow logical dates)" in md
+
+    def test_catchup_only_backfill_omits_the_resolver_parameters(self):
+        from flowx.bundler.prereqs_writer import build_prereqs, render_setup_md
+
+        prereqs = build_prereqs(
+            notebooks=[],
+            tasks=[],
+            known_bundle_jobs=set(),
+            airflow_backfills=[{"pipeline": "daily_etl", "catchup": True, "date_resolver": False}],
+        )
+        md = render_setup_md(prereqs, bundle_name="b")
+        assert "__flowx_airflow_trigger_time" not in md
+        assert "- `daily_etl` (catchup=True)" in md
 
     def test_recurses_into_for_each_task_body(self):
         from flowx.bundler.dab_writer import _strip_dangling_task_value_refs
@@ -1146,7 +1165,6 @@ class TestClusterExtrasPropagation:
         from flowx.bundler.dab_writer import (
             _build_default_cluster,
             _build_default_job_clusters,
-            _infer_bundle_cluster_extras,
         )
 
         # Hint set with consistent extras.
@@ -1184,7 +1202,6 @@ class TestClusterExtrasPropagation:
         from flowx.bundler.dab_writer import (
             _build_default_cluster,
             _build_default_job_clusters,
-            _infer_bundle_cluster_extras,
         )
 
         wf = _simple_workflow()
@@ -1238,14 +1255,11 @@ class TestManualCredentialFromMsiLinkedService:
 
 
 class TestUnparseableClusterHintsFiltered:
-    """C-29 (NB-ITER4-002): unparseable spark_version / node_type_id values
-    are filtered before Counter so the bundle default stays deployable."""
+    """C-29 (NB-ITER4-002): unparseable spark_version / node_type_id values are filtered before
+    Counter so they are never suggested as the value for a required bundle variable."""
 
-    def test_unparseable_spark_version_falls_back_to_default(self):
-        from flowx.bundler.dab_writer import (
-            _DEFAULT_SPARK_VERSION,
-            _infer_bundle_cluster_defaults,
-        )
+    def test_unparseable_spark_version_is_not_suggested(self):
+        from flowx.bundler.dab_writer import _cluster_hint_consensus
 
         wf = _simple_workflow()
         wf.cluster_hints = [
@@ -1254,15 +1268,12 @@ class TestUnparseableClusterHintsFiltered:
                 "node_type_id": "Standard_DS3_v2",
             },
         ]
-        spark_version, node_type_id = _infer_bundle_cluster_defaults(wf)
-        assert spark_version == _DEFAULT_SPARK_VERSION
+        spark_version, node_type_id = _cluster_hint_consensus(wf.cluster_hints)
+        assert spark_version is None
         assert node_type_id == "Standard_DS3_v2"
 
-    def test_unparseable_node_type_falls_back_to_default(self):
-        from flowx.bundler.dab_writer import (
-            _DEFAULT_NODE_TYPE_ID,
-            _infer_bundle_cluster_defaults,
-        )
+    def test_unparseable_node_type_is_not_suggested(self):
+        from flowx.bundler.dab_writer import _cluster_hint_consensus
 
         wf = _simple_workflow()
         wf.cluster_hints = [
@@ -1271,12 +1282,12 @@ class TestUnparseableClusterHintsFiltered:
                 "node_type_id": "@pipeline().parameters.unresolved",
             },
         ]
-        spark_version, node_type_id = _infer_bundle_cluster_defaults(wf)
+        spark_version, node_type_id = _cluster_hint_consensus(wf.cluster_hints)
         assert spark_version == "15.4.x-scala2.12"
-        assert node_type_id == _DEFAULT_NODE_TYPE_ID
+        assert node_type_id is None
 
     def test_real_spark_version_still_wins(self):
-        from flowx.bundler.dab_writer import _infer_bundle_cluster_defaults
+        from flowx.bundler.dab_writer import _cluster_hint_consensus
 
         wf = _simple_workflow()
         wf.cluster_hints = [
@@ -1284,8 +1295,70 @@ class TestUnparseableClusterHintsFiltered:
             {"spark_version": "15.4.x-photon-scala2.12", "node_type_id": "Standard_D4s_v3"},
             {"spark_version": "@if(equals(item()?.photon,true),X,Y)", "node_type_id": "Standard_D4s_v3"},
         ]
-        spark_version, _ = _infer_bundle_cluster_defaults(wf)
+        spark_version, _ = _cluster_hint_consensus(wf.cluster_hints)
         assert spark_version == "15.4.x-photon-scala2.12"
+
+
+class TestRequiredClusterVariables:
+    """Airflow bundles declare node_type_id and spark_version as required variables listed in SETUP.md.
+
+    ADF bundles keep source-derived defaults until ADF node-type handling is revisited separately.
+    """
+
+    def _classic_workflow(self, source: str | None = "airflow"):
+        pipeline = Pipeline(
+            name="classic_job",
+            tags={"source": source} if source else {},
+            tasks=[
+                NotebookActivity(
+                    name="Run NB",
+                    task_key="run_nb",
+                    notebook_path="/Shared/ETL/transform",
+                    cluster={"spark_version": "14.3.x-scala2.12", "node_type_id": "Standard_D4s_v3"},
+                )
+            ],
+        )
+        return prepare_workflow(pipeline)
+
+    def test_cluster_variables_have_no_default(self, tmp_path):
+        write_bundle(self._classic_workflow(), tmp_path)
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        for name in ("node_type_id", "spark_version"):
+            assert name in variables
+            assert "default" not in variables[name]
+            assert variables[name]["description"].startswith("Required.")
+
+    def test_source_values_are_suggested_not_defaulted(self, tmp_path):
+        write_bundle(self._classic_workflow(), tmp_path)
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        assert "The source pipelines used Standard_D4s_v3." in variables["node_type_id"]["description"]
+        assert "The source pipelines used 14.3.x-scala2.12." in variables["spark_version"]["description"]
+
+    def test_setup_md_lists_required_variables(self, tmp_path):
+        write_bundle(self._classic_workflow(), tmp_path)
+        setup = (tmp_path / "SETUP.md").read_text()
+        assert "## Required bundle variables" in setup
+        assert "| `node_type_id` |" in setup
+        assert "| `spark_version` |" in setup
+        assert "--var node_type_id=<value> --var spark_version=<value>" in setup
+
+    def test_adf_bundle_defaults_cluster_variables_to_source_values(self, tmp_path):
+        write_bundle(self._classic_workflow(source="adf"), tmp_path)
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        assert variables["node_type_id"]["default"] == "Standard_D4s_v3"
+        assert variables["spark_version"]["default"] == "14.3.x-scala2.12"
+        assert "## Required bundle variables" not in (tmp_path / "SETUP.md").read_text()
+
+    def test_serverless_bundle_declares_no_cluster_variables(self, tmp_path):
+        pipeline = Pipeline(
+            name="serverless_job",
+            tasks=[WaitActivity(name="Pause", task_key="pause", wait_time_seconds=10)],
+        )
+        write_bundle(prepare_workflow(pipeline), tmp_path)
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        assert "node_type_id" not in variables
+        assert "spark_version" not in variables
+        assert "## Required bundle variables" not in (tmp_path / "SETUP.md").read_text()
 
 
 class TestSingleUserNameOnSingleUserClusters:
@@ -1590,3 +1663,69 @@ class TestHoistedGlobalVariables:
         assert "Factory global parameters (bundle variables)" in md
         assert "Security note" in md
         assert "env=<value>" in md
+
+
+class TestHoistedGlobalsAcrossGroupedWorkflows:
+    """When several workflows share one bundle (single / per-group modes), global-parameter hoisting
+    must be UNION at the bundle level (databricks.yml variables + SETUP.md declare every workflow's
+    globals) but PER-WORKFLOW at each job (a notebook widget binds to ${var.X} only in the pipelines
+    that actually declare X). Regression: the multi-workflow merge previously applied a single leaked
+    workflow's hoisted set (the last one) to every job and to databricks.yml."""
+
+    def _hoisted_workflow(self, name: str, global_name: str) -> PreparedWorkflow:
+        # A generated notebook that reads BOTH globals as widgets, so per-job binding is observable:
+        # the owning workflow's global binds to ${var.X}, the other stays "".
+        notebook = DabNotebook(
+            relative_path=f"notebooks/{name}.py",
+            content=("env_a = dbutils.widgets.get('env_a')\nenv_b = dbutils.widgets.get('env_b')\n"),
+        )
+        return PreparedWorkflow(
+            name=name,
+            tasks=[{"task_key": "run", "notebook_task": {"notebook_path": f"../src/notebooks/{name}.py"}}],
+            notebooks=[notebook],
+            secrets=[],
+            setup_tasks=[],
+            bundle_variables={global_name: {"description": f"Factory global '{global_name}'.", "default": "prod"}},
+        )
+
+    def test_bundle_variables_are_the_union_across_workflows(self, tmp_path):
+        wfs = [self._hoisted_workflow("pl_a", "env_a"), self._hoisted_workflow("pl_b", "env_b")]
+        write_bundle_group(wfs, tmp_path, bundle_name="grouped")
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        # Union: BOTH pipelines' globals are declared, not just the last workflow's.
+        assert "env_a" in variables
+        assert "env_b" in variables
+
+    def test_setup_md_lists_every_workflows_globals(self, tmp_path):
+        wfs = [self._hoisted_workflow("pl_a", "env_a"), self._hoisted_workflow("pl_b", "env_b")]
+        write_bundle_group(wfs, tmp_path, bundle_name="grouped")
+        setup = (tmp_path / "SETUP.md").read_text()
+        assert "env_a" in setup
+        assert "env_b" in setup
+
+    def test_each_job_binds_only_its_own_global(self, tmp_path):
+        wfs = [self._hoisted_workflow("pl_a", "env_a"), self._hoisted_workflow("pl_b", "env_b")]
+        write_bundle_group(wfs, tmp_path, bundle_name="grouped")
+
+        job_a = yaml.safe_load((tmp_path / "resources" / "pl_a.yml").read_text())["resources"]["jobs"]["pl_a"]
+        base_a = job_a["tasks"][0]["notebook_task"]["base_parameters"]
+        # pl_a declares only env_a -> its widget binds to the var; env_b is not its global -> "".
+        assert base_a["env_a"] == "${var.env_a}"
+        assert base_a["env_b"] == ""
+
+        job_b = yaml.safe_load((tmp_path / "resources" / "pl_b.yml").read_text())["resources"]["jobs"]["pl_b"]
+        base_b = job_b["tasks"][0]["notebook_task"]["base_parameters"]
+        assert base_b["env_b"] == "${var.env_b}"
+        assert base_b["env_a"] == ""
+
+    def test_single_workflow_group_unchanged(self, tmp_path):
+        # With one workflow the union equals that workflow's set -> byte-identical to per-pipeline.
+        wf = self._hoisted_workflow("pl_solo", "env_a")
+        write_bundle_group([wf], tmp_path, bundle_name="pl_solo")
+        variables = yaml.safe_load((tmp_path / "databricks.yml").read_text())["variables"]
+        assert "env_a" in variables
+        assert "env_b" not in variables
+        job = yaml.safe_load((tmp_path / "resources" / "pl_solo.yml").read_text())["resources"]["jobs"]["pl_solo"]
+        base = job["tasks"][0]["notebook_task"]["base_parameters"]
+        assert base["env_a"] == "${var.env_a}"
+        assert base["env_b"] == ""

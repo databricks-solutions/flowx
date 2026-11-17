@@ -2153,6 +2153,31 @@ class TestScheduleCompilation:
         assert report.pipeline.schedule["kind"] == "schedule"
         assert report.pipeline.schedule["tumbling"] is True
 
+    def test_tumbling_window_trigger_with_a_singular_pipeline_reference_schedules_the_pipeline(self):
+        from flowx.models.adf_ast import AdfPipeline
+        from flowx.sources.adf.loader import _parse_trigger_json
+
+        pipeline = AdfPipeline(name="pl_with_trigger", activities=[])
+        trigger = _parse_trigger_json(
+            {
+                "name": "trg",
+                "properties": {
+                    "type": "TumblingWindowTrigger",
+                    "runtimeState": "Started",
+                    "typeProperties": {"frequency": "Hour", "interval": 1},
+                    "pipeline": {
+                        "pipelineReference": {"referenceName": "pl_with_trigger", "type": "PipelineReference"},
+                        "parameters": {"windowStart": "@trigger().outputs.windowStartTime"},
+                    },
+                },
+            }
+        )
+        definitions = AdfDefinitions(pipelines=[pipeline], datasets={}, linked_services={}, triggers=[trigger])
+        report = translate_pipeline(pipeline, definitions)
+        assert report.pipeline.schedule is not None
+        assert report.pipeline.schedule["tumbling"] is True
+        assert report.pipeline.schedule["parameter_overrides"] == {"windowStart": "@trigger().outputs.windowStartTime"}
+
     def test_blob_events_trigger_maps_to_file_arrival(self):
         pipeline, definitions = self._build_definitions(
             {

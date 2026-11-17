@@ -1,0 +1,257 @@
+name: integration
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/**"
+      - ".github/claude-code/**"
+      - ".github/workflows/integration.yml"
+      - "!.github/scripts/setup-integration.sh"
+      - "!.github/scripts/check-formatting.sh"
+      - "!.github/scripts/verify-requirements.sh"
+      - "tests/integration/azure/**"
+      - "tests/integration/test_azure_fixture_coverage.py"
+      - "tests/integration/test_adf_cases.py"
+      - "tests/integration/test_adf_profile_live.py"
+      - "!tests/integration/azure/README.md"
+      - "src/flowx/sources/adf/**"
+  pull_request:
+    paths:
+      - ".github/scripts/**"
+      - ".github/claude-code/**"
+      - ".github/workflows/integration.yml"
+      - "!.github/scripts/setup-integration.sh"
+      - "!.github/scripts/check-formatting.sh"
+      - "!.github/scripts/verify-requirements.sh"
+      - "tests/integration/azure/**"
+      - "tests/integration/test_azure_fixture_coverage.py"
+      - "tests/integration/test_adf_cases.py"
+      - "tests/integration/test_adf_profile_live.py"
+      - "!tests/integration/azure/README.md"
+      - "src/flowx/sources/adf/**"
+
+permissions:
+  contents: read
+
+jobs:
+  not-a-fork:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+      !github.event.pull_request.head.repo.fork &&
+      github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - run: echo "Trusted repository event; live integration may proceed."
+
+  preflight:
+    needs: not-a-fork
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+        with:
+          version: "0.11.2"
+          checksum: "7ac2ca0449c8d68dae9b99e635cd3bc9b22a4cb1de64b7c43716398447d42981"
+          python-version: "3.12"
+      - run: >-
+          PYTHONPATH=src uv run pytest
+          tests/integration/test_azure_fixture_coverage.py
+          tests/integration/test_adf_cases.py
+          tests/integration/test_integration_workflow.py -v
+
+  integration:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: flowx-live-integration
+    # Every run shares one resource group, so runs queue instead of overlapping or cancelling mid-deploy.
+    concurrency:
+      group: flowx-live-integration
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TF_IN_AUTOMATION: "true"
+      FLOWX_OUTPUT: flowx_output
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Copy CI scripts out of Claude's reach
+        shell: bash
+        run: '"${GITHUB_WORKSPACE}/.github/scripts/bootstrap-ci-scripts.sh"'
+
+      - name: Configure Terraform paths outside the checkout
+        shell: bash
+        run: '"${CI_SCRIPTS}/configure-terraform-paths.sh"'
+
+      - name: Check required configuration
+        env:
+          RESOURCE_OWNER_EMAIL: ${{ secrets.RESOURCE_OWNER_EMAIL }}
+          TF_VAR_resource_group_name: ${{ secrets.AZURE_RESOURCE_GROUP }}
+        shell: bash
+        run: '"${CI_SCRIPTS}/check-required-configuration.sh"'
+
+      - uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7.3.1
+        with:
+          version: "0.11.2"
+          checksum: "7ac2ca0449c8d68dae9b99e635cd3bc9b22a4cb1de64b7c43716398447d42981"
+          python-version: "3.12"
+
+      - name: Normalize uv.lock to the public package index
+        run: sed -i -E 's#https://[a-zA-Z0-9._-]+/simple#https://pypi.org/simple#g' uv.lock
+
+      - name: Install flowx from the lock file
+        run: uv sync --frozen --extra azure --extra mcp
+
+      - name: Install Terraform
+        run: '"${CI_SCRIPTS}/install-pinned-tool.sh" terraform'
+
+      - name: Install Claude Code
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: '"${CI_SCRIPTS}/install-claude-code.sh"'
+
+      - name: Check optional Databricks credentials
+        id: databricks-auth
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: '"${CI_SCRIPTS}/check-databricks-credentials.sh"'
+
+      - name: Install Databricks CLI
+        if: steps.databricks-auth.outputs.configured == 'true'
+        run: '"${CI_SCRIPTS}/install-pinned-tool.sh" databricks'
+
+      - name: Derive collision-resistant run prefix
+        shell: bash
+        run: '"${CI_SCRIPTS}/configure-run-prefix.sh"'
+
+      - name: Sign in to Azure with OIDC
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Mask Azure principal object ID
+        continue-on-error: true
+        shell: bash
+        run: '"${CI_SCRIPTS}/mask-azure-principal.sh"'
+
+      - name: Create ephemeral Azure resources
+        working-directory: tests/integration/azure/terraform
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_owner_email: ${{ secrets.RESOURCE_OWNER_EMAIL }}
+          TF_VAR_resource_group_name: ${{ secrets.AZURE_RESOURCE_GROUP }}
+        run: '"${CI_SCRIPTS}/apply-terraform.sh"'
+
+      - name: Export deployed ADF definitions
+        shell: bash
+        run: '"${CI_SCRIPTS}/export-adf.sh"'
+
+      - name: Profile the live factory
+        id: profile-live
+        continue-on-error: true
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+        run: PYTHONPATH=src uv run pytest -m integration tests/integration/test_adf_profile_live.py -v --tb=short
+
+      - name: Sign out of Azure CLI before Claude runs
+        if: always()
+        shell: bash
+        run: '"${CI_SCRIPTS}/sign-out-azure-cli.sh"'
+
+      - name: Compare live ADF cases with expected outputs
+        id: adf-cases
+        continue-on-error: true
+        run: PYTHONPATH=src uv run pytest tests/integration/test_adf_cases.py -v --tb=short
+
+      - name: Discover and convert exported definitions
+        run: '"${CI_SCRIPTS}/run-flowx-convert.sh"'
+
+      - name: Resolve agentic gaps with Claude Code
+        id: agentic
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        shell: bash
+        run: '"${CI_SCRIPTS}/resolve-agentic-gaps.sh"'
+
+      - name: Report unexpected agentic-step failure
+        if: always() && steps.agentic.outcome == 'failure'
+        run: '"${CI_SCRIPTS}/report-agentic-failure.sh"'
+
+      - name: Verify Claude changed only agentic results
+        if: always() && steps.agentic.outputs.configured == 'true'
+        shell: bash
+        run: '"${CI_SCRIPTS}/verify-claude-worktree.sh"'
+
+      - name: Merge agentic results when available
+        id: agentic-merge
+        continue-on-error: true
+        if: steps.agentic.outputs.resolved == 'true'
+        run: '"${CI_SCRIPTS}/merge-agentic-results.sh"'
+
+      - name: Validate merged agentic structure
+        id: agentic-structure
+        continue-on-error: true
+        if: steps.agentic.outputs.resolved == 'true' && steps.agentic-merge.outcome == 'success'
+        run: '"${CI_SCRIPTS}/validate-agentic-structure.sh"'
+
+      - name: Package merged translation
+        run: '"${CI_SCRIPTS}/package-integration-results.sh"'
+
+      - name: Validate bundles with Databricks CLI
+        if: steps.databricks-auth.outputs.configured == 'true'
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: '"${CI_SCRIPTS}/validate-bundles.sh"'
+
+      - name: Enforce live integration results
+        if: always()
+        env:
+          ADF_CASES_OUTCOME: ${{ steps.adf-cases.outcome }}
+          PROFILE_LIVE_OUTCOME: ${{ steps.profile-live.outcome }}
+          AGENTIC_CONFIGURED: ${{ steps.agentic.outputs.configured }}
+          AGENTIC_OUTCOME: ${{ steps.agentic.outcome }}
+          AGENTIC_RESOLVED: ${{ steps.agentic.outputs.resolved }}
+          MERGE_OUTCOME: ${{ steps.agentic-merge.outcome }}
+          STRUCTURE_OUTCOME: ${{ steps.agentic-structure.outcome }}
+        run: '"${CI_SCRIPTS}/enforce-integration-results.sh"'
+
+      - name: Destroy ephemeral Azure resources
+        if: always()
+        working-directory: tests/integration/azure/terraform
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_owner_email: ${{ secrets.RESOURCE_OWNER_EMAIL }}
+          TF_VAR_resource_group_name: ${{ secrets.AZURE_RESOURCE_GROUP }}
+        shell: bash
+        run: '"${CI_SCRIPTS}/teardown-integration.sh"'

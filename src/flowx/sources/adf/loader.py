@@ -552,6 +552,9 @@ def _parse_trigger_json(data: dict[str, Any], *, fallback_name: str = "unknown")
     name = data.get("name") or fallback_name
     trigger_type = props.get("type", "Unknown")
     trigger_pipelines = props.get("pipelines")
+    # A tumbling-window trigger references its one pipeline under the singular "pipeline" key.
+    if not trigger_pipelines and isinstance(props.get("pipeline"), dict):
+        trigger_pipelines = [props["pipeline"]]
 
     return AdfTrigger(
         name=name,
@@ -1224,10 +1227,9 @@ def main(argv: list[str] | None = None) -> int:
     print("===================")
     print(f"Pipelines parsed:     {summary['pipeline_count']}")
     print(f"Total activities:     {summary['activity_count']}  (raw activities, incl. nested)")
-    # Discover counts every activity, including those nested inside ForEach/If/Switch. The
-    # convert phase reports top-level task-units *after* motif collapse, so its count is
-    # smaller -- label the units here so the two numbers are not mistaken for a discrepancy.
-    print("  (convert reports top-level task-units after motif collapse; expect fewer there)")
+    # Discover counts every activity, including those nested inside ForEach/If/Switch. Convert's
+    # total counts only the top-level activities, before any motif collapse, so the two can differ.
+    print("  (convert counts only top-level activities, before any motif collapse, so its total may differ)")
     print("\nStrategy Breakdown:")
     print(f"  Deterministic:      {summary['deterministic_count']}")
     print(f"  Agentic:            {summary['agentic_count']}")

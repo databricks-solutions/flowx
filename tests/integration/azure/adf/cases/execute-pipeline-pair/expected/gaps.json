@@ -1,0 +1,30 @@
+[
+  {
+    "activity_name": "mixed-script",
+    "activity_type": "Script",
+    "raw_definition": {
+      "dependsOn": [
+        {
+          "activity": "launch-child",
+          "dependencyConditions": [
+            "Succeeded"
+          ]
+        }
+      ],
+      "linkedServiceName": {
+        "referenceName": "azure-sql",
+        "type": "LinkedServiceReference"
+      },
+      "name": "mixed-script",
+      "type": "Script",
+      "typeProperties": {
+        "scripts": [
+          {
+            "text": "SELECT 1",
+            "type": "Query"
+          }
+        ]
+      }
+    }
+  }
+]

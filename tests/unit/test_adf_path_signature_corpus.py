@@ -100,7 +100,7 @@ def test_a_runtime_piece_is_one_slot_where_it_sits(folder: str, piece: str, spel
 
     assert "<P>" in signature
     assert signature == _written_signature(_spell(spelling, folder, "item().x")[0])
-    assert signature == f"ST[sales@acctA]/FP[{expected_shape}]/FN[]"
+    assert signature == f"ST[sales@accta]/FP[{expected_shape}]/FN[]"
 
 
 _BOUND_WRAPPERS = [
@@ -149,5 +149,5 @@ def test_a_function_over_a_bound_value_is_one_slot_keyed_by_that_value(
 
     assert len(set(signatures.values())) == len(_BOUND_VALUES)
     for value, signature in signatures.items():
-        assert re.sub(r"<P:(?:[^<>]|<P>)*>", "<P>", signature) == f"ST[sales@acctA]/FP[{folder}/<P>]/FN[]"
+        assert re.sub(r"<P:(?:[^<>]|<P>)*>", "<P>", signature) == f"ST[sales@accta]/FP[{folder}/<P>]/FN[]"
         assert signature != _written_signature(f"{folder}/{value}")

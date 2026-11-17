@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from flowx.models.dab import DabNotebook
-from flowx.preparer.activity_preparers.helpers import resolve_param_value
+from flowx.preparer.activity_preparers.helpers import (
+    bind_requested_job_cluster,
+    is_remote_artifact_uri,
+    resolve_param_value,
+)
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
 from flowx.preparer.workspace_downloader import download_dbfs_file
 
@@ -46,6 +50,14 @@ def prepare(activity: SparkPythonActivity, *, scope: str = "") -> PreparedActivi
     task = build_common_task_fields(activity)
 
     original_path = resolve_param_value(activity.python_file) if activity.python_file else ""
+    if activity.keep_remote_artifacts and is_remote_artifact_uri(original_path):
+        task["spark_python_task"] = {"python_file": original_path}
+        if activity.parameters:
+            task["spark_python_task"]["parameters"] = list(activity.parameters)
+        if activity.libraries:
+            task["libraries"] = activity.libraries
+        bind_requested_job_cluster(task, activity)
+        return PreparedActivity(task=task, notebooks=[])
     if original_path and ("dbfs:" in original_path or "/" in original_path):
         filename = original_path.rsplit("/", 1)[-1] if "/" in original_path else original_path
     else:
@@ -75,4 +87,5 @@ def prepare(activity: SparkPythonActivity, *, scope: str = "") -> PreparedActivi
         task["spark_python_task"]["parameters"] = list(activity.parameters)
     if activity.libraries:
         task["libraries"] = activity.libraries
+    bind_requested_job_cluster(task, activity)
     return PreparedActivity(task=task, notebooks=notebooks)

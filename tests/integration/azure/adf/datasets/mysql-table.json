@@ -1,0 +1,1 @@
+{"name":"mysql-table","properties":{"type":"AzureMySqlTable","linkedServiceName":{"referenceName":"mysql-parameterized","type":"LinkedServiceReference"},"typeProperties":{"tableName":"flowx_integration"}}}

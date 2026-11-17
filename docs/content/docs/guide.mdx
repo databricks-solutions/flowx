@@ -120,6 +120,32 @@ databricks bundle deploy --target <your deployment target>
 Bundles created by flowx are standard Declarative Automation Bundles. You can target different environments, integrate with CI/CD, 
 or further customize the YAML before deploying. See the [Declarative Automation Bundles documentation](https://docs.databricks.com/aws/en/dev-tools/bundles/) for more information.
 </Callout>
+
+### Packaging modes
+
+A multi-pipeline migration can be laid out into bundles in three ways, selected with `--packaging-mode` on `package`:
+
+| Mode | Layout |
+| --- | --- |
+| `per-pipeline` (default) | One bundle per pipeline, each in its own subdirectory. |
+| `single` | Every pipeline in one bundle at the output root. |
+| `per-group` | Pipelines grouped into bundles — `--group-by inferred` (default) groups by the Run Pipeline (`ExecutePipeline`) call graph; `--group-by spec` reads an explicit mapping from `--group-spec`. |
+
+When a pipeline calls another (`ExecutePipeline`) that lands in a **different** bundle, the caller's `run_job_task` job id is rewritten to a bundle variable (`${var.<callee>_job_id}`) and wired at deploy time. A top-level `DEPLOY.md` lists every bundle, its cross-bundle dependencies, and the suggested **callees-first** deploy order.
+
+### Deploying multiple bundles in order
+
+For a multi-bundle migration, the ordered deployer resolves the cross-bundle job ids for you rather than deploying each bundle by hand:
+
+```bash
+python -m flowx.adapter deploy --output-dir ./flowx_output --target <your deployment target>
+```
+
+It discovers the bundles, deploys callees before callers, reads each deployed job's numeric id from `databricks bundle summary`, and injects it into callers via `--var <callee>_job_id=<id>`. Add `--dry-run` to print the deploy order without deploying.
+
+<Callout type="warn" title="Local CLI only">
+`databricks bundle deploy` / `summary` are not available on Databricks serverless / Genie Code. Run the deploy step from a local CLI session or the web terminal.
+</Callout>
 </Step>
 
 </Steps>

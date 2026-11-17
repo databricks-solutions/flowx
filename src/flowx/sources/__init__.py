@@ -30,12 +30,18 @@ class Source:
             ``main(argv)``).
         source_path_flag: The source-specific alias for ``--source-path``
             accepted on the discover/convert runners (e.g. ``--adf-source-path``).
+        extract_module: Import path of the extract-phase module (exposes
+            ``main(argv)``), or ``None`` if the source can't be extracted live.
+        profile_module: Import path of the profile-phase module (exposes
+            ``main(argv)``), or ``None`` if the source has no profiler.
     """
 
     name: str
     discover_module: str
     convert_module: str
     source_path_flag: str
+    extract_module: str | None = None
+    profile_module: str | None = None
 
 
 _REGISTRY: dict[str, Source] = {
@@ -44,6 +50,8 @@ _REGISTRY: dict[str, Source] = {
         discover_module="flowx.sources.adf.loader",
         convert_module="flowx.sources.adf.translate",
         source_path_flag="--adf-source-path",
+        extract_module="flowx.sources.adf.extract.runner",
+        profile_module="flowx.sources.adf.profile.runner",
     ),
     "airflow": Source(
         name="airflow",

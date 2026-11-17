@@ -77,6 +77,7 @@ def collapse_motifs(
         migration_status=pipeline.migration_status,
         audit=dict(pipeline.audit),
         translation_configuration=pipeline.translation_configuration,
+        synthesized_variable_init_keys=pipeline.synthesized_variable_init_keys,
     )
 
 
