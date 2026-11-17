@@ -96,10 +96,19 @@ def test_signature_tier_with_one_resolved_side_claims_no_identity() -> None:
 
 
 @pytest.mark.parametrize("resolved_side", ["writer", "reader"])
-def test_one_resolved_side_does_not_link_on_its_own_shared_signature(resolved_side: str) -> None:
-    """A resolved asset whose signature is a shared dataset name never links to an unresolved one by that name."""
+@pytest.mark.parametrize(
+    "unresolved_signature",
+    [
+        pytest.param("ds_generic", id="shares-the-resolved-signature"),
+        pytest.param("curated.orders", id="spells-the-resolved-identity"),
+    ],
+)
+def test_a_resolved_side_whose_signature_is_not_its_identity_never_links_by_signature(
+    resolved_side: str, unresolved_signature: str
+) -> None:
+    """A resolved asset signed with a shared dataset name links to no unresolved asset, by the name or the identity."""
     resolved = DataAsset(signature="ds_generic", identity="curated.orders")
-    unresolved = DataAsset(signature="ds_generic")
+    unresolved = DataAsset(signature=unresolved_signature)
     writer_asset, reader_asset = (resolved, unresolved) if resolved_side == "writer" else (unresolved, resolved)
     graph = _graph(_node("writer", writes=[writer_asset]), _node("reader", reads=[reader_asset]))
 
