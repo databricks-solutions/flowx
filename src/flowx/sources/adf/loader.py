@@ -1228,8 +1228,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Pipelines parsed:     {summary['pipeline_count']}")
     print(f"Total activities:     {summary['activity_count']}  (raw activities, incl. nested)")
     # Discover counts every activity, including those nested inside ForEach/If/Switch. Convert's
-    # total counts only the top-level activities, before any motif collapse, so the two differ.
-    print("  (convert counts only top-level activities, before any motif collapse, so its total will differ)")
+    # total counts only the top-level activities, before any motif collapse, so the two can differ.
+    print("  (convert counts only top-level activities, before any motif collapse, so its total may differ)")
     print("\nStrategy Breakdown:")
     print(f"  Deterministic:      {summary['deterministic_count']}")
     print(f"  Agentic:            {summary['agentic_count']}")

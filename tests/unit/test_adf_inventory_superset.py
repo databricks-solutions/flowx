@@ -315,7 +315,7 @@ def test_discover_describes_convert_total_as_top_level_activities_before_collaps
     _run_discover(tmp_path)
     output = capsys.readouterr().out
 
-    assert "(convert counts only top-level activities, before any motif collapse, so its total will differ)" in output
+    assert "(convert counts only top-level activities, before any motif collapse, so its total may differ)" in output
     assert "expect fewer" not in output
 
 
