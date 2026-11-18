@@ -191,11 +191,12 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
         hint = " (set by the library, not the author)" if key in _LIBRARY_KEYS else ""
         violations.append(f"unknown top-level key: {key!r}{hint}")
 
-    violations.extend(_authored_against_violations(raw.get(_AUTHORED_AGAINST_KEY), inventory))
+    if _AUTHORED_AGAINST_KEY in raw:
+        violations.extend(_authored_against_violations(raw[_AUTHORED_AGAINST_KEY], inventory))
     violations.extend(_text_length_violations(raw, ""))
 
     overview = raw.get("overview")
-    if overview is not None and (not isinstance(overview, str) or not overview.strip()):
+    if "overview" in raw and (not isinstance(overview, str) or not overview.strip()):
         violations.append("'overview' must be a non-empty string when present")
 
     if "system_recommendation" in raw:
@@ -243,7 +244,10 @@ def _authored_against_violations(authored_against: Any, inventory: dict[str, Any
     inventory unchecked.
     """
     if authored_against is None:
-        return []
+        return [
+            f"'{_AUTHORED_AGAINST_KEY}' must not be null; copy the inventory's {_SOURCE_GRAPHS_HASH_KEY} or leave "
+            "the field out"
+        ]
     recorded = inventory.get(_SOURCE_GRAPHS_HASH_KEY)
     if recorded is None:
         return [f"'{_AUTHORED_AGAINST_KEY}' was given but inventory.json records no {_SOURCE_GRAPHS_HASH_KEY}"]
@@ -285,7 +289,9 @@ def _validate_pipeline_insights(insights: Any, names: set[str]) -> list[str]:
                 violations.append(f"{loc}: pipeline {name!r} not in inventory")
         violations.extend(_validate_optional_strings(item, _INSIGHT_TEXT_FIELDS, loc))
         notes = item.get("conversion_notes")
-        if notes is not None and (not isinstance(notes, list) or not all(isinstance(note, str) for note in notes)):
+        if "conversion_notes" in item and (
+            not isinstance(notes, list) or not all(isinstance(note, str) for note in notes)
+        ):
             violations.append(f"{loc}: 'conversion_notes' must be a list of strings when present")
         if "recommended_patterns" in item:
             violations.extend(_validate_recommended_patterns(item["recommended_patterns"], loc))
@@ -369,13 +375,18 @@ def _resolves_control_edge(
     return all(isinstance(part, str) for part in triple) and triple in control_triples
 
 
-def _validate_optional_strings(record: dict[str, Any], fields: tuple[str, ...], loc: str) -> list[str]:
-    """Report each of *fields* that *record* sets to something other than a string (``null`` is allowed)."""
+def _validate_optional_strings(record: dict[str, Any], field_names: tuple[str, ...], loc: str) -> list[str]:
+    """Report each of *field_names* that *record* sets to something other than a string, ``null`` included."""
     return [
-        f"{loc}: {field_name!r} must be a string when present, got {type(record[field_name]).__name__}"
-        for field_name in fields
-        if record.get(field_name) is not None and not isinstance(record[field_name], str)
+        f"{loc}: {field_name!r} must be a string when present, got {_json_type_name(record[field_name])}"
+        for field_name in field_names
+        if field_name in record and not isinstance(record[field_name], str)
     ]
+
+
+def _json_type_name(value: Any) -> str:
+    """The type name a violation reports for *value*, saying ``null`` rather than Python's ``NoneType``."""
+    return "null" if value is None else type(value).__name__
 
 
 def _validate_edge(
@@ -519,18 +530,19 @@ def _validate_release_state(pattern: dict[str, Any], loc: str) -> list[str]:
     release_state = pattern.get("release_state")
     source = pattern.get("release_state_source")
 
-    if release_state is not None and release_state not in RELEASE_STATES:
+    if "release_state" in pattern and release_state not in RELEASE_STATES:
         allowed = ", ".join(repr(state) for state in RELEASE_STATES)
-        problems.append(f"{loc}: 'release_state' must be one of {{{allowed}}}, got {release_state!r}")
+        got = _json_type_name(release_state) if release_state is None else repr(release_state)
+        problems.append(f"{loc}: 'release_state' must be one of {{{allowed}}}, got {got}")
 
-    if pattern.get("simplification_pattern") is True and release_state is None:
+    if pattern.get("simplification_pattern") is True and "release_state" not in pattern:
         problems.append(
             f"{loc}: 'release_state' is required when 'simplification_pattern' is true "
             f"(a distinctive capability must declare its verified GA/Preview release state)"
         )
 
-    if source is not None and not isinstance(source, str):
-        problems.append(f"{loc}: 'release_state_source' must be a string when present, got {type(source).__name__}")
+    if "release_state_source" in pattern and not isinstance(source, str):
+        problems.append(f"{loc}: 'release_state_source' must be a string when present, got {_json_type_name(source)}")
     elif release_state in RELEASE_STATES_REQUIRING_SOURCE and (source is None or not source.strip()):
         problems.append(
             f"{loc}: 'release_state_source' (a non-empty doc URL / citation) is required when "
@@ -561,12 +573,12 @@ def _validate_system_recommendation(value: Any) -> list[str]:
     else:
         problems.extend(_validate_recommended_patterns(value["recommended_patterns"], loc))
     cascade = value.get("cascade")
-    if cascade is not None and (
+    if "cascade" in value and (
         not isinstance(cascade, list) or not all(isinstance(item, str) and item.strip() for item in cascade)
     ):
         problems.append(f"{loc}: 'cascade' must be a list of non-empty strings when present")
     driver = value.get("decision_driver")
-    if driver is not None and (not isinstance(driver, str) or not driver.strip()):
+    if "decision_driver" in value and (not isinstance(driver, str) or not driver.strip()):
         problems.append(f"{loc}: 'decision_driver' must be a non-empty string when present")
     return problems
 

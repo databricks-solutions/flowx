@@ -665,6 +665,36 @@ def test_relationship_text_fields_must_be_strings(field_name: str) -> None:
     assert violations == [f"pipeline_relationships[0]: {field_name!r} must be a string when present, got dict"]
 
 
+@pytest.mark.parametrize(
+    ("path", "field_name"),
+    [
+        ((), "overview"),
+        ((), "authored_against"),
+        (("pipeline_insights", 0), "pattern_name"),
+        (("pipeline_insights", 0), "intent"),
+        (("pipeline_insights", 0), "databricks_pattern"),
+        (("pipeline_insights", 0), "risk_if_ignored"),
+        (("pipeline_insights", 0), "conversion_notes"),
+        (("pipeline_relationships", 0), "relationship_summary"),
+        (("pipeline_relationships", 0), "databricks_pattern"),
+        (("pipeline_relationships", 0), "risk_if_ignored"),
+        (("system_recommendation",), "cascade"),
+        (("system_recommendation",), "decision_driver"),
+        (("system_recommendation", "recommended_patterns", 1), "release_state"),
+        (("system_recommendation", "recommended_patterns", 1), "release_state_source"),
+    ],
+)
+def test_an_explicit_null_for_an_optional_field_is_a_violation(path: tuple[Any, ...], field_name: str) -> None:
+    """A null would be copied into both files as null, so an optional field is either given or left out."""
+    raw = _valid_insights()
+    record = functools.reduce(lambda value, key: value[key], path, raw)
+    record[field_name] = None
+
+    violations = validate_insights(raw, _inventory())
+
+    assert any(repr(field_name) in violation for violation in violations), violations
+
+
 def test_system_recommendation_requires_headline_and_patterns() -> None:
     raw = _valid_insights()
     raw["system_recommendation"] = {"cascade": ["x"]}

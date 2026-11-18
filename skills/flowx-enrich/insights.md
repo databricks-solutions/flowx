@@ -77,7 +77,8 @@ of those four keys yourself:
 - **Field types.** Pipeline names are strings. When present, `pattern_name`, `intent`,
   `databricks_pattern` and `risk_if_ignored` (per pipeline) and `relationship_summary`,
   `databricks_pattern` and `risk_if_ignored` (per relationship) must be strings, and
-  `conversion_notes` a list of strings.
+  `conversion_notes` a list of strings. Leave out a field you have nothing for: an explicit `null` is
+  refused wherever a field is optional.
 - **Text length.** No text value may exceed 20,000 characters (`overview`, `intent`, `evidence`, a
   `cascade` step or any other); the violation names the field. Summarise rather than paste source code.
 - **`recommended_patterns`** (per pipeline and system-wide): **1–4** patterns. The validator enforces
