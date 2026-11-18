@@ -1,0 +1,948 @@
+"""Validate agent-authored insights against the discover inventory, then record them.
+
+Discover writes a deterministic ``metadata/inventory.json``. An agent then authors an ``insights``
+object: its judgment about the factory, each pipeline and how pipelines couple (see
+:mod:`flowx.models.insights`). Enrich checks that object against the real inventory and, only when it
+is clean, writes it to ``metadata/agentic_insights.json`` and rebuilds ``inventory.json`` from the saved
+``source_graphs.json`` plus that file (or, when the inventory records no graphs hash, from discover's
+deterministic part). The inventory is always rebuilt, never patched, and re-running with the same
+insights writes the same bytes.
+
+The checks:
+
+* every ``pipeline`` and relationship endpoint must be a pipeline the inventory lists, except that a
+  ``control`` relationship whose edge resolves may name a pipeline discover left unlisted;
+* a ``control`` relationship must match a real control edge on the full ``(from, to, via_task_key)``
+  triple, so it connects exactly the pipelines it claims;
+* an ``inferred`` relationship has nothing to match, so it must carry ``evidence`` and a ``confidence``.
+
+The library stamps ``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and
+``agentic_insights_sha256``; authored insights carrying any of them are refused. The optional
+``authored_against`` (the ``source_graphs_sha256`` the author read) is checked when given and never
+recorded.
+
+One enrich writes an output folder at a time, and an enrich that finds discover ran while it worked
+writes nothing. Sequential use is safe; a few narrow windows with concurrent runs stay open.
+:func:`_enrich_locked` describes the lock, the checks, the crash cases and those windows in one place.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import fields
+from pathlib import Path
+from typing import Any
+
+from flowx.discovery_inventory import build_source_inventory
+from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, canonical_sha256, source_graphs_from_document
+from flowx.models.discovery import SOURCE_ADF, SourceGraph
+from flowx.models.insights import (
+    CONFIDENCE_LEVELS,
+    MAX_RECOMMENDED_PATTERNS,
+    MAX_TEXT_FIELD_CHARS,
+    RELEASE_STATES,
+    RELEASE_STATES_REQUIRING_SOURCE,
+    SCHEMA_VERSION,
+    Insights,
+    LineageEdgeRef,
+    PipelineInsight,
+    PipelineRelationship,
+    RecommendedPattern,
+    SystemRecommendation,
+)
+
+# The single additive top-level key the insights block is rendered under in inventory.json.
+INSIGHTS_KEY = "insights"
+
+# The file enrich writes; inventory.json's insights block is always a copy of it.
+AGENTIC_INSIGHTS_FILENAME = "agentic_insights.json"
+
+# Held in metadata/ while one enrich reads, validates and writes (see _enrich_locked).
+ENRICH_LOCK_FILENAME = ".enrich.lock"
+
+# A hosted agent cannot delete files in output_dir, but discover clears metadata/ and the lock with it.
+_LOCK_RECOVERY = (
+    f"locally, delete metadata/{ENRICH_LOCK_FILENAME} and run enrich again; on the hosted MCP server, run "
+    "discover again (it clears metadata/ and the lock), then enrich prepare and apply again"
+)
+
+# Library-owned keys stamped on record; authored insights must not supply them.
+_SCHEMA_VERSION_KEY = "schema_version"
+_FINGERPRINT_KEY = "inventory_sha256"
+_SOURCE_GRAPHS_HASH_KEY = "source_graphs_sha256"
+_AGENTIC_INSIGHTS_HASH_KEY = "agentic_insights_sha256"
+_LIBRARY_KEYS = (_SCHEMA_VERSION_KEY, _FINGERPRINT_KEY, _SOURCE_GRAPHS_HASH_KEY, _AGENTIC_INSIGHTS_HASH_KEY)
+
+# The source_graphs_sha256 the author read from inventory.json, checked when given so stale insights never
+# bind to a newer discover. Optional and not recorded: the library stamps the hash itself.
+_AUTHORED_AGAINST_KEY = "authored_against"
+
+# Each object's allowed keys come from its model in flowx.models.insights, so the contract and the validator agree.
+_CONTENT_KEYS = tuple(field.name for field in fields(Insights))
+_INSIGHTS_TOP_KEYS = {*_CONTENT_KEYS, _AUTHORED_AGAINST_KEY}
+_INSIGHT_KEYS = {field.name for field in fields(PipelineInsight)}
+_INSIGHT_TEXT_FIELDS = ("pattern_name", "intent", "databricks_pattern", "risk_if_ignored")
+_RECOMMENDED_PATTERN_KEYS = {field.name for field in fields(RecommendedPattern)}
+_SYSTEM_RECOMMENDATION_KEYS = {field.name for field in fields(SystemRecommendation)}
+_RELATIONSHIP_KEYS = {field.name for field in fields(PipelineRelationship)}
+_RELATIONSHIP_TEXT_FIELDS = ("relationship_summary", "databricks_pattern", "risk_if_ignored")
+_EDGE_KEYS = {field.name for field in fields(LineageEdgeRef)}
+_EDGE_TYPES = ("control", "inferred")
+
+
+# --------------------------------------------------------------------------- #
+# Inventory projections used for foreign-key + lineage-edge resolution.
+# --------------------------------------------------------------------------- #
+
+
+def _inventory_pipelines(inventory: dict[str, Any]) -> list[dict[str, Any]]:
+    """The inventory's pipeline entries that are objects; a malformed ``pipelines`` value lists none."""
+    pipelines = inventory.get("pipelines")
+    if not isinstance(pipelines, list):
+        return []
+    return [pipeline for pipeline in pipelines if isinstance(pipeline, dict)]
+
+
+def _pipeline_names(inventory: dict[str, Any]) -> set[str]:
+    """The pipeline names the inventory lists (the foreign-key domain, which only a resolved control edge widens).
+
+    Only string names count.
+    """
+    return {pipeline["name"] for pipeline in _inventory_pipelines(inventory) if isinstance(pipeline.get("name"), str)}
+
+
+def _control_edge_triples(inventory: dict[str, Any]) -> set[tuple[str, str, str]]:
+    """Real control edges as ``(source_workflow, target_workflow, via_task_key)`` triples.
+
+    The unified inventory places lineage **per pipeline** (one block beside each pipeline's
+    ``activities``), so every pipeline's ``lineage.control_edges`` are gathered into one set.
+    Resolving on the full triple -- not the bare ``via_task_key`` -- pins a relationship to a
+    *specific* edge: a callee is often invoked from several callers, so a ``via_task_key``
+    alone could match an edge between the wrong pair. Only edges discover marked ``resolved``
+    with string fields count; a malformed ``lineage`` block contributes none.
+    """
+    triples: set[tuple[str, str, str]] = set()
+    for pipeline in _inventory_pipelines(inventory):
+        lineage = pipeline.get("lineage")
+        edges = lineage.get("control_edges") if isinstance(lineage, dict) else None
+        for edge in edges if isinstance(edges, list) else []:
+            if not isinstance(edge, dict) or edge.get("resolved") is not True:
+                continue
+            source, target, via_task_key = (
+                edge.get(key) for key in ("source_workflow", "target_workflow", "via_task_key")
+            )
+            if isinstance(source, str) and isinstance(target, str) and isinstance(via_task_key, str):
+                triples.add((source, target, via_task_key))
+    return triples
+
+
+# --------------------------------------------------------------------------- #
+# Validation. All violations are collected (never fail-fast) so the authoring
+# agent can fix every problem in one pass.
+# --------------------------------------------------------------------------- #
+
+
+def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
+    """Validate an authored insights payload against the inventory.
+
+    Returns a list of human-readable violation strings; an empty list means the insights are
+    valid. Never raises on a malformed payload -- a non-dict payload is reported as a violation
+    so the caller can surface it the same way as every other problem.
+    """
+    if not isinstance(raw, dict):
+        return [f"insights must be a JSON object, got {type(raw).__name__}"]
+
+    violations: list[str] = []
+    for key in sorted(set(raw) - _INSIGHTS_TOP_KEYS):
+        hint = " (set by the library, not the author)" if key in _LIBRARY_KEYS else ""
+        violations.append(f"unknown top-level key: {key!r}{hint}")
+    if not any(key in raw and raw[key] != [] for key in _CONTENT_KEYS):
+        content_keys = ", ".join(repr(key) for key in _CONTENT_KEYS[:-1])
+        violations.append(
+            f"insights must set at least one of {content_keys} or {_CONTENT_KEYS[-1]!r} (an empty list does not count)"
+        )
+
+    if _AUTHORED_AGAINST_KEY in raw:
+        violations.extend(_authored_against_violations(raw[_AUTHORED_AGAINST_KEY], inventory))
+    violations.extend(_text_length_violations(raw, ""))
+
+    overview = raw.get("overview")
+    if "overview" in raw and (not isinstance(overview, str) or not overview.strip()):
+        violations.append("'overview' must be a non-empty string when present")
+
+    if "system_recommendation" in raw:
+        violations.extend(_validate_system_recommendation(raw["system_recommendation"]))
+
+    names = _pipeline_names(inventory)
+    control_triples = _control_edge_triples(inventory)
+
+    violations.extend(_validate_pipeline_insights(raw.get("pipeline_insights", []), names))
+    violations.extend(_validate_relationships(raw.get("pipeline_relationships", []), names, control_triples))
+    return violations
+
+
+def _text_length_violations(value: Any, location: str) -> list[str]:
+    """Report every text value under *value* longer than :data:`MAX_TEXT_FIELD_CHARS`, named by its path.
+
+    The walk covers every free-text field wherever it sits (overview, intent, evidence, a cascade step
+    and so on), so a field added to the schema later is capped too.
+    """
+    if isinstance(value, str):
+        if len(value) <= MAX_TEXT_FIELD_CHARS:
+            return []
+        return [f"{location}: text is {len(value)} characters; at most {MAX_TEXT_FIELD_CHARS} are allowed"]
+    if isinstance(value, dict):
+        return [
+            violation
+            for key, item in value.items()
+            for violation in _text_length_violations(item, f"{location}.{key}" if location else str(key))
+        ]
+    if isinstance(value, list):
+        return [
+            violation
+            for index, item in enumerate(value)
+            for violation in _text_length_violations(item, f"{location}[{index}]")
+        ]
+    return []
+
+
+def _authored_against_violations(authored_against: Any, inventory: dict[str, Any]) -> list[str]:
+    """Check the insights were authored against the inventory enrich is about to record them on.
+
+    ``authored_against`` is optional: without it the library stamps the graphs hash itself. When the
+    author does copy the inventory's ``source_graphs_sha256`` into it, a different value means
+    discover ran again after the insights were written, so they would otherwise bind to a newer
+    inventory unchecked.
+    """
+    if authored_against is None:
+        return [
+            f"'{_AUTHORED_AGAINST_KEY}' must not be null; copy the inventory's {_SOURCE_GRAPHS_HASH_KEY} or leave "
+            "the field out"
+        ]
+    recorded = inventory.get(_SOURCE_GRAPHS_HASH_KEY)
+    if recorded is None:
+        return [f"'{_AUTHORED_AGAINST_KEY}' was given but inventory.json records no {_SOURCE_GRAPHS_HASH_KEY}"]
+    if authored_against != recorded:
+        return [
+            f"the insights were authored against a different inventory ({_AUTHORED_AGAINST_KEY} "
+            f"{authored_against!r}, inventory {_SOURCE_GRAPHS_HASH_KEY} {recorded!r}); re-read inventory.json "
+            "and author the insights again"
+        ]
+    return []
+
+
+def _validate_pipeline_insights(insights: Any, names: set[str]) -> list[str]:
+    """Validate the ``pipeline_insights`` list: shape, unknown fields, the pipeline FK, one entry per pipeline."""
+    if not isinstance(insights, list):
+        return ["'pipeline_insights' must be a list"]
+    violations: list[str] = []
+    first_index_by_name: dict[str, int] = {}
+    for index, item in enumerate(insights):
+        loc = f"pipeline_insights[{index}]"
+        if not isinstance(item, dict):
+            violations.append(f"{loc} must be an object")
+            continue
+        for key in sorted(set(item) - _INSIGHT_KEYS):
+            violations.append(f"{loc}: unknown field {key!r}")
+        name = item.get("pipeline")
+        if not name:
+            violations.append(f"{loc}: missing required field 'pipeline'")
+        elif not isinstance(name, str):
+            violations.append(f"{loc}: 'pipeline' must be a string, got {type(name).__name__}")
+        elif name in first_index_by_name:
+            violations.append(
+                f"{loc}: duplicate insight for pipeline {name!r} (already given at "
+                f"pipeline_insights[{first_index_by_name[name]}]); give one entry per pipeline"
+            )
+        else:
+            first_index_by_name[name] = index
+            if name not in names:
+                violations.append(f"{loc}: pipeline {name!r} not in inventory")
+        violations.extend(_validate_optional_strings(item, _INSIGHT_TEXT_FIELDS, loc))
+        notes = item.get("conversion_notes")
+        if "conversion_notes" in item and (
+            not isinstance(notes, list) or not all(isinstance(note, str) for note in notes)
+        ):
+            violations.append(f"{loc}: 'conversion_notes' must be a list of strings when present")
+        if "recommended_patterns" in item:
+            violations.extend(_validate_recommended_patterns(item["recommended_patterns"], loc))
+    return violations
+
+
+def _validate_relationships(
+    relationships: Any,
+    names: set[str],
+    control_triples: set[tuple[str, str, str]],
+) -> list[str]:
+    """Validate the ``pipeline_relationships`` list: endpoints (FK) + each ``lineage_edge``.
+
+    A pipeline cannot relate to itself (discovery never records a self-edge either), and one
+    relationship is given once. Two relationships are the same when they share both endpoints and the
+    edge's type and identity, so two control edges between one pair through different tasks are both
+    kept.
+    """
+    if not isinstance(relationships, list):
+        return ["'pipeline_relationships' must be a list"]
+    violations: list[str] = []
+    first_index_by_relationship: dict[tuple[str, str, Any, Any], int] = {}
+    for index, relationship in enumerate(relationships):
+        loc = f"pipeline_relationships[{index}]"
+        if not isinstance(relationship, dict):
+            violations.append(f"{loc} must be an object")
+            continue
+        for key in sorted(set(relationship) - _RELATIONSHIP_KEYS):
+            violations.append(f"{loc}: unknown field {key!r}")
+        from_pipeline = relationship.get("from_pipeline")
+        to_pipeline = relationship.get("to_pipeline")
+        edge = relationship.get("lineage_edge")
+        resolves_control_edge = _resolves_control_edge(edge, from_pipeline, to_pipeline, control_triples)
+        for endpoint, value in (("from_pipeline", from_pipeline), ("to_pipeline", to_pipeline)):
+            if not value:
+                violations.append(f"{loc}: missing required field {endpoint!r}")
+            elif not isinstance(value, str):
+                violations.append(f"{loc}: {endpoint!r} must be a string, got {type(value).__name__}")
+            elif value not in names and not resolves_control_edge:
+                violations.append(f"{loc}: {endpoint} {value!r} not in inventory")
+        if isinstance(from_pipeline, str) and from_pipeline and from_pipeline == to_pipeline:
+            violations.append(f"{loc}: a pipeline cannot relate to itself ({from_pipeline!r} to {from_pipeline!r})")
+        relationship_key = _relationship_key(from_pipeline, to_pipeline, edge)
+        if relationship_key is not None and relationship_key in first_index_by_relationship:
+            violations.append(
+                f"{loc}: duplicate relationship (already given at "
+                f"pipeline_relationships[{first_index_by_relationship[relationship_key]}]); give each one once"
+            )
+        elif relationship_key is not None:
+            first_index_by_relationship[relationship_key] = index
+        violations.extend(_validate_optional_strings(relationship, _RELATIONSHIP_TEXT_FIELDS, loc))
+        violations.extend(_validate_edge(edge, loc, from_pipeline, to_pipeline, resolves_control_edge))
+    return violations
+
+
+def _relationship_key(from_pipeline: Any, to_pipeline: Any, edge: Any) -> tuple[str, str, Any, Any] | None:
+    """``(from, to, edge_type, edge_identity)`` for spotting a repeated relationship, or ``None`` when unreadable.
+
+    The identity is compared stripped, so surrounding spaces do not make a second relationship.
+    """
+    if not (isinstance(from_pipeline, str) and isinstance(to_pipeline, str) and isinstance(edge, dict)):
+        return None
+    edge_type, edge_identity = edge.get("edge_type"), edge.get("edge_identity")
+    if not all(value is None or isinstance(value, str) for value in (edge_type, edge_identity)):
+        return None
+    return from_pipeline, to_pipeline, edge_type, edge_identity.strip() if isinstance(edge_identity, str) else None
+
+
+def _resolves_control_edge(
+    edge: Any,
+    from_pipeline: Any,
+    to_pipeline: Any,
+    control_triples: set[tuple[str, str, str]],
+) -> bool:
+    """Whether *edge* is a ``control`` edge naming one of the inventory's resolved control edges, end to end.
+
+    Such an edge proves both endpoints are pipelines in the export, so they count as foreign keys
+    even when discover left one unlisted (filtered out with ``--pipeline``, or a pipeline with no
+    activities).
+    """
+    if not isinstance(edge, dict) or edge.get("edge_type") != "control":
+        return False
+    triple = (from_pipeline, to_pipeline, edge.get("edge_identity"))
+    return all(isinstance(part, str) for part in triple) and triple in control_triples
+
+
+def _validate_optional_strings(record: dict[str, Any], field_names: tuple[str, ...], loc: str) -> list[str]:
+    """Report each of *field_names* that *record* sets to something other than a string, ``null`` included."""
+    return [
+        f"{loc}: {field_name!r} must be a string when present, got {_json_type_name(record[field_name])}"
+        for field_name in field_names
+        if field_name in record and not isinstance(record[field_name], str)
+    ]
+
+
+def _json_type_name(value: Any) -> str:
+    """The type name a violation reports for *value*, saying ``null`` rather than Python's ``NoneType``."""
+    return "null" if value is None else type(value).__name__
+
+
+def _validate_edge(
+    edge: Any,
+    loc: str,
+    from_pipeline: Any,
+    to_pipeline: Any,
+    resolves_control_edge: bool,
+) -> list[str]:
+    """Validate one ``lineage_edge`` reference.
+
+    A ``control`` edge annotates a deterministic edge: the full ``(from, to, edge_identity)``
+    triple must resolve against the inventory's lineage and the inferred-only ``evidence`` /
+    ``confidence`` keys must be **absent entirely** (an explicit ``null`` is still a violation --
+    the deterministic edge *is* the evidence). An ``inferred`` edge asserts a coupling the
+    deterministic layer never found: nothing to resolve, but a non-empty ``evidence`` string
+    and a ``confidence`` level are required instead.
+
+    Every problem on the edge is collected (never fail-fast), so a single edge that is wrong in
+    several ways -- e.g. an ``inferred`` edge with both an invalid identity and missing evidence
+    -- surfaces all its errors in one pass, matching the rest of the validator.
+    """
+    if edge is None:
+        return [f"{loc}: missing required field 'lineage_edge'"]
+    if not isinstance(edge, dict):
+        return [f"{loc}.lineage_edge must be an object"]
+    problems: list[str] = []
+    for key in sorted(set(edge) - _EDGE_KEYS):
+        problems.append(f"{loc}.lineage_edge: unknown field {key!r}")
+
+    edge_type = edge.get("edge_type")
+    identity = edge.get("edge_identity")
+    if edge_type not in _EDGE_TYPES:
+        problems.append(
+            f"{loc}.lineage_edge: edge_type must be 'control' or 'inferred', got {edge_type!r}. "
+            "There is no 'data' edge_type: a cross-pipeline data coupling (one pipeline writes a "
+            "table/file another reads) belongs on the 'inferred' tier -- set edge_type 'inferred' "
+            "with an 'evidence' string and a 'confidence' level, not a 'data' edge."
+        )
+    if not isinstance(identity, str) or not identity.strip():
+        problems.append(f"{loc}.lineage_edge: edge_identity must be a non-empty string")
+
+    # Tier-specific checks run independently of the type/identity checks above so every problem
+    # on the edge is reported together rather than masked by an early return.
+    if edge_type == "inferred":
+        problems.extend(_validate_inferred_edge(edge, loc))
+    elif edge_type == "control":
+        # Annotation tier: the inferred-only fields must be ABSENT (key not present), not merely
+        # non-null -- an explicit `evidence: null` / `confidence: null` is still a violation.
+        for inferred_only in ("evidence", "confidence"):
+            if inferred_only in edge:
+                problems.append(f"{loc}.lineage_edge: {inferred_only!r} is only valid on an 'inferred' edge")
+        # Report an unresolved triple only when the identity and both endpoints are usable strings
+        # (a bad identity / endpoint is already reported here or by the caller).
+        if (
+            isinstance(identity, str)
+            and identity
+            and isinstance(from_pipeline, str)
+            and isinstance(to_pipeline, str)
+            and not resolves_control_edge
+        ):
+            problems.append(
+                f"{loc}.lineage_edge: control edge {identity!r} does not resolve to a lineage edge "
+                f"from {from_pipeline!r} to {to_pipeline!r}"
+            )
+    return problems
+
+
+def _validate_inferred_edge(edge: dict[str, Any], loc: str) -> list[str]:
+    """Validate the inferred-only fields: a non-empty ``evidence`` string + a ``confidence`` level."""
+    problems: list[str] = []
+    evidence = edge.get("evidence")
+    if not isinstance(evidence, str) or not evidence.strip():
+        problems.append(f"{loc}.lineage_edge: an 'inferred' edge requires a non-empty 'evidence' string")
+    confidence = edge.get("confidence")
+    if confidence not in CONFIDENCE_LEVELS:
+        levels = ", ".join(repr(level) for level in CONFIDENCE_LEVELS)
+        problems.append(
+            f"{loc}.lineage_edge: an 'inferred' edge requires 'confidence' in {{{levels}}}, got {confidence!r}"
+        )
+    return problems
+
+
+def _validate_recommended_patterns(value: Any, loc: str) -> list[str]:
+    """Validate a ranked ``recommended_patterns`` list.
+
+    When present it must hold 1-:data:`MAX_RECOMMENDED_PATTERNS` objects, ordered best-first.
+    Each requires a non-empty ``pattern`` and ``fit`` string and a boolean
+    ``simplification_pattern``. Shared by a pipeline's list and the system recommendation's
+    (``loc`` distinguishes them). All problems are collected.
+    """
+    field_loc = f"{loc}.recommended_patterns"
+    if not isinstance(value, list):
+        return [f"{field_loc} must be a list"]
+    if not value:
+        return [
+            f"{field_loc} must contain 1-{MAX_RECOMMENDED_PATTERNS} patterns when present "
+            f"(omit the field instead of sending an empty list)"
+        ]
+    problems: list[str] = []
+    if len(value) > MAX_RECOMMENDED_PATTERNS:
+        problems.append(f"{field_loc} has {len(value)} patterns; at most {MAX_RECOMMENDED_PATTERNS} are allowed")
+    for index, pattern in enumerate(value):
+        pattern_loc = f"{field_loc}[{index}]"
+        if not isinstance(pattern, dict):
+            problems.append(f"{pattern_loc} must be an object")
+            continue
+        for key in sorted(set(pattern) - _RECOMMENDED_PATTERN_KEYS):
+            problems.append(f"{pattern_loc}: unknown field {key!r}")
+        for required in ("pattern", "fit"):
+            text = pattern.get(required)
+            if not isinstance(text, str) or not text.strip():
+                problems.append(f"{pattern_loc}: {required!r} must be a non-empty string")
+        # A JSON bool parses to a Python bool; reject ints/strings so 1 / "yes" don't slip through.
+        if not isinstance(pattern.get("simplification_pattern"), bool):
+            problems.append(
+                f"{pattern_loc}: 'simplification_pattern' must be a boolean (true/false), "
+                f"got {type(pattern.get('simplification_pattern')).__name__}"
+            )
+        problems.extend(_validate_release_state(pattern, pattern_loc))
+    return problems
+
+
+def _validate_release_state(pattern: dict[str, Any], loc: str) -> list[str]:
+    """Validate a recommended pattern's optional GA/Preview ``release_state`` fields.
+
+    The release state is authored judgment the deterministic layer can never derive, verified against
+    current public Databricks docs. Rules (all collected, never fail-fast, matching the rest of the
+    validator):
+
+    * ``release_state``, when set, must be one of :data:`~flowx.models.insights.RELEASE_STATES`.
+    * ``release_state`` is **required** whenever ``simplification_pattern`` is ``True`` -- a
+      distinctive capability that collapses a legacy pattern must declare its verified release state
+      so the downstream routing surface can disclose it correctly rather than recommend blindly.
+    * ``release_state_source`` (a non-empty citation) is **required** whenever ``release_state`` is a
+      non-GA preview/beta state (:data:`~flowx.models.insights.RELEASE_STATES_REQUIRING_SOURCE`); it
+      is not required for ``"ga"`` (the stable default) or ``"unknown"`` (no claim to ground).
+    * ``release_state_source``, when set, must be a string whatever the ``release_state``.
+    """
+    problems: list[str] = []
+    release_state = pattern.get("release_state")
+    source = pattern.get("release_state_source")
+
+    if "release_state" in pattern and release_state not in RELEASE_STATES:
+        allowed = ", ".join(repr(state) for state in RELEASE_STATES)
+        got = _json_type_name(release_state) if release_state is None else repr(release_state)
+        problems.append(f"{loc}: 'release_state' must be one of {{{allowed}}}, got {got}")
+
+    if pattern.get("simplification_pattern") is True and "release_state" not in pattern:
+        problems.append(
+            f"{loc}: 'release_state' is required when 'simplification_pattern' is true "
+            f"(a distinctive capability must declare its verified GA/Preview release state)"
+        )
+
+    if "release_state_source" in pattern and not isinstance(source, str):
+        problems.append(f"{loc}: 'release_state_source' must be a string when present, got {_json_type_name(source)}")
+    elif release_state in RELEASE_STATES_REQUIRING_SOURCE and (source is None or not source.strip()):
+        problems.append(
+            f"{loc}: 'release_state_source' (a non-empty doc URL / citation) is required when "
+            f"'release_state' is {release_state!r}"
+        )
+    return problems
+
+
+def _validate_system_recommendation(value: Any) -> list[str]:
+    """Validate the optional top-level ``system_recommendation`` object.
+
+    The one whole-factory decision, authored before per-pipeline insights. When present it must
+    be an object with a non-empty ``headline`` and a ``recommended_patterns`` ranked list.
+    ``cascade`` (non-empty strings) and ``decision_driver`` (the gating question) are optional.
+    All problems are collected.
+    """
+    loc = "system_recommendation"
+    if not isinstance(value, dict):
+        return [f"{loc} must be an object"]
+    problems: list[str] = []
+    for key in sorted(set(value) - _SYSTEM_RECOMMENDATION_KEYS):
+        problems.append(f"{loc}: unknown field {key!r}")
+    headline = value.get("headline")
+    if not isinstance(headline, str) or not headline.strip():
+        problems.append(f"{loc}: 'headline' must be a non-empty string")
+    if "recommended_patterns" not in value:
+        problems.append(f"{loc}: missing required field 'recommended_patterns'")
+    else:
+        problems.extend(_validate_recommended_patterns(value["recommended_patterns"], loc))
+    cascade = value.get("cascade")
+    if "cascade" in value and (
+        not isinstance(cascade, list) or not all(isinstance(item, str) and item.strip() for item in cascade)
+    ):
+        problems.append(f"{loc}: 'cascade' must be a list of non-empty strings when present")
+    driver = value.get("decision_driver")
+    if "decision_driver" in value and (not isinstance(driver, str) or not driver.strip()):
+        problems.append(f"{loc}: 'decision_driver' must be a non-empty string when present")
+    return problems
+
+
+# --------------------------------------------------------------------------- #
+# Loading, fingerprinting, and the locked idempotent record.
+# --------------------------------------------------------------------------- #
+
+
+def load_insights(*, insights: dict[str, Any] | None = None, insights_path: Path | None = None) -> dict[str, Any]:
+    """Return the raw authored insights dict from exactly one source (inline or file).
+
+    Raises:
+        ValueError: if neither or both sources are provided.
+    """
+    if (insights is None) == (insights_path is None):
+        raise ValueError("provide exactly one of 'insights' (inline dict) or 'insights_path'")
+    if insights is not None:
+        return insights
+    assert insights_path is not None  # guaranteed by the guard above
+    return json.loads(insights_path.read_text(encoding="utf-8"))
+
+
+def _base_inventory(inventory: dict[str, Any]) -> dict[str, Any]:
+    """The deterministic inventory with any previously-rendered ``insights`` block stripped.
+
+    Fingerprinting and re-serialisation both work off this so re-enriching an already-enriched
+    inventory is stable: the fingerprint reflects only the deterministic layer, never a prior
+    ``insights`` block.
+    """
+    return {key: value for key, value in inventory.items() if key != INSIGHTS_KEY}
+
+
+def inventory_fingerprint(inventory: dict[str, Any]) -> str:
+    """A stable SHA-256 over the deterministic inventory (any ``insights`` block excluded).
+
+    Canonicalised with ``sort_keys`` so the digest is independent of key insertion order --
+    it binds the authored insights to *what the inventory says*, not to a particular byte layout.
+    """
+    return canonical_sha256(_base_inventory(inventory))
+
+
+def build_agentic_insights(inventory: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``agentic_insights.json`` document from validated authored insights.
+
+    The document is the authored content plus the library-owned ``schema_version``, the
+    ``inventory_sha256`` fingerprint of the deterministic inventory, the persisted
+    ``source_graphs_sha256`` the inventory records (when it records one), and finally
+    ``agentic_insights_sha256``, a hash over everything above it. Does not mutate the inputs.
+    """
+    base = _base_inventory(inventory)
+    document: dict[str, Any] = {_SCHEMA_VERSION_KEY: SCHEMA_VERSION, _FINGERPRINT_KEY: inventory_fingerprint(base)}
+    source_graphs_sha256 = base.get(_SOURCE_GRAPHS_HASH_KEY)
+    if source_graphs_sha256 is not None:
+        document[_SOURCE_GRAPHS_HASH_KEY] = source_graphs_sha256
+    for key in _CONTENT_KEYS:
+        if key in raw:
+            document[key] = raw[key]
+    document[_AGENTIC_INSIGHTS_HASH_KEY] = canonical_sha256(document)
+    return document
+
+
+def render_inventory(inventory: dict[str, Any], agentic_insights: dict[str, Any]) -> dict[str, Any]:
+    """Return the inventory built from its deterministic part plus the agentic insights document.
+
+    Does not mutate the input and performs no I/O. The deterministic keys keep their original
+    order and values, so re-serialising them is byte-identical to discover's write, and the
+    ``insights`` block is exactly the ``agentic_insights.json`` content, replacing any prior block.
+    """
+    base = _base_inventory(inventory)
+    base[INSIGHTS_KEY] = dict(agentic_insights)
+    return base
+
+
+def _load_source_graphs(output_dir: Path, inventory: dict[str, Any]) -> tuple[list[SourceGraph] | None, list[str]]:
+    """Read the saved ``source_graphs.json`` the inventory records, as ``(graphs, violations)``.
+
+    An inventory without a recorded hash (an older discover, or a source that does not persist
+    graphs yet) has nothing to read, so it yields ``(None, [])`` -- unless ``source_graphs.json`` is
+    saved beside it, which means the hash was removed from the inventory, so that is a violation.
+    Otherwise the saved file must be intact and its document hash must be the one the inventory
+    records, so insights are never bound to a stale graph. The two unhashed settings the rebuild
+    takes from ``inventory.json`` must also hold up: ``source`` must be the graphs' own source and
+    ``source_dir`` a string. Any problem yields ``(None, [violation])``.
+    """
+    recorded = inventory.get(_SOURCE_GRAPHS_HASH_KEY)
+    graphs_path = Path(output_dir) / "metadata" / SOURCE_GRAPHS_FILENAME
+    if recorded is None:
+        if graphs_path.exists():
+            return None, [
+                f"inventory.json records no {_SOURCE_GRAPHS_HASH_KEY} but {SOURCE_GRAPHS_FILENAME} exists, so "
+                "inventory.json was edited after discover; re-run discover"
+            ]
+        return None, []
+    if not graphs_path.is_file():
+        return None, [
+            f"inventory.json records source_graphs_sha256 but {SOURCE_GRAPHS_FILENAME} is missing; re-run discover"
+        ]
+    try:
+        document = json.loads(graphs_path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError(f"expected a JSON object, got {type(document).__name__}")
+        if document.get("document_sha256") != recorded:
+            return None, [f"inventory.json was projected from a different {SOURCE_GRAPHS_FILENAME}; re-run discover"]
+        graphs = source_graphs_from_document(document)
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        return None, [f"{SOURCE_GRAPHS_FILENAME} is not usable: {error}"]
+    violations: list[str] = []
+    if inventory.get("source") != document.get("source"):
+        violations.append(
+            f"inventory.json source {inventory.get('source')!r} does not match {SOURCE_GRAPHS_FILENAME} source "
+            f"{document.get('source')!r}"
+        )
+    if not isinstance(inventory.get("source_dir"), str):
+        violations.append(
+            f"inventory.json source_dir must be a string, got {type(inventory.get('source_dir')).__name__}"
+        )
+    return (None, violations) if violations else (graphs, [])
+
+
+# Sources whose discover leaves zero-activity pipelines out of the per-pipeline listing (see the ADF loader).
+_SOURCES_OMITTING_EMPTY_PIPELINES = frozenset({SOURCE_ADF})
+
+
+def project_inventory(graphs: list[SourceGraph], inventory: dict[str, Any]) -> dict[str, Any]:
+    """Project the deterministic inventory again from the saved source graphs, as discover did.
+
+    The graphs are the content; ``inventory.json`` only supplies the two settings discover passed
+    alongside them and that ``source_graphs.json`` does not record -- the ``source_dir`` echoed for
+    provenance and the recorded ``source_graphs_sha256`` -- plus the source, which decides whether
+    empty pipelines are listed. The result serialises byte-identically to discover's inventory.
+    """
+    source = str(inventory.get("source", ""))
+    return build_source_inventory(
+        graphs,
+        source=source,
+        source_dir=str(inventory.get("source_dir", "")),
+        include_empty_pipelines=source not in _SOURCES_OMITTING_EMPTY_PIPELINES,
+        source_graphs_sha256=inventory.get(_SOURCE_GRAPHS_HASH_KEY),
+    )
+
+
+class _UnrecoveredWriteError(OSError):
+    """The two files may disagree: putting the previous insights file back failed, or an interrupt hit a replace."""
+
+
+class _DiscoverRanError(Exception):
+    """Discover cleared or rewrote ``metadata/`` after this enrich read the inventory, so nothing may be written."""
+
+
+# Reported when discover ran between an enrich's read and its write.
+_DISCOVER_RAN_VIOLATION = "discover ran during this enrich; prepare and enrich again"
+
+
+def _holds_lock(lock_path: Path, token: str) -> bool:
+    """Whether the lock file at *lock_path* is still the one this enrich created (holding *token*)."""
+    try:
+        return lock_path.read_text(encoding="utf-8") == token
+    except OSError:
+        return False
+
+
+def _is_open_file(descriptor: int, path: Path) -> bool:
+    """Whether *path* is still the file open on *descriptor*, not one created there since."""
+    try:
+        return os.path.samestat(os.fstat(descriptor), path.stat())
+    except OSError:
+        return False
+
+
+@contextmanager
+def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
+    """Hold the output directory's enrich lock, yielding its token, or ``None`` when another enrich holds it.
+
+    The lock is a file created with ``O_EXCL`` (portable, unlike ``fcntl``) holding a random token,
+    so this enrich can tell its own lock from one a later enrich created after discover cleared
+    ``metadata/`` (see :func:`_enrich_locked`). It is removed when the enrich finishes or raises,
+    if it is still this enrich's.
+    It is left behind when the two files may disagree -- a killed process, or an error that is or
+    was raised from :class:`_UnrecoveredWriteError` (a failed rollback, or an interrupt between the
+    two replaces) -- and, with nothing written, when writing the token fails and cleanup cannot
+    confirm the lock is still this enrich's. The next enrich refuses until the lock is removed.
+    """
+    lock_path = metadata_dir / ENRICH_LOCK_FILENAME
+    token = secrets.token_hex(16)
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        yield None
+        return
+    try:
+        try:
+            if os.write(descriptor, token.encode("ascii")) != len(token):
+                raise OSError(f"could not write the enrich lock {lock_path}")
+        except BaseException:
+            # The token may be missing or partial, so compare file identity instead; the open
+            # descriptor keeps its inode from being reused by a later enrich's lock.
+            if _is_open_file(descriptor, lock_path):
+                lock_path.unlink(missing_ok=True)
+            raise
+        finally:
+            os.close(descriptor)
+    except BaseException:
+        if _holds_lock(lock_path, token):
+            lock_path.unlink(missing_ok=True)
+        raise
+    keep_lock = False
+    try:
+        yield token
+    except BaseException as error:
+        keep_lock = isinstance(error, _UnrecoveredWriteError) or isinstance(error.__cause__, _UnrecoveredWriteError)
+        raise
+    finally:
+        if not keep_lock and _holds_lock(lock_path, token):
+            lock_path.unlink(missing_ok=True)
+
+
+def _write_both_or_neither(
+    insights_path: Path,
+    insights_document: dict[str, Any],
+    inventory_path: Path,
+    inventory_document: dict[str, Any],
+    *,
+    current_insights: dict[str, Any] | None,
+    still_current: Callable[[], bool],
+    lock_token: str,
+) -> None:
+    """Replace ``agentic_insights.json`` and then ``inventory.json``, keeping the two consistent.
+
+    Both temp files, named after *lock_token*, are written first and removed on the way out. If the
+    inventory replace fails, the insights file is put back to *current_insights* (the block the unchanged
+    inventory holds) or removed when that is ``None``; if that rollback fails too,
+    :class:`_UnrecoveredWriteError` is raised so the caller keeps the lock. An interrupt from the first
+    replace on may land just after a rename, so nothing is rolled back and it is re-raised from an
+    :class:`_UnrecoveredWriteError`. When *still_current* says discover ran, before the temp files or
+    before the first replace, :class:`_DiscoverRanError` is raised and nothing is replaced.
+    """
+    previous_insights = None if current_insights is None else json.dumps(current_insights, indent=2).encode("utf-8")
+    insights_temporary = insights_path.with_name(f".{insights_path.name}.{lock_token}.tmp")
+    inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.{lock_token}.tmp")
+    try:
+        if not still_current():
+            raise _DiscoverRanError
+        insights_temporary.write_text(json.dumps(insights_document, indent=2), encoding="utf-8")
+        inventory_temporary.write_text(json.dumps(inventory_document, indent=2), encoding="utf-8")
+        if not still_current():
+            raise _DiscoverRanError
+        try:
+            os.replace(insights_temporary, insights_path)
+            try:
+                os.replace(inventory_temporary, inventory_path)
+            except OSError:
+                try:
+                    if previous_insights is None:
+                        insights_path.unlink(missing_ok=True)
+                    else:
+                        insights_temporary.write_bytes(previous_insights)
+                        os.replace(insights_temporary, insights_path)
+                except OSError as rollback_error:
+                    raise _UnrecoveredWriteError(
+                        f"inventory.json was not updated and the previous {insights_path.name} could not be put "
+                        f"back ({rollback_error}); the enrich lock is kept, so to recover: {_LOCK_RECOVERY}"
+                    ) from rollback_error
+                raise
+        except Exception:
+            raise
+        except BaseException as interrupt:
+            raise interrupt from _UnrecoveredWriteError(
+                f"enrich was interrupted while replacing {insights_path.name} and inventory.json, so they may "
+                f"disagree; the enrich lock is kept, so to recover: {_LOCK_RECOVERY}"
+            )
+    finally:
+        insights_temporary.unlink(missing_ok=True)
+        inventory_temporary.unlink(missing_ok=True)
+
+
+def enrich_inventory(
+    output_dir: Path,
+    *,
+    insights: dict[str, Any] | None = None,
+    insights_path: Path | None = None,
+) -> dict[str, Any]:
+    """Validate authored insights against the inventory, then record them on success.
+
+    Reads ``<output_dir>/metadata/inventory.json``, validates the authored insights and checks the
+    inventory still matches the saved ``source_graphs.json`` it records. Only when there are no
+    violations does it write ``metadata/agentic_insights.json`` and rebuild ``inventory.json`` from
+    the saved source graphs (or, without a recorded graphs hash, its existing deterministic part)
+    plus that document, every deterministic key byte-identical to discover's write. On any
+    violation both files are left untouched. The read, the checks and the write all happen under
+    the output directory's enrich lock; when another enrich holds it, that is reported as a
+    violation and nothing is written.
+
+    Provide the authored insights via exactly one of ``insights`` (an inline dict) or
+    ``insights_path`` (a JSON file).
+
+    Returns a result dict ``{"ok", "violations", "inventory_sha256", "agentic_insights_sha256",
+    "pipeline_insights", "relationships"}``. ``ok`` is ``False`` (and the files untouched) when
+    there are violations.
+
+    Raises:
+        FileNotFoundError: when ``inventory.json`` does not exist (run discover first).
+        ValueError: when neither or both insight sources are provided, or the inventory file is
+            not a JSON object.
+    """
+    inventory_path = Path(output_dir) / "metadata" / "inventory.json"
+    if not inventory_path.exists():
+        raise FileNotFoundError(f"No inventory.json under {inventory_path.parent}; run the discover phase first.")
+    raw = load_insights(insights=insights, insights_path=insights_path)
+    with _enrich_lock(inventory_path.parent) as lock_token:
+        if lock_token is None:
+            lock_path = inventory_path.parent / ENRICH_LOCK_FILENAME
+            return {
+                "ok": False,
+                "violations": [
+                    f"another enrich is writing to {inventory_path.parent} ({lock_path} exists); run enrich again "
+                    "once it finishes. If no enrich is running, a previous one stopped mid-write, so to rewrite "
+                    f"both files: {_LOCK_RECOVERY}"
+                ],
+                "pipeline_insights": 0,
+                "relationships": 0,
+            }
+        return _enrich_locked(Path(output_dir), inventory_path, raw, lock_token)
+
+
+def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any, lock_token: str) -> dict[str, Any]:
+    """The read-validate-write half of :func:`enrich_inventory`, run while holding the enrich lock.
+
+    How enrich keeps ``agentic_insights.json`` and ``inventory.json`` consistent, in one place:
+
+    * **The lock.** :func:`_enrich_lock` keeps other enrich runs out. Discover does not take it: it
+      clears ``metadata/``, the lock with it.
+    * **Discover during an enrich.** Right before writing the temp files and again right before the
+      first replace, this checks that its lock is still in place and ``inventory.json`` still holds the
+      bytes it read. If discover ran in between, it writes nothing and reports that, so insights checked
+      against the old inventory never overwrite the new one.
+    * **The write.** :func:`_write_both_or_neither` writes temp files named after this run's lock token,
+      so no other run can install them, then replaces the two files back to back.
+    * **Crashes.** A kill or interrupt between the two replaces, or a failed rollback, can leave
+      ``agentic_insights.json`` a write ahead of ``inventory.json``. The lock then stays behind and the
+      next enrich refuses until it is removed. A killed run's temp files stay in ``metadata/`` until the
+      next discover clears it.
+    * **Windows left open.** Each is a few file operations wide and needs a discover during an enrich.
+      A discover between the final check and the replaces makes the enrich fail with an error and can
+      leave the two files out of step. Releasing the lock reads the token and then deletes the file, so a
+      discover plus a new enrich's lock landing between those steps lets this enrich delete the new lock;
+      a third enrich can then write alongside the second, so the two files may come from different runs.
+    """
+    inventory_bytes = inventory_path.read_bytes()
+    inventory = json.loads(inventory_bytes.decode("utf-8"))
+    if not isinstance(inventory, dict):
+        raise ValueError(f"inventory.json must contain a JSON object, got {type(inventory).__name__}")
+
+    graphs, graph_violations = _load_source_graphs(output_dir, inventory)
+    deterministic = inventory if graphs is None else project_inventory(graphs, inventory)
+    violations = validate_insights(raw, deterministic) + graph_violations
+    if violations:
+        return {"ok": False, "violations": violations, "pipeline_insights": 0, "relationships": 0}
+
+    agentic_insights = build_agentic_insights(deterministic, raw)
+    rendered_inventory = render_inventory(deterministic, agentic_insights)
+    lock_path = inventory_path.parent / ENRICH_LOCK_FILENAME
+
+    def still_current() -> bool:
+        try:
+            return _holds_lock(lock_path, lock_token) and inventory_path.read_bytes() == inventory_bytes
+        except OSError:
+            return False
+
+    try:
+        _write_both_or_neither(
+            inventory_path.with_name(AGENTIC_INSIGHTS_FILENAME),
+            agentic_insights,
+            inventory_path,
+            rendered_inventory,
+            current_insights=inventory.get(INSIGHTS_KEY),
+            still_current=still_current,
+            lock_token=lock_token,
+        )
+    except _DiscoverRanError:
+        return {"ok": False, "violations": [_DISCOVER_RAN_VIOLATION], "pipeline_insights": 0, "relationships": 0}
+    return {
+        "ok": True,
+        "violations": [],
+        "inventory_sha256": agentic_insights[_FINGERPRINT_KEY],
+        "agentic_insights_sha256": agentic_insights[_AGENTIC_INSIGHTS_HASH_KEY],
+        "pipeline_insights": len(raw.get("pipeline_insights", [])),
+        "relationships": len(raw.get("pipeline_relationships", [])),
+    }

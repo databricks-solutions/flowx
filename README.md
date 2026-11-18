@@ -98,6 +98,7 @@ Or run individual phases:
 ```
 /flowx:flowx-extract-metadata  # (ADF) Get the factory's definitions: ADF Studio export, Git, or live Azure API
 /flowx:flowx-discover    # Parse the source (ADF JSON / Airflow DAGs), produce inventory + complexity report
+/flowx:flowx-enrich      # Validate and record agent-authored insights on the inventory
 /flowx:flowx-convert     # Deterministic + agentic translation
 /flowx:flowx-package     # Generate DABs project
 /flowx:flowx-profile     # (ADF, optional) Estimate current ADF spend from a live Azure scan
@@ -273,6 +274,7 @@ flowx_output/
   metadata/
     inventory.json            # discover: activity inventory
     source_graphs.json        # discover (ADF): saved source graphs the inventory is built from
+    agentic_insights.json     # enrich: validated agent-authored insights, rebuilt into inventory.json
     profile_report.csv        # discover: per-pipeline complexity report
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
     configuration.json        # modify: collected configuration answers
