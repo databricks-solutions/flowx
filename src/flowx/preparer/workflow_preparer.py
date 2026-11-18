@@ -12,6 +12,7 @@ from flowx.models.ir import (
     Activity,
     AppendVariableActivity,
     CopyActivity,
+    DbtCommandActivity,
     DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
@@ -148,6 +149,7 @@ def prepare_activity(
         append_variable,
         copy,
         databricks_job,
+        dbt_command,
         dbt_factory,
         delete,
         execute_pipeline,
@@ -186,6 +188,7 @@ def prepare_activity(
         WaitActivity: wait.prepare,
         MotifActivity: motif.prepare,
         DbtFactoryActivity: dbt_factory.prepare,
+        DbtCommandActivity: dbt_command.prepare,
     }
 
     preparer_fn = dispatch.get(type(activity))

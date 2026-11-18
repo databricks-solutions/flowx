@@ -36,7 +36,7 @@ _DBT_FACTORY_VERSION = "0.3.5"
 _EXCLUDED_DBT_PATH_PARTS = {".git", ".venv", "__pycache__", "logs", "target"}
 
 
-def _tree_artifacts(source_root: Path, destination_root: str) -> list[DabNotebook]:
+def tree_artifacts(source_root: Path, destination_root: str) -> list[DabNotebook]:
     """Returns bundle artifacts for files beneath a local source directory."""
     if not source_root.is_dir():
         return []
@@ -56,12 +56,12 @@ def _dbt_source_artifacts(activity: DbtFactoryActivity) -> list[DabNotebook]:
     """Returns deployable project, profile, and manifest files available on the local filesystem."""
     project_dir = Path(activity.project_dir).expanduser()
     artifacts = (
-        _tree_artifacts(project_dir, _DBT_PROJECT_RELATIVE_PATH) if (project_dir / "dbt_project.yml").is_file() else []
+        tree_artifacts(project_dir, _DBT_PROJECT_RELATIVE_PATH) if (project_dir / "dbt_project.yml").is_file() else []
     )
 
     profiles_dir = Path(activity.profiles_dir).expanduser()
     if (profiles_dir / "profiles.yml").is_file():
-        artifacts.extend(_tree_artifacts(profiles_dir, _DBT_PROFILES_RELATIVE_PATH))
+        artifacts.extend(tree_artifacts(profiles_dir, _DBT_PROFILES_RELATIVE_PATH))
 
     manifest_path = Path(activity.manifest_path).expanduser() if activity.manifest_path else None
     if manifest_path and manifest_path.is_file():
