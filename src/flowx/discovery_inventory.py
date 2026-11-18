@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from flowx.discovery_lineage import walk_nodes
-from flowx.ir_serde import lineage_to_dict
+from flowx.discovery_lineage import distinct_motif_matches, walk_nodes
+from flowx.lineage_serde import lineage_to_dict
 from flowx.models.discovery import SourceGraph, SourceNode
 from flowx.models.lineage import MotifAnnotation
 
@@ -60,19 +60,32 @@ def build_source_inventory(
     children are listed depth-first after their container. A node whose
     ``inventory_visible`` property is exactly ``False`` (for example an Airflow
     TaskGroup kept only for structure) is left out of the list and the counts,
-    while its children are still listed.
+    while its children are still listed. Only that node's own entry goes: other
+    activities' ``depends_on`` and ``dependencies``, the ``lineage`` block and motif
+    ``member_task_keys`` are written as the graph has them, so a hidden node they name
+    would dangle. A mapper that hides a node must therefore not name it anywhere else
+    in the graph, remapping such references itself (for example to the group's
+    visible children); the builder does not drop them, since a silently dropped
+    upstream reads as no upstream at all.
 
     A graph with derived lineage gives its pipeline entry a ``lineage`` block with
     its ``control_edges`` and ``data_edges``. Detected motifs are not in that block;
     they go in a separate ``motifs`` list, and their member activities stay listed:
     collapsing a motif is a convert decision, never a discover one. Exact-duplicate detections
     (same ``motif_id`` and same member set) collapse to one (see
-    :func:`_dedupe_motif_entries`); overlapping-but-distinct matches are all kept.
+    :func:`~flowx.discovery_lineage.distinct_motif_matches`); overlapping-but-distinct matches are all kept.
 
     Returns:
         A JSON-friendly dict with ``source``, ``source_dir``, ``pipelines`` and
         ``summary`` keys, plus ``source_graphs_sha256`` when given.
+
+    Raises:
+        ValueError: A graph's ``source`` differs from *source*, as the
+            ``source_graphs.json`` reader and writer also refuse.
     """
+    foreign = sorted({graph.source for graph in graphs if graph.source != source})
+    if foreign:
+        raise ValueError(f"inventory for source {source!r} was given graphs from another source: {foreign}")
     pipeline_entries: list[dict[str, Any]] = []
     deterministic = 0
     agentic = 0
@@ -100,7 +113,10 @@ def build_source_inventory(
                 del lineage_block["motifs"]
                 entry["lineage"] = lineage_block
                 if graph.lineage.motifs:
-                    entry["motifs"] = _dedupe_motif_entries([_motif_entry(motif) for motif in graph.lineage.motifs])
+                    entry["motifs"] = distinct_motif_matches(
+                        [_motif_entry(motif) for motif in graph.lineage.motifs],
+                        motif_key=lambda motif_entry: (motif_entry["motif_id"], motif_entry["member_task_keys"]),
+                    )
             pipeline_entries.append(entry)
 
     total = deterministic + agentic + unsupported
@@ -140,9 +156,13 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
     reproduce the historical ADF activity shape byte-for-byte; the rest are the
     additive standardised fields.
 
-    ``depends_on`` is only the upstream names from ``dependencies``. It is kept so
-    existing readers keep working; new readers should use ``dependencies``, which
-    also records each edge's conditions and whether it resolved.
+    ``depends_on`` lists each upstream by name as the source wrote it, as the
+    historical shape did: the dependency's ``upstream_name`` when the mapper kept one,
+    otherwise its ``upstream``. The name is never looked up by task key, because two
+    names can share a key. It is kept so existing readers keep working; new
+    readers should use ``dependencies``, whose ``upstream`` is the task key, so it
+    joins with ``task_key``, and which also records each edge's conditions and
+    whether it resolved.
 
     The entry does not carry the node's ``raw`` source payload. That payload is on
     every node in ``source_graphs.json`` (and in the verbatim ``<pipeline>.arm.json``
@@ -154,7 +174,10 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
         "type": node.native_type,
         "strategy": _strategy(node),
     }
-    upstream_names = [dependency.upstream for dependency in node.dependencies]
+    upstream_names = [
+        dependency.upstream if dependency.upstream_name is None else dependency.upstream_name
+        for dependency in node.dependencies
+    ]
     if upstream_names:
         entry["depends_on"] = upstream_names
 
@@ -173,10 +196,10 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
 def _motif_entry(motif: MotifAnnotation) -> dict[str, Any]:
     """Project one motif annotation into its additive inventory entry.
 
-    Surfacing only: ``member_task_keys`` names the participating activities as the
-    detector claimed them (for ADF these are the activity names, which are the
-    same values used as each activity entry's ``task_key``, so a consumer can join
-    a motif back to its members). The detector reports its confidence as
+    Surfacing only: ``member_task_keys`` names the participating activities by the
+    same task keys their activity entries carry (for ADF, the key convert gives each
+    activity name), so a consumer can join a motif back to its members, and to
+    convert's tasks before any motif is collapsed. The detector reports its confidence as
     human-readable rationale rather than a numeric score, so the annotation's
     ``notes`` are surfaced verbatim as ``confidence_notes``, the inventory's
     long-standing key.
@@ -189,26 +212,3 @@ def _motif_entry(motif: MotifAnnotation) -> dict[str, Any]:
         "source_type_hint": motif.source_type_hint,
         "confidence_notes": list(motif.notes),
     }
-
-
-def _dedupe_motif_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse exact-duplicate motif entries, preserving first-seen order.
-
-    A detector can report the same match more than once (e.g. two upstreams that
-    each pair with the same notification activity), which would otherwise emit
-    identical inventory entries. Two entries are the *same* motif only when they
-    share both ``motif_id`` **and** the exact same set of ``member_task_keys``;
-    such duplicates collapse to the first occurrence. Entries that merely overlap
-    -- same ``motif_id`` but a different member set -- are genuinely distinct
-    matches and are all kept. The member comparison is order-insensitive (a set),
-    so the same activities in a different order still count as one motif.
-    """
-    seen: set[tuple[str, frozenset[str]]] = set()
-    deduped: list[dict[str, Any]] = []
-    for entry in entries:
-        identity = (entry["motif_id"], frozenset(entry["member_task_keys"]))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        deduped.append(entry)
-    return deduped

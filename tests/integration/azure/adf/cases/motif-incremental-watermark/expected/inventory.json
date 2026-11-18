@@ -3,36 +3,92 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "old-watermark",
           "strategy": "deterministic",
+          "task_key": "old-watermark",
           "type": "Lookup"
         },
         {
+          "dependencies": [],
           "name": "new-watermark",
           "strategy": "deterministic",
+          "task_key": "new-watermark",
           "type": "Lookup"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "old-watermark"
+            },
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "new-watermark"
+            }
+          ],
           "depends_on": [
             "old-watermark",
             "new-watermark"
           ],
           "name": "incremental-copy",
           "strategy": "deterministic",
+          "task_key": "incremental-copy",
           "type": "Copy"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "incremental-copy"
+            }
+          ],
           "depends_on": [
             "incremental-copy"
           ],
           "name": "update-watermark",
           "strategy": "agentic",
+          "task_key": "update-watermark",
           "type": "SqlServerStoredProcedure"
+        }
+      ],
+      "lineage": {
+        "control_edges": [],
+        "data_edges": []
+      },
+      "motifs": [
+        {
+          "confidence_notes": [
+            "Lookup 'old-watermark' contains watermark-style query",
+            "Lookup 'new-watermark' contains watermark-style query",
+            "StoredProcedure 'update-watermark' updates watermark after Copy"
+          ],
+          "databricks_replacement": "auto_loader",
+          "display_name": "Incremental Load (Watermark)",
+          "member_task_keys": [
+            "old-watermark",
+            "new-watermark",
+            "incremental-copy",
+            "update-watermark"
+          ],
+          "motif_id": "incremental_load_watermark",
+          "source_type_hint": "database"
         }
       ],
       "name": "motif-incremental-watermark"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "e6db9e17024cf35a2005b8cb64cc5cc534108fb88f863076c9229ade368e5d70",
   "summary": {
     "activity_count": 4,
     "agentic_count": 1,

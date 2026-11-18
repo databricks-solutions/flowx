@@ -8,10 +8,12 @@ import json
 import logging
 import re
 import shutil
-from datetime import datetime, timezone
+import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from flowx.discovery_lineage import distinct_motif_matches
 from flowx.models.adf_ast import (
     AdfActivity,
     AdfDataset,
@@ -23,12 +25,17 @@ from flowx.models.adf_ast import (
     AdfParameter,
     AdfPipeline,
     AdfPolicy,
+    AdfSwitchCase,
     AdfTrigger,
     AdfVariable,
     Inventory,
     InventoryItem,
     TranslationStrategy,
 )
+from flowx.models.discovery import SourceGraph
+from flowx.models.ir import Lineage, MotifAnnotation
+from flowx.models.motifs import DetectedMotif
+from flowx.utils import to_case_preserving_key
 
 logger = logging.getLogger(__name__)
 
@@ -386,7 +393,7 @@ def parse_activity(data: dict[str, Any]) -> AdfActivity:
     if_true_activities: list[AdfActivity] | None = None
     if_false_activities: list[AdfActivity] | None = None
     child_activities: list[AdfActivity] | None = None
-    switch_cases: dict[str, list[AdfActivity]] | None = None
+    switch_cases: list[AdfSwitchCase] | None = None
     switch_default_activities: list[AdfActivity] | None = None
 
     if type_properties:
@@ -399,19 +406,18 @@ def parse_activity(data: dict[str, Any]) -> AdfActivity:
         raw_children = type_properties.get("activities")
         if raw_children:
             child_activities = [parse_activity(raw_activity) for raw_activity in raw_children]
-        # Switch: cases[].activities (keyed by case value) + defaultActivities. Without
-        # this, a Switch's nested activities never enter the AST, so inventory counts and
-        # lineage edges silently drop everything inside a Switch case.
+        # Switch: cases[] + defaultActivities. Without this, a Switch's nested activities
+        # never enter the AST, so inventory counts and lineage edges silently drop everything
+        # inside a Switch case.
         raw_cases = type_properties.get("cases")
         if raw_cases:
-            parsed_cases: dict[str, list[AdfActivity]] = {}
-            for raw_case in raw_cases:
-                case_value = str(raw_case.get("value", ""))
-                case_activities = [parse_activity(raw_activity) for raw_activity in raw_case.get("activities", [])]
-                if case_activities:
-                    parsed_cases[case_value] = case_activities
-            if parsed_cases:
-                switch_cases = parsed_cases
+            switch_cases = [
+                AdfSwitchCase(
+                    value=str(raw_case.get("value", "")),
+                    activities=[parse_activity(raw_activity) for raw_activity in raw_case.get("activities") or []],
+                )
+                for raw_case in raw_cases
+            ]
         raw_default = type_properties.get("defaultActivities")
         if raw_default:
             switch_default_activities = [parse_activity(raw_activity) for raw_activity in raw_default]
@@ -548,6 +554,9 @@ def _parse_trigger_json(data: dict[str, Any], *, fallback_name: str = "unknown")
     name = data.get("name") or fallback_name
     trigger_type = props.get("type", "Unknown")
     trigger_pipelines = props.get("pipelines")
+    # A tumbling-window trigger references its one pipeline under the singular "pipeline" key.
+    if not trigger_pipelines and isinstance(props.get("pipeline"), dict):
+        trigger_pipelines = [props["pipeline"]]
 
     return AdfTrigger(
         name=name,
@@ -790,50 +799,6 @@ def _classify_activities(
 
 
 # ---------------------------------------------------------------------------
-# Serialisation helpers
-# ---------------------------------------------------------------------------
-
-
-def _inventory_to_dict(inventory: Inventory, source_dir: str) -> dict[str, Any]:
-    """Serialise an :class:`Inventory` to a JSON-friendly dictionary.
-
-    Args:
-        inventory: The inventory to serialise.
-        source_dir: Original source directory path (for provenance).
-
-    Returns:
-        Dictionary suitable for ``json.dumps``.
-    """
-    pipeline_map: dict[str, list[dict[str, Any]]] = {}
-    for item in inventory.items:
-        entry: dict[str, Any] = {
-            "name": item.activity_name,
-            "type": item.activity_type,
-            "strategy": item.strategy.value,
-        }
-        if item.depends_on:
-            entry["depends_on"] = item.depends_on
-        pipeline_map.setdefault(item.pipeline_name, []).append(entry)
-
-    total = inventory.deterministic_count + inventory.agentic_count + inventory.unsupported_count
-    coverage_pct = round((inventory.deterministic_count + inventory.agentic_count) / total * 100, 1) if total else 0.0
-
-    return {
-        "source_dir": source_dir,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "pipelines": [{"name": pname, "activities": acts} for pname, acts in pipeline_map.items()],
-        "summary": {
-            "pipeline_count": inventory.pipeline_count,
-            "activity_count": total,
-            "deterministic_count": inventory.deterministic_count,
-            "agentic_count": inventory.agentic_count,
-            "unsupported_count": inventory.unsupported_count,
-            "coverage_pct": coverage_pct,
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
 # Profile complexity report (CSV)
 # ---------------------------------------------------------------------------
 
@@ -924,7 +889,72 @@ def _tshirt_size(score: int) -> str:
     return "XL"
 
 
-def build_profile_rows(definitions: AdfDefinitions) -> list[dict[str, Any]]:
+def detect_motifs_by_pipeline(definitions: AdfDefinitions) -> dict[str, list[DetectedMotif]]:
+    """Detect the motifs in every pipeline, keyed by pipeline name.
+
+    Runs the profiler's motif detector (:func:`flowx.motifs.detector.detect_motifs`)
+    once per pipeline, so the discover phase can both surface the full detected
+    motifs additively in ``inventory.json`` and count them in the profile report
+    from a single detection pass. Detection is best-effort: a pipeline whose
+    detection raises is logged and recorded with an empty list, never allowed to
+    hard-fail discover. This only *detects* motifs -- it never collapses their
+    member activities, which stays a convert-phase decision. Repeated detections are
+    kept once, by the rule the inventory uses
+    (:func:`~flowx.discovery_lineage.distinct_motif_matches`, on members' task keys),
+    so the saved graph, the inventory and the profile report's pattern count all read
+    the same list.
+    """
+    from flowx.motifs.detector import detect_motifs
+
+    results: dict[str, list[DetectedMotif]] = {}
+    for pipeline in definitions.pipelines:
+        try:
+            results[pipeline.name] = distinct_motif_matches(
+                detect_motifs(pipeline, definitions), motif_key=_motif_task_keys
+            )
+        except Exception as exc:  # noqa: BLE001 - detection must never hard-fail discover
+            logger.warning("Motif detection failed for pipeline %r: %s", pipeline.name, exc)
+            results[pipeline.name] = []
+    return results
+
+
+def _motif_task_keys(motif: DetectedMotif) -> tuple[str, list[str]]:
+    """A detected motif's id and its members' task keys, as the inventory names them."""
+    return motif.definition.motif_id, [to_case_preserving_key(member) for member in motif.matched_activities]
+
+
+def attach_motifs_to_graphs(graphs: list[SourceGraph], motifs_by_pipeline: Mapping[str, list[DetectedMotif]]) -> None:
+    """Record each pipeline's detected motifs on its source graph as lineage motif annotations.
+
+    Motifs are deterministic facts about the pipeline, so they belong in the saved
+    graph next to its edges. Detection itself still runs on the ADF definitions;
+    this only copies the results onto the graph, member activities untouched. Each
+    member is named by the task key convert gives it (:func:`to_case_preserving_key`
+    of the activity name), the same key its discovery node carries.
+    """
+    for graph in graphs:
+        detections = motifs_by_pipeline.get(graph.name)
+        if not detections:
+            continue
+        if graph.lineage is None:
+            graph.lineage = Lineage()
+        graph.lineage.motifs = [
+            MotifAnnotation(
+                motif_id=motif.definition.motif_id,
+                member_task_keys=[to_case_preserving_key(name) for name in motif.matched_activities],
+                display_name=motif.definition.display_name,
+                databricks_replacement=motif.definition.databricks_replacement,
+                notes=list(motif.confidence_notes),
+                source_type_hint=motif.source_type_hint,
+            )
+            for motif in detections
+        ]
+
+
+def build_profile_rows(
+    definitions: AdfDefinitions,
+    motifs_by_pipeline: dict[str, list[DetectedMotif]] | None = None,
+) -> list[dict[str, Any]]:
     """Builds one profile-report row per pipeline.
 
     Each row carries the source activity / dataset / linked-service counts, the
@@ -933,20 +963,22 @@ def build_profile_rows(definitions: AdfDefinitions) -> list[dict[str, Any]]:
 
     Args:
         definitions: Parsed ADF definitions.
+        motifs_by_pipeline: Optional precomputed motif detections keyed by
+            pipeline name (see :func:`detect_motifs_by_pipeline`). Passing the
+            same map the inventory emitter uses keeps the report's pattern count
+            consistent with the surfaced motifs and avoids detecting twice; when
+            omitted, detection runs here.
 
     Returns:
         List of row dicts ordered by pipeline name.
     """
-    from flowx.motifs.detector import detect_motifs
+    if motifs_by_pipeline is None:
+        motifs_by_pipeline = detect_motifs_by_pipeline(definitions)
 
     rows: list[dict[str, Any]] = []
     for pipeline in sorted(definitions.pipelines, key=lambda p: p.name):
         activity_count, datasets, linked_services, category_counts = _pipeline_reference_counts(pipeline, definitions)
-        try:
-            n_patterns = len(detect_motifs(pipeline, definitions))
-        except Exception as exc:  # noqa: BLE001 - profiling must never hard-fail on motif detection
-            logger.warning("Motif detection failed for pipeline %r: %s", pipeline.name, exc)
-            n_patterns = 0
+        n_patterns = len(motifs_by_pipeline.get(pipeline.name, []))
         score = _complexity_score(category_counts, len(datasets), len(linked_services), n_patterns)
         rows.append(
             {
@@ -1043,6 +1075,41 @@ def clear_stale_outputs(output_dir: Path) -> None:
         (output_dir / filename).unlink(missing_ok=True)
 
 
+def _warn_no_pipelines_found(source_dir: Path) -> None:
+    """Prints a loud stderr warning when discover parses zero pipelines.
+
+    The usual cause is pointing ``--adf-source-path`` at a directory that holds ARM-template
+    ``.json`` file(s) instead of the expected ADF export layout (a ``pipelines/`` folder), or
+    passing a directory when a single ARM template file was meant. We tailor the guidance to
+    whichever case we can detect, so an operator reading the output sees that nothing was loaded;
+    the exit code stays 0, so a script or CI job has to read the warning to notice. The message
+    names ``--adf-source-path`` -- the user-facing flag the discover runner takes -- not the
+    loader's internal ``--source-dir`` it normalises to.
+    """
+    source_path = Path(source_dir)
+    top_level_json = sorted(source_path.glob("*.json")) if source_path.is_dir() else []
+
+    banner = "!" * 72
+    lines = [banner, "WARNING: discover loaded 0 pipelines -- nothing was migrated."]
+    if top_level_json:
+        lines.append(
+            f"Found {len(top_level_json)} top-level .json file(s) in {source_path} but no "
+            "recognized ADF export layout (no 'pipelines/' directory)."
+        )
+        lines.append(
+            "If these are ARM templates, pass the ARM template file directly as the "
+            "--adf-source-path (a single .json file), not the containing directory."
+        )
+    else:
+        lines.append(
+            f"No ADF pipelines were found under {source_path}. Pass an ARM template file as "
+            "the --adf-source-path, or point --adf-source-path at a directory with the expected "
+            "ADF export layout ('pipelines/', 'datasets/', 'linked_services/', ...)."
+        )
+    lines.append(banner)
+    print("\n".join(lines), file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Discover-phase entry point: load ADF, build the inventory + profile report.
 
@@ -1059,7 +1126,7 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("./flowx_output"),
         help=(
             "Migration output directory. Profile artifacts are written into its "
-            "metadata/ subfolder (inventory.json, profile_report.csv, <pipeline>.arm.json)."
+            "metadata/ subfolder (inventory.json, source_graphs.json, profile_report.csv, <pipeline>.arm.json)."
         ),
     )
     parser.add_argument(
@@ -1074,6 +1141,15 @@ def main(argv: list[str] | None = None) -> int:
 
     definitions = load_adf_definitions(args.source_dir)
     logger.info("Loaded %d pipeline(s) from %s", len(definitions.pipelines), args.source_dir)
+
+    # A directory of ARM templates with no recognized ``pipelines/`` layout parses to zero
+    # pipelines and would otherwise finish with a success-shaped "Loaded 0 pipeline(s)". Warn
+    # on stderr so the operator notices the export layout / path is wrong; the exit code stays 0,
+    # so a script or CI job has to read the warning to see it.
+    if not definitions.pipelines:
+        _warn_no_pipelines_found(args.source_dir)
+
+    exported_pipeline_names = {pipeline.name for pipeline in definitions.pipelines}
 
     # Filter to a single pipeline when --pipeline is specified
     if args.pipeline:
@@ -1095,7 +1171,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         logger.info("Filtered to pipeline: %s", args.pipeline)
 
-    inventory = build_inventory(definitions)
+    # Inventory JSON is projected from the discovery graph contract via the
+    # source-agnostic emitter (so ADF and Airflow emit one shape); imported here
+    # to avoid a module-level cycle (discovery_mapping imports this loader).
+    from flowx.discovery_inventory import build_source_inventory
+    from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, write_source_graphs
+    from flowx.models.discovery import SOURCE_ADF
+    from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
 
     output_dir: Path = args.output_dir.resolve()
     clear_stale_outputs(output_dir)
@@ -1103,11 +1185,31 @@ def main(argv: list[str] | None = None) -> int:
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
     inventory_path = metadata_dir / "inventory.json"
-    inventory_dict = _inventory_to_dict(inventory, str(args.source_dir))
+    source_graphs = adf_definitions_to_source_graphs(definitions, known_workflows=exported_pipeline_names)
+    # Detect motifs once and share the result: the graphs carry them (so they are saved and
+    # hashed with each graph), the inventory surfaces them, the profile report counts them.
+    motifs_by_pipeline = detect_motifs_by_pipeline(definitions)
+    attach_motifs_to_graphs(source_graphs, motifs_by_pipeline)
+
+    # Persist the full graphs first, so the inventory projected from them can record which saved
+    # graph it describes, and a later phase can read exactly what discover saw.
+    source_graphs_path = metadata_dir / SOURCE_GRAPHS_FILENAME
+    source_graphs_document = write_source_graphs(source_graphs_path, source_graphs, source=SOURCE_ADF)
+    logger.info("Wrote source graphs to %s", source_graphs_path)
+
+    inventory_dict = build_source_inventory(
+        source_graphs,
+        source=SOURCE_ADF,
+        source_dir=str(args.source_dir),
+        # ADF has historically omitted zero-activity pipelines from the per-pipeline
+        # listing while still counting them in summary.pipeline_count; preserve that.
+        include_empty_pipelines=False,
+        source_graphs_sha256=source_graphs_document["document_sha256"],
+    )
     inventory_path.write_text(json.dumps(inventory_dict, indent=2), encoding="utf-8")
     logger.info("Wrote inventory to %s", inventory_path)
 
-    profile_rows = build_profile_rows(definitions)
+    profile_rows = build_profile_rows(definitions, motifs_by_pipeline)
     csv_path = metadata_dir / "profile_report.csv"
     write_profile_csv(profile_rows, csv_path)
     logger.info("Wrote profile report to %s", csv_path)
@@ -1119,7 +1221,10 @@ def main(argv: list[str] | None = None) -> int:
     print("\nADF Profile Summary")
     print("===================")
     print(f"Pipelines parsed:     {summary['pipeline_count']}")
-    print(f"Total activities:     {summary['activity_count']}")
+    print(f"Total activities:     {summary['activity_count']}  (raw activities, incl. nested)")
+    # Discover counts every activity, including those nested inside ForEach/If/Switch. Convert's
+    # total counts only the top-level activities, before any motif collapse, so the two can differ.
+    print("  (convert counts only top-level activities, before any motif collapse, so its total may differ)")
     print("\nStrategy Breakdown:")
     print(f"  Deterministic:      {summary['deterministic_count']}")
     print(f"  Agentic:            {summary['agentic_count']}")

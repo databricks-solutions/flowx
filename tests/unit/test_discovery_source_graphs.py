@@ -48,7 +48,7 @@ def _graph(name: str) -> SourceGraph:
                 concept=CONCEPT_NOTEBOOK,
                 source="unit",
                 native_type="Notebook",
-                dependencies=[SourceDependency(upstream="a", conditions=["Succeeded"])],
+                dependencies=[SourceDependency(upstream="a", conditions=["Succeeded"], resolved=True)],
             ),
         ],
         raw={"name": name},

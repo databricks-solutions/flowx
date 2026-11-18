@@ -86,13 +86,33 @@ def test_signature_tier_when_identity_unresolved() -> None:
 def test_signature_tier_with_one_resolved_side_claims_no_identity() -> None:
     """A signature match where only one endpoint resolved stays a weak match with no identity."""
     graph = _graph(
-        _node("writer", writes=[DataAsset(signature="shared", identity="curated.orders")]),
-        _node("reader", reads=[DataAsset(signature="shared")]),
+        _node("writer", writes=[DataAsset(signature="curated.orders", identity="curated.orders")]),
+        _node("reader", reads=[DataAsset(signature="curated.orders")]),
     )
     edges = build_graph_lineage(graph, known_workflows=()).data_edges
     assert len(edges) == 1
     assert edges[0].match_kind == "signature"
     assert edges[0].identity is None
+
+
+@pytest.mark.parametrize("resolved_side", ["writer", "reader"])
+@pytest.mark.parametrize(
+    "unresolved_signature",
+    [
+        pytest.param("ds_generic", id="shares-the-resolved-signature"),
+        pytest.param("curated.orders", id="spells-the-resolved-identity"),
+    ],
+)
+def test_a_resolved_side_whose_signature_is_not_its_identity_never_links_by_signature(
+    resolved_side: str, unresolved_signature: str
+) -> None:
+    """A resolved asset signed with a shared dataset name links to no unresolved asset, by the name or the identity."""
+    resolved = DataAsset(signature="ds_generic", identity="curated.orders")
+    unresolved = DataAsset(signature=unresolved_signature)
+    writer_asset, reader_asset = (resolved, unresolved) if resolved_side == "writer" else (unresolved, resolved)
+    graph = _graph(_node("writer", writes=[writer_asset]), _node("reader", reads=[reader_asset]))
+
+    assert build_graph_lineage(graph, known_workflows=()).data_edges == []
 
 
 def test_distinct_identities_do_not_fall_back_to_signature() -> None:
@@ -264,7 +284,7 @@ def test_writer_that_runs_after_the_reader_still_gets_an_edge() -> None:
     """The match ignores run order, so a writer downstream of the reader still pairs with it."""
     reader = _node("reader", reads=[DataAsset(signature="ds", identity="x.y")])
     writer = _node("writer", writes=[DataAsset(signature="ds", identity="x.y")])
-    writer.dependencies = [SourceDependency(upstream="reader")]
+    writer.dependencies = [SourceDependency(upstream="reader", resolved=True)]
     edges = build_graph_lineage(_graph(reader, writer), known_workflows=()).data_edges
     assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [("writer", "reader")]
 

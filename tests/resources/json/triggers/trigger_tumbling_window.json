@@ -42,20 +42,6 @@
         "eventDate": "@formatDateTime(trigger().outputs.windowStartTime, 'yyyy-MM-dd')"
       }
     },
-    "pipelines": [
-      {
-        "pipelineReference": {
-          "referenceName": "pipeline_copy_parquet_to_delta",
-          "type": "PipelineReference"
-        },
-        "parameters": {
-          "windowStart": "@trigger().outputs.windowStartTime",
-          "windowEnd": "@trigger().outputs.windowEndTime",
-          "sourcePath": "@concat('events/', formatDateTime(trigger().outputs.windowStartTime, 'yyyy/MM/dd/HH'))",
-          "eventDate": "@formatDateTime(trigger().outputs.windowStartTime, 'yyyy-MM-dd')"
-        }
-      }
-    ],
     "runtimeState": "Started",
     "annotations": [
       "tumbling-window",

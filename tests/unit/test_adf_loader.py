@@ -17,9 +17,11 @@ from flowx.sources.adf.loader import (
     _parse_pipeline_json,
     _resolve_arm_parameters,
     build_inventory,
+    build_profile_rows,
     classify_activity,
     clear_stale_outputs,
     load_adf_definitions,
+    main,
 )
 
 # ---------------------------------------------------------------------------
@@ -312,13 +314,14 @@ def _switch_pipeline_json() -> dict:
 
 class TestSwitchNesting:
     def test_parse_populates_switch_cases_and_default(self):
-        """parse_activity captures cases[].activities (keyed by value) + defaultActivities."""
+        """parse_activity captures each case's value and activities, in order, plus defaultActivities."""
         pipeline = _parse_pipeline_json(_switch_pipeline_json())
         switch = next(a for a in pipeline.activities if a.type == "Switch")
         assert switch.switch_cases is not None
-        assert set(switch.switch_cases) == {"prod", "dev"}
-        assert [a.name for a in switch.switch_cases["prod"]] == ["ProdNotebook", "RunProdChild"]
-        assert [a.name for a in switch.switch_cases["dev"]] == ["DevNotebook"]
+        assert [(case.value, [a.name for a in case.activities]) for case in switch.switch_cases] == [
+            ("prod", ["ProdNotebook", "RunProdChild"]),
+            ("dev", ["DevNotebook"]),
+        ]
         assert switch.switch_default_activities is not None
         assert [a.name for a in switch.switch_default_activities] == ["UnknownEnvNotebook"]
 
@@ -342,6 +345,42 @@ class TestSwitchNesting:
         assert len(names) == 6
         for expected in ("SetVar", "RouteByEnv", "ProdNotebook", "RunProdChild", "DevNotebook", "UnknownEnvNotebook"):
             assert expected in names
+
+    def test_switch_cases_sharing_a_value_keep_every_activity(self):
+        """Every declared case stays its own case, empty or sharing a value, so every walk reads one list."""
+        data = {
+            "name": "routing",
+            "properties": {
+                "activities": [
+                    {
+                        "name": "Route",
+                        "type": "Switch",
+                        "typeProperties": {
+                            "cases": [
+                                {"value": "full", "activities": [{"name": "CopyA", "type": "Copy"}]},
+                                {"value": "delta", "activities": [{"name": "CopyB", "type": "Copy"}]},
+                                {"value": "full", "activities": []},
+                                {"value": "full", "activities": [{"name": "CopyC", "type": "Copy"}]},
+                            ]
+                        },
+                    }
+                ]
+            },
+        }
+        pipeline = _parse_pipeline_json(data)
+        switch = pipeline.activities[0]
+        assert switch.switch_cases is not None
+        assert [(case.value, [a.name for a in case.activities]) for case in switch.switch_cases] == [
+            ("full", ["CopyA"]),
+            ("delta", ["CopyB"]),
+            ("full", []),
+            ("full", ["CopyC"]),
+        ]
+        definitions = AdfDefinitions(pipelines=[pipeline])
+        [row] = build_profile_rows(definitions)
+        assert row["activities"] == 4
+        names = [item.activity_name for item in build_inventory(definitions).items]
+        assert sorted(names) == ["CopyA", "CopyB", "CopyC", "Route"]
 
     def test_lineage_walk_reaches_executepipeline_inside_switch(self):
         """The ExecutePipeline nested in a Switch case is reachable by the activity
@@ -554,3 +593,35 @@ class TestClearStaleOutputs:
         """Clearing a directory with no flowx artifacts is a no-op (no error)."""
         clear_stale_outputs(tmp_path)
         assert list(tmp_path.iterdir()) == []
+
+
+class TestZeroPipelineWarning:
+    """discover warns on stderr, and still exits 0, when it parses zero pipelines."""
+
+    def test_arm_template_directory_warns_loudly(self, tmp_path, capsys):
+        """A dir holding ARM-template .json (no pipelines/ layout) loads 0 pipelines + warns."""
+        source_dir = tmp_path / "arm_export"
+        source_dir.mkdir()
+        # An ARM template dropped at the top level, not the expected pipelines/ layout.
+        (source_dir / "ARMTemplateForFactory.json").write_text(json.dumps({"resources": []}), encoding="utf-8")
+
+        exit_code = main(["--source-dir", str(source_dir), "--output-dir", str(tmp_path / "out")])
+
+        # The 0-pipeline case exits 0; the deliverable is the stderr warning that steers the
+        # operator to pass the ARM template as the file path.
+        assert exit_code == 0
+        stderr = capsys.readouterr().err
+        assert "0 pipelines" in stderr
+        assert "ARM template" in stderr
+        assert ".json" in stderr
+        # The guidance names the user-facing flag (--adf-source-path), not the loader-internal one.
+        assert "--adf-source-path" in stderr
+        assert "--source-dir" not in stderr
+
+    def test_valid_directory_does_not_warn(self, fixtures_dir, tmp_path, capsys):
+        """A valid ADF export loads pipelines and emits no zero-pipeline warning."""
+        exit_code = main(["--source-dir", str(fixtures_dir), "--output-dir", str(tmp_path / "out")])
+
+        assert exit_code == 0
+        stderr = capsys.readouterr().err
+        assert "discover loaded 0 pipelines" not in stderr

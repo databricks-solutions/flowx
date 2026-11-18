@@ -54,15 +54,33 @@ Read `<output_dir>/metadata/inventory.json`:
     {
       "name": "PipelineName",
       "activities": [
-        {"name": "CopyFromBlob", "type": "Copy", "strategy": "deterministic", "translator": "copy.py"},
-        {"name": "RunDataFlow", "type": "ExecuteDataFlow", "strategy": "agentic"}
+        {"name": "CopyFromBlob", "type": "Copy", "strategy": "deterministic", "task_key": "CopyFromBlob"},
+        {"name": "RunDataFlow", "type": "ExecuteDataFlow", "strategy": "agentic", "task_key": "RunDataFlow"}
       ]
     }
   ],
   "summary": {"pipeline_count": 12, "activity_count": 47, "deterministic_count": 35,
-              "agentic_count": 10, "unsupported_count": 2, "coverage_pct": 95.7}
+              "agentic_count": 10, "unsupported_count": 2, "coverage_pct": 95.7},
+  "source_graphs_sha256": "<document_sha256 of metadata/source_graphs.json>"
 }
 ```
+
+Each activity's `task_key` is the task key convert gives it: the ADF activity name with every
+character outside `A-Z`, `a-z`, `0-9`, `_` and `-` replaced by `_` (runs of `_` collapsed, leading
+and trailing `_` dropped, and `unnamed` when nothing is left), so `Copy Orders (daily)` is
+`Copy_Orders_daily`. Two names that differ only in those characters (`Copy A`, `Copy (A)`) share
+one key, as they do in convert; discover logs a warning naming them, and one should be renamed.
+`name` and the legacy `depends_on` keep the names as written. A resolved
+`dependencies[].upstream`, the lineage edges and the motifs' `member_task_keys` use the task key, so
+they join with convert's task keys; an unresolved upstream keeps the name as written, since no
+activity carries it. `source_graphs_sha256` names the saved `metadata/source_graphs.json` the
+inventory was built from.
+
+The inventory deliberately has no top-level `generated_at` timestamp any more, so the same export,
+given the same `--source-dir`, always produces byte-identical `inventory.json` and any hash taken
+over it stays stable. (`source_dir` is recorded exactly as it was passed in, so a different spelling
+of the same path changes the bytes.) Use the file's modification time if you need to know when
+discover ran.
 
 ## Step 4b — Review the complexity report
 
