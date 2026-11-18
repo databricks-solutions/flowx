@@ -24,6 +24,7 @@ _RECOGNIZED_DAG_SETTINGS = frozenset(
         "default_args.retry_delay",
         "default_args.execution_timeout",
         "dagrun_timeout",
+        "max_active_runs",
         "max_consecutive_failed_dag_runs",
         "sla_miss_callback",
         "default_args.depends_on_past",
@@ -84,6 +85,12 @@ def _unavailable_search_entries(entries: list[str]) -> list[str]:
 
 def _job_timeout_seconds(visitor: _DagVisitor) -> int | None:
     return templating.timedelta_seconds(visitor.dag_kwargs.get("dagrun_timeout"))
+
+
+def job_max_concurrent_runs(visitor: _DagVisitor) -> int | None:
+    """Returns the DAG's static positive ``max_active_runs``, the Databricks job's ``max_concurrent_runs``."""
+    value = ops.literal_value(visitor.dag_kwargs.get("max_active_runs"))
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def _job_email_notifications(visitor: _DagVisitor) -> dict[str, list[str]]:
@@ -160,6 +167,19 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
                 "template files."
             ),
             "rationale": "template_searchpath_not_statically_resolvable",
+        }
+    if name == "max_active_runs":
+        if job_max_concurrent_runs(visitor) is not None:
+            return {
+                "status": "mapped",
+                "target": "job.max_concurrent_runs",
+                "rationale": "preserved_as_databricks_job_concurrency_limit",
+            }
+        return {
+            "status": "gap",
+            "message": "Airflow max_active_runs must be a static positive integer before it can map to Job "
+            "max_concurrent_runs.",
+            "rationale": "max_active_runs_not_statically_resolvable",
         }
     if name == "dagrun_timeout":
         if _job_timeout_seconds(visitor) is not None:

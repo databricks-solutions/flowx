@@ -76,6 +76,8 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
         result["description"] = pipeline.description
     if pipeline.timeout_seconds is not None:
         result["timeout_seconds"] = pipeline.timeout_seconds
+    if pipeline.max_concurrent_runs is not None:
+        result["max_concurrent_runs"] = pipeline.max_concurrent_runs
     if pipeline.email_notifications:
         result["email_notifications"] = {
             event: list(recipients) for event, recipients in pipeline.email_notifications.items()
@@ -439,6 +441,7 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
         "parameters": pipeline.parameters,
         "schedule": pipeline.schedule,
         "timeout_seconds": pipeline.timeout_seconds,
+        "max_concurrent_runs": pipeline.max_concurrent_runs,
         "email_notifications": pipeline.email_notifications,
         "tags": pipeline.tags,
         "tasks": [activity_to_debug_dict(task) for task in pipeline.tasks],

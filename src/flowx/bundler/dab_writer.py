@@ -2245,6 +2245,8 @@ def _build_job_resource(
         job_def["tags"] = dict(workflow.tags)
     if workflow.timeout_seconds is not None:
         job_def["timeout_seconds"] = workflow.timeout_seconds
+    if workflow.max_concurrent_runs is not None:
+        job_def["max_concurrent_runs"] = workflow.max_concurrent_runs
     if workflow.email_notifications:
         job_def["email_notifications"] = {
             event: list(recipients) for event, recipients in workflow.email_notifications.items()
@@ -2638,6 +2640,11 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0
     ):
         raise ValueError("Pipeline timeout_seconds must be a positive integer")
+    max_concurrent_runs = pipeline_dict.get("max_concurrent_runs")
+    if max_concurrent_runs is not None and (
+        isinstance(max_concurrent_runs, bool) or not isinstance(max_concurrent_runs, int) or max_concurrent_runs <= 0
+    ):
+        raise ValueError("Pipeline max_concurrent_runs must be a positive integer")
     raw_email_notifications = pipeline_dict.get("email_notifications") or {}
     if not isinstance(raw_email_notifications, dict):
         raise ValueError("Pipeline email_notifications must be an object")
@@ -2667,6 +2674,7 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         schedule=pipeline_dict.get("schedule"),
         bundle_variables=pipeline_dict.get("bundle_variables") or {},
         timeout_seconds=timeout_seconds,
+        max_concurrent_runs=max_concurrent_runs,
         email_notifications=email_notifications,
         tags=dict(pipeline_dict.get("tags") or {}),
         not_translatable=list(pipeline_dict.get("not_translatable") or []),

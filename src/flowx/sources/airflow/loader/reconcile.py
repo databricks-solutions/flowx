@@ -128,6 +128,7 @@ def _reconcile_pipeline(
     logical_date_resolver: tuple[NotebookActivity, dict[str, Any]] | None = None,
     timezone_disclosure: dict[str, Any] | None = None,
     dag_id_disclosure: dict[str, Any] | None = None,
+    concurrency_disclosure: dict[str, Any] | None = None,
     setting_sources: dict[str, list[dict[str, Any]]] | None = None,
 ) -> Pipeline:
     """Reconciles an independent source audit with captured graph and emitted IR."""
@@ -154,7 +155,9 @@ def _reconcile_pipeline(
         transformations.append(sensor_lift_proof)
     if schedule_proof is not None:
         transformations.append(schedule_proof)
-    transformations.extend(item for item in (timezone_disclosure, dag_id_disclosure) if item is not None)
+    transformations.extend(
+        item for item in (timezone_disclosure, dag_id_disclosure, concurrency_disclosure) if item is not None
+    )
     transformations.extend(collapse_proofs or [])
     captured_task_count = len(visitor.operators) + len(visitor.taskflow_tasks) + len(visitor.taskgroup_calls)
 

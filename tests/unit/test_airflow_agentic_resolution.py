@@ -372,7 +372,7 @@ def test_gap_fingerprint_is_stable_when_an_unrelated_source_gap_changes_task_pat
 
     source.write_text(
         "from airflow import DAG\n"
-        "with DAG(dag_id='stable', max_active_runs=1) as dag:\n"
+        "with DAG(dag_id='stable', max_active_tasks=4) as dag:\n"
         "    KubernetesPodOperator(task_id='pod', image='python:3.12')\n",
         encoding="utf-8",
     )
