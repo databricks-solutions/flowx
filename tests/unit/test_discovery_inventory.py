@@ -107,7 +107,7 @@ def test_activity_entry_carries_legacy_and_additive_fields() -> None:
                 "b",
                 "Copy",
                 "deterministic",
-                deps=[SourceDependency(upstream="a", conditions=["Succeeded", "Skipped"])],
+                deps=[SourceDependency(upstream="a", conditions=["Succeeded", "Skipped"], resolved=True)],
             ),
         ],
     )
@@ -483,3 +483,12 @@ def test_only_an_explicit_false_visibility_marker_hides_a_node(marker) -> None:
     assert inventory["summary"]["activity_count"] == 2
     assert inventory["summary"]["unsupported_count"] == 1
     assert inventory["summary"]["coverage_pct"] == 50.0
+
+
+def test_inventory_refuses_a_graph_from_another_source() -> None:
+    """The builder refuses a mixed-source list, as the source_graphs.json reader and writer do."""
+    own = SourceGraph(name="own", source="unit", tasks=[_node("a", "Notebook", "deterministic")])
+    other = SourceGraph(name="other", source="airflow", tasks=[_node("b", "Notebook", "deterministic")])
+
+    with pytest.raises(ValueError, match="graphs from another source: \\['airflow'\\]"):
+        build_source_inventory([own, other], source="unit", source_dir="/tmp")

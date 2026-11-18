@@ -4,16 +4,17 @@ Kept separate from :mod:`flowx.ir_serde` on purpose: ``ir_serde`` owns the
 ``translation_report.json`` convert->package contract for the Databricks IR, and
 the discovery graph is a different model with a different lifecycle. The graph and
 node shapes are this module's own; the data-asset and lineage shapes come from
-``ir_serde`` (see below), so changing those also changes ``source_graphs.json``.
+:mod:`flowx.lineage_serde` (see below), so changing those also changes ``source_graphs.json``.
 It also owns the persisted ``metadata/source_graphs.json`` envelope
 (:func:`source_graphs_document`), versioned and content-hashed, so every source's
 discover phase writes the same file and a later phase can read the graphs back
 without going to the source again.
 
-The data-asset and lineage (de)serialisers are reused from ``ir_serde``
+The data-asset and lineage (de)serialisers come from :mod:`flowx.lineage_serde`
 (``data_asset_to_dict`` / ``data_asset_from_dict`` and ``lineage_to_dict`` /
-``lineage_from_dict``), so each shape has one definition shared by the lineage
-substrate and the discovery graph. A data asset describes what a task reads or
+``lineage_from_dict``), which ``ir_serde`` uses too, so each shape has one definition
+shared by the translation report and the discovery graph without discovery depending
+on the IR's serialiser. A data asset describes what a task reads or
 writes on a best-effort basis, not only physical tables; see
 :class:`~flowx.models.lineage.DataAsset`.
 
@@ -30,7 +31,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from flowx.ir_serde import data_asset_from_dict, data_asset_to_dict, lineage_from_dict, lineage_to_dict
+from flowx.lineage_serde import data_asset_from_dict, data_asset_to_dict, lineage_from_dict, lineage_to_dict
 from flowx.models.discovery import (
     ContainerNode,
     GapNode,
@@ -280,19 +281,27 @@ def _policy_from_dict(raw: dict[str, Any]) -> PolicySpec:
 
 
 def _dependency_to_dict(dependency: SourceDependency) -> dict[str, Any]:
-    return {
+    result: dict[str, Any] = {
         "upstream": dependency.upstream,
         "conditions": list(dependency.conditions),
         "resolved": dependency.resolved,
     }
+    if dependency.upstream_name is not None:
+        result["upstream_name"] = dependency.upstream_name
+    return result
 
 
 def _dependency_from_dict(raw: dict[str, Any]) -> SourceDependency:
-    """Rehydrate a dependency; only an explicit ``resolved: true`` reads as resolved."""
+    """Rehydrate a dependency; only an explicit ``resolved: true`` reads as resolved.
+
+    Only a string ``upstream_name`` is read back.
+    """
+    upstream_name = raw.get("upstream_name")
     return SourceDependency(
         upstream=raw.get("upstream", ""),
         conditions=list(raw.get("conditions") or []),
         resolved=raw.get("resolved") is True,
+        upstream_name=upstream_name if isinstance(upstream_name, str) else None,
     )
 
 

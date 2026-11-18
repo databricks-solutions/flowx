@@ -3,30 +3,66 @@
     {
       "activities": [
         {
+          "dependencies": [],
           "name": "launch-child",
           "strategy": "deterministic",
+          "task_key": "launch-child",
           "type": "ExecutePipeline"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "launch-child"
+            }
+          ],
           "depends_on": [
             "launch-child"
           ],
           "name": "mixed-script",
           "strategy": "agentic",
+          "task_key": "mixed-script",
           "type": "Script"
         },
         {
+          "dependencies": [
+            {
+              "conditions": [
+                "Succeeded"
+              ],
+              "resolved": true,
+              "upstream": "mixed-script"
+            }
+          ],
           "depends_on": [
             "mixed-script"
           ],
           "name": "complete",
           "strategy": "deterministic",
+          "task_key": "complete",
           "type": "SetVariable"
         }
       ],
+      "lineage": {
+        "control_edges": [
+          {
+            "resolved": false,
+            "source_workflow": "complex-orchestration",
+            "target_workflow": "child-pipeline",
+            "via_task_key": "launch-child",
+            "wait_for_completion": true
+          }
+        ],
+        "data_edges": []
+      },
       "name": "complex-orchestration"
     }
   ],
+  "source": "adf",
+  "source_graphs_sha256": "ef87f978c5e7ffeaf3506ba4882fecf9035d640291bdf6c3be6f23c6a593090c",
   "summary": {
     "activity_count": 3,
     "agentic_count": 1,

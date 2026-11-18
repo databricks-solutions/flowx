@@ -5,7 +5,14 @@
   "not_translatable": [],
   "parameters": null,
   "reconciliation_status": null,
-  "schedule": null,
+  "schedule": {
+    "frequency": "Hour",
+    "interval": 1,
+    "kind": "schedule",
+    "note": "Approximated from TumblingWindowTrigger; review window boundaries.",
+    "pause_status": "PAUSED",
+    "tumbling": true
+  },
   "tags": {
     "pipeline": "motif-incremental-watermark",
     "source": "adf"

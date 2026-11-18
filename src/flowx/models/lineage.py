@@ -20,8 +20,11 @@ class DataAsset:
     be a physical table or file, and a task with no assets at all is valid.
 
     Two assets are joined on ``identity`` when both have one, otherwise on
-    ``signature``. When both sides set ``asset_type`` and the two differ, they never
-    match, so the writer and reader of one asset must spell the type the same way.
+    ``signature``; when only one has an identity, the shared signature must also be
+    that identity, so a resolved asset joins an unresolved one only when it mirrors its
+    identity into its signature. When both sides set ``asset_type`` and the two differ,
+    they never match, so the writer and reader of one asset must spell the type the
+    same way.
 
     Attributes:
         signature: Always-present descriptor (dataset name, value key or normalised
@@ -85,7 +88,8 @@ class DataEdge:
 
 @dataclass(slots=True, kw_only=True)
 class MotifAnnotation:
-    """A detected motif and the tasks it spans.
+    """A detected motif and the tasks it spans. Each member activity also carries the same
+    :attr:`flowx.models.ir.Activity.motif_id` tag.
 
     Attributes:
         motif_id: Identifier of the matched motif definition.

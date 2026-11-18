@@ -11,3 +11,10 @@ resources:
           base_parameters:
             source_path: ''
             target_table: ''
+      schedule_setup_note:
+        kind: schedule
+        tumbling: true
+        frequency: Hour
+        interval: 1
+        pause_status: PAUSED
+        note: Approximated from TumblingWindowTrigger; review window boundaries.

@@ -18,7 +18,8 @@ Airflow graph derives lineage through this one code path once its nodes carry
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Collection, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
+from typing import TypeVar
 
 from flowx.lineage import control_edges_from_calls, data_edges_from_endpoints
 from flowx.models.discovery import ContainerNode, SourceGraph, SourceNode
@@ -33,6 +34,8 @@ INVOKES_WORKFLOW_PROPERTY = "invokes_workflow"
 # Companion key: whether the caller waits for the invoked workflow to complete
 # (``True`` / ``False``), or absent when the source has no such notion.
 INVOKES_WAIT_PROPERTY = "invokes_wait"
+
+_Match = TypeVar("_Match")
 
 
 def walk_nodes(nodes: list[SourceNode]) -> Iterator[SourceNode]:
@@ -151,3 +154,27 @@ def with_graph_lineage(graph: SourceGraph, *, known_workflows: Collection[str]) 
     motifs = list(graph.lineage.motifs) if graph.lineage else []
     lineage = dataclasses.replace(build_graph_lineage(graph, known_workflows=known_workflows), motifs=motifs)
     return dataclasses.replace(graph, lineage=lineage)
+
+
+def distinct_motif_matches(
+    matches: Iterable[_Match], *, motif_key: Callable[[_Match], tuple[str, Iterable[str]]]
+) -> list[_Match]:
+    """Drop repeated motif matches, keeping the first one seen and the original order.
+
+    *motif_key* gives a match's motif id and its members' task keys. Two matches are
+    the same motif when they have the same motif id and the same members, in any order;
+    a match that only overlaps another (same motif id, other members) is kept. A
+    detector can report one match twice (two upstreams that each pair with the same
+    notification activity, say), and member names that differ only in punctuation share
+    a task key, so the ADF loader, which counts motifs for the profile report, and the
+    inventory both use this one rule to agree on the count.
+    """
+    seen: set[tuple[str, frozenset[str]]] = set()
+    distinct: list[_Match] = []
+    for match in matches:
+        motif_id, member_task_keys = motif_key(match)
+        identity = (motif_id, frozenset(member_task_keys))
+        if identity not in seen:
+            seen.add(identity)
+            distinct.append(match)
+    return distinct

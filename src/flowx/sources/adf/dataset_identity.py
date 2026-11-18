@@ -1,0 +1,619 @@
+"""Physical identity of an ADF dataset (the strong lineage key), and the value helpers it shares.
+
+An identity is a store-qualified table (``<server>/schema.table``) or a file path
+(``abfss://<container>@<account>.dfs.core.windows.net/...``) built only from
+literals. Anything parameterised or unresolved gives ``None`` rather than a guess.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from flowx.models.adf_ast import AdfDatasetReference, AdfDefinitions
+from flowx.models.ir import TranslationContext
+from flowx.parser.expression_parser import resolve_expression, resolve_interpolated_string
+
+_ACCOUNT_NAME_RE = re.compile(r"AccountName=([^;]*)", re.IGNORECASE)
+_STORAGE_ACCOUNT_RE = re.compile(r"[A-Za-z0-9]+")
+# The object types whose ``value`` is the field's own value; any other typed object is left whole.
+_VALUE_OBJECT_TYPES = frozenset({"Expression", "SecureString"})
+_ARM_CALL_RE = re.compile(
+    r"^\[\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\((?P<arguments>.*)\]$", re.DOTALL
+)
+_NESTED_CALL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*\(")
+# A whole SQL Server bracketed name, where "]]" inside stands for one "]".
+_BRACKETED_NAME_RE = re.compile(r"\[((?:[^\]]|\]\])*)\]")
+# A whole double-quoted name, where '""' inside stands for one '"'.
+_DOUBLE_QUOTED_NAME_RE = re.compile(r'"(?:[^"]|"")*"')
+
+
+# ARM template functions (compared lower-cased, as ARM does). A bracketed call is an unevaluated ARM
+# expression when it calls one of these, a ``list*`` function, or a ``namespace.function`` of the
+# template's own, or when its arguments hold a quoted string or another call, as only ARM's do. So a
+# bracket-quoted SQL name such as ``[Sales (2024)]`` stays a literal.
+_ARM_FUNCTIONS = frozenset(
+    name.lower()
+    for name in (
+        "add and array base64 base64ToJson base64ToString bool cidrHost cidrSubnet coalesce concat contains "
+        "copyIndex createArray createObject dataUri dataUriToString dateTimeAdd dateTimeFromEpoch "
+        "dateTimeToEpoch deployer deployment div empty endsWith environment equals extensionResourceId "
+        "filter first float format greater greaterOrEquals groupBy guid if indexFromEnd indexOf int "
+        "intersection items join json last lastIndexOf length less lessOrEquals managementGroup "
+        "managementGroupResourceId map mapValues max min mod mul newGuid not null objectKeys or padLeft "
+        "parameters parseCidr pickZones providers range reduce reference references replace resourceGroup "
+        "resourceId shallowMerge skip sort split startsWith string sub subscription subscriptionResourceId "
+        "substring take tenant tenantResourceId toLower toObject toUpper trim tryGet tryIndexFromEnd union "
+        "uniqueString uri uriComponent uriComponentToString utcNow variables"
+    ).split()
+)
+
+
+DATASET_PARAMETER_RE = re.compile(r"dataset\(\)\??\.(\w+)")
+
+
+def expression_value(value: Any) -> Any:
+    """*value* itself, or the ``value`` of an ADF Expression-shaped object (``None`` when it has none).
+
+    Only an object typed ``Expression`` or ``SecureString``, or an untyped one carrying a
+    ``value``, is unwrapped. Any other object, such as a Key Vault secret reference or a
+    type ADF does not define, is returned whole, so a caller never mistakes it for an
+    empty value or reads a value it cannot vouch for.
+    """
+    if isinstance(value, dict) and (
+        value.get("type") in _VALUE_OBJECT_TYPES or ("type" not in value and "value" in value)
+    ):
+        return value.get("value")
+    return value
+
+
+def type_properties(properties: dict[str, Any]) -> dict[str, Any]:
+    """The ``typeProperties`` object of a dataset or linked service, or *properties* itself.
+
+    A flattened export writes the fields straight under *properties*, so those are read
+    when there is no ``typeProperties`` object or it is empty. A ``typeProperties`` that is
+    a list or a string is not one ADF defines, so it is ignored the same way rather than read.
+    """
+    value = properties.get("typeProperties")
+    return value if isinstance(value, dict) and value else properties
+
+
+def holds_mask(name: str) -> bool:
+    """``True`` when a resolved *name* holds a masked secret, so it names nothing.
+
+    An export writes a SecureString as ``**********``, so a run of two or more ``*``
+    marks a mask, alone or joined to other text (``landing/**********``). A single
+    ``*`` is left alone: a blob or a bracket-quoted SQL name may hold one.
+    """
+    return "**" in name
+
+
+def resolve_dataset_identity(
+    dataset_ref: AdfDatasetReference,
+    definitions: AdfDefinitions,
+    context: TranslationContext | None = None,
+) -> str | None:
+    """Physical identity for a dataset reference, or ``None`` when it is not provable.
+
+    A table is ``<store>/schema.table``, where the store is the linked service's
+    server (and database), or its name when the server is hidden in a secret, so a
+    source ``dbo.Orders`` and a warehouse ``dbo.Orders`` stay apart. A file is its
+    path down to the literal file name. Any ADF expression or DAB placeholder left
+    unresolved, a parameterised linked service included, gives ``None``: two
+    pipelines sharing a parameter name must never collide on the placeholder text.
+    A schema, table, folder or file name that holds a mask (:func:`holds_mask`) is unknown
+    too, so it gives ``None``. The check runs on the resolved name, so a mask reached
+    through a parameter, or joined to other text, is caught as well.
+
+    A separate ``schema`` field is one part of the name, and so is a separate ``table``
+    beside it, even when it holds a dot, so ``schema=dbo, table=a.b`` is ``dbo.[a.b]``. A
+    table name with no schema (a legacy ``tableName``, or a generic dataset given
+    ``dbo.Orders``) may be the whole qualified name, so it is split on its dots, and so is
+    a legacy ``tableName`` beside a schema.
+    """
+    resolution_context = context if context is not None else TranslationContext()
+    properties = dataset_props(dataset_ref, definitions)
+    if properties is None:
+        return None
+    schema, table, table_is_dotted = _resolve_table_fields(dataset_ref, properties, resolution_context)
+    if table:
+        if not all(_is_physical(part) and not holds_mask(part) for part in (schema, table) if part):
+            return None
+        if schema:
+            table_parts = _canonical_table_name(table) if table_is_dotted else _single_part_name(table)
+            qualified_table = f"{_single_part_name(schema)}.{table_parts}"
+        else:
+            qualified_table = _canonical_table_name(table)
+        store = resolve_table_store(properties, definitions)
+        return f"{store}/{qualified_table}" if store else None
+    return _resolve_dataset_path(
+        properties,
+        backing_linked_service(properties, definitions),
+        effective_dataset_params(dataset_ref, properties),
+        resolution_context,
+    )
+
+
+def _canonical_table_name(qualified_name: str) -> str:
+    """*qualified_name* with SQL Server bracket quoting taken off wherever it changes nothing.
+
+    ``[dbo].[Orders]`` (a legacy ``tableName``) and ``schema=dbo, table=Orders`` name
+    one table, so both read ``dbo.Orders``. A bracketed part keeps its brackets only
+    when it needs them to stay one part (it holds a dot, a bracket, a double quote,
+    or edge spaces), written with ``]]`` for each ``]`` inside, so ``[a.b].c`` never
+    meets ``a.b.c``. Spaces around each dot are dropped, as SQL ignores them. Case
+    is left alone, and so is a double-quoted part, because in
+    PostgreSQL ``"Orders"`` and ``Orders`` are different tables. A name whose
+    brackets or quotes do not close is kept as written.
+    """
+    parts: list[str] = []
+    part_start = 0
+    closing_quote = ""
+    index = 0
+    while index < len(qualified_name):
+        character = qualified_name[index]
+        if closing_quote:
+            if character == closing_quote and qualified_name[index + 1 : index + 2] == closing_quote:
+                index += 1
+            elif character == closing_quote:
+                closing_quote = ""
+        elif character == "[":
+            closing_quote = "]"
+        elif character == '"':
+            closing_quote = '"'
+        elif character == ".":
+            parts.append(qualified_name[part_start:index])
+            part_start = index + 1
+        index += 1
+    if closing_quote:
+        return qualified_name
+    parts.append(qualified_name[part_start:])
+    return ".".join(_canonical_table_name_part(part) for part in parts)
+
+
+def _canonical_table_name_part(part: str) -> str:
+    """One dotted part of a table name, trimmed, with its brackets taken off when they change nothing.
+
+    SQL ignores spaces around the dot, so ``dbo .Orders`` reads ``dbo.Orders``. Only a
+    part that is exactly one bracketed name, its ``[`` closed by its last ``]``, loses
+    its brackets; anything else, such as ``[a]b]``, keeps them.
+    """
+    stripped = part.strip()
+    bracketed = _BRACKETED_NAME_RE.fullmatch(stripped)
+    if bracketed is None:
+        return stripped
+    name = bracketed.group(1).replace("]]", "]")
+    if not name or name != name.strip() or any(character in name for character in '.[]"'):
+        return "[" + name.replace("]", "]]") + "]"
+    return name
+
+
+def _single_part_name(name: str) -> str:
+    """*name*, written in one separate field, as one canonical part of a table name.
+
+    A name already quoted whole (``[a.b]`` or ``"Orders"``) is read as
+    :func:`_canonical_table_name_part` reads a part. Any other name is the part as
+    written, so a dot or bracket in it stays inside it: ``a.b`` reads ``[a.b]``.
+    """
+    stripped = name.strip()
+    if _BRACKETED_NAME_RE.fullmatch(stripped) or _DOUBLE_QUOTED_NAME_RE.fullmatch(stripped):
+        return _canonical_table_name_part(stripped)
+    return _canonical_table_name_part("[" + stripped.replace("]", "]]") + "]")
+
+
+def dataset_props(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions) -> dict[str, Any] | None:
+    """Return the ``properties`` dict for a dataset reference, or ``None``."""
+    dataset = definitions.get_dataset(dataset_ref.reference_name)
+    if not dataset:
+        return None
+    return dict(dataset.properties or {})
+
+
+def _resolve_param_value(
+    raw: Any,
+    dataset_params: dict[str, Any],
+    context: TranslationContext,
+    visited_parameters: frozenset[str] = frozenset(),
+) -> str:
+    """Resolve a single ADF location / table field to a string.
+
+    A value object is read by its ``value`` under the same rule as everywhere else
+    (:func:`expression_value`), so a table written as ``{"value": "Orders"}`` is read the
+    way a server written like that is.
+
+    A ``dataset().<name>`` that comes back round to itself through the defaults
+    (``a`` is ``@dataset().b`` and ``b`` is ``@dataset().a``) is unresolved, so it gives
+    ``""`` instead of recursing until Python gives up.
+    """
+    raw = expression_value(raw)
+    if raw is None:
+        return ""
+    if isinstance(raw, (list, dict)):
+        return ""
+    if not isinstance(raw, str):
+        return str(raw)
+    text = raw
+
+    stripped = text.strip()
+    match = DATASET_PARAMETER_RE.fullmatch(stripped[1:]) if stripped.startswith("@") else None
+    if match:
+        parameter_name = match.group(1)
+        if parameter_name in visited_parameters:
+            return ""
+        return _resolve_param_value(
+            dataset_params.get(parameter_name, ""), dataset_params, context, visited_parameters | {parameter_name}
+        )
+
+    if "@{" in text:
+        return resolve_interpolated_string(text, context)
+
+    if text.startswith("@"):
+        result = resolve_expression(text, context)
+        if result is not None and result.kind in ("literal", "dab_ref"):
+            return result.value
+        return text
+
+    return text
+
+
+def effective_dataset_params(dataset_ref: AdfDatasetReference, dataset_props: dict[str, Any]) -> dict[str, Any]:
+    """Effective parameter map: declared dataset defaults first, call-site overrides win.
+
+    Declared or call-site ``parameters`` that are not a map (a list, say) bind nothing,
+    rather than crashing the whole discover run.
+    """
+    declared = dataset_props.get("parameters")
+    effective: dict[str, Any] = {}
+    if isinstance(declared, dict):
+        for name, spec in declared.items():
+            if isinstance(spec, dict) and "defaultValue" in spec:
+                effective[name] = spec["defaultValue"]
+    effective.update(call_site_parameters(dataset_ref))
+    return effective
+
+
+def call_site_parameters(dataset_ref: AdfDatasetReference) -> dict[str, Any]:
+    """The parameters the reference passes, or an empty map when they are missing or not a map."""
+    return dict(dataset_ref.parameters) if isinstance(dataset_ref.parameters, dict) else {}
+
+
+def resolve_table_reference(
+    dataset_ref: AdfDatasetReference,
+    dataset_props: dict[str, Any] | None,
+    context: TranslationContext,
+) -> tuple[str | None, str | None]:
+    """Resolve ``(schema, table)`` from a dataset reference.
+
+    Handles both the nested ``typeProperties`` shape and the
+    ``schemaTypePropertiesSchema`` flattened form ``az datafactory dataset show``
+    emits. ADF parameter expressions resolve against the reference's effective
+    parameter map.
+    """
+    schema, table, _ = _resolve_table_fields(dataset_ref, dataset_props, context)
+    return schema, table
+
+
+def _resolve_table_fields(
+    dataset_ref: AdfDatasetReference,
+    dataset_props: dict[str, Any] | None,
+    context: TranslationContext,
+) -> tuple[str | None, str | None, bool]:
+    """Resolve ``(schema, table, table_is_dotted)`` as :func:`resolve_table_reference` does.
+
+    ``table_is_dotted`` is ``True`` when the table name came from a legacy ``tableName``,
+    which may write the whole dotted name in one field, rather than a separate ``table``.
+    """
+    if not dataset_props:
+        return None, None, False
+    type_props = dataset_props.get("typeProperties") if isinstance(dataset_props.get("typeProperties"), dict) else None
+    effective_params = effective_dataset_params(dataset_ref, dataset_props)
+    _, schema_raw = _pick_dataset_field(
+        type_props,
+        dataset_props,
+        ("schema", "database"),
+        ("schemaTypePropertiesSchema", "database"),
+    )
+    table_key, table_raw = _pick_dataset_field(
+        type_props,
+        dataset_props,
+        ("table", "tableName"),
+        ("table", "tableName"),
+    )
+    schema = _resolve_param_value(schema_raw, effective_params, context) if schema_raw is not None else None
+    table = _resolve_param_value(table_raw, effective_params, context) if table_raw is not None else None
+    return (schema or None), (table or None), table_key == "tableName"
+
+
+def _pick_dataset_field(
+    type_props: dict[str, Any] | None,
+    dataset_props: dict[str, Any],
+    nested_keys: tuple[str, ...],
+    flat_keys: tuple[str, ...],
+) -> tuple[str | None, Any]:
+    """First populated dataset field across the nested and az-flattened shapes, as ``(key, value)``.
+
+    Empty strings, empty lists, and ``None`` are skipped so a column-schema
+    artifact like ``schema: []`` does not shadow the real database schema stored
+    under a flattened key. ``(None, None)`` when no field is populated.
+    """
+    candidates: list[tuple[str, Any]] = []
+    if type_props is not None:
+        candidates.extend((key, type_props.get(key)) for key in nested_keys)
+    candidates.extend((key, dataset_props.get(key)) for key in flat_keys)
+    for key, value in candidates:
+        if value is None:
+            continue
+        if isinstance(value, (list, dict)) and not value:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return key, value
+    return None, None
+
+
+def _linked_service_reference(dataset_props: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Return the dataset's linked service name and the parameters its reference binds.
+
+    The name is ``""`` unless it is a plain name: an unevaluated ``[parameters('ls')]``
+    or any other expression names no linked service, even if a definition happens to be
+    loaded under that key, so it can never prove a store.
+    """
+    linked_service_reference = dataset_props.get("linkedServiceName") or {}
+    if isinstance(linked_service_reference, dict):
+        name = linked_service_reference.get("referenceName")
+        parameters = linked_service_reference.get("parameters")
+    else:
+        name, parameters = linked_service_reference, None
+    if not isinstance(name, str) or not name or not _is_physical(name):
+        return "", {}
+    return name, parameters if isinstance(parameters, dict) else {}
+
+
+def backing_linked_service(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> Any:
+    """Return the loaded definition of the dataset's linked service, or ``None``."""
+    linked_service_name, _ = _linked_service_reference(dataset_props)
+    return definitions.get_linked_service(linked_service_name) if linked_service_name else None
+
+
+def resolve_table_store(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> str | None:
+    """Name the store that holds a dataset's table, or ``None`` when it is not provable.
+
+    Uses the literal ``server`` (plus ``database`` when given) from the backing
+    linked service's properties or plaintext connection string, exactly as written.
+    A ``server`` or ``database`` wrapped in an Expression or SecureString object (or
+    an untyped one with a ``value``) is read from its ``value`` and checked like a
+    plain string. Neither name can hold ``*``, so one that does is a masked secret
+    (an export writes ``**********``). A parameterised or masked server or database,
+    or a parameterised connection string, gives ``None``. When no server can be read
+    (the connection string is hidden in a Key Vault reference or a masked secret),
+    the linked service name stands in for it, but only when that linked service
+    takes no parameters: each binding of one that does may point at a different
+    store, so no single name identifies it.
+    """
+    linked_service_name, _ = _linked_service_reference(dataset_props)
+    if not linked_service_name:
+        return None
+    linked_service = definitions.get_linked_service(linked_service_name)
+    linked_service_properties = linked_service.properties if linked_service is not None else {}
+    type_props = type_properties(linked_service_properties)
+    connection_string = expression_value(type_props.get("connectionString"))
+    if isinstance(connection_string, str) and not _is_physical(connection_string):
+        return None
+    connection_fields = _connection_string_fields(connection_string) if isinstance(connection_string, str) else {}
+
+    server = (
+        expression_value(type_props.get("server"))
+        or connection_fields.get("server")
+        or connection_fields.get("data source")
+    )
+    database = (
+        expression_value(type_props.get("database"))
+        or connection_fields.get("database")
+        or connection_fields.get("initial catalog")
+    )
+    store_parts = [part for part in (server, database) if part]
+    if not all(
+        isinstance(part, str) and part.strip() and _is_physical(part) and "*" not in part for part in store_parts
+    ):
+        return None
+    if server:
+        return "/".join(part.strip() for part in store_parts)
+    return unparameterised_linked_service_name(dataset_props, definitions)
+
+
+def unparameterised_linked_service_name(dataset_props: dict[str, Any], definitions: AdfDefinitions) -> str | None:
+    """The dataset's linked service name when that linked service takes no parameters, else ``None``.
+
+    A linked service with no parameters points at the same store on every use, so its
+    name can stand in for a server or account it hides in a secret. One that takes
+    parameters, on its reference or in its own definition, may point somewhere else
+    for each binding. A name that is not plain, such as an unevaluated
+    ``[parameters('ls')]``, gives ``None`` too.
+
+    ADF names are not case-sensitive, so the name is spelled as the loaded linked
+    service spells it, whatever case the reference used; ``ls_sql`` and ``LS_SQL``
+    name one store. A linked service that is not in the export keeps the reference's
+    spelling.
+    """
+    linked_service_name, reference_parameters = _linked_service_reference(dataset_props)
+    if not linked_service_name or reference_parameters:
+        return None
+    linked_service = definitions.get_linked_service(linked_service_name)
+    if linked_service is None:
+        return linked_service_name
+    if linked_service.properties.get("parameters"):
+        return None
+    return linked_service.name
+
+
+def resolve_file_store(
+    location: dict[str, Any],
+    linked_service: Any,
+    dataset_params: dict[str, Any],
+    context: TranslationContext,
+) -> tuple[str | None, str | None]:
+    """Resolve a file dataset's ``(file system, storage account)``.
+
+    The file system is the ADLS ``fileSystem``, the Blob ``container``, or the S3 /
+    GCS ``bucketName``. Each part is ``None`` unless it resolves to a literal. No
+    file system name can hold ``*``, so one that does is masked and unknown. The
+    path identity and the signature's store qualifier both read the store here, so
+    they always agree on what counts as a known file system and account.
+    """
+    file_system = written_file_system(location, dataset_params, context)
+    account = _resolve_storage_account(linked_service)
+    return (
+        file_system if file_system and _is_physical(file_system) and "*" not in file_system else None,
+        account if account and _is_physical(account) else None,
+    )
+
+
+def written_file_system(location: dict[str, Any], dataset_params: dict[str, Any], context: TranslationContext) -> str:
+    """The location's file system, container or bucket as it resolves, before any check (``""`` when unset)."""
+    return _resolve_param_value(
+        location.get("fileSystem") or location.get("container") or location.get("bucketName"), dataset_params, context
+    )
+
+
+def _connection_string_fields(connection_string: str) -> dict[str, str]:
+    """Split a ``key=value;`` connection string into a lower-cased key map."""
+    fields: dict[str, str] = {}
+    for part in connection_string.split(";"):
+        key, separator, value = part.partition("=")
+        if separator:
+            fields[key.strip().lower()] = value.strip()
+    return fields
+
+
+def _resolve_dataset_path(
+    dataset_props: dict[str, Any],
+    linked_service: Any,
+    dataset_params: dict[str, Any],
+    context: TranslationContext,
+) -> str | None:
+    """Resolve a dataset's storage path from its location + backing linked service.
+
+    The path runs down to the literal ``fileName`` when the dataset names one, so
+    two files in the same folder stay distinct. Location parts written as
+    ``@dataset().x`` resolve against the reference's effective parameters, as table
+    names do, so a parameterised dataset bound to literals still gets its identity.
+    Any part that stays parameterised or unresolved (file system, folder, file name,
+    or storage account) yields ``None``.
+
+    Blob and ADLS Gen2 datasets share one ``abfss://<container>@<account>.dfs...``
+    form on purpose. A storage account name is unique across Azure and both
+    connectors are endpoints onto that one account, so a Blob writer and an ADLS
+    Gen2 reader of the same container and path touch the same file and should link.
+    """
+    type_props = type_properties(dataset_props)
+    location = type_props.get("location") or {}
+    if not isinstance(location, dict):
+        return None
+
+    def _resolved_part(raw: Any) -> str | None:
+        if raw is None or raw == "":
+            return ""
+        resolved = _resolve_param_value(raw, dataset_params, context)
+        # A part that was written but resolves to nothing (an unbound parameter) is unknown, not absent,
+        # and so is one that holds a mask.
+        if not resolved or not _is_physical(resolved) or holds_mask(resolved):
+            return None
+        return resolved
+
+    file_system, account = resolve_file_store(location, linked_service, dataset_params, context)
+    folder_path = _resolved_part(location.get("folderPath"))
+    file_name = _resolved_part(location.get("fileName"))
+    if file_system is None or account is None or folder_path is None or file_name is None:
+        return None
+
+    relative_path = "/".join(part.strip("/") for part in (folder_path, file_name) if part.strip("/"))
+    return f"abfss://{file_system}@{account}.dfs.core.windows.net/{relative_path}".rstrip("/")
+
+
+def _resolve_storage_account(linked_service: Any) -> str | None:
+    """Pull a storage account name out of a linked service, if present.
+
+    The account is read from ``url``, then ``serviceEndpoint`` (a Blob linked service
+    that signs in with a service principal or managed identity), then ``sasUri``, then
+    the connection string. Each is read from its ``value`` when wrapped in an
+    Expression or SecureString object (or an untyped one). The
+    whole value must be physical before the account is cut out of it: cutting first
+    would drop the closing ``]`` of an ARM expression or the tail of an ``@{...}``
+    and leave a fragment that looks literal. A storage account name is only letters
+    and digits, so a cut that holds anything else (a masked ``*``, a ``-``) names no
+    account.
+    """
+    if linked_service is None:
+        return None
+    type_props = type_properties(linked_service.properties)
+
+    for endpoint_key in ("url", "serviceEndpoint"):
+        url = expression_value(type_props.get(endpoint_key)) or ""
+        if isinstance(url, str) and url:
+            if not _is_physical(url):
+                return None
+            host = url.replace("https://", "").split("/", 1)[0]
+            host_no_port = host.split(":", 1)[0]
+            if "." in host_no_port:
+                return _storage_account_name(host_no_port.split(".", 1)[0])
+
+    sas_uri = expression_value(type_props.get("sasUri")) or ""
+    if isinstance(sas_uri, str) and sas_uri:
+        if not _is_physical(sas_uri):
+            return None
+        host = sas_uri.split("?", 1)[0].replace("https://", "").split("/", 1)[0]
+        if "." in host:
+            return _storage_account_name(host.split(".", 1)[0])
+
+    # Plaintext connection string (rare in az exports -- usually masked).
+    connection_string = expression_value(type_props.get("connectionString"))
+    if isinstance(connection_string, str):
+        if not _is_physical(connection_string):
+            return None
+        match = _ACCOUNT_NAME_RE.search(connection_string)
+        if match:
+            return _storage_account_name(match.group(1).strip())
+
+    # AWS -- bucket name lives on the dataset, account is implicit; nothing useful
+    # to return at the linked-service level for S3 / GCS.
+    return None
+
+
+def _storage_account_name(text: str) -> str | None:
+    """*text*, lower-cased, when it can be a storage account name (letters and digits only), else ``None``.
+
+    Azure account names are lower case and host names ignore case, so ``ACCTONE``
+    and ``acctone`` are one account; lower-casing loses nothing.
+    """
+    return text.lower() if _STORAGE_ACCOUNT_RE.fullmatch(text) else None
+
+
+def _is_physical(value: str) -> bool:
+    """Return ``True`` only when *value* is a literal (physical) identifier.
+
+    A value is NOT physical when it still contains an unresolved marker -- a
+    DAB-ref placeholder (``{{`` ... ``}}``), a bundle variable (``${var.x}``, which
+    a global parameter becomes under ``bundle_variable`` resolution and is only known
+    at deploy time), a leftover ADF interpolation fragment (``@{``), a bare ADF
+    expression (starts with ``@``), or an ARM
+    template expression the export left unevaluated (``[parameters('x')]``,
+    ``[concat(...)]``). An ARM expression always opens with a function call, so
+    bracket-quoted SQL names such as ``[dbo].[Orders]`` stay physical, and so
+    does ARM's ``[[`` escape for a literal that starts with ``[``.
+    """
+    stripped = value.strip()
+    if "{{" in value or "${var." in value or "@{" in value or stripped.startswith("@"):
+        return False
+    return not is_arm_expression(stripped)
+
+
+def is_arm_expression(text: str) -> bool:
+    """``True`` when *text* is an unevaluated ARM template expression such as ``[parameters('x')]``."""
+    call = _ARM_CALL_RE.match(text)
+    if call is None:
+        return False
+    function = call.group(1).lower()
+    if "." in function or function.startswith("list") or function in _ARM_FUNCTIONS:
+        return True
+    arguments = call.group("arguments")
+    return "'" in arguments or bool(_NESTED_CALL_RE.search(arguments))

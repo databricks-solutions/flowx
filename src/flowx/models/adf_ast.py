@@ -121,6 +121,19 @@ class AdfLinkedServiceReference:
 
 
 @dataclass(slots=True, kw_only=True)
+class AdfSwitchCase:
+    """One case of a Switch activity, as declared.
+
+    Attributes:
+        value: The case's ``value``, as a string.
+        activities: The case's child activities; empty when it declares none.
+    """
+
+    value: str
+    activities: list[AdfActivity] = field(default_factory=list)
+
+
+@dataclass(slots=True, kw_only=True)
 class AdfActivity:
     """Single ADF activity node.
 
@@ -136,9 +149,10 @@ class AdfActivity:
         if_true_activities: Activities to run when an IfCondition evaluates to true.
         if_false_activities: Activities to run when an IfCondition evaluates to false.
         activities: Child activities for ForEach / Until containers.
-        switch_cases: Per-case child activities for a Switch, keyed by case value
-            (``cases[].value`` -> that case's ``activities``). Preserves case
-            grouping; use :func:`switch_child_activities` for a flat view.
+        switch_cases: A Switch's cases, one :class:`AdfSwitchCase` per declared case
+            in declared order. A case with no activities, or one whose value an
+            earlier case also declares, is kept as its own case, so every reader
+            sees the same list. Use :func:`switch_child_activities` for a flat view.
         switch_default_activities: A Switch's ``defaultActivities`` (the branch
             taken when no case matches).
     """
@@ -154,7 +168,7 @@ class AdfActivity:
     if_true_activities: list[AdfActivity] | None = None
     if_false_activities: list[AdfActivity] | None = None
     activities: list[AdfActivity] | None = None  # ForEach, Until
-    switch_cases: dict[str, list[AdfActivity]] | None = None  # Switch cases[].value -> activities
+    switch_cases: list[AdfSwitchCase] | None = None  # Switch cases[], one per declared case
     switch_default_activities: list[AdfActivity] | None = None  # Switch defaultActivities
     # Original ADF/ARM activity JSON, retained so agentic handlers can translate from the source.
     raw: dict[str, Any] | None = None
@@ -172,8 +186,8 @@ class AdfActivity:
         """
         children: list[AdfActivity] = []
         if self.switch_cases:
-            for case_activities in self.switch_cases.values():
-                children.extend(case_activities)
+            for case in self.switch_cases:
+                children.extend(case.activities)
         if self.switch_default_activities:
             children.extend(self.switch_default_activities)
         return children
