@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from flowx.models.ir import Pipeline
-from flowx.sources.airflow.loader import load_airflow_dag
+from flowx.sources.airflow.loader import load_airflow_dag, load_airflow_dags
 
 
 def _load(tmp_path: Path, setup: str, default_args: str = "default_args") -> Pipeline:
@@ -137,3 +137,28 @@ def test_dict_passed_as_a_default_args_keyword_to_a_function_is_a_gap(tmp_path: 
     )
 
     assert "default_args" in _gap_names(pipeline)
+
+
+def test_change_made_in_a_module_level_loop_is_followed(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "default_args = {'retries': 1}\nfor env in ['prod']:\n    default_args['retries'] = 3")
+
+    assert pipeline.reconciliation_status == "verified"
+    assert _task(pipeline).max_retries == 3
+
+
+def test_dags_generated_in_a_loop_get_the_dict_as_the_loop_changed_it(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dags.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "default_args = {'retries': 1}\n"
+        "for team in ['a', 'b']:\n"
+        "    default_args['retries'] = 4\n"
+        "    with DAG(dag_id=f'etl_{team}', default_args=default_args) as dag:\n"
+        "        BashOperator(task_id='t', bash_command='echo hi')\n",
+        encoding="utf-8",
+    )
+
+    pipelines = load_airflow_dags(dag_path)
+
+    assert [(pipeline.name, _task(pipeline).max_retries) for pipeline in pipelines] == [("etl_a", 4), ("etl_b", 4)]

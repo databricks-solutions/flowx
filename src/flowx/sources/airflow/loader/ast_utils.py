@@ -210,6 +210,21 @@ class _ConstantSubstituter(ast.NodeTransformer):
         value = self.constants.get(node.id, _UNRESOLVED)
         return ast.copy_location(_value_node(value), node) if value is not _UNRESOLVED else node
 
+    def visit_Subscript(self, node: ast.Subscript) -> ast.expr:
+        # ``name[key] = value`` and ``del name[key]`` change the object the name holds, so the name stays.
+        if not isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name):
+            node.slice = self.visit(node.slice)
+            return node
+        return self.generic_visit(node)  # type: ignore[return-value]
+
+    def visit_Call(self, node: ast.Call) -> ast.expr:
+        # A method called on a name, such as ``name.update(...)``, may change the object, so the name stays.
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            node.args = [self.visit(argument) for argument in node.args]
+            node.keywords = [self.visit(keyword) for keyword in node.keywords]
+            return node
+        return self.generic_visit(node)  # type: ignore[return-value]
+
     def generic_visit(self, node: ast.AST) -> ast.AST:
         visited = super().generic_visit(node)
         if isinstance(visited, ast.expr):
@@ -249,11 +264,37 @@ def _static_iteration_nodes(node: ast.expr, constants: dict[str, Any]) -> list[a
     return None
 
 
+def _mutated_names(statement: ast.stmt) -> set[str]:
+    """Returns the names whose objects a statement may change in place.
+
+    That is an item assignment or ``del``, an augmented assignment, or a method call on the name.
+    """
+    names: set[str] = set()
+    for node in ast.walk(statement):
+        if isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name):
+            names.add(node.value.id)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+        ):
+            names.add(node.func.value.id)
+    return names
+
+
 def _expand_top_level_loops(module: ast.Module) -> ast.Module:
-    """Unrolls bounded module-level loops so generated DAG declarations stay distinct."""
+    """Unrolls bounded module-level loops so generated DAG declarations stay distinct.
+
+    A name whose object a statement changes in place stops being a constant from there on, so a later use
+    is not replaced with its earlier value.
+    """
     body: list[ast.stmt] = []
     constants: dict[str, Any] = {}
     for statement in module.body:
+        for name in _mutated_names(statement):
+            constants.pop(name, None)
         if (
             isinstance(statement, ast.Assign)
             and len(statement.targets) == 1
@@ -269,7 +310,11 @@ def _expand_top_level_loops(module: ast.Module) -> ast.Module:
                     value = _safe_static_value(item, constants)
                     if value is _UNRESOLVED:
                         continue
-                    iteration_constants = {**constants, statement.target.id: value}
+                    changed = {name for child in statement.body for name in _mutated_names(child)}
+                    iteration_constants = {
+                        **{name: known for name, known in constants.items() if name not in changed},
+                        statement.target.id: value,
+                    }
                     body.extend(_bind_constants(child, iteration_constants) for child in statement.body)
                 continue
         body.append(statement)
