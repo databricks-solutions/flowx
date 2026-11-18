@@ -68,6 +68,8 @@ of those four keys yourself:
 
 ### Rules the validator enforces
 
+- **Some content.** Set at least one of `overview`, `system_recommendation`, `pipeline_insights` or
+  `pipeline_relationships`; an empty list does not count. Insights with nothing in them are refused.
 - **Foreign keys.** Every `pipeline_insights[].pipeline` and every relationship
   `from_pipeline` / `to_pipeline` must be a pipeline name listed in the inventory's `pipelines`.
   The one exception is a `control` relationship whose edge resolves (see below): its endpoints may

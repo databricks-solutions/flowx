@@ -190,6 +190,11 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
     for key in sorted(set(raw) - _INSIGHTS_TOP_KEYS):
         hint = " (set by the library, not the author)" if key in _LIBRARY_KEYS else ""
         violations.append(f"unknown top-level key: {key!r}{hint}")
+    if not any(key in raw and raw[key] != [] for key in _CONTENT_KEYS):
+        content_keys = ", ".join(repr(key) for key in _CONTENT_KEYS[:-1])
+        violations.append(
+            f"insights must set at least one of {content_keys} or {_CONTENT_KEYS[-1]!r} (an empty list does not count)"
+        )
 
     if _AUTHORED_AGAINST_KEY in raw:
         violations.extend(_authored_against_violations(raw[_AUTHORED_AGAINST_KEY], inventory))

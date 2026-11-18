@@ -230,6 +230,42 @@ def test_non_dict_payload_is_a_violation() -> None:
     assert violations == ["insights must be a JSON object, got list"]
 
 
+_NO_CONTENT_VIOLATION = (
+    "insights must set at least one of 'overview', 'system_recommendation', 'pipeline_insights' or "
+    "'pipeline_relationships' (an empty list does not count)"
+)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {},
+        {"pipeline_insights": []},
+        {"pipeline_relationships": []},
+        {"pipeline_insights": [], "pipeline_relationships": []},
+    ],
+)
+def test_insights_with_no_content_are_a_violation(raw: dict[str, Any]) -> None:
+    assert validate_insights(raw, _inventory()) == [_NO_CONTENT_VIOLATION]
+
+
+@pytest.mark.parametrize("key", ["overview", "system_recommendation", "pipeline_insights", "pipeline_relationships"])
+def test_any_one_content_field_is_enough(key: str) -> None:
+    assert validate_insights({key: _valid_insights()[key]}, _inventory()) == []
+
+
+def test_enrich_records_nothing_for_empty_insights(tmp_path: Path) -> None:
+    path = _write_inventory(tmp_path, _inventory())
+    before = path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights={})
+
+    assert result["ok"] is False
+    assert result["violations"] == [_NO_CONTENT_VIOLATION]
+    assert path.read_bytes() == before
+    assert not (tmp_path / "metadata" / "agentic_insights.json").exists()
+
+
 def test_unknown_pipeline_reference_in_insight() -> None:
     raw = _valid_insights()
     raw["pipeline_insights"][0]["pipeline"] = "ghost"
