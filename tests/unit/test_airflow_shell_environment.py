@@ -54,12 +54,12 @@ def _task(tmp_path: Path, task: str):
 
 
 def test_bash_command_reading_a_worker_variable_is_a_gap(tmp_path: Path) -> None:
-    task = _task(tmp_path, "BashOperator(task_id='t', bash_command='$DBT_PATH snapshot --select snp')")
+    task = _task(tmp_path, "BashOperator(task_id='t', bash_command='$LOADER_HOME/bin/load --table orders')")
 
     assert isinstance(task, PlaceholderActivity)
-    assert "$DBT_PATH" in task.comment
+    assert "$LOADER_HOME" in task.comment
     assert "Airflow worker" in task.comment
-    assert task.raw_definition["environment_variables"] == ["DBT_PATH"]
+    assert task.raw_definition["environment_variables"] == ["LOADER_HOME"]
 
 
 def test_ssh_command_names_the_ssh_host(tmp_path: Path) -> None:

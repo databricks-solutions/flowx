@@ -318,6 +318,7 @@ def _load_airflow_module(
         tasks.append(activity)
 
     semantic_findings: list[dict[str, Any]] = []
+    builder_disclosures: list[dict[str, Any]] = []
     argument_proofs = [
         {
             "code": "operator_arguments_classified",
@@ -328,6 +329,7 @@ def _load_airflow_module(
         }
         for var, (_task_id, operator, kwargs) in visitor.operators.items()
     ]
+    argument_proof_by_capture = {str(proof["capture_id"]): proof for proof in argument_proofs}
     semantic_findings.extend(
         _semantic_finding(
             source_file or dag_path.name,
@@ -415,6 +417,7 @@ def _load_airflow_module(
             call_source=call_source,
             default_args=visitor.default_args_for(var),
             template_search_paths=template_search_paths,
+            source_root=source_root,
         )
         builder = ops.OPERATOR_REGISTRY.get(operator, ops.build_placeholder)
         activity = builder(ctx)
@@ -455,7 +458,7 @@ def _load_airflow_module(
                 )
             )
         unconsumed = ops.unconsumed_kwargs(operator, kwargs)
-        if unconsumed:
+        if unconsumed - ctx.consumed_arguments:
             names = ", ".join(sorted(unconsumed))
             activity = _replace_with_placeholder(
                 ctx,
@@ -570,6 +573,11 @@ def _load_airflow_module(
                 )
             )
 
+        if not isinstance(activity, PlaceholderActivity):
+            builder_disclosures.extend(ctx.disclosures)
+            if ctx.consumed_arguments:
+                proof = argument_proof_by_capture[var]
+                proof["arguments"] = ops.argument_classification(operator, kwargs, ctx.consumed_arguments)
         # Stamp policy only after every semantic guard has selected the final leaf activity.
         policy = templating.retry_policy(visitor.default_args_for(var), kwargs)
         activity.max_retries = policy.get("max_retries")
@@ -843,7 +851,7 @@ def _load_airflow_module(
             for name, value in visitor.dag_kwargs.items()
             if (records := imported_sources.imported_sources(value, imports, import_roots))
         },
-        argument_proofs=argument_proofs,
+        argument_proofs=[*argument_proofs, *builder_disclosures],
         collapse_proofs=dataproc_plan.proofs,
         logical_date_resolver=logical_date_resolver,
         expected_ir_edges=expected_ir_edges,
