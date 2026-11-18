@@ -879,6 +879,8 @@ class _DagVisitor(ast.NodeVisitor):
             owner = self.default_args.get("owner")
             if owner is not None:
                 self.dag_owner = ops.literal_str(owner)
+            # Airflow takes the DAG timezone from a start_date in default_args when the DAG sets none.
+            self.timezone = self.timezone or _extract_timezone(self.default_args.get("start_date"))
         # params={...} supplies DAG parameter defaults; each value is a literal or a Param(default=...).
         params = kwargs.get("params")
         if isinstance(params, ast.Dict):
