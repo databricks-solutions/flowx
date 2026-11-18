@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
-from flowx.dbt.bundle_files import DBT_PACKAGES, tree_artifacts
+from flowx.dbt.bundle_files import DBT_PACKAGES, project_artifacts
 from flowx.models.dab import DabNotebook
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
 from flowx.utils import to_lowercase_key
@@ -23,9 +23,6 @@ if TYPE_CHECKING:
     from flowx.models.ir import DbtCommandActivity
 
 _DBT_PROJECTS_RELATIVE_PATH = "dbt_projects"
-# Installed packages and connection profiles are not part of the project: the task runs ``dbt deps`` and
-# Databricks generates the profile from the task's warehouse.
-_EXCLUDED_PROJECT_PARTS = frozenset({"dbt_packages", "profiles.yml"})
 # Files that declare dbt packages, which a fresh task environment installs with ``dbt deps``.
 _PACKAGE_FILES = ("packages.yml", "dependencies.yml")
 
@@ -99,6 +96,4 @@ def prepare(activity: DbtCommandActivity, *, scope: str = "") -> PreparedActivit
     }
     task["job_cluster_key"] = DEFAULT_JOB_CLUSTER_KEY
     task["libraries"] = [{"pypi": {"package": package}} for package in DBT_PACKAGES]
-    return PreparedActivity(
-        task=task, notebooks=tree_artifacts(project, folder, excluded_parts=_EXCLUDED_PROJECT_PARTS)
-    )
+    return PreparedActivity(task=task, notebooks=project_artifacts(project, folder))

@@ -17,7 +17,7 @@ import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from flowx.dbt.bundle_files import DBT_PACKAGES, tree_artifacts
+from flowx.dbt.bundle_files import DBT_PACKAGES, project_artifacts, tree_artifacts
 from flowx.dbt.manifest import explode_manifest
 from flowx.models.dab import DabNotebook, SetupTask
 from flowx.preparer.workflow_preparer import (
@@ -40,7 +40,9 @@ def _dbt_source_artifacts(activity: DbtFactoryActivity) -> list[DabNotebook]:
     """Returns deployable project, profile, and manifest files available on the local filesystem."""
     project_dir = Path(activity.project_dir).expanduser()
     artifacts = (
-        tree_artifacts(project_dir, _DBT_PROJECT_RELATIVE_PATH) if (project_dir / "dbt_project.yml").is_file() else []
+        project_artifacts(project_dir, _DBT_PROJECT_RELATIVE_PATH)
+        if (project_dir / "dbt_project.yml").is_file()
+        else []
     )
 
     profiles_dir = Path(activity.profiles_dir).expanduser()

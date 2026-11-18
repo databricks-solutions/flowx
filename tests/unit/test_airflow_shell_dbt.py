@@ -24,6 +24,7 @@ from flowx.sources.airflow.loader import load_pipelines
         ("cd /opt/proj && dbt deps && dbt run", None, ["dbt deps", "dbt run"], "/opt/proj"),
         ("cd proj && dbt run", "/srv", ["dbt run"], "/srv/proj"),
         ("cd /p &&\ndbt run", None, ["dbt run"], "/p"),
+        ("dbt run \\\n  --select a", "/p", ["dbt run --select a"], "/p"),
         ("cd /opt/proj &&\n  dbt deps &&\n  dbt run", None, ["dbt deps", "dbt run"], "/opt/proj"),
         ("\n    dbt run --select a\n", "/srv", ["dbt run --select a"], "/srv"),
         ("dbt run --project-dir=../other", "/srv/proj", ["dbt run"], "/srv/other"),
@@ -58,6 +59,8 @@ def test_profile_options_are_dropped_and_reported() -> None:
         "dbt run &&",
         "&& dbt run",
         "dbt run && && dbt test",
+        "dbt run --vars 'x\ny'",
+        'dbt run --vars "{\n  \\"day\\": 1}"',
         "dbt run\ndbt test",
         "dbt run || true",
         "dbt run | tee run.log",
@@ -372,3 +375,31 @@ def test_dbt_command_activity_round_trips_through_the_report() -> None:
     assert task.commands == ["dbt deps", "dbt run"]
     assert task.project_dir == "/srv/proj"
     assert task.source_project_dir == "/home/ec2-user/airflow/proj"
+
+
+def test_only_the_files_dbt_reads_are_copied_into_the_bundle(tmp_path: Path) -> None:
+    project = _project(tmp_path, {".env": "DBT_PASSWORD=secret\n", "service_account.json": "{}\n"})
+    (project / "macros").mkdir()
+    (project / "macros" / "merge.sql").write_text("{% macro merge() %}{% endmacro %}\n", encoding="utf-8")
+    (project / "models" / ".secrets").write_text("token\n", encoding="utf-8")
+    _, out = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
+    )
+
+    copied = next((out / "src" / "dbt_projects").iterdir())
+    files = sorted(path.relative_to(copied).as_posix() for path in copied.rglob("*") if path.is_file())
+    assert files == ["dbt_project.yml", "macros/merge.sql", "models/dim.sql"]
+
+
+def test_folders_named_in_dbt_project_yml_are_copied(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    (project / "dbt_project.yml").write_text("name: intelsat_ca\nmodel-paths: ['transform']\n", encoding="utf-8")
+    (project / "transform").mkdir()
+    (project / "transform" / "orders.sql").write_text("select 1\n", encoding="utf-8")
+    _, out = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
+    )
+
+    copied = next((out / "src" / "dbt_projects").iterdir())
+    assert (copied / "transform" / "orders.sql").is_file()
+    assert not (copied / "models").exists()

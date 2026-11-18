@@ -73,10 +73,44 @@ def _join(base: str | None, path: str) -> str:
     return posixpath.normpath(posixpath.join(base, path)) if base and not posixpath.isabs(path) else path
 
 
+def _line_breaks_as_separators(command: str) -> str | None:
+    """Rewrites the line breaks that end a command as ``;``, or returns None if one falls inside quotes.
+
+    A line break after a backslash or right after ``&&`` continues the command, as in the shell. One inside a
+    quoted argument is part of the argument, which a dbt task command cannot carry.
+    """
+    output: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if character == "\\" and quote != "'" and index + 1 < len(command):
+            if command[index + 1] == "\n":
+                output.append(" ")
+            else:
+                output.append(command[index : index + 2])
+            index += 2
+            continue
+        if quote is None and character in "'\"":
+            quote = character
+        elif character == quote:
+            quote = None
+        elif character == "\n":
+            if quote is not None:
+                return None
+            output.append(" " if "".join(output).rstrip().endswith("&&") else " ; ")
+            index += 1
+            continue
+        output.append(character)
+        index += 1
+    return "".join(output)
+
+
 def _segments(command: str) -> list[tuple[str | None, list[str]]] | None:
     """Splits a command into ``(separator before it, words)`` simple commands, or None if it does not parse."""
-    # A line break ends a command, except right after ``&&``, where the shell reads on to the next line.
-    text = re.sub(r"&&[ \t]*\n\s*", "&& ", command.strip().replace("\\\n", " ")).replace("\n", " ; ")
+    text = _line_breaks_as_separators(command.strip())
+    if text is None:
+        return None
     lexer = shlex.shlex(text, posix=True, punctuation_chars=_PUNCTUATION)
     lexer.whitespace_split = True
     lexer.commenters = ""
