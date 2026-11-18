@@ -505,6 +505,21 @@ def test_structural_gap_rejects_leaf_replacement_but_accepts_deferred_candidate(
     assert _stage(output, _candidate(gap, status="deferred")) == 0
 
 
+@pytest.mark.parametrize(
+    ("operator", "finding_codes", "expected"),
+    [
+        ("BranchPythonOperator", set(), "graph_patch"),
+        ("CustomOperator", {"unsupported_trigger_rule"}, "graph_patch"),
+        ("CustomOperator", {"unrepresented_task_policy"}, "task_policy_patch"),
+        ("CustomOperator", {"operator_placeholder"}, None),
+    ],
+)
+def test_gap_capability_is_shared_by_envelope_and_mcp_classification(
+    operator: str, finding_codes: set[str], expected: str | None
+) -> None:
+    assert agentic_contract.airflow_gap_required_capability(operator, finding_codes) == expected
+
+
 def test_only_actually_preserved_policy_arguments_are_flowx_owned(tmp_path: Path) -> None:
     source = tmp_path / "policy.py"
     source.write_text(
