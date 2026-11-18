@@ -806,4 +806,28 @@ def _reconcile_pipeline(
         "excluded_count": 0,
         "transformations": transformations,
     }
+    pause_unfinished_schedule(pipeline)
     return pipeline
+
+
+def pause_unfinished_schedule(pipeline: Pipeline) -> None:
+    """Pauses the job's schedule or trigger while any task is unconverted or any source gap is open.
+
+    A deployed job with placeholder tasks would fail on every scheduled run. The schedule is emitted
+    paused, so whoever finishes the migration turns it on deliberately.
+    """
+    schedule = pipeline.schedule
+    if not schedule or pipeline.reconciliation_status == "verified" or schedule.get("pause_status") == "PAUSED":
+        return
+    schedule["pause_status"] = "PAUSED"
+    pipeline.audit.setdefault("transformations", []).append(
+        {
+            "code": "schedule_paused_until_migration_completes",
+            "schedule_kind": schedule.get("kind"),
+            "rationale": f"reconciliation_status_{pipeline.reconciliation_status}",
+            "message": (
+                "The job's schedule is emitted paused because the migration has open gaps or placeholder tasks. "
+                "Unpause it once every task is converted and checked."
+            ),
+        }
+    )

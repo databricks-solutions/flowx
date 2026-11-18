@@ -48,3 +48,24 @@ def test_default_args_start_date_sets_the_schedule_timezone(tmp_path: Path) -> N
 
     assert pipeline.schedule["timezone_id"] == "America/New_York"
     assert _transformation(pipeline, "schedule_timezone_defaulted") is None
+
+
+def test_verified_job_keeps_its_schedule_active(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, ", start_date=pendulum.datetime(2024, 1, 1, tz='UTC')")
+
+    assert pipeline.reconciliation_status == "verified"
+    assert pipeline.schedule["pause_status"] == "UNPAUSED"
+
+
+def test_job_with_a_placeholder_task_is_scheduled_paused(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "", task="BashOperator(task_id='t', bash_command='echo hi', cwd='/opt/work')")
+
+    assert pipeline.reconciliation_status == "verified_with_gaps"
+    assert pipeline.schedule["pause_status"] == "PAUSED"
+    assert _transformation(pipeline, "schedule_paused_until_migration_completes") is not None
+
+
+def test_job_with_a_dag_setting_gap_is_scheduled_paused(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, ", default_args=SHARED_DEFAULTS")
+
+    assert pipeline.schedule["pause_status"] == "PAUSED"

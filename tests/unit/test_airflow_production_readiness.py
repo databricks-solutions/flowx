@@ -71,7 +71,7 @@ def test_assigned_dag_preserves_configuration_and_tasks() -> None:
         "kind": "schedule",
         "quartz_cron_expression": "0 0 3 ? * *",
         "timezone_id": "UTC",
-        "pause_status": "UNPAUSED",
+        "pause_status": "PAUSED",
     }
     assert pipeline.tags["airflow_catchup"] == "true"
     assert {task.task_key for task in pipeline.tasks} == {"__flowx_airflow_dates", "extract", "load"}
