@@ -77,6 +77,7 @@ class _TaskFlowTask:
     is_async: bool = False
     positional_deps: dict[int, str] = field(default_factory=dict)
     keyword_deps: dict[str, str] = field(default_factory=dict)
+    mapped_deps: list[str] = field(default_factory=list)
     positional_values: dict[int, str] = field(default_factory=dict)
     keyword_values: dict[str, str] = field(default_factory=dict)
     unresolved_arguments: list[str] = field(default_factory=list)

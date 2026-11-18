@@ -9,7 +9,7 @@ from pathlib import Path
 
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow import templating
-from flowx.sources.airflow.loader.visitor import _DagVisitor
+from flowx.sources.airflow.loader.visitor import DagVisitor
 
 _RECOGNIZED_DAG_SETTINGS = frozenset(
     {
@@ -103,7 +103,7 @@ def _static_path(node: ast.expr, dag_file: Path | None) -> str | None:
     return None
 
 
-def template_searchpath(visitor: _DagVisitor) -> list[str] | None:
+def template_searchpath(visitor: DagVisitor) -> list[str] | None:
     """Returns the DAG's ``template_searchpath`` entries, ``[]`` when it is unset, or None when it is not static.
 
     Entries may be literals or paths built from ``__file__``, evaluated against the DAG file.
@@ -118,7 +118,7 @@ def template_searchpath(visitor: _DagVisitor) -> list[str] | None:
     return [entry for entry in entries if entry is not None]
 
 
-def template_search_directories(visitor: _DagVisitor) -> list[Path]:
+def template_search_directories(visitor: DagVisitor) -> list[Path]:
     """Returns the ``template_searchpath`` directories flowx can search: absolute ones present at discovery.
 
     Airflow documents these folders as absolute; a relative entry resolves against the worker's working
@@ -141,11 +141,11 @@ def _unavailable_search_entries(entries: list[str]) -> list[str]:
     return unavailable
 
 
-def _job_timeout_seconds(visitor: _DagVisitor) -> int | None:
+def _job_timeout_seconds(visitor: DagVisitor) -> int | None:
     return templating.timedelta_seconds(visitor.dag_kwargs.get("dagrun_timeout"))
 
 
-def _job_email_notifications(visitor: _DagVisitor) -> dict[str, list[str]]:
+def _job_email_notifications(visitor: DagVisitor) -> dict[str, list[str]]:
     recipients = templating.literal_email_recipients(visitor.default_args.get("email"))
     on_failure = visitor.default_args.get("email_on_failure")
     failure_enabled = on_failure is None or (isinstance(on_failure, ast.Constant) and on_failure.value is True)
@@ -154,7 +154,7 @@ def _job_email_notifications(visitor: _DagVisitor) -> dict[str, list[str]]:
     return {}
 
 
-def _retry_email_is_active(visitor: _DagVisitor) -> bool:
+def _retry_email_is_active(visitor: DagVisitor) -> bool:
     """Returns whether any captured task can emit an Airflow retry email."""
     for var, (_, _, kwargs) in visitor.operators.items():
         default_args = visitor.default_args_for(var)
@@ -171,7 +171,7 @@ def _retry_email_is_active(visitor: _DagVisitor) -> bool:
     return False
 
 
-def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] | None:
+def _dag_setting_disposition(name: str, visitor: DagVisitor) -> dict[str, str] | None:
     """Classifies recognized DAG settings as mapped, intentional no-ops, or runtime gaps."""
     if name not in _RECOGNIZED_DAG_SETTINGS:
         return {
@@ -365,3 +365,15 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
             "rationale": "preserved_as_databricks_job_failure_notification",
         }
     return None
+
+
+def job_timeout_seconds(visitor: DagVisitor) -> int | None:
+    """Returns the statically resolved DAG run timeout in seconds.
+
+    Args:
+        visitor: Completed capture containing the DAG arguments.
+
+    Returns:
+        The DAG run timeout in seconds, or ``None`` when it cannot be resolved.
+    """
+    return _job_timeout_seconds(visitor)
