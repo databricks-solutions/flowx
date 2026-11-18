@@ -65,8 +65,14 @@ Read `<output_dir>/metadata/inventory.json`:
 }
 ```
 
-Each activity's `task_key` equals its ADF activity name. `source_graphs_sha256` names the saved
-`metadata/source_graphs.json` the inventory was built from.
+Each activity's `task_key` is the task key convert gives it: the ADF activity name with every
+character outside `A-Z`, `a-z`, `0-9`, `_` and `-` replaced by `_` (runs of `_` collapsed, leading
+and trailing `_` dropped, and `unnamed` when nothing is left), so `Copy Orders (daily)` is
+`Copy_Orders_daily`. `name` and the legacy `depends_on` keep the names as written. A resolved
+`dependencies[].upstream`, the lineage edges and the motifs' `member_task_keys` use the task key, so
+they join with convert's task keys; an unresolved upstream keeps the name as written, since no
+activity carries it. `source_graphs_sha256` names the saved `metadata/source_graphs.json` the
+inventory was built from.
 
 The inventory deliberately has no top-level `generated_at` timestamp any more, so the same export,
 given the same `--source-dir`, always produces byte-identical `inventory.json` and any hash taken
