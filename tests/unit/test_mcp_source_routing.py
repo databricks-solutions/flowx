@@ -241,6 +241,29 @@ def test_resolve_agentic_prepare_materializes_hosted_airflow_source(captured, mo
     assert result["ok"] is True
 
 
+def test_resolve_agentic_apply_rematerializes_the_hosted_prepare_source(captured, monkeypatch, tmp_path: Path):
+    prepared_source = tmp_path / "prepared-source"
+    applied_source = tmp_path / "applied-source"
+    materialized = iter((prepared_source, applied_source))
+    cleaned: list[str] = []
+    monkeypatch.setattr(runner, "download_volume_dir", lambda _path: str(next(materialized)))
+    monkeypatch.setattr(runner, "cleanup_materialized", cleaned.append)
+    parameters = {
+        "source": "airflow",
+        "airflow_volume_path": "/Volumes/main/default/dags",
+        "report_path": "/tmp/out/.work/translation_report.json",
+        "output_dir": "/tmp/out",
+    }
+
+    assert server._cmd_resolve_agentic({**parameters, "action": "prepare"})["ok"] is True
+    assert server._cmd_resolve_agentic({**parameters, "action": "apply", "reset": True})["ok"] is True
+
+    prepare_argv, apply_argv = [argv for argv in captured if argv[0] == "resolve-agentic"]
+    assert prepare_argv[prepare_argv.index("--source-path") + 1] == str(prepared_source)
+    assert apply_argv[apply_argv.index("--source-path") + 1] == str(applied_source)
+    assert cleaned == [str(prepared_source), str(applied_source)]
+
+
 def test_resolve_agentic_stage_materializes_inline_candidate(captured):
     result = server._cmd_resolve_agentic(
         {

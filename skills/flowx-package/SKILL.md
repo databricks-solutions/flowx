@@ -39,6 +39,7 @@ This phase runs one of two ways; run the **`setup`** skill first if you haven't.
   flowx(command="package", parameters={"output_dir": "<dir>", "report_path": "<optional>", "catalog": "<catalog>",
                                             "schema": "<schema>", "bundle_name": "<optional>", "profile": "<optional>",
                                             "download_workspace_files": true,
+                                            "allow_unresolved_gaps": false,
                                             "output_volume_path": "<optional /Volumes/... target>",
                                             "output_workspace_path": "<optional /Workspace/... target>"})
   flowx(command="workspace_paths", parameters={"source": "adf", "report_path": "...", "source_dir": "<optional source dir>"})
@@ -190,6 +191,7 @@ Execute the DAB writer:
   [--group-by inferred|spec] [--group-spec <path>] \
   [--profile <databricks-cli-profile>] \
   [--no-download-workspace-files] \
+  [--allow-unresolved-gaps] \
   [--keep-intermediates]
 ```
 
@@ -201,6 +203,8 @@ Where:
 - After a successful build, `package` **prunes the transient `<output_dir>/.work/`** so the
   final tree contains only the bundle and the kept `metadata/` files. Pass `--keep-intermediates`
   to retain `.work/` for debugging.
+
+Airflow package preflight fails when an unreviewed deterministic report still contains gap findings. Prefer the fingerprint-bound `resolve-agentic` workflow. If the user deliberately wants a bundle that retains linked `NotImplementedError` placeholders, require explicit acknowledgment through MCP `allow_unresolved_gaps=true` or CLI `--allow-unresolved-gaps`; a successful MCP package then returns `status="packaged_with_unresolved_gaps"`. A reviewed agentic report is validated against persisted evidence and returns `completed_with_reviewed_gaps` when reviewed placeholders remain.
 
 **Workspace artifact downloading (default: enabled).** When the report references workspace-resident notebooks (`/Shared/...`), DBFS Spark JARs (`dbfs:/...`), or Spark Python files, the preparer downloads them via the Databricks CLI auth so the resulting bundle is self-contained and deployable across environments. Downloaded notebooks are downloaded under `src/notebooks/` and bound to the default `job_cluster` (since they may rely on classic-compute features). The original `notebook_path` in the resource YAML is rewritten to the bundle-relative path `../src/notebooks/<file>.py`.
 

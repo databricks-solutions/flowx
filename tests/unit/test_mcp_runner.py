@@ -32,6 +32,8 @@ def test_materialize_airflow_definitions_writes_nested_python_files() -> None:
         ({"README.md": "not a DAG"}, "must end in .py"),
         ({"dag.py": {"not": "source"}}, "must be a string"),
         ({"team/./dag.py": "pass\n", "team/dag.py": "print('duplicate')\n"}, "duplicate path"),
+        ({"a.py": "pass\n", "a.py/b.py": "pass\n"}, "parent/child path conflict"),
+        ({"a.py/b.py": "pass\n", "a.py": "pass\n"}, "parent/child path conflict"),
     ],
 )
 def test_materialize_airflow_definitions_rejects_unsafe_payloads(definitions: dict[str, object], message: str) -> None:
@@ -44,3 +46,17 @@ def test_materialize_airflow_definitions_enforces_utf8_byte_limit(monkeypatch) -
 
     with pytest.raises(ValueError, match="limit 4"):
         runner.materialize_airflow_definitions({"dag.py": "ééé"})
+
+
+def test_materialize_airflow_definitions_enforces_file_count_limit(monkeypatch) -> None:
+    monkeypatch.setattr(runner, "MAX_INLINE_FILES", 1)
+
+    with pytest.raises(ValueError, match="2 files.*limit 1"):
+        runner.materialize_airflow_definitions({"one.py": "pass\n", "two.py": "pass\n"})
+
+
+def test_materialize_airflow_definitions_enforces_utf8_path_limit(monkeypatch) -> None:
+    monkeypatch.setattr(runner, "MAX_INLINE_PATH_BYTES", 6)
+
+    with pytest.raises(ValueError, match="7 bytes.*limit 6"):
+        runner.materialize_airflow_definitions({"éé.py": "pass\n"})
