@@ -675,22 +675,13 @@ def build_server() -> FastMCP:
           review_complete, review_manifest, reset —
           prepare, stage, and explicitly apply fingerprint-bound Airflow leaf-gap resolutions.
         - "enrich": action(prepare | apply, default apply). prepare: output_dir, output_volume_path,
-          output_workspace_path — return metadata/inventory.json and, when present, the activity details in
-          metadata/source_graphs.json the same way package returns a bundle, for the agent to author against
-          when it cannot read output_dir (ok is false, naming the file, when one is too large to return
-          inline; pass one of the upload paths). apply: output_dir(req),
-          one of insights(inline object, or its JSON text) | insights_path(req) — validate agent-authored
-          discover insights
-          against inventory.json, record them in agentic_insights.json, and rebuild inventory.json from
-          source_graphs.json plus that document (one enrich per output_dir at a time absent a concurrent
-          discover, idempotent). `ok`
-          reflects validation; `result.violations` lists any problems (including another enrich holding
-          metadata/.enrich.lock) and both files are left untouched on failure. A lock a stopped enrich
-          left behind is cleared locally by deleting it and running enrich again; on the hosted server,
-          run discover again (it clears metadata/ and the lock), then prepare and apply. Author the insights by
-          reading inventory.json + the source artifacts first (source_graphs.json, which prepare returns), setting
-          `authored_against` (optional, checked when given) to its source_graphs_sha256 when it records one and
-          leaving it out otherwise (see the flowx-enrich skill's insights.md).
+          output_workspace_path — return metadata/inventory.json and, when present, metadata/source_graphs.json
+          (the activity details) to author insights against; when one is too large to return inline, ok is
+          false and you pass one of the upload paths. apply: output_dir(req), one of insights(inline object,
+          or its JSON text) | insights_path(req) — validate the insights against inventory.json and record
+          them; `ok` reflects validation and `result.violations` lists every problem. Set `authored_against`
+          to the inventory's source_graphs_sha256 when it records one. The flowx-enrich skill covers the
+          insights shape and what to do when enrich reports a leftover lock.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.
