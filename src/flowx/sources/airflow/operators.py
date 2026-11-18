@@ -747,11 +747,16 @@ def _variable_list(names: Iterable[str]) -> str:
 def _dbt_command_activity(ctx: OperatorContext, dbt: shell_dbt.ShellDbt) -> Activity:
     """Builds a Databricks dbt task for a shell command that only runs dbt."""
     if dbt.project_dir is None or not dbt.project_dir.startswith("/"):
+        reason = (
+            f"its project path {dbt.project_dir!r} is relative to a working directory flowx does not know; give "
+            "an absolute cwd, cd, or --project-dir"
+            if dbt.project_dir
+            else "the command does not cd into the project or pass --project-dir, and the task sets no cwd"
+        )
         return _placeholder(
             ctx,
-            f"This {ctx.operator} runs dbt, but flowx cannot tell which dbt project: the command does not cd into "
-            "an absolute path or pass --project-dir, and the task sets no cwd. Name the project folder, then "
-            "translate the task to a dbt task.",
+            f"This {ctx.operator} runs dbt, but flowx cannot tell which dbt project: {reason}. Name the project "
+            "folder, then translate the task to a dbt task.",
             {"dbt_commands": dbt.commands},
         )
     local_project = shell_dbt.locate_project(dbt.project_dir, ctx.source_root)
@@ -783,7 +788,11 @@ def _dbt_command_activity(ctx: OperatorContext, dbt: shell_dbt.ShellDbt) -> Acti
         }
     )
     return DbtCommandActivity(
-        name=ctx.task_id, task_key=ctx.task_key, commands=list(dbt.commands), project_dir=str(local_project)
+        name=ctx.task_id,
+        task_key=ctx.task_key,
+        commands=list(dbt.commands),
+        project_dir=str(local_project),
+        source_project_dir=dbt.project_dir,
     )
 
 
