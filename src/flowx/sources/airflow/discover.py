@@ -1,9 +1,9 @@
 """Airflow discover phase: parse DAGs into a classified inventory.
 
-Mirrors the ADF discover contract: writes ``metadata/inventory.json`` and
-``metadata/profile_report.csv`` under the shared output dir. Independently audited
-task candidates drive deterministic, agentic, failed, and excluded counts; emitted
-IR tasks remain available for the per-task inventory.
+Mirrors the ADF discover contract: writes ``metadata/inventory.json``,
+``metadata/source_graphs.json``, and ``metadata/profile_report.csv`` under the shared
+output dir. Shared source graphs drive per-task inventory while independently audited
+task candidates drive deterministic, agentic, failed, and excluded counts.
 Exposes ``main(argv)`` so the adapter runs it in-process, like the ADF loader.
 """
 
@@ -17,9 +17,13 @@ from pathlib import Path
 from typing import Any
 
 from flowx.adapter.predicates import walk_activities
+from flowx.discovery_inventory import build_source_inventory
+from flowx.discovery_lineage import walk_nodes
+from flowx.discovery_serde import source_graph_to_dict
+from flowx.models.discovery import SourceGraph
 from flowx.models.ir import NotebookActivity, Pipeline, PlaceholderActivity
 from flowx.sources.adf.loader import clear_stale_outputs
-from flowx.sources.airflow.loader import load_pipelines
+from flowx.sources.airflow.loader import load_discovery_results
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +46,34 @@ def _classify(pipeline: Pipeline) -> list[dict[str, str]]:
     return items
 
 
-def build_inventory_dict(pipelines: list[Pipeline], source_dir: str) -> dict[str, Any]:
+def build_inventory_dict(
+    pipelines: list[Pipeline],
+    source_dir: str,
+    *,
+    graphs: list[SourceGraph] | None = None,
+) -> dict[str, Any]:
     """Builds the inventory.json payload matching the ADF discover shape."""
+    if graphs is not None and len(graphs) != len(pipelines):
+        raise ValueError("Airflow inventory requires exactly one source graph per pipeline")
+    base: dict[str, Any] = (
+        build_source_inventory(graphs, source="airflow", source_dir=source_dir)
+        if graphs is not None
+        else {"source": "airflow", "source_dir": source_dir, "pipelines": [], "summary": {}}
+    )
+    base_entries = list(base["pipelines"])
     pipeline_entries: list[dict[str, Any]] = []
     audited = deterministic = agentic = failed = excluded = 0
     for pipeline in pipelines:
-        items = _classify(pipeline)
+        base_entry = base_entries[len(pipeline_entries)] if len(base_entries) > len(pipeline_entries) else None
+        items = list(base_entry["activities"]) if base_entry is not None else _classify(pipeline)
+        if graphs is not None and base_entry is not None:
+            graph_nodes = [
+                node
+                for node in walk_nodes(graphs[len(pipeline_entries)].tasks)
+                if node.properties.get("inventory_visible", True)
+            ]
+            for item, node in zip(items, graph_nodes, strict=True):
+                item["task_key"] = node.task_key
         pipeline_audited = int(pipeline.audit.get("audited_activity_count", len(items)))
         pipeline_deterministic = int(
             pipeline.audit.get("deterministic_count", sum(1 for item in items if item["strategy"] == "deterministic"))
@@ -70,7 +96,8 @@ def build_inventory_dict(pipelines: list[Pipeline], source_dir: str) -> dict[str
         agentic += pipeline_agentic
         failed += pipeline_failed
         excluded += pipeline_excluded
-        pipeline_entries.append(
+        entry = dict(base_entry or {})
+        entry.update(
             {
                 "name": pipeline.name,
                 "activities": items,
@@ -87,6 +114,7 @@ def build_inventory_dict(pipelines: list[Pipeline], source_dir: str) -> dict[str
                 "transformations": pipeline.audit.get("transformations", []),
             }
         )
+        pipeline_entries.append(entry)
     coverage = round(100.0 * (deterministic + agentic) / audited, 1) if audited else 0.0
     deterministic_coverage = round(100.0 * deterministic / audited, 1) if audited else 0.0
     reconciliation_status = (
@@ -98,24 +126,25 @@ def build_inventory_dict(pipelines: list[Pipeline], source_dir: str) -> dict[str
         if pipelines and all(pipeline.migration_status == "excluded" for pipeline in pipelines)
         else "verified"
     )
-    return {
-        "source": "airflow",
-        "source_dir": source_dir,
-        "pipelines": pipeline_entries,
-        "summary": {
-            "pipeline_count": len(pipelines),
-            "activity_count": audited,
-            "audited_activity_count": audited,
-            "deterministic_count": deterministic,
-            "agentic_count": agentic,
-            "unsupported_count": 0,
-            "failed_count": failed,
-            "excluded_count": excluded,
-            "coverage_pct": coverage,
-            "deterministic_coverage_pct": deterministic_coverage,
-            "reconciliation_status": reconciliation_status,
-        },
-    }
+    base.update(
+        {
+            "pipelines": pipeline_entries,
+            "summary": {
+                "pipeline_count": len(pipelines),
+                "activity_count": audited,
+                "audited_activity_count": audited,
+                "deterministic_count": deterministic,
+                "agentic_count": agentic,
+                "unsupported_count": 0,
+                "failed_count": failed,
+                "excluded_count": excluded,
+                "coverage_pct": coverage,
+                "deterministic_coverage_pct": deterministic_coverage,
+                "reconciliation_status": reconciliation_status,
+            },
+        }
+    )
+    return base
 
 
 # Full profile column set the shared reporting.coverage / dashboard consume. Airflow has no
@@ -187,7 +216,9 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    pipelines = load_pipelines(args.source_dir, pipeline=args.pipeline, exclude_dags=set(args.exclude_dag))
+    results = load_discovery_results(args.source_dir, pipeline=args.pipeline, exclude_dags=set(args.exclude_dag))
+    pipelines = [result.pipeline for result in results]
+    graphs = [result.graph for result in results]
     if not pipelines:
         logger.error("No Airflow DAGs found under %s (or none matched --pipeline).", args.source_dir)
         return 1
@@ -198,8 +229,14 @@ def main(argv: list[str] | None = None) -> int:
     metadata_dir = output_dir / "metadata"
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
-    inventory = build_inventory_dict(pipelines, str(args.source_dir))
+    inventory = build_inventory_dict(pipelines, str(args.source_dir), graphs=graphs)
     (metadata_dir / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+    source_graphs = {
+        "contract_version": "1",
+        "source": "airflow",
+        "graphs": [source_graph_to_dict(graph) for graph in graphs],
+    }
+    (metadata_dir / "source_graphs.json").write_text(json.dumps(source_graphs, indent=2), encoding="utf-8")
     _write_profile_csv(pipelines, metadata_dir / "profile_report.csv")
 
     summary = inventory["summary"]

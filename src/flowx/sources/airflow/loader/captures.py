@@ -41,6 +41,7 @@ class TaskCapture:
     variable: str
     task_id: str
     operator: str
+    operator_fqn: str
     call: ast.Call
     span: SourceSpan
 

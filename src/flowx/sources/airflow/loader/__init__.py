@@ -6,14 +6,18 @@ from flowx.sources.airflow.loader.api import (
     detect_hosts,
     discover_dags,
     load_airflow_dag,
+    load_airflow_dag_results,
     load_airflow_dags,
+    load_discovery_results,
     load_pipelines,
 )
 
 __all__ = [
     "detect_hosts",
     "discover_dags",
+    "load_discovery_results",
     "load_airflow_dag",
+    "load_airflow_dag_results",
     "load_airflow_dags",
     "load_pipelines",
 ]

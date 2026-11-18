@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
 import pytest
 
 from flowx.adapter.session import MigrationInputSession
+from flowx.discovery_serde import source_graph_from_dict
 from flowx.models.ir import NotebookActivity, Pipeline
 from flowx.reporting.coverage import COVERAGE_METRIC_COLUMNS, build_coverage_rows
 from flowx.sources.airflow.discover import _profile_row, build_inventory_dict
@@ -67,6 +69,14 @@ def test_airflow_profile_csv_has_all_coverage_columns():
         assert row["databricks_native_activities"] == 1  # the PythonOperator
         assert row["other_activities"] == 1  # the placeholder
         assert row["complexity_score"] == 4  # 1*1 + 1*3
+        source_graphs = json.loads((out / "metadata" / "source_graphs.json").read_text(encoding="utf-8"))
+        assert source_graphs["contract_version"] == "1"
+        assert source_graphs["source"] == "airflow"
+        graph = source_graph_from_dict(source_graphs["graphs"][0])
+        assert graph.name == "cov"
+        inventory = json.loads((out / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+        assert [activity["task_key"] for activity in inventory["pipelines"][0]["activities"]] == ["a", "b"]
+        assert "lineage" in inventory["pipelines"][0]
 
 
 def test_airflow_inventory_persists_audit_status_counts_and_findings() -> None:
