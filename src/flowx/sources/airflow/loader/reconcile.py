@@ -126,6 +126,10 @@ def _reconcile_pipeline(
     placeholder_capture_ids: dict[int, str],
     collapse_proofs: list[dict[str, Any]] | None = None,
     logical_date_resolver: tuple[NotebookActivity, dict[str, Any]] | None = None,
+    timezone_disclosure: dict[str, Any] | None = None,
+    dag_id_disclosure: dict[str, Any] | None = None,
+    concurrency_disclosure: dict[str, Any] | None = None,
+    setting_sources: dict[str, list[dict[str, Any]]] | None = None,
 ) -> Pipeline:
     """Reconciles an independent source audit with captured graph and emitted IR."""
     findings: list[dict[str, Any]] = list(semantic_findings)
@@ -151,6 +155,9 @@ def _reconcile_pipeline(
         transformations.append(sensor_lift_proof)
     if schedule_proof is not None:
         transformations.append(schedule_proof)
+    transformations.extend(
+        item for item in (timezone_disclosure, dag_id_disclosure, concurrency_disclosure) if item is not None
+    )
     transformations.extend(collapse_proofs or [])
     captured_task_count = len(visitor.operators) + len(visitor.taskflow_tasks) + len(visitor.taskgroup_calls)
 
@@ -519,7 +526,15 @@ def _reconcile_pipeline(
                 severity="gap",
                 message=disposition["message"],
                 candidate=candidate,
-                details={"name": name, "rationale": disposition["rationale"]},
+                details={
+                    "name": name,
+                    "rationale": disposition["rationale"],
+                    **(
+                        {"imported_sources": setting_sources[name]}
+                        if setting_sources and name in setting_sources
+                        else {}
+                    ),
+                },
             )
         )
 
@@ -803,4 +818,28 @@ def _reconcile_pipeline(
         "excluded_count": 0,
         "transformations": transformations,
     }
+    pause_unfinished_schedule(pipeline)
     return pipeline
+
+
+def pause_unfinished_schedule(pipeline: Pipeline) -> None:
+    """Pauses the job's schedule or trigger while any task is unconverted or any source gap is open.
+
+    A deployed job with placeholder tasks would fail on every scheduled run. The schedule is emitted
+    paused, so whoever finishes the migration turns it on deliberately.
+    """
+    schedule = pipeline.schedule
+    if not schedule or pipeline.reconciliation_status == "verified" or schedule.get("pause_status") == "PAUSED":
+        return
+    schedule["pause_status"] = "PAUSED"
+    pipeline.audit.setdefault("transformations", []).append(
+        {
+            "code": "schedule_paused_until_migration_completes",
+            "schedule_kind": schedule.get("kind"),
+            "rationale": f"reconciliation_status_{pipeline.reconciliation_status}",
+            "message": (
+                "The job's schedule is emitted paused because the migration has open gaps or placeholder tasks. "
+                "Unpause it once every task is converted and checked."
+            ),
+        }
+    )

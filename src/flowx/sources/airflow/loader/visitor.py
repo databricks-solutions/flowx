@@ -11,6 +11,7 @@ from typing import Any
 
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow import templating
+from flowx.sources.airflow.dict_tracking import DictTracker
 from flowx.sources.airflow.loader.ast_utils import (
     _UNRESOLVED,
     _airflow_generation,
@@ -25,6 +26,7 @@ from flowx.sources.airflow.loader.ast_utils import (
     _sanitize_task_key,
     _span,
     _static_iteration_nodes,
+    _static_path,
 )
 from flowx.sources.airflow.loader.captures import EdgeCapture, TaskCapture, _TaskFlowTask
 from flowx.sources.airflow.loader.dispatch import (
@@ -82,6 +84,12 @@ class _DagVisitor(ast.NodeVisitor):
         self._resolved_callables: dict[str, tuple[str, ast.FunctionDef | None]] = {}
         self.helper_expansions: list[dict[str, Any]] = []
         self._constants: dict[str, Any] = {}
+        # Module dicts by name, kept current through the changes made to them, so a DAG's
+        # ``default_args=<name>`` reads the dict as it stood when the DAG was built.
+        self._dicts = DictTracker(
+            lambda name: name in self.taskflow_defs or _is_task_construct(name),
+            lambda function: _construct_name(function, self._aliases),
+        )
         self._task_bindings: dict[str, str | list[str]] = {}
         self._list_bindings: dict[str, list[str]] = {}
         self._capture_sequence = 0
@@ -102,6 +110,8 @@ class _DagVisitor(ast.NodeVisitor):
         self.calls: dict[str, ast.Call] = {}
         self.edges: list[tuple[str, str]] = []  # (upstream_var, downstream_var)
         self.dag_id: str | None = None
+        # The dag_id expression when the DAG gives one that cannot be evaluated statically.
+        self.unresolved_dag_id: ast.expr | None = None
         self.schedule_interval: str | None = None
         self.schedule_node: ast.expr | None = None
         self.timezone: str | None = None
@@ -212,7 +222,7 @@ class _DagVisitor(ast.NodeVisitor):
             }
             self._apply_dag_kwargs(dag_kwargs)
             if self.dag_id is None:
-                self.dag_id = ops.literal_str(dag_kwargs.get("dag_id")) or node.name
+                self.dag_id = self._static_dag_id(dag_kwargs.get("dag_id")) or node.name
         self._scope_stack.append(node)
         if is_dag_definition:
             self._dag_scope_depth += 1
@@ -233,6 +243,7 @@ class _DagVisitor(ast.NodeVisitor):
             self._claimed_statement_ids.add(id(node))
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        self._sync_dict_constants(self._dicts.assign(node.targets, node.value))
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call):
             var = node.targets[0].id
             if _construct_name(node.value.func, self._aliases) == "DAG":
@@ -256,6 +267,9 @@ class _DagVisitor(ast.NodeVisitor):
                     self._task_bindings[var] = internal_var
                     self._claimed_statement_ids.add(id(node))
                     return
+                if self._bind_file_path_constant(var, node.value):
+                    self._claimed_statement_ids.add(id(node))
+                    return
         elif len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             target = node.targets[0].id
             if isinstance(node.value, ast.Name):
@@ -265,6 +279,9 @@ class _DagVisitor(ast.NodeVisitor):
                     self._constants.pop(target, None)
                     self._claimed_statement_ids.add(id(node))
                     return
+            if self._bind_file_path_constant(target, node.value):
+                self._claimed_statement_ids.add(id(node))
+                return
             value = _safe_static_value(node.value, self._constants)
             if value is not _UNRESOLVED:
                 self._constants[target] = value
@@ -274,6 +291,50 @@ class _DagVisitor(ast.NodeVisitor):
                 self._claimed_statement_ids.add(id(node))
                 return
         self.generic_visit(node)
+
+    def _bind_file_path_constant(self, name: str, value: ast.expr) -> bool:
+        """Binds a name to a file name built from ``__file__``, such as a dag_id named after its file.
+
+        A full path is left unbound: it is where discover runs, not where the DAG ran, so it must not be
+        substituted into a task.
+        """
+        if not any(isinstance(node, ast.Name) and node.id == "__file__" for node in ast.walk(value)):
+            return False
+        path = _static_path(value, self.dag_file)
+        if path is None or "/" in path or "\\" in path:
+            return False
+        self._constants[name] = path
+        self._task_bindings.pop(name, None)
+        return True
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """Reads ``name: type = value`` like a plain assignment for dict tracking and constants."""
+        if node.value is not None and isinstance(node.target, ast.Name):
+            self._sync_dict_constants(self._dicts.assign([node.target], node.value))
+            value = _safe_static_value(node.value, self._constants)
+            if value is _UNRESOLVED:
+                self._constants.pop(node.target.id, None)
+            else:
+                self._constants[node.target.id] = value
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._sync_dict_constants(self._dicts.augment(node.target))
+        self.generic_visit(node)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        self._sync_dict_constants(self._dicts.delete(node.targets))
+        self.generic_visit(node)
+
+    def _sync_dict_constants(self, names: set[str]) -> None:
+        """Keeps the constant value of each changed dict name in step with what the tracker knows of it."""
+        for name in names:
+            dictionary = self._dicts.as_dict(ast.Name(id=name, ctx=ast.Load()))
+            value = _safe_static_value(dictionary, self._constants) if dictionary is not None else _UNRESOLVED
+            if value is _UNRESOLVED:
+                self._constants.pop(name, None)
+            else:
+                self._constants[name] = value
 
     def _new_task_var(self, binding: str, node: ast.AST) -> str:
         """Allocates an internal identity while preserving Python's latest name binding."""
@@ -765,13 +826,27 @@ class _DagVisitor(ast.NodeVisitor):
 
     def _read_dag_kwargs(self, call: ast.Call) -> None:
         kwargs = {kw.arg: _bind_constants(kw.value, self._constants) for kw in call.keywords if kw.arg}
-        positional_dag_id = ops.literal_str(call.args[0]) if call.args else None
-        self.dag_id = ops.literal_str(kwargs.get("dag_id")) or positional_dag_id
+        dag_id_node = kwargs.get("dag_id") or (_bind_constants(call.args[0], self._constants) if call.args else None)
+        self.dag_id = self._static_dag_id(dag_id_node)
         self._apply_dag_kwargs(kwargs)
         if self.airflow_generation == "1.10" and not {"schedule", "schedule_interval"} & kwargs.keys():
             self.unresolved_constructs.append(("ambiguous_airflow_1_10_default_schedule", call))
 
+    def _static_dag_id(self, node: ast.expr | None) -> str | None:
+        """Evaluates a dag_id given as a literal or built from ``__file__``, recording one it cannot evaluate."""
+        if node is None:
+            return None
+        file_name = _static_path(node, self.dag_file)
+        dag_id = ops.literal_str(node) or (file_name if file_name and "/" not in file_name else None)
+        if dag_id is None:
+            self.unresolved_dag_id = node
+        return dag_id
+
     def _apply_dag_kwargs(self, kwargs: dict[str, ast.expr]) -> None:
+        default_args = kwargs.get("default_args")
+        dictionary = self._dicts.as_dict(default_args) if default_args is not None else None
+        if dictionary is not None:
+            kwargs = {**kwargs, "default_args": _bind_constants(dictionary, self._constants)}
         self.dag_kwargs.update(kwargs)
         self.captured_dag_settings.update(kwargs)
         self.schedule_node = kwargs.get("schedule_interval") or kwargs.get("schedule")
@@ -796,6 +871,8 @@ class _DagVisitor(ast.NodeVisitor):
             owner = self.default_args.get("owner")
             if owner is not None:
                 self.dag_owner = ops.literal_str(owner)
+            # Airflow takes the DAG timezone from a start_date in default_args when the DAG sets none.
+            self.timezone = self.timezone or _extract_timezone(self.default_args.get("start_date"))
         # params={...} supplies DAG parameter defaults; each value is a literal or a Param(default=...).
         params = kwargs.get("params")
         if isinstance(params, ast.Dict):
@@ -811,6 +888,7 @@ class _DagVisitor(ast.NodeVisitor):
         #   - shift chains: `a >> b >> c`, `a >> [b, c]`, `[a, b] >> c`, `a << b`
         #   - method calls: `a.set_upstream(b)` / `a.set_downstream([b, c])`
         value = node.value
+        self._sync_dict_constants(self._dicts.follow_calls(value))
         if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.RShift, ast.LShift)):
             before = len(self.edge_captures)
             self._collect_shift_chain(value)

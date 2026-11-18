@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import ast
-import os
-from collections.abc import Callable
 from pathlib import Path
 
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow import templating
+from flowx.sources.airflow.loader.ast_utils import _static_path
 from flowx.sources.airflow.loader.visitor import _DagVisitor
 
 _RECOGNIZED_DAG_SETTINGS = frozenset(
@@ -25,6 +24,7 @@ _RECOGNIZED_DAG_SETTINGS = frozenset(
         "default_args.retry_delay",
         "default_args.execution_timeout",
         "dagrun_timeout",
+        "max_active_runs",
         "max_consecutive_failed_dag_runs",
         "sla_miss_callback",
         "default_args.depends_on_past",
@@ -43,64 +43,6 @@ _RECOGNIZED_DAG_SETTINGS = frozenset(
 
 
 _NON_EXECUTION_DAG_SETTINGS = frozenset({"tags", "description", "doc_md", "dag_display_name", "default_args.owner"})
-
-
-_PATH_FUNCTIONS: dict[str, Callable[[str], str]] = {
-    "dirname": os.path.dirname,
-    "abspath": os.path.abspath,
-    "normpath": os.path.normpath,
-    "realpath": os.path.realpath,
-}
-
-
-def _dotted_name(node: ast.expr) -> str:
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return f"{_dotted_name(node.value)}.{node.attr}"
-    return ""
-
-
-def _static_path(node: ast.expr, dag_file: Path | None) -> str | None:
-    """Evaluates a path expression built from literals and ``__file__``, or returns None.
-
-    Covers the usual ways a DAG names a folder beside itself: ``os.path.join(os.path.dirname(__file__),
-    "sql")``, ``Path(__file__).parent / "sql"``, and ``str(...)`` / ``os.fspath(...)`` around either.
-    """
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, ast.Name) and node.id == "__file__":
-        return str(dag_file) if dag_file is not None else None
-    if isinstance(node, ast.Attribute) and node.attr == "parent":
-        inner = _static_path(node.value, dag_file)
-        return str(Path(inner).parent) if inner is not None else None
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        left, right = _static_path(node.left, dag_file), _static_path(node.right, dag_file)
-        return str(Path(left) / right) if left is not None and right is not None else None
-    if not isinstance(node, ast.Call) or node.keywords:
-        return None
-    name = _dotted_name(node.func)
-    function = name.rsplit(".", 1)[-1]
-    if isinstance(node.func, ast.Attribute) and function in ("resolve", "absolute") and not node.args:
-        inner = _static_path(node.func.value, dag_file)
-        if inner is None:
-            return None
-        return str(Path(inner).resolve()) if function == "resolve" else str(Path(inner).absolute())
-    arguments = [_static_path(argument, dag_file) for argument in node.args]
-    if any(argument is None for argument in arguments):
-        return None
-    values = [argument for argument in arguments if argument is not None]
-    if function == "join" and name in ("os.path.join", "path.join", "join") and values:
-        return os.path.join(*values)
-    if (
-        function in _PATH_FUNCTIONS
-        and len(values) == 1
-        and name in (function, f"path.{function}", f"os.path.{function}")
-    ):
-        return _PATH_FUNCTIONS[function](values[0])
-    if name in ("Path", "pathlib.Path", "PurePath", "str", "os.fspath") and len(values) == 1:
-        return values[0]
-    return None
 
 
 def template_searchpath(visitor: _DagVisitor) -> list[str] | None:
@@ -145,6 +87,12 @@ def _job_timeout_seconds(visitor: _DagVisitor) -> int | None:
     return templating.timedelta_seconds(visitor.dag_kwargs.get("dagrun_timeout"))
 
 
+def job_max_concurrent_runs(visitor: _DagVisitor) -> int | None:
+    """Returns the DAG's static positive ``max_active_runs``, the Databricks job's ``max_concurrent_runs``."""
+    value = ops.literal_value(visitor.dag_kwargs.get("max_active_runs"))
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
 def _job_email_notifications(visitor: _DagVisitor) -> dict[str, list[str]]:
     recipients = templating.literal_email_recipients(visitor.default_args.get("email"))
     on_failure = visitor.default_args.get("email_on_failure")
@@ -179,6 +127,22 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
             "message": f"Airflow DAG setting {name!r} has no deterministic Databricks Jobs mapping.",
             "rationale": "no_deterministic_databricks_jobs_mapping",
         }
+    if name == "default_args":
+        default_args = visitor.dag_kwargs.get("default_args")
+        if (isinstance(default_args, ast.Constant) and default_args.value is None) or (
+            isinstance(default_args, ast.Dict)
+            and all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in default_args.keys)
+        ):
+            return None
+        return {
+            "status": "gap",
+            "message": (
+                "Airflow default_args must be a dict literal, or a dict built in the DAG file from literal keys, "
+                "before flowx can read it; the task settings it carries (such as retries, retry_delay, "
+                "execution_timeout, email, and start_date) were not migrated."
+            ),
+            "rationale": "default_args_not_statically_resolvable",
+        }
     if name == "template_searchpath":
         entries = template_searchpath(visitor)
         if entries == []:
@@ -203,6 +167,19 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
                 "template files."
             ),
             "rationale": "template_searchpath_not_statically_resolvable",
+        }
+    if name == "max_active_runs":
+        if job_max_concurrent_runs(visitor) is not None:
+            return {
+                "status": "mapped",
+                "target": "job.max_concurrent_runs",
+                "rationale": "preserved_as_databricks_job_concurrency_limit",
+            }
+        return {
+            "status": "gap",
+            "message": "Airflow max_active_runs must be a static positive integer before it can map to Job "
+            "max_concurrent_runs.",
+            "rationale": "max_active_runs_not_statically_resolvable",
         }
     if name == "dagrun_timeout":
         if _job_timeout_seconds(visitor) is not None:

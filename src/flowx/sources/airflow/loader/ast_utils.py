@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import ast
 import copy
+import os
 import re
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from flowx.sources.airflow import operators as ops
@@ -207,6 +210,25 @@ class _ConstantSubstituter(ast.NodeTransformer):
         value = self.constants.get(node.id, _UNRESOLVED)
         return ast.copy_location(_value_node(value), node) if value is not _UNRESOLVED else node
 
+    def visit_Subscript(self, node: ast.Subscript) -> ast.expr:
+        # ``name[key] = value`` and ``del name[key]`` change the object the name holds, so the name stays.
+        if not isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name):
+            node.slice = self.visit(node.slice)
+            return node
+        return self.generic_visit(node)  # type: ignore[return-value]
+
+    def visit_Call(self, node: ast.Call) -> ast.expr:
+        # A changing method called on a name, such as ``name.update(...)``, changes the object, so the name stays.
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.attr in _CHANGING_METHODS
+        ):
+            node.args = [self.visit(argument) for argument in node.args]
+            node.keywords = [self.visit(keyword) for keyword in node.keywords]
+            return node
+        return self.generic_visit(node)  # type: ignore[return-value]
+
     def generic_visit(self, node: ast.AST) -> ast.AST:
         visited = super().generic_visit(node)
         if isinstance(visited, ast.expr):
@@ -246,11 +268,68 @@ def _static_iteration_nodes(node: ast.expr, constants: dict[str, Any]) -> list[a
     return None
 
 
+# Dict, list, and set methods that change the object in place.
+_CHANGING_METHODS = frozenset(
+    {
+        "add",
+        "append",
+        "clear",
+        "difference_update",
+        "discard",
+        "extend",
+        "insert",
+        "intersection_update",
+        "pop",
+        "popitem",
+        "remove",
+        "reverse",
+        "setdefault",
+        "sort",
+        "symmetric_difference_update",
+        "update",
+    }
+)
+
+
+def _mutated_names(statement: ast.stmt) -> set[str]:
+    """Returns the names whose objects a statement may change in place.
+
+    That is an item assignment or ``del``, an augmented assignment, or a call to a dict, list, or set method
+    that changes it, such as ``update`` or ``append``. Methods that only read, such as ``get``, do not count,
+    and neither do changes inside a function or lambda the statement defines, which run only when called.
+    """
+    names: set[str] = set()
+    pending: list[ast.AST] = [statement]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        pending.extend(ast.iter_child_nodes(node))
+        if isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name):
+            names.add(node.value.id)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.attr in _CHANGING_METHODS
+        ):
+            names.add(node.func.value.id)
+    return names
+
+
 def _expand_top_level_loops(module: ast.Module) -> ast.Module:
-    """Unrolls bounded module-level loops so generated DAG declarations stay distinct."""
+    """Unrolls bounded module-level loops so generated DAG declarations stay distinct.
+
+    A name whose object a statement changes in place stops being a constant from there on, so a later use
+    is not replaced with its earlier value.
+    """
     body: list[ast.stmt] = []
     constants: dict[str, Any] = {}
     for statement in module.body:
+        for name in _mutated_names(statement):
+            constants.pop(name, None)
         if (
             isinstance(statement, ast.Assign)
             and len(statement.targets) == 1
@@ -266,7 +345,11 @@ def _expand_top_level_loops(module: ast.Module) -> ast.Module:
                     value = _safe_static_value(item, constants)
                     if value is _UNRESOLVED:
                         continue
-                    iteration_constants = {**constants, statement.target.id: value}
+                    changed = {name for child in statement.body for name in _mutated_names(child)}
+                    iteration_constants = {
+                        **{name: known for name, known in constants.items() if name not in changed},
+                        statement.target.id: value,
+                    }
                     body.extend(_bind_constants(child, iteration_constants) for child in statement.body)
                 continue
         body.append(statement)
@@ -352,3 +435,79 @@ def _literal_argument_source(node: ast.expr) -> str | None:
         return repr(ast.literal_eval(node))
     except (ValueError, SyntaxError):
         return None
+
+
+_PATH_FUNCTIONS: dict[str, Callable[[str], str]] = {
+    "dirname": os.path.dirname,
+    "abspath": os.path.abspath,
+    "normpath": os.path.normpath,
+    "realpath": os.path.realpath,
+    "basename": os.path.basename,
+}
+
+
+def _dotted_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return f"{_dotted_name(node.value)}.{node.attr}"
+    return ""
+
+
+def _static_path(node: ast.expr, dag_file: Path | None) -> str | None:
+    """Evaluates a path expression built from literals and ``__file__``, or returns None.
+
+    Covers the usual ways a DAG names a folder beside itself: ``os.path.join(os.path.dirname(__file__),
+    "sql")``, ``Path(__file__).parent / "sql"``, and ``str(...)`` / ``os.fspath(...)`` around either, and
+    the ways it names itself after its file: ``os.path.basename(__file__).replace(".py", "")``,
+    ``os.path.splitext(os.path.basename(__file__))[0]``, and ``Path(__file__).stem``.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name) and node.id == "__file__":
+        return str(dag_file) if dag_file is not None else None
+    if isinstance(node, ast.Attribute) and node.attr in ("parent", "stem", "name"):
+        inner = _static_path(node.value, dag_file)
+        return str(getattr(Path(inner), node.attr)) if inner is not None else None
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Call)
+        and _dotted_name(node.value.func) in ("os.path.splitext", "path.splitext", "splitext")
+        and len(node.value.args) == 1
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, int)
+        and node.slice.value in (0, 1)
+    ):
+        inner = _static_path(node.value.args[0], dag_file)
+        return os.path.splitext(inner)[node.slice.value] if inner is not None else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left, right = _static_path(node.left, dag_file), _static_path(node.right, dag_file)
+        return str(Path(left) / right) if left is not None and right is not None else None
+    if not isinstance(node, ast.Call) or node.keywords:
+        return None
+    name = _dotted_name(node.func)
+    function = name.rsplit(".", 1)[-1]
+    if isinstance(node.func, ast.Attribute) and function == "replace" and len(node.args) == 2:
+        inner = _static_path(node.func.value, dag_file)
+        old, new = (ops.literal_str(argument) for argument in node.args)
+        return inner.replace(old, new) if inner is not None and old is not None and new is not None else None
+    if isinstance(node.func, ast.Attribute) and function in ("resolve", "absolute") and not node.args:
+        inner = _static_path(node.func.value, dag_file)
+        if inner is None:
+            return None
+        return str(Path(inner).resolve()) if function == "resolve" else str(Path(inner).absolute())
+    arguments = [_static_path(argument, dag_file) for argument in node.args]
+    if any(argument is None for argument in arguments):
+        return None
+    values = [argument for argument in arguments if argument is not None]
+    if function == "join" and name in ("os.path.join", "path.join", "join") and values:
+        return os.path.join(*values)
+    if (
+        function in _PATH_FUNCTIONS
+        and len(values) == 1
+        and name in (function, f"path.{function}", f"os.path.{function}")
+    ):
+        return _PATH_FUNCTIONS[function](values[0])
+    if name in ("Path", "pathlib.Path", "PurePath", "str", "os.fspath") and len(values) == 1:
+        return values[0]
+    return None

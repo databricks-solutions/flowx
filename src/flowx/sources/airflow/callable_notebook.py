@@ -11,12 +11,197 @@ from __future__ import annotations
 
 import ast
 import builtins
+import sys
 from collections.abc import Sequence
 
 from flowx.sources.airflow import templating
 
 # Import roots that don't exist on Databricks -- never copy these into the notebook.
 _AIRFLOW_IMPORT_ROOTS: frozenset[str] = frozenset({"airflow", "cosmos", "airflow_dbt"})
+
+# Import names of the Python libraries Databricks Runtime 16.4 LTS installs (the "Installed Python
+# libraries" table of its release notes), plus pyspark and delta, which the runtime itself provides. A callable
+# may import these; any other package outside the standard library was installed on the Airflow worker.
+# Namespace packages (``google``, ``azure``, ...) are listed by the full import path each library provides,
+# since other libraries in the same namespace are not installed.
+RUNTIME_PACKAGES: frozenset[str] = frozenset(
+    {
+        "annotated_types",
+        "asttokens",
+        "astunparse",
+        "autocommand",
+        "azure.core",
+        "azure.storage.blob",
+        "azure.storage.filedatalake",
+        "backports.tarfile",
+        "black",
+        "blinker",
+        "boto3",
+        "botocore",
+        "cachetools",
+        "certifi",
+        "cffi",
+        "chardet",
+        "charset_normalizer",
+        "click",
+        "cloudpickle",
+        "comm",
+        "contourpy",
+        "cryptography",
+        "cycler",
+        "Cython",
+        "databricks",
+        "dateutil",
+        "dbus",
+        "debugpy",
+        "decorator",
+        "delta",
+        "deprecated",
+        "distlib",
+        "docstring_to_markdown",
+        "executing",
+        "facets_overview",
+        "filelock",
+        "fonttools",
+        "gi",
+        "git",
+        "gitdb",
+        "google_crc32c",
+        "google.api",
+        "google.api_core",
+        "google.auth",
+        "google.oauth2",
+        "google.cloud.client",
+        "google.cloud.environment_vars",
+        "google.cloud.exceptions",
+        "google.cloud.location",
+        "google.cloud.storage",
+        "google.gapic",
+        "google.logging",
+        "google.longrunning",
+        "google.protobuf",
+        "google.resumable_media",
+        "google.rpc",
+        "google.type",
+        "grpc",
+        "grpc_status",
+        "httplib2",
+        "idna",
+        "importlib_metadata",
+        "importlib_resources",
+        "inflect",
+        "ipyflow",
+        "ipykernel",
+        "IPython",
+        "ipython_genutils",
+        "ipywidgets",
+        "isodate",
+        "jaraco.context",
+        "jaraco.functools",
+        "jaraco.text",
+        "jedi",
+        "jmespath",
+        "joblib",
+        "jupyter_client",
+        "jupyter_core",
+        "jwt",
+        "kiwisolver",
+        "launchpadlib",
+        "lazr.restfulclient",
+        "lazr.uri",
+        "matplotlib",
+        "matplotlib_inline",
+        "mccabe",
+        "mlflow",
+        "more_itertools",
+        "mypy",
+        "mypy_extensions",
+        "nest_asyncio",
+        "nodeenv",
+        "numpy",
+        "oauthlib",
+        "opentelemetry.attributes",
+        "opentelemetry.baggage",
+        "opentelemetry.context",
+        "opentelemetry.environment_variables",
+        "opentelemetry.metrics",
+        "opentelemetry.propagate",
+        "opentelemetry.propagators",
+        "opentelemetry.sdk",
+        "opentelemetry.semconv",
+        "opentelemetry.trace",
+        "opentelemetry.util",
+        "opentelemetry.version",
+        "packaging",
+        "pandas",
+        "parso",
+        "pathspec",
+        "patsy",
+        "pexpect",
+        "PIL",
+        "pip",
+        "pkg_resources",
+        "platformdirs",
+        "plotly",
+        "pluggy",
+        "prompt_toolkit",
+        "proto",
+        "psutil",
+        "psycopg2",
+        "ptyprocess",
+        "pure_eval",
+        "pyarrow",
+        "pyasn1",
+        "pyasn1_modules",
+        "pyccolo",
+        "pycparser",
+        "pydantic",
+        "pydantic_core",
+        "pyflakes",
+        "pygments",
+        "pylsp",
+        "pylsp_jsonrpc",
+        "pyodbc",
+        "pyparsing",
+        "pyright",
+        "pyspark",
+        "pytoolconfig",
+        "pytz",
+        "requests",
+        "rope",
+        "rsa",
+        "s3transfer",
+        "scipy",
+        "seaborn",
+        "setuptools",
+        "six",
+        "sklearn",
+        "smmap",
+        "sqlparse",
+        "stack_data",
+        "statsmodels",
+        "tenacity",
+        "threadpoolctl",
+        "tokenize_rt",
+        "tomli",
+        "tornado",
+        "traitlets",
+        "typeguard",
+        "typing_extensions",
+        "ujson",
+        "urllib3",
+        "virtualenv",
+        "wadllib",
+        "wcwidth",
+        "whatthepatch",
+        "wheel",
+        "wrapt",
+        "yaml",
+        "yapf",
+        "zipp",
+        "zmq",
+    }
+)
 
 
 def _enclosing_statements(module: ast.Module, func: ast.FunctionDef) -> list[ast.stmt]:
@@ -289,10 +474,102 @@ def airflow_runtime_reason(func: ast.FunctionDef, source: str) -> str | None:
     )
     if import_reason is not None:
         return import_reason
+    unavailable = unavailable_imports(module, enclosing_statements, closure_nodes)
+    if unavailable:
+        return (
+            f"callable imports {', '.join(unavailable)}, which Databricks compute does not provide (a package "
+            "installed on the Airflow worker, or a module from the Airflow project); add it as a task library "
+            "or port it with the callable"
+        )
     unresolved_names = _unresolved_closure_names(func, source)
     if unresolved_names:
         return f"captures nonliteral closure '{unresolved_names[0]}'"
     return None
+
+
+def _is_available(path: str) -> bool:
+    """Returns whether an absolute import path is provided by the standard library or the runtime.
+
+    A path is provided when it or one of its parent packages is listed, such as ``google.protobuf`` for
+    ``google.protobuf.json_format``, or when it is a namespace that listed packages live in, such as a bare
+    ``import google``.
+    """
+    parts = path.split(".")
+    if parts[0] in sys.stdlib_module_names or parts[0] in _AIRFLOW_IMPORT_ROOTS:
+        return True
+    if any(entry.startswith(f"{path}.") for entry in RUNTIME_PACKAGES):
+        return True
+    return any(".".join(parts[:length]) in RUNTIME_PACKAGES for length in range(1, len(parts) + 1))
+
+
+def _imported_paths(statement: ast.stmt, bound_name: str | None = None) -> list[str]:
+    """Returns the modules an import statement loads, as absolute dotted paths or ``.``-prefixed relative ones.
+
+    With *bound_name*, only the path of the alias that binds that name is returned.
+    """
+    paths: list[str] = []
+    if isinstance(statement, ast.Import):
+        for alias in statement.names:
+            if bound_name is None or (alias.asname or alias.name.split(".")[0]) == bound_name:
+                paths.append(alias.name)
+    elif isinstance(statement, ast.ImportFrom):
+        module = statement.module or ""
+        for alias in statement.names:
+            if bound_name is not None and (alias.asname or alias.name) != bound_name:
+                continue
+            if statement.level:
+                paths.append("." * statement.level + module.split(".")[0])
+            else:
+                paths.append(f"{module}.{alias.name}" if alias.name != "*" else module)
+    return paths
+
+
+def _reported_name(path: str) -> str:
+    """Returns the package to report for an unavailable import path.
+
+    That is the shortest leading part of the path that is not a namespace the runtime partly installs:
+    ``snowflake`` for ``snowflake.connector``, but ``google.cloud.bigquery`` for ``google.cloud.bigquery.Client``.
+    """
+    parts = path.split(".")
+    for length in range(1, len(parts) + 1):
+        prefix = ".".join(parts[:length])
+        if not any(entry.startswith(f"{prefix}.") for entry in RUNTIME_PACKAGES):
+            return prefix
+    return path
+
+
+def unavailable_imports(
+    module: ast.Module, enclosing_statements: list[ast.stmt], closure_nodes: Sequence[ast.AST]
+) -> list[str]:
+    """Returns the modules emitted callable code imports that Databricks compute does not have.
+
+    Covers imports inside the callable and its helpers and module-level imports they use. Standard library
+    and Databricks Runtime packages are available; a relative import names a module of the Airflow project.
+    """
+    missing: list[str] = []
+
+    def add(path: str) -> None:
+        if path.startswith("."):
+            name = path
+        elif _is_available(path):
+            return
+        else:
+            name = _reported_name(path)
+        if name not in missing:
+            missing.append(name)
+
+    for closure_node in closure_nodes:
+        for imported in ast.walk(closure_node):
+            if isinstance(imported, (ast.Import, ast.ImportFrom)):
+                for path in _imported_paths(imported):
+                    add(path)
+    bindings = _import_bindings(module, enclosing_statements)
+    for closure_node in closure_nodes:
+        for name in sorted(_names_used(closure_node)):
+            if name in bindings:
+                for path in _imported_paths(bindings[name][0], name):
+                    add(path)
+    return missing
 
 
 def _airflow_runtime_import_reason(

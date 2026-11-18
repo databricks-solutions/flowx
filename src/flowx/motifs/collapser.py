@@ -69,6 +69,7 @@ def collapse_motifs(
         parameters=pipeline.parameters,
         schedule=pipeline.schedule,
         timeout_seconds=pipeline.timeout_seconds,
+        max_concurrent_runs=pipeline.max_concurrent_runs,
         email_notifications=dict(pipeline.email_notifications),
         tasks=new_tasks,
         tags=pipeline.tags,

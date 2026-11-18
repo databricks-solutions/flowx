@@ -43,12 +43,25 @@ tasks with a `strategy`. `metadata/profile_report.csv` carries one row per DAG (
 ```
 Airflow Discover Summary
 ========================
-DAGs parsed:        3
-Total tasks:        8
-  Deterministic:    7
-  Agentic:          1
-Coverage:           87.5%
+DAGs parsed:          3
+  Ready to deploy:    2  (verified, no gaps or placeholders)
+Total tasks:          8
+  Converted:          7  (deterministic; runs as translated)
+  Placeholders:       1  (agentic; must be translated before deploying)
+  Failed:             0
+  Excluded:           0
+Converted:            87.5% of tasks
+Classified:           100.0% of tasks (converted or placeholder; not readiness)
+Reconciliation:       verified_with_gaps
+
+Job settings to review:
+  - nightly_load: The job's schedule is emitted paused because the migration has open gaps or placeholder tasks. Unpause it once every task is converted and checked.
 ```
+
+Lead with **Converted %** and **Ready to deploy**. **Classified** counts placeholders too, so 100% there
+does not mean anything converted. Repeat every line under "Job settings to review" to the user: they
+name a schedule emitted paused, a timezone assumed to be UTC, a job name that fell back to the file
+name, or a job that allows one run at a time where Airflow allowed more. Each DAG's `ready_to_deploy` flag in `inventory.json` says the same per DAG.
 
 ## Step 5 — Detail agentic tasks
 

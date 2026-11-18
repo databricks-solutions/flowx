@@ -20,7 +20,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from flowx.models.ir import (
     Activity,
@@ -31,7 +31,7 @@ from flowx.models.ir import (
     SparkPythonActivity,
     SqlActivity,
 )
-from flowx.sources.airflow import callable_notebook, dataproc, templating, teradata
+from flowx.sources.airflow import callable_notebook, dataproc, shell_environment, shell_tools, templating, teradata
 from flowx.sources.airflow.template_files import find_template_file, read_template_file
 from flowx.utils import to_lowercase_key
 
@@ -674,11 +674,53 @@ def _shell_activity(ctx: OperatorContext, command_kwarg: str) -> Activity:
             f"flowx could not parse this {ctx.operator} command as shell (for example an unbalanced quote), so it "
             "cannot tell what the command runs; check and translate it manually.",
         )
+    environment = shell_environment.environment_references(command)
+    if environment:
+        machine = "SSH host" if ctx.operator == "SSHOperator" else "Airflow worker"
+        task_environment = ctx.kwargs.get("env")
+        task_names = (
+            {key.value for key in task_environment.keys if isinstance(key, ast.Constant)}
+            if isinstance(task_environment, ast.Dict)
+            else set()
+        )
+        sources = [
+            *(
+                [f"{_variable_list(name for name in environment if name in task_names)} from the task's env argument"]
+                if task_names & set(environment)
+                else []
+            ),
+            *(
+                [f"{_variable_list(name for name in environment if name not in task_names)} from the {machine}"]
+                if set(environment) - task_names
+                else []
+            ),
+        ]
+        return _placeholder(
+            ctx,
+            f"This {ctx.operator} command reads environment variable(s) {' and '.join(sources)}, which are not set "
+            "on Databricks compute. Replace them with values, job parameters, or compute environment variables, then "
+            "translate the command.",
+            {"environment_variables": environment},
+        )
     submit = parse_spark_submit(command)
     if submit is not None:
         # The SSH hop is eliminated -- Databricks runs Spark natively.
         return _spark_activity_from_submit(ctx, submit, f"{ctx.operator} spark-submit")
+    programs = shell_tools.unavailable_programs(command)
+    if programs:
+        machine = "SSH host" if ctx.operator == "SSHOperator" else "Airflow worker"
+        return _placeholder(
+            ctx,
+            f"This {ctx.operator} command runs {', '.join(programs)}, which Databricks compute does not provide "
+            f"(it is installed on, or a file on, the {machine}). Replace it with a Databricks equivalent, such as "
+            "a native task, a Python library, or a cluster init script, then translate the command.",
+            {"unavailable_programs": programs},
+        )
     return _sh_notebook_activity(ctx, command)
+
+
+def _variable_list(names: Iterable[str]) -> str:
+    return ", ".join(f"${name}" for name in names)
 
 
 def _build_bash(ctx: OperatorContext) -> Activity:
