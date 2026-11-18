@@ -86,7 +86,10 @@ class _DagVisitor(ast.NodeVisitor):
         self._constants: dict[str, Any] = {}
         # Module dicts by name, kept current through the changes made to them, so a DAG's
         # ``default_args=<name>`` reads the dict as it stood when the DAG was built.
-        self._dicts = DictTracker(lambda name: name in self.taskflow_defs or _is_task_construct(name))
+        self._dicts = DictTracker(
+            lambda name: name in self.taskflow_defs or _is_task_construct(name),
+            lambda function: _construct_name(function, self._aliases),
+        )
         self._task_bindings: dict[str, str | list[str]] = {}
         self._list_bindings: dict[str, list[str]] = {}
         self._capture_sequence = 0

@@ -11,19 +11,17 @@ from __future__ import annotations
 import ast
 from collections.abc import Callable
 
-# Dict methods that change the dict in place.
 CHANGING_METHODS = frozenset({"update", "pop", "popitem", "setdefault", "clear"})
-# Builtins and helpers that read a dict passed to them without changing it.
 _READING_FUNCTIONS = frozenset({"dict", "len", "list", "print", "repr", "sorted", "str", "deepcopy", "dumps"})
-# Airflow constructors and decorator factories, which store the arguments they are given.
+# Airflow constructors and decorator factories keep the arguments they are given without changing them.
 _CONSTRUCTOR_SUFFIXES = ("Operator", "Sensor", "DAG", "TaskGroup", "Group")
 _CONSTRUCTOR_FUNCTIONS = frozenset({"dag", "task_group"})
 
 
-def _function_name(call: ast.Call) -> str:
-    if isinstance(call.func, ast.Attribute):
-        return call.func.attr
-    return call.func.id if isinstance(call.func, ast.Name) else ""
+def _local_name(function: ast.expr) -> str:
+    if isinstance(function, ast.Attribute):
+        return function.attr
+    return function.id if isinstance(function, ast.Name) else ""
 
 
 class DictTracker:
@@ -35,16 +33,31 @@ class DictTracker:
     Args:
         stores_arguments: Returns whether a call to the named function only stores its arguments, such as an
             operator class or a TaskFlow task, in addition to the Airflow constructors every caller shares.
+        function_name: Returns the name a call's function stands for, resolved through the file's imports, so
+            ``from airflow import DAG as Workflow`` makes ``Workflow(...)`` a DAG constructor.
+
+    Attributes:
+        items: The tracked dicts by name, each as its items in order.
     """
 
-    def __init__(self, stores_arguments: Callable[[str], bool] = lambda name: False) -> None:
+    def __init__(
+        self,
+        stores_arguments: Callable[[str], bool] = lambda name: False,
+        function_name: Callable[[ast.expr], str] = _local_name,
+    ) -> None:
         self.items: dict[str, dict[str, ast.expr]] = {}
         self._stores_arguments = stores_arguments
+        self._function_name = function_name
 
     def literal(self, node: ast.expr) -> dict[str, ast.expr] | None:
-        """Returns the items of a tracked name, a string-keyed dict literal, or ``dict(key=value)``.
+        """Reads an expression as a dict with string keys.
 
-        A ``**`` spread of a tracked name is inlined. Returns None for anything else.
+        Args:
+            node: A tracked name, a dict literal with string keys, or ``dict(key=value)``. A ``**`` spread of a
+                tracked name is inlined.
+
+        Returns:
+            The dict's items, or None when the expression is anything else.
         """
         if isinstance(node, ast.Name):
             tracked = self.items.get(node.id)
@@ -70,14 +83,22 @@ class DictTracker:
         return items
 
     def as_dict(self, node: ast.expr) -> ast.Dict | None:
-        """Returns what :meth:`literal` finds as one flat dict literal."""
+        """Reads an expression like :meth:`literal` and returns the items as one flat dict literal, or None."""
         items = self.literal(node)
         if items is None:
             return None
         return ast.Dict(keys=[ast.Constant(value=key) for key in items], values=list(items.values()))
 
     def assign(self, targets: list[ast.expr], value: ast.expr) -> set[str]:
-        """Follows ``target = value``, including ``name[key] = value``; returns the names whose contents changed."""
+        """Follows an assignment, including ``name[key] = value``.
+
+        Args:
+            targets: The assignment's targets.
+            value: The assigned value.
+
+        Returns:
+            The names whose contents changed or stopped being tracked.
+        """
         changed = self.follow_calls(value)
         for target in targets:
             if isinstance(target, ast.Name):
@@ -106,14 +127,22 @@ class DictTracker:
         return changed
 
     def augment(self, target: ast.expr) -> set[str]:
-        """Follows ``target op= value``, which may change a dict in place (``|=``), so it ends the tracking."""
+        """Follows ``target op= value``, which may change a dict in place (``|=``), so it ends the tracking.
+
+        Returns:
+            The name that stopped being tracked, if any.
+        """
         if isinstance(target, ast.Name):
             self.items.pop(target.id, None)
             return {target.id}
         return set()
 
     def delete(self, targets: list[ast.expr]) -> set[str]:
-        """Follows ``del name[key]`` and ``del name``; returns the names whose contents changed."""
+        """Follows ``del name[key]`` and ``del name``.
+
+        Returns:
+            The names whose contents changed or stopped being tracked.
+        """
         changed: set[str] = set()
         for target in targets:
             if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
@@ -129,11 +158,14 @@ class DictTracker:
         return changed
 
     def follow_calls(self, node: ast.AST) -> set[str]:
-        """Applies the changes the calls in an expression make to tracked dicts; returns the names changed.
+        """Applies the changes the calls in an expression make to tracked dicts.
 
         ``update()`` and ``pop("key")`` are followed. A tracked dict passed to a function that may change it, even
         as ``default_args=``, or given to any other changing method, stops being tracked. Calls that only store
         or read their arguments keep the tracking.
+
+        Returns:
+            The names whose contents changed or stopped being tracked.
         """
         changed: set[str] = set()
         for call in ast.walk(node):
@@ -157,7 +189,7 @@ class DictTracker:
         return changed
 
     def _only_stores_or_reads(self, call: ast.Call) -> bool:
-        function = _function_name(call)
+        function = self._function_name(call.func).rsplit(".", 1)[-1]
         return (
             function in _READING_FUNCTIONS
             or function in _CONSTRUCTOR_FUNCTIONS
@@ -166,7 +198,7 @@ class DictTracker:
         )
 
     def _apply_method(self, name: str, call: ast.Call) -> None:
-        """Follows ``update({...})``, ``update(key=value)``, and ``pop("key")``; any other change ends the tracking."""
+        """Follows ``update({...})``, ``update(key=value)``, and ``pop("key")``; any other change ends tracking."""
         assert isinstance(call.func, ast.Attribute)
         key = call.args[0] if call.args else None
         if (

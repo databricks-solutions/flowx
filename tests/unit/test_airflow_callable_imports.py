@@ -54,6 +54,8 @@ def test_callable_importing_a_worker_package_is_a_gap(tmp_path: Path, setup: str
         ("from google.cloud import storage\n", "    storage.Client()\n"),
         ("from google.protobuf import json_format\n", "    print(json_format)\n"),
         ("from azure.storage.blob import BlobClient\n", "    print(BlobClient)\n"),
+        ("import google\n", "    print(google.__name__)\n"),
+        ("import azure\n", "    print(azure.__name__)\n"),
     ],
 )
 def test_callable_using_standard_and_runtime_packages_is_translated(tmp_path: Path, setup: str, body: str) -> None:

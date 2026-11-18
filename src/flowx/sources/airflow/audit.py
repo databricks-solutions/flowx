@@ -114,7 +114,10 @@ class _SourceAuditor(ast.NodeVisitor):
         self.values: dict[str, Any] = {}
         # Module dicts by name, kept current through the changes made to them, so a DAG's
         # ``default_args=<name>`` is audited key by key.
-        self.dicts = DictTracker(lambda name: name in self.taskflow_defs or _is_operator(name))
+        self.dicts = DictTracker(
+            lambda name: name in self.taskflow_defs or _is_operator(name),
+            lambda function: _leaf(function, self.aliases),
+        )
         self.task_refs: dict[str, list[str]] = {}
         # Tasks built without a DAG of their own while a DAG variable is selected, kept only if wiring
         # reaches the DAG. Each instance gets a key; current_dagless maps a reference (a variable name or

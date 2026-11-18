@@ -295,10 +295,16 @@ def _mutated_names(statement: ast.stmt) -> set[str]:
     """Returns the names whose objects a statement may change in place.
 
     That is an item assignment or ``del``, an augmented assignment, or a call to a dict, list, or set method
-    that changes it, such as ``update`` or ``append``. Methods that only read, such as ``get``, do not count.
+    that changes it, such as ``update`` or ``append``. Methods that only read, such as ``get``, do not count,
+    and neither do changes inside a function or lambda the statement defines, which run only when called.
     """
     names: set[str] = set()
-    for node in ast.walk(statement):
+    pending: list[ast.AST] = [statement]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        pending.extend(ast.iter_child_nodes(node))
         if isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name):
             names.add(node.value.id)
         elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):

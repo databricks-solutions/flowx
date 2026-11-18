@@ -311,7 +311,8 @@ _GUSTY_REGISTRATIONS = frozenset({"create_dag", "create_dags"})
 def _import_time_nodes(module: ast.Module) -> list[ast.AST]:
     """Returns the nodes that run when Airflow imports a module: module-level code and the functions it calls.
 
-    Function and class bodies are left out unless module-level code calls the function by name.
+    A class body runs at import time, but function bodies, methods included, are left out unless module-level
+    code calls the function by name.
     """
     functions = {node.name: node for node in module.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     nodes: list[ast.AST] = []
@@ -321,7 +322,7 @@ def _import_time_nodes(module: ast.Module) -> list[ast.AST]:
         pending: list[ast.AST] = list(statements)
         while pending:
             node = pending.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 continue
             nodes.append(node)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):

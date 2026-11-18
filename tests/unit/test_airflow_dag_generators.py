@@ -116,3 +116,28 @@ def test_helper_called_at_import_time_that_registers_dags_is_reported(tmp_path: 
     )
 
     assert [pipeline.reconciliation_status for pipeline in load_pipelines(tmp_path)] == ["failed"]
+
+
+def test_dags_generated_in_a_class_body_are_reported(tmp_path: Path) -> None:
+    (tmp_path / "generated.py").write_text(
+        "import dagfactory\n"
+        "class Loader:\n"
+        "    dagfactory.DagFactory('/c.yml').generate_dags(globals())\n"
+        "    def reload(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+
+    assert [pipeline.reconciliation_status for pipeline in load_pipelines(tmp_path)] == ["failed"]
+
+
+def test_method_that_generates_dags_is_not_reported(tmp_path: Path) -> None:
+    (tmp_path / "helper.py").write_text(
+        "import dagfactory\n"
+        "class Loader:\n"
+        "    def build(self):\n"
+        "        dagfactory.DagFactory('/c.yml').generate_dags(globals())\n",
+        encoding="utf-8",
+    )
+
+    assert discover_dags(tmp_path) == []

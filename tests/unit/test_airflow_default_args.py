@@ -187,3 +187,37 @@ def test_reading_a_module_list_keeps_later_loops_unrolled(tmp_path: Path) -> Non
     pipelines = load_airflow_dags(dag_path)
 
     assert [(pipeline.name, _task(pipeline).max_retries) for pipeline in pipelines] == [("load_a", 2), ("load_b", 2)]
+
+
+def test_change_inside_an_uncalled_helper_keeps_the_loop_unrolled(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dags.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "TEAMS = ['a', 'b']\n"
+        "def add_team(name):\n"
+        "    TEAMS.append(name)\n"
+        "for team in TEAMS:\n"
+        "    with DAG(dag_id=f'etl_{team}') as dag:\n"
+        "        BashOperator(task_id='t', bash_command='echo hi')\n",
+        encoding="utf-8",
+    )
+
+    assert sorted(pipeline.name for pipeline in load_airflow_dags(dag_path)) == ["etl_a", "etl_b"]
+
+
+def test_dict_passed_to_an_aliased_dag_constructor_is_still_read(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dag.py"
+    dag_path.write_text(
+        "from airflow import DAG as Workflow\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "default_args = {'retries': 3}\n"
+        "dag = Workflow(dag_id='d', default_args=default_args)\n"
+        "t = BashOperator(task_id='t', bash_command='echo hi', dag=dag)\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(dag_path)
+
+    assert pipeline.reconciliation_status == "verified"
+    assert _task(pipeline).max_retries == 3

@@ -491,10 +491,13 @@ def _is_available(path: str) -> bool:
     """Returns whether an absolute import path is provided by the standard library or the runtime.
 
     A path is provided when it or one of its parent packages is listed, such as ``google.protobuf`` for
-    ``google.protobuf.json_format``.
+    ``google.protobuf.json_format``, or when it is a namespace that listed packages live in, such as a bare
+    ``import google``.
     """
     parts = path.split(".")
     if parts[0] in sys.stdlib_module_names or parts[0] in _AIRFLOW_IMPORT_ROOTS:
+        return True
+    if any(entry.startswith(f"{path}.") for entry in RUNTIME_PACKAGES):
         return True
     return any(".".join(parts[:length]) in RUNTIME_PACKAGES for length in range(1, len(parts) + 1))
 

@@ -186,3 +186,51 @@ def test_scheduled_job_queues_runs_like_airflow(tmp_path: Path) -> None:
 
     job = next(iter(yaml.safe_load(next((out / "resources").glob("*.yml")).read_text())["resources"]["jobs"].values()))
     assert job["queue"] == {"enabled": True}
+
+
+def _job(tmp_path: Path, pipeline: Pipeline) -> dict:
+    rehydrated, _ = pipeline_dict_to_ir(pipeline_to_dict(pipeline))
+    out = tmp_path / "bundle"
+    write_bundle(prepare_workflow(rehydrated), out, catalog="main", schema="a")
+    return next(iter(yaml.safe_load(next((out / "resources").glob("*.yml")).read_text())["resources"]["jobs"].values()))
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "timedelta(hours=2)",
+        "None",
+    ],
+)
+def test_queueing_follows_whether_the_job_is_scheduled(tmp_path: Path, schedule: str) -> None:
+    dag_path = tmp_path / "dag.py"
+    dag_path.write_text(
+        "from datetime import timedelta\n"
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        f"with DAG(dag_id='d', schedule={schedule}) as dag:\n"
+        "    t = BashOperator(task_id='t', bash_command='echo hi')\n",
+        encoding="utf-8",
+    )
+
+    job = _job(tmp_path, load_airflow_dag(dag_path))
+
+    assert job.get("queue") == ({"enabled": True} if schedule != "None" else None)
+
+
+def test_file_arrival_trigger_queues_runs(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dag.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor\n"
+        "with DAG(dag_id='d', schedule=None) as dag:\n"
+        "    wait = S3KeySensor(task_id='wait', bucket_key='s3://bucket/landing/')\n"
+        "    t = BashOperator(task_id='t', bash_command='echo hi')\n"
+        "    wait >> t\n",
+        encoding="utf-8",
+    )
+    pipeline = load_airflow_dag(dag_path)
+
+    assert pipeline.schedule["kind"] == "file_arrival"
+    assert _job(tmp_path, pipeline)["queue"] == {"enabled": True}
