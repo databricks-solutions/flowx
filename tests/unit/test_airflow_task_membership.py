@@ -330,8 +330,8 @@ def test_adopted_task_does_not_enable_the_dag_retry_email(tmp_path: Path) -> Non
         "from airflow import DAG\n"
         "from airflow.operators.bash import BashOperator\n"
         "dag = DAG('c', schedule=None, default_args={'retries': 2, 'email': ['a@x.com'], 'email_on_retry': True})\n"
-        "start = BashOperator(task_id='start', bash_command='x', dag=dag, retries=0)\n"
-        "child = BashOperator(task_id='child', bash_command='x')\n"
+        "start = BashOperator(task_id='start', bash_command='echo x', dag=dag, retries=0)\n"
+        "child = BashOperator(task_id='child', bash_command='echo x')\n"
         "start >> child\n"
     )
 
@@ -347,8 +347,8 @@ def test_operator_without_dag_argument_joins_through_cross_downstream(tmp_path: 
         "from airflow.models.baseoperator import cross_downstream\n"
         "from airflow.operators.bash import BashOperator\n"
         "dag = DAG('c', schedule=None)\n"
-        "start = BashOperator(task_id='start', bash_command='x', dag=dag)\n"
-        "t = BashOperator(task_id='t', bash_command='x')\n"
+        "start = BashOperator(task_id='start', bash_command='echo x', dag=dag)\n"
+        "t = BashOperator(task_id='t', bash_command='echo x')\n"
         "cross_downstream([start], [t])\n"
     )
 
@@ -363,8 +363,8 @@ def test_task_built_after_a_with_dag_block_and_wired_in_does_not_inherit_default
         "from airflow import DAG\n"
         "from airflow.operators.bash import BashOperator\n"
         "with DAG('c', schedule=None, default_args={'retries': 4}) as dag:\n"
-        "    start = BashOperator(task_id='start', bash_command='x')\n"
-        "t = BashOperator(task_id='t', bash_command='x')\n"
+        "    start = BashOperator(task_id='start', bash_command='echo x')\n"
+        "t = BashOperator(task_id='t', bash_command='echo x')\n"
         "start >> t\n"
     )
 
@@ -384,8 +384,8 @@ def test_wiring_inside_a_statically_invoked_helper_adopts_the_task(tmp_path: Pat
         "from airflow import DAG\n"
         "from airflow.operators.bash import BashOperator\n"
         "dag = DAG('c', schedule=None)\n"
-        "start = BashOperator(task_id='start', bash_command='x', dag=dag)\n"
-        "t = BashOperator(task_id='t', bash_command='x')\n"
+        "start = BashOperator(task_id='start', bash_command='echo x', dag=dag)\n"
+        "t = BashOperator(task_id='t', bash_command='echo x')\n"
         "def wire():\n"
         "    start >> t\n"
         "wire()\n"
@@ -407,10 +407,10 @@ _TWO_DAG_MODULE = (
     "from airflow import DAG\n"
     "from airflow.operators.bash import BashOperator\n"
     "a = DAG('a', schedule=None)\n"
-    "start = BashOperator(task_id='start', bash_command='x', dag=a)\n"
+    "start = BashOperator(task_id='start', bash_command='echo x', dag=a)\n"
     "with DAG('b', schedule=None) as b:\n"
-    "    x = BashOperator(task_id='x', bash_command='x')\n"
-    "    y = BashOperator(task_id='y', bash_command='x')\n"
+    "    x = BashOperator(task_id='x', bash_command='echo x')\n"
+    "    y = BashOperator(task_id='y', bash_command='echo x')\n"
     "    x >> y\n"
 )
 
@@ -425,7 +425,7 @@ def test_task_bound_to_another_dag_stays_out_of_a_with_dag(tmp_path: Path) -> No
 
 def test_task_naming_another_dag_inside_a_with_block_fails_closed(tmp_path: Path) -> None:
     # z belongs to DAG a, but a's isolated module doesn't contain b's block, so neither DAG can capture it.
-    source = _TWO_DAG_MODULE + "    z = BashOperator(task_id='z', bash_command='x', dag=a)\n"
+    source = _TWO_DAG_MODULE + "    z = BashOperator(task_id='z', bash_command='echo x', dag=a)\n"
 
     pipelines = _load_all(tmp_path, source)
 
@@ -438,9 +438,9 @@ def test_task_naming_an_unknown_dag_variable_is_still_captured(tmp_path: Path) -
         "from airflow import DAG\n"
         "from airflow.operators.bash import BashOperator\n"
         "with DAG('c', schedule=None) as dag:\n"
-        "    start = BashOperator(task_id='start', bash_command='x')\n"
+        "    start = BashOperator(task_id='start', bash_command='echo x')\n"
         "alias = dag\n"
-        "t = BashOperator(task_id='t', bash_command='x', dag=alias)\n"
+        "t = BashOperator(task_id='t', bash_command='echo x', dag=alias)\n"
         "start >> t\n"
     )
 
