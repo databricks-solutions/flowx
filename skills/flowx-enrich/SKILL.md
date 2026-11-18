@@ -160,27 +160,15 @@ document rather than patching it in place. The `insights` block is replaced whol
 and every deterministic inventory key stays byte-identical. Re-running with the same insights rewrites the same bytes; re-running
 with different insights replaces the block. A validation failure writes nothing.
 
-Absent a concurrent `discover`, only one `enrich` writes an output directory at a time (see the races
-below): it holds `metadata/.enrich.lock` from reading
-the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
-writes nothing. `discover` does not wait for the lock: it clears `metadata/`, the lock with it. So right
-before writing, `enrich` checks that its lock and the `inventory.json` it read are both still there; if
-`discover` ran in between, it writes nothing and reports "discover ran during this enrich; prepare and
-enrich again". The two files are replaced one right after the other. If replacing `inventory.json`
-fails, `agentic_insights.json` is put back to the insights the unchanged `inventory.json` holds (or
-removed when it holds none). A process killed or interrupted (Ctrl-C)
-between those two steps, or a failure while putting that file back, can leave
-`agentic_insights.json` one write ahead of `inventory.json`. That run's lock then stays behind, and the
-next `enrich` refuses until the lock is cleared:
+Don't run `enrich` alongside `discover` or another `enrich` on the same output folder. If it fails, run
+it again.
+
+If `enrich` reports that `metadata/.enrich.lock` exists and no other `enrich` is running, an earlier
+run stopped mid-write. Clear the lock, then enrich again:
 
 - **Locally**, delete `metadata/.enrich.lock` and run `enrich` again; it rewrites both files.
 - **On the hosted MCP server** you cannot delete files in `output_dir`, so run `discover` again (it
   clears `metadata/`, the lock with it), then `enrich` with `action="prepare"` and apply the insights again.
-
-Sequential use is safe. The checks above do not close every race, though: a `discover` plus two
-`enrich` runs on one output folder within a few milliseconds can slip past them. That can end in an
-error, but it can also overwrite silently: two runs can write together, so the two files may come from
-different runs and need not match the current inventory. Do not run `enrich` while another `enrich` or a `discover` is working on the same output folder.
 
 ## Next step
 
