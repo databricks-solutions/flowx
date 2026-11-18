@@ -155,6 +155,129 @@ build()
     assert result.graph.lineage.control_edges[0].target_workflow == "child_dag"
 
 
+def test_persists_factory_and_task_callable_definitions(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow.decorators import dag, task, task_group
+from airflow.operators.python import PythonOperator
+
+def classic_callable():
+    return "classic"
+
+@task_group
+def grouped():
+    @task
+    def nested():
+        return "nested"
+    nested()
+
+@dag(dag_id="callables", schedule=None)
+def build():
+    @task
+    def taskflow_callable():
+        return "taskflow"
+
+    classic = PythonOperator(task_id="classic", python_callable=classic_callable)
+    taskflow = taskflow_callable()
+    group = grouped()
+    classic >> taskflow >> group
+
+build()
+""",
+    )
+
+    assert result.graph.raw is not None
+    assert "def build():" in result.graph.raw["factory_definition"]["source"]
+    nodes = {node.source_id: node for node in walk_nodes(result.graph.tasks)}
+    assert "def classic_callable():" in nodes["classic"].raw["callable_definition"]["source"]
+    assert "def taskflow_callable():" in nodes["taskflow"].raw["callable_definition"]["source"]
+    assert "def grouped():" in nodes["group"].raw["callable_definition"]["source"]
+
+
+def test_ordering_only_taskflow_dependency_does_not_create_xcom_lineage(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow.decorators import dag, task
+
+@dag(dag_id="ordering_only", schedule=None)
+def build():
+    @task
+    def first():
+        return 1
+
+    @task
+    def second():
+        return 2
+
+    first_task = first()
+    second_task = second()
+    first_task >> second_task
+
+build()
+""",
+    )
+
+    nodes = {node.source_id: node for node in walk_nodes(result.graph.tasks)}
+    assert [dependency.upstream for dependency in nodes["second_task"].dependencies] == ["first_task"]
+    assert nodes["second_task"].data_reads == []
+    assert result.graph.lineage is not None
+    assert result.graph.lineage.data_edges == []
+
+
+def test_preserves_unknown_trigger_dag_run_wait_semantics(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow import DAG
+from airflow.models import Variable
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+
+with DAG(dag_id="dynamic_wait", schedule=None) as dag:
+    trigger = TriggerDagRunOperator(
+        task_id="trigger",
+        trigger_dag_id="child",
+        wait_for_completion=Variable.get("WAIT_FOR_CHILD") == "true",
+    )
+""",
+    )
+
+    trigger = result.graph.tasks[0]
+    assert trigger.properties["invokes_wait"] is None
+    assert result.graph.lineage is not None
+    assert result.graph.lineage.control_edges[0].wait_for_completion is None
+
+
+def test_preserves_mixed_task_kind_source_order_and_collision_allocation(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow.decorators import dag, task
+from airflow.operators.bash import BashOperator
+
+@task
+def taskflow_callable():
+    return 1
+
+@dag(dag_id="mixed_order", schedule=None)
+def build():
+    same = taskflow_callable()
+    middle = BashOperator(task_id="same", bash_command="echo middle")
+    last = taskflow_callable()
+
+build()
+""",
+    )
+
+    assert [(node.source_id, node.task_key) for node in result.graph.tasks] == [
+        ("same", "same"),
+        ("middle", "same__2"),
+        ("last", "last"),
+    ]
+    assert [task.task_key for task in result.pipeline.tasks] == ["same", "same__2", "last"]
+
+
 def test_unclaimed_comprehension_is_an_explicit_gap(tmp_path: Path) -> None:
     result = _load(
         tmp_path,
@@ -204,6 +327,31 @@ with DAG(dag_id="assets", schedule=[Dataset("logical.orders")]) as dag:
     assert nodes["copy"].data_writes[0].identity == "main.bronze.orders"
     assert result.graph.schedule is not None
     assert result.graph.schedule.kind == "asset"
+
+
+def test_maps_named_composed_airflow_three_asset_schedule(tmp_path: Path) -> None:
+    result = _load(
+        tmp_path,
+        """
+from airflow.sdk import Asset, DAG
+from airflow.providers.standard.operators.bash import BashOperator
+
+orders = Asset("x-databricks-table://main.raw.orders")
+customers = Asset("x-databricks-table://main.raw.customers")
+
+with DAG(dag_id="asset_expression", schedule=orders & customers) as dag:
+    run = BashOperator(task_id="run", bash_command="echo ready")
+""",
+    )
+
+    assert result.graph.schedule is not None
+    assert result.graph.schedule.kind == "asset"
+    assert result.pipeline.schedule == {
+        "kind": "table_update",
+        "table_names": ["main.raw.orders", "main.raw.customers"],
+        "condition": "ALL_UPDATED",
+        "pause_status": "UNPAUSED",
+    }
 
 
 def test_maps_multiple_dag_declarations_independently(tmp_path: Path) -> None:
