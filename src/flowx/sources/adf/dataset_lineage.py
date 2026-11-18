@@ -124,9 +124,9 @@ def _dataset_ref_to_asset(
     path signature, else empty. It is never the bare dataset name, so two opaque
     references cannot join by name; an empty signature joins nothing but still
     records the read or write. With *location_overridden* neither key is derived.
-    A dataset that names its store but cannot prove it (see
-    :func:`resolve_dataset_store`) gets no signature, because a folder shape alone
-    cannot tell two such stores apart.
+    A dataset that names its store but cannot prove it, or that is missing from the
+    export (see :func:`resolve_dataset_store`), gets no signature, because a folder
+    shape alone cannot tell two such stores apart.
     """
     if location_overridden:
         return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))

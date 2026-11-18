@@ -92,9 +92,8 @@ def build_source_inventory(
     unsupported = 0
 
     for graph in graphs:
-        flattened = [
-            node for node in walk_nodes(graph.tasks) if node.properties.get(INVENTORY_VISIBLE_PROPERTY) is not False
-        ]
+        nodes = list(walk_nodes(graph.tasks))
+        flattened = [node for node in nodes if node.properties.get(INVENTORY_VISIBLE_PROPERTY) is not False]
         for node in flattened:
             strategy = _strategy(node)
             if strategy == _DETERMINISTIC:
@@ -104,7 +103,7 @@ def build_source_inventory(
             else:
                 unsupported += 1
         if flattened or include_empty_pipelines:
-            names_by_task_key = {node.task_key: node.name for node in walk_nodes(graph.tasks) if node.name is not None}
+            names_by_task_key = {node.task_key: node.name for node in nodes if node.name is not None}
             entry: dict[str, Any] = {
                 "name": graph.name,
                 "activities": [_activity_entry(node, names_by_task_key) for node in flattened],
@@ -196,8 +195,8 @@ def _motif_entry(motif: MotifAnnotation) -> dict[str, Any]:
 
     Surfacing only: ``member_task_keys`` names the participating activities by the
     same task keys their activity entries carry (for ADF, the key convert gives each
-    activity name), so a consumer can join a motif back to its members, and to the
-    bundle's tasks. The detector reports its confidence as
+    activity name), so a consumer can join a motif back to its members, and to
+    convert's tasks before any motif is collapsed. The detector reports its confidence as
     human-readable rationale rather than a numeric score, so the annotation's
     ``notes`` are surfaced verbatim as ``confidence_notes``, the inventory's
     long-standing key.

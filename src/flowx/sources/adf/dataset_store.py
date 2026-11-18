@@ -51,10 +51,11 @@ def resolve_dataset_store(
       service (SFTP, FTP, a file share, HDFS, HTTP, a Fabric Lakehouse, ADLS Gen1;
       type compared case-insensitively) is named by that linked service name alone.
 
-    ``location_names_store`` says whether the location tells its store apart at all,
-    provable or not: a literal file system, container or bucket, or one of those
-    linked-service locations. A masked file system (holding ``*``) names a store that
-    cannot be proven, so it gives ``(None, True)``.
+    ``location_names_store`` says whether the dataset sits in some particular store,
+    provable or not, so that a bare folder shape must not stand in for it: a literal
+    file system, container or bucket, one of those linked-service locations, a
+    run-time file system, or a dataset missing from the export. A masked file system
+    (holding ``*``) names a store that cannot be proven, so it gives ``(None, True)``.
 
     A file system that is written but only known at run time (``@dataset().fs`` bound
     to a pipeline parameter, say) still sits inside a known account, so the store is

@@ -69,7 +69,7 @@ Each activity's `task_key` is the task key convert gives it: the ADF activity na
 character outside `A-Z`, `a-z`, `0-9`, `_` and `-` replaced by `_` (runs of `_` collapsed, leading
 and trailing `_` dropped), so `Copy Orders (daily)` is `Copy_Orders_daily`. `name` and the legacy
 `depends_on` keep the names as written; `dependencies[].upstream`, the lineage edges and the motifs'
-`member_task_keys` use the task key, so they join with the bundle's tasks. `source_graphs_sha256`
+`member_task_keys` use the task key, so they join with convert's task keys. `source_graphs_sha256`
 names the saved `metadata/source_graphs.json` the inventory was built from.
 
 The inventory deliberately has no top-level `generated_at` timestamp any more, so the same export,

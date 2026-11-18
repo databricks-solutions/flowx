@@ -54,7 +54,15 @@ from flowx.discovery_lineage import (
     build_graph_lineage,
     walk_nodes,
 )
-from flowx.models.adf_ast import AdfActivity, AdfDefinitions, AdfParameter, AdfPipeline, AdfTrigger, AdfVariable
+from flowx.models.adf_ast import (
+    AdfActivity,
+    AdfDefinitions,
+    AdfDependency,
+    AdfParameter,
+    AdfPipeline,
+    AdfTrigger,
+    AdfVariable,
+)
 from flowx.models.discovery import (
     CONCEPT_BRANCH,
     CONCEPT_COPY_DATA,
@@ -371,25 +379,14 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions, siblin
 
     The task key is the one convert gives the activity (:func:`to_case_preserving_key`
     of its name, so ``Copy Orders (daily)`` is ``Copy_Orders_daily``), so discover's
-    keys, edges and motifs join with the bundle's tasks. ``name`` and ``source_id``
+    keys, edges and motifs join with convert's task keys. ``name`` and ``source_id``
     keep the name as written. A resolved upstream is that same key; an unresolved
     one keeps the name as written, since no task carries it.
     """
     strategy = classify_activity(activity.type)
     concept = _CONCEPT_BY_TYPE.get(activity.type, CONCEPT_GAP)
     task_key = to_case_preserving_key(activity.name)
-    dependencies = [
-        SourceDependency(
-            upstream=(
-                to_case_preserving_key(dependency.activity)
-                if dependency.activity in sibling_names
-                else dependency.activity
-            ),
-            conditions=list(dependency.dependency_conditions),
-            resolved=dependency.activity in sibling_names,
-        )
-        for dependency in (activity.depends_on or [])
-    ]
+    dependencies = [_dependency(dependency, sibling_names) for dependency in (activity.depends_on or [])]
     policy = _policy_to_spec(activity)
     properties: dict[str, Any] = {STRATEGY_PROPERTY: strategy.value}
     _record_invocation(activity, properties)
@@ -441,6 +438,16 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions, siblin
         data_writes=data_writes,
         properties=properties,
         raw=_activity_without_get_defaults(activity.raw),
+    )
+
+
+def _dependency(dependency: AdfDependency, sibling_names: frozenset[str]) -> SourceDependency:
+    """Map one ``dependsOn`` entry, naming a resolved upstream by its task key and an unresolved one as written."""
+    resolved = dependency.activity in sibling_names
+    return SourceDependency(
+        upstream=to_case_preserving_key(dependency.activity) if resolved else dependency.activity,
+        conditions=list(dependency.dependency_conditions),
+        resolved=resolved,
     )
 
 
