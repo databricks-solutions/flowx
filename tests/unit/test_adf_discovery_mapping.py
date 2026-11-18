@@ -47,7 +47,9 @@ def test_activity_maps_1to1_retaining_type_and_raw() -> None:
     assert isinstance(node, SourceNode)
     assert node.source == SOURCE_ADF
     assert node.name == "Run Notebook"
-    assert node.task_key == "Run Notebook"
+    assert node.source_id == "Run Notebook"
+    # The task key is the one convert gives the activity, so the two phases join.
+    assert node.task_key == "Run_Notebook"
     # ADF type is retained verbatim as native_type.
     assert node.native_type == "DatabricksNotebook"
     # Verbatim source dict preserved for lossless fallback.
@@ -453,6 +455,27 @@ def test_tumbling_window_trigger_expression_from_type_properties() -> None:
     assert schedule is not None
     assert schedule.kind == "interval"
     assert schedule.expression == {"frequency": "Hour", "interval": 1, "startTime": "2024-01-01T00:00:00Z"}
+
+
+@pytest.mark.parametrize("pipelines_list", [None, []])
+def test_tumbling_window_trigger_attaches_through_its_singular_pipeline_reference(pipelines_list: list | None) -> None:
+    """A real tumbling-window trigger names its one pipeline under ``pipeline``, with no (or an empty) ``pipelines``."""
+    trigger: dict = {
+        "name": "tr_tumble",
+        "properties": {
+            "type": "TumblingWindowTrigger",
+            "typeProperties": {"frequency": "Hour", "interval": 1, "startTime": "2024-01-01T00:00:00Z"},
+            "pipeline": {"pipelineReference": {"referenceName": "pl_sched", "type": "PipelineReference"}},
+        },
+    }
+    if pipelines_list is not None:
+        trigger["properties"]["pipelines"] = pipelines_list
+    graphs = adf_definitions_to_source_graphs(_definitions_with_trigger(trigger))
+
+    schedule = graphs[0].schedule
+    assert schedule is not None
+    assert schedule.kind == "interval"
+    assert schedule.extensions["trigger_name"] == "tr_tumble"
 
 
 def test_unreferenced_pipeline_has_no_schedule() -> None:

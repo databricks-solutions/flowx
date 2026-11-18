@@ -5,18 +5,6 @@
         {
           "dependencies": [],
           "name": "launch-child",
-          "original_type": "ExecutePipeline",
-          "raw": {
-            "name": "launch-child",
-            "type": "ExecutePipeline",
-            "typeProperties": {
-              "pipeline": {
-                "referenceName": "child-pipeline",
-                "type": "PipelineReference"
-              },
-              "waitOnCompletion": true
-            }
-          },
           "strategy": "deterministic",
           "task_key": "launch-child",
           "type": "ExecutePipeline"
@@ -35,31 +23,6 @@
             "launch-child"
           ],
           "name": "mixed-script",
-          "original_type": "Script",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "launch-child",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "linkedServiceName": {
-              "referenceName": "azure-sql",
-              "type": "LinkedServiceReference"
-            },
-            "name": "mixed-script",
-            "type": "Script",
-            "typeProperties": {
-              "scripts": [
-                {
-                  "text": "SELECT 1",
-                  "type": "Query"
-                }
-              ]
-            }
-          },
           "strategy": "agentic",
           "task_key": "mixed-script",
           "type": "Script"
@@ -78,23 +41,6 @@
             "mixed-script"
           ],
           "name": "complete",
-          "original_type": "SetVariable",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "mixed-script",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "name": "complete",
-            "type": "SetVariable",
-            "typeProperties": {
-              "value": "complete",
-              "variableName": "state"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "complete",
           "type": "SetVariable"
@@ -110,8 +56,7 @@
             "wait_for_completion": true
           }
         ],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "name": "complex-orchestration"
     }

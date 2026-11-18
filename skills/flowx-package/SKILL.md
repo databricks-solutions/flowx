@@ -101,12 +101,6 @@ Ask the user for the following (provide defaults):
 | Packaging mode | How to lay out bundles for a multi-pipeline factory (`--packaging-mode`): `per-pipeline`, `single`, or `per-group`. See below. | `per-pipeline` |
 | Databricks CLI profile | Profile used to download workspace-resident notebooks / JARs / Python files (`--profile`). Required only when the bundle references absolute workspace paths. | resolved from `~/.databrickscfg` (auto-prompt if multiple) |
 
-Ask for the catalog and schema as **one free-text question**: "Which catalog and schema should the
-bundle target, as `catalog.schema`? (default `main.default`)". Split the answer at the dot between the
-two names, stripping any backticks around either name, and pass them as `--catalog` and `--schema`.
-Never offer a "Custom" choice that can't take text: if you use a picker, the only way to type a value
-must be its free-text answer.
-
 **Packaging mode** (`--packaging-mode`, surfaced as the `packaging_mode` input) controls how a
 multi-pipeline migration is laid out. For a single-pipeline migration every mode is equivalent.
 
@@ -123,6 +117,12 @@ multi-pipeline migration is laid out. For a single-pipeline migration every mode
 Regardless of mode, a single top-level `DEPLOY.md` is written describing every bundle, its
 cross-bundle dependencies, and a suggested callees-first deploy order. Use the `flowx-deploy` skill
 (`python -m flowx.adapter deploy`) to deploy the bundles in that order automatically.
+
+Ask for the catalog and schema as **one free-text question**: "Which catalog and schema should the
+bundle target, as `catalog.schema`? (default `main.default`)". Split the answer at the dot between the
+two names, stripping any backticks around either name, and pass them as `--catalog` and `--schema`.
+Never offer a "Custom" choice that can't take text: if you use a picker, the only way to type a value
+must be its free-text answer.
 
 ### Step 2.5 — Detect workspace artifacts and authenticate
 
@@ -217,11 +217,11 @@ Where:
   added by hand) is moved into `metadata/archive/<UTC time>/` with an `archive.json`, so it no longer
   deploys and is kept for audit. The files package does write again are overwritten.
 - Package records the bundle folders it wrote in `metadata/packaged_bundles.json` (`"."` for one bundle
-  at the top of the output folder, otherwise one folder per bundle: per pipeline or per group, by
-  packaging mode). Once its preflight passes and before it writes anything, the next package moves every
-  recorded folder it will not write into `metadata/archive/<UTC time>/`: a pipeline an agentic unit
-  replaced under a new name, the per-pipeline folders when a convert narrows to one pipeline or the
-  packaging mode changes to `single`, or the top-level bundle when it widens again. So a new
+  at the top of the output folder, otherwise one folder per bundle: per pipeline, or per group under
+  `--packaging-mode per-group`). Once its preflight passes and
+  before it writes anything, the next package moves every recorded folder it will not write into
+  `metadata/archive/<UTC time>/`: a pipeline an agentic unit replaced under a new name, the per-pipeline
+  folders when a convert narrows to one pipeline, or the top-level bundle when it widens again. So a new
   bundle never lands on top of an old one that shares its folder name. A folder package never recorded
   stays where it is. A malformed record stops package before it writes anything; discover archives it
   with the rest of `metadata/`.

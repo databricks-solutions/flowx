@@ -86,27 +86,27 @@ estimates current ADF spend from a live Azure scan and writes `metadata/tco/cost
 
 ## Module Descriptions
 
-| Module | Purpose |
-|--------|---------|
-| `models/adf_ast.py` | Typed AST nodes for ADF definitions |
-| `models/ir.py` | Databricks intermediate representation |
-| `models/dab.py` | DAB output schema types |
-| `parser/adf_loader.py` | Parses ADF exports, produces `metadata/inventory.json` + `metadata/profile_report.csv` |
-| `parser/expression_parser.py` | Translates ADF expressions (@activity, @pipeline, @variables) |
-| `translator/engine.py` | Registry dispatch, topological sort, context threading |
-| `translator/activity_translators/` | One module per deterministic activity type (16 total) |
-| `preparer/workflow_preparer.py` | Orchestrates activity preparers |
-| `preparer/code_generator.py` | Notebook code generation for activity types |
-| `preparer/activity_preparers/` | One module per activity type |
-| `bundler/dab_writer.py` | Generates databricks.yml, job YAML, resources; groups pipelines into bundles per `--packaging-mode` |
-| `bundler/pipeline_graph.py` | Run Pipeline (ExecutePipeline) dependency graph: grouping (connected components) + deploy order (topo sort) |
-| `bundler/deploy_writer.py` | Renders the top-level `DEPLOY.md` (bundle layout + suggested deploy order) |
-| `bundler/deployer.py` | Ordered multi-bundle deploy: discovers bundles, deploys callees first, wires cross-bundle job ids |
-| `bundler/notebook_writer.py` | Writes generated notebooks to bundle |
-| `bundler/setup_generator.py` | Setup scripts for UC volumes, secrets, connections |
-| `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/` |
-| `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK |
-| `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table |
+| Module | Purpose                                                                                                                                                       |
+|--------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `models/adf_ast.py` | Typed AST nodes for ADF definitions                                                                                                                           |
+| `models/ir.py` | Databricks intermediate representation                                                                                                                        |
+| `models/dab.py` | DAB output schema types                                                                                                                                       |
+| `parser/adf_loader.py` | Parses ADF exports, produces `metadata/inventory.json` + `metadata/profile_report.csv`                                                                        |
+| `parser/expression_parser.py` | Translates ADF expressions (@activity, @pipeline, @variables)                                                                                                 |
+| `translator/engine.py` | Registry dispatch, topological sort, context threading                                                                                                        |
+| `translator/activity_translators/` | One module per deterministic activity type (16 total)                                                                                                         |
+| `preparer/workflow_preparer.py` | Orchestrates activity preparers                                                                                                                               |
+| `preparer/code_generator.py` | Notebook code generation for activity types                                                                                                                   |
+| `preparer/activity_preparers/` | One module per activity type                                                                                                                                  |
+| `bundler/dab_writer.py` | Generates databricks.yml, job YAML, resources; groups pipelines into bundles per `--packaging-mode`                                                           |
+| `bundler/pipeline_graph.py` | Run Pipeline (ExecutePipeline) dependency graph: grouping (connected components) + deploy order (topo sort)                                                   |
+| `bundler/deploy_writer.py` | Renders the top-level `DEPLOY.md` (bundle layout + suggested deploy order)                                                                                    |
+| `bundler/deployer.py` | Ordered multi-bundle deploy: discovers bundles, deploys callees first, wires cross-bundle job ids                                                             |
+| `bundler/notebook_writer.py` | Writes generated notebooks to bundle                                                                                                                          |
+| `bundler/setup_generator.py` | Setup scripts for UC volumes, secrets, connections                                                                                                            |
+| `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/`                                                                                                            |
+| `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK                                                                                    |
+| `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table                                                                                       |
 | `reporting/routing_review.py` | Renders `metadata/routing_review.html`, the standard eight-section routing review page, from `routing_review_template.html` (stdlib only, no timestamps) |
 | `routing.py` | Groups pipelines into connected components over control lineage; recommends deterministic/agentic per component (both options) and suggests groupings from the insights; writes the recommendation into `metadata/conversion_plan.json` with decisions pending and records the user's edits (additive; convert untouched). Agentic decisions are ADF-only; also the reader-side check that `agentic_insights.json` agrees with the inventory |
 | `route_agentic.py` | Applies a routing decision after convert: rebuilds the report from the never-rewritten baseline (`.work/route_baseline/`), the plan, and the agent's output in `metadata/agentic_conversion.json` (per-unit pipelines + fills of convert's own gaps); `fill-agentic` is the only fill for routed-agentic units |

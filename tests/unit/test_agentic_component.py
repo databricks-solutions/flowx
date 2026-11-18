@@ -8,7 +8,13 @@ import json
 import pytest
 import yaml
 
-from flowx.bundler.dab_writer import _combine_airflow_workflows, pipeline_dict_to_ir, write_bundle
+from flowx.bundler.dab_writer import (
+    _combine_airflow_workflows,
+    _glob_matches,
+    pipeline_dict_to_ir,
+    write_bundle,
+    write_bundle_group,
+)
 from flowx.ir_serde import activity_to_dict, merge_agentic_results, pipeline_to_dict
 from flowx.models.dab import DabNotebook, SetupTask
 from flowx.models.ir import (
@@ -23,7 +29,7 @@ from flowx.models.ir import (
     SwitchCase,
     WaitActivity,
 )
-from flowx.preparer.workflow_preparer import prepare_workflow
+from flowx.preparer.workflow_preparer import PreparedWorkflow, prepare_workflow
 from flowx.validate.bundle_invariants import check_bundle_dir
 
 SOURCE_DEFINITION = {"type": "ExecuteDataFlow", "typeProperties": {"dataflow": "orders"}}
@@ -1626,3 +1632,348 @@ def test_agentic_component_rejects_malformed_parameter_approximations(approximat
 
     with pytest.raises(ValueError, match="Agentic component 'ingest_orders' parameter approximation"):
         prepare_workflow(Pipeline(name="orders", tasks=[activity]))
+
+
+def _grouped_component_bundle(tmp_path, component_for_pipeline):
+    """Package one component per pipeline into a single shared bundle, as single and per-group modes do."""
+    workflows = [
+        prepare_workflow(Pipeline(name=pipeline, tasks=[component_for_pipeline(pipeline)]))
+        for pipeline in ("pipe_a", "pipe_b")
+    ]
+    write_bundle_group(workflows, tmp_path, bundle_name="combined")
+    return tmp_path
+
+
+def test_a_pipeline_resource_follows_its_authored_file_in_a_shared_bundle(tmp_path):
+    """Each grouped pipeline's resource names the authored file where namespacing put it, not the old path."""
+
+    def component(pipeline):
+        return AgenticComponentActivity(
+            name="Transform",
+            task_key="transform",
+            files=[{"path": "dataflows/transform.py", "content": f"# {pipeline}\n"}],
+            resources=[
+                {
+                    "resource_key": f"{pipeline}_transform",
+                    "definition": {
+                        "name": f"{pipeline}_transform",
+                        "catalog": "${var.catalog}",
+                        "schema": "${var.schema}",
+                        "serverless": True,
+                        "libraries": [{"file": {"path": "../src/dataflows/transform.py"}}],
+                    },
+                }
+            ],
+            task={"pipeline_task": {"pipeline_id": f"${{resources.pipelines.{pipeline}_transform.id}}"}},
+        )
+
+    bundle = _grouped_component_bundle(tmp_path, component)
+
+    for pipeline in ("pipe_a", "pipe_b"):
+        resources = {}
+        for resource_file in (bundle / "resources").glob("*.yml"):
+            resources.update(
+                yaml.safe_load(resource_file.read_text(encoding="utf-8"))["resources"].get("pipelines", {})
+            )
+        (definition,) = [value for value in resources.values() if value["name"] == f"{pipeline}_transform"]
+        library_path = definition["libraries"][0]["file"]["path"]
+        assert library_path == f"../src/{pipeline}/dataflows/transform.py"
+        assert (bundle / "resources" / library_path).resolve().read_text(encoding="utf-8") == f"# {pipeline}\n"
+
+
+def test_an_environment_dependency_follows_its_authored_file_in_a_shared_bundle(tmp_path):
+    """An authored requirements.txt and wheel glob are still provided once namespacing moves them."""
+
+    def component(pipeline):
+        return AgenticComponentActivity(
+            name="Run",
+            task_key="run",
+            files=[
+                {"path": "requirements.txt", "content": "requests==2.32.3\n"},
+                {"path": "dist/app-0.1-py3-none-any.whl", "binary_content": "UEsDBAoAAAAA"},
+                {"path": "jobs/run.py", "content": f"print('{pipeline}')\n"},
+            ],
+            environments=[
+                {
+                    "environment_key": "serverless",
+                    "spec": {
+                        "environment_version": "2",
+                        "dependencies": ["../src/requirements.txt", "../src/dist/*.whl"],
+                    },
+                }
+            ],
+            task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "serverless"},
+        )
+
+    bundle = _grouped_component_bundle(tmp_path, component)
+
+    for pipeline in ("pipe_a", "pipe_b"):
+        job = yaml.safe_load((bundle / "resources" / f"{pipeline}.yml").read_text(encoding="utf-8"))
+        (environment,) = job["resources"]["jobs"][pipeline]["environments"]
+        assert environment["spec"]["dependencies"] == [
+            f"../src/{pipeline}/requirements.txt",
+            f"../src/{pipeline}/dist/*.whl",
+        ]
+        assert (bundle / "src" / pipeline / "requirements.txt").is_file()
+        assert (bundle / "src" / pipeline / "dist" / "app-0.1-py3-none-any.whl").is_file()
+
+
+def test_a_component_keeps_its_file_layout_in_a_shared_bundle(tmp_path):
+    """main.py and pkg/mod.py move together, so the import between them still works, and content is untouched."""
+    main_content = "from pkg import mod  # deployed as ../src/main.py\n"
+
+    def component(pipeline):
+        return AgenticComponentActivity(
+            name="Entry",
+            task_key="entry",
+            files=[
+                {"path": "main.py", "content": main_content},
+                {"path": "pkg/mod.py", "content": f"NAME = '{pipeline}'\n"},
+            ],
+            environments=[{"environment_key": "serverless", "spec": {"environment_version": "2"}}],
+            task={"spark_python_task": {"python_file": "../src/main.py"}, "environment_key": "serverless"},
+        )
+
+    bundle = _grouped_component_bundle(tmp_path, component)
+
+    for pipeline in ("pipe_a", "pipe_b"):
+        assert (bundle / "src" / pipeline / "main.py").read_text(encoding="utf-8") == main_content
+        assert (bundle / "src" / pipeline / "pkg" / "mod.py").read_text(encoding="utf-8") == f"NAME = '{pipeline}'\n"
+        job = yaml.safe_load((bundle / "resources" / f"{pipeline}.yml").read_text(encoding="utf-8"))
+        task = job["resources"]["jobs"][pipeline]["tasks"][0]
+        assert task["spark_python_task"]["python_file"] == f"../src/{pipeline}/main.py"
+
+
+def test_a_pipeline_resource_naming_a_missing_bundle_file_fails_at_package_time(tmp_path):
+    activity = AgenticComponentActivity(
+        name="Transform",
+        task_key="transform",
+        files=[{"path": "dataflows/transform.py", "content": "# transform\n"}],
+        resources=[
+            {
+                "resource_key": "transform_pipeline",
+                "definition": {
+                    "name": "transform_pipeline",
+                    "libraries": [{"file": {"path": "../src/dataflows/missing.py"}}],
+                },
+            }
+        ],
+        task={"pipeline_task": {"pipeline_id": "${resources.pipelines.transform_pipeline.id}"}},
+    )
+
+    with pytest.raises(
+        ValueError, match=r"Pipeline resource 'transform_pipeline' names '\.\./src/dataflows/missing\.py'"
+    ):
+        write_bundle(prepare_workflow(Pipeline(name="custom", tasks=[activity])), tmp_path)
+
+
+def _transform_component(pipeline, resource_key="transform_pipeline"):
+    """A component that authors dataflows/transform.py and a pipeline resource that runs it."""
+    return AgenticComponentActivity(
+        name="Transform",
+        task_key="transform",
+        files=[{"path": "dataflows/transform.py", "content": f"# {pipeline}\n"}],
+        resources=[
+            {
+                "resource_key": resource_key,
+                "definition": {
+                    "name": f"{pipeline}_transform",
+                    "serverless": True,
+                    "libraries": [{"file": {"path": "../src/dataflows/transform.py"}}],
+                },
+            }
+        ],
+        task={"pipeline_task": {"pipeline_id": f"${{resources.pipelines.{resource_key}.id}}"}},
+    )
+
+
+def _pipelines_in(bundle):
+    pipelines = {}
+    for resource_file in (bundle / "resources").glob("*.yml"):
+        pipelines.update(yaml.safe_load(resource_file.read_text(encoding="utf-8"))["resources"].get("pipelines", {}))
+    return pipelines
+
+
+def test_a_combined_airflow_bundle_rewrites_pipeline_resources_and_clashing_keys(tmp_path):
+    """The multi-DAG Airflow bundle moves each DAG's files too, so its pipeline resources follow, keyed per DAG."""
+    combined = _combine_airflow_workflows(
+        [prepare_workflow(Pipeline(name=dag, tasks=[_transform_component(dag)])) for dag in ("dag_a", "dag_b")]
+    )
+
+    write_bundle(combined, tmp_path)
+
+    pipelines = _pipelines_in(tmp_path)
+    for dag in ("dag_a", "dag_b"):
+        job = yaml.safe_load((tmp_path / "resources" / f"{dag}.yml").read_text(encoding="utf-8"))
+        reference = job["resources"]["jobs"][dag]["tasks"][0]["pipeline_task"]["pipeline_id"]
+        resource_key = reference.removeprefix("${resources.pipelines.").removesuffix(".id}")
+        assert resource_key == f"{dag}_transform_pipeline"
+        library_path = pipelines[resource_key]["libraries"][0]["file"]["path"]
+        assert library_path == f"../src/{dag}/dataflows/transform.py"
+        assert (tmp_path / "src" / dag / "dataflows" / "transform.py").read_text(encoding="utf-8") == f"# {dag}\n"
+
+
+def test_an_authored_file_at_a_generated_notebook_path_is_refused_in_a_shared_bundle_too(tmp_path):
+    """Shared bundles move the two to different folders, so the per-pipeline check runs before namespacing."""
+
+    def workflow(pipeline):
+        return PreparedWorkflow(
+            name=pipeline,
+            tasks=[
+                {
+                    "task_key": "run",
+                    "_authored": True,
+                    "notebook_task": {"notebook_path": "../src/notebooks/run.py"},
+                }
+            ],
+            notebooks=[
+                DabNotebook(relative_path="notebooks/run.py", content="# generated\n"),
+                DabNotebook(relative_path="notebooks/run.py", content="# authored\n", authored=True),
+            ],
+            secrets=[],
+            setup_tasks=[],
+        )
+
+    with pytest.raises(ValueError, match="shares its path with another file"):
+        write_bundle_group([workflow("pipe_a"), workflow("pipe_b")], tmp_path, bundle_name="combined")
+
+
+def test_a_glob_over_authored_and_generated_files_is_refused_in_a_shared_bundle(tmp_path):
+    def workflow(pipeline):
+        return PreparedWorkflow(
+            name=pipeline,
+            tasks=[{"task_key": "run", "pipeline_task": {"pipeline_id": f"${{resources.pipelines.{pipeline}.id}}"}}],
+            notebooks=[
+                DabNotebook(relative_path="notebooks/generated.py", content="# generated\n"),
+                DabNotebook(relative_path="notebooks/authored.py", content="# authored\n", authored=True),
+            ],
+            secrets=[],
+            setup_tasks=[],
+            pipeline_resources=[
+                {
+                    "resource_key": pipeline,
+                    "definition": {"name": pipeline, "libraries": [{"glob": {"include": "../src/notebooks/**"}}]},
+                }
+            ],
+        )
+
+    with pytest.raises(ValueError, match="covers both agent-authored files and generated files"):
+        write_bundle_group([workflow("pipe_a"), workflow("pipe_b")], tmp_path, bundle_name="combined")
+
+
+def test_folder_and_dot_relative_dependencies_follow_their_authored_files_in_a_shared_bundle(tmp_path):
+    """A project folder and a ./../src/ spelling both still name the component's files after the move."""
+
+    def component(pipeline):
+        return AgenticComponentActivity(
+            name="Run",
+            task_key="run",
+            files=[
+                {"path": "project/pyproject.toml", "content": f"[project]\nname = '{pipeline}'\n"},
+                {"path": "requirements.txt", "content": "requests==2.32.3\n"},
+                {"path": "jobs/run.py", "content": "print('run')\n"},
+            ],
+            environments=[
+                {
+                    "environment_key": "serverless",
+                    "spec": {
+                        "environment_version": "2",
+                        "dependencies": ["../src/project", "./../src/requirements.txt"],
+                    },
+                }
+            ],
+            task={"spark_python_task": {"python_file": "../src/jobs/run.py"}, "environment_key": "serverless"},
+        )
+
+    bundle = _grouped_component_bundle(tmp_path, component)
+
+    for pipeline in ("pipe_a", "pipe_b"):
+        job = yaml.safe_load((bundle / "resources" / f"{pipeline}.yml").read_text(encoding="utf-8"))
+        (environment,) = job["resources"]["jobs"][pipeline]["environments"]
+        assert environment["spec"]["dependencies"] == [
+            f"../src/{pipeline}/project",
+            f"../src/{pipeline}/requirements.txt",
+        ]
+
+
+@pytest.mark.parametrize(
+    ("path", "pattern", "matches"),
+    [
+        ("src/transform.py", "src/**/transform.py", True),
+        ("src/a/b/transform.py", "src/**/transform.py", True),
+        ("src/a/dist/pkg.whl", "src/**/dist/*.whl", True),
+        ("src/a/dist/nested/pkg.whl", "src/**/dist/*.whl", False),
+        ("src/dataflows/a/b.py", "src/dataflows/**", True),
+        ("src/dist/a.whl", "src/dist/*.whl", True),
+        ("src/dist/x/a.whl", "src/dist/*.whl", False),
+        ("src/a1.py", "src/a[0-9].py", True),
+        ("src/ab.py", "src/a?.py", True),
+        ("src/a/x/b.py", "src/a**b.py", False),
+        ("src/foo/bar.py", "src/foo[!a]bar.py", False),
+        ("src/].py", "src/[]].py", True),
+    ],
+)
+def test_bundle_globs_match_one_folder_per_star_and_any_number_for_two(path, pattern, matches):
+    assert _glob_matches(path, pattern) is matches
+
+
+def test_a_glob_with_a_double_star_matches_a_file_at_no_depth_in_the_reference_check(tmp_path):
+    activity = _transform_component("custom")
+    activity.files = [{"path": "transform.py", "content": "# custom\n"}]
+    activity.resources[0]["definition"]["libraries"] = [{"glob": {"include": "../src/**/transform.py"}}]
+
+    write_bundle(prepare_workflow(Pipeline(name="custom", tasks=[activity])), tmp_path)
+
+    assert (tmp_path / "src" / "transform.py").is_file()
+
+
+def test_a_reference_to_the_whole_src_folder_follows_a_component_into_its_folder(tmp_path):
+    """``../src`` names every file below src, so in a shared bundle it becomes the pipeline's own folder."""
+
+    def workflow(pipeline):
+        return PreparedWorkflow(
+            name=pipeline,
+            tasks=[
+                {"task_key": "run", "pipeline_task": {"pipeline_id": f"${{resources.pipelines.{pipeline}_flow.id}}"}}
+            ],
+            notebooks=[DabNotebook(relative_path="transform.py", content=f"# {pipeline}\n", authored=True)],
+            secrets=[],
+            setup_tasks=[],
+            pipeline_resources=[
+                {"resource_key": f"{pipeline}_flow", "definition": {"name": pipeline, "root_path": "../src"}}
+            ],
+        )
+
+    write_bundle_group([workflow("pipe_a"), workflow("pipe_b")], tmp_path, bundle_name="combined")
+
+    pipelines = _pipelines_in(tmp_path)
+    assert pipelines["pipe_a_flow"]["root_path"] == "../src/pipe_a"
+    assert pipelines["pipe_b_flow"]["root_path"] == "../src/pipe_b"
+
+
+def test_a_bundle_root_file_does_not_count_as_a_generated_src_file(tmp_path):
+    """A generated root pyproject.toml is not below src, so an authored src/pyproject.toml is not a mixed reference."""
+
+    def workflow(pipeline):
+        return PreparedWorkflow(
+            name=pipeline,
+            tasks=[
+                {"task_key": "run", "pipeline_task": {"pipeline_id": f"${{resources.pipelines.{pipeline}_flow.id}}"}}
+            ],
+            notebooks=[
+                DabNotebook(relative_path="pyproject.toml", content="[project]\nname = 'bundle'\n"),
+                DabNotebook(relative_path="pyproject.toml", content=f"[project]\nname = '{pipeline}'\n", authored=True),
+            ],
+            secrets=[],
+            setup_tasks=[],
+            pipeline_resources=[
+                {
+                    "resource_key": f"{pipeline}_flow",
+                    "definition": {"name": pipeline, "libraries": [{"file": {"path": "../src/pyproject.toml"}}]},
+                }
+            ],
+        )
+
+    write_bundle_group([workflow("pipe_a"), workflow("pipe_b")], tmp_path, bundle_name="combined")
+
+    assert _pipelines_in(tmp_path)["pipe_a_flow"]["libraries"][0]["file"]["path"] == "../src/pipe_a/pyproject.toml"

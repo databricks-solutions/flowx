@@ -119,12 +119,14 @@ class SourceDependency:
             ``["Succeeded", "Skipped"]``); empty when unconditional.
         resolved: ``False`` when no node in the same workflow scope (for example the
             same pipeline, container or DAG) has the upstream's name, such as a missing
-            or misspelled upstream. The edge is kept, not dropped.
+            or misspelled upstream. The edge is kept, not dropped. It has no default on
+            purpose: each source mapper must say whether it resolved the edge, so one
+            that forgets cannot report a missing upstream as resolved.
     """
 
     upstream: str
     conditions: list[str] = field(default_factory=list)
-    resolved: bool = True
+    resolved: bool
 
 
 @dataclass(slots=True, kw_only=True)
@@ -135,7 +137,10 @@ class SourceNode:
         source_id: Stable identifier from the source (ADF activity name, an
             Airflow capture id) used to resolve dependency edges before task
             keys are allocated.
-        task_key: Normalised task key unique within the graph.
+        task_key: Normalised task key unique within the graph: the key convert gives
+            the same task, so discover and convert join on it. For ADF that is
+            :func:`~flowx.utils.to_case_preserving_key` of the activity name, so
+            ``Copy Orders (daily)`` is ``Copy_Orders_daily``.
         concept: Neutral, classified kind (see the ``CONCEPT_*`` constants);
             ``CONCEPT_GAP`` when the source could not classify it.
         source: Source discriminator (``SOURCE_ADF`` / ``SOURCE_AIRFLOW``).

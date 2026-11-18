@@ -17,6 +17,7 @@ from flowx.models.ir import ControlEdge, Lineage
 from flowx.models.motifs import MOTIF_METADATA_DRIVEN_BULK_COPY, DetectedMotif
 from flowx.routing import build_recommendation, recommend_component
 from flowx.sources.adf.loader import attach_motifs_to_graphs
+from flowx.utils import to_case_preserving_key
 
 
 def _node(task_key: str, native_type: str, *, strategy: str = "deterministic") -> SourceNode:
@@ -24,7 +25,7 @@ def _node(task_key: str, native_type: str, *, strategy: str = "deterministic") -
         source_id=task_key,
         task_key=task_key,
         concept=CONCEPT_NOTEBOOK,
-        source="unit",
+        source="adf",
         name=task_key,
         native_type=native_type,
         properties={STRATEGY_PROPERTY: strategy},
@@ -65,7 +66,7 @@ def _pattern_insights(*pipelines: str, simplification: bool = False) -> dict[str
 
 
 def test_all_deterministic_component_recommends_deterministic() -> None:
-    graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook"), _node("copy", "Copy")])]
+    graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook"), _node("copy", "Copy")])]
     recommended, options = recommend_component(["a"], _inventory(graphs))
     assert recommended == "deterministic"
     assert options["deterministic"]["capable"] is True
@@ -77,7 +78,7 @@ def test_uncovered_activity_without_a_pattern_recommends_deterministic_and_cites
     graphs = [
         SourceGraph(
             name="a",
-            source="unit",
+            source="adf",
             tasks=[_node("load", "Notebook"), _node("flow", "ExecuteDataFlow", strategy="agentic")],
         )
     ]
@@ -94,7 +95,7 @@ def test_uncovered_activity_with_a_pattern_recommends_agentic() -> None:
     graphs = [
         SourceGraph(
             name="a",
-            source="unit",
+            source="adf",
             tasks=[_node("load", "Notebook"), _node("flow", "ExecuteDataFlow", strategy="agentic")],
         )
     ]
@@ -107,13 +108,13 @@ def test_pattern_on_any_member_pipeline_recommends_agentic_for_the_component() -
     graphs = [
         SourceGraph(
             name="A",
-            source="unit",
+            source="adf",
             tasks=[_node("call_b", "ExecutePipeline")],
             lineage=Lineage(
                 control_edges=[ControlEdge(source_workflow="A", target_workflow="B", via_task_key="call_b")]
             ),
         ),
-        SourceGraph(name="B", source="unit", tasks=[_node("flow", "ExecuteDataFlow", strategy="agentic")]),
+        SourceGraph(name="B", source="adf", tasks=[_node("flow", "ExecuteDataFlow", strategy="agentic")]),
     ]
     inventory = _inventory(graphs, insights=_pattern_insights("A", simplification=True))
     assert recommend_component(["A", "B"], inventory)[0] == "agentic"
@@ -123,13 +124,13 @@ def test_one_uncovered_activity_without_a_pattern_does_not_send_the_whole_compon
     graphs = [
         SourceGraph(
             name="A",
-            source="unit",
+            source="adf",
             tasks=[_node("call_b", "ExecutePipeline"), _node("load", "Notebook")],
             lineage=Lineage(
                 control_edges=[ControlEdge(source_workflow="A", target_workflow="B", via_task_key="call_b")]
             ),
         ),
-        SourceGraph(name="B", source="unit", tasks=[_node("flow", "ExecuteDataFlow", strategy="agentic")]),
+        SourceGraph(name="B", source="adf", tasks=[_node("flow", "ExecuteDataFlow", strategy="agentic")]),
     ]
     recommended, options = recommend_component(["A", "B"], _inventory(graphs))
     assert recommended == "deterministic"
@@ -137,13 +138,13 @@ def test_one_uncovered_activity_without_a_pattern_does_not_send_the_whole_compon
 
 
 def test_a_pattern_entry_that_names_nothing_does_not_recommend_agentic() -> None:
-    graphs = [SourceGraph(name="a", source="unit", tasks=[_node("flow", "ExecuteDataFlow", strategy="agentic")])]
+    graphs = [SourceGraph(name="a", source="adf", tasks=[_node("flow", "ExecuteDataFlow", strategy="agentic")])]
     insights = {"pipeline_insights": [{"pipeline": "a", "recommended_patterns": [{}, {"pattern": ""}]}]}
     assert recommend_component(["a"], _inventory(graphs, insights=insights))[0] == "deterministic"
 
 
 def test_fully_capable_component_stays_deterministic_even_with_a_pattern() -> None:
-    graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook"), _node("copy", "Copy")])]
+    graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook"), _node("copy", "Copy")])]
     recommended, options = recommend_component(["a"], _inventory(graphs, insights=_pattern_insights("a")))
     assert recommended == "deterministic"
     assert options["deterministic"]["capable"] is True
@@ -156,7 +157,7 @@ def test_motif_covered_agentic_activity_is_engine_capable() -> None:
     graphs = [
         SourceGraph(
             name="a",
-            source="unit",
+            source="adf",
             tasks=[_node("lookup", "Lookup"), _node("each", "ForEach", strategy="agentic")],
         )
     ]
@@ -172,6 +173,34 @@ def test_motif_covered_agentic_activity_is_engine_capable() -> None:
     assert options["deterministic"]["motifs"] == ["metadata_driven_bulk_copy"]
 
 
+def test_a_motif_covers_an_activity_whose_name_differs_from_its_task_key() -> None:
+    """Motif members are task keys, so ``ForEach Table In Config`` is covered as ``ForEach_Table_In_Config``."""
+
+    def _named(name: str, native_type: str, *, strategy: str) -> SourceNode:
+        node = _node(to_case_preserving_key(name), native_type, strategy=strategy)
+        node.source_id = node.name = name
+        return node
+
+    graphs = [
+        SourceGraph(
+            name="a",
+            source="adf",
+            tasks=[
+                _named("Lookup ETL Config", "Lookup", strategy="deterministic"),
+                _named("ForEach Table In Config", "ForEach", strategy="agentic"),
+            ],
+        )
+    ]
+    motif = DetectedMotif(
+        definition=MOTIF_METADATA_DRIVEN_BULK_COPY,
+        matched_activities=["Lookup ETL Config", "ForEach Table In Config"],
+        source_type_hint="database",
+    )
+    recommended, options = recommend_component(["a"], _inventory(graphs, motifs={"a": [motif]}))
+    assert recommended == "deterministic"
+    assert options["deterministic"]["uncovered"] == []
+
+
 def test_motif_coverage_does_not_leak_across_pipelines_in_a_component() -> None:
     # A component spans A -> B. Pipeline A has a motif claiming an activity named 'shared'; pipeline B
     # has an UNRELATED activity also named 'shared' with no motif. Motif coverage must be keyed by
@@ -179,13 +208,13 @@ def test_motif_coverage_does_not_leak_across_pipelines_in_a_component() -> None:
     graphs = [
         SourceGraph(
             name="A",
-            source="unit",
+            source="adf",
             tasks=[_node("call_b", "ExecutePipeline"), _node("shared", "Copy", strategy="agentic")],
             lineage=Lineage(
                 control_edges=[ControlEdge(source_workflow="A", target_workflow="B", via_task_key="call_b")]
             ),
         ),
-        SourceGraph(name="B", source="unit", tasks=[_node("shared", "Copy", strategy="agentic")]),
+        SourceGraph(name="B", source="adf", tasks=[_node("shared", "Copy", strategy="agentic")]),
     ]
     motif = DetectedMotif(
         definition=MOTIF_METADATA_DRIVEN_BULK_COPY, matched_activities=["shared"], source_type_hint="database"
@@ -203,7 +232,7 @@ def test_motif_coverage_does_not_leak_across_pipelines_in_a_component() -> None:
 def test_missing_strategy_counts_as_unsupported_gap() -> None:
     node = _node("mystery", "Custom")
     node.properties.pop(STRATEGY_PROPERTY)  # no strategy recorded at all
-    graphs = [SourceGraph(name="a", source="unit", tasks=[node])]
+    graphs = [SourceGraph(name="a", source="adf", tasks=[node])]
     recommended, options = recommend_component(["a"], _inventory(graphs))
     assert recommended == "deterministic"
     assert options["deterministic"]["activity_counts"] == {"deterministic": 0, "agentic": 0, "unsupported": 1}
@@ -213,7 +242,7 @@ def test_missing_strategy_counts_as_unsupported_gap() -> None:
 
 
 def test_agentic_option_surfaces_insight_patterns_with_simplification_prominent() -> None:
-    graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook")])]
+    graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook")])]
     insights = {
         "pipeline_insights": [
             {
@@ -249,7 +278,7 @@ def test_agentic_option_surfaces_insight_patterns_with_simplification_prominent(
 
 
 def test_agentic_option_empty_when_no_insights() -> None:
-    graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook")])]
+    graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook")])]
     _, options = recommend_component(["a"], _inventory(graphs))
     assert options["agentic"] == {
         "recommended_patterns": [],
@@ -271,7 +300,7 @@ def _insights_one_pattern(pattern: dict[str, Any]) -> dict[str, Any]:
 def test_agentic_option_ga_and_unknown_are_silent() -> None:
     # 'ga' and 'unknown' both contribute NO disclosure entry -- 'unknown' is treated exactly like 'ga'.
     for state in ("ga", "unknown"):
-        graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook")])]
+        graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook")])]
         insights = _insights_one_pattern(
             {
                 "pattern": "Lakeflow Job",
@@ -285,7 +314,7 @@ def test_agentic_option_ga_and_unknown_are_silent() -> None:
 
 
 def test_agentic_option_public_preview_is_disclosed_as_production_ready() -> None:
-    graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook")])]
+    graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook")])]
     insights = _insights_one_pattern(
         {
             "pattern": "Lakeflow Connect",
@@ -310,7 +339,7 @@ def test_agentic_option_public_preview_is_disclosed_as_production_ready() -> Non
 
 def test_agentic_option_private_preview_and_beta_are_plain_labels() -> None:
     for state, expected_label in (("private_preview", "Private Preview"), ("beta", "Beta")):
-        graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook")])]
+        graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook")])]
         insights = _insights_one_pattern(
             {
                 "pattern": "Some capability",
@@ -335,7 +364,7 @@ def test_agentic_option_discloses_each_non_silent_pattern() -> None:
     graphs = [
         SourceGraph(
             name="parent",
-            source="unit",
+            source="adf",
             tasks=[_node("call_child", "ExecutePipeline")],
             lineage=Lineage(
                 control_edges=[
@@ -343,7 +372,7 @@ def test_agentic_option_discloses_each_non_silent_pattern() -> None:
                 ]
             ),
         ),
-        SourceGraph(name="child", source="unit", tasks=[_node("load", "Notebook")]),
+        SourceGraph(name="child", source="adf", tasks=[_node("load", "Notebook")]),
     ]
     insights = {
         "pipeline_insights": [
@@ -383,7 +412,7 @@ def test_build_recommendation_emits_both_options_per_component() -> None:
     graphs = [
         SourceGraph(
             name="parent",
-            source="unit",
+            source="adf",
             tasks=[_node("call_child", "ExecutePipeline")],
             lineage=Lineage(
                 control_edges=[
@@ -391,8 +420,8 @@ def test_build_recommendation_emits_both_options_per_component() -> None:
                 ]
             ),
         ),
-        SourceGraph(name="child", source="unit", tasks=[_node("flow", "ExecuteDataFlow", strategy="agentic")]),
-        SourceGraph(name="solo", source="unit", tasks=[_node("load", "Notebook")]),
+        SourceGraph(name="child", source="adf", tasks=[_node("flow", "ExecuteDataFlow", strategy="agentic")]),
+        SourceGraph(name="solo", source="adf", tasks=[_node("load", "Notebook")]),
     ]
     recommendation = build_recommendation(_inventory(graphs, insights=_pattern_insights("child", "solo")))
     ids = [component["component_id"] for component in recommendation["components"]]
@@ -406,6 +435,6 @@ def test_build_recommendation_emits_both_options_per_component() -> None:
 
 
 def test_recommendation_is_pure_and_idempotent() -> None:
-    graphs = [SourceGraph(name="a", source="unit", tasks=[_node("load", "Notebook")])]
+    graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook")])]
     inventory = _inventory(graphs)
     assert build_recommendation(inventory) == build_recommendation(inventory)

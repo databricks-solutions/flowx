@@ -5,21 +5,6 @@
         {
           "dependencies": [],
           "name": "data-flow",
-          "original_type": "ExecuteDataFlow",
-          "raw": {
-            "name": "data-flow",
-            "type": "ExecuteDataFlow",
-            "typeProperties": {
-              "compute": {
-                "computeType": "General",
-                "coreCount": 8
-              },
-              "dataFlow": {
-                "referenceName": "placeholder-data-flow",
-                "type": "DataFlowReference"
-              }
-            }
-          },
           "strategy": "agentic",
           "task_key": "data-flow",
           "type": "ExecuteDataFlow"
@@ -27,27 +12,6 @@
         {
           "dependencies": [],
           "name": "until",
-          "original_type": "Until",
-          "raw": {
-            "name": "until",
-            "type": "Until",
-            "typeProperties": {
-              "activities": [
-                {
-                  "name": "until-wait",
-                  "type": "Wait",
-                  "typeProperties": {
-                    "waitTimeInSeconds": 1
-                  }
-                }
-              ],
-              "expression": {
-                "type": "Expression",
-                "value": "@equals(1,1)"
-              },
-              "timeout": "0.00:01:00"
-            }
-          },
           "strategy": "agentic",
           "task_key": "until",
           "type": "Until"
@@ -55,14 +19,6 @@
         {
           "dependencies": [],
           "name": "until-wait",
-          "original_type": "Wait",
-          "raw": {
-            "name": "until-wait",
-            "type": "Wait",
-            "typeProperties": {
-              "waitTimeInSeconds": 1
-            }
-          },
           "strategy": "deterministic",
           "task_key": "until-wait",
           "type": "Wait"
@@ -70,18 +26,6 @@
         {
           "dependencies": [],
           "name": "stored-procedure",
-          "original_type": "SqlServerStoredProcedure",
-          "raw": {
-            "linkedServiceName": {
-              "referenceName": "azure-sql",
-              "type": "LinkedServiceReference"
-            },
-            "name": "stored-procedure",
-            "type": "SqlServerStoredProcedure",
-            "typeProperties": {
-              "storedProcedureName": "dbo.flowx_integration"
-            }
-          },
           "strategy": "agentic",
           "task_key": "stored-procedure",
           "type": "SqlServerStoredProcedure"
@@ -89,19 +33,6 @@
         {
           "dependencies": [],
           "name": "azure-function",
-          "original_type": "AzureFunction",
-          "raw": {
-            "linkedServiceName": {
-              "referenceName": "azure-function-parameterized",
-              "type": "LinkedServiceReference"
-            },
-            "name": "azure-function",
-            "type": "AzureFunction",
-            "typeProperties": {
-              "functionName": "flowx",
-              "method": "GET"
-            }
-          },
           "strategy": "agentic",
           "task_key": "azure-function",
           "type": "AzureFunction"
@@ -109,16 +40,6 @@
         {
           "dependencies": [],
           "name": "webhook",
-          "original_type": "WebHook",
-          "raw": {
-            "name": "webhook",
-            "type": "WebHook",
-            "typeProperties": {
-              "method": "POST",
-              "timeout": "00:01:00",
-              "url": "https://example.invalid/webhook"
-            }
-          },
           "strategy": "agentic",
           "task_key": "webhook",
           "type": "WebHook"
@@ -126,23 +47,6 @@
         {
           "dependencies": [],
           "name": "custom",
-          "original_type": "Custom",
-          "raw": {
-            "linkedServiceName": {
-              "referenceName": "batch-parameterized",
-              "type": "LinkedServiceReference"
-            },
-            "name": "custom",
-            "type": "Custom",
-            "typeProperties": {
-              "command": "echo flowx",
-              "folderPath": "integration",
-              "resourceLinkedService": {
-                "referenceName": "blob",
-                "type": "LinkedServiceReference"
-              }
-            }
-          },
           "strategy": "agentic",
           "task_key": "custom",
           "type": "Custom"
@@ -150,21 +54,6 @@
         {
           "dependencies": [],
           "name": "ssis",
-          "original_type": "ExecuteSSISPackage",
-          "raw": {
-            "name": "ssis",
-            "type": "ExecuteSSISPackage",
-            "typeProperties": {
-              "connectVia": {
-                "referenceName": "azure-ssis-placeholder",
-                "type": "IntegrationRuntimeReference"
-              },
-              "packageLocation": {
-                "packagePath": "flowx/package.dtsx",
-                "type": "SSISDB"
-              }
-            }
-          },
           "strategy": "agentic",
           "task_key": "ssis",
           "type": "ExecuteSSISPackage"
@@ -172,15 +61,6 @@
         {
           "dependencies": [],
           "name": "azure-ml",
-          "original_type": "AzureMLExecutePipeline",
-          "raw": {
-            "name": "azure-ml",
-            "type": "AzureMLExecutePipeline",
-            "typeProperties": {
-              "mlPipelineId": "<AZURE_ML_PIPELINE_ID>",
-              "version": "1"
-            }
-          },
           "strategy": "agentic",
           "task_key": "azure-ml",
           "type": "AzureMLExecutePipeline"
@@ -188,20 +68,6 @@
         {
           "dependencies": [],
           "name": "get-metadata",
-          "original_type": "GetMetadata",
-          "raw": {
-            "name": "get-metadata",
-            "type": "GetMetadata",
-            "typeProperties": {
-              "dataset": {
-                "referenceName": "csv-adls",
-                "type": "DatasetReference"
-              },
-              "fieldList": [
-                "exists"
-              ]
-            }
-          },
           "strategy": "agentic",
           "task_key": "get-metadata",
           "type": "GetMetadata"
@@ -209,20 +75,6 @@
         {
           "dependencies": [],
           "name": "validation",
-          "original_type": "Validation",
-          "raw": {
-            "name": "validation",
-            "type": "Validation",
-            "typeProperties": {
-              "dataset": {
-                "referenceName": "csv-adls",
-                "type": "DatasetReference"
-              },
-              "minimumSize": 0,
-              "sleep": 1,
-              "timeout": "0.00:01:00"
-            }
-          },
           "strategy": "agentic",
           "task_key": "validation",
           "type": "Validation"
@@ -230,23 +82,6 @@
         {
           "dependencies": [],
           "name": "script",
-          "original_type": "Script",
-          "raw": {
-            "linkedServiceName": {
-              "referenceName": "azure-sql",
-              "type": "LinkedServiceReference"
-            },
-            "name": "script",
-            "type": "Script",
-            "typeProperties": {
-              "scripts": [
-                {
-                  "text": "SELECT 1",
-                  "type": "Query"
-                }
-              ]
-            }
-          },
           "strategy": "agentic",
           "task_key": "script",
           "type": "Script"
@@ -254,15 +89,6 @@
         {
           "dependencies": [],
           "name": "fail",
-          "original_type": "Fail",
-          "raw": {
-            "name": "fail",
-            "type": "Fail",
-            "typeProperties": {
-              "errorCode": "FLOWX_TEST",
-              "message": "intentional integration fixture"
-            }
-          },
           "strategy": "agentic",
           "task_key": "fail",
           "type": "Fail"
@@ -270,8 +96,7 @@
       ],
       "lineage": {
         "control_edges": [],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "name": "agentic-activities"
     },
@@ -280,31 +105,6 @@
         {
           "dependencies": [],
           "name": "copy",
-          "original_type": "Copy",
-          "raw": {
-            "inputs": [
-              {
-                "referenceName": "csv-adls",
-                "type": "DatasetReference"
-              }
-            ],
-            "name": "copy",
-            "outputs": [
-              {
-                "referenceName": "parquet-adls",
-                "type": "DatasetReference"
-              }
-            ],
-            "type": "Copy",
-            "typeProperties": {
-              "sink": {
-                "type": "ParquetSink"
-              },
-              "source": {
-                "type": "DelimitedTextSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "copy",
           "type": "Copy"
@@ -312,18 +112,6 @@
         {
           "dependencies": [],
           "name": "notebook",
-          "original_type": "DatabricksNotebook",
-          "raw": {
-            "linkedServiceName": {
-              "referenceName": "databricks-parameterized",
-              "type": "LinkedServiceReference"
-            },
-            "name": "notebook",
-            "type": "DatabricksNotebook",
-            "typeProperties": {
-              "notebookPath": "/Shared/flowx/integration"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "notebook",
           "type": "DatabricksNotebook"
@@ -331,19 +119,6 @@
         {
           "dependencies": [],
           "name": "spark-jar",
-          "original_type": "DatabricksSparkJar",
-          "raw": {
-            "linkedServiceName": {
-              "referenceName": "databricks-parameterized",
-              "type": "LinkedServiceReference"
-            },
-            "name": "spark-jar",
-            "type": "DatabricksSparkJar",
-            "typeProperties": {
-              "mainClassName": "com.example.Integration",
-              "parameters": []
-            }
-          },
           "strategy": "deterministic",
           "task_key": "spark-jar",
           "type": "DatabricksSparkJar"
@@ -351,19 +126,6 @@
         {
           "dependencies": [],
           "name": "spark-python",
-          "original_type": "DatabricksSparkPython",
-          "raw": {
-            "linkedServiceName": {
-              "referenceName": "databricks-parameterized",
-              "type": "LinkedServiceReference"
-            },
-            "name": "spark-python",
-            "type": "DatabricksSparkPython",
-            "typeProperties": {
-              "parameters": [],
-              "pythonFile": "dbfs:/flowx/integration.py"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "spark-python",
           "type": "DatabricksSparkPython"
@@ -371,15 +133,6 @@
         {
           "dependencies": [],
           "name": "databricks-job",
-          "original_type": "DatabricksJob",
-          "raw": {
-            "name": "databricks-job",
-            "type": "DatabricksJob",
-            "typeProperties": {
-              "jobId": "1",
-              "jobParameters": {}
-            }
-          },
           "strategy": "deterministic",
           "task_key": "databricks-job",
           "type": "DatabricksJob"
@@ -387,22 +140,6 @@
         {
           "dependencies": [],
           "name": "lookup",
-          "original_type": "Lookup",
-          "raw": {
-            "name": "lookup",
-            "type": "Lookup",
-            "typeProperties": {
-              "dataset": {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              },
-              "firstRowOnly": true,
-              "source": {
-                "sqlReaderQuery": "SELECT 1 AS value",
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "lookup",
           "type": "Lookup"
@@ -410,15 +147,6 @@
         {
           "dependencies": [],
           "name": "web",
-          "original_type": "WebActivity",
-          "raw": {
-            "name": "web",
-            "type": "WebActivity",
-            "typeProperties": {
-              "method": "GET",
-              "url": "https://example.invalid/flowx"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "web",
           "type": "WebActivity"
@@ -426,18 +154,6 @@
         {
           "dependencies": [],
           "name": "delete",
-          "original_type": "Delete",
-          "raw": {
-            "name": "delete",
-            "type": "Delete",
-            "typeProperties": {
-              "dataset": {
-                "referenceName": "json-adls",
-                "type": "DatasetReference"
-              },
-              "enableLogging": false
-            }
-          },
           "strategy": "deterministic",
           "task_key": "delete",
           "type": "Delete"
@@ -445,18 +161,6 @@
         {
           "dependencies": [],
           "name": "execute-child",
-          "original_type": "ExecutePipeline",
-          "raw": {
-            "name": "execute-child",
-            "type": "ExecutePipeline",
-            "typeProperties": {
-              "pipeline": {
-                "referenceName": "child-pipeline",
-                "type": "PipelineReference"
-              },
-              "waitOnCompletion": true
-            }
-          },
           "strategy": "deterministic",
           "task_key": "execute-child",
           "type": "ExecutePipeline"
@@ -464,14 +168,6 @@
         {
           "dependencies": [],
           "name": "wait",
-          "original_type": "Wait",
-          "raw": {
-            "name": "wait",
-            "type": "Wait",
-            "typeProperties": {
-              "waitTimeInSeconds": 1
-            }
-          },
           "strategy": "deterministic",
           "task_key": "wait",
           "type": "Wait"
@@ -479,15 +175,6 @@
         {
           "dependencies": [],
           "name": "set-variable",
-          "original_type": "SetVariable",
-          "raw": {
-            "name": "set-variable",
-            "type": "SetVariable",
-            "typeProperties": {
-              "value": "running",
-              "variableName": "status"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "set-variable",
           "type": "SetVariable"
@@ -495,15 +182,6 @@
         {
           "dependencies": [],
           "name": "append-variable",
-          "original_type": "AppendVariable",
-          "raw": {
-            "name": "append-variable",
-            "type": "AppendVariable",
-            "typeProperties": {
-              "value": "ok",
-              "variableName": "results"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "append-variable",
           "type": "AppendVariable"
@@ -511,21 +189,6 @@
         {
           "dependencies": [],
           "name": "filter",
-          "original_type": "Filter",
-          "raw": {
-            "name": "filter",
-            "type": "Filter",
-            "typeProperties": {
-              "condition": {
-                "type": "Expression",
-                "value": "@not(empty(item()))"
-              },
-              "items": {
-                "type": "Expression",
-                "value": "@pipeline().parameters.items"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "filter",
           "type": "Filter"
@@ -533,26 +196,6 @@
         {
           "dependencies": [],
           "name": "foreach",
-          "original_type": "ForEach",
-          "raw": {
-            "name": "foreach",
-            "type": "ForEach",
-            "typeProperties": {
-              "activities": [
-                {
-                  "name": "foreach-wait",
-                  "type": "Wait",
-                  "typeProperties": {
-                    "waitTimeInSeconds": 1
-                  }
-                }
-              ],
-              "items": {
-                "type": "Expression",
-                "value": "@pipeline().parameters.items"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "foreach",
           "type": "ForEach"
@@ -560,14 +203,6 @@
         {
           "dependencies": [],
           "name": "foreach-wait",
-          "original_type": "Wait",
-          "raw": {
-            "name": "foreach-wait",
-            "type": "Wait",
-            "typeProperties": {
-              "waitTimeInSeconds": 1
-            }
-          },
           "strategy": "deterministic",
           "task_key": "foreach-wait",
           "type": "Wait"
@@ -575,35 +210,6 @@
         {
           "dependencies": [],
           "name": "if-condition",
-          "original_type": "IfCondition",
-          "raw": {
-            "name": "if-condition",
-            "type": "IfCondition",
-            "typeProperties": {
-              "expression": {
-                "type": "Expression",
-                "value": "@equals(1,1)"
-              },
-              "ifFalseActivities": [
-                {
-                  "name": "false-wait",
-                  "type": "Wait",
-                  "typeProperties": {
-                    "waitTimeInSeconds": 1
-                  }
-                }
-              ],
-              "ifTrueActivities": [
-                {
-                  "name": "true-wait",
-                  "type": "Wait",
-                  "typeProperties": {
-                    "waitTimeInSeconds": 1
-                  }
-                }
-              ]
-            }
-          },
           "strategy": "deterministic",
           "task_key": "if-condition",
           "type": "IfCondition"
@@ -611,14 +217,6 @@
         {
           "dependencies": [],
           "name": "true-wait",
-          "original_type": "Wait",
-          "raw": {
-            "name": "true-wait",
-            "type": "Wait",
-            "typeProperties": {
-              "waitTimeInSeconds": 1
-            }
-          },
           "strategy": "deterministic",
           "task_key": "true-wait",
           "type": "Wait"
@@ -626,14 +224,6 @@
         {
           "dependencies": [],
           "name": "false-wait",
-          "original_type": "Wait",
-          "raw": {
-            "name": "false-wait",
-            "type": "Wait",
-            "typeProperties": {
-              "waitTimeInSeconds": 1
-            }
-          },
           "strategy": "deterministic",
           "task_key": "false-wait",
           "type": "Wait"
@@ -641,40 +231,6 @@
         {
           "dependencies": [],
           "name": "switch",
-          "original_type": "Switch",
-          "raw": {
-            "name": "switch",
-            "type": "Switch",
-            "typeProperties": {
-              "cases": [
-                {
-                  "activities": [
-                    {
-                      "name": "case-wait",
-                      "type": "Wait",
-                      "typeProperties": {
-                        "waitTimeInSeconds": 1
-                      }
-                    }
-                  ],
-                  "value": "running"
-                }
-              ],
-              "defaultActivities": [
-                {
-                  "name": "default-wait",
-                  "type": "Wait",
-                  "typeProperties": {
-                    "waitTimeInSeconds": 1
-                  }
-                }
-              ],
-              "on": {
-                "type": "Expression",
-                "value": "@variables('status')"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "switch",
           "type": "Switch"
@@ -682,14 +238,6 @@
         {
           "dependencies": [],
           "name": "case-wait",
-          "original_type": "Wait",
-          "raw": {
-            "name": "case-wait",
-            "type": "Wait",
-            "typeProperties": {
-              "waitTimeInSeconds": 1
-            }
-          },
           "strategy": "deterministic",
           "task_key": "case-wait",
           "type": "Wait"
@@ -697,14 +245,6 @@
         {
           "dependencies": [],
           "name": "default-wait",
-          "original_type": "Wait",
-          "raw": {
-            "name": "default-wait",
-            "type": "Wait",
-            "typeProperties": {
-              "waitTimeInSeconds": 1
-            }
-          },
           "strategy": "deterministic",
           "task_key": "default-wait",
           "type": "Wait"
@@ -720,8 +260,7 @@
             "wait_for_completion": true
           }
         ],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "name": "all-activity-types"
     },
@@ -730,18 +269,6 @@
         {
           "dependencies": [],
           "name": "child-notebook",
-          "original_type": "DatabricksNotebook",
-          "raw": {
-            "linkedServiceName": {
-              "referenceName": "databricks-parameterized",
-              "type": "LinkedServiceReference"
-            },
-            "name": "child-notebook",
-            "type": "DatabricksNotebook",
-            "typeProperties": {
-              "notebookPath": "/Shared/flowx/child"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "child-notebook",
           "type": "DatabricksNotebook"
@@ -749,8 +276,7 @@
       ],
       "lineage": {
         "control_edges": [],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "name": "child-pipeline"
     },
@@ -759,18 +285,6 @@
         {
           "dependencies": [],
           "name": "launch-child",
-          "original_type": "ExecutePipeline",
-          "raw": {
-            "name": "launch-child",
-            "type": "ExecutePipeline",
-            "typeProperties": {
-              "pipeline": {
-                "referenceName": "child-pipeline",
-                "type": "PipelineReference"
-              },
-              "waitOnCompletion": true
-            }
-          },
           "strategy": "deterministic",
           "task_key": "launch-child",
           "type": "ExecutePipeline"
@@ -789,31 +303,6 @@
             "launch-child"
           ],
           "name": "mixed-script",
-          "original_type": "Script",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "launch-child",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "linkedServiceName": {
-              "referenceName": "azure-sql",
-              "type": "LinkedServiceReference"
-            },
-            "name": "mixed-script",
-            "type": "Script",
-            "typeProperties": {
-              "scripts": [
-                {
-                  "text": "SELECT 1",
-                  "type": "Query"
-                }
-              ]
-            }
-          },
           "strategy": "agentic",
           "task_key": "mixed-script",
           "type": "Script"
@@ -832,23 +321,6 @@
             "mixed-script"
           ],
           "name": "complete",
-          "original_type": "SetVariable",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "mixed-script",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "name": "complete",
-            "type": "SetVariable",
-            "typeProperties": {
-              "value": "complete",
-              "variableName": "state"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "complete",
           "type": "SetVariable"
@@ -864,8 +336,7 @@
             "wait_for_completion": true
           }
         ],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "name": "complex-orchestration"
     },
@@ -874,14 +345,6 @@
         {
           "dependencies": [],
           "name": "work",
-          "original_type": "Wait",
-          "raw": {
-            "name": "work",
-            "type": "Wait",
-            "typeProperties": {
-              "waitTimeInSeconds": 1
-            }
-          },
           "strategy": "deterministic",
           "task_key": "work",
           "type": "Wait"
@@ -900,26 +363,6 @@
             "work"
           ],
           "name": "notify",
-          "original_type": "WebActivity",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "work",
-                "dependencyConditions": [
-                  "Completed"
-                ]
-              }
-            ],
-            "name": "notify",
-            "type": "WebActivity",
-            "typeProperties": {
-              "body": {
-                "status": "complete"
-              },
-              "method": "POST",
-              "url": "https://example.invalid/notify"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "notify",
           "type": "WebActivity"
@@ -927,8 +370,7 @@
       ],
       "lineage": {
         "control_edges": [],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "motifs": [
         {
@@ -952,22 +394,6 @@
         {
           "dependencies": [],
           "name": "old-watermark",
-          "original_type": "Lookup",
-          "raw": {
-            "name": "old-watermark",
-            "type": "Lookup",
-            "typeProperties": {
-              "dataset": {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              },
-              "firstRowOnly": true,
-              "source": {
-                "sqlReaderQuery": "SELECT watermark FROM dbo.control",
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "old-watermark",
           "type": "Lookup"
@@ -975,22 +401,6 @@
         {
           "dependencies": [],
           "name": "new-watermark",
-          "original_type": "Lookup",
-          "raw": {
-            "name": "new-watermark",
-            "type": "Lookup",
-            "typeProperties": {
-              "dataset": {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              },
-              "firstRowOnly": true,
-              "source": {
-                "sqlReaderQuery": "SELECT MAX(updated_at) AS watermark FROM dbo.source",
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "new-watermark",
           "type": "Lookup"
@@ -1017,45 +427,6 @@
             "new-watermark"
           ],
           "name": "incremental-copy",
-          "original_type": "Copy",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "old-watermark",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              },
-              {
-                "activity": "new-watermark",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "inputs": [
-              {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              }
-            ],
-            "name": "incremental-copy",
-            "outputs": [
-              {
-                "referenceName": "csv-adls",
-                "type": "DatasetReference"
-              }
-            ],
-            "type": "Copy",
-            "typeProperties": {
-              "sink": {
-                "type": "DelimitedTextSink"
-              },
-              "source": {
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "incremental-copy",
           "type": "Copy"
@@ -1074,26 +445,6 @@
             "incremental-copy"
           ],
           "name": "update-watermark",
-          "original_type": "SqlServerStoredProcedure",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "incremental-copy",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "linkedServiceName": {
-              "referenceName": "azure-sql",
-              "type": "LinkedServiceReference"
-            },
-            "name": "update-watermark",
-            "type": "SqlServerStoredProcedure",
-            "typeProperties": {
-              "storedProcedureName": "dbo.update_watermark"
-            }
-          },
           "strategy": "agentic",
           "task_key": "update-watermark",
           "type": "SqlServerStoredProcedure"
@@ -1101,8 +452,7 @@
       ],
       "lineage": {
         "control_edges": [],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "motifs": [
         {
@@ -1130,22 +480,6 @@
         {
           "dependencies": [],
           "name": "lookup-metadata",
-          "original_type": "Lookup",
-          "raw": {
-            "name": "lookup-metadata",
-            "type": "Lookup",
-            "typeProperties": {
-              "dataset": {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              },
-              "firstRowOnly": false,
-              "source": {
-                "sqlReaderQuery": "SELECT schema_name, table_name FROM dbo.copy_config",
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "lookup-metadata",
           "type": "Lookup"
@@ -1164,51 +498,6 @@
             "lookup-metadata"
           ],
           "name": "copy-each-table",
-          "original_type": "ForEach",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "lookup-metadata",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "name": "copy-each-table",
-            "type": "ForEach",
-            "typeProperties": {
-              "activities": [
-                {
-                  "inputs": [
-                    {
-                      "referenceName": "azure-sql-table",
-                      "type": "DatasetReference"
-                    }
-                  ],
-                  "name": "dynamic-copy",
-                  "outputs": [
-                    {
-                      "referenceName": "parquet-adls",
-                      "type": "DatasetReference"
-                    }
-                  ],
-                  "type": "Copy",
-                  "typeProperties": {
-                    "sink": {
-                      "type": "ParquetSink"
-                    },
-                    "source": {
-                      "type": "AzureSqlSource"
-                    }
-                  }
-                }
-              ],
-              "items": {
-                "type": "Expression",
-                "value": "@activity('lookup-metadata').output.value"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "copy-each-table",
           "type": "ForEach"
@@ -1216,31 +505,6 @@
         {
           "dependencies": [],
           "name": "dynamic-copy",
-          "original_type": "Copy",
-          "raw": {
-            "inputs": [
-              {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              }
-            ],
-            "name": "dynamic-copy",
-            "outputs": [
-              {
-                "referenceName": "parquet-adls",
-                "type": "DatasetReference"
-              }
-            ],
-            "type": "Copy",
-            "typeProperties": {
-              "sink": {
-                "type": "ParquetSink"
-              },
-              "source": {
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "dynamic-copy",
           "type": "Copy"
@@ -1248,8 +512,7 @@
       ],
       "lineage": {
         "control_edges": [],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "motifs": [
         {
@@ -1273,15 +536,6 @@
         {
           "dependencies": [],
           "name": "initial-request",
-          "original_type": "WebActivity",
-          "raw": {
-            "name": "initial-request",
-            "type": "WebActivity",
-            "typeProperties": {
-              "method": "GET",
-              "url": "https://example.invalid/api/items"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "initial-request",
           "type": "WebActivity"
@@ -1300,52 +554,6 @@
             "initial-request"
           ],
           "name": "paginate",
-          "original_type": "Until",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "initial-request",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "name": "paginate",
-            "type": "Until",
-            "typeProperties": {
-              "activities": [
-                {
-                  "name": "page-request",
-                  "type": "WebActivity",
-                  "typeProperties": {
-                    "method": "GET",
-                    "url": "https://example.invalid/api/items?page=next"
-                  }
-                },
-                {
-                  "dependsOn": [
-                    {
-                      "activity": "page-request",
-                      "dependencyConditions": [
-                        "Succeeded"
-                      ]
-                    }
-                  ],
-                  "name": "set-continuation",
-                  "type": "SetVariable",
-                  "typeProperties": {
-                    "value": "done",
-                    "variableName": "continuation"
-                  }
-                }
-              ],
-              "expression": {
-                "type": "Expression",
-                "value": "@empty(variables('continuation'))"
-              },
-              "timeout": "0.00:05:00"
-            }
-          },
           "strategy": "agentic",
           "task_key": "paginate",
           "type": "Until"
@@ -1353,15 +561,6 @@
         {
           "dependencies": [],
           "name": "page-request",
-          "original_type": "WebActivity",
-          "raw": {
-            "name": "page-request",
-            "type": "WebActivity",
-            "typeProperties": {
-              "method": "GET",
-              "url": "https://example.invalid/api/items?page=next"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "page-request",
           "type": "WebActivity"
@@ -1380,23 +579,6 @@
             "page-request"
           ],
           "name": "set-continuation",
-          "original_type": "SetVariable",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "page-request",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "name": "set-continuation",
-            "type": "SetVariable",
-            "typeProperties": {
-              "value": "done",
-              "variableName": "continuation"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "set-continuation",
           "type": "SetVariable"
@@ -1404,8 +586,7 @@
       ],
       "lineage": {
         "control_edges": [],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "motifs": [
         {
@@ -1427,7 +608,7 @@
     }
   ],
   "source": "adf",
-  "source_graphs_sha256": "d8aa11fb11a9c811344af4a611f54457a19c4e56c9670d4ed31440e958c629a4",
+  "source_graphs_sha256": "a9e2dddc7f8136be498ec38ca418e1845de0ee7c7bfd08e273a60c074b2800e5",
   "summary": {
     "activity_count": 51,
     "agentic_count": 15,

@@ -573,3 +573,116 @@ class TestPrefixedNotebookRelativePath:
 
     def test_slashless_path_prefixed_once(self):
         assert _prefixed_notebook_relative_path("x.py", "pre") == "pre/x.py"
+
+
+def test_authored_files_at_root_artifact_paths_are_namespaced_in_a_group_bundle(tmp_path):
+    """An authored ``resources/config.json`` lives below ``src``, so each grouped pipeline gets its own copy."""
+
+    def authored_wf(pipeline: str) -> PreparedWorkflow:
+        return PreparedWorkflow(
+            name=pipeline,
+            tasks=[{"task_key": "wait", "condition_task": {"op": "EQUAL_TO", "left": "1", "right": "1"}}],
+            notebooks=[
+                DabNotebook(
+                    relative_path="resources/config.json", content=f'{{"pipeline": "{pipeline}"}}\n', authored=True
+                )
+            ],
+            secrets=[],
+            setup_tasks=[],
+        )
+
+    write_bundle_group([authored_wf("pipe_a"), authored_wf("pipe_b")], tmp_path, bundle_name="combined")
+
+    assert json.loads((tmp_path / "src/pipe_a/resources/config.json").read_text()) == {"pipeline": "pipe_a"}
+    assert json.loads((tmp_path / "src/pipe_b/resources/config.json").read_text()) == {"pipeline": "pipe_b"}
+    assert not (tmp_path / "src/resources/config.json").exists()
+
+
+def test_same_named_lakeflow_connect_copies_in_a_group_bundle_each_keep_their_own_pipeline(tmp_path):
+    """Two pipelines with a same-named Lakeflow Connect copy each get their own pipeline resource and task ref."""
+    from flowx.adapter import TranslationConfiguration, apply_configuration
+
+    def lakeflow_copy_workflow(pipeline: str, table: str) -> PreparedWorkflow:
+        copy_activity = CopyActivity(
+            name="copy_orders",
+            task_key="copy_orders",
+            source_type="AzureSqlSource",
+            sink_type="DeltaSink",
+            sink_format="delta",
+            sink_properties={"table": table},
+        )
+        stamped = apply_configuration(
+            Pipeline(name=pipeline, tasks=[copy_activity]),
+            TranslationConfiguration(use_lakeflow_connectors="lakeflow_connect"),
+        )
+        return prepare_workflow(stamped)
+
+    write_bundle_group(
+        [lakeflow_copy_workflow("pipe_a", "raw.orders_a"), lakeflow_copy_workflow("pipe_b", "raw.orders_b")],
+        tmp_path,
+        bundle_name="combined",
+    )
+
+    pipelines = {}
+    for resource_file in (tmp_path / "resources").glob("*.yml"):
+        pipelines.update(yaml.safe_load(resource_file.read_text(encoding="utf-8"))["resources"].get("pipelines", {}))
+    for pipeline, table in (("pipe_a", "raw.orders_a"), ("pipe_b", "raw.orders_b")):
+        job = yaml.safe_load((tmp_path / "resources" / f"{pipeline}.yml").read_text(encoding="utf-8"))
+        pipeline_reference = job["resources"]["jobs"][pipeline]["tasks"][0]["pipeline_task"]["pipeline_id"]
+        resource_key = pipeline_reference.removeprefix("${resources.pipelines.").removesuffix(".id}")
+        assert resource_key.startswith(pipeline)
+        destination = pipelines[resource_key]["ingestion_definition"]["objects"][0]["table"]["destination_table"]
+        assert destination == table
+
+
+def test_an_identical_pipeline_resource_in_two_grouped_pipelines_is_still_written_once(tmp_path):
+    """Only keys that two different definitions share are prefixed, so a shared resource keeps one pipeline."""
+
+    def workflow(pipeline: str) -> PreparedWorkflow:
+        return PreparedWorkflow(
+            name=pipeline,
+            tasks=[{"task_key": "ingest", "pipeline_task": {"pipeline_id": "${resources.pipelines.shared.id}"}}],
+            notebooks=[],
+            secrets=[],
+            setup_tasks=[],
+            pipeline_resources=[{"resource_key": "shared", "definition": {"name": "shared"}}],
+        )
+
+    write_bundle_group([workflow("pipe_a"), workflow("pipe_b")], tmp_path, bundle_name="combined")
+
+    assert sorted(path.name for path in (tmp_path / "resources").glob("*shared*.yml")) == ["shared.yml"]
+    for pipeline in ("pipe_a", "pipe_b"):
+        job = yaml.safe_load((tmp_path / "resources" / f"{pipeline}.yml").read_text(encoding="utf-8"))
+        assert job["resources"]["jobs"][pipeline]["tasks"][0]["pipeline_task"]["pipeline_id"] == (
+            "${resources.pipelines.shared.id}"
+        )
+
+
+def test_each_pipeline_reference_is_renamed_once_even_when_a_new_key_is_another_old_one():
+    """In pipeline "p", "x" cannot become "p_x", which is taken, and no reference is renamed twice."""
+    from flowx.bundler.dab_writer import _prefix_clashing_pipeline_keys
+
+    def workflow(name: str, definition_tag: str) -> PreparedWorkflow:
+        return PreparedWorkflow(
+            name=name,
+            tasks=[
+                {"task_key": "one", "pipeline_task": {"pipeline_id": "${resources.pipelines.x.id}"}},
+                {"task_key": "two", "pipeline_task": {"pipeline_id": "${resources.pipelines.p_x.id}"}},
+            ],
+            notebooks=[],
+            secrets=[],
+            setup_tasks=[],
+            pipeline_resources=[
+                {"resource_key": "x", "definition": {"name": f"x_{definition_tag}"}},
+                {"resource_key": "p_x", "definition": {"name": f"p_x_{definition_tag}"}},
+            ],
+        )
+
+    first, second = workflow("p", "first"), workflow("q", "second")
+    _prefix_clashing_pipeline_keys([first, second])
+
+    assert [task["pipeline_task"]["pipeline_id"] for task in first.tasks] == [
+        "${resources.pipelines.p_x_2.id}",
+        "${resources.pipelines.p_p_x.id}",
+    ]
+    assert [resource["resource_key"] for resource in first.pipeline_resources] == ["p_x_2", "p_p_x"]

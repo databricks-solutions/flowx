@@ -4,8 +4,8 @@ description: >
   Enrich the discover inventory with an agent-authored layer of judgment — a factory-wide
   architecture recommendation, per-pipeline intent + recommended Databricks patterns, and
   cross-pipeline relationships. The library validates it, records it in agentic_insights.json and
-  rebuilds inventory.json from discovery plus that file. The default next step after flowx-discover
-  and the input the routing step consumes.
+  rebuilds inventory.json from discovery plus that file. flowx-migrate runs it after discover by
+  default, and the routing step consumes it.
 triggers:
   - "enrich inventory"
   - "enrich pipelines"
@@ -26,23 +26,29 @@ and recorded by the library in its own file, `metadata/agentic_insights.json`, b
 `metadata/inventory.json` from `source_graphs.json` plus that file, so it carries the same block under
 a single additive `insights` key; you never pass it anything for that step.
 
-This is the standard step **between discover and convert** in the flowx workflow. `flowx-discover`
-chains into this skill by default; the routing step (`flowx-route`) reads the `insights` block to
+This is the standard step **between discover and convert** in the flowx workflow. `flowx-migrate`
+runs this skill after discover by default; the routing step (`flowx-route`) reads the `insights` block to
 present the agentic conversion option per connected component. The one-shot MCP `migrate` command
 runs discover, convert and package without it, so it records no insights.
 
-## No LLM inside flowx: you author, the library validates and records
+## How much to write
 
-**There is no LLM inside flowx.** You author the insights JSON; the library (`enrich`) only
-*validates and records* it, using the same author, validate, record, fingerprint-bound contract the
-agentic gap-resolution and routing paths use. That keeps the deterministic inventory trustworthy and
-every insight accountable: foreign keys must point at real pipelines, and every cross-pipeline edge
-is either an annotation of a proven lineage edge or an explicitly-flagged inference with cited
-evidence.
+Insights are advice for the people planning the migration, not a full report. Spend your effort where a
+wrong or missing insight would change the migration:
 
-`enrich` is **additive**: it writes `agentic_insights.json` and adds only the matching `insights`
-block to the inventory, leaving every existing inventory key byte-identical. It changes no conversion, IR, or routing decision on its own — the `insights` are
-descriptive data that `flowx-route` later consumes.
+- **Start with the factory-wide decision** (`system_recommendation`) when one choice, such as a managed
+  connector for a family of extractors, reshapes many pipelines. Leave it out when there is none.
+- **Write a pipeline insight only when a migrator would act on it**: a target pattern that differs from
+  a like-for-like port, a risk, or a conversion note. A pipeline that ports as it is needs no entry.
+- **Record the couplings a migrator could miss** and that would break if dropped. Give an `inferred`
+  one only with evidence you can cite, and set its `confidence` honestly.
+- **Keep `risk_if_ignored` for what is critical**: data loss, wrong results, a broken dependency or a
+  missed schedule. Leave it out rather than state a generic risk.
+- **Leave a field out rather than guess.** Name only publicly documented Databricks capabilities.
+- **Keep each text to a sentence or two.** The 20,000-character cap is a ceiling, not a target.
+
+For a large factory, cover the factory-wide decision and the pipelines it touches first. Enrich records
+whatever valid insights you give it, so a partial set is fine.
 
 ## When to skip enrich (deterministic-only)
 
@@ -56,7 +62,8 @@ narrative.
 ## How to author (four steps)
 
 1. **Read the deterministic inventory.** Load `<output_dir>/metadata/inventory.json` (on the hosted
-   MCP server, through `enrich` with `action="prepare"`; see below). Note every
+   MCP server, through `enrich` with `action="prepare"`, which also returns `source_graphs.json`; see
+   below). Note every
    pipeline `name` (these are the valid foreign keys), and each pipeline's `lineage` block — in
    particular `lineage.control_edges`, each `{source_workflow, target_workflow, via_task_key}`. A
    deterministic **control** relationship you annotate must match one of these exactly, and only an
@@ -68,44 +75,25 @@ narrative.
    `authored_against` by default, so enrich can refuse your insights if discover runs again before
    you submit them; when it records none, leave `authored_against` out.
 2. **Read the source artifacts** you need to form judgment: each activity's `raw` payload in
-   `metadata/source_graphs.json`, the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source.
+   `metadata/source_graphs.json` (on the hosted server, `bundle.files["source_graphs.json"]` from
+   `prepare`), the ADF `metadata/<pipeline>.arm.json` provenance, or the DAG source.
    The inventory carries no `raw` payloads. Read enough to state
    each pipeline's *intent* and the Databricks patterns that fit. Ground every recommended pattern in
    a **real, publicly-documented** Databricks capability; never invent a product name.
 
-   **Verify GA/Preview status before recommending a connector or Lakeflow Connect pattern, then
-   record it as a structured field.** Do **not** hardcode GA/Preview status or dates — release state
-   changes. Before recommending a connector or a Lakeflow Connect ingestion pattern (or naming it in
-   `recommended_patterns` / `system_recommendation`), you **must** verify against the **current public
-   Databricks docs** both that (a) the feature's GA-vs-Preview release state is acceptable and (b) it
-   is available in the target workspace. Verification happens **before** the recommendation, never
-   after: never emit a "recommend now, verify later" conditional.
+   **Check the release state of every capability you recommend, then record it.** Release states
+   change, so never take one from memory or from this skill. Before you name a connector or other
+   capability in `recommended_patterns` or `system_recommendation`, check on the current public
+   Databricks docs that its release state is acceptable and that it is available in the target
+   workspace; [Databricks preview releases](https://docs.databricks.com/aws/en/release-notes/release-types)
+   explains the states. Check first, then recommend; never recommend now and verify later.
 
-   Record the resolved state on the pattern with the **structured `release_state` field** — *not* prose
-   buried in `fit` / `conversion_notes` — and cite the doc that grounds it in `release_state_source`.
-   The validator enforces this. The state is a factual **disclosure**, not a warning; `flowx-route`
-   surfaces it as a neutral label (no alarm), tiered as:
-
-   - `ga` — Generally Available. **Silent** (not surfaced).
-   - `unknown` — the release state could not be verified. **Silent**, treated exactly like `ga` (there
-     is no separate label — the two are indistinguishable in the surfaced output).
-   - `public_preview` — surfaced as the informational label **"Public Preview (production-ready)"**:
-     Public Preview is generally production-ready and supported per Databricks. Still confirm the
-     feature is available in the target workspace. A cited `release_state_source` is required.
-   - `private_preview` — surfaced as the plain factual label **"Private Preview"**. A cited
-     `release_state_source` is required.
-   - `beta` — surfaced as the plain factual label **"Beta"**. A cited `release_state_source` is
-     required.
-
-   `release_state` is **required** on any pattern you mark `simplification_pattern: true` (a distinctive
-   capability must declare its verified release state). There is **no recommendation-eligibility gate** on
-   top of that: even a verified **Private Preview** feature may be suggested. **Disclose the release state
-   and let the customer decide** — record the verified state on the structured `release_state` /
-   `release_state_source` fields, note that Private Preview typically requires workspace
-   enrollment/entitlement, and leave the decision to proceed to the customer. The tool does **not**
-   unilaterally refuse to suggest it (there is no `doNotSuggest` gate). This is disclosure, not a gate —
-   and it does not relax the rule above: you still **verify the release state against the current public
-   Databricks docs before recommending** (never "recommend now, verify later").
+   Record the state in the pattern's `release_state` (`ga`, `public_preview`, `private_preview`,
+   `beta`, or `unknown` when you could not verify it) and cite the page in `release_state_source`. The
+   validator requires a state on every `simplification_pattern: true` pattern and a source for the
+   preview and beta states. A preview or beta capability may still be recommended: record its state and
+   let the customer decide. `flowx-route` shows the state as a plain label, and nothing for `ga` and
+   `unknown`.
 
    **Check every pattern you recommend against the current Databricks platform limits.** Before you name
    a pattern in `recommended_patterns` or `system_recommendation`, read the limits it rests on live from
@@ -186,14 +174,15 @@ Run the **`setup`** skill first if you haven't. Both paths run the same validate
 
 - **MCP tool (Databricks Genie Code, or a local stdio registration):** call the single **`flowx`**
   tool with `command="enrich"`. On the hosted server you cannot read `output_dir`, so first read the
-  inventory with `action="prepare"`. It returns `metadata/inventory.json` inline as
-  `bundle.files["inventory.json"]`, the same way `package` returns a bundle; pass `output_volume_path`
-  or `output_workspace_path` to have a large inventory uploaded there as `inventory.json` instead. An
-  inventory too large to return inline makes `prepare` fail with `ok: false`, naming those two options. Then
-  record the insights (the default `action="apply"`) with either inline insights or a file:
+  inventory and the activity details with `action="prepare"`. It returns `metadata/inventory.json` inline
+  as `bundle.files["inventory.json"]` and, when discover wrote it (ADF does, Airflow does not),
+  `metadata/source_graphs.json` as `bundle.files["source_graphs.json"]`, the same way `package` returns a
+  bundle; pass `output_volume_path` or `output_workspace_path` to have them uploaded there instead. A file
+  too large to return inline makes `prepare` fail with `ok: false`, naming that file and those two
+  options. Then record the insights (the default `action="apply"`) with either inline insights or a file:
 
   ```
-  flowx(command="enrich", parameters={"output_dir": "<dir>", "action": "prepare"})   # read inventory.json
+  flowx(command="enrich", parameters={"output_dir": "<dir>", "action": "prepare"})   # read inventory.json + source_graphs.json
   flowx(command="enrich", parameters={"output_dir": "<dir>", "insights": { ... }})   # inline object
   flowx(command="enrich", parameters={"output_dir": "<dir>", "insights_path": "<file>"})
   ```
@@ -223,31 +212,16 @@ document rather than patching it in place. The `insights` block is replaced whol
 and every deterministic inventory key stays byte-identical. Re-running with the same insights rewrites the same bytes; re-running
 with different insights replaces the block. A validation failure writes nothing.
 
-Absent a concurrent `discover`, only one `enrich` writes an output directory at a time (see the races
-below): it holds `metadata/.enrich.lock` from reading
-the inventory until both files are replaced, and a second call made meanwhile fails with a violation and
-writes nothing. `discover` does not wait for the lock: it clears `metadata/`, the lock with it. So right
-before writing, `enrich` checks that its lock and the `inventory.json` it read are both still there; if
-`discover` ran in between, it writes nothing and reports "discover ran during this enrich; prepare and
-enrich again". The two files are replaced one right after the other. If replacing `inventory.json`
-fails, `agentic_insights.json` is put back to the insights the unchanged `inventory.json` holds (or
-removed when it holds none). A process killed or interrupted (Ctrl-C)
-between those two steps, or a failure while putting that file back, can leave
-`agentic_insights.json` one write ahead of `inventory.json`. That run's lock then stays behind, and the
-next `enrich` refuses until the lock is cleared:
+Don't run `enrich` alongside `discover` or another `enrich` on the same output folder. If it fails, run
+it again.
+
+If `enrich` reports that `metadata/.enrich.lock` exists and no other `enrich` is running, an earlier
+run stopped mid-write. Clear the lock, then enrich again:
 
 - **Locally**, delete `metadata/.enrich.lock` and run `enrich` again; it rewrites both files.
 - **On the hosted MCP server** you cannot delete files in `output_dir`, so run `discover` again (it
   moves the earlier `metadata/`, the lock with it, into `metadata/archive/<UTC time>/`), then `enrich`
   with `action="prepare"` and apply the insights again.
-
-Sequential use is safe. The checks above do not close every race, though: a `discover` plus two
-`enrich` runs on one output folder within a few milliseconds can slip past them. That can end in an
-error, but it can also overwrite silently. Every `enrich` uses the same temp file names, so one run can
-install another's files, leaving a stale `inventory.json` while it reports `ok: True` with
-`inventory_sha256` and `agentic_insights_sha256` values that do not match the files on disk. Two runs
-can also write together, so the two files may come from different runs and need not match the current
-inventory. Do not run `enrich` while another `enrich` or a `discover` is working on the same output folder.
 
 ## Next step
 

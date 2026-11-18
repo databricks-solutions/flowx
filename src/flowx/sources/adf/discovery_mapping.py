@@ -54,7 +54,15 @@ from flowx.discovery_lineage import (
     build_graph_lineage,
     walk_nodes,
 )
-from flowx.models.adf_ast import AdfActivity, AdfDefinitions, AdfParameter, AdfPipeline, AdfTrigger, AdfVariable
+from flowx.models.adf_ast import (
+    AdfActivity,
+    AdfDefinitions,
+    AdfDependency,
+    AdfParameter,
+    AdfPipeline,
+    AdfTrigger,
+    AdfVariable,
+)
 from flowx.models.discovery import (
     CONCEPT_BRANCH,
     CONCEPT_COPY_DATA,
@@ -79,6 +87,7 @@ from flowx.models.discovery import (
 )
 from flowx.sources.adf.dataset_lineage import activity_data_assets
 from flowx.sources.adf.loader import classify_activity, parse_activity
+from flowx.utils import to_case_preserving_key
 
 logger = logging.getLogger(__name__)
 
@@ -353,15 +362,11 @@ def _nodes_for_scope(activities: list[AdfActivity], definitions: AdfDefinitions)
     ``resolved=False`` in the inventory. Package has its own dependency checks, but they do not
     cover every case, so an edge flagged here may not be refused later.
     """
-    nodes = [_activity_to_node(activity, definitions) for activity in activities]
-    sibling_names = {node.task_key for node in nodes}
-    for node in nodes:
-        for dependency in node.dependencies:
-            dependency.resolved = dependency.upstream in sibling_names
-    return nodes
+    sibling_names = frozenset(activity.name for activity in activities)
+    return [_activity_to_node(activity, definitions, sibling_names) for activity in activities]
 
 
-def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> SourceNode:
+def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions, sibling_names: frozenset[str]) -> SourceNode:
     """Map one ADF activity to a discovery node (1:1, source-faithful).
 
     Fields are passed explicitly to each node class (rather than unpacking a
@@ -369,14 +374,19 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
     are resolved from the activity's dataset references, and an ``ExecutePipeline``
     records the child pipeline it invokes under the neutral control-edge marker;
     both apply to nested nodes too because the branch children below route back
-    through this function.
+    through this function. Each dependency is resolved when *sibling_names* (the
+    activities in the same pipeline or container branch) holds its upstream.
+
+    The task key is the one convert gives the activity (:func:`to_case_preserving_key`
+    of its name, so ``Copy Orders (daily)`` is ``Copy_Orders_daily``), so discover's
+    keys, edges and motifs join with convert's task keys. ``name`` and ``source_id``
+    keep the name as written. A resolved upstream is that same key; an unresolved
+    one keeps the name as written, since no task carries it.
     """
     strategy = classify_activity(activity.type)
     concept = _CONCEPT_BY_TYPE.get(activity.type, CONCEPT_GAP)
-    dependencies = [
-        SourceDependency(upstream=dependency.activity, conditions=list(dependency.dependency_conditions))
-        for dependency in (activity.depends_on or [])
-    ]
+    task_key = to_case_preserving_key(activity.name)
+    dependencies = [_dependency(dependency, sibling_names) for dependency in (activity.depends_on or [])]
     policy = _policy_to_spec(activity)
     properties: dict[str, Any] = {STRATEGY_PROPERTY: strategy.value}
     _record_invocation(activity, properties)
@@ -387,7 +397,7 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
         _record_duplicate_switch_cases(activity, properties)
         return ContainerNode(
             source_id=activity.name,
-            task_key=activity.name,
+            task_key=task_key,
             concept=concept,
             source=SOURCE_ADF,
             name=activity.name,
@@ -403,7 +413,7 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
     if strategy.value == "unsupported":
         return GapNode(
             source_id=activity.name,
-            task_key=activity.name,
+            task_key=task_key,
             source=SOURCE_ADF,
             name=activity.name,
             native_type=activity.type,
@@ -417,7 +427,7 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
         )
     return SourceNode(
         source_id=activity.name,
-        task_key=activity.name,
+        task_key=task_key,
         concept=concept,
         source=SOURCE_ADF,
         name=activity.name,
@@ -428,6 +438,16 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions) -> Sou
         data_writes=data_writes,
         properties=properties,
         raw=_activity_without_get_defaults(activity.raw),
+    )
+
+
+def _dependency(dependency: AdfDependency, sibling_names: frozenset[str]) -> SourceDependency:
+    """Map one ``dependsOn`` entry, naming a resolved upstream by its task key and an unresolved one as written."""
+    resolved = dependency.activity in sibling_names
+    return SourceDependency(
+        upstream=to_case_preserving_key(dependency.activity) if resolved else dependency.activity,
+        conditions=list(dependency.dependency_conditions),
+        resolved=resolved,
     )
 
 

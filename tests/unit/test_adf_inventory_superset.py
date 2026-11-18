@@ -21,8 +21,10 @@ from pathlib import Path
 import pytest
 
 from flowx.discovery_serde import read_source_graphs
+from flowx.lineage import build_control_edges, walk_activities
 from flowx.reporting.coverage import build_coverage_rows
 from flowx.sources.adf.loader import build_inventory, load_adf_definitions, main
+from flowx.sources.adf.translate import translate_pipeline
 
 FIXTURES_DIR = Path(__file__).parent.parent / "resources" / "json"
 GOLDEN_COVERAGE = Path(__file__).parent.parent / "resources" / "golden" / "adf_fixture_coverage.json"
@@ -142,6 +144,122 @@ def test_a_misspelled_depends_on_is_flagged_unresolved_in_the_inventory(tmp_path
     assert unresolved == {("pipeline_set_variable_chain", "Set Catalog Name", "Set Enviroment")}
 
 
+def test_discover_names_tasks_and_edges_by_the_keys_convert_gives_them(tmp_path: Path) -> None:
+    """Activity names with spaces and brackets get convert's task keys everywhere discover writes a key.
+
+    The inventory's ``task_key``, each dependency's ``upstream`` and the data and control
+    edges must join with what convert builds from the same export, while ``name`` and the
+    legacy ``depends_on`` keep the names as written.
+    """
+    source_dir = tmp_path / "export"
+    _write_punctuated_names_export(source_dir)
+    output_dir = tmp_path / "out"
+    assert main(["--source-dir", str(source_dir), "--output-dir", str(output_dir)]) == 0
+    inventory = json.loads((output_dir / "metadata" / "inventory.json").read_text())
+    pipeline = next(entry for entry in inventory["pipelines"] if entry["name"] == "pl_punctuated")
+
+    definitions = load_adf_definitions(source_dir)
+    adf_pipeline = next(candidate for candidate in definitions.pipelines if candidate.name == "pl_punctuated")
+    convert_pipeline = translate_pipeline(adf_pipeline, definitions, motif_consolidations={}).pipeline
+    convert_tasks = list(walk_activities(convert_pipeline.tasks))
+
+    assert {activity["name"]: activity["task_key"] for activity in pipeline["activities"]} == {
+        "Copy Orders (daily)": "Copy_Orders_daily",
+        "Wait (daily) 1": "Wait_daily_1",
+        "Load Orders (2)": "Load_Orders_2",
+        "Run Child (x)": "Run_Child_x",
+    }
+    assert {activity["task_key"] for activity in pipeline["activities"]} == {task.task_key for task in convert_tasks}
+
+    discover_dependencies = {
+        (activity["task_key"], dependency["upstream"])
+        for activity in pipeline["activities"]
+        for dependency in activity["dependencies"]
+    }
+    convert_dependencies = {
+        (task.task_key, dependency.task_key) for task in convert_tasks for dependency in task.depends_on or []
+    }
+    assert discover_dependencies == convert_dependencies
+    wait = next(activity for activity in pipeline["activities"] if activity["name"] == "Wait (daily) 1")
+    assert wait["depends_on"] == ["Copy Orders (daily)"]
+
+    convert_task_keys = {task.task_key for task in convert_tasks}
+    data_edges = [(edge["source_task_key"], edge["target_task_key"]) for edge in pipeline["lineage"]["data_edges"]]
+    assert data_edges == [("Copy_Orders_daily", "Load_Orders_2")]
+    assert {key for edge in data_edges for key in edge} <= convert_task_keys
+    via_task_keys = [edge["via_task_key"] for edge in pipeline["lineage"]["control_edges"]]
+    assert via_task_keys == ["Run_Child_x"]
+    assert via_task_keys == [
+        edge.via_task_key for edge in build_control_edges(convert_pipeline, known_workflows={"pl_child"})
+    ]
+
+
+def _write_punctuated_names_export(source_dir: Path) -> None:
+    """Write a tiny export whose activity names have spaces and brackets, with one data and one control hand-off."""
+    linked_service = {
+        "name": "ls_sql_orders",
+        "properties": {
+            "type": "AzureSqlDatabase",
+            "typeProperties": {"connectionString": "Server=tcp:orders.database.windows.net;Database=sales;"},
+        },
+    }
+
+    def _table(name: str, table: str) -> dict:
+        return {
+            "name": name,
+            "properties": {
+                "type": "AzureSqlTable",
+                "linkedServiceName": {"referenceName": "ls_sql_orders", "type": "LinkedServiceReference"},
+                "typeProperties": {"schema": "dbo", "table": table},
+            },
+        }
+
+    def _copy(name: str, *, source: str, sink: str, after: str | None = None) -> dict:
+        activity: dict = {
+            "name": name,
+            "type": "Copy",
+            "inputs": [{"referenceName": source, "type": "DatasetReference"}],
+            "outputs": [{"referenceName": sink, "type": "DatasetReference"}],
+            "typeProperties": {"source": {"type": "AzureSqlSource"}, "sink": {"type": "AzureSqlSink"}},
+        }
+        if after is not None:
+            activity["dependsOn"] = [{"activity": after, "dependencyConditions": ["Succeeded"]}]
+        return activity
+
+    activities = [
+        _copy("Copy Orders (daily)", source="ds_raw", sink="ds_orders"),
+        {
+            "name": "Wait (daily) 1",
+            "type": "Wait",
+            "dependsOn": [{"activity": "Copy Orders (daily)", "dependencyConditions": ["Succeeded"]}],
+            "typeProperties": {"waitTimeInSeconds": 1},
+        },
+        _copy("Load Orders (2)", source="ds_orders", sink="ds_out", after="Wait (daily) 1"),
+        {
+            "name": "Run Child (x)",
+            "type": "ExecutePipeline",
+            "dependsOn": [{"activity": "Load Orders (2)", "dependencyConditions": ["Succeeded"]}],
+            "typeProperties": {
+                "pipeline": {"referenceName": "pl_child", "type": "PipelineReference"},
+                "waitOnCompletion": True,
+            },
+        },
+    ]
+    child = {"name": "Child Wait", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}
+    files = {
+        "linked_services/ls_sql_orders.json": linked_service,
+        "datasets/ds_raw.json": _table("ds_raw", "raw_orders"),
+        "datasets/ds_orders.json": _table("ds_orders", "orders"),
+        "datasets/ds_out.json": _table("ds_out", "orders_out"),
+        "pipelines/pl_punctuated.json": {"name": "pl_punctuated", "properties": {"activities": activities}},
+        "pipelines/pl_child.json": {"name": "pl_child", "properties": {"activities": [child]}},
+    }
+    for relative_path, document in files.items():
+        path = source_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document))
+
+
 def test_inventory_carries_per_pipeline_lineage(tmp_path: Path) -> None:
     """The emitted inventory surfaces the lineage #62b derived over the ADF fixtures.
 
@@ -190,12 +308,17 @@ def test_inventory_surfaces_detected_motifs_without_collapsing(tmp_path: Path) -
     }
     assert bulk["databricks_replacement"] == "for_each_ingestion"
     # Exact expected member set for this fixture -- a partial-member regression must fail.
-    assert bulk["member_task_keys"] == ["Lookup ETL Config", "ForEach Table In Config"]
+    # Members are named by convert's task keys, as the activity entries are.
+    assert bulk["member_task_keys"] == ["Lookup_ETL_Config", "ForEach_Table_In_Config"]
 
     # No collapse at discover: each member survives as its own activity entry.
-    activity_names = {activity["name"] for activity in pipeline["activities"]}
+    activity_task_keys = {activity["task_key"] for activity in pipeline["activities"]}
     for member in bulk["member_task_keys"]:
-        assert member in activity_names, member
+        assert member in activity_task_keys, member
+    definitions = load_adf_definitions(FIXTURES_DIR)
+    adf_pipeline = next(candidate for candidate in definitions.pipelines if candidate.name == "pipeline_complex_etl")
+    convert_pipeline = translate_pipeline(adf_pipeline, definitions, motif_consolidations={}).pipeline
+    assert set(bulk["member_task_keys"]) <= {task.task_key for task in walk_activities(convert_pipeline.tasks)}
 
     # Decoupled from lineage: motifs ride on the pipeline entry, not inside its lineage block.
     assert "motifs" not in pipeline["lineage"]
@@ -306,6 +429,32 @@ def test_discover_prints_the_inventory_activity_count_labelled_raw_including_nes
     activity_count = json.loads((metadata / "inventory.json").read_text())["summary"]["activity_count"]
 
     assert f"Total activities:     {activity_count}  (raw activities, incl. nested)" in capsys.readouterr().out
+
+
+def test_discover_describes_convert_total_as_top_level_activities_before_collapse(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The console note matches what convert counts, and no longer promises a smaller post-collapse number."""
+    _run_discover(tmp_path)
+    output = capsys.readouterr().out
+
+    assert "(convert counts only top-level activities, before any motif collapse, so its total may differ)" in output
+    assert "expect fewer" not in output
+
+
+def test_convert_total_counts_top_level_activities_before_motif_collapse() -> None:
+    """What the discover note says: convert's total is the top-level activity count, not the collapsed task count."""
+    from flowx.models.ir import MotifActivity
+    from flowx.sources.adf.translate import translate_pipeline
+
+    definitions = load_adf_definitions(FIXTURES_DIR)
+    pipeline = next(pipeline for pipeline in definitions.pipelines if pipeline.name == "pipeline_complex_etl")
+    report = translate_pipeline(pipeline, definitions)
+
+    total = report.deterministic_count + report.agentic_count + report.unsupported_count
+    assert any(isinstance(task, MotifActivity) for task in report.pipeline.tasks)
+    assert total == len(pipeline.activities)
+    assert total != len(report.pipeline.tasks)
 
 
 def test_a_motif_detected_twice_is_counted_once_in_the_graph_and_the_profile(monkeypatch: pytest.MonkeyPatch) -> None:

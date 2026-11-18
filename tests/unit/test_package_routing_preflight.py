@@ -466,7 +466,6 @@ _MANAGED_ROOTS = (
     "SETUP.md",
     "WARNINGS.md",
     "DEPLOY.md",
-    "pyproject.toml",
 )
 
 

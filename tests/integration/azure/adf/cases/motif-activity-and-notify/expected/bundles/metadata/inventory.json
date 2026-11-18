@@ -5,14 +5,6 @@
         {
           "dependencies": [],
           "name": "work",
-          "original_type": "Wait",
-          "raw": {
-            "name": "work",
-            "type": "Wait",
-            "typeProperties": {
-              "waitTimeInSeconds": 1
-            }
-          },
           "strategy": "deterministic",
           "task_key": "work",
           "type": "Wait"
@@ -31,26 +23,6 @@
             "work"
           ],
           "name": "notify",
-          "original_type": "WebActivity",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "work",
-                "dependencyConditions": [
-                  "Completed"
-                ]
-              }
-            ],
-            "name": "notify",
-            "type": "WebActivity",
-            "typeProperties": {
-              "body": {
-                "status": "complete"
-              },
-              "method": "POST",
-              "url": "https://example.invalid/notify"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "notify",
           "type": "WebActivity"
@@ -58,8 +30,7 @@
       ],
       "lineage": {
         "control_edges": [],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "motifs": [
         {

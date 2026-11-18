@@ -34,17 +34,17 @@ from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.sources.adf.loader import main as adf_discover_main
 
 
-def _graphs() -> list[SourceGraph]:
+def _graphs(source: str = "adf") -> list[SourceGraph]:
     node = SourceNode(
         source_id="load",
         task_key="load",
         concept=CONCEPT_NOTEBOOK,
-        source="adf",
+        source=source,
         name="load",
         native_type="DatabricksNotebook",
         properties={STRATEGY_PROPERTY: "deterministic"},
     )
-    return [SourceGraph(name="orders", source="adf", tasks=[node])]
+    return [SourceGraph(name="orders", source=source, tasks=[node])]
 
 
 def _discover(output_dir: Path) -> Path:
@@ -152,7 +152,7 @@ def test_inventory_without_a_recorded_graph_hash_still_enriches(tmp_path: Path) 
     """An inventory from a source that does not persist graphs yet has nothing to check."""
     metadata = tmp_path / "metadata"
     metadata.mkdir(parents=True)
-    inventory = build_source_inventory(_graphs(), source="airflow", source_dir="/dags")
+    inventory = build_source_inventory(_graphs("airflow"), source="airflow", source_dir="/dags")
     (metadata / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
 
     result = enrich_inventory(tmp_path, insights=_insights())
@@ -208,7 +208,7 @@ def test_insights_without_authored_against_are_recorded_with_the_library_stamped
 
 
 def test_authored_against_is_refused_when_the_inventory_records_no_graph_hash() -> None:
-    inventory = build_source_inventory(_graphs(), source="airflow", source_dir="/dags")
+    inventory = build_source_inventory(_graphs("airflow"), source="airflow", source_dir="/dags")
 
     violations = validate_insights({**_insights(), "authored_against": "a-placeholder"}, inventory)
 
@@ -237,6 +237,29 @@ def test_a_failed_first_inventory_write_leaves_no_insights_behind(tmp_path: Path
     assert not (metadata / AGENTIC_INSIGHTS_FILENAME).exists()
     assert inventory_path.read_bytes() == inventory_before
     assert sorted(path.name for path in metadata.iterdir()) == files_before
+
+
+def test_a_failed_temp_file_write_leaves_no_temp_files_behind(tmp_path: Path, monkeypatch: Any) -> None:
+    """Temp files are named for this run, so no later enrich overwrites them; a failed write removes its own."""
+    inventory_path = _discover(tmp_path)
+    metadata = tmp_path / "metadata"
+    files_before = sorted(path.name for path in metadata.iterdir())
+    real_write_text = Path.write_text
+
+    def write_half_then_fail(self: Path, data: str, **kwargs: Any) -> int:
+        if not self.name.startswith(".inventory.json."):
+            return real_write_text(self, data, **kwargs)
+        real_write_text(self, data[: len(data) // 2], **kwargs)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", write_half_then_fail)
+    with pytest.raises(OSError, match="No space left"):
+        enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    monkeypatch.undo()
+
+    assert sorted(path.name for path in metadata.iterdir()) == files_before
+    assert enrich_inventory(tmp_path, insights=_authored(tmp_path))["ok"] is True
+    assert json.loads(inventory_path.read_text(encoding="utf-8"))[INSIGHTS_KEY]
 
 
 def test_a_failed_inventory_write_leaves_the_previous_insights_in_place(tmp_path: Path, monkeypatch: Any) -> None:
@@ -447,7 +470,7 @@ def _pause_enrich_at(stage: str, monkeypatch: Any, paused: threading.Event, resu
 
     def pausing_write_text(self: Path, *args: Any, **kwargs: Any) -> int:
         written = real_write_text(self, *args, **kwargs)
-        if threading.current_thread() is not threading.main_thread() and self.name == ".inventory.json.tmp":
+        if threading.current_thread() is not threading.main_thread() and self.name.startswith(".inventory.json."):
             paused.set()
             resume.wait(timeout=10)
         return written
@@ -508,8 +531,92 @@ def test_an_enrich_whose_inventory_changed_under_it_writes_nothing(tmp_path: Pat
     assert not (tmp_path / "metadata" / ".enrich.lock").exists()
 
 
-def test_the_enrich_after_a_killed_one_clears_its_temp_files(tmp_path: Path) -> None:
-    """Kill an enrich between its two replaces, clear the lock as instructed, and enrich again."""
+def _rediscover_with_a_new_task(output_dir: Path) -> None:
+    """Clear metadata/ as discover does, the lock with it, and write an inventory unlike :func:`_discover`'s."""
+    metadata = output_dir / "metadata"
+    for path in metadata.iterdir():
+        path.unlink()
+    graphs = _graphs()
+    graphs[0].tasks.append(
+        SourceNode(
+            source_id="publish",
+            task_key="publish",
+            concept=CONCEPT_NOTEBOOK,
+            source="adf",
+            name="publish",
+            native_type="DatabricksNotebook",
+            properties={STRATEGY_PROPERTY: "deterministic"},
+        )
+    )
+    document = write_source_graphs(metadata / SOURCE_GRAPHS_FILENAME, graphs, source="adf")
+    inventory = build_source_inventory(
+        graphs, source="adf", source_dir="/src", source_graphs_sha256=document["document_sha256"]
+    )
+    (metadata / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+
+
+def test_an_enrich_never_installs_another_enrichs_temp_files(tmp_path: Path, monkeypatch: Any) -> None:
+    """A stale enrich writes its temp files while a newer one is replacing; the newer one must install only its own.
+
+    Enrich A passes its first check, then discover runs and enrich B starts on the new inventory. A writes its temp
+    files after B's last check and before B's replaces. With shared temp names B would install A's stale inventory
+    and still report ``ok: True``.
+    """
+    inventory_path = _discover(tmp_path)
+    metadata = tmp_path / "metadata"
+    stale_authored = {**_authored(tmp_path), "overview": "Written against the old inventory."}
+    first_paused, first_may_write, first_wrote, second_done = (threading.Event() for _ in range(4))
+    real_write_text, real_replace = Path.write_text, os.replace
+
+    def first_enrich_write_text(self: Path, *args: Any, **kwargs: Any) -> int:
+        if threading.current_thread() is threading.main_thread():
+            return real_write_text(self, *args, **kwargs)
+        if not first_paused.is_set():
+            first_paused.set()
+            first_may_write.wait(timeout=10)
+        written = real_write_text(self, *args, **kwargs)
+        if self.name.startswith(".inventory.json"):
+            first_wrote.set()
+            second_done.wait(timeout=10)
+        return written
+
+    def second_enrich_replace(source: Any, destination: Any) -> None:
+        if threading.current_thread() is threading.main_thread() and not first_may_write.is_set():
+            first_may_write.set()
+            first_wrote.wait(timeout=10)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(Path, "write_text", first_enrich_write_text)
+    monkeypatch.setattr(os, "replace", second_enrich_replace)
+    first_results: list[dict[str, Any]] = []
+    first = threading.Thread(target=lambda: first_results.append(enrich_inventory(tmp_path, insights=stale_authored)))
+    first.start()
+    assert first_paused.wait(timeout=10)
+
+    _rediscover_with_a_new_task(tmp_path)
+    rediscovered = json.loads(inventory_path.read_text(encoding="utf-8"))
+    second = enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    second_done.set()
+    first.join(timeout=10)
+    monkeypatch.undo()
+
+    assert first_results[0]["violations"] == ["discover ran during this enrich; prepare and enrich again"]
+    assert second["ok"] is True
+    agentic_insights = json.loads((metadata / AGENTIC_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    assert {key: value for key, value in inventory.items() if key != INSIGHTS_KEY} == rediscovered
+    assert inventory[INSIGHTS_KEY] == agentic_insights
+    assert agentic_insights["overview"] == _insights()["overview"]
+    assert second["agentic_insights_sha256"] == agentic_insights["agentic_insights_sha256"]
+    assert not [path.name for path in metadata.iterdir() if path.name.endswith(".tmp")]
+
+
+def test_the_enrich_after_a_killed_one_installs_only_its_own_temp_files(tmp_path: Path) -> None:
+    """Kill an enrich between its two replaces, clear the lock as instructed, and enrich again.
+
+    The killed run's temp file is named for its own lock, so the next enrich neither installs nor deletes it; it
+    stays in metadata/ until the next discover clears it.
+    """
     inventory_path = _discover(tmp_path)
     metadata = tmp_path / "metadata"
     authored = _authored(tmp_path)
@@ -520,14 +627,16 @@ def test_the_enrich_after_a_killed_one_clears_its_temp_files(tmp_path: Path) -> 
         check=False,
     )
     assert killed.returncode == 1
-    assert [path.name for path in metadata.iterdir() if path.name.endswith(".tmp")]
+    left_by_the_killed_run = sorted(path.name for path in metadata.iterdir() if path.name.endswith(".tmp"))
+    assert left_by_the_killed_run
 
     (metadata / ".enrich.lock").unlink()
-    result = enrich_inventory(tmp_path, insights=authored)
+    result = enrich_inventory(tmp_path, insights={**authored, "overview": "The run after the killed one."})
 
     assert result["ok"] is True
-    assert not [path.name for path in metadata.iterdir() if path.name.endswith(".tmp")]
+    assert sorted(path.name for path in metadata.iterdir() if path.name.endswith(".tmp")) == left_by_the_killed_run
     agentic_insights = json.loads((metadata / AGENTIC_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
+    assert agentic_insights["overview"] == "The run after the killed one."
     assert json.loads(inventory_path.read_text(encoding="utf-8"))[INSIGHTS_KEY] == agentic_insights
 
 

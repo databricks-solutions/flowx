@@ -2111,6 +2111,36 @@
           }
         }
       ],
+      "schedule": {
+        "kind": "interval",
+        "expression": {
+          "frequency": "Hour",
+          "interval": 1,
+          "maxConcurrency": 1,
+          "startTime": "2026-01-01T00:00:00Z"
+        },
+        "extensions": {
+          "trigger_name": "tumbling-window",
+          "trigger_type": "TumblingWindowTrigger",
+          "properties": {
+            "pipeline": {
+              "parameters": {},
+              "pipelineReference": {
+                "referenceName": "motif-incremental-watermark",
+                "type": "PipelineReference"
+              }
+            },
+            "runtimeState": "Stopped",
+            "type": "TumblingWindowTrigger",
+            "typeProperties": {
+              "frequency": "Hour",
+              "interval": 1,
+              "maxConcurrency": 1,
+              "startTime": "2026-01-01T00:00:00Z"
+            }
+          }
+        }
+      },
       "lineage": {
         "control_edges": [],
         "data_edges": [],
@@ -2735,15 +2765,5 @@
       }
     }
   ],
-  "graph_sha256": [
-    "42746023803d32bd6b060f8149dcc6143afdcac0491fb97dfc0f65eda42104f5",
-    "d169126f6a766d1429b60ca03ec192f367a388875658831fbb3ee44a12c4fe4d",
-    "4c747a234efa9cf9fdaf2f0e99d55e8bb87e24158578924a0fbfda1c6c43befa",
-    "85e3f58f4e7381e918346e9124ae621f6bbb9d92d85eb92d169eb639935eb417",
-    "86e862e857b71ef4b8e0dbd3a0aa5a4a3981b391900dd66265b2bf0c4ab09357",
-    "c1009705ed2f1f474d6c84844cebe2448b3f2bc88a96d874afe7f118513e63db",
-    "9ff32eb44fb560ca95665fc98bc95e0d3c3228a37643c5fcd54b11b876aab9d6",
-    "ed7415cc7656f5061218900137631be2fb553e67bdcb8bed7cc0331bdf40f107"
-  ],
-  "document_sha256": "d8aa11fb11a9c811344af4a611f54457a19c4e56c9670d4ed31440e958c629a4"
+  "document_sha256": "a9e2dddc7f8136be498ec38ca418e1845de0ee7c7bfd08e273a60c074b2800e5"
 }

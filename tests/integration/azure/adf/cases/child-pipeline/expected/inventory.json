@@ -5,18 +5,6 @@
         {
           "dependencies": [],
           "name": "child-notebook",
-          "original_type": "DatabricksNotebook",
-          "raw": {
-            "linkedServiceName": {
-              "referenceName": "databricks-parameterized",
-              "type": "LinkedServiceReference"
-            },
-            "name": "child-notebook",
-            "type": "DatabricksNotebook",
-            "typeProperties": {
-              "notebookPath": "/Shared/flowx/child"
-            }
-          },
           "strategy": "deterministic",
           "task_key": "child-notebook",
           "type": "DatabricksNotebook"
@@ -24,8 +12,7 @@
       ],
       "lineage": {
         "control_edges": [],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "name": "child-pipeline"
     }

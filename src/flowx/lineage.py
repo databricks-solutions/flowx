@@ -169,7 +169,12 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
       *not* fall through to a signature match, which would invent edges. An empty
       identity counts as unresolved.
     - **signature** -- when at least one identity is unresolved, fall back to the
-      neutral descriptor and match on equal, non-empty signatures.
+      neutral descriptor and match on equal, non-empty signatures. With only one
+      side resolved, that shared signature must also be the resolved side's
+      *identity* (as when a mapper mirrors the identity into the signature). A
+      resolved side whose signature is something else, such as a generic dataset
+      name many activities share, does not link on it, since that name says nothing
+      about which data the unresolved side touches.
 
     In both tiers, when both sides name their ``asset_type`` and the types differ
     (compared exactly), they are different things, so they do not match.
@@ -183,10 +188,13 @@ def _match_assets(producer: DataAsset, consumer: DataAsset) -> tuple[str, str, s
         if producer.identity == consumer.identity:
             return "identity", producer.identity, producer.identity
         return None
-    if producer.signature and producer.signature == consumer.signature:
-        # A signature match proves nothing physical, so it never claims either side's identity.
-        return "signature", producer.signature, None
-    return None
+    if not producer.signature or producer.signature != consumer.signature:
+        return None
+    resolved_identity = producer.identity or consumer.identity
+    if resolved_identity and producer.signature != resolved_identity:
+        return None
+    # A signature match proves nothing physical, so it never claims either side's identity.
+    return "signature", producer.signature, None
 
 
 def data_edges_from_endpoints(
@@ -267,9 +275,13 @@ def build_data_edges(pipeline: Pipeline) -> list[DataEdge]:
 def build_motif_annotations(pipeline: Pipeline) -> list[MotifAnnotation]:
     """Derive motif annotations from the collapsed motif activities in a pipeline.
 
-    One annotation per :class:`MotifActivity`, listing the task keys it spans
-    (the motif task itself plus any member activities that carry the same
-    ``motif_id`` tag). Deduplicated by ``motif_id`` in first-seen order.
+    One annotation per motif definition, listing the task keys it spans (the
+    motif task itself plus any member activities that carry the same
+    ``motif_id`` tag). Annotations are keyed by ``motif_id`` in first-seen order,
+    so two or more :class:`MotifActivity` occurrences of the same definition merge
+    into one annotation: it starts with the first occurrence's task key and lists
+    every other task tagged with that ``motif_id``, later occurrences included.
+    Keying each occurrence on its own is a planned follow-up.
 
     Args:
         pipeline: The translated pipeline IR.

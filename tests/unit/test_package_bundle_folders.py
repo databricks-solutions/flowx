@@ -231,6 +231,19 @@ def test_re_running_discover_moves_the_recorded_bundle_folders_into_the_archive(
     assert {"alpha", "beta", "metadata"} <= moved
 
 
+def test_re_running_discover_moves_the_deploy_order_with_the_bundles(tmp_path: Path) -> None:
+    """DEPLOY.md lists the bundles discover just archived, so it goes into the archive with them."""
+    assert _package(tmp_path, ["alpha", "beta"]) == 0
+    deploy_order = (tmp_path / "DEPLOY.md").read_text(encoding="utf-8")
+
+    record_path = clear_stale_outputs(tmp_path)
+
+    assert record_path is not None
+    assert not (tmp_path / "DEPLOY.md").exists()
+    moved = {entry["from"]: entry["to"] for entry in json.loads(record_path.read_text(encoding="utf-8"))["moved"]}
+    assert (tmp_path / moved["DEPLOY.md"]).read_text(encoding="utf-8") == deploy_order
+
+
 def test_discover_still_resets_a_folder_whose_record_is_malformed(tmp_path: Path) -> None:
     """Discover is the hosted server's way out of a stuck folder, so a bad record is archived, not refused."""
     assert _package(tmp_path, ["alpha", "beta"]) == 0

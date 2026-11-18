@@ -271,7 +271,7 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
     """Assess the deterministic (1:1 engine) conversion of a component.
 
     An activity is engine-capable when its ``strategy`` is ``"deterministic"`` or it is claimed by a
-    detected motif (present in some motif's ``member_task_keys``). ``capable`` is True only when the
+    detected motif (its ``task_key`` is in some motif's ``member_task_keys``). ``capable`` is True only when the
     whole component leaves no gap; ``uncovered`` cites each activity that keeps it from being fully
     deterministic.
     """
@@ -279,8 +279,8 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
     motifs_by_pipeline = _motifs_by_pipeline(inventory)
 
     motif_ids: list[str] = []
-    # Motif coverage is keyed by (pipeline, activity name), never bare name: a motif claiming a task
-    # in one pipeline must not mark an unrelated same-named task in another pipeline of the component
+    # Motif coverage is keyed by (pipeline, task key), never the bare key: a motif claiming a task
+    # in one pipeline must not mark an unrelated same-keyed task in another pipeline of the component
     # as covered, which would silently hide a real gap.
     covered_activities: set[tuple[str, str]] = set()
     for pipeline in members:
@@ -298,12 +298,11 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
             strategy = activity.get("strategy")
             bucket = strategy if strategy in ("deterministic", "agentic") else "unsupported"
             counts[bucket] += 1
-            name = activity.get("name")
-            if strategy != _DETERMINISTIC_STRATEGY and (pipeline, name) not in covered_activities:
+            if strategy != _DETERMINISTIC_STRATEGY and (pipeline, activity.get("task_key")) not in covered_activities:
                 uncovered.append(
                     {
                         "pipeline": pipeline,
-                        "activity": name,
+                        "activity": activity.get("name"),
                         "type": activity.get("type"),
                         "strategy": bucket,
                     }
@@ -1027,7 +1026,7 @@ def inventory_shape_violations(inventory: Any) -> list[str]:
             if not _is_list_of(motif.get("member_task_keys"), str):
                 violations.append(
                     f"metadata/inventory.json pipeline {label!r} motif {motif.get('motif_id')!r} "
-                    "'member_task_keys' must be a list of activity names"
+                    "'member_task_keys' must be a list of task keys"
                 )
     return [f"{violation}; run discover again" for violation in violations]
 

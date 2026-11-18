@@ -35,6 +35,7 @@ from flowx.models.adf_ast import (
 from flowx.models.discovery import SourceGraph
 from flowx.models.ir import Lineage, MotifAnnotation
 from flowx.models.motifs import DetectedMotif
+from flowx.utils import to_case_preserving_key
 
 logger = logging.getLogger(__name__)
 
@@ -554,6 +555,9 @@ def _parse_trigger_json(data: dict[str, Any], *, fallback_name: str = "unknown")
     name = data.get("name") or fallback_name
     trigger_type = props.get("type", "Unknown")
     trigger_pipelines = props.get("pipelines")
+    # A tumbling-window trigger references its one pipeline under the singular "pipeline" key.
+    if not trigger_pipelines and isinstance(props.get("pipeline"), dict):
+        trigger_pipelines = [props["pipeline"]]
 
     return AdfTrigger(
         name=name,
@@ -934,7 +938,9 @@ def attach_motifs_to_graphs(graphs: list[SourceGraph], motifs_by_pipeline: Mappi
 
     Motifs are deterministic facts about the pipeline, so they belong in the saved
     graph next to its edges. Detection itself still runs on the ADF definitions;
-    this only copies the results onto the graph, member activities untouched.
+    this only copies the results onto the graph, member activities untouched. Each
+    member is named by the task key convert gives it (:func:`to_case_preserving_key`
+    of the activity name), the same key its discovery node carries.
     """
     for graph in graphs:
         detections = motifs_by_pipeline.get(graph.name)
@@ -945,7 +951,7 @@ def attach_motifs_to_graphs(graphs: list[SourceGraph], motifs_by_pipeline: Mappi
         graph.lineage.motifs = [
             MotifAnnotation(
                 motif_id=motif.definition.motif_id,
-                member_task_keys=list(motif.matched_activities),
+                member_task_keys=[to_case_preserving_key(name) for name in motif.matched_activities],
                 display_name=motif.definition.display_name,
                 databricks_replacement=motif.definition.databricks_replacement,
                 notes=list(motif.confidence_notes),
@@ -1053,10 +1059,9 @@ def write_pipeline_arm(definitions: AdfDefinitions, metadata_dir: Path) -> list[
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-# flowx-managed entries under the shared output_dir, cleared at the start of each fresh run. Package writes
-# DEPLOY.md at the top for every packaging mode, and pyproject.toml beside a top-level bundle's PyDABs hooks.
+# flowx-managed entries under the shared output_dir, cleared at the start of each fresh run.
 _MANAGED_OUTPUT_DIRS: tuple[str, ...] = ("metadata", ".work", "resources", "src", "setup")
-_MANAGED_OUTPUT_FILES: tuple[str, ...] = ("databricks.yml", "SETUP.md", "WARNINGS.md", "DEPLOY.md", "pyproject.toml")
+_MANAGED_OUTPUT_FILES: tuple[str, ...] = ("databricks.yml", "SETUP.md", "WARNINGS.md", "DEPLOY.md")
 # Earlier runs' outputs are moved here (under metadata/, which package keeps) instead of deleted.
 ARCHIVE_DIRNAME = "archive"
 ARCHIVE_RECORD_FILENAME = "archive.json"
@@ -1071,7 +1076,7 @@ def clear_stale_outputs(output_dir: Path) -> Path | None:
     pipelines' source ARM and generated notebooks in the packaged bundle.
 
     Nothing is deleted: everything this run would remove (the plan, the review page, the insights,
-    the route baseline, the agent's fills, the bundle, and the per-pipeline bundle folders package
+    the route baseline, the agent's fills, the bundle, its ``DEPLOY.md``, and the bundle folders package
     recorded in ``metadata/packaged_bundles.json``) moves into
     ``metadata/archive/<UTC time>/`` under its own relative path, with an ``archive.json`` that
     records what moved, from where and when, so an earlier run can still be audited. Earlier
@@ -1322,10 +1327,9 @@ def main(argv: list[str] | None = None) -> int:
     print("===================")
     print(f"Pipelines parsed:     {summary['pipeline_count']}")
     print(f"Total activities:     {summary['activity_count']}  (raw activities, incl. nested)")
-    # Discover counts every activity, including those nested inside ForEach/If/Switch. The
-    # convert phase reports top-level task-units *after* motif collapse, so its count is
-    # smaller -- label the units here so the two numbers are not mistaken for a discrepancy.
-    print("  (convert reports top-level task-units after motif collapse; expect fewer there)")
+    # Discover counts every activity, including those nested inside ForEach/If/Switch. Convert's
+    # total counts only the top-level activities, before any motif collapse, so the two can differ.
+    print("  (convert counts only top-level activities, before any motif collapse, so its total may differ)")
     print("\nStrategy Breakdown:")
     print(f"  Deterministic:      {summary['deterministic_count']}")
     print(f"  Agentic:            {summary['agentic_count']}")

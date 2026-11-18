@@ -5,22 +5,6 @@
         {
           "dependencies": [],
           "name": "lookup-metadata",
-          "original_type": "Lookup",
-          "raw": {
-            "name": "lookup-metadata",
-            "type": "Lookup",
-            "typeProperties": {
-              "dataset": {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              },
-              "firstRowOnly": false,
-              "source": {
-                "sqlReaderQuery": "SELECT schema_name, table_name FROM dbo.copy_config",
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "lookup-metadata",
           "type": "Lookup"
@@ -39,51 +23,6 @@
             "lookup-metadata"
           ],
           "name": "copy-each-table",
-          "original_type": "ForEach",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "lookup-metadata",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "name": "copy-each-table",
-            "type": "ForEach",
-            "typeProperties": {
-              "activities": [
-                {
-                  "inputs": [
-                    {
-                      "referenceName": "azure-sql-table",
-                      "type": "DatasetReference"
-                    }
-                  ],
-                  "name": "dynamic-copy",
-                  "outputs": [
-                    {
-                      "referenceName": "parquet-adls",
-                      "type": "DatasetReference"
-                    }
-                  ],
-                  "type": "Copy",
-                  "typeProperties": {
-                    "sink": {
-                      "type": "ParquetSink"
-                    },
-                    "source": {
-                      "type": "AzureSqlSource"
-                    }
-                  }
-                }
-              ],
-              "items": {
-                "type": "Expression",
-                "value": "@activity('lookup-metadata').output.value"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "copy-each-table",
           "type": "ForEach"
@@ -91,31 +30,6 @@
         {
           "dependencies": [],
           "name": "dynamic-copy",
-          "original_type": "Copy",
-          "raw": {
-            "inputs": [
-              {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              }
-            ],
-            "name": "dynamic-copy",
-            "outputs": [
-              {
-                "referenceName": "parquet-adls",
-                "type": "DatasetReference"
-              }
-            ],
-            "type": "Copy",
-            "typeProperties": {
-              "sink": {
-                "type": "ParquetSink"
-              },
-              "source": {
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "dynamic-copy",
           "type": "Copy"
@@ -123,8 +37,7 @@
       ],
       "lineage": {
         "control_edges": [],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "motifs": [
         {

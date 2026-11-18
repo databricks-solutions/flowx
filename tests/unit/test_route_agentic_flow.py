@@ -139,7 +139,7 @@ def _node(task_key: str, native_type: str) -> SourceNode:
         source_id=task_key,
         task_key=task_key,
         concept=CONCEPT_NOTEBOOK,
-        source="unit",
+        source="adf",
         name=task_key,
         native_type=native_type,
         properties={STRATEGY_PROPERTY: "deterministic"},
@@ -151,13 +151,13 @@ def _routed_inventory() -> dict[str, Any]:
     """Inventory whose single 'parent -> child' control edge forms one component {child, parent}."""
     parent = SourceGraph(
         name="parent",
-        source="unit",
+        source="adf",
         tasks=[_node("call_child", "ExecutePipeline")],
         lineage=Lineage(
             control_edges=[ControlEdge(source_workflow="parent", target_workflow="child", via_task_key="call_child")]
         ),
     )
-    child = SourceGraph(name="child", source="unit", tasks=[_node("copy_orders", "Copy")])
+    child = SourceGraph(name="child", source="adf", tasks=[_node("copy_orders", "Copy")])
     return build_source_inventory([parent, child], source="adf", source_dir="/tmp/src")
 
 
@@ -177,8 +177,8 @@ def _setup_routed_agentic(output_dir: Path, *, decision: str = "agentic") -> Non
 
 def _two_component_inventory() -> dict[str, Any]:
     """Inventory with no control edge, so 'parent' and 'child' are separate components."""
-    parent = SourceGraph(name="parent", source="unit", tasks=[_node("extract", "Copy")])
-    child = SourceGraph(name="child", source="unit", tasks=[_node("load", "Script")])
+    parent = SourceGraph(name="parent", source="adf", tasks=[_node("extract", "Copy")])
+    child = SourceGraph(name="child", source="adf", tasks=[_node("load", "Script")])
     return build_source_inventory([parent, child], source="adf", source_dir="/tmp/src")
 
 
@@ -1844,10 +1844,10 @@ def _route_parent_with_motif_and_missing_activity(output_dir: Path, *, child_act
     """Route 'parent' agentic: its report task is a collapsed motif, and 'probe_folder' is in the inventory only."""
     parent = SourceGraph(
         name="parent",
-        source="unit",
+        source="adf",
         tasks=[_node("list_files", "GetMetadata"), _node("copy_files", "Copy"), _node("probe_folder", "GetMetadata")],
     )
-    child = SourceGraph(name="child", source="unit", tasks=[_node(name, "Copy") for name in child_activities])
+    child = SourceGraph(name="child", source="adf", tasks=[_node(name, "Copy") for name in child_activities])
     metadata = output_dir / "metadata"
     metadata.mkdir(parents=True, exist_ok=True)
     inventory = build_source_inventory([parent, child], source="adf", source_dir="/tmp/src")
@@ -1890,8 +1890,8 @@ def test_a_filled_unit_keeps_a_gap_whose_name_a_non_routed_pipeline_also_holds(t
 
 
 def test_two_filled_units_drop_an_inventory_only_gap_name_they_share(tmp_path: Path) -> None:
-    parent = SourceGraph(name="parent", source="unit", tasks=[_node("extract", "Copy"), _node("probe", "GetMetadata")])
-    child = SourceGraph(name="child", source="unit", tasks=[_node("load", "Copy"), _node("probe", "GetMetadata")])
+    parent = SourceGraph(name="parent", source="adf", tasks=[_node("extract", "Copy"), _node("probe", "GetMetadata")])
+    child = SourceGraph(name="child", source="adf", tasks=[_node("load", "Copy"), _node("probe", "GetMetadata")])
     metadata = tmp_path / "metadata"
     metadata.mkdir(parents=True, exist_ok=True)
     inventory = build_source_inventory([parent, child], source="adf", source_dir="/tmp/src")

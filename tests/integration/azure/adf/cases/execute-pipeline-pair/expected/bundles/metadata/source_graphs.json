@@ -300,9 +300,5 @@
       }
     }
   ],
-  "graph_sha256": [
-    "4c747a234efa9cf9fdaf2f0e99d55e8bb87e24158578924a0fbfda1c6c43befa",
-    "85e3f58f4e7381e918346e9124ae621f6bbb9d92d85eb92d169eb639935eb417"
-  ],
   "document_sha256": "417fe82e998f7ff02da538479d4f24738d3f890bed199e1d11a777195b247161"
 }

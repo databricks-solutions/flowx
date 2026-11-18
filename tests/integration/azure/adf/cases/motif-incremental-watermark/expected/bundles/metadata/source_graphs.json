@@ -201,6 +201,36 @@
           }
         }
       ],
+      "schedule": {
+        "kind": "interval",
+        "expression": {
+          "frequency": "Hour",
+          "interval": 1,
+          "maxConcurrency": 1,
+          "startTime": "2026-01-01T00:00:00Z"
+        },
+        "extensions": {
+          "trigger_name": "tumbling-window",
+          "trigger_type": "TumblingWindowTrigger",
+          "properties": {
+            "pipeline": {
+              "parameters": {},
+              "pipelineReference": {
+                "referenceName": "motif-incremental-watermark",
+                "type": "PipelineReference"
+              }
+            },
+            "runtimeState": "Stopped",
+            "type": "TumblingWindowTrigger",
+            "typeProperties": {
+              "frequency": "Hour",
+              "interval": 1,
+              "maxConcurrency": 1,
+              "startTime": "2026-01-01T00:00:00Z"
+            }
+          }
+        }
+      },
       "lineage": {
         "control_edges": [],
         "data_edges": [],
@@ -320,8 +350,5 @@
       }
     }
   ],
-  "graph_sha256": [
-    "c1009705ed2f1f474d6c84844cebe2448b3f2bc88a96d874afe7f118513e63db"
-  ],
-  "document_sha256": "c7edc678e3b77622ea13f46f2a07aee63de2f130c096d5ccd03519d80f08ad6d"
+  "document_sha256": "e6db9e17024cf35a2005b8cb64cc5cc534108fb88f863076c9229ade368e5d70"
 }

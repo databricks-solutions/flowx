@@ -10,6 +10,7 @@ index 0.
 from __future__ import annotations
 
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -21,8 +22,10 @@ from flowx.models.adf_ast import (
     AdfDefinitions,
     AdfLinkedService,
 )
+from flowx.models.ir import TranslationContext
 from flowx.sources.adf.dataset_lineage import activity_data_assets, resolve_dataset_identity
-from flowx.sources.adf.loader import load_adf_definitions
+from flowx.sources.adf.discovery_mapping import adf_definitions_to_source_graphs
+from flowx.sources.adf.loader import _parse_pipeline_json, load_adf_definitions
 
 FIXTURES_DIR = Path(__file__).parent.parent / "resources" / "json"
 
@@ -410,9 +413,16 @@ def test_unresolved_reference_falls_back_to_path_signature() -> None:
     dataset = AdfDataset(
         name="ds_wm",
         type="DelimitedText",
-        properties={"typeProperties": {"location": {"fileSystem": "@dataset().fs"}}},
+        properties={
+            "typeProperties": {"location": {"fileSystem": "@dataset().fs"}},
+            "linkedServiceName": {"referenceName": "ls_lake"},
+        },
     )
-    definitions = _definitions(ds_wm=dataset)
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_wm": dataset},
+        linked_services={"ls_lake": _adls_linked_service("ls_lake", account="acctone")},
+    )
     reference = AdfDatasetReference(
         reference_name="ds_wm",
         parameters={"folderPath": "@concat('watermark/', item().entity)", "fileName": "version.txt"},
@@ -420,7 +430,7 @@ def test_unresolved_reference_falls_back_to_path_signature() -> None:
     activity = AdfActivity(name="Read WM", type="Lookup", type_properties={"dataset": _ref_dict(reference)})
     reads, _ = activity_data_assets(activity, definitions)
     assert reads[0].identity is None
-    assert reads[0].signature == "FP[watermark/<P>]/FN[version.txt]"
+    assert reads[0].signature == "ST[<P>@acctone]/FP[watermark/<P>]/FN[version.txt]"
 
 
 def test_unresolved_reference_without_path_anchor_has_empty_signature() -> None:
@@ -617,7 +627,10 @@ def test_unevaluated_arm_expressions_never_become_identities() -> None:
 
 
 def test_bracket_quoted_sql_names_keep_their_identity() -> None:
-    """Bracket-quoted SQL names are literal table names, not ARM expressions, so they keep their identity."""
+    """Bracket-quoted SQL names are literal table names, not ARM expressions, so they keep their identity.
+
+    The identity drops brackets that change nothing, so it reads as the plain name would.
+    """
     definitions = AdfDefinitions(
         pipelines=[],
         datasets={
@@ -639,11 +652,11 @@ def test_bracket_quoted_sql_names_keep_their_identity() -> None:
     )
     assert (
         resolve_dataset_identity(AdfDatasetReference(reference_name="ds_legacy"), definitions)
-        == "sql.example.net/[dbo].[Orders]"
+        == "sql.example.net/dbo.Orders"
     )
     assert (
         resolve_dataset_identity(AdfDatasetReference(reference_name="ds_spaced"), definitions)
-        == "sql.example.net/dbo.[Order Details]"
+        == "sql.example.net/dbo.Order Details"
     )
 
 
@@ -653,8 +666,51 @@ def test_a_bracket_quoted_table_name_with_parentheses_keeps_its_identity(table: 
     definitions = _definitions(ds_sales=_table_dataset("ds_sales", schema="dbo", table=table))
 
     assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_sales"), definitions) == (
-        f"ls_sql/dbo.{table}"
+        f"ls_sql/dbo.{table[1:-1]}"
     )
+
+
+def _orders_identity(type_properties: dict) -> str | None:
+    """The identity of a SQL dataset with *type_properties* on linked service ``ls_sql``."""
+    definitions = _definitions(
+        ds_orders=AdfDataset(
+            name="ds_orders",
+            type="AzureSqlTable",
+            properties={"typeProperties": type_properties, "linkedServiceName": {"referenceName": "ls_sql"}},
+        )
+    )
+    return resolve_dataset_identity(AdfDatasetReference(reference_name="ds_orders"), definitions)
+
+
+@pytest.mark.parametrize(
+    ("bracketed", "plain"),
+    [
+        ({"tableName": "[dbo].[Orders]"}, {"schema": "dbo", "table": "Orders"}),
+        ({"tableName": "[dbo].Orders"}, {"tableName": "dbo.Orders"}),
+        ({"schema": "[dbo]", "table": "[Orders]"}, {"schema": "dbo", "table": "Orders"}),
+        ({"tableName": "[dbo].[Order Details]"}, {"schema": "dbo", "table": "Order Details"}),
+        ({"tableName": "[dbo].[a]]b]"}, {"schema": "dbo", "table": "[a]]b]"}),
+        ({"tableName": "[sales.eu].[Orders]"}, {"schema": "[sales.eu]", "table": "Orders"}),
+        ({"tableName": "dbo. [Orders]"}, {"schema": "dbo ", "table": "Orders"}),
+        ({"tableName": "[dbo] .Orders"}, {"tableName": "dbo.Orders"}),
+    ],
+)
+def test_bracket_quoting_that_changes_nothing_gives_the_same_table_identity(bracketed: dict, plain: dict) -> None:
+    """``[dbo].[Orders]`` and ``schema=dbo, table=Orders`` name one table, so they share one identity."""
+    assert _orders_identity(bracketed) == _orders_identity(plain) is not None
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ({"tableName": "[dbo].[Orders]"}, {"tableName": "[dbo].[orders]"}),
+        ({"tableName": "[sales.eu].[Orders]"}, {"tableName": "sales.eu.Orders"}),
+        ({"tableName": '"dbo"."Orders"'}, {"schema": "dbo", "table": "Orders"}),
+    ],
+)
+def test_table_names_that_may_differ_keep_different_identities(first: dict, second: dict) -> None:
+    """Case is kept, a dot inside brackets stays inside one part, and double quotes are left as written."""
+    assert _orders_identity(first) != _orders_identity(second)
 
 
 @pytest.mark.parametrize(
@@ -747,6 +803,56 @@ def test_blob_and_adls_gen2_reach_the_same_files_on_the_same_account(
     assert [(edge.match_kind, edge.match_key) for edge in edges] == (
         [("identity", "abfss://sales@acct.dfs.core.windows.net/landing/orders.csv")] if links else []
     )
+
+
+def test_a_blob_service_endpoint_names_the_account_and_links_to_an_adls_reader() -> None:
+    """A managed-identity Blob linked service names its account in ``serviceEndpoint``, so it links to ADLS Gen2."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_blob": _azure_storage_dataset("ds_blob", connector="blob", container="sales", linked_service="ls_blob"),
+            "ds_adls": _azure_storage_dataset("ds_adls", connector="adls", container="sales", linked_service="ls_adls"),
+        },
+        linked_services={
+            "ls_blob": AdfLinkedService(
+                name="ls_blob",
+                type="AzureBlobStorage",
+                properties={
+                    "typeProperties": {
+                        "serviceEndpoint": "https://acct.blob.core.windows.net/",
+                        "accountKind": "StorageV2",
+                    }
+                },
+            ),
+            "ls_adls": _azure_storage_linked_service("ls_adls", connector="adls", account="acct"),
+        },
+    )
+    write = AdfActivity(name="WriteBlob", type="Copy", outputs=[AdfDatasetReference(reference_name="ds_blob")])
+    read = AdfActivity(name="ReadAdls", type="Copy", inputs=[AdfDatasetReference(reference_name="ds_adls")])
+    _, writes = activity_data_assets(write, definitions)
+    reads, _ = activity_data_assets(read, definitions)
+
+    edges = data_edges_from_endpoints(
+        [("WriteBlob", asset) for asset in writes], [("ReadAdls", asset) for asset in reads]
+    )
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("identity", "abfss://sales@acct.dfs.core.windows.net/landing/orders.csv")
+    ]
+
+
+@pytest.mark.parametrize(
+    "service_endpoint",
+    [
+        "https://@{linkedService().accountName}.blob.core.windows.net/",
+        "@linkedService().endpoint",
+        "[concat('https://', parameters('storageAccountName'), '.blob.core.windows.net/')]",
+        {"type": "Expression", "value": "@linkedService().endpoint"},
+        {"type": "SecureString", "value": "https://*****.blob.core.windows.net/"},
+    ],
+)
+def test_an_unprovable_blob_service_endpoint_names_no_account(service_endpoint: object) -> None:
+    """A parameterised, unevaluated or masked ``serviceEndpoint`` is checked like ``url`` and names no account."""
+    assert _storage_account_identity({"serviceEndpoint": service_endpoint}) is None
 
 
 def test_arm_expression_storage_url_has_no_path_identity() -> None:
@@ -923,6 +1029,20 @@ def test_mask_inside_server_or_database_gives_no_table_identity(type_properties:
 def test_storage_account_that_is_not_letters_and_digits_names_no_account(type_properties: dict) -> None:
     """A storage account name is only letters and digits, so a masked or malformed host names no account."""
     assert _storage_account_identity(type_properties) is None
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"url": "https://ACCTONE.dfs.core.windows.net"},
+        {"serviceEndpoint": "https://AcctOne.blob.core.windows.net/"},
+        {"sasUri": "https://ACCTONE.blob.core.windows.net/?sv=2022-11-02"},
+        {"connectionString": "DefaultEndpointsProtocol=https;AccountName=ACCTONE;EndpointSuffix=core.windows.net"},
+    ],
+)
+def test_storage_account_in_any_case_gives_the_lower_case_identity(type_properties: dict) -> None:
+    """Host names ignore case, so an upper-case account is the same account; the path keeps its own case."""
+    assert _storage_account_identity(type_properties) == "abfss://raw@acctone.dfs.core.windows.net/in/orders.csv"
 
 
 @pytest.mark.parametrize(
@@ -1380,7 +1500,7 @@ def test_same_folder_shape_on_the_same_store_still_joins_by_signature() -> None:
 
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert [(edge.match_kind, edge.match_key) for edge in edges] == [
-        ("signature", "ST[sales@acctA]/FP[landing/<P>]/FN[]")
+        ("signature", "ST[sales@accta]/FP[landing/<P>]/FN[]")
     ]
 
 
@@ -1422,6 +1542,39 @@ def test_same_folder_shape_on_one_container_of_a_hidden_account_still_joins() ->
     assert [(edge.match_kind, edge.match_key) for edge in edges] == [
         ("signature", "ST[staging@ls_azure_blob]/FP[landing/<P>]/FN[]")
     ]
+
+
+def test_a_linked_service_referenced_in_another_case_qualifies_one_file_store() -> None:
+    """``ls_azure_blob`` and ``LS_AZURE_BLOB`` are one linked service, so the store qualifier is spelled one way."""
+    definitions = _vaulted_blob_definitions(ds_out="staging", ds_in="staging")
+    definitions.datasets["ds_in"].properties["linkedServiceName"] = {"referenceName": "LS_AZURE_BLOB"}
+    _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[staging@ls_azure_blob]/FP[landing/<P>]/FN[]")
+    ]
+
+
+def test_a_linked_service_referenced_in_another_case_gives_one_table_identity() -> None:
+    """A Key Vault SQL service referenced as ``ls_sql`` and as ``LS_SQL`` names one store, spelled as it is defined."""
+    key_vault_connection = {
+        "type": "AzureKeyVaultSecret",
+        "store": {"referenceName": "kv", "type": "LinkedServiceReference"},
+        "secretName": "sql",
+    }
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_lower": _table_dataset("ds_lower", schema="dbo", table="Orders", linked_service="ls_sql"),
+            "ds_upper": _table_dataset("ds_upper", schema="dbo", table="Orders", linked_service="LS_SQL"),
+        },
+        linked_services={"ls_sql": _sql_linked_service("ls_sql", connection_string=key_vault_connection)},
+    )
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_lower"), definitions) == "ls_sql/dbo.Orders"
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_upper"), definitions) == "ls_sql/dbo.Orders"
 
 
 def _unprovable_store_definitions(
@@ -1493,18 +1646,130 @@ def test_literal_file_systems_on_an_unprovable_store_give_no_signature(
 
 
 @pytest.mark.parametrize("linked_service", ["ls_generic_store", "[parameters('ls')]"])
-def test_parameterised_file_system_on_an_unprovable_store_keeps_its_unqualified_signature(
-    linked_service: str,
-) -> None:
-    """A file system left as ``@dataset().fs`` names no store, so the folder shape still joins, unqualified."""
+def test_parameterised_file_system_on_an_unprovable_store_gives_no_signature(linked_service: str) -> None:
+    """A run-time file system on an account nobody can prove is at least as unknown as a literal one, so no edge."""
     definitions = _unprovable_store_definitions(
         "AzureBlobFSLocation", "fileSystem", linked_service, ds_out="@dataset().fs", ds_in="@dataset().fs"
     )
     _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
     reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
 
+    assert writes[0].signature == reads[0].signature == ""
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
-    assert [(edge.match_kind, edge.match_key) for edge in edges] == [("signature", "FP[landing/<P>]/FN[]")]
+    assert edges == []
+
+
+def test_dynamic_containers_on_accounts_passed_to_one_generic_linked_service_do_not_join() -> None:
+    """``acctone`` and ``accttwo`` reach one generic linked service as parameters, so the folder proves nothing."""
+    generic_store = AdfLinkedService(
+        name="ls_generic_store",
+        type="AzureBlobFS",
+        properties={
+            "typeProperties": {"url": "https://@{linkedService().account}.dfs.core.windows.net"},
+            "parameters": {"account": {"type": "String"}},
+        },
+    )
+
+    def _on_account(name: str, account: str) -> AdfDataset:
+        dataset = _adls_dataset(
+            name, file_system="@dataset().fs", folder_path="@dataset().folderPath", linked_service="ls_generic_store"
+        )
+        dataset.properties["linkedServiceName"]["parameters"] = {"account": account}
+        return dataset
+
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_a": _on_account("ds_a", "acctone"), "ds_b": _on_account("ds_b", "accttwo")},
+        linked_services={"ls_generic_store": generic_store},
+    )
+    _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_a", produced=True), definitions)
+    reads, _ = activity_data_assets(_dynamic_container_copy("R", dataset="ds_b", produced=False), definitions)
+
+    assert writes[0].signature == reads[0].signature == ""
+    assert data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads]) == []
+
+
+def test_two_references_to_a_dataset_missing_from_the_export_do_not_join_on_the_folder() -> None:
+    """A dataset missing from the export could live in any store, so ``folderPath=landing/orders`` links nothing."""
+    definitions = AdfDefinitions(pipelines=[])
+    reference = AdfDatasetReference(reference_name="ds_missing", parameters={"folderPath": "landing/orders"})
+    _, writes = activity_data_assets(AdfActivity(name="W", type="Copy", outputs=[reference]), definitions)
+    reads, _ = activity_data_assets(AdfActivity(name="R", type="Copy", inputs=[reference]), definitions)
+
+    assert writes[0].signature == reads[0].signature == ""
+    assert data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads]) == []
+
+
+def _dynamic_container_definitions(**accounts: str) -> AdfDefinitions:
+    """One dataset per entry whose container and folder are both dataset parameters, on account ``accounts[name]``."""
+    return AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name, file_system="@dataset().fs", folder_path="@dataset().folderPath", linked_service=f"ls_{account}"
+            )
+            for name, account in accounts.items()
+        },
+        linked_services={
+            f"ls_{account}": _adls_linked_service(f"ls_{account}", account=account) for account in accounts.values()
+        },
+    )
+
+
+def _dynamic_container_copy(name: str, *, dataset: str, produced: bool) -> AdfActivity:
+    """A Copy that binds the container to a pipeline parameter and the folder to ``landing/orders``."""
+    reference = AdfDatasetReference(
+        reference_name=dataset,
+        parameters={"fs": "@pipeline().parameters.container", "folderPath": "landing/orders"},
+    )
+    if produced:
+        return AdfActivity(name=name, type="Copy", outputs=[reference])
+    return AdfActivity(name=name, type="Copy", inputs=[reference])
+
+
+def test_dynamic_containers_on_different_accounts_do_not_join_by_signature() -> None:
+    """A run-time container on ``acctone`` and one on ``accttwo`` are still on different accounts, so no edge."""
+    definitions = _dynamic_container_definitions(ds_one="acctone", ds_two="accttwo")
+    _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_one", produced=True), definitions)
+    reads, _ = activity_data_assets(_dynamic_container_copy("R", dataset="ds_two", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads])
+    assert edges == []
+
+
+def test_dynamic_containers_on_one_account_join_on_that_account() -> None:
+    """Two run-time containers on the same account keep their signature edge, qualified by the account."""
+    definitions = _dynamic_container_definitions(ds_out="acctone", ds_in="acctone")
+    _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_dynamic_container_copy("R", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[<P>@acctone]/FP[landing/orders]/FN[]")
+    ]
+
+
+def test_dynamic_container_on_a_hidden_account_joins_on_the_linked_service() -> None:
+    """With the account in Key Vault, a plain linked service name is the boundary a run-time container sits in."""
+    vaulted_blob = load_adf_definitions(FIXTURES_DIR).get_linked_service("ls_azure_blob")
+    assert vaulted_blob is not None
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            name: _adls_dataset(
+                name, file_system="@dataset().fs", folder_path="@dataset().folderPath", linked_service="ls_azure_blob"
+            )
+            for name in ("ds_out", "ds_in")
+        },
+        linked_services={"ls_azure_blob": vaulted_blob},
+    )
+    _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_out", produced=True), definitions)
+    reads, _ = activity_data_assets(_dynamic_container_copy("R", dataset="ds_in", produced=False), definitions)
+
+    edges = data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads])
+    assert [(edge.match_kind, edge.match_key) for edge in edges] == [
+        ("signature", "ST[<P>@ls_azure_blob]/FP[landing/orders]/FN[]")
+    ]
 
 
 def test_arm_expression_linked_service_name_never_qualifies_an_identity() -> None:
@@ -1679,8 +1944,8 @@ def test_datasets_that_wrap_the_same_folder_value_in_different_folders_never_joi
     silver_reads, _ = activity_data_assets(_orders_copy("ReadSilver", dataset="ds_silver", produced=False), definitions)
 
     assert bronze_writes[0].identity is None and silver_reads[0].identity is None
-    assert bronze_writes[0].signature == "ST[sales@acctA]/FP[bronze/orders]/FN[]"
-    assert silver_reads[0].signature == "ST[sales@acctA]/FP[silver/orders]/FN[]"
+    assert bronze_writes[0].signature == "ST[sales@accta]/FP[bronze/orders]/FN[]"
+    assert silver_reads[0].signature == "ST[sales@accta]/FP[silver/orders]/FN[]"
     edges = data_edges_from_endpoints(
         [("WriteBronze", asset) for asset in bronze_writes], [("ReadSilver", asset) for asset in silver_reads]
     )
@@ -1697,7 +1962,7 @@ def test_datasets_that_wrap_the_same_folder_value_in_one_folder_still_join() -> 
 
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert [(edge.match_kind, edge.match_key) for edge in edges] == [
-        ("signature", "ST[sales@acctA]/FP[bronze/orders]/FN[]")
+        ("signature", "ST[sales@accta]/FP[bronze/orders]/FN[]")
     ]
 
 
@@ -1711,8 +1976,8 @@ def test_interpolated_dataset_folders_keep_their_own_literal_text() -> None:
     )
     silver_reads, _ = activity_data_assets(_orders_copy("ReadSilver", dataset="ds_silver", produced=False), definitions)
 
-    assert bronze_writes[0].signature == "ST[sales@acctA]/FP[bronze/orders]/FN[]"
-    assert silver_reads[0].signature == "ST[sales@acctA]/FP[silver/orders]/FN[]"
+    assert bronze_writes[0].signature == "ST[sales@accta]/FP[bronze/orders]/FN[]"
+    assert silver_reads[0].signature == "ST[sales@accta]/FP[silver/orders]/FN[]"
 
 
 def _folder_binding_copy(name: str, *, dataset: str, folder_path: str, produced: bool) -> AdfActivity:
@@ -1741,8 +2006,8 @@ def test_folder_signature_keeps_where_each_runtime_value_sits() -> None:
         definitions,
     )
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
-    assert reads[0].signature == "ST[sales@acctA]/FP[<P>/landing]/FN[]"
+    assert writes[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[]"
+    assert reads[0].signature == "ST[sales@accta]/FP[<P>/landing]/FN[]"
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert edges == []
 
@@ -1759,7 +2024,7 @@ def test_a_dataset_whose_parameters_are_not_a_map_does_not_crash() -> None:
     reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_odd", produced=False), definitions)
 
     assert reads[0].identity is None
-    assert reads[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert reads[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[]"
 
 
 def test_call_site_parameters_that_are_not_a_map_do_not_crash() -> None:
@@ -1807,8 +2072,8 @@ def test_a_quoted_interpolation_marker_inside_a_whole_expression_stays_literal_t
         definitions,
     )
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[foo/@{left}]/FN[]"
-    assert reads[0].signature == "ST[sales@acctA]/FP[foo/@{right}]/FN[]"
+    assert writes[0].signature == "ST[sales@accta]/FP[foo/@{left}]/FN[]"
+    assert reads[0].signature == "ST[sales@accta]/FP[foo/@{right}]/FN[]"
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert edges == []
 
@@ -1850,8 +2115,8 @@ def test_a_system_runtime_value_in_a_folder_is_a_slot_not_nothing(runtime_value:
         AdfActivity(name="Read", type="Copy", inputs=[_reference("ds_in", "landing")]), definitions
     )
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
-    assert reads[0].signature == "ST[sales@acctA]/FP[landing]/FN[]"
+    assert writes[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[]"
+    assert reads[0].signature == "ST[sales@accta]/FP[landing]/FN[]"
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert edges == []
 
@@ -1914,8 +2179,8 @@ def test_any_runtime_function_in_a_folder_is_one_slot(folder_path: str) -> None:
     definitions = _sales_definitions(ds_out="@dataset().folderPath", ds_in="@dataset().folderPath")
     written, read, edges = _write_then_read(definitions, written=("ds_out", folder_path), read=("ds_in", "landing"))
 
-    assert written == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
-    assert read == "ST[sales@acctA]/FP[landing]/FN[]"
+    assert written == "ST[sales@accta]/FP[landing/<P>]/FN[]"
+    assert read == "ST[sales@accta]/FP[landing]/FN[]"
     assert edges == []
 
 
@@ -1945,8 +2210,8 @@ def test_a_bound_value_keeps_its_own_slash_when_spliced_into_the_folder(rooted_f
         definitions, written=("ds_rooted", "orders"), read=("ds_plain", "bronzeorders")
     )
 
-    assert written == "ST[sales@acctA]/FP[bronze/orders]/FN[]"
-    assert read == "ST[sales@acctA]/FP[bronzeorders]/FN[]"
+    assert written == "ST[sales@accta]/FP[bronze/orders]/FN[]"
+    assert read == "ST[sales@accta]/FP[bronzeorders]/FN[]"
     assert edges == []
 
 
@@ -1956,7 +2221,7 @@ def test_a_bound_root_links_to_the_same_folder_spelled_with_a_literal_root(roote
     definitions = _rooted_definitions(rooted_folder, ds_bronze="@concat('bronze/', dataset().folderPath)")
     _, _, edges = _write_then_read(definitions, written=("ds_rooted", "orders"), read=("ds_bronze", "orders"))
 
-    assert edges == [("signature", "ST[sales@acctA]/FP[bronze/orders]/FN[]")]
+    assert edges == [("signature", "ST[sales@accta]/FP[bronze/orders]/FN[]")]
 
 
 def test_a_subscript_is_one_slot_so_its_key_never_becomes_folder_text() -> None:
@@ -1968,8 +2233,8 @@ def test_a_subscript_is_one_slot_so_its_key_never_becomes_folder_text() -> None:
         read=("ds_in", "@concat('raw/', item().region, 'zone')"),
     )
 
-    assert written == "ST[sales@acctA]/FP[raw/<P>]/FN[]"
-    assert read == "ST[sales@acctA]/FP[raw/<P>zone]/FN[]"
+    assert written == "ST[sales@accta]/FP[raw/<P>]/FN[]"
+    assert read == "ST[sales@accta]/FP[raw/<P>zone]/FN[]"
     assert edges == []
 
 
@@ -1981,7 +2246,7 @@ def test_an_interpolated_folder_links_like_its_concat_spelling(read_folder: str)
         definitions, written=("ds_out", "landing/@{pipeline().parameters.run}"), read=("ds_in", read_folder)
     )
 
-    assert edges == [("signature", "ST[sales@acctA]/FP[landing/<P>]/FN[]")]
+    assert edges == [("signature", "ST[sales@accta]/FP[landing/<P>]/FN[]")]
 
 
 def test_a_folder_that_is_only_a_formatted_date_gets_no_signature() -> None:
@@ -2032,7 +2297,7 @@ def test_a_function_over_a_bound_folder_is_a_keyed_slot_not_folder_text() -> Non
     )
     written, read, edges = _write_then_read(definitions, written=("ds_out", "orders"), read=("ds_in", "bronze/orders"))
 
-    assert written == "ST[sales@acctA]/FP[bronze/<P:tolower('orders')>]/FN[]"
+    assert written == "ST[sales@accta]/FP[bronze/<P:tolower('orders')>]/FN[]"
     assert edges == []
 
 
@@ -2078,7 +2343,7 @@ def test_a_function_over_different_bound_file_names_never_links() -> None:
     reads, _ = activity_data_assets(_file_copy("Read", dataset="ds_in", file_name="B", produced=False), definitions)
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:tolower('A')>.csv]"
+    assert writes[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[<P:tolower('A')>.csv]"
     assert edges == []
 
 
@@ -2112,7 +2377,7 @@ def test_a_function_over_the_same_bound_file_name_still_links() -> None:
     reads, _ = activity_data_assets(AdfActivity(name="Read", type="Copy", inputs=[reference["ds_in"]]), definitions)
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
 
-    assert [edge.match_key for edge in edges] == ["ST[sales@acctA]/FP[landing/<P>]/FN[<P:tolower('A')>.csv]"]
+    assert [edge.match_key for edge in edges] == ["ST[sales@accta]/FP[landing/<P>]/FN[<P:tolower('A')>.csv]"]
 
 
 def test_a_file_name_that_is_only_a_function_over_a_bound_value_keeps_its_key() -> None:
@@ -2149,7 +2414,7 @@ def test_a_file_name_that_is_only_a_function_over_a_bound_value_keeps_its_key() 
     )
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
 
-    assert writes[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[<P:tolower('A')>]"
+    assert writes[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[<P:tolower('A')>]"
     assert edges == []
 
 
@@ -2192,7 +2457,7 @@ def test_an_apostrophe_in_a_bound_value_never_merges_two_keyed_slots() -> None:
     definitions = _sales_definitions(ds_out=wrapped_folder, ds_in=wrapped_folder)
     written, read, edges = _write_then_read(definitions, written=("ds_out", "O'Brien"), read=("ds_in", "O' Brien"))
 
-    assert written == "ST[sales@acctA]/FP[bronze/<P:tolower('O''Brien')>]/FN[]"
+    assert written == "ST[sales@accta]/FP[bronze/<P:tolower('O''Brien')>]/FN[]"
     assert written != read
     assert edges == []
 
@@ -2204,7 +2469,7 @@ def test_a_closing_brace_inside_quoted_text_does_not_end_an_interpolation_block(
         definitions, written=("ds_out", "x/@{concat('}', item().x)}/y"), read=("ds_in", "x/y")
     )
 
-    assert written == "ST[sales@acctA]/FP[x/}<P>/y]/FN[]"
+    assert written == "ST[sales@accta]/FP[x/}<P>/y]/FN[]"
 
 
 def test_an_escaped_at_sign_is_literal_folder_text() -> None:
@@ -2212,7 +2477,7 @@ def test_an_escaped_at_sign_is_literal_folder_text() -> None:
     definitions = _sales_definitions(ds_out="@dataset().folderPath", ds_in="@dataset().folderPath")
     written, read, edges = _write_then_read(definitions, written=("ds_out", "@@landing"), read=("ds_in", "@@landing"))
 
-    assert written == "ST[sales@acctA]/FP[@landing]/FN[]"
+    assert written == "ST[sales@accta]/FP[@landing]/FN[]"
     assert edges == [("signature", written)]
 
 
@@ -2224,8 +2489,8 @@ def test_a_number_in_an_expression_is_literal_folder_text(year_folder: str) -> N
         definitions, written=("ds_out", year_folder), read=("ds_in", "landing/@{item().year}")
     )
 
-    assert written == "ST[sales@acctA]/FP[landing/2024]/FN[]"
-    assert read == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert written == "ST[sales@accta]/FP[landing/2024]/FN[]"
+    assert read == "ST[sales@accta]/FP[landing/<P>]/FN[]"
     assert edges == []
 
 
@@ -2237,7 +2502,7 @@ def test_function_names_in_a_keyed_slot_ignore_case_as_adf_does() -> None:
     )
     written, read, edges = _write_then_read(definitions, written=("ds_out", "Orders"), read=("ds_in", "Orders"))
 
-    assert written == read == "ST[sales@acctA]/FP[bronze/<P:tolower('Orders')>]/FN[]"
+    assert written == read == "ST[sales@accta]/FP[bronze/<P:tolower('Orders')>]/FN[]"
     assert edges == [("signature", written)]
 
 
@@ -2269,7 +2534,7 @@ def test_an_empty_bound_value_adds_nothing_to_the_folder() -> None:
         definitions, written=("ds_sub", "landing/"), read=("ds_plain", "@concat('landing/', item().day)")
     )
 
-    assert written == "ST[sales@acctA]/FP[landing]/FN[]"
+    assert written == "ST[sales@accta]/FP[landing]/FN[]"
     assert literal_edges == [("signature", written)]
     assert runtime_edges == []
 
@@ -2280,7 +2545,7 @@ def test_an_unreadable_bound_value_is_a_runtime_slot(sub_default: object) -> Non
     definitions = _subfolder_definitions("@concat(dataset().folderPath, dataset().sub)", ds_sub=sub_default)
     written, _, edges = _write_then_read(definitions, written=("ds_sub", "landing/"), read=("ds_plain", "landing"))
 
-    assert written == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert written == "ST[sales@accta]/FP[landing/<P>]/FN[]"
     assert edges == []
 
 
@@ -2294,8 +2559,8 @@ def test_a_function_over_an_unreadable_bound_value_never_shares_a_key_with_an_em
         definitions, written=("ds_unknown", "landing"), read=("ds_empty", "landing")
     )
 
-    assert written == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
-    assert read == "ST[sales@acctA]/FP[landing/<P:tolower('')>]/FN[]"
+    assert written == "ST[sales@accta]/FP[landing/<P>]/FN[]"
+    assert read == "ST[sales@accta]/FP[landing/<P:tolower('')>]/FN[]"
     assert edges == []
 
 
@@ -2348,7 +2613,7 @@ def test_a_folder_bound_through_any_parameter_name_gets_the_same_signature_as_fo
     _, writes = activity_data_assets(_copy("Write", dataset="ds_out", produced=True), definitions)
     reads, _ = activity_data_assets(_copy("Read", dataset="ds_in", produced=False), definitions)
 
-    assert writes[0].signature == reads[0].signature == "ST[sales@acctA]/FP[landing/<P>]/FN[]"
+    assert writes[0].signature == reads[0].signature == "ST[sales@accta]/FP[landing/<P>]/FN[]"
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
     assert [(edge.source_task_key, edge.target_task_key) for edge in edges] == [("Write", "Read")]
 
@@ -2388,3 +2653,137 @@ def test_dataset_parameter_text_inside_quotes_is_not_a_parameter_the_folder_read
     _, writes = activity_data_assets(AdfActivity(name="Write", type="Copy", outputs=[reference]), definitions)
 
     assert writes[0].signature == ""
+
+
+def _legacy_blob_dataset(name: str, *, folder_prefix: str, location: dict | None) -> AdfDataset:
+    """A legacy ``AzureBlob`` dataset: folder and file written straight under ``typeProperties``.
+
+    *location*, when given, is a ``location`` object that sets no folder or file of its own.
+    """
+    type_properties: dict = {
+        "folderPath": {"value": f"@concat('{folder_prefix}/', dataset().folderPath)", "type": "Expression"},
+        "fileName": "orders.csv",
+        "format": {"type": "TextFormat"},
+    }
+    if location is not None:
+        type_properties["location"] = location
+    return AdfDataset(
+        name=name,
+        type="AzureBlob",
+        properties={
+            "linkedServiceName": {"referenceName": "ls_blob"},
+            "parameters": {"folderPath": {"type": "string"}},
+            "typeProperties": type_properties,
+        },
+    )
+
+
+@pytest.mark.parametrize("location", [None, {}, {"type": "AzureBlobStorageLocation"}])
+def test_a_legacy_dataset_folder_is_never_replaced_by_the_call_site_folder(location: dict | None) -> None:
+    """Legacy ``bronze/orders`` and ``silver/orders`` datasets get no signature, so they never join on ``orders``."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_bronze": _legacy_blob_dataset("ds_bronze", folder_prefix="bronze", location=location),
+            "ds_silver": _legacy_blob_dataset("ds_silver", folder_prefix="silver", location=location),
+        },
+        linked_services={
+            "ls_blob": AdfLinkedService(
+                name="ls_blob", type="AzureBlobStorage", properties={"typeProperties": {"connectionString": "*****"}}
+            )
+        },
+    )
+    write = AdfActivity(
+        name="W",
+        type="Copy",
+        outputs=[AdfDatasetReference(reference_name="ds_bronze", parameters={"folderPath": "orders"})],
+    )
+    read = AdfActivity(
+        name="R",
+        type="Copy",
+        inputs=[AdfDatasetReference(reference_name="ds_silver", parameters={"folderPath": "orders"})],
+    )
+    _, writes = activity_data_assets(write, definitions)
+    reads, _ = activity_data_assets(read, definitions)
+
+    assert writes[0].signature == reads[0].signature == ""
+    assert data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads]) == []
+
+
+def _cyclic_defaults_definitions() -> AdfDefinitions:
+    """A table dataset read as ``@dataset().a``, whose defaults send ``a`` to ``b`` and ``b`` back to ``a``."""
+    dataset = AdfDataset(
+        name="ds_cycle",
+        type="AzureSqlTable",
+        properties={
+            "linkedServiceName": {"referenceName": "ls_sql"},
+            "parameters": {
+                "a": {"type": "string", "defaultValue": "@dataset().b"},
+                "b": {"type": "string", "defaultValue": "@dataset().a"},
+            },
+            "typeProperties": {"schema": "dbo", "table": {"value": "@dataset().a", "type": "Expression"}},
+        },
+    )
+    lookup = {
+        "name": "Lookup1",
+        "type": "Lookup",
+        "typeProperties": {"source": {"type": "AzureSqlSource"}, "dataset": {"referenceName": "ds_cycle"}},
+    }
+    pipeline = _parse_pipeline_json({"name": "pl", "properties": {"activities": [lookup]}})
+    return AdfDefinitions(pipelines=[pipeline], datasets={"ds_cycle": dataset})
+
+
+def test_dataset_defaults_that_refer_to_each_other_give_no_identity() -> None:
+    """A cycle through dataset defaults never resolves, so the table has no identity rather than a crash."""
+    definitions = _cyclic_defaults_definitions()
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_cycle"), definitions) is None
+
+
+def test_dataset_defaults_that_refer_to_each_other_do_not_stop_discovery() -> None:
+    """One malformed dataset must not abort the whole discover run."""
+    graphs = adf_definitions_to_source_graphs(_cyclic_defaults_definitions())
+
+    assert [graph.name for graph in graphs] == ["pl"]
+
+
+def test_a_bundle_variable_placeholder_never_becomes_a_table_identity() -> None:
+    """Under ``bundle_variable`` resolution a global parameter becomes ``${var.table}``, known only at deploy time."""
+    definitions = _definitions(
+        ds_global=AdfDataset(
+            name="ds_global",
+            type="AzureSqlTable",
+            properties={
+                "linkedServiceName": {"referenceName": "ls_sql"},
+                "typeProperties": {
+                    "schema": "dbo",
+                    "table": {"value": "@pipeline().globalParameters.table", "type": "Expression"},
+                },
+            },
+        )
+    )
+    context = TranslationContext(
+        global_parameters=MappingProxyType({"table": "Orders"}), global_parameter_resolution="bundle_variable"
+    )
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_global"), definitions, context) is None
+
+
+def test_a_literal_table_name_holding_a_dollar_brace_keeps_its_identity() -> None:
+    """Only the ``${var.`` placeholder flowx writes is unresolved; other ``${`` text in a literal name is just text."""
+    definitions = _definitions(ds_costs=_table_dataset("ds_costs", schema="dbo", table="costs_${region}"))
+
+    assert (
+        resolve_dataset_identity(AdfDatasetReference(reference_name="ds_costs"), definitions)
+        == "ls_sql/dbo.costs_${region}"
+    )
+
+
+@pytest.mark.parametrize("empty_container", [{}, {"type": "Expression", "value": ""}])
+def test_an_empty_container_value_is_not_a_dynamic_container(empty_container: dict) -> None:
+    """An empty ``fileSystem`` writes no container, so it gets no ``<P>@account`` store, as before."""
+    definitions = _dynamic_container_definitions(ds_out="acctone")
+    definitions.datasets["ds_out"].properties["typeProperties"]["location"]["fileSystem"] = empty_container
+    _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_out", produced=True), definitions)
+
+    assert writes[0].signature == "FP[landing/orders]/FN[]"

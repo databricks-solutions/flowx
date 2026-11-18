@@ -11,8 +11,10 @@ author-then-validate-record contract :mod:`flowx.agentic` uses for gap resolutio
 These models are **source-neutral**: they describe the shape of the ``insights`` object
 independent of whether the pipelines came from ADF or Airflow, because the inventory they
 attach to is itself standardised across sources via the source-neutral discovery graph
-contract (#61/#62). The validate/record engine works on the raw dict form; these dataclasses document the
-contract and back the unit tests.
+contract (#61/#62). The validate/record engine works on the raw dict form and takes each object's allowed
+key names from these dataclasses, so the two always list the same keys; it checks each value's type itself. A field
+left at its ``None`` default is one the author leaves out of the JSON: the validator refuses an explicit
+``null``.
 
 Cross-pipeline couplings come in two accountable tiers (:class:`LineageEdgeRef`):
 
@@ -42,6 +44,10 @@ SCHEMA_VERSION = "1"
 # Cap on a ranked ``recommended_patterns`` list (per pipeline and system-wide). A short,
 # ranked shortlist keeps the recommendation legible; an unbounded list is noise.
 MAX_RECOMMENDED_PATTERNS = 4
+
+# Cap on the characters in any one authored text value. One oversized insight would otherwise be
+# accepted and only fail later, as an inventory too large for enrich prepare to return inline.
+MAX_TEXT_FIELD_CHARS = 20_000
 
 # The confidence levels an ``inferred`` edge may carry.
 CONFIDENCE_LEVELS: tuple[str, ...] = ("high", "medium", "low")
@@ -125,8 +131,8 @@ class RecommendedPattern:
             is disclosed as production-ready (Public Preview is generally production-ready and supported
             per Databricks); ``"private_preview"`` and ``"beta"`` are stated as plain factual labels.
             **Required** whenever :attr:`simplification_pattern` is ``True`` -- a distinctive capability
-            must declare its release state; optional otherwise, defaulting to ``None`` (unstated) for
-            back-compat with insights authored before this field.
+            must declare its release state; optional otherwise; ``None`` means the field is left out,
+            for back-compat with insights authored before this field.
         release_state_source: The doc URL / citation grounding :attr:`release_state`. **Required**
             (a non-empty string) whenever ``release_state`` is one of
             :data:`RELEASE_STATES_REQUIRING_SOURCE` (``"public_preview"`` / ``"private_preview"`` /

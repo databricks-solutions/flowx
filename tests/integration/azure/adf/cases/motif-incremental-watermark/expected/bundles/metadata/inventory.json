@@ -5,22 +5,6 @@
         {
           "dependencies": [],
           "name": "old-watermark",
-          "original_type": "Lookup",
-          "raw": {
-            "name": "old-watermark",
-            "type": "Lookup",
-            "typeProperties": {
-              "dataset": {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              },
-              "firstRowOnly": true,
-              "source": {
-                "sqlReaderQuery": "SELECT watermark FROM dbo.control",
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "old-watermark",
           "type": "Lookup"
@@ -28,22 +12,6 @@
         {
           "dependencies": [],
           "name": "new-watermark",
-          "original_type": "Lookup",
-          "raw": {
-            "name": "new-watermark",
-            "type": "Lookup",
-            "typeProperties": {
-              "dataset": {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              },
-              "firstRowOnly": true,
-              "source": {
-                "sqlReaderQuery": "SELECT MAX(updated_at) AS watermark FROM dbo.source",
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "new-watermark",
           "type": "Lookup"
@@ -70,45 +38,6 @@
             "new-watermark"
           ],
           "name": "incremental-copy",
-          "original_type": "Copy",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "old-watermark",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              },
-              {
-                "activity": "new-watermark",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "inputs": [
-              {
-                "referenceName": "azure-sql-table",
-                "type": "DatasetReference"
-              }
-            ],
-            "name": "incremental-copy",
-            "outputs": [
-              {
-                "referenceName": "csv-adls",
-                "type": "DatasetReference"
-              }
-            ],
-            "type": "Copy",
-            "typeProperties": {
-              "sink": {
-                "type": "DelimitedTextSink"
-              },
-              "source": {
-                "type": "AzureSqlSource"
-              }
-            }
-          },
           "strategy": "deterministic",
           "task_key": "incremental-copy",
           "type": "Copy"
@@ -127,26 +56,6 @@
             "incremental-copy"
           ],
           "name": "update-watermark",
-          "original_type": "SqlServerStoredProcedure",
-          "raw": {
-            "dependsOn": [
-              {
-                "activity": "incremental-copy",
-                "dependencyConditions": [
-                  "Succeeded"
-                ]
-              }
-            ],
-            "linkedServiceName": {
-              "referenceName": "azure-sql",
-              "type": "LinkedServiceReference"
-            },
-            "name": "update-watermark",
-            "type": "SqlServerStoredProcedure",
-            "typeProperties": {
-              "storedProcedureName": "dbo.update_watermark"
-            }
-          },
           "strategy": "agentic",
           "task_key": "update-watermark",
           "type": "SqlServerStoredProcedure"
@@ -154,8 +63,7 @@
       ],
       "lineage": {
         "control_edges": [],
-        "data_edges": [],
-        "motifs": []
+        "data_edges": []
       },
       "motifs": [
         {
@@ -180,7 +88,7 @@
     }
   ],
   "source": "adf",
-  "source_graphs_sha256": "c7edc678e3b77622ea13f46f2a07aee63de2f130c096d5ccd03519d80f08ad6d",
+  "source_graphs_sha256": "e6db9e17024cf35a2005b8cb64cc5cc534108fb88f863076c9229ade368e5d70",
   "summary": {
     "activity_count": 4,
     "agentic_count": 1,

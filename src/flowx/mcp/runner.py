@@ -243,7 +243,11 @@ def cleanup_materialized(source: str) -> None:
         shutil.rmtree(target, ignore_errors=True)
 
 
-def read_tree(root: Path, *, max_total_bytes: int = 2_000_000) -> dict[str, Any]:
+# The total size of the files read_tree returns inline, summed across every file.
+INLINE_TREE_BYTES = 2_000_000
+
+
+def read_tree(root: Path, *, max_total_bytes: int = INLINE_TREE_BYTES) -> dict[str, Any]:
     """Return the text contents of files under *root* so a caller can persist them.
 
     The hosted app writes the generated bundle to ephemeral local disk that the user cannot

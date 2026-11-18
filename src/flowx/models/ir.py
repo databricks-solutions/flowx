@@ -712,8 +712,8 @@ class Pipeline:
     audit: dict[str, Any] = field(default_factory=dict)
     translation_configuration: TranslationConfiguration | None = None
     bundle_variables: dict[str, dict[str, Any]] = field(default_factory=dict)
-    lineage: Lineage | None = None
     synthesized_variable_init_keys: frozenset[str] = field(default_factory=frozenset)
+    lineage: Lineage | None = None
 
 
 @dataclass(frozen=True, slots=True)
