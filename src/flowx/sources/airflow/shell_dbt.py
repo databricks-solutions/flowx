@@ -41,6 +41,7 @@ SUBCOMMANDS = frozenset(
 # are dropped from the command and reported.
 _PROFILE_OPTIONS = frozenset({"--profiles-dir", "--profile", "--target", "-t"})
 _PROJECT_OPTION = "--project-dir"
+_ATTACHED_TARGET = re.compile(r"[A-Za-z0-9_-]+")
 # A command word naming the dbt executable through a variable, such as ``$DBT_PATH`` or ``${DBT_BIN}``.
 _DBT_VARIABLE = re.compile(r"\$\{?[A-Za-z0-9_]*dbt[A-Za-z0-9_]*\}?", re.IGNORECASE)
 _SEPARATORS = frozenset({"&&", ";"})
@@ -180,8 +181,11 @@ def parse(command: str, working_directory: str | None = None) -> ShellDbt | None
             word = words[index]
             name, has_value, value = word.partition("=")
             if word.startswith("-t") and not word.startswith("--") and len(word) > 2:
-                # The short target option with its value attached, as in ``-tprod``.
-                name, has_value, value = "-t", "=", word[2:].removeprefix("=")
+                # The short target option with its value attached, as in ``-tprod``. Anything with ``=``, such as
+                # ``-threads=4``, is not a form dbt documents, so the command stays on the Bash path.
+                if not _ATTACHED_TARGET.fullmatch(word[2:]):
+                    return None
+                name, has_value, value = "-t", "=", word[2:]
             if "$" in word:
                 return None
             if name in _PROFILE_OPTIONS or name == _PROJECT_OPTION:

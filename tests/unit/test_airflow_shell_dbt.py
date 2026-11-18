@@ -75,6 +75,7 @@ def test_profile_options_are_dropped_and_reported() -> None:
         "&& dbt run",
         "dbt run && && dbt test",
         "dbt run --vars 'x\ny'",
+        "dbt run -threads=4",
         'dbt run --vars "{\n  \\"day\\": 1}"',
         "dbt run\ndbt test",
         "dbt run || true",
@@ -463,3 +464,22 @@ def test_deps_runs_after_a_leading_clean(tmp_path: Path) -> None:
     )
 
     assert job["tasks"][0]["dbt_task"]["commands"] == ["dbt clean", "dbt deps", "dbt build"]
+
+
+def test_project_with_models_at_its_root_copies_root_resource_files(tmp_path: Path) -> None:
+    project = tmp_path / "flat"
+    project.mkdir()
+    (project / "dbt_project.yml").write_text("name: flat\nmodel-paths: ['.']\n", encoding="utf-8")
+    (project / "orders.sql").write_text("select 1\n", encoding="utf-8")
+    (project / "schema.yml").write_text("version: 2\n", encoding="utf-8")
+    (project / "profiles.yml").write_text("flat: {}\n", encoding="utf-8")
+    (project / "service_account.json").write_text("{}\n", encoding="utf-8")
+    (project / "target").mkdir()
+    (project / "target" / "compiled.sql").write_text("select 1\n", encoding="utf-8")
+    _, out = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
+    )
+
+    copied = next((out / "src" / "dbt_projects").iterdir())
+    files = sorted(path.relative_to(copied).as_posix() for path in copied.rglob("*") if path.is_file())
+    assert files == ["dbt_project.yml", "orders.sql", "schema.yml"]
