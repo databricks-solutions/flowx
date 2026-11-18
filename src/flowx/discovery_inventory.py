@@ -104,9 +104,10 @@ def build_source_inventory(
             else:
                 unsupported += 1
         if flattened or include_empty_pipelines:
+            names_by_task_key = {node.task_key: node.name for node in walk_nodes(graph.tasks) if node.name is not None}
             entry: dict[str, Any] = {
                 "name": graph.name,
-                "activities": [_activity_entry(node) for node in flattened],
+                "activities": [_activity_entry(node, names_by_task_key) for node in flattened],
             }
             if graph.lineage is not None:
                 lineage_block = lineage_to_dict(graph.lineage)
@@ -146,16 +147,20 @@ def _strategy(node: SourceNode) -> str:
     return strategy if strategy in (_DETERMINISTIC, _AGENTIC) else _UNSUPPORTED
 
 
-def _activity_entry(node: SourceNode) -> dict[str, Any]:
+def _activity_entry(node: SourceNode, names_by_task_key: dict[str, str]) -> dict[str, Any]:
     """Build one per-activity inventory entry from a node.
 
     The first three keys (plus ``depends_on`` when the node has dependencies)
     reproduce the historical ADF activity shape byte-for-byte; the rest are the
     additive standardised fields.
 
-    ``depends_on`` is only the upstream names from ``dependencies``. It is kept so
-    existing readers keep working; new readers should use ``dependencies``, which
-    also records each edge's conditions and whether it resolved.
+    ``depends_on`` lists each upstream by name, as the historical shape did: a
+    resolved upstream's task key is turned back into that node's name through
+    *names_by_task_key* (the graph's task keys and names), and an unresolved one is
+    already the name as written. It is kept so existing readers keep working; new
+    readers should use ``dependencies``, whose ``upstream`` is the task key, so it
+    joins with ``task_key``, and which also records each edge's conditions and
+    whether it resolved.
 
     The entry does not carry the node's ``raw`` source payload. That payload is on
     every node in ``source_graphs.json`` (and in the verbatim ``<pipeline>.arm.json``
@@ -167,7 +172,10 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
         "type": node.native_type,
         "strategy": _strategy(node),
     }
-    upstream_names = [dependency.upstream for dependency in node.dependencies]
+    upstream_names = [
+        names_by_task_key.get(dependency.upstream, dependency.upstream) if dependency.resolved else dependency.upstream
+        for dependency in node.dependencies
+    ]
     if upstream_names:
         entry["depends_on"] = upstream_names
 
@@ -186,10 +194,10 @@ def _activity_entry(node: SourceNode) -> dict[str, Any]:
 def _motif_entry(motif: MotifAnnotation) -> dict[str, Any]:
     """Project one motif annotation into its additive inventory entry.
 
-    Surfacing only: ``member_task_keys`` names the participating activities as the
-    detector claimed them (for ADF these are the activity names, which are the
-    same values used as each activity entry's ``task_key``, so a consumer can join
-    a motif back to its members). The detector reports its confidence as
+    Surfacing only: ``member_task_keys`` names the participating activities by the
+    same task keys their activity entries carry (for ADF, the key convert gives each
+    activity name), so a consumer can join a motif back to its members, and to the
+    bundle's tasks. The detector reports its confidence as
     human-readable rationale rather than a numeric score, so the annotation's
     ``notes`` are surfaced verbatim as ``confidence_notes``, the inventory's
     long-standing key.
