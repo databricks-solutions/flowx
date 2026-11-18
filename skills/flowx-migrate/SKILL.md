@@ -2,7 +2,7 @@
 name: flowx-migrate
 description: >
   End-to-end migration of a source orchestrator's pipelines (Azure Data Factory, Apache Airflow)
-  to Databricks Lakeflow Jobs. Orchestrates discover, convert, and package phases in sequence.
+  to Databricks Lakeflow Jobs. Orchestrates discover, enrich, convert, and package in sequence.
 triggers:
   - "migrate pipelines"
   - "migrate ADF"
@@ -16,8 +16,8 @@ triggers:
 # End-to-End Source to Databricks Migration
 
 Orchestrate the complete migration of a source orchestrator's pipelines to Databricks Lakeflow Jobs
-via Declarative Automation Bundles. This skill runs all three phases in sequence: discover, convert,
-package.
+via Declarative Automation Bundles. This skill runs the phases in sequence: discover, enrich
+(default), convert, package.
 
 ## Context
 
@@ -26,8 +26,10 @@ This is the top-level orchestration skill. It runs the full migration pipeline:
 0. **Extract** (ADF only, optional) — If the user has no export yet, get the factory's
    definitions with `flowx-extract-metadata`
 1. **Discover** — Parse the source's definitions into a typed inventory
-2. **Convert** — Convert the source's tasks to Databricks IR (deterministic + agentic)
-3. **Package** — Generate Databricks Declarative Automation Bundles for deployment
+2. **Enrich** *(default)* — Author the agentic `insights` layer over the inventory and merge it
+   (`flowx-enrich`); skippable for a deterministic-only pass
+3. **Convert** — Convert the source's tasks to Databricks IR (deterministic + agentic)
+4. **Package** — Generate Databricks Declarative Automation Bundles for deployment
 
 Each phase builds on the output of the previous phase. The user is shown a summary and asked to confirm before proceeding to the next phase.
 
@@ -42,7 +44,7 @@ source path (`--adf-source-path` / `--airflow-source-path`, both aliases of `--s
 
 ## How to run this skill — MCP tools or venv CLI
 
-This skill orchestrates all three phases. Run the **`setup`** skill first if you haven't. There are
+This skill orchestrates the phases. Run the **`setup`** skill first if you haven't. There are
 two execution paths:
 
 ### MCP tools (Databricks Genie Code, or a local stdio registration)
@@ -56,7 +58,8 @@ The hosted server **cannot read your workspace/volume files**, so pass the ADF J
 `adf_definitions` (a mapping of relative path → ARM JSON content mirroring the Git-export layout —
 `pipeline/…`, `dataset/…`, `linkedService/…`, `trigger/…`). You read those files and supply them.
 The **recommended Genie path is a single `migrate` call**, which avoids re-sending the payload per
-phase:
+phase. It runs discover, convert and package only, so it records no insights; to enrich, use the
+step-by-step commands below:
 
 ```
 flowx(command="migrate", parameters={
@@ -103,6 +106,8 @@ discover/convert and for `inputs discover`/`inputs convert`; for Airflow, swap `
 ```
 flowx(command="inputs", parameters={"phase": "discover", "source": "adf"})  # source req for discover/convert
 flowx(command="discover", parameters={"source": "adf", "adf_definitions": {...}, "output_dir": ..., "pipeline": ...})
+flowx(command="enrich", parameters={"output_dir": ..., "action": "prepare"})  # returns inventory.json to author against
+flowx(command="enrich", parameters={"output_dir": ..., "insights": {...}})  # default: author + record the insights layer (see flowx-enrich)
 flowx(command="convert", parameters={"source": "adf", "output_dir": ..., "pipeline": ...})
 flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # ADF only, if agentic results
 flowx(command="inspect", parameters={"report_path": ...})
@@ -214,7 +219,9 @@ If the user says no, explain the options:
 - Review `<output_dir>/metadata/inventory.json` (and `profile_report.csv`) to understand unsupported activities and pipeline complexity
 - Manually classify activities before proceeding
 
-If the user says yes, proceed to step 4.
+If the user says yes, enrich the inventory by default: invoke the **`flowx:flowx-enrich`** skill on the
+same `<output_dir>`, and skip it only when the user asked for a deterministic-only pass. Then proceed to
+step 4.
 
 ### Step 4 — Phase 2: Convert
 

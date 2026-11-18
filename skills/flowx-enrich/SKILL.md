@@ -4,8 +4,8 @@ description: >
   Enrich the discover inventory with an agent-authored layer of judgment — a factory-wide
   architecture recommendation, per-pipeline intent + recommended Databricks patterns, and
   cross-pipeline relationships. The library validates it, records it in agentic_insights.json and
-  rebuilds inventory.json from discovery plus that file. The default next step after flowx-discover
-  and the input the routing step consumes.
+  rebuilds inventory.json from discovery plus that file. flowx-migrate runs it after discover by
+  default, and the routing step consumes it.
 triggers:
   - "enrich inventory"
   - "enrich pipelines"
@@ -26,8 +26,8 @@ and recorded by the library in its own file, `metadata/agentic_insights.json`, b
 `metadata/inventory.json` from `source_graphs.json` plus that file, so it carries the same block under
 a single additive `insights` key; you never pass it anything for that step.
 
-This is the standard step **between discover and route** in the flowx workflow. `flowx-discover`
-chains into this skill by default; the routing step (`flowx-route`) reads the `insights` block to
+This is the standard step **between discover and route** in the flowx workflow. `flowx-migrate`
+runs this skill after discover by default; the routing step (`flowx-route`) reads the `insights` block to
 present the agentic conversion option per connected component. The one-shot MCP `migrate` command
 runs discover, convert and package without it, so it records no insights.
 
