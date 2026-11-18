@@ -143,6 +143,8 @@ class OperatorContext:
             order: the DAG file's folder, then the DAG's ``template_searchpath``.
         consumed_arguments: Arguments the builder represented beyond the operator's usual set, such
             as a BashOperator ``cwd`` that names the dbt project of a dbt task.
+        source_root: The folder discover was pointed at, where a dbt project the task names by its source
+            machine path may be found by folder name.
         disclosures: Audit transformations the builder records about how it translated the task.
     """
 
@@ -157,6 +159,7 @@ class OperatorContext:
     template_search_paths: tuple[Path, ...] = ()
     consumed_arguments: set[str] = field(default_factory=set)
     disclosures: list[dict[str, Any]] = field(default_factory=list)
+    source_root: Path | None = None
 
 
 # --------------------------------------------------------------------------------------
@@ -751,6 +754,15 @@ def _dbt_command_activity(ctx: OperatorContext, dbt: shell_dbt.ShellDbt) -> Acti
             "translate the task to a dbt task.",
             {"dbt_commands": dbt.commands},
         )
+    local_project = shell_dbt.locate_project(dbt.project_dir, ctx.source_root)
+    if local_project is None:
+        searched = f" or as a {Path(dbt.project_dir).name!r} folder under {ctx.source_root}" if ctx.source_root else ""
+        return _placeholder(
+            ctx,
+            f"This {ctx.operator} runs dbt in project {dbt.project_dir}, which was not found at that path{searched} "
+            "where flowx ran. Add the dbt project to the folder discover reads, then re-run discover and convert.",
+            {"dbt_commands": dbt.commands, "dbt_project_dir": dbt.project_dir},
+        )
     if "cwd" in ctx.kwargs:
         ctx.consumed_arguments.add("cwd")
     ctx.disclosures.append(
@@ -760,6 +772,7 @@ def _dbt_command_activity(ctx: OperatorContext, dbt: shell_dbt.ShellDbt) -> Acti
             "executable": dbt.executable,
             "commands": list(dbt.commands),
             "project_dir": dbt.project_dir,
+            "local_project_dir": str(local_project),
             "dropped_options": list(dbt.dropped_options),
             "rationale": "dbt_task_runs_on_the_bundle_sql_warehouse",
             "message": (
@@ -770,7 +783,7 @@ def _dbt_command_activity(ctx: OperatorContext, dbt: shell_dbt.ShellDbt) -> Acti
         }
     )
     return DbtCommandActivity(
-        name=ctx.task_id, task_key=ctx.task_key, commands=list(dbt.commands), project_dir=dbt.project_dir
+        name=ctx.task_id, task_key=ctx.task_key, commands=list(dbt.commands), project_dir=str(local_project)
     )
 
 

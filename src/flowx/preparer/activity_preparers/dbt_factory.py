@@ -34,10 +34,17 @@ _DBT_PROJECT_RELATIVE_PATH = "dbt_project"
 _DBT_PROFILES_RELATIVE_PATH = "dbt_profiles"
 _DBT_FACTORY_VERSION = "0.3.5"
 _EXCLUDED_DBT_PATH_PARTS = {".git", ".venv", "__pycache__", "logs", "target"}
+# The dbt packages every generated dbt task installs.
+DBT_PACKAGES = ("dbt-databricks==1.12.2", "dbt-core==1.11.12")
 
 
-def tree_artifacts(source_root: Path, destination_root: str) -> list[DabNotebook]:
-    """Returns bundle artifacts for files beneath a local source directory."""
+def tree_artifacts(
+    source_root: Path, destination_root: str, *, excluded_parts: frozenset[str] = frozenset()
+) -> list[DabNotebook]:
+    """Returns bundle artifacts for files beneath a local source directory.
+
+    Files under build, cache, and log folders are skipped, as are any under *excluded_parts*.
+    """
     if not source_root.is_dir():
         return []
     return [
@@ -48,7 +55,7 @@ def tree_artifacts(source_root: Path, destination_root: str) -> list[DabNotebook
         for source in sorted(source_root.rglob("*"))
         if source.is_file()
         and not source.is_symlink()
-        and not (_EXCLUDED_DBT_PATH_PARTS & set(source.relative_to(source_root).parts))
+        and not ((_EXCLUDED_DBT_PATH_PARTS | excluded_parts) & set(source.relative_to(source_root).parts))
     ]
 
 
@@ -92,9 +99,8 @@ def _pydabs_pyproject_source() -> str:
         "dependencies = [\n"
         '    "databricks-bundles>=1.0.0,<2.0.0",\n'
         f'    "databricks-dbt-factory=={_DBT_FACTORY_VERSION}",\n'
-        '    "dbt-databricks==1.12.2",\n'
-        '    "dbt-core==1.11.12",\n'
-        "]\n"
+        + "".join(f'    "{package}",\n' for package in DBT_PACKAGES)
+        + "]\n"
     )
 
 
@@ -281,10 +287,7 @@ def _node_task(node: dict[str, Any], activity: DbtFactoryActivity) -> dict[str, 
     """Builds one inner-job notebook task for a dbt node."""
     task: dict[str, Any] = {
         "task_key": node["task_key"],
-        "libraries": [
-            {"pypi": {"package": "dbt-databricks==1.12.2"}},
-            {"pypi": {"package": "dbt-core==1.11.12"}},
-        ],
+        "libraries": [{"pypi": {"package": package}} for package in DBT_PACKAGES],
         "notebook_task": {
             "notebook_path": f"../src/{_RUNNER_RELATIVE_PATH}",
             "base_parameters": {
@@ -417,7 +420,7 @@ def _pydabs_hook_source(activity: DbtFactoryActivity) -> str:
         "        'environment_key': 'Default',\n"
         "        'spec': {\n"
         "            'environment_version': '5',\n"
-        "            'dependencies': ['dbt-databricks==1.12.2', 'dbt-core==1.11.12'],\n"
+        f"            'dependencies': {list(DBT_PACKAGES)!r},\n"
         "        },\n"
         "    }\n"
         f"    resources.add_job({to_lowercase_key(activity.task_key + '_dbt')!r}, Job(\n"

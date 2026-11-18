@@ -417,6 +417,7 @@ def _load_airflow_module(
             call_source=call_source,
             default_args=visitor.default_args_for(var),
             template_search_paths=template_search_paths,
+            source_root=source_root,
         )
         builder = ops.OPERATOR_REGISTRY.get(operator, ops.build_placeholder)
         activity = builder(ctx)
