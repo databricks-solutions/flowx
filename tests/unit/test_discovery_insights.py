@@ -327,6 +327,21 @@ def test_the_same_relationship_given_twice_is_a_violation(tmp_path: Path) -> Non
     assert path.read_bytes() == original_bytes
 
 
+def test_a_relationship_repeated_with_padded_edge_identity_is_a_duplicate() -> None:
+    """The edge identity is compared stripped, so surrounding spaces do not make a second relationship."""
+    raw = _valid_insights()
+    repeated = copy.deepcopy(raw["pipeline_relationships"][1])
+    repeated["lineage_edge"]["edge_identity"] = f"  {repeated['lineage_edge']['edge_identity']} "
+    raw["pipeline_relationships"].append(repeated)
+
+    violations = validate_insights(raw, _inventory())
+
+    assert violations == [
+        "pipeline_relationships[2]: duplicate relationship (already given at pipeline_relationships[1]); "
+        "give each one once"
+    ]
+
+
 def test_two_control_edges_between_one_pair_through_different_tasks_are_both_kept() -> None:
     parent = SourceGraph(
         name="parent",

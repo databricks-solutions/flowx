@@ -353,13 +353,16 @@ def _validate_relationships(
 
 
 def _relationship_key(from_pipeline: Any, to_pipeline: Any, edge: Any) -> tuple[str, str, Any, Any] | None:
-    """``(from, to, edge_type, edge_identity)`` for spotting a repeated relationship, or ``None`` when unreadable."""
+    """``(from, to, edge_type, edge_identity)`` for spotting a repeated relationship, or ``None`` when unreadable.
+
+    The identity is compared stripped, so surrounding spaces do not make a second relationship.
+    """
     if not (isinstance(from_pipeline, str) and isinstance(to_pipeline, str) and isinstance(edge, dict)):
         return None
     edge_type, edge_identity = edge.get("edge_type"), edge.get("edge_identity")
     if not all(value is None or isinstance(value, str) for value in (edge_type, edge_identity)):
         return None
-    return from_pipeline, to_pipeline, edge_type, edge_identity
+    return from_pipeline, to_pipeline, edge_type, edge_identity.strip() if isinstance(edge_identity, str) else None
 
 
 def _resolves_control_edge(
