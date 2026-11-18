@@ -5,6 +5,34 @@ from __future__ import annotations
 import ast
 
 from flowx.sources.airflow import operators as ops
+from flowx.sources.airflow.loader.ast_utils import _sanitize_task_key
+
+
+def _allocate_task_keys(
+    operators: dict[str, tuple[str, str, dict[str, ast.expr]]],
+    taskflow_task_ids: dict[str, str],
+    taskgroup_task_ids: dict[str, str],
+    groups: dict[str, str],
+) -> dict[str, str]:
+    """Allocates stable, collision-free task keys using the legacy lowering order."""
+    task_ids = {variable: task_id for variable, (task_id, _, _) in operators.items()}
+    task_ids.update(taskflow_task_ids)
+    task_ids.update(taskgroup_task_ids)
+
+    allocated: dict[str, str] = {}
+    used: set[str] = set()
+    for variable, task_id in task_ids.items():
+        base = _sanitize_task_key(task_id)
+        if variable in groups:
+            base = f"{groups[variable]}__{base}"
+        candidate = base
+        suffix = 2
+        while candidate in used:
+            candidate = f"{base}__{suffix}"
+            suffix += 1
+        used.add(candidate)
+        allocated[variable] = candidate
+    return allocated
 
 
 def _expand_group_edges(
@@ -150,3 +178,41 @@ def _trigger_from_sensor(operator: str, kwargs: dict[str, ast.expr]) -> dict[str
                 "pause_status": "UNPAUSED",
             }
     return None
+
+
+def allocate_task_keys(
+    operators: dict[str, tuple[str, str, dict[str, ast.expr]]],
+    taskflow_task_ids: dict[str, str],
+    taskgroup_task_ids: dict[str, str],
+    groups: dict[str, str],
+) -> dict[str, str]:
+    """Allocates stable, collision-free keys for all executable task kinds.
+
+    Args:
+        operators: Classic operator captures keyed by source identity.
+        taskflow_task_ids: TaskFlow task identifiers keyed by source identity.
+        taskgroup_task_ids: Decorated task-group identifiers keyed by source identity.
+        groups: Enclosing TaskGroup paths keyed by source identity.
+
+    Returns:
+        Allocated task keys keyed by source identity.
+    """
+    return _allocate_task_keys(operators, taskflow_task_ids, taskgroup_task_ids, groups)
+
+
+def expand_group_edges(
+    edges: list[tuple[str, str]],
+    groups: dict[str, str],
+    group_vars: dict[str, str],
+) -> list[tuple[str, str]]:
+    """Expands TaskGroup dependency endpoints to their boundary tasks.
+
+    Args:
+        edges: Dependency edges expressed in source identities.
+        groups: Enclosing TaskGroup paths keyed by task source identity.
+        group_vars: TaskGroup paths keyed by context-manager variables.
+
+    Returns:
+        Dependency edges whose TaskGroup endpoints have been replaced by boundary tasks.
+    """
+    return _expand_group_edges(edges, groups, group_vars)
