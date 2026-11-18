@@ -660,3 +660,50 @@ work = BashOperator(task_id="work", bash_command="echo child", dag=child)
     assert by_name["parent"].graph.properties["reconciliation_status"] == "verified_with_gaps"
     parent_task = next(iter(by_name["parent"].graph.tasks))
     assert parent_task.properties["strategy"] == "agentic"
+
+
+def test_discover_writes_hashed_source_graphs_the_inventory_points_to(tmp_path: Path) -> None:
+    import json
+
+    from flowx.discovery_serde import read_source_graphs
+    from flowx.sources.airflow.discover import main as discover_main
+
+    dags = tmp_path / "dags"
+    dags.mkdir()
+    (dags / "dag.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = BashOperator(task_id='t', bash_command='echo hi')\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+
+    discover_main(["--source-dir", str(dags), "--output-dir", str(output)])
+
+    graphs_path = output / "metadata" / "source_graphs.json"
+    assert [graph.name for graph in read_source_graphs(graphs_path)] == ["d"]
+    inventory = json.loads((output / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+    assert inventory["source_graphs_sha256"] == json.loads(graphs_path.read_text(encoding="utf-8"))["document_sha256"]
+
+
+def test_unsupported_count_matches_the_unsupported_activities(tmp_path: Path) -> None:
+    from flowx.sources.airflow.discover import build_inventory_dict
+
+    source = tmp_path / "comp.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='comp') as dag:\n"
+        "    tasks = [BashOperator(task_id=f't{i}', bash_command='echo hi') for i in range(2)]\n",
+        encoding="utf-8",
+    )
+    results = load_discovery_results(source)
+
+    inventory = build_inventory_dict(
+        [result.pipeline for result in results], str(tmp_path), graphs=[result.graph for result in results]
+    )
+
+    strategies = [activity["strategy"] for entry in inventory["pipelines"] for activity in entry["activities"]]
+    assert inventory["summary"]["unsupported_count"] == strategies.count("unsupported") == 1
+    assert inventory["pipelines"][0]["unsupported_count"] == 1

@@ -19,7 +19,7 @@ from typing import Any
 from flowx.adapter.predicates import walk_activities
 from flowx.discovery_inventory import build_source_inventory
 from flowx.discovery_lineage import walk_nodes
-from flowx.discovery_serde import source_graph_to_dict
+from flowx.discovery_serde import write_source_graphs
 from flowx.models.discovery import SourceGraph
 from flowx.models.ir import NotebookActivity, Pipeline, PlaceholderActivity
 from flowx.sources.adf.loader import clear_stale_outputs
@@ -51,18 +51,25 @@ def build_inventory_dict(
     source_dir: str,
     *,
     graphs: list[SourceGraph] | None = None,
+    source_graphs_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Builds the inventory.json payload matching the ADF discover shape."""
+    """Builds the inventory.json payload matching the ADF discover shape.
+
+    *source_graphs_sha256* is the ``document_sha256`` of the ``source_graphs.json`` the graphs were written to,
+    recorded so later phases can tell which saved graphs the inventory describes.
+    """
     if graphs is not None and len(graphs) != len(pipelines):
         raise ValueError("Airflow inventory requires exactly one source graph per pipeline")
     base: dict[str, Any] = (
-        build_source_inventory(graphs, source="airflow", source_dir=source_dir)
+        build_source_inventory(
+            graphs, source="airflow", source_dir=source_dir, source_graphs_sha256=source_graphs_sha256
+        )
         if graphs is not None
         else {"source": "airflow", "source_dir": source_dir, "pipelines": [], "summary": {}}
     )
     base_entries = list(base["pipelines"])
     pipeline_entries: list[dict[str, Any]] = []
-    audited = deterministic = agentic = failed = excluded = 0
+    audited = deterministic = agentic = failed = excluded = unsupported = 0
     for pipeline in pipelines:
         base_entry = base_entries[len(pipeline_entries)] if len(base_entries) > len(pipeline_entries) else None
         items = list(base_entry["activities"]) if base_entry is not None else _classify(pipeline)
@@ -83,6 +90,7 @@ def build_inventory_dict(
         )
         pipeline_failed = int(pipeline.audit.get("failed_count", 0))
         pipeline_excluded = int(pipeline.audit.get("excluded_count", 0))
+        pipeline_unsupported = sum(1 for item in items if item["strategy"] == "unsupported")
         coverage = (
             round(100.0 * (pipeline_deterministic + pipeline_agentic) / pipeline_audited, 1)
             if pipeline_audited
@@ -96,6 +104,7 @@ def build_inventory_dict(
         agentic += pipeline_agentic
         failed += pipeline_failed
         excluded += pipeline_excluded
+        unsupported += pipeline_unsupported
         entry = dict(base_entry or {})
         entry.update(
             {
@@ -106,6 +115,7 @@ def build_inventory_dict(
                 "agentic_count": pipeline_agentic,
                 "failed_count": pipeline_failed,
                 "excluded_count": pipeline_excluded,
+                "unsupported_count": pipeline_unsupported,
                 "reconciliation_status": pipeline.reconciliation_status or "verified",
                 "migration_status": pipeline.migration_status,
                 "coverage_pct": coverage,
@@ -135,7 +145,7 @@ def build_inventory_dict(
                 "audited_activity_count": audited,
                 "deterministic_count": deterministic,
                 "agentic_count": agentic,
-                "unsupported_count": 0,
+                "unsupported_count": unsupported,
                 "failed_count": failed,
                 "excluded_count": excluded,
                 "coverage_pct": coverage,
@@ -229,14 +239,11 @@ def main(argv: list[str] | None = None) -> int:
     metadata_dir = output_dir / "metadata"
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
-    inventory = build_inventory_dict(pipelines, str(args.source_dir), graphs=graphs)
+    source_graphs = write_source_graphs(metadata_dir / "source_graphs.json", graphs, source="airflow")
+    inventory = build_inventory_dict(
+        pipelines, str(args.source_dir), graphs=graphs, source_graphs_sha256=source_graphs["document_sha256"]
+    )
     (metadata_dir / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
-    source_graphs = {
-        "contract_version": "1",
-        "source": "airflow",
-        "graphs": [source_graph_to_dict(graph) for graph in graphs],
-    }
-    (metadata_dir / "source_graphs.json").write_text(json.dumps(source_graphs, indent=2), encoding="utf-8")
     _write_profile_csv(pipelines, metadata_dir / "profile_report.csv")
 
     summary = inventory["summary"]
