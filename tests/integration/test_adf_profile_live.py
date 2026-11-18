@@ -128,6 +128,11 @@ def test_profile_scans_the_ephemeral_factory(tmp_path):
     warnings = [
         line.removeprefix("warning: ") for line in completed.stderr.splitlines() if line.startswith("warning: ")
     ]
+    cost_management_throttled = re.compile(
+        rf"Subscription {re.escape(subscription_id[:8])}\.\.\.: Cost Management throttled the query \(HTTP 429.*"
+    )
+    if len(warnings) == 1 and cost_management_throttled.fullmatch(warnings[0]):
+        pytest.skip(warnings[0])
     cost_management_denied = re.compile(
         rf"Subscription {re.escape(subscription_id[:8])}\.\.\.: Cost Management access denied "
         r"\(HTTP 40[13] [A-Za-z0-9]+; need Billing Reader or Cost Management Reader on this subscription\)"

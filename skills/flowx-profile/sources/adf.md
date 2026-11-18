@@ -20,6 +20,10 @@ signed-in identity and the scope.
 
 A missing role never stops the run. The phase degrades and says which role to add.
 
+Cost Management throttles busy subscriptions often. A throttled billing query is retried for up to two
+minutes, waiting as long as Azure asks (at most a minute at a time); if it is still throttled, a warning says
+so, that subscription has no actuals, and running the profile again a little later usually gets them.
+
 Example for a service principal scoped to one resource group:
 
 ```bash

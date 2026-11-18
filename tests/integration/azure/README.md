@@ -122,7 +122,8 @@ and `.../querypipelineruns/read`, and `Microsoft.DataFactory/factories/pipeliner
 `.../pipelineruns/queryactivityruns/read`. With only the `/action` entries, a live run got `403 AuthorizationFailed`
 on `queryPipelineRuns`. It doesn't grant Cost Management: the profile phase reads billing at subscription scope,
 which a resource-group role can't reach, so the live profile test expects the "Cost Management access denied"
-warning. It can't create or delete resource groups. Its
+warning, and skips with the profiler's warning as the reason when Cost Management is still throttling the query
+after its retries. It can't create or delete resource groups. Its
 `NotActions` also block storage-key listing, account SAS, key regeneration, and Key Vault access-policy writes
 (shared-key access is disabled in `main.tf`).
 

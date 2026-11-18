@@ -313,6 +313,92 @@ def test_cost_management_forbidden_yields_empty_actuals(scan):
     assert any("Cost Management Reader" in warning for warning in result.warnings)
 
 
+def _throttled(retry_after_seconds: float | None = None) -> TransportHttpError:
+    return TransportHttpError(429, "cost-url", code="TooManyRequests", retry_after_seconds=retry_after_seconds)
+
+
+def _cost_management_warnings(result) -> list[str]:
+    return [warning for warning in result.warnings if "Cost Management" in warning]
+
+
+def test_throttled_cost_query_waits_as_asked_then_uses_the_retry_answer(scan):
+    sleeps: list[float] = []
+    result, transport = scan(
+        _mapping(**{COST_QUERY: [_throttled(7), _load("cost_management.json")]}), sleep=sleeps.append
+    )
+    assert sleeps == [7]
+    assert len([url for method, url, body in transport.calls if COST_QUERY in url]) == 2
+    assert result.actual_costs
+    assert _cost_management_warnings(result) == []
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+def test_a_throttled_or_transient_cost_query_is_retried_with_backoff(scan, status):
+    sleeps: list[float] = []
+    result, _ = scan(_mapping(**{COST_QUERY: [status, _load("cost_management.json")]}), sleep=sleeps.append)
+    assert len(sleeps) == 1 and 2 <= sleeps[0] <= 3
+    assert result.actual_costs
+
+
+def test_a_wait_longer_than_a_minute_is_cut_to_a_minute(scan):
+    sleeps: list[float] = []
+    scan(_mapping(**{COST_QUERY: [_throttled(90), _load("cost_management.json")]}), sleep=sleeps.append)
+    assert sleeps == [60]
+
+
+def test_a_requested_wait_of_zero_retries_at_once(scan):
+    sleeps: list[float] = []
+    result, _ = scan(_mapping(**{COST_QUERY: [_throttled(0), _load("cost_management.json")]}), sleep=sleeps.append)
+    assert sleeps == [0]
+    assert result.actual_costs
+
+
+def test_a_requested_wait_longer_than_the_budget_gives_up_at_once(scan):
+    sleeps: list[float] = []
+    result, transport = scan(_mapping(**{COST_QUERY: _throttled(300)}), sleep=sleeps.append)
+    assert sleeps == []
+    assert len([url for method, url, body in transport.calls if COST_QUERY in url]) == 1
+    assert _cost_management_warnings(result) == [
+        "Subscription SUB...: Cost Management throttled the query "
+        "(HTTP 429 TooManyRequests after 0 retries over 0s); billed actuals are missing, try again later"
+    ]
+
+
+def test_still_throttled_after_two_minutes_of_waits_warns_and_carries_on(scan):
+    sleeps: list[float] = []
+    result, transport = scan(_mapping(**{COST_QUERY: _throttled(50)}), sleep=sleeps.append)
+    assert sleeps == [50, 50]
+    assert len([url for method, url, body in transport.calls if COST_QUERY in url]) == 3
+    assert _cost_management_warnings(result) == [
+        "Subscription SUB...: Cost Management throttled the query "
+        "(HTTP 429 TooManyRequests after 2 retries over 100s); billed actuals are missing, try again later"
+    ]
+    assert result.actual_costs == []
+    assert result.cost_management_denied == []
+    assert result.total_pipeline_runs == 2
+
+
+def test_throttling_without_a_requested_wait_stops_after_five_retries(scan):
+    sleeps: list[float] = []
+    result, _ = scan(_mapping(**{COST_QUERY: 429}), sleep=sleeps.append)
+    assert len(sleeps) == 5 and sum(sleeps) <= 120
+    assert [warning.split(" (")[0] for warning in _cost_management_warnings(result)] == [
+        "Subscription SUB...: Cost Management throttled the query"
+    ]
+    assert "after 5 retries" in _cost_management_warnings(result)[0]
+
+
+def test_cost_management_access_denied_is_not_retried(scan):
+    sleeps: list[float] = []
+    result, transport = scan(_mapping(**{COST_QUERY: _denied("cost-url", "RBACAccessDenied")}), sleep=sleeps.append)
+    assert sleeps == []
+    assert len([url for method, url, body in transport.calls if COST_QUERY in url]) == 1
+    assert _cost_management_warnings(result) == [
+        "Subscription SUB...: Cost Management access denied "
+        "(HTTP 403 RBACAccessDenied; need Billing Reader or Cost Management Reader on this subscription)"
+    ]
+
+
 def test_empty_cost_management_is_valid(scan):
     result, _ = scan(_mapping(**{COST_QUERY: {"properties": {"columns": [], "rows": []}}}))
     assert result.actual_costs == []

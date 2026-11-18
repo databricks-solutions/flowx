@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+from datetime import datetime, timezone
 
 import pytest
 
@@ -108,6 +109,49 @@ def test_an_azure_error_code_and_request_ids_are_kept_on_the_error():
     assert error.reason == "HTTP 403 AuthorizationFailed"
     assert str(error) == "HTTP 403 AuthorizationFailed from https://management.azure.com/x"
     assert "abc" not in repr(vars(error))
+
+
+def test_a_throttled_answer_carries_the_wait_azure_asked_for():
+    headers = {"x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after": "30", "Retry-After": "5"}
+    session = FakeSession(FakeResponse(429, {"error": {"code": "TooManyRequests"}}, headers))
+    transport = azure_client.LiveTransport(TokenCredential(), session=session)
+    with pytest.raises(azure_client.TransportHttpError) as raised:
+        transport.post_json("https://management.azure.com/x", {})
+    assert (raised.value.status, raised.value.reason, raised.value.retry_after_seconds) == (
+        429,
+        "HTTP 429 TooManyRequests",
+        30.0,
+    )
+
+
+NOW = datetime(2026, 11, 18, 15, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"Retry-After": "12"}, 12.0),
+        ({"retry-after": "1.5"}, 1.5),
+        ({"Retry-After": "Wed, 18 Nov 2026 15:00:45 GMT"}, 45.0),
+        ({"Retry-After": "Wed, 18 Nov 2026 14:59:00 GMT"}, 0.0),
+        ({"x-ms-ratelimit-microsoft.costmanagement-entity-retry-after": "20"}, 20.0),
+        (
+            {
+                "Retry-After": "5",
+                "x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after": "40",
+                "x-ms-ratelimit-microsoft.costmanagement-tenant-retry-after": "10",
+            },
+            40.0,
+        ),
+        ({"Retry-After": "soon"}, None),
+        ({"Retry-After": "Wed, 18 Nov 9999999999999 15:00:45 GMT"}, None),
+        ({"Retry-After": "nan"}, None),
+        ({"x-ms-ratelimit-remaining-subscription-reads": "11999"}, None),
+        ({}, None),
+    ],
+)
+def test_the_requested_wait_is_the_longest_retry_after_in_seconds(headers, expected):
+    assert azure_client.requested_wait_seconds(headers, now=NOW) == expected
 
 
 @pytest.mark.parametrize(
@@ -235,6 +279,48 @@ def test_bearer_token_never_follows_an_off_host_next_link(monkeypatch):
     assert all(url.startswith("https://management.azure.com/") for url, _ in session.requests)
     assert [actual.cost for actual in result.actual_costs] == [1.0]
     assert any("outside https://management.azure.com" in warning for warning in result.warnings)
+
+
+class FirstCostQueryThrottledSession(RoutingSession):
+    """Answers the first Cost Management query with a 429 carrying Cost Management's rate-limit header."""
+
+    def __init__(self, responses: dict[str, dict], *, wait_seconds: str):
+        super().__init__(responses)
+        self.wait_seconds = wait_seconds
+        self.throttled = False
+
+    def _respond(self, url, headers):
+        if "Microsoft.CostManagement/query" in url and not self.throttled:
+            self.throttled = True
+            rate_limit = {"x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after": self.wait_seconds}
+            return FakeResponse(429, {"error": {"code": "TooManyRequests"}}, rate_limit)
+        return super()._respond(url, headers)
+
+
+def test_the_scanner_waits_for_cost_managements_rate_limit_header_then_reads_the_retry(monkeypatch):
+    monkeypatch.setattr(pricing, "fetch_live_pricing", lambda region: pricing.DEFAULT_PRICING)
+    factory_id = "/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.DataFactory/factories/demo-factory"
+    session = FirstCostQueryThrottledSession(
+        {
+            "/subscriptions?": {"value": [{"subscriptionId": "SUB", "displayName": "Demo"}]},
+            "/factories?": {"value": [{"name": "demo-factory", "location": "East US", "id": factory_id}]},
+            "/integrationRuntimes?": {"value": []},
+            "/queryPipelineRuns": {"value": []},
+            "Microsoft.CostManagement/query": {
+                "properties": {
+                    "columns": [{"name": "PreTaxCost"}, {"name": "MeterSubcategory"}, {"name": "ResourceId"}],
+                    "rows": [[1.0, "", factory_id]],
+                }
+            },
+        },
+        wait_seconds="17",
+    )
+    sleeps: list[float] = []
+    transport = azure_client.LiveTransport(TokenCredential(), session=session)
+    result = core.AdfScanner(credential=None, days=45, transport=transport, sleep=sleeps.append).scan()
+    assert sleeps == [17]
+    assert [actual.cost for actual in result.actual_costs] == [1.0]
+    assert not any("Cost Management" in warning for warning in result.warnings)
 
 
 UNTRUSTED_URLS = [

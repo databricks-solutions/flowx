@@ -7,11 +7,13 @@ estimates, queries Cost Management, and collects the scan's warnings for the rep
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from flowx.sources.adf.extract.core import RETRYABLE_STATUSES, backoff_seconds
 from flowx.sources.adf.profile import cost_model, discovery
 from flowx.sources.adf.profile import pricing as pricing_module
 from flowx.sources.adf.profile.azure_client import (
@@ -64,6 +66,14 @@ _COST_MANAGEMENT_DENIED = (
     "Subscription {subscription}...: Cost Management access denied "
     "({reason}; need Billing Reader or Cost Management Reader on this subscription)"
 )
+_COST_MANAGEMENT_THROTTLED = (
+    "Subscription {subscription}...: Cost Management throttled the query "
+    "({reason} after {retries} retries over {waited:.0f}s); billed actuals are missing, try again later"
+)
+# Cost Management's throttling usually clears within a minute, and a single backoff is at most a
+# minute, so two minutes allows two full waits without stalling the scan of a subscription for long.
+_COST_QUERY_MAX_WAIT_SECONDS = 120.0
+_COST_QUERY_MAX_RETRIES = 5
 
 
 @dataclass(slots=True, kw_only=True)
@@ -79,13 +89,38 @@ class _PipelineTotals:
         return self.orchestration_cost + self.data_movement_cost + self.pipeline_activity_cost + self.external_cost
 
 
+@dataclass(slots=True, kw_only=True)
+class _CostQueryRetries:
+    """The retries one subscription's Cost Management query has used, so its total wait stays bounded."""
+
+    sleep: Callable[[float], None]
+    retries: int = 0
+    waited_seconds: float = 0.0
+
+    def wait_before_retry(self, error: TransportHttpError) -> bool:
+        """Wait and return True when `error` is worth retrying within the budget; otherwise return False."""
+        if error.status not in RETRYABLE_STATUSES or self.retries >= _COST_QUERY_MAX_RETRIES:
+            return False
+        remaining_seconds = _COST_QUERY_MAX_WAIT_SECONDS - self.waited_seconds
+        if error.retry_after_seconds is not None and error.retry_after_seconds > remaining_seconds:
+            return False
+        delay = backoff_seconds(self.retries + 1, error.retry_after_seconds)
+        if delay > remaining_seconds:
+            return False
+        self.sleep(delay)
+        self.retries += 1
+        self.waited_seconds += delay
+        return True
+
+
 class AdfScanner:
     """Scans ADF live and estimates what its pipeline runs cost over the last `days` days.
 
     Ported from the standalone script's RuntimeProfiler, ADF only. Every Azure call goes through
     `transport` (live by default), so a recorded scan can be replayed in tests. Passing `pricing`
     pins the rate cards ("custom"); otherwise each factory is priced from the Retail Prices API for
-    its own region, falling back to list rates.
+    its own region, falling back to list rates. `sleep` is how the scanner waits before retrying a
+    throttled Cost Management query, so tests can skip the wait.
     """
 
     def __init__(
@@ -97,12 +132,14 @@ class AdfScanner:
         transport: Transport | None = None,
         pricing: RateCards | None = None,
         now: datetime | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ):
         self._transport: Transport = (
             transport if transport is not None else LiveTransport(credential, tenant_id=tenant_id)
         )
         self._days = days
         self._custom_pricing = pricing
+        self._sleep = sleep
         window_end = now or datetime.now(timezone.utc)
         self._window_end = window_end
         self._window = {
@@ -216,6 +253,10 @@ class AdfScanner:
         compared case-insensitively because Cost Management lowercases resource IDs. (The original
         matched by substring, so a factory also took the billing of any factory whose name contained
         its own.)
+
+        A throttled or briefly failing request (429, 408, 500, 502, 503 or 504) is retried after the wait Azure asks
+        for, or an exponential backoff, for at most two minutes in all; when Azure asks for a longer
+        wait than is left, the query gives up straight away. Access denied is not retried.
         """
         url = (
             f"{AZURE_MANAGEMENT_URL}/subscriptions/{subscription_id}"
@@ -248,10 +289,17 @@ class AdfScanner:
         records: list[dict[str, Any]] = []
         next_url: str | None = url
         seen_urls: set[str] = set()
+        retries = _CostQueryRetries(sleep=self._sleep)
         try:
             while next_url and next_url not in seen_urls:
+                try:
+                    page = self._transport.post_json(next_url, body)
+                except TransportHttpError as error:
+                    if retries.wait_before_retry(error):
+                        continue
+                    raise
                 seen_urls.add(next_url)
-                properties = self._transport.post_json(next_url, body).get("properties", {})
+                properties = page.get("properties", {})
                 columns = [column["name"] for column in properties.get("columns", [])]
                 records.extend(dict(zip(columns, row)) for row in properties.get("rows", []))
                 next_url = properties.get("nextLink")
@@ -268,6 +316,15 @@ class AdfScanner:
                 )
                 result.cost_management_denied.append(subscription_id)
                 _log_denied(error)
+            elif error.status == 429:
+                result.warnings.append(
+                    _COST_MANAGEMENT_THROTTLED.format(
+                        subscription=subscription_id[:8],
+                        reason=error.reason,
+                        retries=retries.retries,
+                        waited=retries.waited_seconds,
+                    )
+                )
             else:
                 logger.warning(
                     "Cost Management query for sub %s... returned HTTP %s", subscription_id[:8], error.status

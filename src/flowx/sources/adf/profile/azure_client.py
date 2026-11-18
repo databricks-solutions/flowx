@@ -5,8 +5,12 @@ until the profile phase actually runs.
 
 from __future__ import annotations
 
+import math
 import re
 import time
+from collections.abc import Mapping
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
@@ -14,6 +18,8 @@ AZURE_MANAGEMENT_URL = "https://management.azure.com"
 _MANAGEMENT_HOST = "management.azure.com"
 _MANAGEMENT_SCOPE = "https://management.azure.com/.default"
 REQUEST_TIMEOUT_SECONDS = 30
+# Cost Management names one header per limit, for example x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after.
+_RATE_LIMIT_RETRY_AFTER = re.compile(r"x-ms-ratelimit-.+-retry-after", re.IGNORECASE)
 # Refresh a little before expiry so a token can't lapse between the check and the request.
 _TOKEN_REFRESH_MARGIN_SECONDS = 300
 
@@ -66,7 +72,10 @@ def get_credential() -> Any:
 
 
 class TransportHttpError(Exception):
-    """A non-200 answer from Azure. `status` lets callers turn 401/403 into "missing role" notes."""
+    """A non-200 answer from Azure. `status` lets callers turn 401/403 into "missing role" notes.
+
+    `retry_after_seconds` is how long Azure asked the caller to wait before trying again, when it said.
+    """
 
     def __init__(
         self,
@@ -76,12 +85,14 @@ class TransportHttpError(Exception):
         code: str = "",
         request_id: str = "",
         correlation_id: str = "",
+        retry_after_seconds: float | None = None,
     ):
         self.status = status
         self.url = url
         self.code = code
         self.request_id = request_id
         self.correlation_id = correlation_id
+        self.retry_after_seconds = retry_after_seconds
         self.reason = f"HTTP {status} {code}" if code else f"HTTP {status}"
         super().__init__(f"{self.reason} from {url}")
 
@@ -92,6 +103,37 @@ def _azure_error_code(response: Any) -> str:
     except Exception:
         return ""
     return code if re.fullmatch(r"[A-Za-z0-9]{1,64}", code) else ""
+
+
+def requested_wait_seconds(headers: Mapping[str, str], *, now: datetime | None = None) -> float | None:
+    """The longest wait Azure asked for before a retry, in seconds, or None when it didn't ask.
+
+    Azure can send `Retry-After` (seconds, or an HTTP date to wait until) and, from Cost Management,
+    one `x-ms-ratelimit-...-retry-after` header in seconds for each limit that was hit. A retry only
+    succeeds once every limit has cleared, so the longest wait wins.
+    """
+    waits = [
+        wait
+        for name, value in headers.items()
+        if name.lower() == "retry-after" or _RATE_LIMIT_RETRY_AFTER.fullmatch(name)
+        if (wait := _wait_seconds(value, now or datetime.now(timezone.utc))) is not None
+    ]
+    return max(waits, default=None)
+
+
+def _wait_seconds(value: str, now: datetime) -> float | None:
+    """A retry-after header value as seconds from `now`: a number of seconds, or an HTTP date."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            until = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        seconds = (until - now).total_seconds()
+    return max(0.0, seconds) if math.isfinite(seconds) else None
 
 
 def is_https_on(url: str, host: str) -> bool:
@@ -174,6 +216,7 @@ class LiveTransport:
                     code=_azure_error_code(response),
                     request_id=response.headers.get("x-ms-request-id", ""),
                     correlation_id=response.headers.get("x-ms-correlation-request-id", ""),
+                    retry_after_seconds=requested_wait_seconds(response.headers),
                 )
             payload: dict[str, Any] = response.json()
             return payload
