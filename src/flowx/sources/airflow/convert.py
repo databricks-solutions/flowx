@@ -17,6 +17,7 @@ from pathlib import Path
 from flowx.adapter.predicates import walk_activities
 from flowx.ir_serde import pipeline_to_dict
 from flowx.models.ir import PlaceholderActivity
+from flowx.sources.airflow.discover import is_ready_to_deploy, print_disclosures
 from flowx.sources.airflow.loader import load_pipelines
 
 logger = logging.getLogger(__name__)
@@ -91,11 +92,14 @@ def main(argv: list[str] | None = None) -> int:
         (work_dir / "gaps.json").write_text(json.dumps(gaps, indent=2, default=str), encoding="utf-8")
 
     total_tasks = sum(len(p.tasks) for p in pipelines)
+    ready = sum(1 for pipeline in pipelines if is_ready_to_deploy(pipeline))
     print("\nAirflow Translation Summary")
     print("===========================")
     print(f"DAGs translated:    {len(pipelines)}")
+    print(f"  Ready to deploy:  {ready}  (verified, no gaps or placeholders)")
     print(f"Total tasks:        {total_tasks}")
-    print(f"Agentic gaps:       {len(gaps)}")
+    print(f"Placeholders:       {len(gaps)}  (agentic gaps; must be translated before deploying)")
+    print_disclosures(pipelines)
     print(f"\nTranslation report (intermediate): {report_file}")
     return 1 if any(pipeline.reconciliation_status == "failed" for pipeline in pipelines) else 0
 

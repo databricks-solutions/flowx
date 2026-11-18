@@ -106,6 +106,44 @@ def test_airflow_inventory_persists_audit_status_counts_and_findings() -> None:
     assert entry["transformations"] == [{"code": "task_key_collision_resolved"}]
     assert inventory["summary"]["activity_count"] == 8
     assert inventory["summary"]["deterministic_coverage_pct"] == 87.5
+    assert entry["ready_to_deploy"] is False
+    assert inventory["summary"]["ready_to_deploy_count"] == 0
+
+
+def test_only_a_verified_included_dag_is_ready_to_deploy() -> None:
+    pipelines = [
+        Pipeline(name="verified", reconciliation_status="verified", migration_status="included"),
+        Pipeline(name="gaps", reconciliation_status="verified_with_gaps", migration_status="included"),
+        Pipeline(name="excluded", reconciliation_status="verified", migration_status="excluded"),
+    ]
+
+    inventory = build_inventory_dict(pipelines, "/src")
+
+    assert [entry["ready_to_deploy"] for entry in inventory["pipelines"]] == [True, False, False]
+    assert inventory["summary"]["ready_to_deploy_count"] == 1
+
+
+def test_discover_summary_leads_with_converted_tasks_and_lists_job_disclosures(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dags = tmp_path / "dags"
+    dags.mkdir()
+    (dags / "dag.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d', schedule_interval='0 1 * * *') as dag:\n"
+        "    t = BashOperator(task_id='t', bash_command='$TOOL run')\n",
+        encoding="utf-8",
+    )
+
+    discover_main(["--source-dir", str(dags), "--output-dir", str(tmp_path / "out")])
+
+    output = capsys.readouterr().out
+    assert "Ready to deploy:    0" in output
+    assert "Converted:            0.0% of tasks" in output
+    assert "Translation path" not in output
+    assert "schedule is emitted paused" in output
+    assert "flowx used UTC" in output
 
 
 def test_airflow_profile_categories_never_mix_audited_and_synthetic_tasks() -> None:
