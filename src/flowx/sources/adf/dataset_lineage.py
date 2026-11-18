@@ -9,8 +9,11 @@ Each read or write gets two keys, and :mod:`flowx.lineage` joins on them:
   it is the structural path signature (:func:`path_signature`): the folder and file
   name with literal text kept and one ``<P>`` slot per run-time value, prefixed
   ``ST[<store>]/`` when the store is known. It is empty when nothing literal anchors
-  the path, when the activity overrides the dataset's location at run time, and it
-  is never the bare dataset name, so two opaque references never join by name.
+  the path, when the activity overrides the dataset's location at run time, when the
+  dataset names a store that cannot be proven (a run-time container on an account
+  passed as a linked service parameter, say) and when the dataset is missing from
+  the export. It is never the bare dataset name, so two opaque references never
+  join by name.
 
 The identity lives in :mod:`~flowx.sources.adf.dataset_identity`, the store that
 qualifies a signature in :mod:`~flowx.sources.adf.dataset_store`, and the
@@ -124,9 +127,9 @@ def _dataset_ref_to_asset(
     path signature, else empty. It is never the bare dataset name, so two opaque
     references cannot join by name; an empty signature joins nothing but still
     records the read or write. With *location_overridden* neither key is derived.
-    A dataset that names its store but cannot prove it (see
-    :func:`resolve_dataset_store`) gets no signature, because a folder shape alone
-    cannot tell two such stores apart.
+    A dataset that names its store but cannot prove it, or that is missing from the
+    export (see :func:`resolve_dataset_store`), gets no signature, because a folder
+    shape alone cannot tell two such stores apart.
     """
     if location_overridden:
         return DataAsset(signature="", identity=None, asset_type=_asset_type(dataset_ref, definitions))

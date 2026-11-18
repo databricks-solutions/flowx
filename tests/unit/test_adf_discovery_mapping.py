@@ -47,7 +47,9 @@ def test_activity_maps_1to1_retaining_type_and_raw() -> None:
     assert isinstance(node, SourceNode)
     assert node.source == SOURCE_ADF
     assert node.name == "Run Notebook"
-    assert node.task_key == "Run Notebook"
+    assert node.source_id == "Run Notebook"
+    # The task key is the one convert gives the activity, so the two phases join.
+    assert node.task_key == "Run_Notebook"
     # ADF type is retained verbatim as native_type.
     assert node.native_type == "DatabricksNotebook"
     # Verbatim source dict preserved for lossless fallback.

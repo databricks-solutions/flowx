@@ -35,6 +35,7 @@ from flowx.models.adf_ast import (
 from flowx.models.discovery import SourceGraph
 from flowx.models.ir import Lineage, MotifAnnotation
 from flowx.models.motifs import DetectedMotif
+from flowx.utils import to_case_preserving_key
 
 logger = logging.getLogger(__name__)
 
@@ -937,7 +938,9 @@ def attach_motifs_to_graphs(graphs: list[SourceGraph], motifs_by_pipeline: Mappi
 
     Motifs are deterministic facts about the pipeline, so they belong in the saved
     graph next to its edges. Detection itself still runs on the ADF definitions;
-    this only copies the results onto the graph, member activities untouched.
+    this only copies the results onto the graph, member activities untouched. Each
+    member is named by the task key convert gives it (:func:`to_case_preserving_key`
+    of the activity name), the same key its discovery node carries.
     """
     for graph in graphs:
         detections = motifs_by_pipeline.get(graph.name)
@@ -948,7 +951,7 @@ def attach_motifs_to_graphs(graphs: list[SourceGraph], motifs_by_pipeline: Mappi
         graph.lineage.motifs = [
             MotifAnnotation(
                 motif_id=motif.definition.motif_id,
-                member_task_keys=list(motif.matched_activities),
+                member_task_keys=[to_case_preserving_key(name) for name in motif.matched_activities],
                 display_name=motif.definition.display_name,
                 databricks_replacement=motif.definition.databricks_replacement,
                 notes=list(motif.confidence_notes),

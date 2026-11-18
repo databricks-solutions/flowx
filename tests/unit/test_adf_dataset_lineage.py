@@ -413,9 +413,16 @@ def test_unresolved_reference_falls_back_to_path_signature() -> None:
     dataset = AdfDataset(
         name="ds_wm",
         type="DelimitedText",
-        properties={"typeProperties": {"location": {"fileSystem": "@dataset().fs"}}},
+        properties={
+            "typeProperties": {"location": {"fileSystem": "@dataset().fs"}},
+            "linkedServiceName": {"referenceName": "ls_lake"},
+        },
     )
-    definitions = _definitions(ds_wm=dataset)
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_wm": dataset},
+        linked_services={"ls_lake": _adls_linked_service("ls_lake", account="acctone")},
+    )
     reference = AdfDatasetReference(
         reference_name="ds_wm",
         parameters={"folderPath": "@concat('watermark/', item().entity)", "fileName": "version.txt"},
@@ -423,7 +430,7 @@ def test_unresolved_reference_falls_back_to_path_signature() -> None:
     activity = AdfActivity(name="Read WM", type="Lookup", type_properties={"dataset": _ref_dict(reference)})
     reads, _ = activity_data_assets(activity, definitions)
     assert reads[0].identity is None
-    assert reads[0].signature == "FP[watermark/<P>]/FN[version.txt]"
+    assert reads[0].signature == "ST[<P>@acctone]/FP[watermark/<P>]/FN[version.txt]"
 
 
 def test_unresolved_reference_without_path_anchor_has_empty_signature() -> None:
@@ -1639,18 +1646,58 @@ def test_literal_file_systems_on_an_unprovable_store_give_no_signature(
 
 
 @pytest.mark.parametrize("linked_service", ["ls_generic_store", "[parameters('ls')]"])
-def test_parameterised_file_system_on_an_unprovable_store_keeps_its_unqualified_signature(
-    linked_service: str,
-) -> None:
-    """A file system left as ``@dataset().fs`` names no store, so the folder shape still joins, unqualified."""
+def test_parameterised_file_system_on_an_unprovable_store_gives_no_signature(linked_service: str) -> None:
+    """A run-time file system on an account nobody can prove is at least as unknown as a literal one, so no edge."""
     definitions = _unprovable_store_definitions(
         "AzureBlobFSLocation", "fileSystem", linked_service, ds_out="@dataset().fs", ds_in="@dataset().fs"
     )
     _, writes = activity_data_assets(_landing_copy("Write", dataset="ds_out", produced=True), definitions)
     reads, _ = activity_data_assets(_landing_copy("Read", dataset="ds_in", produced=False), definitions)
 
+    assert writes[0].signature == reads[0].signature == ""
     edges = data_edges_from_endpoints([("Write", asset) for asset in writes], [("Read", asset) for asset in reads])
-    assert [(edge.match_kind, edge.match_key) for edge in edges] == [("signature", "FP[landing/<P>]/FN[]")]
+    assert edges == []
+
+
+def test_dynamic_containers_on_accounts_passed_to_one_generic_linked_service_do_not_join() -> None:
+    """``acctone`` and ``accttwo`` reach one generic linked service as parameters, so the folder proves nothing."""
+    generic_store = AdfLinkedService(
+        name="ls_generic_store",
+        type="AzureBlobFS",
+        properties={
+            "typeProperties": {"url": "https://@{linkedService().account}.dfs.core.windows.net"},
+            "parameters": {"account": {"type": "String"}},
+        },
+    )
+
+    def _on_account(name: str, account: str) -> AdfDataset:
+        dataset = _adls_dataset(
+            name, file_system="@dataset().fs", folder_path="@dataset().folderPath", linked_service="ls_generic_store"
+        )
+        dataset.properties["linkedServiceName"]["parameters"] = {"account": account}
+        return dataset
+
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_a": _on_account("ds_a", "acctone"), "ds_b": _on_account("ds_b", "accttwo")},
+        linked_services={"ls_generic_store": generic_store},
+    )
+    _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_a", produced=True), definitions)
+    reads, _ = activity_data_assets(_dynamic_container_copy("R", dataset="ds_b", produced=False), definitions)
+
+    assert writes[0].signature == reads[0].signature == ""
+    assert data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads]) == []
+
+
+def test_two_references_to_a_dataset_missing_from_the_export_do_not_join_on_the_folder() -> None:
+    """A dataset missing from the export could live in any store, so ``folderPath=landing/orders`` links nothing."""
+    definitions = AdfDefinitions(pipelines=[])
+    reference = AdfDatasetReference(reference_name="ds_missing", parameters={"folderPath": "landing/orders"})
+    _, writes = activity_data_assets(AdfActivity(name="W", type="Copy", outputs=[reference]), definitions)
+    reads, _ = activity_data_assets(AdfActivity(name="R", type="Copy", inputs=[reference]), definitions)
+
+    assert writes[0].signature == reads[0].signature == ""
+    assert data_edges_from_endpoints([("W", asset) for asset in writes], [("R", asset) for asset in reads]) == []
 
 
 def _dynamic_container_definitions(**accounts: str) -> AdfDefinitions:
