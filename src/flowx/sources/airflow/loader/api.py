@@ -38,8 +38,13 @@ def load_airflow_dags(
     *,
     dbt_mode: str = "static",
     source_file: str | None = None,
+    source_root: Path | None = None,
 ) -> list[Pipeline]:
-    """Parses every independently declared Airflow DAG in a Python file."""
+    """Parses every independently declared Airflow DAG in a Python file.
+
+    *source_root* is the folder discover was pointed at; project code the DAG imports is read from the
+    DAG's folder up to it.
+    """
     source = Path(dag_path).read_text(encoding="utf-8")
     module = _expand_top_level_loops(ast.parse(source))
     declarations = _top_level_dag_declarations(module)
@@ -65,6 +70,7 @@ def load_airflow_dags(
                     other.variable for other in declarations if other is not declaration and other.variable
                 ),
                 source_file=source_file or dag_path.name,
+                source_root=source_root,
             )
         )
     return pipelines
@@ -96,6 +102,7 @@ def load_pipelines(
             dag_path,
             dbt_mode=dbt_mode,
             source_file=source_audit.source_label(dag_path, root),
+            source_root=root,
         )
     ]
     if pipeline is not None:

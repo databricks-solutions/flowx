@@ -128,6 +128,7 @@ def _reconcile_pipeline(
     logical_date_resolver: tuple[NotebookActivity, dict[str, Any]] | None = None,
     timezone_disclosure: dict[str, Any] | None = None,
     dag_id_disclosure: dict[str, Any] | None = None,
+    setting_sources: dict[str, list[dict[str, Any]]] | None = None,
 ) -> Pipeline:
     """Reconciles an independent source audit with captured graph and emitted IR."""
     findings: list[dict[str, Any]] = list(semantic_findings)
@@ -522,7 +523,15 @@ def _reconcile_pipeline(
                 severity="gap",
                 message=disposition["message"],
                 candidate=candidate,
-                details={"name": name, "rationale": disposition["rationale"]},
+                details={
+                    "name": name,
+                    "rationale": disposition["rationale"],
+                    **(
+                        {"imported_sources": setting_sources[name]}
+                        if setting_sources and name in setting_sources
+                        else {}
+                    ),
+                },
             )
         )
 

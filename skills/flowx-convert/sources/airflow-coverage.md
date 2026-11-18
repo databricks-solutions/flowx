@@ -51,6 +51,8 @@ safe fallback is a flagged, failing task rather than a silent omission. Callable
 (`**context` / `ti`) or XCom, and runtime-branching decorators, take the same route rather than
 emitting code that fails at runtime.
 
+When a gap uses project code the DAG file imports (a custom operator class, an imported `python_callable`, a query string, or a shared `default_args`), its `raw_definition.imported_sources` (or the finding's `details.imported_sources` for a DAG setting) lists each import with the definition's source. The definition is looked up from the DAG's folder up to the folder discover was pointed at, never through a symbolic link leading outside; a module that is not there is recorded as `unresolved`. Airflow and standard library imports are not listed.
+
 The resolver consumes the pinned `airflow-to-dabs` Flowx provider profile. It receives one flowx-produced gap envelope and cannot express graph or task-policy changes. Accepted `resolved` candidates contribute to mechanically validated code-attached coverage, but remain agentic and do not increase deterministic coverage. `needs_input`, `deferred`, and unreviewed candidates remain linked failing placeholders.
 
 ## Not yet supported
