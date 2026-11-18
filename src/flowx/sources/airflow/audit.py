@@ -244,6 +244,18 @@ class _SourceAuditor(ast.NodeVisitor):
 
     def _follow_dict_calls(self, node: ast.AST) -> None:
         for call in ast.walk(node):
+            if isinstance(call, ast.Call):
+                function = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", "")
+                if not (
+                    function in {"dict", "len", "list", "print", "repr", "sorted", "str", "deepcopy", "dumps"}
+                    or function in self.taskflow_defs
+                    or function.endswith(("Operator", "Sensor", "DAG", "TaskGroup", "Group"))
+                    or _is_operator(function)
+                ):
+                    for value in [*call.args, *(item.value for item in call.keywords if item.arg != "default_args")]:
+                        passed = value.value if isinstance(value, ast.Starred) else value
+                        if isinstance(passed, ast.Name):
+                            self.dict_items.pop(passed.id, None)
             if (
                 isinstance(call, ast.Call)
                 and isinstance(call.func, ast.Attribute)
@@ -273,6 +285,11 @@ class _SourceAuditor(ast.NodeVisitor):
             return
         updated.update({str(keyword.arg): keyword.value for keyword in call.keywords})
         self.dict_items[name] = {**self.dict_items[name], **updated}
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None and isinstance(node.target, ast.Name):
+            self._follow_dict_items(ast.copy_location(ast.Assign(targets=[node.target], value=node.value), node))
+        self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         if isinstance(node.target, ast.Name):

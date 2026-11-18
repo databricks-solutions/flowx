@@ -83,25 +83,35 @@ def _unquoted_text(command: str) -> str:
     return "".join(output)
 
 
-def assigned_names(command: str) -> set[str]:
-    """Returns the variable names a command sets itself, by assignment, ``for``, ``read``, or ``getopts``."""
-    names = {match.group("name") for pattern in _ASSIGNED for match in pattern.finditer(command)}
+def assignments(command: str) -> dict[str, int]:
+    """Returns where a command first sets each variable itself, by assignment, ``for``, ``read``, or ``getopts``."""
+    first: dict[str, int] = {}
+
+    def add(name: str, position: int) -> None:
+        first[name] = min(position, first.get(name, position))
+
+    for pattern in _ASSIGNED:
+        for match in pattern.finditer(command):
+            add(match.group("name"), match.start("name"))
     for match in _READ.finditer(command):
-        names.update(match.group("names").split())
-    return names
+        for name in match.group("names").split():
+            add(name, match.start("names"))
+    return first
 
 
 def environment_references(command: str) -> list[str]:
     """Returns the environment variables a shell command reads but never sets, in order of first use.
 
-    Special parameters (``$1``, ``$?``, ``$@``), variables every shell provides, text in single quotes or
-    quoted here-documents, and Jinja expressions are not references.
+    A variable counts as set only for the uses after the command sets it. Special parameters (``$1``, ``$?``,
+    ``$@``), variables every shell provides, text in single quotes or quoted here-documents, and Jinja
+    expressions are not references.
     """
     text = _unquoted_text(_QUOTED_HEREDOC.sub("\n", _JINJA.sub(" ", command)))
-    assigned = assigned_names(text)
+    set_at = assignments(text)
     references: list[str] = []
     for match in _REFERENCE.finditer(text):
         name = match.group("braced") or match.group("plain")
-        if name not in assigned and name not in SHELL_PROVIDED and name not in references:
+        set_before = name in set_at and set_at[name] < match.start()
+        if not set_before and name not in SHELL_PROVIDED and name not in references:
             references.append(name)
     return references

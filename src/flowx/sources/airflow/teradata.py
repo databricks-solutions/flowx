@@ -114,6 +114,23 @@ def _strip_heredocs(command: str) -> str:
     return _HEREDOC.sub(lambda match: f"{match.group('rest')}\n", command)
 
 
+# Shell operators, longest first. shlex joins adjacent punctuation, so ``);`` arrives as one token.
+_OPERATORS = (">>", "<<", "&&", "||", ";;", "&>", ">&", "<&", "<>", ">|", "|&", ";", "&", "|", "(", ")", "<", ">")
+_OPERATOR_CHARACTERS = frozenset("();<>|&")
+
+
+def _split_operators(word: str) -> list[str]:
+    """Splits a run of shell punctuation such as ``);`` into its operators; any other word is returned whole."""
+    if not word or not set(word) <= _OPERATOR_CHARACTERS or word in _OPERATORS:
+        return [word]
+    operators: list[str] = []
+    while word:
+        operator = next(item for item in _OPERATORS if word.startswith(item))
+        operators.append(operator)
+        word = word[len(operator) :]
+    return operators
+
+
 def _shell_words(command: str) -> list[str] | None:
     """Splits a command into shell words and separators, with here-document bodies and comments removed.
 
@@ -130,7 +147,7 @@ def _shell_words(command: str) -> list[str] | None:
         return None
     words: list[str] = []
     in_comment = False
-    for word in raw_words:
+    for word in (operator for raw in raw_words for operator in _split_operators(raw)):
         if word == _LINE_BREAK:
             in_comment = False
             words.append(word)

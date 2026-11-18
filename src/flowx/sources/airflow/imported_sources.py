@@ -16,6 +16,8 @@ from typing import Any
 
 # Definitions above this size are recorded by path and size only.
 MAXIMUM_ATTACHED_SOURCE_BYTES = 64 * 1024
+# Module files above this size are not read.
+MAXIMUM_READ_BYTES = 1024 * 1024
 
 # Packages whose code is not part of the user's project.
 _EXTERNAL_PACKAGES = frozenset({"airflow", "pendulum", "cosmos", "airflow_dbt"}) | frozenset(sys.stdlib_module_names)
@@ -115,6 +117,39 @@ def _definition_source(text: str, name: str) -> str | None:
     return None
 
 
+def _reexported_source(package_init: Path, text: str, name: str, root: Path) -> tuple[Path, str] | None:
+    """Follows one ``from .module import name`` in a package ``__init__`` to the definition it re-exports."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if not (isinstance(node, ast.ImportFrom) and node.level == 1 and node.module):
+            continue
+        original = next((item.name for item in node.names if (item.asname or item.name) == name), None)
+        if original is None:
+            continue
+        module = package_init.parent.joinpath(*node.module.split("."))
+        for candidate in (module.with_suffix(".py"), module / "__init__.py"):
+            if candidate.is_file() and candidate.resolve().is_relative_to(root.resolve()):
+                content = _read_text(candidate)
+                source = _definition_source(content, original) if isinstance(content, str) else None
+                if source is not None:
+                    return candidate, source
+    return None
+
+
+def _read_text(path: Path) -> str | dict[str, Any]:
+    """Returns a file's text, or the fields that say why it was not read."""
+    try:
+        size = path.stat().st_size
+        if size > MAXIMUM_READ_BYTES:
+            return {"size_bytes": size, "unresolved": "the module file is too large to read"}
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        return {"unresolved": f"could not be read ({error})"}
+
+
 def resolve_import(imported: ImportedName, roots: tuple[Path, ...]) -> dict[str, Any]:
     """Describes where an imported name is defined, attaching its source when it is found and small."""
     record: dict[str, Any] = {"name": imported.local, "import": imported.statement()}
@@ -123,17 +158,21 @@ def resolve_import(imported: ImportedName, roots: tuple[Path, ...]) -> dict[str,
             continue
         if not candidate.resolve().is_relative_to(root.resolve()):
             return {**record, "unresolved": f"{candidate} is a symbolic link that leads outside {root}"}
-        try:
-            text = candidate.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as error:
-            return {**record, "resolved_path": str(candidate), "unresolved": f"could not be read ({error})"}
+        text = _read_text(candidate)
+        if not isinstance(text, str):
+            return {**record, "resolved_path": str(candidate), **text}
+        location: Path = candidate
         source = (
             text if is_module_itself or imported.attribute is None else _definition_source(text, imported.attribute)
         )
+        if source is None and imported.attribute is not None and candidate.name == "__init__.py":
+            reexported = _reexported_source(candidate, text, imported.attribute, root)
+            if reexported is not None:
+                location, source = reexported
         if source is None:
-            # A package __init__ may only re-export the name; keep looking in later candidates.
+            # The name may be a submodule of the package; keep looking in later candidates.
             continue
-        record["resolved_path"] = str(candidate)
+        record["resolved_path"] = str(location)
         size = len(source.encode("utf-8"))
         if size > MAXIMUM_ATTACHED_SOURCE_BYTES:
             record["size_bytes"] = size

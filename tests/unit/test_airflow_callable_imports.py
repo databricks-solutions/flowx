@@ -29,7 +29,7 @@ def _task(tmp_path: Path, setup: str, body: str):
     ("setup", "body", "missing"),
     [
         ("", "    import snowflake.connector\n    snowflake.connector.connect()\n", "snowflake"),
-        ("import pyodbc\n", "    pyodbc.connect('dsn')\n", "pyodbc"),
+        ("import oracledb\n", "    oracledb.connect('dsn')\n", "oracledb"),
         ("from libs.dq import run_checks\n", "    run_checks()\n", "libs"),
         ("from .helpers import clean\n", "    clean()\n", ".helpers"),
     ],
@@ -46,7 +46,8 @@ def test_callable_importing_a_worker_package_is_a_gap(tmp_path: Path, setup: str
     [
         ("import json\nimport os\n", "    print(json.dumps({'cwd': os.getcwd()}))\n"),
         ("import pandas as pd\n", "    import requests\n    print(pd.DataFrame(), requests.__name__)\n"),
-        ("import pyodbc\n", "    print('pyodbc is imported by the module but unused here')\n"),
+        ("import oracledb\n", "    print('oracledb is imported by the module but unused here')\n"),
+        ("import pyodbc\n", "    pyodbc.connect('dsn')\n"),
     ],
 )
 def test_callable_using_standard_and_runtime_packages_is_translated(tmp_path: Path, setup: str, body: str) -> None:

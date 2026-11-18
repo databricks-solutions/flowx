@@ -137,3 +137,33 @@ def test_relative_import_resolves_from_the_dag_folder(tmp_path: Path) -> None:
     sources = _sources(load_pipelines(tmp_path / "dags")[0], "copy")
 
     assert sources["CopyOperator"]["content"] == "class CopyOperator:\n    pass"
+
+
+def test_name_re_exported_by_a_package_is_followed(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "dags/team/dag.py": (
+                "from airflow import DAG\n"
+                "from libs import CopyOperator\n"
+                "with DAG(dag_id='d') as dag:\n"
+                "    copy = CopyOperator(task_id='copy')\n"
+            ),
+            "dags/libs/__init__.py": "from .custom import CopyOperator\n",
+            "dags/libs/custom.py": "class CopyOperator:\n    pass\n",
+        },
+    )
+
+    sources = _sources(load_pipelines(tmp_path / "dags")[0], "copy")
+
+    assert sources["CopyOperator"]["resolved_path"] == str(tmp_path / "dags" / "libs" / "custom.py")
+    assert sources["CopyOperator"]["content"] == "class CopyOperator:\n    pass"
+
+
+def test_module_file_too_large_to_read_is_recorded(tmp_path: Path) -> None:
+    sources = _sources(
+        _load(tmp_path, {**_PROJECT, "dags/libs/operators.py": "class CopyOperator:\n    pass\n" + "#" * 1_100_000}),
+        "copy",
+    )
+
+    assert sources["CopyOperator"]["unresolved"] == "the module file is too large to read"

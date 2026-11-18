@@ -50,10 +50,7 @@ def load_airflow_dags(
     source = Path(dag_path).read_text(encoding="utf-8")
     module = _expand_top_level_loops(ast.parse(source))
     declarations = _top_level_dag_declarations(module)
-    if not declarations:
-        generator = dag_generator(module)
-        if generator is not None:
-            return [_failed_dag_generator_pipeline(dag_path, generator, source_file=source_file or dag_path.name)]
+    generator = dag_generator(module, declarations)
     pipelines: list[Pipeline] = []
     for declaration in declarations:
         if declaration.unsupported_reason is not None:
@@ -77,6 +74,15 @@ def load_airflow_dags(
                 ),
                 source_file=source_file or dag_path.name,
                 source_root=source_root,
+            )
+        )
+    if generator is not None:
+        pipelines.append(
+            _failed_dag_generator_pipeline(
+                dag_path,
+                generator,
+                source_file=source_file or dag_path.name,
+                name=f"{Path(dag_path).stem}__generated_dags" if declarations else None,
             )
         )
     return pipelines

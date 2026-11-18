@@ -84,7 +84,8 @@ _SHELL_BUILTINS = frozenset(
     }
 )
 
-# Programs on the PATH of Databricks compute: GNU coreutils and the usual Linux userland, plus Python.
+# Programs on the PATH of Databricks Runtime 16.4 LTS: the Ubuntu 24.04 userland (coreutils, findutils,
+# procps, archivers, curl, git) with Java 17, Python 3.12, R 4.4, and the Databricks CLI.
 AVAILABLE_PROGRAMS = frozenset(
     {
         "awk",
@@ -109,13 +110,17 @@ AVAILABLE_PROGRAMS = frozenset(
         "env",
         "expr",
         "fgrep",
+        "databricks",
         "find",
+        "free",
+        "git",
         "grep",
         "gunzip",
         "gzip",
         "head",
         "hostname",
         "id",
+        "java",
         "join",
         "ln",
         "ls",
@@ -125,16 +130,20 @@ AVAILABLE_PROGRAMS = frozenset(
         "mv",
         "nice",
         "nohup",
+        "nproc",
         "paste",
         "pip",
         "pip3",
         "printenv",
+        "ps",
         "python",
         "python3",
+        "R",
         "readlink",
         "realpath",
         "rm",
         "rmdir",
+        "Rscript",
         "sed",
         "seq",
         "sh",
@@ -153,6 +162,7 @@ AVAILABLE_PROGRAMS = frozenset(
         "truncate",
         "uname",
         "uniq",
+        "uptime",
         "unzip",
         "wc",
         "wget",

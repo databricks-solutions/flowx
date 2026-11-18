@@ -10,6 +10,7 @@ import pytest
 from flowx.adapter.session import MigrationInputSession
 from flowx.models.ir import NotebookActivity, Pipeline
 from flowx.reporting.coverage import COVERAGE_METRIC_COLUMNS, build_coverage_rows
+from flowx.sources.airflow.convert import main as convert_main
 from flowx.sources.airflow.discover import _profile_row, build_inventory_dict
 from flowx.sources.airflow.discover import main as discover_main
 
@@ -144,6 +145,29 @@ def test_discover_summary_leads_with_converted_tasks_and_lists_job_disclosures(
     assert "Translation path" not in output
     assert "schedule is emitted paused" in output
     assert "flowx used UTC" in output
+    assert "16 by default" in output
+
+
+def test_convert_summary_reports_converted_tasks_like_discover(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dags = tmp_path / "dags"
+    dags.mkdir()
+    (dags / "dag.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "from settings import SHARED\n"
+        "with DAG(dag_id='d', default_args=SHARED) as dag:\n"
+        "    a = BashOperator(task_id='a', bash_command='echo a')\n"
+        "    b = BashOperator(task_id='b', bash_command='$TOOL run')\n",
+        encoding="utf-8",
+    )
+
+    convert_main(["--source-dir", str(dags), "--output-dir", str(tmp_path / "out")])
+
+    output = capsys.readouterr().out
+    assert "Total tasks:          2" in output
+    assert "Converted:            50.0% of tasks" in output
 
 
 def test_airflow_profile_categories_never_mix_audited_and_synthetic_tasks() -> None:

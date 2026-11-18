@@ -64,3 +64,33 @@ def test_helper_that_only_reads_globals_is_not_reported(tmp_path: Path) -> None:
     (tmp_path / "registry.py").write_text("def lookup(name):\n    return globals().get(name)\n", encoding="utf-8")
 
     assert discover_dags(tmp_path) == []
+
+
+def test_import_only_helper_is_not_reported(tmp_path: Path) -> None:
+    (tmp_path / "helper.py").write_text("import dagfactory\n", encoding="utf-8")
+
+    assert discover_dags(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "generation",
+    [
+        "from configs import build_all\nglobals().update(build_all())\n",
+        "import dagfactory\ndagfactory.DagFactory('/opt/airflow/dags/config.yml').generate_dags(globals())\n",
+    ],
+)
+def test_generated_dags_next_to_a_static_dag_are_reported(tmp_path: Path, generation: str) -> None:
+    (tmp_path / "mixed.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='static') as dag:\n"
+        "    BashOperator(task_id='t', bash_command='echo hi')\n" + generation,
+        encoding="utf-8",
+    )
+
+    pipelines = load_pipelines(tmp_path)
+
+    assert [(pipeline.name, pipeline.reconciliation_status) for pipeline in pipelines] == [
+        ("static", "verified"),
+        ("mixed__generated_dags", "failed"),
+    ]

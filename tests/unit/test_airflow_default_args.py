@@ -109,3 +109,23 @@ def test_key_popped_into_a_variable_is_not_audited(tmp_path: Path) -> None:
 
     assert pipeline.reconciliation_status == "verified"
     assert _task(pipeline).max_retries == 2
+
+
+def test_dict_passed_to_a_function_before_the_dag_is_a_gap(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "from libs import mutate\ndefault_args = {'retries': 1}\nmutate(default_args)")
+
+    assert "default_args" in _gap_names(pipeline)
+
+
+def test_dict_read_by_a_builtin_is_still_followed(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "default_args = {'retries': 2}\nprint(len(default_args))")
+
+    assert pipeline.reconciliation_status == "verified"
+    assert _task(pipeline).max_retries == 2
+
+
+def test_annotated_dict_is_read_like_a_plain_one(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "default_args: dict = {'retries': 3}")
+
+    assert pipeline.reconciliation_status == "verified"
+    assert _task(pipeline).max_retries == 3

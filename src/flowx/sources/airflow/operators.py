@@ -20,7 +20,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from flowx.models.ir import (
     Activity,
@@ -677,12 +677,29 @@ def _shell_activity(ctx: OperatorContext, command_kwarg: str) -> Activity:
     environment = shell_environment.environment_references(command)
     if environment:
         machine = "SSH host" if ctx.operator == "SSHOperator" else "Airflow worker"
-        names = ", ".join(f"${name}" for name in environment)
+        task_environment = ctx.kwargs.get("env")
+        task_names = (
+            {key.value for key in task_environment.keys if isinstance(key, ast.Constant)}
+            if isinstance(task_environment, ast.Dict)
+            else set()
+        )
+        sources = [
+            *(
+                [f"{_variable_list(name for name in environment if name in task_names)} from the task's env argument"]
+                if task_names & set(environment)
+                else []
+            ),
+            *(
+                [f"{_variable_list(name for name in environment if name not in task_names)} from the {machine}"]
+                if set(environment) - task_names
+                else []
+            ),
+        ]
         return _placeholder(
             ctx,
-            f"This {ctx.operator} command reads environment variable(s) {names}, which come from the {machine} "
-            "and are not set on Databricks compute. Replace them with values, job parameters, or compute "
-            "environment variables, then translate the command.",
+            f"This {ctx.operator} command reads environment variable(s) {' and '.join(sources)}, which are not set "
+            "on Databricks compute. Replace them with values, job parameters, or compute environment variables, then "
+            "translate the command.",
             {"environment_variables": environment},
         )
     submit = parse_spark_submit(command)
@@ -700,6 +717,10 @@ def _shell_activity(ctx: OperatorContext, command_kwarg: str) -> Activity:
             {"unavailable_programs": programs},
         )
     return _sh_notebook_activity(ctx, command)
+
+
+def _variable_list(names: Iterable[str]) -> str:
+    return ", ".join(f"${name}" for name in names)
 
 
 def _build_bash(ctx: OperatorContext) -> Activity:

@@ -570,3 +570,7 @@ def test_unclosed_jinja_tag_does_not_hide_a_utility(command: str) -> None:
 )
 def test_parse_check_does_not_fall_back_before_unclosed_jinja(command: str, parses: bool) -> None:
     assert teradata.parses(command) is parses
+
+
+def test_subshell_holding_only_an_assignment_does_not_hide_a_utility() -> None:
+    assert teradata.find_utilities("(TOKEN=x); bteq < load.bteq") == ["bteq"]

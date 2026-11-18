@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow.loader.ast_utils import (
     _UNRESOLVED,
     _bind_constants,
+    _canonical_name,
     _construct_name,
     _import_aliases,
     _safe_static_value,
@@ -304,15 +306,25 @@ def _module_for_dag(
 _DAG_GENERATOR_PACKAGES = frozenset({"dagfactory", "gusty"})
 
 
-def dag_generator(module: ast.Module) -> ast.AST | None:
-    """Returns the statement through which a module builds DAGs flowx cannot see, or None.
+def dag_generator(module: ast.Module, declarations: Sequence[DagDeclaration] = ()) -> ast.AST | None:
+    """Returns the first construct through which a module builds DAGs flowx cannot see, or None.
 
-    That is a call into a DAG-generating library (dag-factory, gusty), or a module that registers objects
-    through ``globals()`` (an item assignment, ``globals().update(...)``, or ``globals()`` passed to a
-    function), which Airflow scans for DAGs. Reading ``globals()`` does not count. Called only for modules
-    with no DAG declaration flowx recognizes, so such a file is reported rather than skipped.
+    That is a call into a DAG-generating library (dag-factory, gusty), or a registration through ``globals()``
+    (an item assignment, ``globals().update(...)``, or ``globals()`` passed to a function), which Airflow scans
+    for DAGs. Reading ``globals()`` or only importing a library does not count, and neither does a
+    registration that is one of *declarations*, such as a static factory call stored with ``globals()[name]``.
     """
     aliases = _import_aliases(module)
+    declared = {id(node) for declaration in declarations for node in ast.walk(declaration.node)}
+    dag_variables = {
+        name for declaration in declarations for name in (declaration.variable, declaration.target_dag_variable) if name
+    } | {
+        item.optional_vars.id
+        for declaration in declarations
+        if isinstance(declaration.node, ast.With)
+        for item in declaration.node.items
+        if isinstance(item.optional_vars, ast.Name)
+    }
 
     def is_globals(node: ast.AST) -> bool:
         return (
@@ -323,26 +335,27 @@ def dag_generator(module: ast.Module) -> ast.AST | None:
         )
 
     for node in ast.walk(module):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            names = [item.name for item in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-            if any(name.split(".")[0] in _DAG_GENERATOR_PACKAGES for name in names):
-                return node
+        if id(node) in declared:
+            continue
         if isinstance(node, ast.Call):
-            target = aliases.get(node.func.id, "") if isinstance(node.func, ast.Name) else ""
-            if target.split(".")[0] in _DAG_GENERATOR_PACKAGES:
+            if _canonical_name(node.func, aliases).split(".")[0] in _DAG_GENERATOR_PACKAGES:
                 return node
             if any(is_globals(argument) for argument in [*node.args, *(item.value for item in node.keywords)]):
                 return node
             if isinstance(node.func, ast.Attribute) and node.func.attr == "update" and is_globals(node.func.value):
                 return node
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Subscript) and is_globals(target.value) for target in node.targets
+        if (
+            isinstance(node, ast.Assign)
+            and not (isinstance(node.value, ast.Name) and node.value.id in dag_variables)
+            and any(isinstance(target, ast.Subscript) and is_globals(target.value) for target in node.targets)
         ):
             return node
     return None
 
 
-def _failed_dag_generator_pipeline(dag_path: Path, node: ast.AST, *, source_file: str) -> Pipeline:
+def _failed_dag_generator_pipeline(
+    dag_path: Path, node: ast.AST, *, source_file: str, name: str | None = None
+) -> Pipeline:
     """Returns a failed, reportable pipeline for a module that builds its DAGs in a way flowx cannot follow."""
     span = _span(node)
     candidate = source_audit.AuditCandidate(
@@ -366,7 +379,7 @@ def _failed_dag_generator_pipeline(dag_path: Path, node: ast.AST, *, source_file
         ),
         candidate=candidate,
     )
-    return _failed_pipeline(Path(dag_path).stem, finding, source_file)
+    return _failed_pipeline(name or Path(dag_path).stem, finding, source_file)
 
 
 def _failed_dag_declaration_pipeline(

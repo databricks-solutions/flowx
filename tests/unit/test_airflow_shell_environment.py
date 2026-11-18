@@ -25,6 +25,8 @@ from flowx.sources.airflow.shell_environment import environment_references
         ("[[ $LINE =~ ^([a-z]+) ]] && echo ${BASH_REMATCH[1]} from $BASH_SOURCE", ["LINE"]),
         ("$SPARK_HOME/bin/pyspark --version && echo $JAVA_HOME", []),
         ("OUT=/tmp/x; echo $OUT", []),
+        ('echo "$TOKEN"; TOKEN=x', ["TOKEN"]),
+        ("echo $X; export X=1", ["X"]),
         ("export TARGET=prod && dbt run --target $TARGET", []),
         ("for f in a b; do echo $f; done", []),
         ("read -r LINE < f; echo $LINE", []),
@@ -79,3 +81,10 @@ def test_spark_submit_named_through_spark_home_is_lifted(tmp_path: Path) -> None
     )
 
     assert not isinstance(task, PlaceholderActivity)
+
+
+def test_variable_from_the_env_argument_is_named_as_such(tmp_path: Path) -> None:
+    task = _task(tmp_path, "BashOperator(task_id='t', bash_command='echo $A $B', env={'A': '1'})")
+
+    assert isinstance(task, PlaceholderActivity)
+    assert "$A from the task's env argument and $B from the Airflow worker" in task.comment
