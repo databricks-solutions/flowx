@@ -1,58 +1,29 @@
 """Validate agent-authored insights against the discover inventory, then record them.
 
-The discover phase writes a purely deterministic ``metadata/inventory.json`` (source,
-pipelines, per-pipeline ``lineage``, summary). An external agent then *authors* an
-``insights`` object -- its judgment about factory-wide architecture, per-pipeline intent
-and recommended Databricks patterns, and cross-pipeline relationships (see
-:mod:`flowx.models.insights`). This module *enriches* the inventory: it validates the
-authored JSON against the real inventory and, **only when clean**, records it in
-``metadata/agentic_insights.json`` and rebuilds ``inventory.json`` from the saved source graphs
-plus that document -- it never patches the inventory in place.
+Discover writes a deterministic ``metadata/inventory.json``. An agent then authors an ``insights``
+object: its judgment about the factory, each pipeline and how pipelines couple (see
+:mod:`flowx.models.insights`). Enrich checks that object against the real inventory and, only when it
+is clean, writes it to ``metadata/agentic_insights.json`` and rebuilds ``inventory.json`` from the saved
+``source_graphs.json`` plus that file (or, when the inventory records no graphs hash, from discover's
+deterministic part). The inventory is always rebuilt, never patched, and re-running with the same
+insights writes the same bytes.
 
-There is **no LLM here** -- the tool only validates and records, mirroring the
-author-then-validate-record contract :mod:`flowx.agentic` uses for gap resolution. That
-keeps the deterministic inventory trustworthy and every insight accountable:
+The checks:
 
-* every ``pipeline`` and every relationship endpoint must be a pipeline the inventory lists
-  (foreign-key validation), except that a ``control`` relationship whose edge resolves (below) may
-  name a pipeline discover left unlisted, since that edge proves the pipeline is in the export;
-* a ``control`` relationship edge must resolve to a real ``ControlEdge`` in the inventory's
-  ``lineage`` -- the full ``(from, to, via_task_key)`` triple, so the annotation connects
-  exactly the pipelines it claims, not merely some edge that shares a ``via_task_key``;
-* an ``inferred`` edge has nothing to resolve against, so it must instead carry a non-empty
-  ``evidence`` string and a ``confidence`` level.
+* every ``pipeline`` and relationship endpoint must be a pipeline the inventory lists, except that a
+  ``control`` relationship whose edge resolves may name a pipeline discover left unlisted;
+* a ``control`` relationship must match a real control edge on the full ``(from, to, via_task_key)``
+  triple, so it connects exactly the pipelines it claims;
+* an ``inferred`` relationship has nothing to match, so it must carry ``evidence`` and a ``confidence``.
 
-Validated insights are written to their own file, ``metadata/agentic_insights.json``, which
-records the persisted ``source_graphs.json`` hash it was checked against
-(``source_graphs_sha256``) and carries its own content hash (``agentic_insights_sha256``).
-``inventory.json`` is then rebuilt by the library alone: when the inventory records a
-``source_graphs_sha256``, its deterministic part is projected again from ``source_graphs.json``
-(byte-identical to what discover writes), otherwise discover's deterministic part is reused; that
-same block is added under ``insights``, so the inventory is always built from those two pieces
-rather than patched. Absent a concurrent discover, only one enrich writes an output directory at a
-time (the windows a discover opens are listed below); an enrich that finds
-discover ran while it was working writes nothing (see ``_enrich_locked``); and the two files are
-replaced back to back (see ``_write_both_or_neither``). A process killed or interrupted between
-those two replaces, or a rollback that itself fails, can leave ``agentic_insights.json`` a write ahead of
-``inventory.json``; the lock file then stays behind, so the next enrich refuses until the lock is
-removed and enrich is run again.
+The library stamps ``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and
+``agentic_insights_sha256``; authored insights carrying any of them are refused. The optional
+``authored_against`` (the ``source_graphs_sha256`` the author read) is checked when given and never
+recorded.
 
-Sequential use is safe. A discover that runs during an enrich is detected around the read and
-again right before the write, and that enrich then writes nothing. Each enrich names its temp files
-after its own lock token, so no run can install another's files. Two windows are not closed, each a
-few file operations wide: between the final check and the two replaces, and in releasing the lock.
-Hitting one needs a discover during an enrich on one output folder within a few milliseconds (the
-lock-release window also needs two more enrich runs). Such a race can end in an error, but a lock
-released at the wrong moment can also let two enrich runs write together, so the two files may come
-from different runs and need not match the current inventory.
-
-The record is **idempotent**: re-running with the same
-authored insights rewrites byte-identical bytes and never stacks. The library owns
-``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and ``agentic_insights_sha256``;
-authored insights carrying any of them are rejected as unknown keys.
-The author may also supply ``authored_against``, the ``source_graphs_sha256`` copied from the
-``inventory.json`` it read. It is optional; when given it is verified, so insights written before
-discover ran again are refused, and it is never recorded.
+One enrich writes an output folder at a time, and an enrich that finds discover ran while it worked
+writes nothing. Sequential use is safe; a few narrow windows with concurrent runs stay open.
+:func:`_enrich_locked` describes the lock, the checks, the crash cases and those windows in one place.
 """
 
 from __future__ import annotations
@@ -90,8 +61,7 @@ INSIGHTS_KEY = "insights"
 # The file enrich writes; inventory.json's insights block is always a copy of it.
 AGENTIC_INSIGHTS_FILENAME = "agentic_insights.json"
 
-# Held in metadata/ while one enrich reads, validates and writes, so absent a concurrent discover two enrich
-# calls never interleave (the module docstring lists the windows a discover opens).
+# Held in metadata/ while one enrich reads, validates and writes (see _enrich_locked).
 ENRICH_LOCK_FILENAME = ".enrich.lock"
 
 # A hosted agent cannot delete files in output_dir, but discover clears metadata/ and the lock with it.
@@ -772,8 +742,7 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
 
     The lock is a file created with ``O_EXCL`` (portable, unlike ``fcntl``) holding a random token,
     so this enrich can tell its own lock from one a later enrich created after discover cleared
-    ``metadata/``. It keeps other enrich runs out only absent a concurrent discover; the module
-    docstring lists the windows a discover opens. It is removed when the enrich finishes or raises,
+    ``metadata/`` (see :func:`_enrich_locked`). It is removed when the enrich finishes or raises,
     if it is still this enrich's.
     It is left behind when the two files may disagree -- a killed process, or an error that is or
     was raised from :class:`_UnrecoveredWriteError` (a failed rollback, or an interrupt between the
@@ -824,24 +793,15 @@ def _write_both_or_neither(
     still_current: Callable[[], bool],
     lock_token: str,
 ) -> None:
-    """Replace ``agentic_insights.json`` and ``inventory.json`` back to back, keeping them consistent.
+    """Replace ``agentic_insights.json`` and then ``inventory.json``, keeping the two consistent.
 
-    Both temp files are written before either target is replaced. If replacing the inventory raises
-    ``OSError`` (the rename did not happen), the insights file is put back to *current_insights* --
-    the block the unchanged ``inventory.json`` holds, not whatever the file held, which an earlier
-    killed write may have left ahead -- by replacing it from a temp file (or removed when the
-    inventory holds none), so the live file is never left half-written. If
-    that rollback fails too, the two may disagree, so :class:`_UnrecoveredWriteError` is raised and
-    the caller's lock stays behind. An interrupt (``KeyboardInterrupt``, ``SystemExit``) from the
-    first replace on can arrive just after a rename succeeded, so nothing is rolled back: it is
-    treated like a kill and re-raised from an :class:`_UnrecoveredWriteError`, keeping the lock.
-    Callers hold :func:`_enrich_lock`, so absent a concurrent discover no other enrich writes between.
-    The temp files are named after *lock_token*, so no other enrich can overwrite or install them; this
-    call removes its own whether the write succeeds or fails, and a killed run's stay in ``metadata/``
-    until the next discover clears it. *still_current* is
-    asked before the temp files are written and again right before the first replace; when it says
-    discover ran since the inventory was read, :class:`_DiscoverRanError` is raised and nothing is
-    replaced.
+    Both temp files, named after *lock_token*, are written first and removed on the way out. If the
+    inventory replace fails, the insights file is put back to *current_insights* (the block the unchanged
+    inventory holds) or removed when that is ``None``; if that rollback fails too,
+    :class:`_UnrecoveredWriteError` is raised so the caller keeps the lock. An interrupt from the first
+    replace on may land just after a rename, so nothing is rolled back and it is re-raised from an
+    :class:`_UnrecoveredWriteError`. When *still_current* says discover ran, before the temp files or
+    before the first replace, :class:`_DiscoverRanError` is raised and nothing is replaced.
     """
     previous_insights = None if current_insights is None else json.dumps(current_insights, indent=2).encode("utf-8")
     insights_temporary = insights_path.with_name(f".{insights_path.name}.{lock_token}.tmp")
@@ -934,10 +894,25 @@ def enrich_inventory(
 def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any, lock_token: str) -> dict[str, Any]:
     """The read-validate-write half of :func:`enrich_inventory`, run while holding the enrich lock.
 
-    The lock only keeps other enrich runs out; discover clears ``metadata/``, the lock with it,
-    without asking. So right before writing, this checks that its lock is still in place and
-    ``inventory.json`` still holds the bytes it read. If discover ran in between, it writes nothing
-    and reports that, so its insights, checked against the old inventory, never overwrite the new one.
+    How enrich keeps ``agentic_insights.json`` and ``inventory.json`` consistent, in one place:
+
+    * **The lock.** :func:`_enrich_lock` keeps other enrich runs out. Discover does not take it: it
+      clears ``metadata/``, the lock with it.
+    * **Discover during an enrich.** Right before writing the temp files and again right before the
+      first replace, this checks that its lock is still in place and ``inventory.json`` still holds the
+      bytes it read. If discover ran in between, it writes nothing and reports that, so insights checked
+      against the old inventory never overwrite the new one.
+    * **The write.** :func:`_write_both_or_neither` writes temp files named after this run's lock token,
+      so no other run can install them, then replaces the two files back to back.
+    * **Crashes.** A kill or interrupt between the two replaces, or a failed rollback, can leave
+      ``agentic_insights.json`` a write ahead of ``inventory.json``. The lock then stays behind and the
+      next enrich refuses until it is removed. A killed run's temp files stay in ``metadata/`` until the
+      next discover clears it.
+    * **Windows left open.** Each is a few file operations wide and needs a discover during an enrich.
+      A discover between the final check and the replaces makes the enrich fail with an error and can
+      leave the two files out of step. Releasing the lock reads the token and then deletes the file, so a
+      discover plus a new enrich's lock landing between those steps lets this enrich delete the new lock;
+      a third enrich can then write alongside the second, so the two files may come from different runs.
     """
     inventory_bytes = inventory_path.read_bytes()
     inventory = json.loads(inventory_bytes.decode("utf-8"))
