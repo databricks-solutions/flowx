@@ -40,7 +40,7 @@ def _dbt_source_artifacts(activity: DbtFactoryActivity) -> list[DabNotebook]:
     """Returns deployable project, profile, and manifest files available on the local filesystem."""
     project_dir = Path(activity.project_dir).expanduser()
     artifacts = (
-        project_artifacts(project_dir, _DBT_PROJECT_RELATIVE_PATH)
+        project_artifacts(project_dir, _DBT_PROJECT_RELATIVE_PATH, include_packages=True)
         if (project_dir / "dbt_project.yml").is_file()
         else []
     )

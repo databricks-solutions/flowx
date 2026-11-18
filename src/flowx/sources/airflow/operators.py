@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from flowx.dbt import bundle_files
 from flowx.models.ir import (
     Activity,
     DbtCommandActivity,
@@ -747,12 +748,13 @@ def _variable_list(names: Iterable[str]) -> str:
 def _dbt_command_activity(ctx: OperatorContext, dbt: shell_dbt.ShellDbt) -> Activity:
     """Builds a Databricks dbt task for a shell command that only runs dbt."""
     if dbt.project_dir is None or not dbt.project_dir.startswith("/"):
-        reason = (
-            f"its project path {dbt.project_dir!r} is relative to a working directory flowx does not know; give "
-            "an absolute cwd, cd, or --project-dir"
-            if dbt.project_dir
-            else "the command does not cd into the project or pass --project-dir, and the task sets no cwd"
-        )
+        if not dbt.project_dir:
+            reason = "the command does not cd into the project or pass --project-dir, and the task sets no cwd"
+        elif dbt.project_dir.startswith("~"):
+            reason = f"its project path {dbt.project_dir!r} is under the home folder of the source machine"
+        else:
+            reason = f"its project path {dbt.project_dir!r} is relative to a working directory flowx does not know"
+        reason += "; give an absolute cwd, cd, or --project-dir"
         return _placeholder(
             ctx,
             f"This {ctx.operator} runs dbt, but flowx cannot tell which dbt project: {reason}. Name the project "
@@ -767,6 +769,17 @@ def _dbt_command_activity(ctx: OperatorContext, dbt: shell_dbt.ShellDbt) -> Acti
             f"This {ctx.operator} runs dbt in project {dbt.project_dir}, which was not found at that path{searched} "
             "where flowx ran. Add the dbt project to the folder discover reads, then re-run discover and convert.",
             {"dbt_commands": dbt.commands, "dbt_project_dir": dbt.project_dir},
+        )
+    local_project = local_project.absolute()
+    environment = bundle_files.environment_variables(local_project)
+    if environment:
+        return _placeholder(
+            ctx,
+            f"This {ctx.operator} runs dbt project {dbt.project_dir}, which reads environment variable(s) "
+            f"{_variable_list(environment)} with env_var(). They come from the Airflow worker and are not set for "
+            "a Databricks dbt task; replace them with dbt vars or set them on the task's compute, then translate "
+            "the task.",
+            {"dbt_commands": dbt.commands, "dbt_project_dir": dbt.project_dir, "environment_variables": environment},
         )
     if "cwd" in ctx.kwargs:
         ctx.consumed_arguments.add("cwd")

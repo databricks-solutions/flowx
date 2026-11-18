@@ -42,6 +42,21 @@ def test_dbt_only_commands_are_recognized(
     assert parsed.project_dir == project_dir
 
 
+def test_attached_short_target_option_is_dropped() -> None:
+    parsed = shell_dbt.parse("dbt run -tprod --select a", "/p")
+
+    assert parsed is not None
+    assert parsed.commands == ["dbt run --select a"]
+    assert parsed.dropped_options == ["-t prod"]
+
+
+def test_home_folder_path_is_not_joined_onto_cwd() -> None:
+    parsed = shell_dbt.parse("cd ~/proj && dbt run", "/opt")
+
+    assert parsed is not None
+    assert parsed.project_dir == "~/proj"
+
+
 def test_profile_options_are_dropped_and_reported() -> None:
     parsed = shell_dbt.parse("dbt run --target prod --profiles-dir ~/.dbt --select a", "/p")
 
@@ -403,3 +418,48 @@ def test_folders_named_in_dbt_project_yml_are_copied(tmp_path: Path) -> None:
     copied = next((out / "src" / "dbt_projects").iterdir())
     assert (copied / "transform" / "orders.sql").is_file()
     assert not (copied / "models").exists()
+
+
+def test_home_folder_project_is_a_gap(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "BashOperator(task_id='t', bash_command='cd ~/proj && dbt run', cwd='/opt')")
+
+    task = _task(pipeline)
+    assert isinstance(task, PlaceholderActivity)
+    assert "home folder of the source machine" in task.comment
+
+
+def test_project_reading_env_var_is_a_gap(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    (project / "models" / "dim.sql").write_text(
+        "select * from {{ env_var('DBT_SOURCE_SCHEMA') }}.orders\n", encoding="utf-8"
+    )
+
+    pipeline = _load(tmp_path, f"BashOperator(task_id='t', bash_command='dbt run', cwd={str(project)!r})")
+
+    task = _task(pipeline)
+    assert isinstance(task, PlaceholderActivity)
+    assert "$DBT_SOURCE_SCHEMA" in task.comment
+    assert task.raw_definition["environment_variables"] == ["DBT_SOURCE_SCHEMA"]
+
+
+def test_relative_discover_folder_stores_an_absolute_project_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _project(tmp_path)
+    _load(tmp_path, "BashOperator(task_id='t', bash_command='dbt run', cwd='/home/ec2-user/airflow/intelsat_ca')")
+    monkeypatch.chdir(tmp_path)
+
+    task = _task(load_pipelines(Path("dags"))[0])
+
+    assert isinstance(task, DbtCommandActivity)
+    assert Path(task.project_dir).is_absolute()
+
+
+def test_deps_runs_after_a_leading_clean(tmp_path: Path) -> None:
+    project = _project(tmp_path, {"packages.yml": "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\n"})
+    job, _ = _bundle(
+        tmp_path,
+        DbtCommandActivity(name="t", task_key="t", commands=["dbt clean", "dbt build"], project_dir=str(project)),
+    )
+
+    assert job["tasks"][0]["dbt_task"]["commands"] == ["dbt clean", "dbt deps", "dbt build"]

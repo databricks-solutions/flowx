@@ -70,7 +70,10 @@ def _is_dbt_executable(word: str) -> bool:
 
 
 def _join(base: str | None, path: str) -> str:
-    return posixpath.normpath(posixpath.join(base, path)) if base and not posixpath.isabs(path) else path
+    """Joins a path onto a base folder. A ``~`` path names the source machine's home folder, so it is kept as is."""
+    if not base or posixpath.isabs(path) or path.startswith("~"):
+        return path
+    return posixpath.normpath(posixpath.join(base, path))
 
 
 def _line_breaks_as_separators(command: str) -> str | None:
@@ -176,6 +179,9 @@ def parse(command: str, working_directory: str | None = None) -> ShellDbt | None
         while index < len(words):
             word = words[index]
             name, has_value, value = word.partition("=")
+            if word.startswith("-t") and not word.startswith("--") and len(word) > 2:
+                # The short target option with its value attached, as in ``-tprod``.
+                name, has_value, value = "-t", "=", word[2:].removeprefix("=")
             if "$" in word:
                 return None
             if name in _PROFILE_OPTIONS or name == _PROJECT_OPTION:

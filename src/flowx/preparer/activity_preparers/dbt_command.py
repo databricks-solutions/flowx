@@ -83,7 +83,11 @@ def prepare(activity: DbtCommandActivity, *, scope: str = "") -> PreparedActivit
     commands = list(activity.commands)
     installs_packages = any(command.split()[:2] == ["dbt", "deps"] for command in commands)
     if not installs_packages and _declares_packages(project):
-        commands.insert(0, "dbt deps")
+        # After any leading ``dbt clean``, which removes installed packages.
+        position = next(
+            (index for index, command in enumerate(commands) if command.split()[:2] != ["dbt", "clean"]), len(commands)
+        )
+        commands.insert(position, "dbt deps")
 
     task = build_common_task_fields(activity)
     task["dbt_task"] = {
