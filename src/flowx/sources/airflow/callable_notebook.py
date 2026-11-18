@@ -11,12 +11,50 @@ from __future__ import annotations
 
 import ast
 import builtins
+import sys
 from collections.abc import Sequence
 
 from flowx.sources.airflow import templating
 
 # Import roots that don't exist on Databricks -- never copy these into the notebook.
 _AIRFLOW_IMPORT_ROOTS: frozenset[str] = frozenset({"airflow", "cosmos", "airflow_dbt"})
+
+# Top-level packages the Databricks Runtime and serverless environments include, so a callable may import
+# them. Anything else that is not in the standard library was installed on the Airflow worker.
+RUNTIME_PACKAGES: frozenset[str] = frozenset(
+    {
+        "attr",
+        "attrs",
+        "boto3",
+        "botocore",
+        "certifi",
+        "charset_normalizer",
+        "cryptography",
+        "databricks",
+        "dateutil",
+        "delta",
+        "idna",
+        "jinja2",
+        "markupsafe",
+        "matplotlib",
+        "mlflow",
+        "numpy",
+        "packaging",
+        "pandas",
+        "pyarrow",
+        "pyspark",
+        "pytz",
+        "requests",
+        "s3transfer",
+        "scipy",
+        "seaborn",
+        "six",
+        "sklearn",
+        "typing_extensions",
+        "urllib3",
+        "yaml",
+    }
+)
 
 
 def _enclosing_statements(module: ast.Module, func: ast.FunctionDef) -> list[ast.stmt]:
@@ -289,10 +327,54 @@ def airflow_runtime_reason(func: ast.FunctionDef, source: str) -> str | None:
     )
     if import_reason is not None:
         return import_reason
+    unavailable = unavailable_imports(module, enclosing_statements, closure_nodes)
+    if unavailable:
+        return (
+            f"callable imports {', '.join(unavailable)}, which Databricks compute does not provide (a package "
+            "installed on the Airflow worker, or a module from the Airflow project); add it as a task library "
+            "or port it with the callable"
+        )
     unresolved_names = _unresolved_closure_names(func, source)
     if unresolved_names:
         return f"captures nonliteral closure '{unresolved_names[0]}'"
     return None
+
+
+def unavailable_imports(
+    module: ast.Module, enclosing_statements: list[ast.stmt], closure_nodes: Sequence[ast.AST]
+) -> list[str]:
+    """Returns the modules emitted callable code imports that Databricks compute does not have.
+
+    Covers imports inside the callable and its helpers and module-level imports they use. Standard library
+    and Databricks Runtime packages are available; a relative import names a module of the Airflow project.
+    """
+    roots: list[str] = []
+
+    def add(root: str) -> None:
+        if (
+            root not in roots
+            and root not in _AIRFLOW_IMPORT_ROOTS
+            and root not in RUNTIME_PACKAGES
+            and root not in sys.stdlib_module_names
+        ):
+            roots.append(root)
+
+    for closure_node in closure_nodes:
+        for imported in ast.walk(closure_node):
+            if isinstance(imported, ast.Import):
+                for alias in imported.names:
+                    add(alias.name.split(".")[0])
+            elif isinstance(imported, ast.ImportFrom):
+                add("." * imported.level + (imported.module or "").split(".")[0])
+    bindings = {
+        name: ("." * statement.level if isinstance(statement, ast.ImportFrom) else "") + root
+        for name, (statement, root) in _import_bindings(module, enclosing_statements).items()
+    }
+    for closure_node in closure_nodes:
+        for name in sorted(_names_used(closure_node)):
+            if name in bindings:
+                add(bindings[name])
+    return roots
 
 
 def _airflow_runtime_import_reason(
