@@ -75,7 +75,8 @@ def _join(base: str | None, path: str) -> str:
 
 def _segments(command: str) -> list[tuple[str | None, list[str]]] | None:
     """Splits a command into ``(separator before it, words)`` simple commands, or None if it does not parse."""
-    text = command.strip().replace("\\\n", " ").replace("\n", " ; ")
+    # A line break ends a command, except right after ``&&``, where the shell reads on to the next line.
+    text = re.sub(r"&&[ \t]*\n\s*", "&& ", command.strip().replace("\\\n", " ")).replace("\n", " ; ")
     lexer = shlex.shlex(text, posix=True, punctuation_chars=_PUNCTUATION)
     lexer.whitespace_split = True
     lexer.commenters = ""

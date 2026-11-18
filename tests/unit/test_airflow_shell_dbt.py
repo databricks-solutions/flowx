@@ -23,6 +23,8 @@ from flowx.sources.airflow.loader import load_pipelines
         ("/opt/venv/bin/dbt build", "/srv/proj", ["dbt build"], "/srv/proj"),
         ("cd /opt/proj && dbt deps && dbt run", None, ["dbt deps", "dbt run"], "/opt/proj"),
         ("cd proj && dbt run", "/srv", ["dbt run"], "/srv/proj"),
+        ("cd /p &&\ndbt run", None, ["dbt run"], "/p"),
+        ("cd /opt/proj &&\n  dbt deps &&\n  dbt run", None, ["dbt deps", "dbt run"], "/opt/proj"),
         ("\n    dbt run --select a\n", "/srv", ["dbt run --select a"], "/srv"),
         ("dbt run --project-dir=../other", "/srv/proj", ["dbt run"], "/srv/other"),
         ("dbt run --vars '{\"day\": 1}'", "/p", ["dbt run --vars '{\"day\": 1}'"], "/p"),
@@ -274,6 +276,15 @@ def test_project_with_packages_installs_them_first(tmp_path: Path) -> None:
     assert job["tasks"][0]["dbt_task"]["commands"] == ["dbt deps", "dbt run"]
 
 
+def test_unparseable_package_file_still_adds_deps(tmp_path: Path) -> None:
+    project = _project(tmp_path, {"packages.yml": "packages: [\n"})
+    job, _ = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
+    )
+
+    assert job["tasks"][0]["dbt_task"]["commands"] == ["dbt deps", "dbt run"]
+
+
 def test_package_file_declaring_no_packages_adds_no_deps(tmp_path: Path) -> None:
     project = _project(tmp_path, {"packages.yml": "packages: []\n"})
     job, _ = _bundle(
@@ -344,7 +355,13 @@ def test_dbt_command_activity_round_trips_through_the_report() -> None:
         name="p",
         tasks=[
             NotebookActivity(name="a", task_key="a", notebook_path="notebooks/a.py"),
-            DbtCommandActivity(name="t", task_key="t", commands=["dbt deps", "dbt run"], project_dir="/srv/proj"),
+            DbtCommandActivity(
+                name="t",
+                task_key="t",
+                commands=["dbt deps", "dbt run"],
+                project_dir="/srv/proj",
+                source_project_dir="/home/ec2-user/airflow/proj",
+            ),
         ],
     )
 
@@ -354,3 +371,4 @@ def test_dbt_command_activity_round_trips_through_the_report() -> None:
     assert isinstance(task, DbtCommandActivity)
     assert task.commands == ["dbt deps", "dbt run"]
     assert task.project_dir == "/srv/proj"
+    assert task.source_project_dir == "/home/ec2-user/airflow/proj"
