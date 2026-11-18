@@ -179,11 +179,8 @@ next `enrich` refuses until the lock is cleared:
 
 Sequential use is safe. The checks above do not close every race, though: a `discover` plus two
 `enrich` runs on one output folder within a few milliseconds can slip past them. That can end in an
-error, but it can also overwrite silently. Every `enrich` uses the same temp file names, so one run can
-install another's files, leaving a stale `inventory.json` while it reports `ok: True` with
-`inventory_sha256` and `agentic_insights_sha256` values that do not match the files on disk. Two runs
-can also write together, so the two files may come from different runs and need not match the current
-inventory. Do not run `enrich` while another `enrich` or a `discover` is working on the same output folder.
+error, but it can also overwrite silently: two runs can write together, so the two files may come from
+different runs and need not match the current inventory. Do not run `enrich` while another `enrich` or a `discover` is working on the same output folder.
 
 ## Next step
 

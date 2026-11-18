@@ -38,16 +38,13 @@ those two replaces, or a rollback that itself fails, can leave ``agentic_insight
 removed and enrich is run again.
 
 Sequential use is safe. A discover that runs during an enrich is detected around the read and
-again right before the write, and that enrich then writes nothing. Some windows are not closed,
-each a few file operations wide: between the first check and writing the temp files, between the
-final check and the two replaces, and in releasing the lock. Hitting one needs a discover plus two
-or more enrich runs on one output folder within a few milliseconds (the lock-release window needs
-three). Such a race can end in an error, but it
-can also overwrite silently. Every enrich uses the same temp file names, so one enrich can install
-another's files, leaving a stale ``inventory.json`` while it reports ``ok: True`` with
-``inventory_sha256`` and ``agentic_insights_sha256`` values that do not match the files on disk. A
-lock released at the wrong moment can also let two enrich runs write together, so the two files may
-come from different runs and need not match the current inventory.
+again right before the write, and that enrich then writes nothing. Each enrich names its temp files
+after its own lock token, so no run can install another's files. Two windows are not closed, each a
+few file operations wide: between the final check and the two replaces, and in releasing the lock.
+Hitting one needs a discover during an enrich on one output folder within a few milliseconds (the
+lock-release window also needs two more enrich runs). Such a race can end in an error, but a lock
+released at the wrong moment can also let two enrich runs write together, so the two files may come
+from different runs and need not match the current inventory.
 
 The record is **idempotent**: re-running with the same
 authored insights rewrites byte-identical bytes and never stacks. The library owns
@@ -816,6 +813,7 @@ def _write_both_or_neither(
     *,
     current_insights: dict[str, Any] | None,
     still_current: Callable[[], bool],
+    lock_token: str,
 ) -> None:
     """Replace ``agentic_insights.json`` and ``inventory.json`` back to back, keeping them consistent.
 
@@ -828,17 +826,17 @@ def _write_both_or_neither(
     the caller's lock stays behind. An interrupt (``KeyboardInterrupt``, ``SystemExit``) from the
     first replace on can arrive just after a rename succeeded, so nothing is rolled back: it is
     treated like a kill and re-raised from an :class:`_UnrecoveredWriteError`, keeping the lock.
-    Callers hold :func:`_enrich_lock`, so absent a concurrent discover no other enrich writes between,
-    and the fixed temp names mean the next write overwrites and removes any left behind by a killed
-    one; with a concurrent discover, another enrich can write or install these same temp files (the
-    module docstring lists those windows). *still_current* is
+    Callers hold :func:`_enrich_lock`, so absent a concurrent discover no other enrich writes between.
+    The temp files are named after *lock_token*, so no other enrich can overwrite or install them; this
+    call removes its own whether the write succeeds or fails, and a killed run's stay in ``metadata/``
+    until the next discover clears it. *still_current* is
     asked before the temp files are written and again right before the first replace; when it says
     discover ran since the inventory was read, :class:`_DiscoverRanError` is raised and nothing is
     replaced.
     """
     previous_insights = None if current_insights is None else json.dumps(current_insights, indent=2).encode("utf-8")
-    insights_temporary = insights_path.with_name(f".{insights_path.name}.tmp")
-    inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.tmp")
+    insights_temporary = insights_path.with_name(f".{insights_path.name}.{lock_token}.tmp")
+    inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.{lock_token}.tmp")
     try:
         if not still_current():
             raise _DiscoverRanError
@@ -961,6 +959,7 @@ def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any, lock_token:
             rendered_inventory,
             current_insights=inventory.get(INSIGHTS_KEY),
             still_current=still_current,
+            lock_token=lock_token,
         )
     except _DiscoverRanError:
         return {"ok": False, "violations": [_DISCOVER_RAN_VIOLATION], "pipeline_insights": 0, "relationships": 0}
