@@ -62,6 +62,7 @@ import os
 import secrets
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,12 @@ from flowx.models.insights import (
     RELEASE_STATES,
     RELEASE_STATES_REQUIRING_SOURCE,
     SCHEMA_VERSION,
+    Insights,
+    LineageEdgeRef,
+    PipelineInsight,
+    PipelineRelationship,
+    RecommendedPattern,
+    SystemRecommendation,
 )
 
 # The single additive top-level key the insights block is rendered under in inventory.json.
@@ -103,35 +110,17 @@ _LIBRARY_KEYS = (_SCHEMA_VERSION_KEY, _FINGERPRINT_KEY, _SOURCE_GRAPHS_HASH_KEY,
 # The source_graphs_sha256 the author read from inventory.json, checked when given so stale insights never
 # bind to a newer discover. Optional and not recorded: the library stamps the hash itself.
 _AUTHORED_AGAINST_KEY = "authored_against"
-_INSIGHTS_TOP_KEYS = {
-    "overview",
-    "system_recommendation",
-    "pipeline_insights",
-    "pipeline_relationships",
-    _AUTHORED_AGAINST_KEY,
-}
-_INSIGHT_KEYS = {
-    "pipeline",
-    "pattern_name",
-    "intent",
-    "databricks_pattern",
-    "recommended_patterns",
-    "conversion_notes",
-    "risk_if_ignored",
-}
+
+# Each object's allowed keys come from its model in flowx.models.insights, so the contract and the validator agree.
+_CONTENT_KEYS = tuple(field.name for field in fields(Insights))
+_INSIGHTS_TOP_KEYS = {*_CONTENT_KEYS, _AUTHORED_AGAINST_KEY}
+_INSIGHT_KEYS = {field.name for field in fields(PipelineInsight)}
 _INSIGHT_TEXT_FIELDS = ("pattern_name", "intent", "databricks_pattern", "risk_if_ignored")
-_RECOMMENDED_PATTERN_KEYS = {"pattern", "fit", "simplification_pattern", "release_state", "release_state_source"}
-_SYSTEM_RECOMMENDATION_KEYS = {"headline", "recommended_patterns", "cascade", "decision_driver"}
-_RELATIONSHIP_KEYS = {
-    "from_pipeline",
-    "to_pipeline",
-    "lineage_edge",
-    "relationship_summary",
-    "databricks_pattern",
-    "risk_if_ignored",
-}
+_RECOMMENDED_PATTERN_KEYS = {field.name for field in fields(RecommendedPattern)}
+_SYSTEM_RECOMMENDATION_KEYS = {field.name for field in fields(SystemRecommendation)}
+_RELATIONSHIP_KEYS = {field.name for field in fields(PipelineRelationship)}
 _RELATIONSHIP_TEXT_FIELDS = ("relationship_summary", "databricks_pattern", "risk_if_ignored")
-_EDGE_KEYS = {"edge_type", "edge_identity", "evidence", "confidence"}
+_EDGE_KEYS = {field.name for field in fields(LineageEdgeRef)}
 _EDGE_TYPES = ("control", "inferred")
 
 
@@ -633,7 +622,7 @@ def build_agentic_insights(inventory: dict[str, Any], raw: dict[str, Any]) -> di
     source_graphs_sha256 = base.get(_SOURCE_GRAPHS_HASH_KEY)
     if source_graphs_sha256 is not None:
         document[_SOURCE_GRAPHS_HASH_KEY] = source_graphs_sha256
-    for key in ("overview", "system_recommendation", "pipeline_insights", "pipeline_relationships"):
+    for key in _CONTENT_KEYS:
         if key in raw:
             document[key] = raw[key]
     document[_AGENTIC_INSIGHTS_HASH_KEY] = canonical_sha256(document)

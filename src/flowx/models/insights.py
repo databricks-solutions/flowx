@@ -11,8 +11,8 @@ author-then-validate-record contract :mod:`flowx.agentic` uses for gap resolutio
 These models are **source-neutral**: they describe the shape of the ``insights`` object
 independent of whether the pipelines came from ADF or Airflow, because the inventory they
 attach to is itself standardised across sources via the source-neutral discovery graph
-contract (#61/#62). The validate/record engine works on the raw dict form; these dataclasses document the
-contract and back the unit tests.
+contract (#61/#62). The validate/record engine works on the raw dict form and takes each object's allowed
+keys from these dataclasses, so the documented contract and the validator cannot drift apart.
 
 Cross-pipeline couplings come in two accountable tiers (:class:`LineageEdgeRef`):
 

@@ -9,6 +9,7 @@ all, exactly as it will see it in production.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import json
 from pathlib import Path
@@ -166,6 +167,48 @@ def test_models_construct_and_document_the_contract() -> None:
     )
     assert insights.pipeline_insights[0].pipeline == "child"
     assert insights.pipeline_relationships[0].lineage_edge.edge_type == "control"
+
+
+def test_every_field_the_models_declare_is_a_key_the_validator_accepts() -> None:
+    """The validator takes its keys from the models, so a payload that sets every model field passes."""
+    pattern = RecommendedPattern(
+        pattern="Lakeflow Connect",
+        fit="Managed CDC ingestion",
+        simplification_pattern=True,
+        release_state="public_preview",
+        release_state_source="https://docs.databricks.com/ingestion/lakeflow-connect/",
+    )
+    insights = Insights(
+        overview="o",
+        system_recommendation=SystemRecommendation(
+            headline="h", recommended_patterns=[pattern], cascade=["c"], decision_driver="d"
+        ),
+        pipeline_insights=[
+            PipelineInsight(
+                pipeline="child",
+                pattern_name="n",
+                intent="i",
+                databricks_pattern="p",
+                recommended_patterns=[pattern],
+                conversion_notes=["note"],
+                risk_if_ignored="r",
+            )
+        ],
+        pipeline_relationships=[
+            PipelineRelationship(
+                from_pipeline="child",
+                to_pipeline="sibling",
+                lineage_edge=LineageEdgeRef(
+                    edge_type="inferred", edge_identity="sales.curated", evidence="e", confidence="low"
+                ),
+                relationship_summary="s",
+                databricks_pattern="p",
+                risk_if_ignored="r",
+            )
+        ],
+    )
+
+    assert validate_insights(dataclasses.asdict(insights), _inventory()) == []
 
 
 # --------------------------------------------------------------------------- #
