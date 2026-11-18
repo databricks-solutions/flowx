@@ -2247,6 +2247,10 @@ def _build_job_resource(
         job_def["timeout_seconds"] = workflow.timeout_seconds
     if workflow.max_concurrent_runs is not None:
         job_def["max_concurrent_runs"] = workflow.max_concurrent_runs
+    if workflow.source == "airflow" and workflow.schedule:
+        # Airflow holds a run that would exceed max_active_runs until a slot frees; without queueing a
+        # Databricks job skips it instead.
+        job_def["queue"] = {"enabled": True}
     if workflow.email_notifications:
         job_def["email_notifications"] = {
             event: list(recipients) for event, recipients in workflow.email_notifications.items()

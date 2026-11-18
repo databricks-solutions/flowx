@@ -200,8 +200,8 @@ def _load_airflow_module(
             "message": (
                 "The DAG sets no max_active_runs, so Airflow allows the deployment's [core] "
                 "max_active_runs_per_dag runs at once (16 by default). The Databricks job keeps its default of one "
-                "run at a time, so a run that overlaps the next schedule delays it; set max_concurrent_runs to "
-                "allow overlap."
+                "run at a time, with queueing enabled, so a run that overlaps the next schedule waits for it to "
+                "finish; set max_concurrent_runs to allow overlap."
             ),
         }
     timezone_disclosure: dict[str, Any] | None = None

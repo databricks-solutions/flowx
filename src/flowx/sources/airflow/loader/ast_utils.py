@@ -218,8 +218,12 @@ class _ConstantSubstituter(ast.NodeTransformer):
         return self.generic_visit(node)  # type: ignore[return-value]
 
     def visit_Call(self, node: ast.Call) -> ast.expr:
-        # A method called on a name, such as ``name.update(...)``, may change the object, so the name stays.
-        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+        # A changing method called on a name, such as ``name.update(...)``, changes the object, so the name stays.
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.attr in _CHANGING_METHODS
+        ):
             node.args = [self.visit(argument) for argument in node.args]
             node.keywords = [self.visit(keyword) for keyword in node.keywords]
             return node
@@ -264,10 +268,34 @@ def _static_iteration_nodes(node: ast.expr, constants: dict[str, Any]) -> list[a
     return None
 
 
+# Dict, list, and set methods that change the object in place.
+_CHANGING_METHODS = frozenset(
+    {
+        "add",
+        "append",
+        "clear",
+        "difference_update",
+        "discard",
+        "extend",
+        "insert",
+        "intersection_update",
+        "pop",
+        "popitem",
+        "remove",
+        "reverse",
+        "setdefault",
+        "sort",
+        "symmetric_difference_update",
+        "update",
+    }
+)
+
+
 def _mutated_names(statement: ast.stmt) -> set[str]:
     """Returns the names whose objects a statement may change in place.
 
-    That is an item assignment or ``del``, an augmented assignment, or a method call on the name.
+    That is an item assignment or ``del``, an augmented assignment, or a call to a dict, list, or set method
+    that changes it, such as ``update`` or ``append``. Methods that only read, such as ``get``, do not count.
     """
     names: set[str] = set()
     for node in ast.walk(statement):
@@ -279,6 +307,7 @@ def _mutated_names(statement: ast.stmt) -> set[str]:
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
+            and node.func.attr in _CHANGING_METHODS
         ):
             names.add(node.func.value.id)
     return names

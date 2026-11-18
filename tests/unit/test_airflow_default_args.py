@@ -162,3 +162,28 @@ def test_dags_generated_in_a_loop_get_the_dict_as_the_loop_changed_it(tmp_path: 
     pipelines = load_airflow_dags(dag_path)
 
     assert [(pipeline.name, _task(pipeline).max_retries) for pipeline in pipelines] == [("etl_a", 4), ("etl_b", 4)]
+
+
+def test_inline_dict_call_is_read_like_a_dict_literal(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, "", "dict(owner='a', retries=3)")
+
+    assert pipeline.reconciliation_status == "verified"
+    assert _task(pipeline).max_retries == 3
+
+
+def test_reading_a_module_list_keeps_later_loops_unrolled(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dags.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "TABLES = ['a', 'b']\n"
+        "RETRIES = TABLES.index('b') + 1\n"
+        "for table in TABLES:\n"
+        "    with DAG(dag_id=f'load_{table}', default_args={'retries': 2}) as dag:\n"
+        "        BashOperator(task_id='t', bash_command='echo hi')\n",
+        encoding="utf-8",
+    )
+
+    pipelines = load_airflow_dags(dag_path)
+
+    assert [(pipeline.name, _task(pipeline).max_retries) for pipeline in pipelines] == [("load_a", 2), ("load_b", 2)]

@@ -175,3 +175,14 @@ def test_path_built_from_dunder_file_is_not_substituted_into_a_task(tmp_path: Pa
 
     assert isinstance(task, PlaceholderActivity)
     assert str(tmp_path) not in (getattr(task, "generated_source", "") or "")
+
+
+def test_scheduled_job_queues_runs_like_airflow(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, ", max_active_runs=1, start_date=pendulum.datetime(2024, 1, 1, tz='UTC')")
+    rehydrated, _ = pipeline_dict_to_ir(pipeline_to_dict(pipeline))
+    out = tmp_path / "bundle"
+
+    write_bundle(prepare_workflow(rehydrated), out, catalog="main", schema="a")
+
+    job = next(iter(yaml.safe_load(next((out / "resources").glob("*.yml")).read_text())["resources"]["jobs"].values()))
+    assert job["queue"] == {"enabled": True}
