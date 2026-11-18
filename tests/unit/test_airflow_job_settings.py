@@ -9,7 +9,7 @@ import yaml
 
 from flowx.bundler.dab_writer import pipeline_dict_to_ir, write_bundle
 from flowx.ir_serde import pipeline_to_dict
-from flowx.models.ir import Pipeline
+from flowx.models.ir import Pipeline, PlaceholderActivity
 from flowx.preparer.workflow_preparer import prepare_workflow
 from flowx.sources.airflow.loader import load_airflow_dag
 
@@ -157,3 +157,21 @@ def test_max_concurrent_runs_reaches_the_bundle(tmp_path: Path) -> None:
 
     job = next(iter(yaml.safe_load(next((out / "resources").glob("*.yml")).read_text())["resources"]["jobs"].values()))
     assert job["max_concurrent_runs"] == 2
+
+
+def test_path_built_from_dunder_file_is_not_substituted_into_a_task(tmp_path: Path) -> None:
+    dag_path = tmp_path / "job.py"
+    dag_path.write_text(
+        "import os\n"
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "BASE = os.path.dirname(os.path.abspath(__file__))\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    t = BashOperator(task_id='t', bash_command=f'python3 {BASE}/scripts/load.py')\n",
+        encoding="utf-8",
+    )
+
+    task = next(task for task in load_airflow_dag(dag_path).tasks if task.task_key == "t")
+
+    assert isinstance(task, PlaceholderActivity)
+    assert str(tmp_path) not in (getattr(task, "generated_source", "") or "")

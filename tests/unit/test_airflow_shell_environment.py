@@ -22,6 +22,8 @@ from flowx.sources.airflow.shell_environment import environment_references
         ("echo \\$ESCAPED", []),
         ("echo $1 $? $@ $$ $#", []),
         ("echo $HOME $PATH $USER", []),
+        ("[[ $LINE =~ ^([a-z]+) ]] && echo ${BASH_REMATCH[1]} from $BASH_SOURCE", ["LINE"]),
+        ("$SPARK_HOME/bin/pyspark --version && echo $JAVA_HOME", []),
         ("OUT=/tmp/x; echo $OUT", []),
         ("export TARGET=prod && dbt run --target $TARGET", []),
         ("for f in a b; do echo $f; done", []),
@@ -69,3 +71,11 @@ def test_command_that_sets_its_own_variables_is_translated(tmp_path: Path) -> No
     task = _task(tmp_path, "BashOperator(task_id='t', bash_command='DAY=$(date +%F); echo $DAY $HOME')")
 
     assert isinstance(task, NotebookActivity)
+
+
+def test_spark_submit_named_through_spark_home_is_lifted(tmp_path: Path) -> None:
+    task = _task(
+        tmp_path, "BashOperator(task_id='t', bash_command='$SPARK_HOME/bin/spark-submit --class com.X app.jar')"
+    )
+
+    assert not isinstance(task, PlaceholderActivity)

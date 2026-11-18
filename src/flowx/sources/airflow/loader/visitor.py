@@ -289,11 +289,15 @@ class _DagVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _bind_file_path_constant(self, name: str, value: ast.expr) -> bool:
-        """Binds a name to a string built from ``__file__``, such as a dag_id named after its file."""
+        """Binds a name to a file name built from ``__file__``, such as a dag_id named after its file.
+
+        A full path is left unbound: it is where discover runs, not where the DAG ran, so it must not be
+        substituted into a task.
+        """
         if not any(isinstance(node, ast.Name) and node.id == "__file__" for node in ast.walk(value)):
             return False
         path = _static_path(value, self.dag_file)
-        if path is None:
+        if path is None or "/" in path or "\\" in path:
             return False
         self._constants[name] = path
         self._task_bindings.pop(name, None)
@@ -301,6 +305,7 @@ class _DagVisitor(ast.NodeVisitor):
 
     def _track_dict_assignment(self, node: ast.Assign) -> None:
         """Records a dict literal bound to a name, or an item assigned into one, for ``default_args``."""
+        self._follow_dict_calls(node.value)
         for target in node.targets:
             if isinstance(target, ast.Name):
                 dictionary = _dict_literal(node.value, self._dict_bindings) if len(node.targets) == 1 else None
@@ -339,9 +344,31 @@ class _DagVisitor(ast.NodeVisitor):
         else:
             self._constants.pop(name, None)
 
+    def _follow_dict_calls(self, node: ast.AST) -> None:
+        """Applies the changing method calls an expression makes on tracked dicts, such as ``x.pop("k")``."""
+        for call in ast.walk(node):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in self._dict_bindings
+                and call.func.attr in _DICT_CHANGING_METHODS
+            ):
+                self._apply_dict_method(call.func.value.id, call)
+
     def _apply_dict_method(self, name: str, call: ast.Call) -> None:
-        """Follows ``name.update({...})`` or ``name.update(key=value)``; any other method call ends the tracking."""
+        """Follows ``update({...})``, ``update(key=value)``, and ``pop("key")``; any other change ends the tracking."""
         self._constants.pop(name, None)
+        key = call.args[0] if call.args else None
+        if (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "pop"
+            and isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and len(call.args) <= 2
+        ):
+            self._dict_bindings[name] = _without_dict_item(self._dict_bindings[name], key.value)
+            return
         if isinstance(call.func, ast.Attribute) and call.func.attr == "update" and len(call.args) <= 1:
             items = _dict_literal(call.args[0], self._dict_bindings) if call.args else ast.Dict(keys=[], values=[])
             if items is not None and all(keyword.arg for keyword in call.keywords):
@@ -875,7 +902,8 @@ class _DagVisitor(ast.NodeVisitor):
         """Evaluates a dag_id given as a literal or built from ``__file__``, recording one it cannot evaluate."""
         if node is None:
             return None
-        dag_id = ops.literal_str(node) or _static_path(node, self.dag_file)
+        file_name = _static_path(node, self.dag_file)
+        dag_id = ops.literal_str(node) or (file_name if file_name and "/" not in file_name else None)
         if dag_id is None:
             self.unresolved_dag_id = node
         return dag_id
@@ -925,13 +953,7 @@ class _DagVisitor(ast.NodeVisitor):
         #   - shift chains: `a >> b >> c`, `a >> [b, c]`, `[a, b] >> c`, `a << b`
         #   - method calls: `a.set_upstream(b)` / `a.set_downstream([b, c])`
         value = node.value
-        if (
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Attribute)
-            and isinstance(value.func.value, ast.Name)
-            and value.func.value.id in self._dict_bindings
-        ):
-            self._apply_dict_method(value.func.value.id, value)
+        self._follow_dict_calls(value)
         if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.RShift, ast.LShift)):
             before = len(self.edge_captures)
             self._collect_shift_chain(value)
@@ -1122,6 +1144,10 @@ class _DagVisitor(ast.NodeVisitor):
             self._add_edges(this_names, others, call)
         elif func.attr == "set_upstream":
             self._add_edges(others, this_names, call)
+
+
+# Dict methods that change the dict in place.
+_DICT_CHANGING_METHODS = frozenset({"update", "pop", "popitem", "setdefault", "clear"})
 
 
 def _dict_literal(node: ast.expr, bindings: dict[str, ast.Dict]) -> ast.Dict | None:
