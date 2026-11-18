@@ -71,6 +71,10 @@ decisions.
 - **Dynamic DAG factories** — classic DAG factories outside the documented single-declaration shape,
   non-literal factory arguments, and non-literal `dag_id` overrides fail reconciliation and block
   package output rather than emitting a filename-derived empty Job.
+- **Configuration-generated DAGs** — a file that builds its DAGs at import time through dag-factory,
+  gusty, or `globals()` registration that flowx cannot expand is reported as a failed source
+  (`unsupported_dag_generator`) rather than skipped. A `create_dag()` factory registered through
+  `globals()` in a bounded loop is still expanded into one job per DAG.
 - **Unresolved Airflow 3 schedules** — `AssetOrTimeSchedule`, mixed Asset boolean expressions, custom timetables, and Assets without explicit Databricks table metadata become `AirflowSourceSemantics` gaps. Job-level trigger and schedule changes are outside the leaf-only agentic contract.
 - **Ambiguous Airflow 1.10 schedule defaults** — assigned DAGs and legacy imports are supported, but a DAG using strong 1.10 syntax that omits `schedule_interval` becomes an `AirflowSourceSemantics` gap because historical default schedule and catchup behavior cannot be inferred safely from source alone.
 - **Cross-run and operational policy** — active `depends_on_past`, `max_consecutive_failed_dag_runs`, `sla_miss_callback`, retry-email events, dynamic `dagrun_timeout`, and non-empty `default_args.env` have no exact leaf-only Jobs mapping. Each becomes a source-semantics placeholder with a setting-specific remediation message; failure recipients and any independently representable Job timeout remain preserved.

@@ -300,6 +300,59 @@ def _module_for_dag(
     return isolated
 
 
+# Libraries that build DAGs from configuration files at import time.
+_DAG_GENERATOR_PACKAGES = frozenset({"dagfactory", "gusty"})
+
+
+def dag_generator(module: ast.Module) -> ast.AST | None:
+    """Returns the statement through which a module builds DAGs flowx cannot see, or None.
+
+    That is a call into a DAG-generating library (dag-factory, gusty), or a module that registers objects
+    through ``globals()``, which Airflow scans for DAGs. Called only for modules with no DAG declaration
+    flowx recognizes, so such a file is reported rather than skipped.
+    """
+    aliases = _import_aliases(module)
+    for node in ast.walk(module):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [item.name for item in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            if any(name.split(".")[0] in _DAG_GENERATOR_PACKAGES for name in names):
+                return node
+        if isinstance(node, ast.Call):
+            target = aliases.get(node.func.id, "") if isinstance(node.func, ast.Name) else ""
+            if target.split(".")[0] in _DAG_GENERATOR_PACKAGES:
+                return node
+            if isinstance(node.func, ast.Name) and node.func.id == "globals" and not node.args:
+                return node
+    return None
+
+
+def _failed_dag_generator_pipeline(dag_path: Path, node: ast.AST, *, source_file: str) -> Pipeline:
+    """Returns a failed, reportable pipeline for a module that builds its DAGs in a way flowx cannot follow."""
+    span = _span(node)
+    candidate = source_audit.AuditCandidate(
+        kind="dag",
+        code="unsupported_dag_generator",
+        line=span.line,
+        column=span.column,
+        occurrence=1,
+        end_line=span.end_line,
+        end_column=span.end_column,
+        details={"expression": ast.unparse(node)},
+    )
+    finding = source_audit.finding(
+        source_file=source_file,
+        code="unsupported_dag_generator",
+        severity="failed",
+        message=(
+            "This file builds Airflow DAGs at import time (through dag-factory, gusty, or globals()), so flowx "
+            "cannot see them. Convert each generated DAG from its rendered definition, or point discover at "
+            "DAG files that declare them."
+        ),
+        candidate=candidate,
+    )
+    return _failed_pipeline(Path(dag_path).stem, finding, source_file)
+
+
 def _failed_dag_declaration_pipeline(
     dag_path: Path,
     declaration: DagDeclaration,
@@ -324,7 +377,11 @@ def _failed_dag_declaration_pipeline(
         message=declaration.unsupported_reason or "Airflow DAG declaration could not be captured statically.",
         candidate=candidate,
     )
-    name = declaration.variable or Path(dag_path).stem
+    return _failed_pipeline(declaration.variable or Path(dag_path).stem, finding, source_file)
+
+
+def _failed_pipeline(name: str, finding: dict[str, Any], source_file: str) -> Pipeline:
+    """Returns an empty pipeline that reports one failed source construct."""
     return Pipeline(
         name=name,
         tasks=[],

@@ -15,8 +15,10 @@ from flowx.sources.airflow import audit as source_audit
 from flowx.sources.airflow.loader.ast_utils import _expand_top_level_loops
 from flowx.sources.airflow.loader.dag_discovery import (
     _failed_dag_declaration_pipeline,
+    _failed_dag_generator_pipeline,
     _module_for_dag,
     _top_level_dag_declarations,
+    dag_generator,
 )
 from flowx.sources.airflow.loader.lowering import _load_airflow_module
 from flowx.sources.airflow.loader.reconcile import pause_unfinished_schedule
@@ -48,6 +50,10 @@ def load_airflow_dags(
     source = Path(dag_path).read_text(encoding="utf-8")
     module = _expand_top_level_loops(ast.parse(source))
     declarations = _top_level_dag_declarations(module)
+    if not declarations:
+        generator = dag_generator(module)
+        if generator is not None:
+            return [_failed_dag_generator_pipeline(dag_path, generator, source_file=source_file or dag_path.name)]
     pipelines: list[Pipeline] = []
     for declaration in declarations:
         if declaration.unsupported_reason is not None:
@@ -163,7 +169,8 @@ def discover_dags(source_path: Path) -> list[Path]:
 
     Accepts either a single ``.py`` file or a directory (scanned recursively).
     Discovery uses the same static declaration model as loading, including
-    import aliases and qualified TaskFlow decorators.
+    import aliases and qualified TaskFlow decorators. A file that builds its DAGs through dag-factory,
+    gusty, or ``globals()`` is included so it is reported as a failed source rather than skipped.
     """
     source_path = Path(source_path)
     candidates = [source_path] if source_path.is_file() else sorted(source_path.rglob("*.py"))
@@ -175,7 +182,7 @@ def discover_dags(source_path: Path) -> list[Path]:
             module = _expand_top_level_loops(ast.parse(candidate.read_text(encoding="utf-8")))
         except (OSError, SyntaxError):
             continue
-        if _top_level_dag_declarations(module):
+        if _top_level_dag_declarations(module) or dag_generator(module) is not None:
             dags.append(candidate)
     return dags
 
