@@ -31,18 +31,24 @@ chains into this skill by default; the routing step (`flowx-route`) reads the `i
 present the agentic conversion option per connected component. The one-shot MCP `migrate` command
 runs discover, convert and package without it, so it records no insights.
 
-## No LLM inside flowx: you author, the library validates and records
+## How much to write
 
-**There is no LLM inside flowx.** You author the insights JSON; the library (`enrich`) only
-*validates and records* it, using the same author, validate, record, fingerprint-bound contract the
-agentic gap-resolution and routing paths use. That keeps the deterministic inventory trustworthy and
-every insight accountable: foreign keys must point at real pipelines, and every cross-pipeline edge
-is either an annotation of a proven lineage edge or an explicitly-flagged inference with cited
-evidence.
+Insights are advice for the people planning the migration, not a full report. Spend your effort where a
+wrong or missing insight would change the migration:
 
-`enrich` is **additive**: it writes `agentic_insights.json` and adds only the matching `insights`
-block to the inventory, leaving every existing inventory key byte-identical. It changes no conversion, IR, or routing decision on its own — the `insights` are
-descriptive data that `flowx-route` later consumes.
+- **Start with the factory-wide decision** (`system_recommendation`) when one choice, such as a managed
+  connector for a family of extractors, reshapes many pipelines. Leave it out when there is none.
+- **Write a pipeline insight only when a migrator would act on it**: a target pattern that differs from
+  a like-for-like port, a risk, or a conversion note. A pipeline that ports as it is needs no entry.
+- **Record the couplings a migrator could miss** and that would break if dropped. Give an `inferred`
+  one only with evidence you can cite, and set its `confidence` honestly.
+- **Keep `risk_if_ignored` for what is critical**: data loss, wrong results, a broken dependency or a
+  missed schedule. Leave it out rather than state a generic risk.
+- **Leave a field out rather than guess.** Name only publicly documented Databricks capabilities.
+- **Keep each text to a sentence or two.** The 20,000-character cap is a ceiling, not a target.
+
+For a large factory, cover the factory-wide decision and the pipelines it touches first. Enrich records
+whatever valid insights you give it, so a partial set is fine.
 
 ## When to skip enrich (deterministic-only)
 
@@ -75,39 +81,19 @@ narrative.
    each pipeline's *intent* and the Databricks patterns that fit. Ground every recommended pattern in
    a **real, publicly-documented** Databricks capability; never invent a product name.
 
-   **Verify GA/Preview status before recommending a connector or Lakeflow Connect pattern, then
-   record it as a structured field.** Do **not** hardcode GA/Preview status or dates — release state
-   changes. Before recommending a connector or a Lakeflow Connect ingestion pattern (or naming it in
-   `recommended_patterns` / `system_recommendation`), you **must** verify against the **current public
-   Databricks docs** both that (a) the feature's GA-vs-Preview release state is acceptable and (b) it
-   is available in the target workspace. Verification happens **before** the recommendation, never
-   after: never emit a "recommend now, verify later" conditional.
+   **Check the release state of every capability you recommend, then record it.** Release states
+   change, so never take one from memory or from this skill. Before you name a connector or other
+   capability in `recommended_patterns` or `system_recommendation`, check on the current public
+   Databricks docs that its release state is acceptable and that it is available in the target
+   workspace; [Databricks preview releases](https://docs.databricks.com/aws/en/release-notes/release-types)
+   explains the states. Check first, then recommend; never recommend now and verify later.
 
-   Record the resolved state on the pattern with the **structured `release_state` field** — *not* prose
-   buried in `fit` / `conversion_notes` — and cite the doc that grounds it in `release_state_source`.
-   The validator enforces this. The state is a factual **disclosure**, not a warning; `flowx-route`
-   surfaces it as a neutral label (no alarm), tiered as:
-
-   - `ga` — Generally Available. **Silent** (not surfaced).
-   - `unknown` — the release state could not be verified. **Silent**, treated exactly like `ga` (there
-     is no separate label — the two are indistinguishable in the surfaced output).
-   - `public_preview` — surfaced as the informational label **"Public Preview (production-ready)"**:
-     Public Preview is generally production-ready and supported per Databricks. Still confirm the
-     feature is available in the target workspace. A cited `release_state_source` is required.
-   - `private_preview` — surfaced as the plain factual label **"Private Preview"**. A cited
-     `release_state_source` is required.
-   - `beta` — surfaced as the plain factual label **"Beta"**. A cited `release_state_source` is
-     required.
-
-   `release_state` is **required** on any pattern you mark `simplification_pattern: true` (a distinctive
-   capability must declare its verified release state). There is **no recommendation-eligibility gate** on
-   top of that: even a verified **Private Preview** feature may be suggested. **Disclose the release state
-   and let the customer decide** — record the verified state on the structured `release_state` /
-   `release_state_source` fields, note that Private Preview typically requires workspace
-   enrollment/entitlement, and leave the decision to proceed to the customer. The tool does **not**
-   unilaterally refuse to suggest it (there is no `doNotSuggest` gate). This is disclosure, not a gate —
-   and it does not relax the rule above: you still **verify the release state against the current public
-   Databricks docs before recommending** (never "recommend now, verify later").
+   Record the state in the pattern's `release_state` (`ga`, `public_preview`, `private_preview`,
+   `beta`, or `unknown` when you could not verify it) and cite the page in `release_state_source`. The
+   validator requires a state on every `simplification_pattern: true` pattern and a source for the
+   preview and beta states. A preview or beta capability may still be recommended: record its state and
+   let the customer decide. `flowx-route` shows the state as a plain label, and nothing for `ga` and
+   `unknown`.
 3. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
    and the saved source graphs and, only when clean, writes `agentic_insights.json` and rebuilds the
    inventory. On any violation both files are left untouched and you get the full list of
