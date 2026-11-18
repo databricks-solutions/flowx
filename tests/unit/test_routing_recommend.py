@@ -17,6 +17,7 @@ from flowx.models.ir import ControlEdge, Lineage
 from flowx.models.motifs import MOTIF_METADATA_DRIVEN_BULK_COPY, DetectedMotif
 from flowx.routing import build_recommendation, recommend_component
 from flowx.sources.adf.loader import attach_motifs_to_graphs
+from flowx.utils import to_case_preserving_key
 
 
 def _node(task_key: str, native_type: str, *, strategy: str = "deterministic") -> SourceNode:
@@ -170,6 +171,34 @@ def test_motif_covered_agentic_activity_is_engine_capable() -> None:
     assert options["deterministic"]["capable"] is True
     assert options["deterministic"]["uncovered"] == []
     assert options["deterministic"]["motifs"] == ["metadata_driven_bulk_copy"]
+
+
+def test_a_motif_covers_an_activity_whose_name_differs_from_its_task_key() -> None:
+    """Motif members are task keys, so ``ForEach Table In Config`` is covered as ``ForEach_Table_In_Config``."""
+
+    def _named(name: str, native_type: str, *, strategy: str) -> SourceNode:
+        node = _node(to_case_preserving_key(name), native_type, strategy=strategy)
+        node.source_id = node.name = name
+        return node
+
+    graphs = [
+        SourceGraph(
+            name="a",
+            source="adf",
+            tasks=[
+                _named("Lookup ETL Config", "Lookup", strategy="deterministic"),
+                _named("ForEach Table In Config", "ForEach", strategy="agentic"),
+            ],
+        )
+    ]
+    motif = DetectedMotif(
+        definition=MOTIF_METADATA_DRIVEN_BULK_COPY,
+        matched_activities=["Lookup ETL Config", "ForEach Table In Config"],
+        source_type_hint="database",
+    )
+    recommended, options = recommend_component(["a"], _inventory(graphs, motifs={"a": [motif]}))
+    assert recommended == "deterministic"
+    assert options["deterministic"]["uncovered"] == []
 
 
 def test_motif_coverage_does_not_leak_across_pipelines_in_a_component() -> None:

@@ -427,11 +427,11 @@ def _set_on_child(key: str, value: Any) -> Any:
         (_set_on_child("name", ""), "must have a non-empty string 'name'"),
         (
             _set_on_child("motifs", [{"motif_id": "m", "member_task_keys": "copy_orders"}]),
-            "pipeline 'child' motif 'm' 'member_task_keys' must be a list of activity names",
+            "pipeline 'child' motif 'm' 'member_task_keys' must be a list of task keys",
         ),
         (
             _set_on_child("motifs", [{"motif_id": "m"}]),
-            "pipeline 'child' motif 'm' 'member_task_keys' must be a list of activity names",
+            "pipeline 'child' motif 'm' 'member_task_keys' must be a list of task keys",
         ),
         (
             _set_on_child("motifs", [{"motif_id": 7, "member_task_keys": ["copy_orders"]}]),
