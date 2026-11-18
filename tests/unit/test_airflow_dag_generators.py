@@ -94,3 +94,25 @@ def test_generated_dags_next_to_a_static_dag_are_reported(tmp_path: Path, genera
         ("static", "verified"),
         ("mixed__generated_dags", "failed"),
     ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import dagfactory\ndef build():\n    dagfactory.DagFactory('/c.yml').generate_dags(globals())\n",
+        "import dagfactory\nfactory = dagfactory.DagFactory('/opt/airflow/dags/config.yml')\n",
+    ],
+)
+def test_dag_factory_use_that_registers_nothing_at_import_is_not_reported(tmp_path: Path, source: str) -> None:
+    (tmp_path / "helper.py").write_text(source, encoding="utf-8")
+
+    assert discover_dags(tmp_path) == []
+
+
+def test_helper_called_at_import_time_that_registers_dags_is_reported(tmp_path: Path) -> None:
+    (tmp_path / "generated.py").write_text(
+        "import dagfactory\ndef build():\n    dagfactory.DagFactory('/c.yml').generate_dags(globals())\nbuild()\n",
+        encoding="utf-8",
+    )
+
+    assert [pipeline.reconciliation_status for pipeline in load_pipelines(tmp_path)] == ["failed"]

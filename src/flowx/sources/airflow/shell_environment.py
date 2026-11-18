@@ -102,9 +102,11 @@ def assignments(command: str) -> dict[str, int]:
 def environment_references(command: str) -> list[str]:
     """Returns the environment variables a shell command reads but never sets, in order of first use.
 
-    A variable counts as set only for the uses after the command sets it. Special parameters (``$1``, ``$?``,
-    ``$@``), variables every shell provides, text in single quotes or quoted here-documents, and Jinja
-    expressions are not references.
+    A variable counts as set only for the uses after the command sets it. The check reads the command as text,
+    so it does not follow scope or control flow: an assignment inside a subshell, such as ``(TOKEN=x)``, or in
+    one branch of an ``if`` still counts as setting the variable for everything after it. Special parameters
+    (``$1``, ``$?``, ``$@``), variables every shell provides, text in single quotes or quoted here-documents,
+    and Jinja expressions are not references.
     """
     text = _unquoted_text(_QUOTED_HEREDOC.sub("\n", _JINJA.sub(" ", command)))
     set_at = assignments(text)

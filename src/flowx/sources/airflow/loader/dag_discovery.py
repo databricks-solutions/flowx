@@ -302,17 +302,49 @@ def _module_for_dag(
     return isolated
 
 
-# Libraries that build DAGs from configuration files at import time.
+# Libraries that build DAGs from configuration files at import time, and the calls that register them.
 _DAG_GENERATOR_PACKAGES = frozenset({"dagfactory", "gusty"})
+_DAG_FACTORY_REGISTRATIONS = frozenset({"generate_dags", "load_yaml_dags"})
+_GUSTY_REGISTRATIONS = frozenset({"create_dag", "create_dags"})
+
+
+def _import_time_nodes(module: ast.Module) -> list[ast.AST]:
+    """Returns the nodes that run when Airflow imports a module: module-level code and the functions it calls.
+
+    Function and class bodies are left out unless module-level code calls the function by name.
+    """
+    functions = {node.name: node for node in module.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    nodes: list[ast.AST] = []
+    visited: set[str] = set()
+
+    def walk(statements: list[ast.stmt]) -> None:
+        pending: list[ast.AST] = list(statements)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            nodes.append(node)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                called = functions.get(node.func.id)
+                if called is not None and called.name not in visited:
+                    visited.add(called.name)
+                    walk(called.body)
+            pending.extend(ast.iter_child_nodes(node))
+
+    walk(module.body)
+    return nodes
 
 
 def dag_generator(module: ast.Module, declarations: Sequence[DagDeclaration] = ()) -> ast.AST | None:
     """Returns the first construct through which a module builds DAGs flowx cannot see, or None.
 
-    That is a call into a DAG-generating library (dag-factory, gusty), or a registration through ``globals()``
-    (an item assignment, ``globals().update(...)``, or ``globals()`` passed to a function), which Airflow scans
-    for DAGs. Reading ``globals()`` or only importing a library does not count, and neither does a
-    registration that is one of *declarations*, such as a static factory call stored with ``globals()[name]``.
+    That is a call that registers DAGs through a DAG-generating library (dag-factory's ``generate_dags`` or
+    ``load_yaml_dags``, gusty's ``create_dag`` or ``create_dags``), or a registration through ``globals()`` (an
+    item assignment, ``globals().update(...)``, or ``globals()`` passed to a function), which Airflow scans for
+    DAGs. Only code that runs at import time counts: module-level statements and the functions they call.
+    Reading ``globals()``, importing a library, or only constructing a ``DagFactory`` does not count, and
+    neither does a registration that is one of *declarations*, such as a static factory call stored with
+    ``globals()[name]``.
     """
     aliases = _import_aliases(module)
     declared = {id(node) for declaration in declarations for node in ast.walk(declaration.node)}
@@ -334,11 +366,16 @@ def dag_generator(module: ast.Module, declarations: Sequence[DagDeclaration] = (
             and not node.args
         )
 
-    for node in ast.walk(module):
+    for node in _import_time_nodes(module):
         if id(node) in declared:
             continue
         if isinstance(node, ast.Call):
-            if _canonical_name(node.func, aliases).split(".")[0] in _DAG_GENERATOR_PACKAGES:
+            leaf = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            canonical = _canonical_name(node.func, aliases)
+            if leaf in _DAG_FACTORY_REGISTRATIONS or (
+                canonical.split(".")[0] in _DAG_GENERATOR_PACKAGES
+                and canonical.rsplit(".", 1)[-1] in _GUSTY_REGISTRATIONS
+            ):
                 return node
             if any(is_globals(argument) for argument in [*node.args, *(item.value for item in node.keywords)]):
                 return node

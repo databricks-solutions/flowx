@@ -249,10 +249,11 @@ class _SourceAuditor(ast.NodeVisitor):
                 if not (
                     function in {"dict", "len", "list", "print", "repr", "sorted", "str", "deepcopy", "dumps"}
                     or function in self.taskflow_defs
+                    or function in {"dag", "task_group"}
                     or function.endswith(("Operator", "Sensor", "DAG", "TaskGroup", "Group"))
                     or _is_operator(function)
                 ):
-                    for value in [*call.args, *(item.value for item in call.keywords if item.arg != "default_args")]:
+                    for value in [*call.args, *(item.value for item in call.keywords)]:
                         passed = value.value if isinstance(value, ast.Starred) else value
                         if isinstance(passed, ast.Name):
                             self.dict_items.pop(passed.id, None)

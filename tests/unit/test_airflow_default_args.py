@@ -129,3 +129,11 @@ def test_annotated_dict_is_read_like_a_plain_one(tmp_path: Path) -> None:
 
     assert pipeline.reconciliation_status == "verified"
     assert _task(pipeline).max_retries == 3
+
+
+def test_dict_passed_as_a_default_args_keyword_to_a_function_is_a_gap(tmp_path: Path) -> None:
+    pipeline = _load(
+        tmp_path, "from libs import mutate\ndefault_args = {'retries': 1}\nmutate(default_args=default_args)"
+    )
+
+    assert "default_args" in _gap_names(pipeline)

@@ -32,6 +32,9 @@ def _task(tmp_path: Path, setup: str, body: str):
         ("import oracledb\n", "    oracledb.connect('dsn')\n", "oracledb"),
         ("from libs.dq import run_checks\n", "    run_checks()\n", "libs"),
         ("from .helpers import clean\n", "    clean()\n", ".helpers"),
+        ("", "    import google.cloud.bigquery\n    google.cloud.bigquery.Client()\n", "google.cloud.bigquery"),
+        ("from google.cloud import bigquery\n", "    bigquery.Client()\n", "google.cloud.bigquery"),
+        ("from azure.identity import DefaultAzureCredential\n", "    DefaultAzureCredential()\n", "azure.identity"),
     ],
 )
 def test_callable_importing_a_worker_package_is_a_gap(tmp_path: Path, setup: str, body: str, missing: str) -> None:
@@ -48,6 +51,9 @@ def test_callable_importing_a_worker_package_is_a_gap(tmp_path: Path, setup: str
         ("import pandas as pd\n", "    import requests\n    print(pd.DataFrame(), requests.__name__)\n"),
         ("import oracledb\n", "    print('oracledb is imported by the module but unused here')\n"),
         ("import pyodbc\n", "    pyodbc.connect('dsn')\n"),
+        ("from google.cloud import storage\n", "    storage.Client()\n"),
+        ("from google.protobuf import json_format\n", "    print(json_format)\n"),
+        ("from azure.storage.blob import BlobClient\n", "    print(BlobClient)\n"),
     ],
 )
 def test_callable_using_standard_and_runtime_packages_is_translated(tmp_path: Path, setup: str, body: str) -> None:

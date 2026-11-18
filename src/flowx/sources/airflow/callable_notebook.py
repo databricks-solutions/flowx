@@ -22,14 +22,18 @@ _AIRFLOW_IMPORT_ROOTS: frozenset[str] = frozenset({"airflow", "cosmos", "airflow
 # Import names of the Python libraries Databricks Runtime 16.4 LTS installs (the "Installed Python
 # libraries" table of its release notes), plus pyspark and delta, which the runtime itself provides. A callable
 # may import these; any other package outside the standard library was installed on the Airflow worker.
+# Namespace packages (``google``, ``azure``, ...) are listed by the full import path each library provides,
+# since other libraries in the same namespace are not installed.
 RUNTIME_PACKAGES: frozenset[str] = frozenset(
     {
         "annotated_types",
         "asttokens",
         "astunparse",
         "autocommand",
-        "azure",
-        "backports",
+        "azure.core",
+        "azure.storage.blob",
+        "azure.storage.filedatalake",
+        "backports.tarfile",
         "black",
         "blinker",
         "boto3",
@@ -62,7 +66,23 @@ RUNTIME_PACKAGES: frozenset[str] = frozenset(
         "gi",
         "git",
         "gitdb",
-        "google",
+        "google_crc32c",
+        "google.api",
+        "google.api_core",
+        "google.auth",
+        "google.oauth2",
+        "google.cloud.client",
+        "google.cloud.environment_vars",
+        "google.cloud.exceptions",
+        "google.cloud.location",
+        "google.cloud.storage",
+        "google.gapic",
+        "google.logging",
+        "google.longrunning",
+        "google.protobuf",
+        "google.resumable_media",
+        "google.rpc",
+        "google.type",
         "grpc",
         "grpc_status",
         "httplib2",
@@ -76,7 +96,9 @@ RUNTIME_PACKAGES: frozenset[str] = frozenset(
         "ipython_genutils",
         "ipywidgets",
         "isodate",
-        "jaraco",
+        "jaraco.context",
+        "jaraco.functools",
+        "jaraco.text",
         "jedi",
         "jmespath",
         "joblib",
@@ -85,7 +107,8 @@ RUNTIME_PACKAGES: frozenset[str] = frozenset(
         "jwt",
         "kiwisolver",
         "launchpadlib",
-        "lazr",
+        "lazr.restfulclient",
+        "lazr.uri",
         "matplotlib",
         "matplotlib_inline",
         "mccabe",
@@ -97,7 +120,18 @@ RUNTIME_PACKAGES: frozenset[str] = frozenset(
         "nodeenv",
         "numpy",
         "oauthlib",
-        "opentelemetry",
+        "opentelemetry.attributes",
+        "opentelemetry.baggage",
+        "opentelemetry.context",
+        "opentelemetry.environment_variables",
+        "opentelemetry.metrics",
+        "opentelemetry.propagate",
+        "opentelemetry.propagators",
+        "opentelemetry.sdk",
+        "opentelemetry.semconv",
+        "opentelemetry.trace",
+        "opentelemetry.util",
+        "opentelemetry.version",
         "packaging",
         "pandas",
         "parso",
@@ -453,6 +487,54 @@ def airflow_runtime_reason(func: ast.FunctionDef, source: str) -> str | None:
     return None
 
 
+def _is_available(path: str) -> bool:
+    """Returns whether an absolute import path is provided by the standard library or the runtime.
+
+    A path is provided when it or one of its parent packages is listed, such as ``google.protobuf`` for
+    ``google.protobuf.json_format``.
+    """
+    parts = path.split(".")
+    if parts[0] in sys.stdlib_module_names or parts[0] in _AIRFLOW_IMPORT_ROOTS:
+        return True
+    return any(".".join(parts[:length]) in RUNTIME_PACKAGES for length in range(1, len(parts) + 1))
+
+
+def _imported_paths(statement: ast.stmt, bound_name: str | None = None) -> list[str]:
+    """Returns the modules an import statement loads, as absolute dotted paths or ``.``-prefixed relative ones.
+
+    With *bound_name*, only the path of the alias that binds that name is returned.
+    """
+    paths: list[str] = []
+    if isinstance(statement, ast.Import):
+        for alias in statement.names:
+            if bound_name is None or (alias.asname or alias.name.split(".")[0]) == bound_name:
+                paths.append(alias.name)
+    elif isinstance(statement, ast.ImportFrom):
+        module = statement.module or ""
+        for alias in statement.names:
+            if bound_name is not None and (alias.asname or alias.name) != bound_name:
+                continue
+            if statement.level:
+                paths.append("." * statement.level + module.split(".")[0])
+            else:
+                paths.append(f"{module}.{alias.name}" if alias.name != "*" else module)
+    return paths
+
+
+def _reported_name(path: str) -> str:
+    """Returns the package to report for an unavailable import path.
+
+    That is the shortest leading part of the path that is not a namespace the runtime partly installs:
+    ``snowflake`` for ``snowflake.connector``, but ``google.cloud.bigquery`` for ``google.cloud.bigquery.Client``.
+    """
+    parts = path.split(".")
+    for length in range(1, len(parts) + 1):
+        prefix = ".".join(parts[:length])
+        if not any(entry.startswith(f"{prefix}.") for entry in RUNTIME_PACKAGES):
+            return prefix
+    return path
+
+
 def unavailable_imports(
     module: ast.Module, enclosing_statements: list[ast.stmt], closure_nodes: Sequence[ast.AST]
 ) -> list[str]:
@@ -461,33 +543,30 @@ def unavailable_imports(
     Covers imports inside the callable and its helpers and module-level imports they use. Standard library
     and Databricks Runtime packages are available; a relative import names a module of the Airflow project.
     """
-    roots: list[str] = []
+    missing: list[str] = []
 
-    def add(root: str) -> None:
-        if (
-            root not in roots
-            and root not in _AIRFLOW_IMPORT_ROOTS
-            and root not in RUNTIME_PACKAGES
-            and root not in sys.stdlib_module_names
-        ):
-            roots.append(root)
+    def add(path: str) -> None:
+        if path.startswith("."):
+            name = path
+        elif _is_available(path):
+            return
+        else:
+            name = _reported_name(path)
+        if name not in missing:
+            missing.append(name)
 
     for closure_node in closure_nodes:
         for imported in ast.walk(closure_node):
-            if isinstance(imported, ast.Import):
-                for alias in imported.names:
-                    add(alias.name.split(".")[0])
-            elif isinstance(imported, ast.ImportFrom):
-                add("." * imported.level + (imported.module or "").split(".")[0])
-    bindings = {
-        name: ("." * statement.level if isinstance(statement, ast.ImportFrom) else "") + root
-        for name, (statement, root) in _import_bindings(module, enclosing_statements).items()
-    }
+            if isinstance(imported, (ast.Import, ast.ImportFrom)):
+                for path in _imported_paths(imported):
+                    add(path)
+    bindings = _import_bindings(module, enclosing_statements)
     for closure_node in closure_nodes:
         for name in sorted(_names_used(closure_node)):
             if name in bindings:
-                add(bindings[name])
-    return roots
+                for path in _imported_paths(bindings[name][0], name):
+                    add(path)
+    return missing
 
 
 def _airflow_runtime_import_reason(

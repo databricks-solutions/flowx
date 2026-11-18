@@ -1170,6 +1170,8 @@ class _DagVisitor(ast.NodeVisitor):
 _DICT_CHANGING_METHODS = frozenset({"update", "pop", "popitem", "setdefault", "clear"})
 # Airflow constructors, which store the arguments they are given.
 _CONSTRUCTOR_SUFFIXES = ("Operator", "Sensor", "DAG", "TaskGroup", "Group")
+# Airflow decorator factories, which also store the arguments they are given.
+_CONSTRUCTOR_FUNCTIONS = frozenset({"dag", "task_group"})
 # Builtins that read a dict passed to them without changing it.
 _DICT_READING_FUNCTIONS = frozenset({"dict", "len", "list", "print", "repr", "sorted", "str", "deepcopy", "dumps"})
 
@@ -1177,17 +1179,19 @@ _DICT_READING_FUNCTIONS = frozenset({"dict", "len", "list", "print", "repr", "so
 def _dict_arguments_passed(call: ast.Call, tracked: Collection[str], task_functions: Collection[str]) -> list[str]:
     """Returns the tracked dicts a call passes to a function that may change them.
 
-    Building a DAG, operator, sensor, or task group, or invoking a TaskFlow task, only stores its arguments.
+    Building a DAG, operator, sensor, or task group, or invoking a TaskFlow task, only stores its arguments, so
+    those calls, ``default_args=`` included, keep the tracking; any other call, even with ``default_args=``, ends it.
     """
     function = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", "")
     if (
         function in _DICT_READING_FUNCTIONS
         or function in task_functions
+        or function in _CONSTRUCTOR_FUNCTIONS
         or function.endswith(_CONSTRUCTOR_SUFFIXES)
         or _is_task_construct(function)
     ):
         return []
-    values = [*call.args, *(keyword.value for keyword in call.keywords if keyword.arg != "default_args")]
+    values = [*call.args, *(keyword.value for keyword in call.keywords)]
     passed = [value.value if isinstance(value, ast.Starred) else value for value in values]
     return [value.id for value in passed if isinstance(value, ast.Name) and value.id in tracked]
 
