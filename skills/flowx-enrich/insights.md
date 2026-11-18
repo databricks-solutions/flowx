@@ -1,7 +1,7 @@
 # The agentic insights shape
 
 This is the reference for the `insights` JSON you author before calling `enrich`. The `flowx-enrich`
-SKILL.md covers the workflow (no-LLM contract, the three authoring steps, how to run `enrich`, and
+SKILL.md covers the workflow (how much to write, the authoring steps, how to run `enrich`, and
 when a deterministic-only pass skips it); this file covers **what to write** and the rules the
 validator enforces.
 
@@ -68,6 +68,8 @@ of those four keys yourself:
 
 ### Rules the validator enforces
 
+- **Some content.** Set at least one of `overview`, `system_recommendation`, `pipeline_insights` or
+  `pipeline_relationships`; an empty list does not count. Insights with nothing in them are refused.
 - **Foreign keys.** Every `pipeline_insights[].pipeline` and every relationship
   `from_pipeline` / `to_pipeline` must be a pipeline name listed in the inventory's `pipelines`.
   The one exception is a `control` relationship whose edge resolves (see below): its endpoints may
@@ -77,7 +79,8 @@ of those four keys yourself:
 - **Field types.** Pipeline names are strings. When present, `pattern_name`, `intent`,
   `databricks_pattern` and `risk_if_ignored` (per pipeline) and `relationship_summary`,
   `databricks_pattern` and `risk_if_ignored` (per relationship) must be strings, and
-  `conversion_notes` a list of strings.
+  `conversion_notes` a list of strings. Leave out a field you have nothing for: an explicit `null` is
+  refused wherever a field is optional.
 - **Text length.** No text value may exceed 20,000 characters (`overview`, `intent`, `evidence`, a
   `cascade` step or any other); the violation names the field. Summarise rather than paste source code.
 - **`recommended_patterns`** (per pipeline and system-wide): **1–4** patterns. The validator enforces
@@ -94,12 +97,8 @@ of those four keys yourself:
   optional otherwise. `release_state_source` must be a string whenever it is set, and a non-empty
   citation is **required** when `release_state` is `public_preview` / `private_preview` / `beta`; not
   required for `ga` / `unknown`.
-  The state is a factual **disclosure**, not a warning: `flowx-route` surfaces `public_preview` as the
-  label "Public Preview (production-ready)" and `private_preview` / `beta` as plain labels, while `ga`
-  and `unknown` are silent (`unknown` is treated exactly like `ga`). Verify against the current public
-  docs **before** recommending — see the SKILL.md GA-grounding step for the full rule. (There is no
-  `doNotSuggest` eligibility gate: a verified Private Preview feature is still eligible to suggest —
-  disclose the state and let the customer decide; see the SKILL.md step.)
+  Verify the state against the current public docs **before** recommending; see the SKILL.md
+  release-state step.
 - **`system_recommendation`** needs a non-empty `headline` and a `recommended_patterns` list;
   `cascade` (non-empty strings) and `decision_driver` are optional.
 - **Relationship edges** come in two tiers:
