@@ -137,7 +137,10 @@ class SourceNode:
         source_id: Stable identifier from the source (ADF activity name, an
             Airflow capture id) used to resolve dependency edges before task
             keys are allocated.
-        task_key: Normalised task key unique within the graph.
+        task_key: Normalised task key unique within the graph: the key convert gives
+            the same task, so discover and convert join on it. For ADF that is
+            :func:`~flowx.utils.to_case_preserving_key` of the activity name, so
+            ``Copy Orders (daily)`` is ``Copy_Orders_daily``.
         concept: Neutral, classified kind (see the ``CONCEPT_*`` constants);
             ``CONCEPT_GAP`` when the source could not classify it.
         source: Source discriminator (``SOURCE_ADF`` / ``SOURCE_AIRFLOW``).

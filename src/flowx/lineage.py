@@ -275,9 +275,13 @@ def build_data_edges(pipeline: Pipeline) -> list[DataEdge]:
 def build_motif_annotations(pipeline: Pipeline) -> list[MotifAnnotation]:
     """Derive motif annotations from the collapsed motif activities in a pipeline.
 
-    One annotation per :class:`MotifActivity`, listing the task keys it spans
-    (the motif task itself plus any member activities that carry the same
-    ``motif_id`` tag). Deduplicated by ``motif_id`` in first-seen order.
+    One annotation per motif definition, listing the task keys it spans (the
+    motif task itself plus any member activities that carry the same
+    ``motif_id`` tag). Annotations are keyed by ``motif_id`` in first-seen order,
+    so two or more :class:`MotifActivity` occurrences of the same definition merge
+    into one annotation: it starts with the first occurrence's task key and lists
+    every other task tagged with that ``motif_id``, later occurrences included.
+    Keying each occurrence on its own is a planned follow-up.
 
     Args:
         pipeline: The translated pipeline IR.
