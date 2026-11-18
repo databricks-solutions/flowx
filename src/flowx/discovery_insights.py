@@ -1,61 +1,29 @@
 """Validate agent-authored insights against the discover inventory, then record them.
 
-The discover phase writes a purely deterministic ``metadata/inventory.json`` (source,
-pipelines, per-pipeline ``lineage``, summary). An external agent then *authors* an
-``insights`` object -- its judgment about factory-wide architecture, per-pipeline intent
-and recommended Databricks patterns, and cross-pipeline relationships (see
-:mod:`flowx.models.insights`). This module *enriches* the inventory: it validates the
-authored JSON against the real inventory and, **only when clean**, records it in
-``metadata/agentic_insights.json`` and rebuilds ``inventory.json`` from the saved source graphs
-plus that document -- it never patches the inventory in place.
+Discover writes a deterministic ``metadata/inventory.json``. An agent then authors an ``insights``
+object: its judgment about the factory, each pipeline and how pipelines couple (see
+:mod:`flowx.models.insights`). Enrich checks that object against the real inventory and, only when it
+is clean, writes it to ``metadata/agentic_insights.json`` and rebuilds ``inventory.json`` from the saved
+``source_graphs.json`` plus that file (or, when the inventory records no graphs hash, from discover's
+deterministic part). The inventory is always rebuilt, never patched, and re-running with the same
+insights writes the same bytes.
 
-There is **no LLM here** -- the tool only validates and records, mirroring the
-author-then-validate-record contract :mod:`flowx.agentic` uses for gap resolution. That
-keeps the deterministic inventory trustworthy and every insight accountable:
+The checks:
 
-* every ``pipeline`` and every relationship endpoint must be a pipeline the inventory lists
-  (foreign-key validation), except that a ``control`` relationship whose edge resolves (below) may
-  name a pipeline discover left unlisted, since that edge proves the pipeline is in the export;
-* a ``control`` relationship edge must resolve to a real ``ControlEdge`` in the inventory's
-  ``lineage`` -- the full ``(from, to, via_task_key)`` triple, so the annotation connects
-  exactly the pipelines it claims, not merely some edge that shares a ``via_task_key``;
-* an ``inferred`` edge has nothing to resolve against, so it must instead carry a non-empty
-  ``evidence`` string and a ``confidence`` level.
+* every ``pipeline`` and relationship endpoint must be a pipeline the inventory lists, except that a
+  ``control`` relationship whose edge resolves may name a pipeline discover left unlisted;
+* a ``control`` relationship must match a real control edge on the full ``(from, to, via_task_key)``
+  triple, so it connects exactly the pipelines it claims;
+* an ``inferred`` relationship has nothing to match, so it must carry ``evidence`` and a ``confidence``.
 
-Validated insights are written to their own file, ``metadata/agentic_insights.json``, which
-records the persisted ``source_graphs.json`` hash it was checked against
-(``source_graphs_sha256``) and carries its own content hash (``agentic_insights_sha256``).
-``inventory.json`` is then rebuilt by the library alone: when the inventory records a
-``source_graphs_sha256``, its deterministic part is projected again from ``source_graphs.json``
-(byte-identical to what discover writes), otherwise discover's deterministic part is reused; that
-same block is added under ``insights``, so the inventory is always built from those two pieces
-rather than patched. Absent a concurrent discover, only one enrich writes an output directory at a
-time (the windows a discover opens are listed below); an enrich that finds
-discover ran while it was working writes nothing (see ``_enrich_locked``); and the two files are
-replaced back to back (see ``_write_both_or_neither``). A process killed or interrupted between
-those two replaces, or a rollback that itself fails, can leave ``agentic_insights.json`` a write ahead of
-``inventory.json``; the lock file then stays behind, so the next enrich refuses until the lock is
-removed and enrich is run again.
+The library stamps ``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and
+``agentic_insights_sha256``; authored insights carrying any of them are refused. The optional
+``authored_against`` (the ``source_graphs_sha256`` the author read) is checked when given and never
+recorded.
 
-Sequential use is safe. A discover that runs during an enrich is detected around the read and
-again right before the write, and that enrich then writes nothing. Some windows are not closed,
-each a few file operations wide: between the first check and writing the temp files, between the
-final check and the two replaces, and in releasing the lock. Hitting one needs a discover plus two
-or more enrich runs on one output folder within a few milliseconds (the lock-release window needs
-three). Such a race can end in an error, but it
-can also overwrite silently. Every enrich uses the same temp file names, so one enrich can install
-another's files, leaving a stale ``inventory.json`` while it reports ``ok: True`` with
-``inventory_sha256`` and ``agentic_insights_sha256`` values that do not match the files on disk. A
-lock released at the wrong moment can also let two enrich runs write together, so the two files may
-come from different runs and need not match the current inventory.
-
-The record is **idempotent**: re-running with the same
-authored insights rewrites byte-identical bytes and never stacks. The library owns
-``schema_version``, ``inventory_sha256``, ``source_graphs_sha256`` and ``agentic_insights_sha256``;
-authored insights carrying any of them are rejected as unknown keys.
-The author may also supply ``authored_against``, the ``source_graphs_sha256`` copied from the
-``inventory.json`` it read. It is optional; when given it is verified, so insights written before
-discover ran again are refused, and it is never recorded.
+One enrich writes an output folder at a time, and an enrich that finds discover ran while it worked
+writes nothing. Sequential use is safe; a few narrow windows with concurrent runs stay open.
+:func:`_enrich_locked` describes the lock, the checks, the crash cases and those windows in one place.
 """
 
 from __future__ import annotations
@@ -65,6 +33,7 @@ import os
 import secrets
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +47,12 @@ from flowx.models.insights import (
     RELEASE_STATES,
     RELEASE_STATES_REQUIRING_SOURCE,
     SCHEMA_VERSION,
+    Insights,
+    LineageEdgeRef,
+    PipelineInsight,
+    PipelineRelationship,
+    RecommendedPattern,
+    SystemRecommendation,
 )
 
 # The single additive top-level key the insights block is rendered under in inventory.json.
@@ -86,8 +61,7 @@ INSIGHTS_KEY = "insights"
 # The file enrich writes; inventory.json's insights block is always a copy of it.
 AGENTIC_INSIGHTS_FILENAME = "agentic_insights.json"
 
-# Held in metadata/ while one enrich reads, validates and writes, so absent a concurrent discover two enrich
-# calls never interleave (the module docstring lists the windows a discover opens).
+# Held in metadata/ while one enrich reads, validates and writes (see _enrich_locked).
 ENRICH_LOCK_FILENAME = ".enrich.lock"
 
 # A hosted agent cannot delete files in output_dir, but discover moves metadata/, the lock with it, into the archive.
@@ -106,35 +80,17 @@ _LIBRARY_KEYS = (_SCHEMA_VERSION_KEY, _FINGERPRINT_KEY, _SOURCE_GRAPHS_HASH_KEY,
 # The source_graphs_sha256 the author read from inventory.json, checked when given so stale insights never
 # bind to a newer discover. Optional and not recorded: the library stamps the hash itself.
 _AUTHORED_AGAINST_KEY = "authored_against"
-_INSIGHTS_TOP_KEYS = {
-    "overview",
-    "system_recommendation",
-    "pipeline_insights",
-    "pipeline_relationships",
-    _AUTHORED_AGAINST_KEY,
-}
-_INSIGHT_KEYS = {
-    "pipeline",
-    "pattern_name",
-    "intent",
-    "databricks_pattern",
-    "recommended_patterns",
-    "conversion_notes",
-    "risk_if_ignored",
-}
+
+# Each object's allowed keys come from its model in flowx.models.insights, so the contract and the validator agree.
+_CONTENT_KEYS = tuple(field.name for field in fields(Insights))
+_INSIGHTS_TOP_KEYS = {*_CONTENT_KEYS, _AUTHORED_AGAINST_KEY}
+_INSIGHT_KEYS = {field.name for field in fields(PipelineInsight)}
 _INSIGHT_TEXT_FIELDS = ("pattern_name", "intent", "databricks_pattern", "risk_if_ignored")
-_RECOMMENDED_PATTERN_KEYS = {"pattern", "fit", "simplification_pattern", "release_state", "release_state_source"}
-_SYSTEM_RECOMMENDATION_KEYS = {"headline", "recommended_patterns", "cascade", "decision_driver"}
-_RELATIONSHIP_KEYS = {
-    "from_pipeline",
-    "to_pipeline",
-    "lineage_edge",
-    "relationship_summary",
-    "databricks_pattern",
-    "risk_if_ignored",
-}
+_RECOMMENDED_PATTERN_KEYS = {field.name for field in fields(RecommendedPattern)}
+_SYSTEM_RECOMMENDATION_KEYS = {field.name for field in fields(SystemRecommendation)}
+_RELATIONSHIP_KEYS = {field.name for field in fields(PipelineRelationship)}
 _RELATIONSHIP_TEXT_FIELDS = ("relationship_summary", "databricks_pattern", "risk_if_ignored")
-_EDGE_KEYS = {"edge_type", "edge_identity", "evidence", "confidence"}
+_EDGE_KEYS = {field.name for field in fields(LineageEdgeRef)}
 _EDGE_TYPES = ("control", "inferred")
 
 
@@ -204,12 +160,18 @@ def validate_insights(raw: Any, inventory: dict[str, Any]) -> list[str]:
     for key in sorted(set(raw) - _INSIGHTS_TOP_KEYS):
         hint = " (set by the library, not the author)" if key in _LIBRARY_KEYS else ""
         violations.append(f"unknown top-level key: {key!r}{hint}")
+    if not any(key in raw and raw[key] != [] for key in _CONTENT_KEYS):
+        content_keys = ", ".join(repr(key) for key in _CONTENT_KEYS[:-1])
+        violations.append(
+            f"insights must set at least one of {content_keys} or {_CONTENT_KEYS[-1]!r} (an empty list does not count)"
+        )
 
-    violations.extend(_authored_against_violations(raw.get(_AUTHORED_AGAINST_KEY), inventory))
+    if _AUTHORED_AGAINST_KEY in raw:
+        violations.extend(_authored_against_violations(raw[_AUTHORED_AGAINST_KEY], inventory))
     violations.extend(_text_length_violations(raw, ""))
 
     overview = raw.get("overview")
-    if overview is not None and (not isinstance(overview, str) or not overview.strip()):
+    if "overview" in raw and (not isinstance(overview, str) or not overview.strip()):
         violations.append("'overview' must be a non-empty string when present")
 
     if "system_recommendation" in raw:
@@ -257,7 +219,10 @@ def _authored_against_violations(authored_against: Any, inventory: dict[str, Any
     inventory unchecked.
     """
     if authored_against is None:
-        return []
+        return [
+            f"'{_AUTHORED_AGAINST_KEY}' must not be null; copy the inventory's {_SOURCE_GRAPHS_HASH_KEY} or leave "
+            "the field out"
+        ]
     recorded = inventory.get(_SOURCE_GRAPHS_HASH_KEY)
     if recorded is None:
         return [f"'{_AUTHORED_AGAINST_KEY}' was given but inventory.json records no {_SOURCE_GRAPHS_HASH_KEY}"]
@@ -299,7 +264,9 @@ def _validate_pipeline_insights(insights: Any, names: set[str]) -> list[str]:
                 violations.append(f"{loc}: pipeline {name!r} not in inventory")
         violations.extend(_validate_optional_strings(item, _INSIGHT_TEXT_FIELDS, loc))
         notes = item.get("conversion_notes")
-        if notes is not None and (not isinstance(notes, list) or not all(isinstance(note, str) for note in notes)):
+        if "conversion_notes" in item and (
+            not isinstance(notes, list) or not all(isinstance(note, str) for note in notes)
+        ):
             violations.append(f"{loc}: 'conversion_notes' must be a list of strings when present")
         if "recommended_patterns" in item:
             violations.extend(_validate_recommended_patterns(item["recommended_patterns"], loc))
@@ -356,13 +323,16 @@ def _validate_relationships(
 
 
 def _relationship_key(from_pipeline: Any, to_pipeline: Any, edge: Any) -> tuple[str, str, Any, Any] | None:
-    """``(from, to, edge_type, edge_identity)`` for spotting a repeated relationship, or ``None`` when unreadable."""
+    """``(from, to, edge_type, edge_identity)`` for spotting a repeated relationship, or ``None`` when unreadable.
+
+    The identity is compared stripped, so surrounding spaces do not make a second relationship.
+    """
     if not (isinstance(from_pipeline, str) and isinstance(to_pipeline, str) and isinstance(edge, dict)):
         return None
     edge_type, edge_identity = edge.get("edge_type"), edge.get("edge_identity")
     if not all(value is None or isinstance(value, str) for value in (edge_type, edge_identity)):
         return None
-    return from_pipeline, to_pipeline, edge_type, edge_identity
+    return from_pipeline, to_pipeline, edge_type, edge_identity.strip() if isinstance(edge_identity, str) else None
 
 
 def _resolves_control_edge(
@@ -383,13 +353,18 @@ def _resolves_control_edge(
     return all(isinstance(part, str) for part in triple) and triple in control_triples
 
 
-def _validate_optional_strings(record: dict[str, Any], fields: tuple[str, ...], loc: str) -> list[str]:
-    """Report each of *fields* that *record* sets to something other than a string (``null`` is allowed)."""
+def _validate_optional_strings(record: dict[str, Any], field_names: tuple[str, ...], loc: str) -> list[str]:
+    """Report each of *field_names* that *record* sets to something other than a string, ``null`` included."""
     return [
-        f"{loc}: {field_name!r} must be a string when present, got {type(record[field_name]).__name__}"
-        for field_name in fields
-        if record.get(field_name) is not None and not isinstance(record[field_name], str)
+        f"{loc}: {field_name!r} must be a string when present, got {_json_type_name(record[field_name])}"
+        for field_name in field_names
+        if field_name in record and not isinstance(record[field_name], str)
     ]
+
+
+def _json_type_name(value: Any) -> str:
+    """The type name a violation reports for *value*, saying ``null`` rather than Python's ``NoneType``."""
+    return "null" if value is None else type(value).__name__
 
 
 def _validate_edge(
@@ -533,18 +508,19 @@ def _validate_release_state(pattern: dict[str, Any], loc: str) -> list[str]:
     release_state = pattern.get("release_state")
     source = pattern.get("release_state_source")
 
-    if release_state is not None and release_state not in RELEASE_STATES:
+    if "release_state" in pattern and release_state not in RELEASE_STATES:
         allowed = ", ".join(repr(state) for state in RELEASE_STATES)
-        problems.append(f"{loc}: 'release_state' must be one of {{{allowed}}}, got {release_state!r}")
+        got = _json_type_name(release_state) if release_state is None else repr(release_state)
+        problems.append(f"{loc}: 'release_state' must be one of {{{allowed}}}, got {got}")
 
-    if pattern.get("simplification_pattern") is True and release_state is None:
+    if pattern.get("simplification_pattern") is True and "release_state" not in pattern:
         problems.append(
             f"{loc}: 'release_state' is required when 'simplification_pattern' is true "
             f"(a distinctive capability must declare its verified GA/Preview release state)"
         )
 
-    if source is not None and not isinstance(source, str):
-        problems.append(f"{loc}: 'release_state_source' must be a string when present, got {type(source).__name__}")
+    if "release_state_source" in pattern and not isinstance(source, str):
+        problems.append(f"{loc}: 'release_state_source' must be a string when present, got {_json_type_name(source)}")
     elif release_state in RELEASE_STATES_REQUIRING_SOURCE and (source is None or not source.strip()):
         problems.append(
             f"{loc}: 'release_state_source' (a non-empty doc URL / citation) is required when "
@@ -575,12 +551,12 @@ def _validate_system_recommendation(value: Any) -> list[str]:
     else:
         problems.extend(_validate_recommended_patterns(value["recommended_patterns"], loc))
     cascade = value.get("cascade")
-    if cascade is not None and (
+    if "cascade" in value and (
         not isinstance(cascade, list) or not all(isinstance(item, str) and item.strip() for item in cascade)
     ):
         problems.append(f"{loc}: 'cascade' must be a list of non-empty strings when present")
     driver = value.get("decision_driver")
-    if driver is not None and (not isinstance(driver, str) or not driver.strip()):
+    if "decision_driver" in value and (not isinstance(driver, str) or not driver.strip()):
         problems.append(f"{loc}: 'decision_driver' must be a non-empty string when present")
     return problems
 
@@ -636,7 +612,7 @@ def build_agentic_insights(inventory: dict[str, Any], raw: dict[str, Any]) -> di
     source_graphs_sha256 = base.get(_SOURCE_GRAPHS_HASH_KEY)
     if source_graphs_sha256 is not None:
         document[_SOURCE_GRAPHS_HASH_KEY] = source_graphs_sha256
-    for key in ("overview", "system_recommendation", "pipeline_insights", "pipeline_relationships"):
+    for key in _CONTENT_KEYS:
         if key in raw:
             document[key] = raw[key]
     document[_AGENTIC_INSIGHTS_HASH_KEY] = canonical_sha256(document)
@@ -766,8 +742,7 @@ def _enrich_lock(metadata_dir: Path) -> Iterator[str | None]:
 
     The lock is a file created with ``O_EXCL`` (portable, unlike ``fcntl``) holding a random token,
     so this enrich can tell its own lock from one a later enrich created after discover cleared
-    ``metadata/``. It keeps other enrich runs out only absent a concurrent discover; the module
-    docstring lists the windows a discover opens. It is removed when the enrich finishes or raises,
+    ``metadata/`` (see :func:`_enrich_locked`). It is removed when the enrich finishes or raises,
     if it is still this enrich's.
     It is left behind when the two files may disagree -- a killed process, or an error that is or
     was raised from :class:`_UnrecoveredWriteError` (a failed rollback, or an interrupt between the
@@ -816,29 +791,21 @@ def _write_both_or_neither(
     *,
     current_insights: dict[str, Any] | None,
     still_current: Callable[[], bool],
+    lock_token: str,
 ) -> None:
-    """Replace ``agentic_insights.json`` and ``inventory.json`` back to back, keeping them consistent.
+    """Replace ``agentic_insights.json`` and then ``inventory.json``, keeping the two consistent.
 
-    Both temp files are written before either target is replaced. If replacing the inventory raises
-    ``OSError`` (the rename did not happen), the insights file is put back to *current_insights* --
-    the block the unchanged ``inventory.json`` holds, not whatever the file held, which an earlier
-    killed write may have left ahead -- by replacing it from a temp file (or removed when the
-    inventory holds none), so the live file is never left half-written. If
-    that rollback fails too, the two may disagree, so :class:`_UnrecoveredWriteError` is raised and
-    the caller's lock stays behind. An interrupt (``KeyboardInterrupt``, ``SystemExit``) from the
-    first replace on can arrive just after a rename succeeded, so nothing is rolled back: it is
-    treated like a kill and re-raised from an :class:`_UnrecoveredWriteError`, keeping the lock.
-    Callers hold :func:`_enrich_lock`, so absent a concurrent discover no other enrich writes between,
-    and the fixed temp names mean the next write overwrites and removes any left behind by a killed
-    one; with a concurrent discover, another enrich can write or install these same temp files (the
-    module docstring lists those windows). *still_current* is
-    asked before the temp files are written and again right before the first replace; when it says
-    discover ran since the inventory was read, :class:`_DiscoverRanError` is raised and nothing is
-    replaced.
+    Both temp files, named after *lock_token*, are written first and removed on the way out. If the
+    inventory replace fails, the insights file is put back to *current_insights* (the block the unchanged
+    inventory holds) or removed when that is ``None``; if that rollback fails too,
+    :class:`_UnrecoveredWriteError` is raised so the caller keeps the lock. An interrupt from the first
+    replace on may land just after a rename, so nothing is rolled back and it is re-raised from an
+    :class:`_UnrecoveredWriteError`. When *still_current* says discover ran, before the temp files or
+    before the first replace, :class:`_DiscoverRanError` is raised and nothing is replaced.
     """
     previous_insights = None if current_insights is None else json.dumps(current_insights, indent=2).encode("utf-8")
-    insights_temporary = insights_path.with_name(f".{insights_path.name}.tmp")
-    inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.tmp")
+    insights_temporary = insights_path.with_name(f".{insights_path.name}.{lock_token}.tmp")
+    inventory_temporary = inventory_path.with_name(f".{inventory_path.name}.{lock_token}.tmp")
     try:
         if not still_current():
             raise _DiscoverRanError
@@ -927,10 +894,25 @@ def enrich_inventory(
 def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any, lock_token: str) -> dict[str, Any]:
     """The read-validate-write half of :func:`enrich_inventory`, run while holding the enrich lock.
 
-    The lock only keeps other enrich runs out; discover clears ``metadata/``, the lock with it,
-    without asking. So right before writing, this checks that its lock is still in place and
-    ``inventory.json`` still holds the bytes it read. If discover ran in between, it writes nothing
-    and reports that, so its insights, checked against the old inventory, never overwrite the new one.
+    How enrich keeps ``agentic_insights.json`` and ``inventory.json`` consistent, in one place:
+
+    * **The lock.** :func:`_enrich_lock` keeps other enrich runs out. Discover does not take it: it
+      clears ``metadata/``, the lock with it.
+    * **Discover during an enrich.** Right before writing the temp files and again right before the
+      first replace, this checks that its lock is still in place and ``inventory.json`` still holds the
+      bytes it read. If discover ran in between, it writes nothing and reports that, so insights checked
+      against the old inventory never overwrite the new one.
+    * **The write.** :func:`_write_both_or_neither` writes temp files named after this run's lock token,
+      so no other run can install them, then replaces the two files back to back.
+    * **Crashes.** A kill or interrupt between the two replaces, or a failed rollback, can leave
+      ``agentic_insights.json`` a write ahead of ``inventory.json``. The lock then stays behind and the
+      next enrich refuses until it is removed. A killed run's temp files stay in ``metadata/`` until the
+      next discover clears it.
+    * **Windows left open.** Each is a few file operations wide and needs a discover during an enrich.
+      A discover between the final check and the replaces makes the enrich fail with an error and can
+      leave the two files out of step. Releasing the lock reads the token and then deletes the file, so a
+      discover plus a new enrich's lock landing between those steps lets this enrich delete the new lock;
+      a third enrich can then write alongside the second, so the two files may come from different runs.
     """
     inventory_bytes = inventory_path.read_bytes()
     inventory = json.loads(inventory_bytes.decode("utf-8"))
@@ -961,6 +943,7 @@ def _enrich_locked(output_dir: Path, inventory_path: Path, raw: Any, lock_token:
             rendered_inventory,
             current_insights=inventory.get(INSIGHTS_KEY),
             still_current=still_current,
+            lock_token=lock_token,
         )
     except _DiscoverRanError:
         return {"ok": False, "violations": [_DISCOVER_RAN_VIOLATION], "pipeline_insights": 0, "relationships": 0}

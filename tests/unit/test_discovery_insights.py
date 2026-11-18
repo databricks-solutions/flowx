@@ -9,6 +9,7 @@ all, exactly as it will see it in production.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import json
 from pathlib import Path
@@ -168,6 +169,48 @@ def test_models_construct_and_document_the_contract() -> None:
     assert insights.pipeline_relationships[0].lineage_edge.edge_type == "control"
 
 
+def test_every_field_the_models_declare_is_a_key_the_validator_accepts() -> None:
+    """The validator takes its keys from the models, so a payload that sets every model field passes."""
+    pattern = RecommendedPattern(
+        pattern="Lakeflow Connect",
+        fit="Managed CDC ingestion",
+        simplification_pattern=True,
+        release_state="public_preview",
+        release_state_source="https://docs.databricks.com/ingestion/lakeflow-connect/",
+    )
+    insights = Insights(
+        overview="o",
+        system_recommendation=SystemRecommendation(
+            headline="h", recommended_patterns=[pattern], cascade=["c"], decision_driver="d"
+        ),
+        pipeline_insights=[
+            PipelineInsight(
+                pipeline="child",
+                pattern_name="n",
+                intent="i",
+                databricks_pattern="p",
+                recommended_patterns=[pattern],
+                conversion_notes=["note"],
+                risk_if_ignored="r",
+            )
+        ],
+        pipeline_relationships=[
+            PipelineRelationship(
+                from_pipeline="child",
+                to_pipeline="sibling",
+                lineage_edge=LineageEdgeRef(
+                    edge_type="inferred", edge_identity="sales.curated", evidence="e", confidence="low"
+                ),
+                relationship_summary="s",
+                databricks_pattern="p",
+                risk_if_ignored="r",
+            )
+        ],
+    )
+
+    assert validate_insights(dataclasses.asdict(insights), _inventory()) == []
+
+
 # --------------------------------------------------------------------------- #
 # Validation: success.
 # --------------------------------------------------------------------------- #
@@ -185,6 +228,42 @@ def test_valid_insights_pass_validation() -> None:
 def test_non_dict_payload_is_a_violation() -> None:
     violations = validate_insights([1, 2, 3], _inventory())
     assert violations == ["insights must be a JSON object, got list"]
+
+
+_NO_CONTENT_VIOLATION = (
+    "insights must set at least one of 'overview', 'system_recommendation', 'pipeline_insights' or "
+    "'pipeline_relationships' (an empty list does not count)"
+)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {},
+        {"pipeline_insights": []},
+        {"pipeline_relationships": []},
+        {"pipeline_insights": [], "pipeline_relationships": []},
+    ],
+)
+def test_insights_with_no_content_are_a_violation(raw: dict[str, Any]) -> None:
+    assert validate_insights(raw, _inventory()) == [_NO_CONTENT_VIOLATION]
+
+
+@pytest.mark.parametrize("key", ["overview", "system_recommendation", "pipeline_insights", "pipeline_relationships"])
+def test_any_one_content_field_is_enough(key: str) -> None:
+    assert validate_insights({key: _valid_insights()[key]}, _inventory()) == []
+
+
+def test_enrich_records_nothing_for_empty_insights(tmp_path: Path) -> None:
+    path = _write_inventory(tmp_path, _inventory())
+    before = path.read_bytes()
+
+    result = enrich_inventory(tmp_path, insights={})
+
+    assert result["ok"] is False
+    assert result["violations"] == [_NO_CONTENT_VIOLATION]
+    assert path.read_bytes() == before
+    assert not (tmp_path / "metadata" / "agentic_insights.json").exists()
 
 
 def test_unknown_pipeline_reference_in_insight() -> None:
@@ -246,6 +325,21 @@ def test_the_same_relationship_given_twice_is_a_violation(tmp_path: Path) -> Non
     )
     assert result["ok"] is False
     assert path.read_bytes() == original_bytes
+
+
+def test_a_relationship_repeated_with_padded_edge_identity_is_a_duplicate() -> None:
+    """The edge identity is compared stripped, so surrounding spaces do not make a second relationship."""
+    raw = _valid_insights()
+    repeated = copy.deepcopy(raw["pipeline_relationships"][1])
+    repeated["lineage_edge"]["edge_identity"] = f"  {repeated['lineage_edge']['edge_identity']} "
+    raw["pipeline_relationships"].append(repeated)
+
+    violations = validate_insights(raw, _inventory())
+
+    assert violations == [
+        "pipeline_relationships[2]: duplicate relationship (already given at pipeline_relationships[1]); "
+        "give each one once"
+    ]
 
 
 def test_two_control_edges_between_one_pair_through_different_tasks_are_both_kept() -> None:
@@ -620,6 +714,36 @@ def test_relationship_text_fields_must_be_strings(field_name: str) -> None:
     raw["pipeline_relationships"][0][field_name] = {"text": "nested"}
     violations = validate_insights(raw, _inventory())
     assert violations == [f"pipeline_relationships[0]: {field_name!r} must be a string when present, got dict"]
+
+
+@pytest.mark.parametrize(
+    ("path", "field_name"),
+    [
+        ((), "overview"),
+        ((), "authored_against"),
+        (("pipeline_insights", 0), "pattern_name"),
+        (("pipeline_insights", 0), "intent"),
+        (("pipeline_insights", 0), "databricks_pattern"),
+        (("pipeline_insights", 0), "risk_if_ignored"),
+        (("pipeline_insights", 0), "conversion_notes"),
+        (("pipeline_relationships", 0), "relationship_summary"),
+        (("pipeline_relationships", 0), "databricks_pattern"),
+        (("pipeline_relationships", 0), "risk_if_ignored"),
+        (("system_recommendation",), "cascade"),
+        (("system_recommendation",), "decision_driver"),
+        (("system_recommendation", "recommended_patterns", 1), "release_state"),
+        (("system_recommendation", "recommended_patterns", 1), "release_state_source"),
+    ],
+)
+def test_an_explicit_null_for_an_optional_field_is_a_violation(path: tuple[Any, ...], field_name: str) -> None:
+    """A null would be copied into both files as null, so an optional field is either given or left out."""
+    raw = _valid_insights()
+    record = functools.reduce(lambda value, key: value[key], path, raw)
+    record[field_name] = None
+
+    violations = validate_insights(raw, _inventory())
+
+    assert any(repr(field_name) in violation for violation in violations), violations
 
 
 def test_system_recommendation_requires_headline_and_patterns() -> None:
