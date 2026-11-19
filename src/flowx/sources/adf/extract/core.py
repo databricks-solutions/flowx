@@ -38,7 +38,7 @@ API_VERSION = "2018-06-01"
 
 _REQUEST_TIMEOUT_SECONDS = 60
 _TOKEN_REFRESH_MARGIN_SECONDS = 300
-_RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_BACKOFF_SECONDS = 60.0
 
 logger = logging.getLogger(__name__)
@@ -250,16 +250,8 @@ class ArmTransport:
         return self._session
 
     def _wait_before_retry(self, attempt: int, retry_after: str | None) -> None:
-        delay: float | None = None
-        if retry_after:
-            try:
-                delay = float(retry_after)
-            except ValueError:
-                delay = None
-        if delay is None:
-            delay = min(_MAX_BACKOFF_SECONDS, 2.0**attempt) + random.uniform(0, 1)
         self.retry_count += 1
-        self._sleep(min(delay, _MAX_BACKOFF_SECONDS))
+        self._sleep(backoff_seconds(attempt, retry_after))
 
     def get_json(self, url: str) -> dict[str, Any]:
         refreshed_after_401 = False
@@ -294,10 +286,29 @@ class ArmTransport:
                 refreshed_after_401 = True
                 self._authorization = None
                 continue
-            if status in _RETRYABLE_STATUSES and attempt < self._max_attempts:
+            if status in RETRYABLE_STATUSES and attempt < self._max_attempts:
                 self._wait_before_retry(attempt, headers.get("Retry-After"))
                 continue
             raise HttpError(status, url, _error_detail(response))
+
+
+def backoff_seconds(attempt: int, retry_after: str | float | None) -> float:
+    """How long to wait before retry number ``attempt``, counting from 1.
+
+    When Azure says how long to wait (``Retry-After`` as a number of seconds), that wait is used;
+    otherwise the wait doubles with each attempt, plus up to a second of jitter so parallel
+    clients don't retry in step. Either way it is never more than a minute. The ADF profiler
+    shares this backoff, passing the wait it read from Azure's retry-after headers.
+    """
+    delay: float | None = None
+    if retry_after is not None:
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            delay = None
+    if delay is None:
+        delay = min(_MAX_BACKOFF_SECONDS, 2.0**attempt) + random.uniform(0, 1)
+    return min(delay, _MAX_BACKOFF_SECONDS)
 
 
 def _json_body(response: Any, url: str) -> dict[str, Any]:
