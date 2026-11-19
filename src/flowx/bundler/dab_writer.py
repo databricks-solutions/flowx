@@ -837,7 +837,7 @@ def write_bundle_group(
         required_variables={
             name: declaration["description"]
             for name, declaration in databricks_yml_dict.get("variables", {}).items()
-            if name in _CLUSTER_VARIABLES and "default" not in declaration
+            if name in _REQUIRED_VARIABLE_NAMES and "default" not in declaration
         },
         synthetic_default_parameters=list(_synthetic_default_parameters),
     )
@@ -1401,7 +1401,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     required = sorted(
-        {name for bundle_dir in bundle_dirs for name in _required_cluster_variables_in(bundle_dir / "databricks.yml")}
+        {name for bundle_dir in bundle_dirs for name in _required_variables_in(bundle_dir / "databricks.yml")}
     )
     print("\nNext steps:")
     print("  1. Review the generated notebooks in src/")
@@ -1419,15 +1419,15 @@ def main(argv: list[str] | None = None) -> int:
     return 4 if skipped_dags else 0
 
 
-def _required_cluster_variables_in(databricks_yml: Path) -> set[str]:
-    """Returns the required cluster variables a written ``databricks.yml`` declares."""
+def _required_variables_in(databricks_yml: Path) -> set[str]:
+    """Returns the required cluster and warehouse variables a written ``databricks.yml`` declares."""
     if not databricks_yml.is_file():
         return set()
     config = yaml.safe_load(databricks_yml.read_text(encoding="utf-8")) or {}
     variables = config.get("variables") or {}
     return {
         name
-        for name in _CLUSTER_VARIABLES
+        for name in _REQUIRED_VARIABLE_NAMES
         if isinstance(variables.get(name), dict) and "default" not in variables[name]
     }
 
@@ -2244,6 +2244,8 @@ def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
 _VAR_REFERENCE_RE = re.compile(r"\$\{var\.([A-Za-z_][A-Za-z0-9_]*(?:-+[A-Za-z0-9_]+)*)\}")
 
 _CLUSTER_VARIABLES = frozenset({"node_type_id", "spark_version"})
+# Variables flowx declares without a default, which the user supplies for each target.
+_REQUIRED_VARIABLE_NAMES = _CLUSTER_VARIABLES | {"warehouse_id"}
 _BUILTIN_BUNDLE_VARIABLES = frozenset({"catalog", "schema"}) | _CLUSTER_VARIABLES
 
 

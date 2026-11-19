@@ -148,9 +148,10 @@ def _segments(command: str) -> list[tuple[str | None, list[str]]] | None:
 def parse(command: str, working_directory: str | None = None) -> ShellDbt | None:
     """Returns what a dbt-only shell command runs, or None when the command does anything else.
 
-    *working_directory* is the task's ``cwd``, which a relative ``cd`` or ``--project-dir`` starts from.
+    *working_directory* is the task's ``cwd``, which a relative ``cd`` or ``--project-dir`` starts from. A
+    Jinja template in either is rendered per run, so the project or command it picks is not fixed.
     """
-    if "{{" in command or "{%" in command:
+    if any("{{" in text or "{%" in text for text in (command, working_directory or "")):
         return None
     segments = _segments(command)
     if not segments:

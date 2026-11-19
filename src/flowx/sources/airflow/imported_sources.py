@@ -31,12 +31,15 @@ class ImportedName:
     module: str
     attribute: str | None
     level: int = 0
+    # The module as an ``import`` statement names it, such as ``a.b.c`` for ``import a.b.c``, which binds ``a``.
+    written_module: str | None = None
 
     def statement(self) -> str:
         """Returns the import as Python source, as the DAG wrote it."""
         module = "." * self.level + self.module
         if self.attribute is None:
-            return f"import {module}" + (f" as {self.local}" if self.local != module.split(".")[0] else "")
+            written = self.written_module or module
+            return f"import {written}" + (f" as {self.local}" if self.local != written.split(".")[0] else "")
         alias = f" as {self.local}" if self.local != self.attribute else ""
         return f"from {module} import {self.attribute}{alias}"
 
@@ -48,7 +51,9 @@ def import_table(module: ast.Module) -> dict[str, ImportedName]:
         if isinstance(node, ast.Import):
             for item in node.names:
                 local = item.asname or item.name.split(".")[0]
-                table[local] = ImportedName(local=local, module=item.name if item.asname else local, attribute=None)
+                table[local] = ImportedName(
+                    local=local, module=item.name if item.asname else local, attribute=None, written_module=item.name
+                )
         elif isinstance(node, ast.ImportFrom):
             for item in node.names:
                 if item.name != "*":
@@ -184,12 +189,64 @@ def resolve_import(imported: ImportedName, roots: tuple[Path, ...]) -> dict[str,
     return {**record, "unresolved": f"its definition was not found under {searched}"}
 
 
+def _dotted_name(node: ast.Attribute) -> tuple[list[str], ast.expr]:
+    """Returns the names of an attribute chain such as ``a.b.c``, with the expression the chain starts from."""
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    return ([current.id] if isinstance(current, ast.Name) else []) + parts[::-1], current
+
+
+def _resolve_module_attribute(
+    imported: ImportedName, dotted: list[str], roots: tuple[Path, ...]
+) -> dict[str, Any] | None:
+    """Resolves a chain such as ``company.operators.custom.LoadOperator`` through a plain ``import company...``.
+
+    The longest module path that holds the next name wins, so ``custom.LoadOperator.partial`` still finds
+    ``LoadOperator``. Returns None when no split resolves.
+    """
+    for split in range(len(dotted) - 1, 0, -1):
+        record = resolve_import(
+            ImportedName(
+                local=".".join(dotted[: split + 1]),
+                module=".".join([imported.module, *dotted[1:split]]),
+                attribute=dotted[split],
+            ),
+            roots,
+        )
+        if "unresolved" not in record:
+            return {**record, "import": imported.statement()}
+    return None
+
+
 def imported_sources(node: ast.AST, imports: dict[str, ImportedName], roots: tuple[Path, ...]) -> list[dict[str, Any]]:
-    """Returns the project definitions an expression uses through the DAG file's imports, in order of use."""
+    """Returns the project definitions an expression uses through the DAG file's imports, in order of use.
+
+    A name used through a plain ``import package.module`` resolves by its full attribute chain.
+    """
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
+    chained: set[int] = set()
     for name in ast.walk(node):
-        if not isinstance(name, ast.Name) or name.id in seen:
+        if isinstance(name, ast.Attribute) and id(name) not in chained:
+            dotted, start = _dotted_name(name)
+            inner: ast.expr = name.value
+            while isinstance(inner, ast.Attribute):
+                chained.add(id(inner))
+                inner = inner.value
+            imported = imports.get(dotted[0]) if dotted else None
+            if imported is None or imported.attribute is not None or not _is_project_import(imported):
+                continue
+            key = ".".join(dotted)
+            record = _resolve_module_attribute(imported, dotted, roots) if key not in seen else None
+            seen.add(key)
+            if record is not None:
+                chained.add(id(start))
+                records.append(record)
+            continue
+        if not isinstance(name, ast.Name) or name.id in seen or id(name) in chained:
             continue
         seen.add(name.id)
         imported = imports.get(name.id)

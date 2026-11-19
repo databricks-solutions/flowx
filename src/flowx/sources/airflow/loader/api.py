@@ -19,6 +19,7 @@ from flowx.sources.airflow.loader.dag_discovery import (
     _module_for_dag,
     _top_level_dag_declarations,
     dag_generator,
+    might_contain_dags,
 )
 from flowx.sources.airflow.loader.lowering import _load_airflow_module
 from flowx.sources.airflow.loader.reconcile import pause_unfinished_schedule
@@ -50,7 +51,7 @@ def load_airflow_dags(
     source = Path(dag_path).read_text(encoding="utf-8")
     module = _expand_top_level_loops(ast.parse(source))
     declarations = _top_level_dag_declarations(module)
-    generator = dag_generator(module, declarations)
+    generator = dag_generator(module, declarations, include_globals=might_contain_dags(source))
     pipelines: list[Pipeline] = []
     for declaration in declarations:
         if declaration.unsupported_reason is not None:
@@ -176,7 +177,8 @@ def discover_dags(source_path: Path) -> list[Path]:
     Accepts either a single ``.py`` file or a directory (scanned recursively).
     Discovery uses the same static declaration model as loading, including
     import aliases and qualified TaskFlow decorators. A file that builds its DAGs through dag-factory,
-    gusty, or ``globals()`` is included so it is reported as a failed source rather than skipped.
+    gusty, or ``globals()`` is included so it is reported as a failed source rather than skipped; a ``globals()``
+    write counts only in a file Airflow's safe-mode discovery would parse.
     """
     source_path = Path(source_path)
     candidates = [source_path] if source_path.is_file() else sorted(source_path.rglob("*.py"))
@@ -185,10 +187,14 @@ def discover_dags(source_path: Path) -> list[Path]:
         if candidate.suffix != ".py":
             continue
         try:
-            module = _expand_top_level_loops(ast.parse(candidate.read_text(encoding="utf-8")))
+            source = candidate.read_text(encoding="utf-8")
+            module = _expand_top_level_loops(ast.parse(source))
         except (OSError, SyntaxError):
             continue
-        if _top_level_dag_declarations(module) or dag_generator(module) is not None:
+        if (
+            _top_level_dag_declarations(module)
+            or dag_generator(module, include_globals=might_contain_dags(source)) is not None
+        ):
             dags.append(candidate)
     return dags
 

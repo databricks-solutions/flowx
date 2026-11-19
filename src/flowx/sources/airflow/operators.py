@@ -781,6 +781,24 @@ def _dbt_command_activity(ctx: OperatorContext, dbt: shell_dbt.ShellDbt) -> Acti
             "the task.",
             {"dbt_commands": dbt.commands, "dbt_project_dir": dbt.project_dir, "environment_variables": environment},
         )
+    outside = bundle_files.local_packages_outside(local_project)
+    if outside:
+        return _placeholder(
+            ctx,
+            f"This {ctx.operator} runs dbt project {dbt.project_dir}, which installs local package(s) "
+            f"{', '.join(outside)} from outside the project folder, so the bundle cannot carry them. Move them into "
+            "the project or publish them as packages, then translate the task.",
+            {"dbt_commands": dbt.commands, "dbt_project_dir": dbt.project_dir, "local_packages": outside},
+        )
+    commands = bundle_files.task_commands(dbt.commands, local_project)
+    if len(commands) > bundle_files.MAX_TASK_COMMANDS:
+        added_deps = " counting the dbt deps the project needs" if commands != dbt.commands else ""
+        return _placeholder(
+            ctx,
+            f"This {ctx.operator} runs {len(commands)} dbt commands{added_deps}, and a Databricks dbt task runs at "
+            f"most {bundle_files.MAX_TASK_COMMANDS}. Split them across dbt tasks, then translate the task.",
+            {"dbt_commands": dbt.commands, "dbt_project_dir": dbt.project_dir},
+        )
     if "cwd" in ctx.kwargs:
         ctx.consumed_arguments.add("cwd")
     ctx.disclosures.append(

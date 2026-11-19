@@ -87,10 +87,20 @@ def _job_timeout_seconds(visitor: _DagVisitor) -> int | None:
     return templating.timedelta_seconds(visitor.dag_kwargs.get("dagrun_timeout"))
 
 
-def job_max_concurrent_runs(visitor: _DagVisitor) -> int | None:
-    """Returns the DAG's static positive ``max_active_runs``, the Databricks job's ``max_concurrent_runs``."""
+# The most concurrent runs a Databricks job allows.
+_MAX_JOB_CONCURRENT_RUNS = 1000
+
+
+def _max_active_runs(visitor: _DagVisitor) -> int | None:
     value = ops.literal_value(visitor.dag_kwargs.get("max_active_runs"))
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def job_max_concurrent_runs(visitor: _DagVisitor) -> int | None:
+    """Returns the Databricks job's ``max_concurrent_runs``: the DAG's static positive ``max_active_runs``,
+    capped at the most a job allows."""
+    value = _max_active_runs(visitor)
+    return None if value is None else min(value, _MAX_JOB_CONCURRENT_RUNS)
 
 
 def _job_email_notifications(visitor: _DagVisitor) -> dict[str, list[str]]:
@@ -169,7 +179,18 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
             "rationale": "template_searchpath_not_statically_resolvable",
         }
     if name == "max_active_runs":
-        if job_max_concurrent_runs(visitor) is not None:
+        max_active_runs = _max_active_runs(visitor)
+        if max_active_runs is not None and max_active_runs > _MAX_JOB_CONCURRENT_RUNS:
+            return {
+                "status": "mapped",
+                "target": "job.max_concurrent_runs",
+                "message": (
+                    f"Airflow max_active_runs is {max_active_runs}, and a Databricks job runs at most "
+                    f"{_MAX_JOB_CONCURRENT_RUNS} at once, so max_concurrent_runs is {_MAX_JOB_CONCURRENT_RUNS}."
+                ),
+                "rationale": "capped_at_databricks_job_concurrency_limit",
+            }
+        if max_active_runs is not None:
             return {
                 "status": "mapped",
                 "target": "job.max_concurrent_runs",
