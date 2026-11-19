@@ -180,7 +180,11 @@ def test_prepare_writes_versioned_fingerprint_bound_gap_without_changing_report(
     assert gap["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert gap["dag_capture_identity"] == "dag:dag.py:agentic"
     assert gap["finding_fingerprints"] == [gap["gap_id"]]
+    assert gap["required_capability"] is None
     assert all(len(gap[field]) == 64 for field in ("task_sha256", "graph_sha256", "provider_sha256", "request_sha256"))
+    request_payload = dict(gap)
+    request_sha256 = request_payload.pop("request_sha256")
+    assert request_sha256 == agentic_contract._sha256_bytes(agentic_contract._json_bytes(request_payload))
     assert {argument["name"] for argument in gap["arguments"]} == {"task_id", "image", "retries"}
     assert {argument["owner"] for argument in gap["arguments"]} == {"flowx", "provider"}
     image = next(argument for argument in gap["arguments"] if argument["name"] == "image")
@@ -464,6 +468,58 @@ def test_taskflow_gap_arguments_come_from_invocation_not_callable_body(tmp_path:
             "preserved_by_flowx": False,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "operator_source",
+    [
+        (
+            "from airflow import DAG\n"
+            "from airflow.operators.python import BranchPythonOperator\n"
+            "def choose():\n"
+            "    return 'next'\n"
+            "with DAG(dag_id='branch') as dag:\n"
+            "    choose_path = BranchPythonOperator(task_id='choose_path', python_callable=choose)\n"
+        ),
+        (
+            "from airflow.decorators import dag, task_group\n"
+            "@task_group\n"
+            "def grouped():\n"
+            "    pass\n"
+            "@dag(dag_id='grouped')\n"
+            "def workflow():\n"
+            "    grouped()\n"
+            "workflow()\n"
+        ),
+    ],
+    ids=("branch", "task-group"),
+)
+def test_structural_gap_rejects_leaf_replacement_but_accepts_deferred_candidate(
+    tmp_path: Path, capsys, operator_source: str
+) -> None:
+    source = tmp_path / "structural.py"
+    source.write_text(operator_source, encoding="utf-8")
+    output = tmp_path / "output"
+    gap = _prepare_source(source, output)[0]
+
+    assert gap["allowed_replacement_kinds"] == []
+    assert gap["required_capability"] == "graph_patch"
+    assert _stage(output, _candidate(gap)) == 1
+    assert "not allowed for this gap" in capsys.readouterr().err
+
+    assert _stage(output, _candidate(gap, status="deferred")) == 0
+
+
+@pytest.mark.parametrize(
+    ("finding_codes", "expected"),
+    [
+        ({"unsupported_trigger_rule"}, "graph_patch"),
+        ({"unrepresented_task_policy"}, "task_policy_patch"),
+        ({"operator_placeholder"}, None),
+    ],
+)
+def test_finding_capability_label_is_shared_with_mcp(finding_codes: set[str], expected: str | None) -> None:
+    assert agentic_contract.airflow_finding_required_capability(finding_codes) == expected
 
 
 def test_only_actually_preserved_policy_arguments_are_flowx_owned(tmp_path: Path) -> None:

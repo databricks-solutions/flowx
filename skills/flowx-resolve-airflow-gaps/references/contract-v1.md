@@ -4,6 +4,8 @@ The provider receives a `GapEnvelope` produced by flowx. It does not receive aut
 
 `capture_identity` is flowx's source-capture identity and may differ from the collision-safe Databricks `task_key`. `task_path` identifies the exact placeholder location, including a nested `for_each` body; providers must copy neither field into the replacement payload.
 
+`allowed_replacement_kinds` and `required_capability` are part of the hash-bound envelope. A non-empty replacement-kind list means the gap is eligible for v1 leaf resolution. An empty list is non-leaf and `required_capability` identifies the missing contract, such as `graph_patch` or `task_policy_patch`.
+
 ## Resolution shape
 
 ```json

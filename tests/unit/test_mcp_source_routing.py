@@ -74,6 +74,64 @@ def test_discover_routes_airflow_source(captured, tmp_path: Path):
     assert argv[argv.index("--source-path") + 1] == str(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("parameter_name", "runner_name", "remote_path"),
+    [
+        ("airflow_volume_path", "download_volume_dir", "/Volumes/main/default/dags"),
+        ("airflow_workspace_path", "download_workspace_dir", "/Workspace/Shared/dags"),
+    ],
+)
+def test_discover_materializes_hosted_airflow_sources(
+    captured,
+    monkeypatch,
+    tmp_path: Path,
+    parameter_name: str,
+    runner_name: str,
+    remote_path: str,
+):
+    materialized = tmp_path / "materialized"
+    cleaned: list[str] = []
+    monkeypatch.setattr(runner, runner_name, lambda path: str(materialized) if path == remote_path else "")
+    monkeypatch.setattr(runner, "cleanup_materialized", cleaned.append)
+
+    server._cmd_discover(
+        {
+            "source": "airflow",
+            parameter_name: remote_path,
+            "output_dir": str(tmp_path / "out"),
+        }
+    )
+
+    argv = _argv(captured, "discover")
+    assert argv[argv.index("--source-path") + 1] == str(materialized)
+    assert cleaned == [str(materialized)]
+
+
+def test_discover_materializes_inline_airflow_definitions(captured, monkeypatch, tmp_path: Path):
+    definitions = {"daily.py": "from airflow import DAG\n"}
+    materialized = tmp_path / "materialized"
+    cleaned: list[str] = []
+    monkeypatch.setattr(
+        runner,
+        "materialize_airflow_definitions",
+        lambda value: str(materialized) if value == definitions else "",
+        raising=False,
+    )
+    monkeypatch.setattr(runner, "cleanup_materialized", cleaned.append)
+
+    server._cmd_discover(
+        {
+            "source": "airflow",
+            "airflow_definitions": definitions,
+            "output_dir": str(tmp_path / "out"),
+        }
+    )
+
+    argv = _argv(captured, "discover")
+    assert argv[argv.index("--source-path") + 1] == str(materialized)
+    assert cleaned == [str(materialized)]
+
+
 def test_airflow_exclusions_are_forwarded_as_repeatable_flags(captured, tmp_path: Path):
     parameters = {
         "source": "airflow",
@@ -143,6 +201,67 @@ def test_resolve_agentic_prepare_routes_airflow_contract(captured):
     assert argv[argv.index("--report") + 1] == "/tmp/out/.work/translation_report.json"
     assert argv[argv.index("--gap-id") + 1] == "abc123"
     assert result["ok"] is True
+
+
+def test_resolve_agentic_prepare_routes_source_dir_alias(captured):
+    result = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "prepare",
+            "source_dir": "/tmp/dags",
+            "report_path": "/tmp/out/.work/translation_report.json",
+            "output_dir": "/tmp/out",
+        }
+    )
+
+    argv = _argv(captured, "resolve-agentic")
+    assert argv[argv.index("--source-path") + 1] == "/tmp/dags"
+    assert result["ok"] is True
+
+
+def test_resolve_agentic_prepare_materializes_hosted_airflow_source(captured, monkeypatch, tmp_path: Path):
+    materialized = tmp_path / "materialized"
+    cleaned: list[str] = []
+    monkeypatch.setattr(runner, "download_volume_dir", lambda _path: str(materialized))
+    monkeypatch.setattr(runner, "cleanup_materialized", cleaned.append)
+
+    result = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "prepare",
+            "airflow_volume_path": "/Volumes/main/default/dags",
+            "report_path": "/tmp/out/.work/translation_report.json",
+            "output_dir": "/tmp/out",
+        }
+    )
+
+    argv = _argv(captured, "resolve-agentic")
+    assert argv[argv.index("--source-path") + 1] == str(materialized)
+    assert cleaned == [str(materialized)]
+    assert result["ok"] is True
+
+
+def test_resolve_agentic_apply_rematerializes_the_hosted_prepare_source(captured, monkeypatch, tmp_path: Path):
+    prepared_source = tmp_path / "prepared-source"
+    applied_source = tmp_path / "applied-source"
+    materialized = iter((prepared_source, applied_source))
+    cleaned: list[str] = []
+    monkeypatch.setattr(runner, "download_volume_dir", lambda _path: str(next(materialized)))
+    monkeypatch.setattr(runner, "cleanup_materialized", cleaned.append)
+    parameters = {
+        "source": "airflow",
+        "airflow_volume_path": "/Volumes/main/default/dags",
+        "report_path": "/tmp/out/.work/translation_report.json",
+        "output_dir": "/tmp/out",
+    }
+
+    assert server._cmd_resolve_agentic({**parameters, "action": "prepare"})["ok"] is True
+    assert server._cmd_resolve_agentic({**parameters, "action": "apply", "reset": True})["ok"] is True
+
+    prepare_argv, apply_argv = [argv for argv in captured if argv[0] == "resolve-agentic"]
+    assert prepare_argv[prepare_argv.index("--source-path") + 1] == str(prepared_source)
+    assert apply_argv[apply_argv.index("--source-path") + 1] == str(applied_source)
+    assert cleaned == [str(prepared_source), str(applied_source)]
 
 
 def test_resolve_agentic_stage_materializes_inline_candidate(captured):

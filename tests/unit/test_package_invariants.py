@@ -54,6 +54,19 @@ def _airflow_pipeline(name: str, tasks: list[dict], *, status: str = "verified")
     }
 
 
+def _airflow_gap_report() -> dict:
+    report = _airflow_pipeline("unresolved", [_notebook_task("a", "a")], status="verified_with_gaps")
+    report["not_translatable"] = [
+        {
+            "fingerprint": "gap-1",
+            "code": "operator_placeholder",
+            "severity": "gap",
+            "message": "The task remains a linked failing placeholder.",
+        }
+    ]
+    return report
+
+
 def test_package_passes_invariants_for_clean_bundle():
     report = _adf_pipeline("clean", [_notebook_task("a", "a"), _notebook_task("b", "b")])
     assert _run_package(report) == 0
@@ -248,6 +261,38 @@ def test_report_preflight_rejects_airflow_without_audit_metadata(tmp_path: Path)
     failures = _preflight_failures(tmp_path, report)
 
     assert any("source-audit metadata" in failure for failure in failures)
+
+
+def test_report_preflight_requires_acknowledgment_for_unreviewed_airflow_gaps(tmp_path: Path):
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(_airflow_gap_report()), encoding="utf-8")
+
+    failures = _report_reconciliation_failures(report_path)
+
+    assert any("--allow-unresolved-gaps" in failure for failure in failures)
+    assert _report_reconciliation_failures(report_path, allow_unresolved_gaps=True) == []
+
+
+def test_package_acknowledges_unreviewed_airflow_gaps_explicitly(tmp_path: Path):
+    output_dir = tmp_path / "bundle"
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(_airflow_gap_report()), encoding="utf-8")
+
+    assert package_main(["--report", str(report_path), "--output-dir", str(output_dir)]) == 1
+    assert not (output_dir / "databricks.yml").exists()
+    assert (
+        package_main(
+            [
+                "--report",
+                str(report_path),
+                "--output-dir",
+                str(output_dir),
+                "--allow-unresolved-gaps",
+            ]
+        )
+        == 0
+    )
+    assert (output_dir / "databricks.yml").exists()
 
 
 def test_report_preflight_rejects_top_level_list(tmp_path: Path):

@@ -30,6 +30,13 @@ _PROVIDER_MANIFEST_PATH = PurePosixPath("providers/flowx-gap-resolver/provider.j
 _PROVIDER_PIN_FIELD = "flowx_pin"
 
 _ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql", "spark_python")
+_STRUCTURAL_OPERATOR_MARKERS = ("branch", "shortcircuit", "taskgroup", "subdag")
+_GRAPH_PATCH_FINDING_CODES = {
+    "excluded_dag_reference",
+    "taskflow_mapped_output_unavailable",
+    "unsupported_trigger_rule",
+}
+_TASK_POLICY_FINDING_CODES = {"unrepresented_task_policy"}
 _RESOLUTION_STATUSES = {"resolved", "needs_input", "deferred"}
 _DISPOSITIONS = {"consumed", "preserved_by_flowx", "ignored", "needs_input"}
 _MAX_GENERATED_FILE_BYTES = 1024 * 1024
@@ -49,6 +56,100 @@ _COMMON_TASK_FIELDS = (
     "compute_mode",
     "notifications",
 )
+
+
+def airflow_finding_required_capability(finding_codes: set[str]) -> str | None:
+    """Returns the non-leaf capability label implied by reconciled finding codes."""
+    if finding_codes & _GRAPH_PATCH_FINDING_CODES:
+        return "graph_patch"
+    if finding_codes & _TASK_POLICY_FINDING_CODES:
+        return "task_policy_patch"
+    return None
+
+
+def airflow_gap_findings(report: Any) -> list[dict[str, Any]]:
+    """Returns every unresolved reconciled gap finding in an Airflow report."""
+    pipelines = report.get("pipelines") if isinstance(report, dict) else None
+    if not isinstance(pipelines, list):
+        pipelines = [report] if isinstance(report, dict) else []
+    return [
+        finding
+        for pipeline in pipelines
+        if isinstance(pipeline, dict)
+        and isinstance(pipeline.get("tags"), dict)
+        and pipeline["tags"].get("source") == "airflow"
+        for finding in pipeline.get("not_translatable") or []
+        if isinstance(finding, dict) and finding.get("severity") == "gap"
+    ]
+
+
+def classify_airflow_gaps(
+    report: Any,
+    prepared_gaps: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Classifies reconciled Airflow findings against the v1 leaf-resolution contract."""
+    pipelines = report.get("pipelines") if isinstance(report, dict) else None
+    if not isinstance(pipelines, list):
+        pipelines = [report] if isinstance(report, dict) else []
+    findings: list[tuple[str, dict[str, Any]]] = []
+    for pipeline in pipelines:
+        if not isinstance(pipeline, dict):
+            continue
+        pipeline_name = str(pipeline.get("name", ""))
+        findings.extend(
+            (pipeline_name, finding)
+            for finding in pipeline.get("not_translatable") or []
+            if isinstance(finding, dict) and finding.get("severity") == "gap"
+        )
+
+    eligible: list[dict[str, Any]] = []
+    structural: list[dict[str, Any]] = []
+    bound_fingerprints: set[str] = set()
+    for gap in prepared_gaps:
+        bound_fingerprints.update(str(value) for value in gap.get("finding_fingerprints") or [])
+        allowed_replacement_kinds = gap.get("allowed_replacement_kinds")
+        if isinstance(allowed_replacement_kinds, list) and allowed_replacement_kinds:
+            eligible.append(gap)
+            continue
+        required_capability = gap.get("required_capability")
+        structural.append(
+            {
+                **gap,
+                "resolution_support": "unsupported_by_leaf_contract",
+                "required_capability": (
+                    required_capability
+                    if isinstance(required_capability, str) and required_capability
+                    else "non_leaf_patch"
+                ),
+            }
+        )
+
+    unsupported: list[dict[str, Any]] = []
+    for pipeline_name, finding in findings:
+        fingerprint = finding.get("fingerprint")
+        if isinstance(fingerprint, str) and fingerprint in bound_fingerprints:
+            continue
+        code = str(finding.get("code", ""))
+        unsupported.append(
+            {
+                "gap_id": fingerprint,
+                "pipeline_name": pipeline_name,
+                "code": code,
+                "message": str(finding.get("message", "")),
+                "source_span": {key: finding.get(key, 0) for key in ("line", "column", "end_line", "end_column")},
+                "details": finding.get("details") or {},
+                "resolution_support": "unsupported_by_leaf_contract",
+                "required_capability": airflow_finding_required_capability({code}) or "source_semantics",
+            }
+        )
+    return {"eligible_gaps": eligible, "structural_gaps": structural, "unsupported_gaps": unsupported}
+
+
+def _operator_requires_graph_patch(operator: str) -> bool:
+    normalized_operator = operator.casefold().replace("_", "")
+    return any(marker in normalized_operator for marker in _STRUCTURAL_OPERATOR_MARKERS)
+
+
 _FLOWX_OWNED_ARGUMENTS = {
     "task_id",
 }
@@ -112,6 +213,8 @@ class GapEnvelope:
     downstream_task_keys: list[str]
     dag_settings: dict[str, Any]
     reason: dict[str, str]
+    required_capability: str | None
+    allowed_replacement_kinds: tuple[str, ...]
 
     def as_dict(self, *, provider: dict[str, str] | None = None) -> dict[str, Any]:
         """Returns the public GapEnvelope v1 representation."""
@@ -141,7 +244,8 @@ class GapEnvelope:
             "downstream_task_keys": self.downstream_task_keys,
             "dag_settings": self.dag_settings,
             "reason": self.reason,
-            "allowed_replacement_kinds": list(_ALLOWED_REPLACEMENT_KINDS),
+            "required_capability": self.required_capability,
+            "allowed_replacement_kinds": list(self.allowed_replacement_kinds),
             "knowledge_provider": provider,
         }
         payload["request_sha256"] = _sha256_bytes(_json_bytes(payload))
@@ -841,6 +945,7 @@ def _build_gap_envelopes(
             if not any(item.get("code") == "unsupported_trigger_rule" for item in related_findings):
                 flowx_owned_arguments.add("trigger_rule")
             sanitized_definition = _sanitize_raw_definition(raw_definition)
+            required_capability = _required_capability(operator, related_findings)
             envelope = GapEnvelope(
                 gap_id=str(matched_finding["fingerprint"]),
                 pipeline_name=str(pipeline["name"]),
@@ -881,6 +986,8 @@ def _build_gap_envelopes(
                     "code": str(matched_finding.get("code", "operator_placeholder")),
                     "message": str(task.get("comment") or matched_finding.get("message", "")),
                 },
+                required_capability=required_capability,
+                allowed_replacement_kinds=() if required_capability else _ALLOWED_REPLACEMENT_KINDS,
             )
             envelopes.append(envelope.as_dict(provider=provider))
     ordered = sorted(envelopes, key=lambda item: (item["pipeline_name"], item["task_path"]))
@@ -888,6 +995,14 @@ def _build_gap_envelopes(
     if len(gap_ids) != len(set(gap_ids)):
         raise AgenticContractError("Prepared Airflow gaps contain duplicate fingerprints")
     return ordered
+
+
+def _required_capability(operator: str, findings: list[dict[str, Any]]) -> str | None:
+    """Returns the graph or task-policy capability required beyond v1 leaf replacement."""
+    finding_codes = {str(finding.get("code", "")) for finding in findings}
+    if _operator_requires_graph_patch(operator):
+        return "graph_patch"
+    return airflow_finding_required_capability(finding_codes)
 
 
 def _extract_arguments(
