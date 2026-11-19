@@ -20,7 +20,7 @@ and recorded by the library in its own file, `metadata/agentic_insights.json`, b
 `metadata/source_graphs.json` it was checked against. The library then rebuilds
 `metadata/inventory.json` from `source_graphs.json` plus that file, so it carries the same block under
 a single additive `insights` key; you never pass it anything for that step. Airflow discover saves no
-`source_graphs.json` yet, so for Airflow the file is bound to `inventory.json` alone (through its
+`source_graphs.json`, so for Airflow the file is bound to `inventory.json` alone (through its
 `inventory_sha256`), and the inventory is rebuilt from that.
 
 This is an optional phase 1.a of the flowx migration workflow. `flowx-migrate` runs it after discover
