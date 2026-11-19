@@ -493,6 +493,10 @@ def _parse_airflow_review_counts(stdout: str) -> dict[str, int]:
     return {}
 
 
+# The exit code package uses when it wrote a bundle but left out DAGs that failed reconciliation.
+_DAGS_LEFT_OUT_EXIT_CODE = 4
+
+
 def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
     output_dir = p.get("output_dir", "./flowx_output")
     args: list[Any] = [
@@ -537,7 +541,10 @@ def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
         else "completed"
     )
     setup_md = runner.read_text(out / "SETUP.md") or runner.read_text(out / "setup" / "SETUP.md")
-    extra = _bundle_output(p, out) if result.ok else {}
+    dags_left_out = result.returncode == _DAGS_LEFT_OUT_EXIT_CODE
+    extra = _bundle_output(p, out) if result.ok or dags_left_out else {}
+    if dags_left_out:
+        extra["dags_left_out"] = True
     return _phase_result(
         result, out, status=status, bundle_files=runner.list_tree(out), setup_md=setup_md, **counts, **extra
     )

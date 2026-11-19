@@ -121,7 +121,7 @@ Regardless of mode, a single top-level `DEPLOY.md` is written describing every b
 cross-bundle dependencies, and a suggested callees-first deploy order. Use the `flowx-deploy` skill
 (`python -m flowx.adapter deploy`) to deploy the bundles in that order automatically.
 
-**Skip failed DAGs** (`--skip-failed-dags`). By default, package writes no bundle when any Airflow DAG failed reconciliation. With this flag, package leaves those DAGs out, packages the rest, and prints which DAGs it left out. A task that triggers a left-out DAG becomes a placeholder task that fails when it runs, and its job's schedule is paused. Ask the user before passing this flag, and tell them which DAGs were left out. To include those DAGs later, fix them and re-run discover, convert, and package.
+**Skip failed DAGs** (`--skip-failed-dags`). By default, package writes no bundle when any Airflow DAG failed reconciliation. With this flag, package leaves those DAGs out, packages the rest, prints which DAGs it left out, and exits 4 (the MCP result has `dags_left_out: true`) so the run does not read as a full success. A task that triggers a left-out DAG becomes a placeholder task that fails when it runs, and its job's schedule is paused. Ask the user before passing this flag, and tell them which DAGs were left out. To include those DAGs later, fix them and re-run discover, convert, and package.
 
 ### Step 2.5 — Detect workspace artifacts and authenticate
 
