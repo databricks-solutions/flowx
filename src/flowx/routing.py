@@ -788,7 +788,10 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
     exactly as it would in a passed plan. A row whose members still form a component takes that
     component's current id, so a decision follows its pipelines when the ids shift. A component it does
     not list is added pending (``decision: None``) and a suggested grouping it does not list is added
-    not accepted, so decisions survive a re-enrich or a re-route. A re-discover keeps nothing in use:
+    not accepted, so decisions survive a re-enrich or a re-route. For a source route can only decide
+    deterministic (see :func:`agentic_routing_supported`), a component it does not list, or lists with no
+    decision, is decided ``deterministic`` instead: that is the only legal decision, and leaving it pending
+    would make package refuse until every component was decided by hand. A re-discover keeps nothing in use:
     discover moves ``metadata/`` and ``.work/`` into ``metadata/archive/<UTC time>/``, so this plan and
     the agent's outputs no longer apply and every component starts pending again.
 
@@ -853,11 +856,16 @@ def carried_forward_plan(previous: Any, inventory: dict[str, Any]) -> tuple[Any,
                 if component_id in pending_again:
                     authored["decision"] = None
             components.append(authored)
+        undecided = None if agentic_routing_supported(inventory) else DECISION_DETERMINISTIC
         components.extend(
-            {"component_id": component["component_id"], "members": component["members"], "decision": None}
+            {"component_id": component["component_id"], "members": component["members"], "decision": undecided}
             for component in recommendation["components"]
             if component["component_id"] not in listed_ids
         )
+        if undecided is not None:
+            for component in components:
+                if isinstance(component, dict) and component.get("decision") is None:
+                    component["decision"] = undecided
         plan["components"] = components
     return plan, dropped
 

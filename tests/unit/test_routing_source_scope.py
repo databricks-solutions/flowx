@@ -118,3 +118,28 @@ def test_an_inventory_without_a_source_refuses_agentic_and_says_re_run_discover(
     assert {component["recommended"] for component in routing.build_recommendation(inventory)["components"]} == {
         "deterministic"
     }
+
+
+def test_route_without_a_plan_decides_every_airflow_component_deterministic_so_package_can_run(
+    tmp_path: Path,
+) -> None:
+    """Deterministic is the only legal decision here, so route must not leave each DAG for the user to decide."""
+    report_bytes = _setup(tmp_path, _inventory("airflow"))
+
+    assert adapter_cli_main(["route", "--output-dir", str(tmp_path)]) == 0
+
+    plan = json.loads((tmp_path / "metadata" / "conversion_plan.json").read_text(encoding="utf-8"))
+    assert {component["decision"] for component in plan["components"]} == {"deterministic"}
+    assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_bytes
+    assert routing.carried_forward_plan(None, _inventory("airflow"))[0]["components"] == [
+        {"component_id": component["component_id"], "members": component["members"], "decision": "deterministic"}
+        for component in routing.build_recommendation(_inventory("airflow"))["components"]
+    ]
+
+
+def test_route_without_a_plan_still_leaves_adf_components_pending() -> None:
+    inventory = _inventory("adf")
+
+    plan, _dropped = routing.carried_forward_plan(None, inventory)
+
+    assert {component["decision"] for component in plan["components"]} == {None}
