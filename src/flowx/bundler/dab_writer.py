@@ -1039,7 +1039,7 @@ def _live_report_failures(
             return []
         try:
             report_sha256 = hashlib.sha256((output_dir / WORK_DIRNAME / REPORT_FILENAME).read_bytes()).hexdigest()
-        except OSError:
+        except FileNotFoundError:
             # No live report to compare with (package pruned .work/), so a stored fill may apply to it, and
             # route needs that report before it can apply anything.
             return [
@@ -1047,6 +1047,8 @@ def _live_report_failures(
                 "re-run convert with the same source, then route, which applies any fill that matches, then "
                 "modify if you used it"
             ]
+        except OSError as error:
+            return [f".work/{REPORT_FILENAME} is unreadable: {error}"]
         if applied_gap_fills(stored.gap_fills, report_sha256):
             return [
                 f"metadata/{AGENTIC_OUTPUT_FILENAME} stores a gap fill but {REPORT_FILENAME} carries no routing "
