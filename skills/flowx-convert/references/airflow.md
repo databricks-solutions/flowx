@@ -33,7 +33,7 @@ Use the same source path and `--pipeline` scoping the discover phase used. This 
 
 Read `<output_dir>/.work/translation_report.json`. A mapped task is a `NotebookActivity` (for example
 from a PythonOperator callable or BashOperator command, carrying `generated_source`), a `SqlActivity`, a
-`SparkPythonActivity` or `SparkJarActivity`, a `RunJobActivity` or a `DbtCommandActivity`; an unmapped
+`SparkPythonActivity` or `SparkJarActivity`, a `RunJobActivity`, a `DbtCommandActivity`, or a `ForEachActivity` for a TaskFlow `.expand()`; an unmapped
 operator is a `PlaceholderActivity`. `../../shared/airflow-coverage.md` lists which operator becomes which. Dependencies come from `>>` / `<<`; the DAG's cron
 `schedule_interval` is carried as the pipeline `schedule`.
 

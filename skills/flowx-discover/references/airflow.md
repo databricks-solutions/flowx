@@ -10,7 +10,7 @@ never executed. It extracts operators, `>>` / `<<` task dependencies, the DAG's
 `schedule_interval`, and inline PythonOperator callables / BashOperator commands. Each task is
 classified:
 
-- **Deterministic** — a mapped operator or sensor that becomes a notebook, SQL, Spark, run-job or dbt
+- **Deterministic**: a mapped operator or sensor that becomes a notebook, SQL, Spark, run-job or dbt
   task; [`../../shared/airflow-coverage.md`](../../shared/airflow-coverage.md) lists each one.
 - **Agentic**: an operator with no deterministic mapping; emitted as a placeholder for
   LLM-assisted translation.

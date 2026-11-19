@@ -7,7 +7,7 @@ counterpart of `../../shared/airflow-coverage.md`.
 **An activity type the activity mapping doesn't list is unsupported: report it as unsupported and never
 guess a translation.** Anything else this file doesn't cover (a connector, a linked service type, a
 pattern) is not unsupported for that reason alone: convert's report says what it translated and leaves
-the rest as agentic gaps (see `references/adf.md`).
+the rest as agentic gaps (see [`adf.md`](adf.md)).
 
 ## Contents
 

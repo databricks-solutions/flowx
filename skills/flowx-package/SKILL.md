@@ -47,7 +47,8 @@ Package reads `<output_dir>/.work/translation_report.stamped.json`, or `translat
 didn't run, so you pass a path only to override that. After the `flowx-resolve-airflow-gaps` skill has
 applied resolutions, pass its report, `--report <output_dir>/.work/translation_report.agentic.json` (MCP
 `report_path`): package checks the accepted evidence only when it reads that report, and without it the
-bundle ships the placeholders. If the output folder isn't known yet, ask: "Which migration output
+bundle ships the placeholders. The resolver works from convert's plain report, so modify's answers are
+not in its report. If the output folder isn't known yet, ask: "Which migration output
 directory should I build the bundle in? (default `./flowx_output`)". Check that the report exists and that
 every required translation has status `translated`.
 
@@ -57,7 +58,7 @@ every required translation has status `translated`.
 |---|---|
 | Catalog and schema, asked as one free-text answer `catalog.schema` | `main.default` |
 | Output directory | `./flowx_output` |
-| Bundle name | one bundle: its pipeline's name (`flowx_bundle` for `single` with several pipelines); several bundles: each pipeline's or group's name |
+| Bundle name | one bundle: its pipeline's name (`flowx_bundle` for `single` with several pipelines; the output folder's name for several Airflow DAGs); several bundles: each pipeline's or group's name |
 | Packaging mode: `per-pipeline`, `single` or `per-group` | `per-pipeline` |
 | Databricks CLI profile, only when Step 3 needs one | from `~/.databrickscfg` |
 
@@ -67,7 +68,8 @@ no input for them, so edit `databricks.yml` for others. A bundle with SQL or dbt
 (`--var warehouse_id=<id>`) or as a target default in `databricks.yml`. Split the catalog and schema answer at the dot, strip backticks, and pass `--catalog` and `--schema`. If
 you use a picker, its only way to enter a value must be free text.
 
-Packaging mode decides how a multi-pipeline factory is laid out (all modes are the same for one pipeline):
+Packaging mode decides how a multi-pipeline ADF factory is laid out (all modes are the same for one
+pipeline, and several Airflow DAGs always become one bundle with a job per DAG):
 `per-pipeline` writes one bundle per pipeline and wires cross-bundle Run Pipeline calls at deploy time;
 `single` writes one bundle; `per-group` writes one bundle per group of pipelines that call each other, or
 per an explicit `--group-by spec --group-spec <path>` mapping. Every mode writes `DEPLOY.md` with a
@@ -84,7 +86,7 @@ is false, go on to Step 4.
 
 ```bash
 "$PY" -m flowx.adapter package --output-dir <output_dir> --catalog <catalog> --schema <schema> \
-  [--bundle-name <name>] [--packaging-mode per-pipeline|single|per-group] \
+  [--report <path>] [--bundle-name <name>] [--packaging-mode per-pipeline|single|per-group] \
   [--group-by inferred|spec] [--group-spec <path>] [--profile <profile>] \
   [--no-download-workspace-files] [--keep-intermediates]
 ```
@@ -104,10 +106,10 @@ Show the generated tree, then explain:
   Ask the user to review them before running, and to fill in the real secret values.
 - `databricks.yml` holds the targets and the variables (catalog, schema, warehouse); each
   `resources/*.yml` is one job with tasks and dependencies mapped from the source.
-- With one bundle (one pipeline, or `single`): `databricks bundle validate --target dev`, then
+- With one bundle (one pipeline, `single`, `per-group` with one group, or an Airflow run): `databricks bundle validate --target dev`, then
   `databricks bundle deploy --target dev`, run a job with `databricks bundle run <job_name> --target dev`,
   then deploy to the other targets.
-- With several bundles (the default `per-pipeline` layout for a multi-pipeline factory, or `per-group`):
+- With several bundles (the default `per-pipeline` layout for a multi-pipeline factory, or `per-group` with more than one group):
   point to `DEPLOY.md` and the `flowx-deploy` skill, which deploys them callees first and wires the
   cross-bundle job ids.
 

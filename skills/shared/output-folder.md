@@ -42,8 +42,10 @@ Package deletes `.work/` after a successful build unless `--keep-intermediates` 
 
 ## The bundle
 
-Package writes one bundle at the top of `<output_dir>` (one pipeline, or `single` packaging), or one folder
-per bundle named after its pipeline or group (`per-pipeline`, the default, and `per-group`). Each bundle
+Package writes one bundle at the top of `<output_dir>` when there is only one (one pipeline, `single`
+packaging, `per-group` with one group, or any Airflow run: several DAGs always become one bundle with a job
+each, whatever the packaging mode), or one folder per bundle named after its pipeline or group
+(`per-pipeline`, the default, and `per-group`). Each bundle
 holds `databricks.yml`, `resources/*.yml`, `src/notebooks/`, `src/setup/` and `SETUP.md`; a top-level
 `DEPLOY.md` gives the deploy order.
 

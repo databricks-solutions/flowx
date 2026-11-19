@@ -203,7 +203,7 @@ options are in [`../shared/translation-options.md`](../shared/translation-option
 
 ### Step 10: Confirm before building the bundle
 
-> Translation is 91.5% complete. 4 activities could not be translated automatically.
+> Translation is 91.5% complete (35 deterministic, 8 filled by the agent). 4 activities could not be translated automatically.
 > Options:
 > 1. Proceed to bundle generation (failed activities will get placeholder tasks)
 > 2. Retry failed translations with more context
@@ -214,7 +214,8 @@ options are in [`../shared/translation-options.md`](../shared/translation-option
 ### Step 11: Check the workspace files the bundle needs
 
 Run `workspace-paths` on the report package will read (`.work/translation_report.stamped.json`, or
-`.work/translation_report.json` when modify didn't run) with `--source-dir <source_path>`, and
+`.work/translation_report.json` when modify didn't run, or the resolver's
+`.work/translation_report.agentic.json`) with `--source-dir <source_path>`, and
 log in when it returns `needs_auth: true`, as
 [`../shared/workspace-files.md`](../shared/workspace-files.md) describes. Pass the resulting
 `--profile <name>` to package in Step 12, so package downloads the referenced notebooks into the bundle.
@@ -231,7 +232,8 @@ text, so a pick always carries the names.
 Then run the `flowx-package` skill with the same `<output_dir>`; it reads the stamped report from
 `.work/` itself (or `translation_report.json` when modify didn't run) and writes the bundle there. After
 the `flowx-resolve-airflow-gaps` skill, pass its `.work/translation_report.agentic.json` as `--report`
-(MCP `report_path`), or the accepted resolutions are not packaged. After a successful build it deletes `.work/`, leaving the
+(MCP `report_path`), or the accepted resolutions are not packaged. The resolver works from convert's
+plain report, so modify's answers from Step 9 are not in that report. After a successful build it deletes `.work/`, leaving the
 bundle and `metadata/`.
 
 ### Step 13 (optional): Record coverage and install the dashboard
@@ -251,7 +253,7 @@ Output:    ./flowx_output/  (bundle + metadata/)
 
 Coverage:
   Total activities:           47
-  Successfully translated:    43 (91.5%)
+  Successfully translated:    43 (91.5%; 8 filled by the agent)
   Placeholder tasks:           4 ( 8.5%)
 
 Generated Files (under ./flowx_output/):
@@ -277,8 +279,9 @@ Next Steps:
   7. Verify job output and promote to staging/prod
 ```
 
-This shows one bundle at the top of the output folder (one pipeline, or `single` packaging). With
-several bundles (the default `per-pipeline` layout, or `per-group`), list each bundle folder with its own
+This shows one bundle at the top of the output folder (one pipeline, `single` packaging, `per-group` with
+one group, or an Airflow run, whose DAGs always share one bundle). With several bundles (the default
+`per-pipeline` layout, or `per-group` with more than one group), list each bundle folder with its own
 `databricks.yml`, `resources/`, `src/` and `SETUP.md`, point to the top-level `DEPLOY.md`, and replace the
 deploy steps with the `flowx-deploy` skill, which deploys callees first and wires the cross-bundle job ids.
 List only the setup scripts package actually wrote.

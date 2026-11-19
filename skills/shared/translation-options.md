@@ -42,8 +42,8 @@ The options the adapter raises. `inspect` returns only those that apply to the r
 | `metadata_driven_lookup_tool`, after `metadata_driven_access=yes` too | `have`, `none` | `none` |
 | `consolidate_motif:<motif_id>` | `keep`, `consolidate` | `keep` |
 | `notify_destination` | `keep`, `email`, `slack`, `teams`, `pagerduty`, `webhook` | `keep` |
-| `notify_events` | `on_failure`, `on_success`, `both` | `both` |
-| after `notify_destination`: `notify_destination_name` and the destination's fields (`notify_email_recipients`, `notify_slack_url`, `notify_slack_channel_id`, `notify_slack_oauth_token`, `notify_teams_url`, `notify_pagerduty_integration_key`, `notify_webhook_url`, `notify_webhook_username`, `notify_webhook_password`) | free text | none |
+| after a `notify_destination` other than `keep`: `notify_events` | `on_failure`, `on_success`, `both` | `both` |
+| after a `notify_destination` other than `keep`: `notify_destination_name` and the destination's fields (`notify_email_recipients`, `notify_slack_url`, `notify_slack_channel_id`, `notify_slack_oauth_token`, `notify_teams_url`, `notify_pagerduty_integration_key`, `notify_webhook_url`, `notify_webhook_username`, `notify_webhook_password`) | free text | none |
 
 There is no connector type option: with `use_lakeflow_connectors=lakeflow_connect`, modify picks the
 connector each Copy can use (CDC for a table read, query-based for a query with a cursor column).

@@ -139,7 +139,9 @@ All date functions use `from datetime import datetime, timezone, timedelta`.
 
 The three time zone functions pass the zone name to `ZoneInfo`, which reads IANA names
 (`America/Los_Angeles`). ADF takes Windows names (`Pacific Standard Time`), which fail when the notebook
-runs, so check each zone name and change it to its IANA name.
+runs, so check each zone name and change it to its IANA name. `ticks` uses float arithmetic, so the last
+digits can differ from ADF's, and it fails on a timestamp with no UTC offset; check any id or sort key
+built from it.
 
 ## Summary
 

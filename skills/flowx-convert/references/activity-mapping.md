@@ -48,10 +48,10 @@ This reference defines the mapping between Azure Data Factory activity types and
 | Validation | Agentic | Agentic (LLM-assisted) | `notebook_task` that waits for and checks a dataset |
 | Fail | Agentic | Agentic (LLM-assisted) | `notebook_task` that raises the activity's error |
 | Script | Agentic | Agentic (LLM-assisted) | SQL task or `notebook_task` |
-| Triggers (`ScheduleTrigger`) | Deterministic | convert (`sources/adf/translate.py`) | job `schedule` (`quartz_cron_expression`), or a periodic trigger |
-| Triggers (`TumblingWindowTrigger`) | Deterministic, approximated | convert (`sources/adf/translate.py`) | periodic schedule, marked for review |
-| Triggers (`BlobEventsTrigger`) | Deterministic | convert (`sources/adf/translate.py`) | `file_arrival` trigger |
-| Triggers (`CustomEventsTrigger`) | Manual setup | convert (`sources/adf/translate.py`) | a setup note in `SETUP.md` |
+| Triggers (`ScheduleTrigger`) | Deterministic | convert (`src/flowx/sources/adf/translate.py`) | job `schedule` (`quartz_cron_expression`), or a periodic trigger for a day or week interval above 1; a month interval above 1 gets only a `schedule_setup_note` |
+| Triggers (`TumblingWindowTrigger`) | Manual setup | convert (`src/flowx/sources/adf/translate.py`) | no schedule; only a `schedule_setup_note` in the job YAML |
+| Triggers (`BlobEventsTrigger`) | Deterministic | convert (`src/flowx/sources/adf/translate.py`) | `file_arrival` trigger |
+| Triggers (`CustomEventsTrigger`) | Manual setup | convert (`src/flowx/sources/adf/translate.py`) | no trigger; only a `schedule_setup_note` in the job YAML (not in `SETUP.md`) |
 
 ## Deterministic Translator Details
 

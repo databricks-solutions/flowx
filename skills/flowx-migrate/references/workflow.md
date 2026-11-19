@@ -63,9 +63,9 @@ ADF JSON Exports
 4. Generate the inventory with summary statistics
 
 **Output:**
-- `metadata/inventory.json` — classified activity inventory
-- `metadata/profile_report.csv` — the complexity report
-- `metadata/source_graphs.json` and `metadata/<pipeline>.arm.json` — the saved source graphs and each pipeline's verbatim ARM JSON (ADF only)
+- `metadata/inventory.json`: classified activity inventory
+- `metadata/profile_report.csv`: the complexity report
+- `metadata/source_graphs.json` and `metadata/<pipeline>.arm.json`: the saved source graphs and each pipeline's verbatim ARM JSON (ADF only)
 
 **Key decisions:**
 - Classification is based on the activity `type` field, not the activity content. This makes classification fast and deterministic.
@@ -105,9 +105,9 @@ ADF JSON Exports
 3. Write the deterministic baseline report with Databricks IR (intermediate representation) for each pipeline
 
 **Output (under `.work/`):**
-- `translation_report.json` — the deterministic baseline, with IR for every task and the gaps marked
-- `<pipeline>.json` — IR per pipeline
-- `gaps.json` — the agentic gaps, when there are any
+- `translation_report.json`: the deterministic baseline, with IR for every task and the gaps marked
+- `<pipeline>.json`: IR per pipeline
+- `gaps.json`: the agentic gaps, when there are any
 
 The agent fills the gaps afterwards: route and fill-agentic for routed-agentic units, `convert --merge-agentic` for convert's own gaps (ADF only), and the `flowx-resolve-airflow-gaps` skill for Airflow.
 
