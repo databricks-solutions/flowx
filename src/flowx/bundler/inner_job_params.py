@@ -109,6 +109,9 @@ def collect_inner_job_params(
 def normalize_inner_task_params(tasks: list[dict[str, Any]]) -> None:
     """Normalise ADF expressions in task dicts for an inner job context.
 
+    The body of an agent-written ``for_each_task`` (marked ``_authored``) is left alone: its
+    ``{{input.x}}`` names that loop's own item, not the enclosing job's parameters.
+
     Args:
         tasks: The inner job's task dicts.
     """
@@ -130,7 +133,7 @@ def normalize_inner_task_params(tasks: list[dict[str, Any]]) -> None:
 
         for_each_task = task.get("for_each_task", {})
         body = for_each_task.get("task")
-        if body:
+        if body and not body.get("_authored"):
             normalize_inner_task_params([body])
 
 
@@ -142,6 +145,10 @@ def _scan_tasks(
     variable_names: set[str] | None = None,
 ) -> None:
     """Recursively scan task dicts for ADF parameter references.
+
+    For an agent-written ``for_each_task`` (its body marked ``_authored``), only the
+    ``{{job.parameters.X}}`` references in its ``inputs`` and body are collected: the body's
+    ``{{input.x}}`` names that loop's own item rather than one the enclosing loop must forward.
 
     Args:
         tasks: List of task dicts to scan.
@@ -170,8 +177,22 @@ def _scan_tasks(
 
         for_each_task = task.get("for_each_task", {})
         body = for_each_task.get("task")
-        if body:
+        if body and not body.get("_authored"):
             _scan_tasks([body], param_names, **field_name_kwargs)
+        elif body:
+            _scan_authored_loop_job_parameters([for_each_task.get("inputs"), body], param_names)
+
+
+def _scan_authored_loop_job_parameters(value: Any, param_names: set[str]) -> None:
+    """Collects the enclosing job's parameters named by any string inside an agent-written loop's inputs and body."""
+    if isinstance(value, str):
+        param_names.update(_DAB_JOB_PARAM_RE.findall(value))
+    elif isinstance(value, dict):
+        for nested_value in value.values():
+            _scan_authored_loop_job_parameters(nested_value, param_names)
+    elif isinstance(value, list):
+        for nested_value in value:
+            _scan_authored_loop_job_parameters(nested_value, param_names)
 
 
 def _scan_ir_tasks(
