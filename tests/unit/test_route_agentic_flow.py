@@ -1245,10 +1245,10 @@ def test_fill_agentic_refuses_both_member_forms_at_once(tmp_path: Path) -> None:
         )
 
 
-def test_a_pipeline_convert_wrote_that_package_cannot_build_is_an_error_not_a_fill_violation(
+def test_a_pipeline_this_fill_did_not_author_that_package_cannot_build_is_named_as_not_this_fills(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Blaming the fill for a packager failure in an untouched pipeline would send the agent rewriting valid work."""
+    """Blaming the fill would send the agent rewriting valid work; crashing would leave the MCP caller no result."""
     import flowx.preparer.workflow_preparer as workflow_preparer
 
     _route_parent_agentic(tmp_path, _report_two_pipelines())
@@ -1261,8 +1261,12 @@ def test_a_pipeline_convert_wrote_that_package_cannot_build_is_an_error_not_a_fi
 
     monkeypatch.setattr(workflow_preparer, "prepare_workflow", failing_for_child)
 
-    with pytest.raises(KeyError, match="a packager bug"):
-        apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])
+    result = apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])
+
+    assert result["ok"] is False
+    [violation] = result["violations"]
+    assert violation.startswith("[unbuildable_pipeline] child:")
+    assert "which this fill did not author" in violation and "a packager bug" in violation
 
 
 def test_combine_rejects_an_authored_pipeline_missing_the_source_tag(tmp_path: Path) -> None:

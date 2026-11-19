@@ -1643,10 +1643,11 @@ def validate_report_structurally(report: dict[str, Any], *, authored_names: Iter
     Uses the same ``prepare_workflow -> write_bundle`` path as the package phase, then aggregates
     :func:`flowx.validate.bundle_invariants.check_bundle_dir` findings across every emitted bundle so
     duplicate keys, dangling dependencies, cycles, and dangling pipeline/run_job references are all
-    caught before the merged report is trusted. An authored pipeline (one named in ``authored_names``)
-    package cannot build at all, such as one with a task field of the wrong shape, is reported as an
-    ``unbuildable_pipeline`` finding naming the error, so the agent gets a violation to fix instead of a
-    crash. Any other pipeline is one convert wrote, so its failure is a packager error and is raised. Returns a
+    caught before the merged report is trusted. A pipeline package cannot build at all, such as one with a
+    task field of the wrong shape, is reported as an ``unbuildable_pipeline`` finding naming the error, so
+    the caller gets a violation instead of a crash. The finding says whether the pipeline is one of
+    ``authored_names`` (the fill being checked): any other pipeline holds a stored gap fill, another unit's
+    output or convert's own tasks, so the fix is not in this fill. Returns a
     :class:`~flowx.validate.bundle_invariants.BundleInvariantResult`.
     """
     from flowx.bundler.dab_writer import pipeline_dict_to_ir, write_bundle
@@ -1667,18 +1668,18 @@ def validate_report_structurally(report: dict[str, Any], *, authored_names: Iter
                 bundle_dir = root / to_lowercase_key(pipeline.name) if len(pipelines) > 1 else root
                 write_bundle(workflow, bundle_dir)
             except (AttributeError, KeyError, TypeError, ValueError) as error:
-                if pipeline_dict.get("name") not in authored:
-                    raise
-                findings.append(
-                    BundleFinding(
-                        code="unbuildable_pipeline",
-                        location=str(label),
-                        message=(
-                            f"package cannot build this pipeline ({type(error).__name__}: {error}); check each "
-                            "task's fields against its IR task type"
-                        ),
+                cause = f"{type(error).__name__}: {error}"
+                if pipeline_dict.get("name") in authored:
+                    message = (
+                        f"package cannot build this pipeline ({cause}); check each task's fields against its IR "
+                        "task type"
                     )
-                )
+                else:
+                    message = (
+                        f"package cannot build this pipeline, which this fill did not author ({cause}); check the "
+                        "gap fills merged into it and any other unit's stored output, or report it as a packager error"
+                    )
+                findings.append(BundleFinding(code="unbuildable_pipeline", location=str(label), message=message))
                 continue
             findings.extend(check_bundle_dir(bundle_dir).findings)
     return BundleInvariantResult(findings=findings)
