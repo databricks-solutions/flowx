@@ -1,0 +1,14 @@
+schema_version: "1.1"
+name: triggers-flowx-deploy
+description: The flowx-deploy skill should trigger for a request it describes.
+tags: [trigger, flowx-deploy]
+runs: 3
+execution:
+  prompt: "I have one bundle per pipeline in ./flowx_output. Deploy them to the dev target in dependency order."
+  max_turns: 4
+  allowed_tools: [Read, Glob, Grep, Skill]
+graders:
+  - name: flowx-deploy-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?flowx-deploy"'
