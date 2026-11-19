@@ -248,12 +248,15 @@ def _route_locked(args: argparse.Namespace) -> int:
         # Checked before the plan is recorded: refusing after it would leave a report routed under another
         # plan, which fill-agentic refuses too, so the clashing fill could not be redone. It reads the plan as
         # route records it, since an edited plan's groupings carry only their ids and accepted flags.
-        recorded_form = routing.build_plan(inventory, plan).to_dict()
-        try:
-            violations = stored_output_name_clashes(recorded_form, load_agentic_output(args.output_dir).outputs)
-        except (OSError, ValueError) as error:
-            print(f"Failed to read metadata/agentic_conversion.json: {error}", file=sys.stderr)
-            return 1
+        # A plan with a pending decision is recorded without being applied, so it never reads the store.
+        to_record = routing.build_plan(inventory, plan)
+        if not to_record.pending_components():
+            try:
+                violations = stored_output_name_clashes(
+                    to_record.to_dict(), load_agentic_output(args.output_dir).outputs
+                )
+            except (OSError, ValueError) as error:
+                violations = [f"metadata/agentic_conversion.json is unreadable: {error}"]
     if violations:
         _emit_json({"ok": False, "violations": violations, "components": 0}, args.out)
         return 1

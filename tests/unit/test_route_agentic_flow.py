@@ -1420,7 +1420,7 @@ def test_route_refuses_a_plan_that_would_apply_two_stored_outputs_with_one_name(
     assert (tmp_path / "metadata" / "conversion_plan.json").read_bytes() == plan_before
 
 
-def test_route_reports_an_unreadable_agent_output_store_instead_of_crashing(
+def test_route_reports_an_unreadable_agent_output_store_as_a_violation_before_applying(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _route_parent_agentic(tmp_path, _report_two_pipelines())
@@ -1429,7 +1429,26 @@ def test_route_reports_an_unreadable_agent_output_store_instead_of_crashing(
 
     assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 1
 
-    assert "agentic_conversion.json" in capsys.readouterr().err
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] is False
+    assert any("agentic_conversion.json is unreadable" in violation for violation in result["violations"])
+
+
+def test_route_still_records_a_pending_plan_while_the_agent_output_store_is_unreadable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pending plan applies nothing, so the store it never reads must not stop the recommendation."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    plan_path = tmp_path / "metadata" / "conversion_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["components"][0]["decision"] = None
+    plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    (tmp_path / "metadata" / "agentic_conversion.json").mkdir()
+    capsys.readouterr()
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 0
+
+    assert json.loads(capsys.readouterr().out)["applied"] is False
 
 
 def test_apply_plan_refuses_to_rebuild_two_stored_outputs_with_one_name(tmp_path: Path) -> None:
@@ -2732,7 +2751,8 @@ def test_the_agent_output_store_must_hold_exactly_its_two_keys(
     with pytest.raises(ValueError, match=re.escape(named)):
         apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc_v2")])
     assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 1
-    assert named in capsys.readouterr().err
+    routed = capsys.readouterr()
+    assert named in routed.out + routed.err
     assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 1
     assert named in capsys.readouterr().err
 
