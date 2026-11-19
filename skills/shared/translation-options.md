@@ -1,6 +1,7 @@
 # Translation options: the inspect and modify commands
 
-Read this from Step 9 of the `flowx-migrate` skill.
+Read this from Step 3 of the `flowx-convert` skill or Step 9 of the `flowx-migrate` skill: the `inspect` and `modify`
+commands, their flags and the options the adapter raises.
 
 Before bundle generation, run the adapter inspect CLI on the translation
 report to surface any pipeline-modifier options the IR raises:

@@ -46,7 +46,8 @@ fingerprint-bound `flowx-resolve-airflow-gaps` skill.
 ### Step 3: Use the shared report commands the guide calls for
 
 `inspect` and `modify` work on the report, not on the source. The ADF guide uses them; Airflow needs only
-the base conversion.
+the base conversion. Their flags and the options the adapter raises are in
+[`../shared/translation-options.md`](../shared/translation-options.md).
 
 - `inspect <report>`: the full just-in-time option schema, each option with a `show_when` condition. Walk
   it locally and ask an option only when its `show_when` is satisfied.
@@ -81,7 +82,9 @@ source-neutral (`flowx.ir_serde`), so `flowx-package` reads it the same way for 
   function translates.
 - [`sources/airflow.md`](sources/airflow.md): Airflow deterministic-first translation plus reviewed
   leaf-gap resolution.
-- [`sources/airflow-coverage.md`](sources/airflow-coverage.md): what the Airflow path converts and what it
+- [`../shared/airflow-coverage.md`](../shared/airflow-coverage.md): what the Airflow path converts and what it
   does not.
+- [`../shared/translation-options.md`](../shared/translation-options.md): the `inspect` and `modify` commands
+  and the options they raise.
 - [`../shared/running-flowx.md`](../shared/running-flowx.md) and
   [`../shared/output-folder.md`](../shared/output-folder.md): running a phase and the output folder.

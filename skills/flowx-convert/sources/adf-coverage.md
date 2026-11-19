@@ -2,7 +2,7 @@
 
 Read this from the `flowx-convert` skill with `sources/adf.md`. It lists each area of an Azure Data
 Factory export, what flowx produces for it, and what you and the user still have to do. It is the ADF
-counterpart of `airflow-coverage.md`.
+counterpart of `../../shared/airflow-coverage.md`.
 
 **Anything this file and the two tables it points to don't list is unsupported: report it as
 unsupported and never guess a translation.**

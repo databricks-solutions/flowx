@@ -79,6 +79,6 @@ location and proceed to `flowx-convert` with the same `<output_dir>` and `--sour
 For the full verified support matrix — classic operators, TaskFlow (`@dag`/`@task`), sensors,
 TaskGroups (incl. group-level dependencies), and dbt factory (static + PyDABs) — plus the constructs
 that are **not** handled (dynamic TaskGroup mapping, shared multi-DAG bundle), see
-[`../../flowx-convert/sources/airflow-coverage.md`](../../flowx-convert/sources/airflow-coverage.md).
+[`../../shared/airflow-coverage.md`](../../shared/airflow-coverage.md).
 Callables reading Airflow task context (`**context` / `ti`) or XCom, and runtime-branching
 decorators, are routed to placeholders for manual/agentic translation rather than converted.

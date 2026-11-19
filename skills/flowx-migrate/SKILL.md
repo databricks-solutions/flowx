@@ -192,7 +192,7 @@ never run `inspect` again per follow-up. When the user consolidates a metadata-d
 a database tool, run the lookup query for the CSV rows; otherwise ask for a CSV file path or a literal
 CSV string. Apply everything in one `modify` call (every `--answer OPTION_ID=VALUE`, plus
 `--lookup-csv "<csv-or-path>"` when needed, with no intermediate JSON file). The commands and the
-options are in [`references/translation-options.md`](references/translation-options.md).
+options are in [`../shared/translation-options.md`](../shared/translation-options.md).
 
 ### Step 10: Confirm before building the bundle
 
@@ -288,7 +288,7 @@ Everything goes into the one `<output_dir>`: `metadata/` (discover, enrich, rout
 
 - [`references/mcp-path.md`](references/mcp-path.md): the MCP path: passing the source to the hosted
   server, the call for each step, and the one-call deterministic `migrate` shortcut.
-- [`references/translation-options.md`](references/translation-options.md): the `inspect` and `modify`
+- [`../shared/translation-options.md`](../shared/translation-options.md): the `inspect` and `modify`
   commands and the options they raise.
 - [`references/workflow.md`](references/workflow.md): the workflow phase by phase, with each phase's
   inputs, process and outputs.

@@ -7,7 +7,7 @@ Airflow translation is **deterministic-first**. The static parse maps ~35 operat
 `PlaceholderActivity` tasks and are recorded in `gaps.json` with their raw source for review. The
 placeholder remains a deliberate runtime failure until it is resolved manually or through the fingerprint-bound `flowx-resolve-airflow-gaps` workflow.
 
-**Before converting, check [`sources/airflow-coverage.md`](airflow-coverage.md)** — the verified
+**Before converting, check [`../../shared/airflow-coverage.md`](../../shared/airflow-coverage.md)**: the verified
 support matrix (classic operators, TaskFlow, sensors, TaskGroups, dbt factory) and the constructs
 still **not** handled (including dynamic TaskGroup mapping). Constructs flowx can't lower
 deterministically — callables reading task context (`**context` / `ti`) or XCom, and runtime-branching

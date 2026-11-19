@@ -66,7 +66,7 @@ archive folder instead of deleting it, and says so. Package keeps `metadata/`, s
 - [`sources/adf.md`](sources/adf.md): ADF discovery (ARM JSON, volume download, complexity report).
 - [`sources/airflow.md`](sources/airflow.md): Airflow discovery (DAG `.py` parsing, operator
   classification).
-- The `flowx-convert` skill's `sources/airflow-coverage.md`: what the Airflow path converts and what it
+- [`../shared/airflow-coverage.md`](../shared/airflow-coverage.md): what the Airflow path converts and what it
   does not.
 - The `flowx-enrich` skill: adds agent-authored insights to the inventory (`flowx-migrate` runs it after
   discover unless the user asks for a deterministic-only pass).
