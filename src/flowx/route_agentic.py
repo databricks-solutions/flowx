@@ -501,8 +501,11 @@ def _route_lock_is_stale(content: str, modified_at: float) -> bool:
     return time.time() - started_at > _route_lock_stale_after_seconds()
 
 
-def _take_over_stale_route_lock(lock_path: Path) -> None:
+def _take_over_stale_route_lock(lock_path: Path) -> bool:
     """Remove the route lock at ``lock_path`` when it is stale, leaving a live one in place.
+
+    Returns ``False`` when this command moved a live lock aside and could not put it back: the command
+    that holds it is still writing, so this one must refuse rather than make a lock of its own.
 
     Two commands may judge the same lock stale at once, so the lock is first moved aside under a name only
     this command uses; only one move succeeds. If the moved file is not the one judged stale (another
@@ -514,22 +517,23 @@ def _take_over_stale_route_lock(lock_path: Path) -> None:
         content = lock_path.read_text(encoding="utf-8")
         modified_at = lock_path.stat().st_mtime
     except OSError:
-        return
+        return True
     if not _route_lock_is_stale(content, modified_at):
-        return
+        return True
     moved = lock_path.with_name(f"{lock_path.name}.stale-{secrets.token_hex(8)}")
     try:
         os.rename(lock_path, moved)
     except OSError:
-        return
+        return True
     try:
         moved_content = moved.read_text(encoding="utf-8")
         if moved_content != content:
             _create_lock_file(lock_path, moved_content)
     except OSError:
-        pass  # the lock could not be put back; the command that made it finds it gone and removes nothing
+        return False
     finally:
         moved.unlink(missing_ok=True)
+    return True
 
 
 def _create_lock_file(lock_path: Path, content: str) -> bool:
@@ -598,7 +602,9 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
             "process_started": _process_start_marker(os.getpid()),
         }
     )
-    _take_over_stale_route_lock(lock_path)
+    if not _take_over_stale_route_lock(lock_path):
+        yield False
+        return
     try:
         created = _create_lock_file(lock_path, holder)
     except BaseException:

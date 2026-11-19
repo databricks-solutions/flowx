@@ -2656,6 +2656,39 @@ def test_a_lock_taken_over_in_between_is_put_back_without_hard_links(
     assert sorted(path.name for path in lock_path.parent.glob(f"{ROUTE_LOCK_FILENAME}*")) == [ROUTE_LOCK_FILENAME]
 
 
+def test_a_command_that_cannot_put_back_a_live_lock_it_moved_refuses_instead_of_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Going ahead would run beside the command whose lock it just moved aside."""
+    import flowx.route_agentic as route_agentic
+
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    report_before = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
+    lock_path = _write_route_lock(tmp_path, pid=_finished_process_id(), started_at=time.time())
+    live_holder = {"token": "live", "pid": os.getpid(), "host": socket.gethostname(), "started_at": time.time()}
+    create = route_agentic._create_lock_file
+    calls: list[str] = []
+
+    def judged_stale_then_replaced(_content: str, _modified_at: float) -> bool:
+        lock_path.write_text(json.dumps(live_holder), encoding="utf-8")
+        return True
+
+    def first_create_fails(path: Path, content: str) -> bool:
+        calls.append(content)
+        if len(calls) == 1:
+            raise OSError("the volume refused the write")
+        return create(path, content)
+
+    monkeypatch.setattr(route_agentic, "_route_lock_is_stale", judged_stale_then_replaced)
+    monkeypatch.setattr(route_agentic, "_create_lock_file", first_create_fails)
+
+    result = apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])
+
+    assert result["ok"] is False and any("another route" in violation for violation in result["violations"])
+    assert len(calls) == 1
+    assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+
+
 def test_the_lock_never_signals_a_process_where_that_would_end_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
