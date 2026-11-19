@@ -68,16 +68,16 @@ ADF JSON Exports
 
 **Process:**
 1. The agent reads the inventory and the source artifacts
-2. The agent authors an `insights` layer: a factory-wide recommendation, each pipeline's intent and recommended Databricks patterns, and cross-pipeline relationships
-3. `enrich` validates the insights against the inventory and the saved source graphs
-4. When they are valid, `enrich` records them and rebuilds the inventory with them
+2. The agent tells the user what it found and asks the open questions the export can't answer
+3. The agent authors an `insights` layer: a factory-wide recommendation, each pipeline's intent and recommended Databricks patterns, and cross-pipeline relationships
+4. `enrich` validates the insights against the inventory and the saved source graphs and, only when they are valid, records them and rebuilds the inventory
 
 **Output:**
-- `agentic_insights.json` — the validated insights, bound to the saved `source_graphs.json`
+- `agentic_insights.json` — the validated insights, bound to the saved `source_graphs.json` (for Airflow, to `inventory.json`)
 - `inventory.json` — rebuilt with a single additive `insights` key
 
 **Key decisions:**
-- Enrich contains no LLM: the agent authors, the library validates and merges.
+- Enrich contains no LLM: the agent authors, the library validates and records.
 - Every deterministic inventory key stays byte-identical.
 - `flowx-migrate` runs enrich unless the user asks for a deterministic-only pass.
 
@@ -113,27 +113,26 @@ ADF JSON Exports
 
 **Skill:** `flowx:flowx-route`
 
-**Input:** `translation_report.json` from phase 2, plus the insights from phase 1.a when present
+**Input:** `translation_report.json` from phase 2, the inventory and source graphs from phase 1, the insights from phase 1.a when present, and any stored fills in `agentic_conversion.json`
 
 **Process:**
 1. Group pipelines into connected components over control lineage
 2. Recommend `deterministic` or `agentic` per component, plus the groupings the insights suggest, and draw them on a review page
 3. Record the customer's decision per component, the groupings they accept (each converted as one agentic unit), and the routing conversation
-4. Once nothing is pending, rebuild the translation report from convert's unchanged baseline, the plan and the agent's stored outputs; an agentic unit with no output yet becomes a placeholder
-5. Fill each routed-agentic unit with `fill-agentic`
+4. Once nothing is pending, rebuild the translation report from convert's unchanged baseline, the plan and the stored fills; an agentic unit with no fill yet becomes a placeholder
+5. Fill each routed-agentic unit with `fill-agentic`, which stores the fill in `agentic_conversion.json` and rebuilds the report
 
 **Output:**
 - `conversion_plan.json` — the recommendation, the decisions and the routing conversation
 - `routing_review.html` — the review page drawn from the plan
-- `agentic_conversion.json` — the agent's output per routed-agentic unit, and fills of convert's own gaps
-- `translation_report.json` and `gaps.json` — rebuilt, with a routing record per unit
+- `translation_report.json` and `gaps.json` — rebuilt; they carry a routing record when any unit is agentic or a gap fill applies
 
 **Key decisions:**
 - Route contains no LLM. Applying a fully decided plan needs the report convert wrote; without one it refuses ("run the convert phase first").
-- A fully deterministic plan, or no plan, leaves the report byte-identical to convert's: the non-breaking guarantee.
+- A fully deterministic plan with no gap fills, or no plan, leaves the report byte-identical to convert's, with no routing record: the non-breaking guarantee.
 - Every re-route rebuilds deterministically from the baseline; a fresh convert becomes the new baseline.
 - Only `fill-agentic` fills routed-agentic units; applying the same output again changes nothing, and a different output replaces it.
-- `convert --merge-agentic` fills only convert's own gaps; an in-place merge after routing is kept across re-routes.
+- `convert --merge-agentic` fills only convert's own gaps; an in-place merge after routing is stored in `agentic_conversion.json` and kept across re-routes.
 - Route, fill-agentic and merge never rewrite `modify`'s configured report; package asks to re-run `modify` when it is out of date.
 - Package refuses until every agentic unit is filled.
 

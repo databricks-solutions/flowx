@@ -19,10 +19,11 @@ The directory should contain subdirectories or files for:
 - `linkedService/` or `linked_services/` — linked service JSON files (optional)
 - `trigger/` or `triggers/` — trigger definition JSON files (optional)
 
-On the MCP path the hosted server cannot read files in the local file system, workspace, or a
-Databricks volume by path. For a workspace or volume source, pass `adf_workspace_path` /
-`adf_volume_path` and the server downloads it through the SDK; for local files or a small factory, pass
-the ADF JSON inline as `adf_definitions` (a mapping of relative path → JSON content).
+On the MCP path the hosted server cannot read files by path, whether they sit in your local file
+system, the workspace, or a Databricks volume. For a workspace or volume source, pass
+`adf_workspace_path` or `adf_volume_path` and the server downloads it through the SDK. For files on
+your machine, upload them to a volume first, or for a small factory pass the ADF JSON inline as
+`adf_definitions` (a mapping of relative path → JSON content).
 
 ## Step 2 — Download from UC volumes if needed
 

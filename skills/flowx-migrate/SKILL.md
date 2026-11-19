@@ -72,9 +72,10 @@ there is **no venv, no `bootstrap.sh`, and no `.migration-venv`**. Run **no** `p
 commands on this path; the `"$PY" -m …` snippets in the steps below are the **local-CLI fallback
 only**. Everything goes through the single **`flowx`** tool, one `command` per step:
 
-The hosted server **cannot read your local files**, so pass the source by reference as
-`adf_volume_path` or `adf_workspace_path` (the server reads them through the SDK; see below), or, for
-small factories, inline as `adf_definitions` (a mapping of relative path → ARM JSON content mirroring
+The hosted server **cannot read files by path**, whether they sit in your local file system, the
+workspace, or a Databricks volume, so pass the source by reference as `adf_volume_path` or
+`adf_workspace_path` (the server reads them through the SDK; see below), or, for small factories,
+inline as `adf_definitions` (a mapping of relative path → ARM JSON content mirroring
 the Git-export layout — `pipeline/…`, `dataset/…`, `linkedService/…`, `trigger/…`), which you read and
 supply yourself.
 
@@ -268,10 +269,9 @@ LLM — you author the insights JSON and `enrich` validates + merges it additive
 deterministic inventory key byte-identical. The routing step consumes this block to present the
 agentic conversion option per group.
 
-Before recording the insights, tell the user in a few lines what the analysis found and ask at most
-three open questions about the facts that would rule a target pattern in or out, such as how many
-sources a runtime list really holds (the skill's "Summarise and ask"). Record the answers in the
-insights so route doesn't ask them again.
+Before recording the insights, tell the user in a few lines what the analysis found and ask the open
+questions whose answers would rule a target pattern in or out (the skill's "Summarise and ask"). Record
+the answers in the insights so route doesn't ask them again.
 
 **Skip only for a deterministic-only pass.** When the user chose a deterministic-only pass in Step 1
 (no agent/LLM authoring), skip enrich and the routing review (Steps 7–8) — the deterministic

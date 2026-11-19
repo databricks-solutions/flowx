@@ -147,7 +147,7 @@ This works the same for every source. On a source where route records determinis
 3. **Pick the questions.** For each fact a candidate pattern needs, decide whether the code shows it
    (cite the code), whether it is data you can read (read it), or whether it is unknown. Ask about an
    unknown only when a plausible answer would rule a candidate in or out, and ask first about the one
-   whose answer splits the candidates most. Ask them together, in one turn.
+   whose answer splits the candidates most. Ask only those, together, in one turn.
 
 The facts, named for what the workload does:
 
