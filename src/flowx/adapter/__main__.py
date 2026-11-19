@@ -249,8 +249,9 @@ def _route_locked(args: argparse.Namespace) -> int:
         # plan, which fill-agentic refuses too, so the clashing fill could not be redone.
         try:
             violations = stored_output_name_clashes(plan, load_agentic_output(args.output_dir).outputs)
-        except ValueError:
-            violations = []  # apply_plan reports an unreadable store
+        except (OSError, ValueError) as error:
+            print(f"Failed to read metadata/agentic_conversion.json: {error}", file=sys.stderr)
+            return 1
     if violations:
         _emit_json({"ok": False, "violations": violations, "components": 0}, args.out)
         return 1

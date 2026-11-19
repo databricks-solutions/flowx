@@ -1363,6 +1363,18 @@ def test_route_refuses_a_plan_that_would_apply_two_stored_outputs_with_one_name(
     assert (tmp_path / "metadata" / "conversion_plan.json").read_bytes() == plan_before
 
 
+def test_route_reports_an_unreadable_agent_output_store_instead_of_crashing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    (tmp_path / "metadata" / "agentic_conversion.json").mkdir()
+    capsys.readouterr()
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 1
+
+    assert "agentic_conversion.json" in capsys.readouterr().err
+
+
 def test_apply_plan_refuses_to_rebuild_two_stored_outputs_with_one_name(tmp_path: Path) -> None:
     _fill_both_units_with_one_name(tmp_path)
     plan = _plan_deciding(tmp_path, parent="agentic", child="agentic")
