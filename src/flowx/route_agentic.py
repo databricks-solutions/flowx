@@ -1621,22 +1621,38 @@ def validate_report_structurally(report: dict[str, Any]) -> Any:
     Uses the same ``prepare_workflow -> write_bundle`` path as the package phase, then aggregates
     :func:`flowx.validate.bundle_invariants.check_bundle_dir` findings across every emitted bundle so
     duplicate keys, dangling dependencies, cycles, and dangling pipeline/run_job references are all
-    caught before the merged report is trusted. Returns a
+    caught before the merged report is trusted. A pipeline package cannot build at all, such as an
+    authored task with a field of the wrong shape, is reported as an ``unbuildable_pipeline`` finding
+    naming the error, so the agent gets a violation to fix instead of a crash. Returns a
     :class:`~flowx.validate.bundle_invariants.BundleInvariantResult`.
     """
     from flowx.bundler.dab_writer import pipeline_dict_to_ir, write_bundle
     from flowx.preparer.workflow_preparer import prepare_workflow
     from flowx.utils import to_lowercase_key
-    from flowx.validate.bundle_invariants import BundleInvariantResult, check_bundle_dir
+    from flowx.validate.bundle_invariants import BundleFinding, BundleInvariantResult, check_bundle_dir
 
     pipelines = _report_pipelines(report)
     findings: list[Any] = []
     with tempfile.TemporaryDirectory(prefix="flowx-fill-validate-") as temporary:
         root = Path(temporary)
-        for pipeline_dict in pipelines:
-            pipeline, _skipped = pipeline_dict_to_ir(pipeline_dict)
-            workflow = prepare_workflow(pipeline)
-            bundle_dir = root / to_lowercase_key(pipeline.name) if len(pipelines) > 1 else root
-            write_bundle(workflow, bundle_dir)
+        for index, pipeline_dict in enumerate(pipelines):
+            label = pipeline_dict.get("name") if isinstance(pipeline_dict.get("name"), str) else f"pipeline[{index}]"
+            try:
+                pipeline, _skipped = pipeline_dict_to_ir(pipeline_dict)
+                workflow = prepare_workflow(pipeline)
+                bundle_dir = root / to_lowercase_key(pipeline.name) if len(pipelines) > 1 else root
+                write_bundle(workflow, bundle_dir)
+            except (AttributeError, KeyError, TypeError, ValueError) as error:
+                findings.append(
+                    BundleFinding(
+                        code="unbuildable_pipeline",
+                        location=str(label),
+                        message=(
+                            f"package cannot build this pipeline ({type(error).__name__}: {error}); check each "
+                            "task's fields against its IR task type"
+                        ),
+                    )
+                )
+                continue
             findings.extend(check_bundle_dir(bundle_dir).findings)
     return BundleInvariantResult(findings=findings)

@@ -1147,6 +1147,32 @@ def test_apply_agentic_output_rejects_and_does_not_write_on_dangling_reference(t
     assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
 
 
+def _notebook_pipeline(name: str, task: dict[str, Any]) -> dict[str, Any]:
+    return {"name": name, "tags": {"source": "adf"}, "tasks": [task]}
+
+
+@pytest.mark.parametrize(
+    "malformed_task",
+    [
+        {**_notebook_task("Load", "load"), "depends_on": ["Upstream"]},
+        {**_notebook_task("Load", "load"), "depends_on": "Upstream"},
+    ],
+    ids=["depends-on-strings", "depends-on-one-string"],
+)
+def test_a_malformed_authored_task_is_refused_with_a_violation_not_a_crash(
+    tmp_path: Path, malformed_task: dict[str, Any]
+) -> None:
+    _setup_routed_agentic(tmp_path, decision="agentic")
+    report_before = (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes()
+
+    result = apply_agentic_output(tmp_path, ["parent", "child"], [_notebook_pipeline("orders", malformed_task)])
+
+    assert result["ok"] is False
+    assert any("[unbuildable_pipeline] orders:" in violation for violation in result["violations"])
+    assert (tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes() == report_before
+    assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
+
+
 def test_combine_rejects_an_authored_pipeline_missing_the_source_tag(tmp_path: Path) -> None:
     """FIX 2: an authored pipeline without tags.source == 'adf' fails closed at combine (nothing written)."""
     _setup_routed_agentic(tmp_path, decision="agentic")
@@ -2221,9 +2247,10 @@ def test_fill_refuses_a_component_that_puts_libraries_or_compute_on_the_activity
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     report_before = report_path.read_bytes()
 
-    with pytest.raises(ValueError, match=next(iter(field))):
-        apply_agentic_output(tmp_path, ["parent"], [authored])
+    result = apply_agentic_output(tmp_path, ["parent"], [authored])
 
+    assert result["ok"] is False
+    assert any(next(iter(field)) in violation for violation in result["violations"])
     assert report_path.read_bytes() == report_before
     assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
 
