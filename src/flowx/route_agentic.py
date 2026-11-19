@@ -48,6 +48,7 @@ import json
 import os
 import secrets
 import socket
+import subprocess
 import tempfile
 import time
 from collections.abc import Iterable, Iterator
@@ -84,9 +85,9 @@ ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS = 1800
 ROUTE_LOCK_HELD = (
     f"another route, fill-agentic or merge is writing to this output folder (metadata/{ROUTE_LOCK_FILENAME} "
     "exists); run this command again once it finishes. If none is running, one was stopped mid-write: its lock "
-    "is taken over once that process has exited (a lock from another machine, once it is older than "
-    f"{ROUTE_LOCK_STALE_AFTER_VARIABLE} seconds, {ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS} by default), so run "
-    f"route, then this command again; locally you can also delete metadata/{ROUTE_LOCK_FILENAME} first"
+    "is taken over once that process has exited (a lock from another machine, or any lock on Windows, once it is "
+    f"older than {ROUTE_LOCK_STALE_AFTER_VARIABLE} seconds, {ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS} by default), "
+    f"so run route, then this command again; locally you can also delete metadata/{ROUTE_LOCK_FILENAME} first"
 )
 
 # Top-level report key holding the routing record. It lives in the report, so a fresh convert (which
@@ -437,6 +438,30 @@ def _process_is_running(process_id: int) -> bool | None:
     return True
 
 
+def _process_start_marker(process_id: int) -> str | None:
+    """A mark of when the process with this id started, or ``None`` when it can't be read.
+
+    Two processes that get the same id one after the other have different marks, which is how a lock tells
+    its holder from a later process that reused the id. On Linux it is the start time in ``/proc``; on other
+    POSIX systems, the start time ``ps`` prints. It is only ever compared with another mark read the same way.
+    """
+    if not _CAN_PROBE_PROCESSES:
+        return None
+    try:
+        status = Path(f"/proc/{process_id}/stat").read_text(encoding="utf-8")
+        return "proc:" + status.rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        pass
+    try:
+        listed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(process_id)], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    started = listed.stdout.strip()
+    return f"ps:{started}" if listed.returncode == 0 and started else None
+
+
 def _route_lock_holder(content: str) -> dict[str, Any] | None:
     """The holder a route lock names (``token``, ``pid``, ``host``, ``started_at``), or ``None`` for another format."""
     try:
@@ -457,16 +482,21 @@ def _route_lock_holder(content: str) -> dict[str, Any] | None:
 def _route_lock_is_stale(content: str, modified_at: float) -> bool:
     """Whether a route lock was left by a command that has stopped.
 
-    A lock this machine wrote is stale only when the process it names has exited, however long that
-    process has run, since a local route or fill may run past the MCP timeout. A lock from another
-    machine, one whose process can't be probed here, or one in another format (written by hand, or by
-    an older flowx) is stale once older than :func:`_route_lock_stale_after_seconds`.
+    A lock this machine wrote is stale when the process it names has exited, or when that id now belongs
+    to a process that started at another time (a restart reused it), however long the holder has run,
+    since a local route or fill may run past the MCP timeout. A lock from another machine, one whose
+    process can't be probed here (Windows), or one in another format (written by hand, or by an older
+    flowx) is stale once older than :func:`_route_lock_stale_after_seconds`.
     """
     holder = _route_lock_holder(content)
     if holder is not None and holder["host"] == socket.gethostname():
         running = _process_is_running(holder["pid"])
         if running is not None:
-            return not running
+            if not running:
+                return True
+            recorded = holder.get("process_started")
+            current = _process_start_marker(holder["pid"])
+            return isinstance(recorded, str) and current is not None and recorded != current
     started_at = holder["started_at"] if holder is not None else modified_at
     return time.time() - started_at > _route_lock_stale_after_seconds()
 
@@ -495,21 +525,36 @@ def _take_over_stale_route_lock(lock_path: Path) -> None:
     try:
         moved_content = moved.read_text(encoding="utf-8")
         if moved_content != content:
-            _restore_route_lock(lock_path, moved_content)
+            _create_lock_file(lock_path, moved_content)
+    except OSError:
+        pass  # the lock could not be put back; the command that made it finds it gone and removes nothing
     finally:
         moved.unlink(missing_ok=True)
 
 
-def _restore_route_lock(lock_path: Path, content: str) -> None:
-    """Create the route lock again holding ``content``, unless a lock exists there already."""
+def _create_lock_file(lock_path: Path, content: str) -> bool:
+    """Create the lock file holding ``content``, returning ``False`` when a lock exists there already.
+
+    It is created with ``O_EXCL``, so only one command makes it. When writing fails or is cut short it is
+    removed again while it is still the file this call opened (compared by file identity, since its
+    content may be partial), so no empty or partial lock is left behind, and the error is raised.
+    """
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        return
+        return False
     try:
-        os.write(descriptor, content.encode("utf-8"))
+        try:
+            data = content.encode("utf-8")
+            if os.write(descriptor, data) != len(data):
+                raise OSError(f"could not write the lock {lock_path}")
+        except BaseException:
+            if _is_open_file(descriptor, lock_path):
+                lock_path.unlink(missing_ok=True)
+            raise
     finally:
         os.close(descriptor)
+    return True
 
 
 def _owns_route_lock(lock_path: Path, token: str) -> bool:
@@ -544,28 +589,25 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
     metadata_dir.mkdir(exist_ok=True)
     lock_path = metadata_dir / ROUTE_LOCK_FILENAME
     token = secrets.token_hex(16)
-    holder = json.dumps({"token": token, "pid": os.getpid(), "host": socket.gethostname(), "started_at": time.time()})
+    holder = json.dumps(
+        {
+            "token": token,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "started_at": time.time(),
+            "process_started": _process_start_marker(os.getpid()),
+        }
+    )
     _take_over_stale_route_lock(lock_path)
     try:
-        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        yield False
-        return
-    try:
-        try:
-            if os.write(descriptor, holder.encode("utf-8")) != len(holder.encode("utf-8")):
-                raise OSError(f"could not write the route lock {lock_path}")
-        except BaseException:
-            # The token may be missing or partial, so compare file identity, as enrich's lock does.
-            if _is_open_file(descriptor, lock_path):
-                lock_path.unlink(missing_ok=True)
-            raise
-        finally:
-            os.close(descriptor)
+        created = _create_lock_file(lock_path, holder)
     except BaseException:
         if _owns_route_lock(lock_path, token):
             lock_path.unlink(missing_ok=True)
         raise
+    if not created:
+        yield False
+        return
     try:
         yield True
     finally:

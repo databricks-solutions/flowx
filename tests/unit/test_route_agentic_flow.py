@@ -2560,6 +2560,36 @@ def test_a_running_command_on_this_machine_keeps_its_lock_past_the_mcp_timeout(
     assert lock_path.read_bytes() == lock_before
 
 
+@pytest.mark.skipif(os.name == "nt", reason="processes are not probed on Windows")
+def test_a_lock_whose_process_id_now_belongs_to_another_process_is_taken_over(tmp_path: Path) -> None:
+    """After a restart the old holder's id can name an unrelated live process; that must not hold the lock forever."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    lock_path = _write_route_lock(tmp_path, pid=os.getpid(), started_at=time.time())
+    holder = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock_path.write_text(json.dumps({**holder, "process_started": "an earlier process"}), encoding="utf-8")
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    assert not lock_path.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="processes are not probed on Windows")
+def test_a_lock_naming_this_very_process_is_still_held_past_the_mcp_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import flowx.route_agentic as route_agentic
+
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    monkeypatch.setenv("FLOWX_MCP_TIMEOUT", "60")
+    lock_path = _write_route_lock(tmp_path, pid=os.getpid(), started_at=time.time() - 120)
+    holder = json.loads(lock_path.read_text(encoding="utf-8"))
+    started = route_agentic._process_start_marker(os.getpid())
+    assert started is not None
+    lock_path.write_text(json.dumps({**holder, "process_started": started}), encoding="utf-8")
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is False
+    assert lock_path.exists()
+
+
 def test_a_lock_taken_over_in_between_is_put_back_without_hard_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
