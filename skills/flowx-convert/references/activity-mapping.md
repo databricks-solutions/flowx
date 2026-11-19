@@ -44,9 +44,14 @@ This reference defines the mapping between Azure Data Factory activity types and
 | Custom | Agentic | Agentic (LLM-assisted) | custom notebook |
 | ExecuteSSISPackage | Agentic | Agentic (LLM-assisted) | PySpark notebook |
 | AzureMLExecutePipeline | Agentic | Agentic (LLM-assisted) | MLflow notebook |
-| Triggers (Schedule) | Agentic | Agentic (LLM-assisted) | `quartz_cron_expression` |
-| Triggers (Tumbling Window) | Agentic | Agentic (LLM-assisted) | periodic schedule |
-| Triggers (Blob Event) | Agentic | Agentic (LLM-assisted) | `file_arrival` trigger |
+| GetMetadata | Agentic | Agentic (LLM-assisted) | `notebook_task` that reads file or table metadata |
+| Validation | Agentic | Agentic (LLM-assisted) | `notebook_task` that waits for and checks a dataset |
+| Fail | Agentic | Agentic (LLM-assisted) | `notebook_task` that raises the activity's error |
+| Script | Agentic | Agentic (LLM-assisted) | SQL task or `notebook_task` |
+| Triggers (`ScheduleTrigger`) | Deterministic | convert (`sources/adf/translate.py`) | job `schedule` (`quartz_cron_expression`), or a periodic trigger |
+| Triggers (`TumblingWindowTrigger`) | Deterministic, approximated | convert (`sources/adf/translate.py`) | periodic schedule, marked for review |
+| Triggers (`BlobEventsTrigger`) | Deterministic | convert (`sources/adf/translate.py`) | `file_arrival` trigger |
+| Triggers (`CustomEventsTrigger`) | Manual setup | convert (`sources/adf/translate.py`) | a setup note in `SETUP.md` |
 
 ## Deterministic Translator Details
 

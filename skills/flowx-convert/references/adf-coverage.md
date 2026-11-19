@@ -34,10 +34,10 @@ other triggers on the same pipeline are for the user to wire.
 
 | ADF trigger | What flowx writes | What to tell the user |
 |---|---|---|
-| Schedule trigger | The job's `schedule` (Quartz cron and time zone); a day, week or month interval above 1 becomes a periodic trigger | Nothing, beyond checking the time zone |
-| Storage events trigger | A file arrival trigger on the trigger's scope | Check that the location is reachable from the workspace |
-| Tumbling window trigger | A periodic schedule, marked as approximated | Review the window boundaries; backfill and window dependencies are not carried over |
-| Custom events trigger | No trigger; a manual setup note in `SETUP.md` | Wire it by hand |
+| Schedule trigger (`ScheduleTrigger`) | The job's `schedule` (Quartz cron and time zone); a day, week or month interval above 1 becomes a periodic trigger | Nothing, beyond checking the time zone |
+| Storage events trigger (`BlobEventsTrigger`) | A file arrival trigger on the trigger's scope | Check that the location is reachable from the workspace |
+| Tumbling window trigger (`TumblingWindowTrigger`) | A periodic schedule, marked as approximated | Review the window boundaries; backfill and window dependencies are not carried over |
+| Custom events trigger (`CustomEventsTrigger`) | No trigger; a manual setup note in `SETUP.md` | Wire it by hand |
 
 Parameter values a trigger passes to its pipeline become the job's default parameter values.
 
