@@ -10,9 +10,6 @@ from typing import Any
 
 from flowx.utils import to_lowercase_key
 
-# The exit code package uses when it wrote a bundle but left out DAGs that failed reconciliation.
-DAGS_LEFT_OUT_EXIT_CODE = 4
-
 # Report task fields that hold nested task lists.
 _NESTED_TASK_LISTS = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
 

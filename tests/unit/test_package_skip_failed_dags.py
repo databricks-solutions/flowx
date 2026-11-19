@@ -64,7 +64,7 @@ def test_a_failed_dag_still_stops_package_by_default(tmp_path: Path) -> None:
 def test_skip_failed_dags_packages_the_others(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     output = _convert(tmp_path, {"good.py": _GOOD, "bad.py": _BAD})
 
-    assert _package(output, "--skip-failed-dags") == 4
+    assert _package(output, "--skip-failed-dags") == 0
 
     assert sorted(path.stem for path in (output / "resources").glob("*.yml")) == ["good"]
     assert _job(output, "good")["schedule"]["pause_status"] == "UNPAUSED"
@@ -74,7 +74,7 @@ def test_skip_failed_dags_packages_the_others(tmp_path: Path, capsys: pytest.Cap
 def test_task_triggering_a_left_out_dag_becomes_a_placeholder_and_pauses_its_job(tmp_path: Path) -> None:
     output = _convert(tmp_path, {"good.py": _GOOD, "bad.py": _BAD, "caller.py": _CALLER})
 
-    assert _package(output, "--skip-failed-dags") == 4
+    assert _package(output, "--skip-failed-dags") == 0
 
     job = _job(output, "caller")
     task = next(task for task in job["tasks"] if task["task_key"] == "kick")
