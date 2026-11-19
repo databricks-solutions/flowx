@@ -16,7 +16,7 @@ End-to-end architecture for migrating Azure Data Factory (ADF) pipelines to Data
 
 ## Overview
 
-flowx follows a three-phase pipeline architecture. Each phase is independently runnable and produces artifacts consumed by the next phase. The design principle is **deterministic-first, agentic fallback**: well-known ADF patterns are translated by fast, reliable Python code, while complex or ambiguous patterns are handled by LLM-assisted skills.
+flowx follows three main phases (discover, convert, package), with optional enrich and route steps between them. Each phase is independently runnable and produces artifacts consumed by the next phase. The design principle is **deterministic-first, agentic fallback**: well-known ADF patterns are translated by fast, reliable Python code, while complex or ambiguous patterns are handled by LLM-assisted skills.
 
 ```
 ADF JSON Exports

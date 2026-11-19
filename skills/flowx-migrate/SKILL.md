@@ -321,7 +321,7 @@ When the response carries `needs_auth: true`:
    services in the ADF export).
 2. Run `databricks auth login --host <host>` interactively to set up
    a local profile.
-3. Pass `--profile <name>` to the prepare invocation in Step 12 so
+3. Pass `--profile <name>` to the package call in Step 12 so
    flowx downloads the referenced notebooks and downloads them under
    `bundle/src/notebooks/` with the task references rewritten to the
    relative `../src/notebooks/...` paths.

@@ -72,7 +72,7 @@ Follow these steps in order:
 
 ### Step 1 — Locate the translation report
 
-The translate/modify phases left the stamped report at `<output_dir>/.work/translation_report.stamped.json`
+The convert/modify phases left the stamped report at `<output_dir>/.work/translation_report.stamped.json`
 (or `<output_dir>/.work/translation_report.json` when `modify` was not run). If the shared
 `<output_dir>` is not in conversation context, ask the user:
 
@@ -385,7 +385,7 @@ All under the shared `<output_dir>`:
 | `SETUP.md` | Human-readable setup instructions (one per bundle) |
 | `DEPLOY.md` | Top-level bundle layout + suggested deploy order (all packaging modes) |
 | `metadata/inventory.json` | Activity inventory (from discover) |
-| `metadata/profile_report.csv` | Per-pipeline complexity report (from profile) |
+| `metadata/profile_report.csv` | Per-pipeline complexity report (from discover) |
 | `metadata/<pipeline>.arm.json` | Verbatim original ADF/ARM source (from discover) |
 | `metadata/configuration.json` | Collected configuration answers (from modify) |
 | `metadata/route_audit.json` | What each routing unit was converted to; written only when a routing plan is recorded (see `flowx-route`) |
