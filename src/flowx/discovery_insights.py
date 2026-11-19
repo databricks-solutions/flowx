@@ -64,7 +64,7 @@ AGENTIC_INSIGHTS_FILENAME = "agentic_insights.json"
 # Held in metadata/ while one enrich reads, validates and writes (see _enrich_locked).
 ENRICH_LOCK_FILENAME = ".enrich.lock"
 
-# A hosted agent cannot delete files in output_dir, but discover clears metadata/ and the lock with it.
+# A hosted agent cannot delete files in output_dir, but discover moves metadata/, the lock with it, into the archive.
 _LOCK_RECOVERY = (
     f"locally, delete metadata/{ENRICH_LOCK_FILENAME} and run enrich again; on the hosted MCP server, run "
     "discover again (it clears metadata/ and the lock), then enrich prepare and apply again"
@@ -617,6 +617,15 @@ def build_agentic_insights(inventory: dict[str, Any], raw: dict[str, Any]) -> di
             document[key] = raw[key]
     document[_AGENTIC_INSIGHTS_HASH_KEY] = canonical_sha256(document)
     return document
+
+
+def agentic_insights_hash_violations(document: dict[str, Any]) -> list[str]:
+    """Check an ``agentic_insights.json`` document's own hash; an empty list means it is intact."""
+    recorded = document.get(_AGENTIC_INSIGHTS_HASH_KEY)
+    content = {key: value for key, value in document.items() if key != _AGENTIC_INSIGHTS_HASH_KEY}
+    if recorded != canonical_sha256(content):
+        return ["agentic_insights.json does not match its recorded agentic_insights_sha256"]
+    return []
 
 
 def render_inventory(inventory: dict[str, Any], agentic_insights: dict[str, Any]) -> dict[str, Any]:

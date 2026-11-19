@@ -22,6 +22,7 @@ from flowx import discovery_insights
 from flowx.discovery_insights import (
     AGENTIC_INSIGHTS_FILENAME,
     INSIGHTS_KEY,
+    agentic_insights_hash_violations,
     enrich_inventory,
     inventory_fingerprint,
     project_inventory,
@@ -170,6 +171,16 @@ def test_authored_insights_cannot_set_the_library_hashes() -> None:
 
     assert any("source_graphs_sha256" in violation and "library" in violation for violation in violations)
     assert any("agentic_insights_sha256" in violation and "library" in violation for violation in violations)
+
+
+def test_an_edited_agentic_insights_file_fails_its_hash_check(tmp_path: Path) -> None:
+    _discover(tmp_path)
+    enrich_inventory(tmp_path, insights=_authored(tmp_path))
+    document = json.loads((tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
+
+    assert agentic_insights_hash_violations(document) == []
+    document["overview"] = "Edited after enrich."
+    assert agentic_insights_hash_violations(document) != []
 
 
 def test_insights_authored_against_an_older_inventory_are_refused(tmp_path: Path) -> None:

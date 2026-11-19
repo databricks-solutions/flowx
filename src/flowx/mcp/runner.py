@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from flowx.sources.adf.loader import ARCHIVE_DIRNAME
+
 # Phases can take a while on large factories; allow generous default headroom.
 DEFAULT_TIMEOUT = int(os.environ.get("FLOWX_MCP_TIMEOUT", "1800"))
 
@@ -117,12 +119,18 @@ def parse_stdout_json(result: AdapterResult) -> Any | None:
         return None
 
 
+def _delivery_order(root: Path, path: Path) -> tuple[bool, str]:
+    """Sort key that puts earlier runs' outputs under ``metadata/archive/`` after the current bundle."""
+    relative = path.relative_to(root)
+    return relative.parts[:2] == ("metadata", ARCHIVE_DIRNAME), str(relative)
+
+
 def list_tree(root: Path, *, max_entries: int = 250) -> list[str]:
-    """Return repo-relative paths of files under *root* (sorted, capped)."""
+    """Return repo-relative paths of files under *root* (sorted, archived runs last, capped)."""
     if not root.exists():
         return []
-    files = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
-    return files[:max_entries]
+    files = sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: _delivery_order(root, p))
+    return [str(p.relative_to(root)) for p in files[:max_entries]]
 
 
 def summarize_inventory(output_dir: Path) -> dict[str, Any] | None:
@@ -245,7 +253,8 @@ def read_tree(root: Path, *, max_total_bytes: int = INLINE_TREE_BYTES) -> dict[s
     The hosted app writes the generated bundle to ephemeral local disk that the user cannot
     reach, so the bundle contents are returned inline. Binary/unreadable files are skipped, and
     once the cumulative size passes *max_total_bytes* further files are listed under ``truncated``
-    instead of being included.
+    instead of being included. Earlier runs' outputs under ``metadata/archive/`` come last, so they never
+    crowd the current bundle out.
 
     Returns:
         ``{"files": {relpath: text, ...}, "truncated": [relpath, ...]}`` ("truncated" omitted when empty).
@@ -254,7 +263,7 @@ def read_tree(root: Path, *, max_total_bytes: int = INLINE_TREE_BYTES) -> dict[s
     truncated: list[str] = []
     total = 0
     if root.exists():
-        for path in sorted(root.rglob("*")):
+        for path in sorted(root.rglob("*"), key=lambda path: _delivery_order(root, path)):
             if not path.is_file():
                 continue
             rel = str(path.relative_to(root))

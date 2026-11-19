@@ -1,0 +1,12 @@
+{
+  "bundles": [
+    "agentic_activities",
+    "all_activity_types",
+    "child_pipeline",
+    "complex_orchestration",
+    "motif_activity_and_notify",
+    "motif_incremental_watermark",
+    "motif_metadata_bulk_copy",
+    "motif_rest_api_pagination"
+  ]
+}
