@@ -778,6 +778,26 @@ def test_package_does_not_need_the_live_report_when_nothing_is_routed_and_no_fil
     assert _routing_plan_failures(tmp_path, configured_copy) == []
 
 
+def test_package_says_to_convert_again_when_a_fill_is_stored_and_the_live_report_is_gone(tmp_path: Path) -> None:
+    """Route can't run without the report, so 're-run route' alone would send the user in a circle."""
+    from flowx.bundler.dab_writer import _routing_plan_failures
+
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir) == (1, 0)
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+    configured_copy = tmp_path / "configured.json"
+    configured = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    configured.pop(ROUTING_RECORD_KEY, None)
+    configured_copy.write_text(json.dumps(configured), encoding="utf-8")
+    (tmp_path / WORK_DIRNAME / REPORT_FILENAME).unlink()
+
+    [failure] = _routing_plan_failures(tmp_path, configured_copy)
+
+    assert "re-run convert with the same source, then route" in failure
+
+
 def test_a_merge_written_to_a_separate_copy_leaves_the_baseline_and_live_report_alone(tmp_path: Path) -> None:
     _route_parent_agentic(tmp_path, _report_with_child_gap())
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
