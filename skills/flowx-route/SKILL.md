@@ -455,7 +455,8 @@ Package refuses, writing nothing, when:
 - the saved baseline no longer has the hashes the record names ("re-run convert, then route"; route,
   fill-agentic and merge refuse it too), or a stored output or gap fill was edited, moved to another
   unit or pointed at another activity ("re-run fill-agentic", or merge that gap again). An edited
-  entry for a unit the plan no longer has is never applied, so package only warns about it. Every stored
+  entry for a unit the plan no longer has, or no longer routes agentic, is never applied, so package
+  only warns about it. Every stored
   entry carries a hash over all its fields, so any edit to it shows, and the store must hold exactly
   `components` and `gap_fills`, so an added key is never dropped on the next save and a deleted one
   never silently drops what it held;

@@ -2282,6 +2282,29 @@ def test_package_warns_about_an_edited_entry_for_a_unit_the_plan_no_longer_has_a
     assert "Warning:" in error and "grouping-gone" in error
 
 
+def test_package_warns_about_an_edited_entry_for_a_unit_now_routed_deterministic_and_still_runs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """fill-agentic refuses a deterministic unit, so its edited entry can't be replaced; it is never applied either."""
+    report = _report_two_pipelines()
+    for pipeline in report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, report)
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    [unit_id] = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))[
+        "components"
+    ]
+    _edit_store(tmp_path, lambda store: store["components"][unit_id].update({"members": ["edited"]}))
+    _route_two_components(tmp_path, parent="deterministic", child="agentic")
+    assert apply_agentic_output(tmp_path, ["child"], [_named_lfc_pipeline("child_lfc")])["ok"] is True
+    capsys.readouterr()
+
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 0
+
+    error = capsys.readouterr().err
+    assert "Warning:" in error and unit_id in error
+
+
 def test_a_stored_output_moved_to_another_unit_is_not_applied(tmp_path: Path) -> None:
     units = _two_filled_components(tmp_path)
 

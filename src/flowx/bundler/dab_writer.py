@@ -1068,14 +1068,18 @@ def _live_report_failures(
         stored = load_agentic_output(output_dir)
     except (OSError, ValueError) as error:
         return [f"metadata/{AGENTIC_OUTPUT_FILENAME} is unreadable: {error}"]
-    # An edited entry for a unit the plan no longer has is never applied, and fill-agentic cannot target
-    # that unit to replace it, so refusing would leave package stuck (a hosted agent cannot delete the file).
+    # An edited entry for a unit the plan no longer has, or no longer routes agentic, is never applied, and
+    # fill-agentic cannot target that unit to replace it, so refusing would leave package stuck (a hosted
+    # agent cannot delete the file).
     edited_unit_ids = set(stored.document.get("components", {})) - set(stored.outputs)
-    vanished = sorted(edited_unit_ids - set(routing_units(plan_document)))
+    agentic_unit_ids = {
+        unit_id for unit_id, unit in routing_units(plan_document).items() if unit["decision"] == DECISION_AGENTIC
+    }
+    vanished = sorted(edited_unit_ids - agentic_unit_ids)
     if vanished:
         print(
-            f"Warning: metadata/{AGENTIC_OUTPUT_FILENAME} holds edited entries for components the plan no longer "
-            f"has ({', '.join(vanished)}); they are never applied, so package ignores them.",
+            f"Warning: metadata/{AGENTIC_OUTPUT_FILENAME} holds edited entries for components the plan does not "
+            f"route agentic ({', '.join(vanished)}); they are never applied, so package ignores them.",
             file=sys.stderr,
         )
     edited = [label for label in stored.edited if label not in vanished]
