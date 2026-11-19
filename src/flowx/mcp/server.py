@@ -516,6 +516,8 @@ def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
         args += ["--keep-intermediates"]
     if p.get("allow_unresolved_gaps"):
         args += ["--allow-unresolved-gaps"]
+    if p.get("skip_failed_dags"):
+        args += ["--skip-failed-dags"]
     out = Path(output_dir)
     default_report = out / ".work" / "translation_report.stamped.json"
     if not default_report.exists():
@@ -904,7 +906,7 @@ def build_server() -> FastMCP:
         - "workspace_paths": source(req), report_path(req), one source-specific input key | source_dir.
         - "package": output_dir, output_volume_path, output_workspace_path, report_path,
           catalog(default "main"), schema(default "default"), bundle_name, profile,
-          download_workspace_files(bool), keep_intermediates(bool), allow_unresolved_gaps(bool).
+          download_workspace_files(bool), keep_intermediates(bool), allow_unresolved_gaps(bool), skip_failed_dags(bool).
         - "migrate": source(req), one source-specific input key (req unless resuming), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
           exclude_dag | exclude_dags (Airflow, repeatable list),
