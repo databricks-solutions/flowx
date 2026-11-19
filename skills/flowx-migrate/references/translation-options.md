@@ -26,7 +26,7 @@ present its rationale, choices, and affected task keys. Then apply all collected
 `modify` writes the stamped report to `<output_dir>/.work/translation_report.stamped.json`
 and the kept answers record to `<output_dir>/metadata/configuration.json`. The package phase
 reads the stamped report from `.work/` automatically. When inspect emits no options for any
-pipeline, skip `modify` — package falls back to the un-stamped report.
+pipeline, skip `modify`: package falls back to the un-stamped report.
 
 The options the adapter raises:
 
@@ -42,5 +42,5 @@ their source linked service.
 
 For each multi-activity motif the detector matches (rest_api_pagination,
 incremental_load_watermark, metadata_driven_bulk_copy, ...) the adapter emits one
-`consolidate_motif:<motif_id>` option. The user must explicitly opt in to `consolidate` 
+`consolidate_motif:<motif_id>` option. The user must explicitly opt in to `consolidate`
 for each detected pattern.

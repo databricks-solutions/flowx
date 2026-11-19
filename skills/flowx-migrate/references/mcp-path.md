@@ -1,31 +1,48 @@
 # The MCP path (Databricks Genie Code, or a local stdio registration)
 
-Read this from the `flowx-migrate` skill before Step 1 when you run the phases through the `flowx` MCP tool.
+Read this from the `flowx-migrate` skill before Step 1 when you run the phases through the `flowx` MCP
+tool. In Genie Code this is the only path: the phases run on the deployed `mcp-flowx` app, so there is
+no venv, no `bootstrap.sh` and no `.migration-venv`. What every phase shares on this path (the single
+`flowx` tool, no Python commands, the temporary server folder and the output paths) is in
+[`../../shared/running-flowx.md`](../../shared/running-flowx.md).
 
-In Genie Code this is the **only** path — the phases run on the deployed `mcp-flowx` app, so
-there is **no venv, no `bootstrap.sh`, and no `.migration-venv`**. Run **no** `python3`/`$PY`/`bash`
-commands on this path; the `"$PY" -m …` snippets in the SKILL.md steps are the **local-CLI fallback
-only**. Everything goes through the single **`flowx`** tool, one `command` per step:
+## Contents
 
-The hosted server **cannot read files by path**, whether they sit in your local file system, the
-workspace, or a Databricks volume, so pass the source by reference as `adf_volume_path` or
-`adf_workspace_path` (the server reads them through the SDK; see below), or, for small factories,
-inline as `adf_definitions` (a mapping of relative path → ARM JSON content mirroring
-the Git-export layout — `pipeline/…`, `dataset/…`, `linkedService/…`, `trigger/…`), which you read and
-supply yourself.
+- [Pass the source by reference](#pass-the-source-by-reference)
+- [Run the same steps, one call per phase](#run-the-same-steps-one-call-per-phase)
+- [The deterministic-only shortcut](#the-deterministic-only-shortcut)
+- [Airflow gaps](#airflow-gaps)
 
-**Run the same Workflow as the CLI path, one `flowx` call per phase**: discover → enrich (optional) →
-convert → route → fill → configuration options → package, in the order of the SKILL.md steps. Do **not**
-replace it with one `migrate` call: `migrate` is server code, which can't author the insights or ask
-the user for the routing decisions, so it runs only discover → convert → package and never enriches
-or routes. Convert reads the source again, so pass the **same source key to `discover` and
-`convert`**. With inline `adf_definitions` that means sending the payload twice; a volume or workspace
-path (below) sends only the path. Every other command reuses `output_dir`. Ask each phase's inputs
-when that phase runs, as SKILL.md Steps 0 and 1 describe: call `inputs` for a phase just before it, not
-for every phase at the start. `source` ("adf" | "airflow") is required for discover/convert and for
-`inputs discover`/`inputs convert`; for Airflow, swap `adf_definitions` for `airflow_source_path`.
-On non-ADF sources route records deterministic decisions only; agentic decisions and `fill_agentic`
-are ADF-only. `merge_agentic` is ADF-only. `package` and `inputs package` are source-independent:
+## Pass the source by reference
+
+**The hosted server cannot read files by path**, whether they sit in your local file system, the
+workspace or a Databricks volume. Pass the source one of these ways:
+
+- `adf_volume_path`, for an ADF export staged to a UC volume, for example
+  `"/Volumes/cat/sch/adf_export"` (the server reads it through the SDK Files API);
+- `adf_workspace_path`, for an ADF Git folder already in the workspace, for example
+  `"/Workspace/Shared/adf_export"` (read through the SDK Workspace API);
+- inline as `adf_definitions`, for small factories only: a mapping of relative path to ARM JSON content
+  that mirrors the Git-export layout (`pipeline/...`, `dataset/...`, `linkedService/...`,
+  `trigger/...`), which you read and supply yourself.
+
+**Large factories (hundreds to thousands of pipelines): do not inline.** Inline `adf_definitions`
+passes through your context window and is capped near 5 MB; use a volume or workspace path. For
+Airflow, pass `airflow_source_path` in place of `adf_definitions`.
+
+## Run the same steps, one call per phase
+
+Run the SKILL.md steps in order, one `flowx` call per phase: discover, enrich (optional), convert,
+route, fill, configuration options, package. Do not replace them with one `migrate` call: `migrate` is
+server code, which can't author the insights or ask the user for the routing decisions, so it runs only
+discover, convert and package and never enriches or routes.
+
+Convert reads the source again, so pass the same source key to `discover` and `convert`. With inline
+`adf_definitions` that means sending the payload twice; a volume or workspace path sends only the
+path. Every other command reuses `output_dir`. Call `inputs` for a phase just before that phase, as
+SKILL.md "How to run" describes. On non-ADF sources route records deterministic decisions only;
+agentic decisions, `fill_agentic` and `merge_agentic` are ADF only. `package` and `inputs package`
+are source-independent.
 
 ```
 flowx(command="inputs", parameters={"phase": "discover", "source": "adf"})  # just before discover; source req for discover/convert
@@ -42,9 +59,10 @@ flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema"
 flowx(command="record_results", parameters={...}) / flowx(command="install_dashboard", parameters={...})
 ```
 
-**Deterministic-only shortcut: `migrate`.** Only when the user explicitly asks for a deterministic-only
-pass (no enrich, no routing, as in Step 4), one `migrate` call runs discover → convert → package and
-sends the source once:
+## The deterministic-only shortcut
+
+Only when the user explicitly asks for a deterministic-only pass (no enrich, no routing, as in SKILL.md
+Step 4), one `migrate` call runs discover, convert and package and sends the source once:
 
 ```
 flowx(command="migrate", parameters={
@@ -54,47 +72,30 @@ flowx(command="migrate", parameters={
 ```
 
 **`migrate` is interactive when configuration options exist.** After translating, if the pipeline
-raises any configuration options (e.g. how to handle an `activity_and_notify` motif, metadata-driven
-bulk-copy consolidation, non-Databricks task compute), it **does not package** — it returns the
-**full option schema once**: `{"status": "needs_input", "pending_options": [{"pipeline_name",
-"options": [{option_id, prompt, rationale, choices, free_text, default, show_when}, …]}, …],
-"report_path", "output_dir"}`. You drive the whole chain locally — no per-answer round trip (the same
-walk applies to `inspect` → `apply_answers` on the step-by-step path):
+raises any configuration options (for example how to handle an `activity_and_notify` motif,
+metadata-driven bulk-copy consolidation, or non-Databricks task compute), it does not package. It
+returns the full option schema once: `{"status": "needs_input", "pending_options": [{"pipeline_name",
+"options": [{option_id, prompt, rationale, choices, free_text, default, show_when}, ...]}, ...],
+"report_path", "output_dir"}`. Walk the whole chain locally, with no round trip per answer (the same
+walk applies to `inspect` then `apply_answers` on the step-by-step path):
 
-1. **Ask an option only when its `show_when` is satisfied** — every clause `{option_id, in:[values]}`
-   must match an answer you've already collected (empty `show_when` = always ask). So
-   `notify_slack_url` surfaces only after `notify_destination=slack`; the metadata-driven
-   `access`/`size`/`lookup_tool` chain only after `metadata_driven_consolidate=consolidate`. Present
-   each option's `prompt`/`rationale`/`choices`; honor the `default`.
-2. **Validate** each answer against `choices` (a `free_text` option accepts any value); collect picks
-   as `"option_id=value"` strings. Run any data action inline (e.g. the lookup query when
-   `metadata_driven_lookup_tool=have`).
-3. When **every applicable option** is answered, call `migrate` **once** with the same parameters plus
-   `"answers": ["option_id=value", …]`. It applies them and packages (`"status": "completed"`).
+1. Ask an option only when its `show_when` is satisfied: every clause `{option_id, in:[values]}` must
+   match an answer already collected (an empty `show_when` means always ask). So `notify_slack_url`
+   comes only after `notify_destination=slack`, and the metadata-driven `access`, `size` and
+   `lookup_tool` chain only after `metadata_driven_consolidate=consolidate`. Present each option's
+   `prompt`, `rationale` and `choices`, and honor the `default`.
+2. Validate each answer against `choices` (a `free_text` option accepts any value) and collect the picks
+   as `"option_id=value"` strings. Run any data action inline, for example the lookup query when
+   `metadata_driven_lookup_tool=have`.
+3. When every applicable option is answered, call `migrate` once with the same parameters plus
+   `"answers": ["option_id=value", ...]`. It applies them and packages (`"status": "completed"`).
 
-To accept all defaults and skip the prompts, pass `"interactive": false`. (Re-calling `migrate` with
-`answers` reuses the existing report and skips re-running discover/convert.)
+To accept all defaults and skip the prompts, pass `"interactive": false`. Calling `migrate` again with
+`answers` reuses the existing report and does not run discover or convert again.
 
-> **Large factories (hundreds–thousands of pipelines): do not inline.** Inline `adf_definitions`
-> passes through your context window and is capped (~5 MB). Instead point the server at the source by
-> reference: either stage the ADF export to a **UC Volume** and pass
-> `"adf_volume_path": "/Volumes/cat/sch/adf_export"` (read via the SDK Files API), or pass
-> `"adf_workspace_path": "/Workspace/Shared/adf_export"` for an ADF Git folder already in the workspace
-> (read via the SDK Workspace API). For output, pass `"output_volume_path": "/Volumes/cat/sch/dab"`
-> **or** `"output_workspace_path": "/Workspace/Shared/dab"` so the generated bundle is written to that
-> target via the SDK (returned as `bundle_uploaded` instead of inline `bundle`). Grant the
-> `mcp-flowx` app's service principal read on the source and write on the output target.
+## Airflow gaps
 
-For an Airflow report with eligible leaf placeholders, use the `flowx-resolve-airflow-gaps` skill between convert and package. It calls `resolve_agentic` with `action="prepare"`, stages one or more provider candidates, and applies only the gap fingerprints the user explicitly accepts. Package must then receive `<output_dir>/.work/translation_report.agentic.json` as `report_path`.
-
-The server's `output_dir` is ephemeral and not reachable from your workspace, so **have `migrate`/
-`package` write the DAB to the target via the SDK** — pass `"output_volume_path": "/Volumes/…"` or
-`"output_workspace_path": "/Workspace/…"` and the bundle is uploaded there (returned as
-`bundle_uploaded`). Only when neither is set is the bundle returned inline as `bundle = {"files":
-{relpath: text,…}, "truncated": [...]}` (small bundles), which you must then persist yourself. Either
-way the user ends up with the DAB to validate and deploy. Each call returns a structured result
-(summaries / file trees); use those in place of reading files. Wherever a SKILL.md step shows `"$PY" -m flowx.adapter <cmd> …`, call
-`flowx(command="<cmd>", parameters={...})` instead.
-
-> `databricks bundle validate` / `deploy` of the *generated* bundle is still a user-driven CLI step
-> (web terminal / local / CI-CD); present the bundle for review.
+For an Airflow report with eligible leaf placeholders, use the `flowx-resolve-airflow-gaps` skill between
+convert and package. It calls `resolve_agentic` with `action="prepare"`, stages one or more provider
+candidates, and applies only the gap fingerprints the user explicitly accepts. Package must then receive
+`<output_dir>/.work/translation_report.agentic.json` as `report_path`.
