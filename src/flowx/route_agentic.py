@@ -84,9 +84,9 @@ ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS = 1800
 ROUTE_LOCK_HELD = (
     f"another route, fill-agentic or merge is writing to this output folder (metadata/{ROUTE_LOCK_FILENAME} "
     "exists); run this command again once it finishes. If none is running, one was stopped mid-write: its lock "
-    f"is taken over once that process has exited, or once it is older than {ROUTE_LOCK_STALE_AFTER_VARIABLE} "
-    f"seconds ({ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS} by default), so run route, then this command again; "
-    f"locally you can also delete metadata/{ROUTE_LOCK_FILENAME} first"
+    "is taken over once that process has exited (a lock from another machine, once it is older than "
+    f"{ROUTE_LOCK_STALE_AFTER_VARIABLE} seconds, {ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS} by default), so run "
+    f"route, then this command again; locally you can also delete metadata/{ROUTE_LOCK_FILENAME} first"
 )
 
 # Top-level report key holding the routing record. It lives in the report, so a fresh convert (which
@@ -418,8 +418,14 @@ def _route_lock_stale_after_seconds() -> float:
         return float(ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS)
 
 
-def _process_is_running(process_id: int) -> bool:
-    """Whether a process with this id is running on this machine."""
+# On Windows os.kill(pid, 0) does not probe: it terminates the process, so the lock never signals there.
+_CAN_PROBE_PROCESSES = os.name != "nt"
+
+
+def _process_is_running(process_id: int) -> bool | None:
+    """Whether a process with this id is running on this machine, or ``None`` where that can't be probed safely."""
+    if not _CAN_PROBE_PROCESSES:
+        return None
     try:
         os.kill(process_id, 0)
     except ProcessLookupError:
@@ -451,15 +457,18 @@ def _route_lock_holder(content: str) -> dict[str, Any] | None:
 def _route_lock_is_stale(content: str, modified_at: float) -> bool:
     """Whether a route lock was left by a command that has stopped.
 
-    It is stale when the process it names has exited on this machine, or when it is older than
-    :func:`_route_lock_stale_after_seconds`. A lock in another format (one written by hand, or by an
-    older flowx) goes by its file's age alone.
+    A lock this machine wrote is stale only when the process it names has exited, however long that
+    process has run, since a local route or fill may run past the MCP timeout. A lock from another
+    machine, one whose process can't be probed here, or one in another format (written by hand, or by
+    an older flowx) is stale once older than :func:`_route_lock_stale_after_seconds`.
     """
     holder = _route_lock_holder(content)
+    if holder is not None and holder["host"] == socket.gethostname():
+        running = _process_is_running(holder["pid"])
+        if running is not None:
+            return not running
     started_at = holder["started_at"] if holder is not None else modified_at
-    if time.time() - started_at > _route_lock_stale_after_seconds():
-        return True
-    return holder is not None and holder["host"] == socket.gethostname() and not _process_is_running(holder["pid"])
+    return time.time() - started_at > _route_lock_stale_after_seconds()
 
 
 def _take_over_stale_route_lock(lock_path: Path) -> None:
@@ -467,8 +476,9 @@ def _take_over_stale_route_lock(lock_path: Path) -> None:
 
     Two commands may judge the same lock stale at once, so the lock is first moved aside under a name only
     this command uses; only one move succeeds. If the moved file is not the one judged stale (another
-    command took the lock over in between and made its own), it is put back, unless yet another command
-    has made a lock since, in which case that one stands.
+    command took the lock over in between and made its own), it is put back by creating the lock again
+    with its content, unless yet another command has made a lock since, in which case that one stands.
+    It is put back by content, not with a hard link, which a workspace or volume mount may not support.
     """
     try:
         content = lock_path.read_text(encoding="utf-8")
@@ -483,13 +493,23 @@ def _take_over_stale_route_lock(lock_path: Path) -> None:
     except OSError:
         return
     try:
-        if moved.read_text(encoding="utf-8") != content:
-            try:
-                os.link(moved, lock_path)
-            except OSError:
-                pass
+        moved_content = moved.read_text(encoding="utf-8")
+        if moved_content != content:
+            _restore_route_lock(lock_path, moved_content)
     finally:
         moved.unlink(missing_ok=True)
+
+
+def _restore_route_lock(lock_path: Path, content: str) -> None:
+    """Create the route lock again holding ``content``, unless a lock exists there already."""
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return
+    try:
+        os.write(descriptor, content.encode("utf-8"))
+    finally:
+        os.close(descriptor)
 
 
 def _owns_route_lock(lock_path: Path, token: str) -> bool:

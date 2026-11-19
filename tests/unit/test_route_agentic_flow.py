@@ -2485,6 +2485,67 @@ def test_a_fresh_lock_held_by_a_running_process_still_refuses(tmp_path: Path, ho
     assert lock_path.read_bytes() == lock_before
 
 
+def test_a_running_command_on_this_machine_keeps_its_lock_past_the_mcp_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local route or fill may run longer than FLOWX_MCP_TIMEOUT; its lock is not stale while it runs."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    monkeypatch.setenv("FLOWX_MCP_TIMEOUT", "60")
+    lock_path = _write_route_lock(tmp_path, pid=os.getpid(), started_at=time.time() - 120)
+    lock_before = lock_path.read_bytes()
+
+    result = apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])
+
+    assert result["ok"] is False
+    assert lock_path.read_bytes() == lock_before
+
+
+def test_a_lock_taken_over_in_between_is_put_back_without_hard_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another command took the stale lock over and wrote its own; a FUSE mount may refuse hard links."""
+    import flowx.route_agentic as route_agentic
+
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    lock_path = _write_route_lock(tmp_path, pid=_finished_process_id(), started_at=time.time())
+    live_holder = {"token": "live", "pid": os.getpid(), "host": socket.gethostname(), "started_at": time.time()}
+
+    def judged_stale_then_replaced(_content: str, _modified_at: float) -> bool:
+        lock_path.write_text(json.dumps(live_holder), encoding="utf-8")
+        return True
+
+    def no_hard_links(*_arguments: Any) -> None:
+        raise PermissionError("hard links are not supported here")
+
+    monkeypatch.setattr(route_agentic, "_route_lock_is_stale", judged_stale_then_replaced)
+    monkeypatch.setattr(os, "link", no_hard_links)
+
+    result = apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])
+
+    assert result["ok"] is False
+    assert json.loads(lock_path.read_text(encoding="utf-8")) == live_holder
+    assert sorted(path.name for path in lock_path.parent.glob(f"{ROUTE_LOCK_FILENAME}*")) == [ROUTE_LOCK_FILENAME]
+
+
+def test_the_lock_never_signals_a_process_where_that_would_end_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows os.kill(pid, 0) terminates the process, so the lock falls back to its age there."""
+    import flowx.route_agentic as route_agentic
+
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    lock_path = _write_route_lock(tmp_path, pid=os.getpid(), started_at=time.time())
+    signalled: list[int] = []
+    monkeypatch.setattr(route_agentic, "_CAN_PROBE_PROCESSES", False)
+    monkeypatch.setattr(os, "kill", lambda process_id, _signal: signalled.append(process_id))
+
+    result = apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])
+
+    assert result["ok"] is False
+    assert signalled == []
+    assert lock_path.exists()
+
+
 def test_a_lock_in_an_unknown_format_is_stale_only_once_older_than_the_mcp_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -357,9 +357,9 @@ Its guarantees:
   and fill-agentic return the reason under `violations`; a merge prints it and exits 1). Run fills one
   after another, never in parallel. A lock is left behind when a run is stopped mid-write (the hosted
   server stops a command after `FLOWX_MCP_TIMEOUT` seconds). The next command takes it over once the
-  process that held it has exited, or once it is older than `FLOWX_MCP_TIMEOUT` (1800 seconds by
-  default); then run route, and the refused fill or merge again. Locally you can also delete the lock
-  first.
+  process that held it has exited; a lock written on another machine, once it is older than
+  `FLOWX_MCP_TIMEOUT` (1800 seconds by default). Then run route, and the refused fill or merge again.
+  Locally you can also delete the lock first.
 
 ### Authoring an `AgenticComponentActivity` (the escape hatch)
 
