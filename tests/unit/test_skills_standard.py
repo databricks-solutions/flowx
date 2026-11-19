@@ -124,7 +124,8 @@ def test_every_reference_file_is_linked_straight_from_skill_md(folder: Path) -> 
     skill_text = (folder / "SKILL.md").read_text(encoding="utf-8")
 
     for reference in _own_reference_files(folder):
-        assert str(reference.relative_to(folder)) in skill_text, f"{reference.relative_to(folder)} is not linked"
+        relative = str(reference.relative_to(folder))
+        assert f"]({relative})" in skill_text or f"]({relative}#" in skill_text, f"{relative} is not linked"
 
 
 @pytest.mark.parametrize("path", _markdown_files(), ids=lambda path: str(path.relative_to(SKILLS_DIR)))
@@ -146,7 +147,8 @@ def test_long_reference_files_start_with_a_contents_list(path: Path) -> None:
     if path.name == "SKILL.md" or len(text.splitlines()) <= CONTENTS_REQUIRED_OVER_LINES:
         return
 
-    assert re.search(r"^## Contents$", text, re.MULTILINE), "a reference file over 100 lines needs '## Contents'"
+    sections = re.findall(r"^## (.+)$", text, re.MULTILINE)
+    assert sections[:1] == ["Contents"], "a reference file over 100 lines needs '## Contents' as its first section"
 
 
 @pytest.mark.parametrize("path", _markdown_files(), ids=lambda path: str(path.relative_to(SKILLS_DIR)))
@@ -174,9 +176,12 @@ def test_the_shared_folder_is_not_a_skill() -> None:
 
 def test_activity_mapping_lists_every_activity_type_the_loader_classifies() -> None:
     mapping = (SKILLS_DIR / "flowx-convert" / "references" / "activity-mapping.md").read_text(encoding="utf-8")
+    strategy_by_type = dict(re.findall(r"^\| (\w+) \| (Deterministic|Agentic) \|", mapping, re.MULTILINE))
 
     for activity_type in sorted(DETERMINISTIC_TYPES | AGENTIC_TYPES):
-        assert re.search(rf"\b{activity_type}\b", mapping), f"{activity_type} is missing from activity-mapping.md"
+        expected = "Deterministic" if activity_type in DETERMINISTIC_TYPES else "Agentic"
+        assert activity_type in strategy_by_type, f"{activity_type} has no row in activity-mapping.md"
+        assert strategy_by_type[activity_type] == expected, f"{activity_type} is {expected} in the loader"
 
 
 def test_adf_coverage_map_covers_every_trigger_type_convert_translates() -> None:
@@ -193,7 +198,13 @@ def test_adf_coverage_map_names_the_global_parameter_input_and_its_choices() -> 
     coverage = (SKILLS_DIR / "flowx-convert" / "references" / "adf-coverage.md").read_text(encoding="utf-8")
     session_source = (REPO_ROOT / "src" / "flowx" / "adapter" / "session.py").read_text(encoding="utf-8")
 
+    translate_source = (REPO_ROOT / "src" / "flowx" / "sources" / "adf" / "translate.py").read_text(encoding="utf-8")
+    choices_match = re.search(r'"--global-parameter-resolution",\s*choices=\(([^)]*)\)', translate_source)
+
+    assert choices_match, "found no --global-parameter-resolution choices in translate.py; the pattern needs updating"
+    choices = re.findall(r'"(\w+)"', choices_match.group(1))
+    assert choices
     assert f"`{INPUT_GLOBAL_PARAMETER_RESOLUTION}`" in coverage
-    for choice in ("literal", "bundle_variable"):
+    for choice in choices:
         assert f"'{choice}'" in session_source, f"session.py no longer offers {choice}"
-        assert f"`{choice}`" in coverage
+        assert f"`{choice}`" in coverage, f"adf-coverage.md does not name the {choice} choice"
