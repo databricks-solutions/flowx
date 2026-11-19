@@ -3,13 +3,7 @@ name: flowx-package
 description: >
   Generate Databricks Declarative Automation Bundles (DABs) from translated IR,
   including job definitions, notebooks, and setup scripts.
-triggers:
-  - "package bundles"
-  - "generate DABs"
-  - "create bundles"
-  - "package deployment"
-  - "generate bundles"
-  - "build DABs"
+  Use after convert when the user asks to package, generate, create or build the bundles (DABs).
 ---
 
 # Package Databricks Declarative Automation Bundles

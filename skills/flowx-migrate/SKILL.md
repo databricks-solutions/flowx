@@ -4,14 +4,8 @@ description: >
   End-to-end migration of a source orchestrator's pipelines (Azure Data Factory, Apache Airflow)
   to Databricks Lakeflow Jobs. Orchestrates discover → enrich → convert (deterministic baseline) →
   route → fill → package in sequence.
-triggers:
-  - "migrate pipelines"
-  - "migrate ADF"
-  - "migrate airflow"
-  - "ADF to Databricks"
-  - "airflow to Databricks"
-  - "migrate to Lakeflow"
-  - "migrate data factory"
+  Use when the user asks to migrate ADF, Data Factory or Airflow pipelines to Databricks or
+  Lakeflow.
 ---
 
 # End-to-End Source to Databricks Migration

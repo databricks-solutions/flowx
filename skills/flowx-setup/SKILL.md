@@ -6,15 +6,8 @@ description: >
   environment — all code runs through MCP. Everywhere else it provisions a Python virtual
   environment for the CLI skills, and optionally a local (stdio) MCP server. Run this once before
   any other flowx skill, or whenever the environment is missing.
-triggers:
-  - "setup flowx"
-  - "bootstrap flowx"
-  - "install flowx dependencies"
-  - "flowx environment"
-  - "create flowx venv"
-  - "ModuleNotFoundError flowx"
-  - "install flowx mcp"
-  - "deploy flowx mcp"
+  Use when the user asks to set up or bootstrap flowx or install its dependencies or MCP server, or
+  when a flowx command fails with ModuleNotFoundError.
 ---
 
 # Set up flowx

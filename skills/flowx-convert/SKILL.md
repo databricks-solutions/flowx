@@ -4,12 +4,8 @@ description: >
   Translate a source's parsed inventory into Databricks IR (intermediate representation): run
   deterministic translators for known types, then agentic (LLM-assisted) translation for the gaps.
   Phase 2 of the flowx migration workflow; routes to a source-specific guide.
-triggers:
-  - "convert pipelines"
-  - "translate pipelines"
-  - "convert ADF"
-  - "convert airflow"
-  - "run translation"
+  Use when the user asks to convert or translate ADF or Airflow pipelines, or to run the
+  translation.
 ---
 
 # Convert Source to Databricks IR

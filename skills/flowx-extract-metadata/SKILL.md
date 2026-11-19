@@ -6,14 +6,8 @@ description: >
   ADF Studio, or pulling it live through the Azure API (run by the assistant, or as a notebook the
   user runs). Explains the permissions and steps for each option, checks the result, and hands
   the path to flowx-discover. Step 0 of the flowx migration workflow.
-triggers:
-  - "extract ADF metadata"
-  - "export ADF pipelines"
-  - "get my ADF definitions"
-  - "download ADF ARM template"
-  - "pull data factory metadata"
-  - "I don't have the ADF export"
-  - "flowx extract"
+  Use when the user has no ADF export, or asks to extract, export, download or pull the factory's
+  definitions or ARM template.
 ---
 
 # Extract the source pipeline definitions

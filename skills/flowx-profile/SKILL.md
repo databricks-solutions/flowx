@@ -5,13 +5,8 @@ description: >
   pipeline and activity runs, priced at Azure list rates and reconciled against Azure-billed
   actuals from Cost Management. Writes a cost report under metadata/tco/. Independent of the
   discover/convert/package phases.
-triggers:
-  - "profile ADF cost"
-  - "ADF TCO"
-  - "estimate ADF spend"
-  - "what does our ADF cost"
-  - "ADF cost report"
-  - "profile data factory"
+  Use when the user asks what their ADF costs, for an ADF TCO or cost report, or to profile a data
+  factory.
 ---
 
 # Profile Current ADF Spend

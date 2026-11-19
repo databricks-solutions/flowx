@@ -6,15 +6,8 @@ description: >
   suggested groupings into metadata/conversion_plan.json and a standard review page, the user decides,
   route applies the plan, and fill-agentic fills each routed-agentic unit. Runs after convert (and
   the optional enrich), before package.
-triggers:
-  - "route pipelines"
-  - "route conversion"
-  - "conversion plan"
-  - "deterministic or agentic"
-  - "fill agentic"
-  - "group pipelines"
-  - "agentic conversion"
-  - "recommend conversion route"
+  Use when the user asks to route the conversion, choose deterministic or agentic per component,
+  review the conversion plan, group pipelines, or fill agentic units.
 ---
 
 # Route the Conversion (deterministic vs. agentic) and Fill the Gaps

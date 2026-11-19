@@ -7,14 +7,8 @@ description: >
   rebuilds inventory.json from discovery plus that file. Optional phase 1.a, after discover and
   before convert; use it unless the user asked for a deterministic-only pass. The routing step reads
   it.
-triggers:
-  - "enrich inventory"
-  - "enrich pipelines"
-  - "author insights"
-  - "agentic insights"
-  - "recommend databricks patterns"
-  - "annotate inventory"
-  - "enrich discover"
+  Use when the user asks to enrich or annotate the inventory, author agentic insights, or recommend
+  Databricks patterns.
 ---
 
 # Enrich the Inventory with Agentic Insights

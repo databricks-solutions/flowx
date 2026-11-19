@@ -4,14 +4,8 @@ description: >
   Parse a source orchestrator's pipeline definitions (Azure Data Factory, Apache Airflow) into a
   typed inventory that classifies every task as deterministic, agentic, or unsupported. Phase 1 of
   the flowx migration workflow; routes to a source-specific guide.
-triggers:
-  - "discover pipelines"
-  - "discover ADF"
-  - "discover airflow"
-  - "load pipelines"
-  - "parse pipelines"
-  - "import pipelines"
-  - "inventory source"
+  Use when the user asks to discover, load, parse or import ADF or Airflow pipelines, or to
+  inventory a source.
 ---
 
 # Discover Source Pipeline Definitions

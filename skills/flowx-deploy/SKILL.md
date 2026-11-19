@@ -4,12 +4,8 @@ description: >
   Deploy the per-pipeline Declarative Automation Bundles from a multi-pipeline flowx
   migration in dependency order, resolving cross-bundle job ids automatically.
   Local CLI only.
-triggers:
-  - "deploy bundles"
-  - "deploy in dependency order"
-  - "ordered deploy"
-  - "deploy flowx bundles"
-  - "deploy multi pipeline migration"
+  Use when the user asks to deploy the flowx bundles, or to deploy a multi-pipeline migration in
+  dependency order.
 ---
 
 # Deploy per-pipeline flowx bundles in dependency order
