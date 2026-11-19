@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from flowx.bundler.constants import KEPT_TRANSLATION_REPORT
+from flowx.ir_serde import report_pipeline_dicts
 from flowx.models.validation import (
     RULESET_VERSION,
     SEVERITIES,
@@ -118,11 +119,9 @@ def _translation_entries(output_dir: Path, translation_report: Path | None) -> d
             f"No translation report at {path}. Run package, which keeps it at {KEPT_TRANSLATION_REPORT}, "
             "or pass the convert report with --report."
         )
-    pipelines = _read_json(path).get("pipelines") or []
     return {
         entry["name"]: {key: value for key, value in entry.items() if key != "tasks"}
-        for entry in pipelines
-        if "name" in entry
+        for entry in report_pipeline_dicts(_read_json(path))
     }
 
 

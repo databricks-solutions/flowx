@@ -519,3 +519,16 @@ def test_cli_runs_prepare_and_reports_record_violations(output_dir: Path, capsys
 def test_cli_reports_a_missing_pipeline(output_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert adapter_cli_main(["validate", "prepare", "--output-dir", str(output_dir), "--pipeline", "nope"]) == 1
     assert "Pipeline 'nope' not found" in capsys.readouterr().err
+
+
+def test_prepare_reads_a_packaged_single_dag_airflow_report(tmp_path: Path) -> None:
+    dag = Path(__file__).parents[1] / "resources" / "airflow" / "orders_analytics_dag.py"
+    convert = ["convert", "--source", "airflow", "--source-path", str(dag), "--output-dir", str(tmp_path)]
+    assert adapter_cli_main(convert) == 0
+    assert adapter_cli_main(["package", "--output-dir", str(tmp_path), "--no-download-workspace-files"]) == 0
+    kept = json.loads((tmp_path / "metadata" / "translation_report.json").read_text())
+    assert "pipelines" not in kept
+    translation = prepare_validation(tmp_path)["translation"]
+    assert list(translation) == ["orders_analytics"]
+    assert translation["orders_analytics"]["name"] == "orders_analytics"
+    assert "tasks" not in translation["orders_analytics"]

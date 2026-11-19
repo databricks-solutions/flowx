@@ -1060,41 +1060,15 @@ def _load_pipelines(report_path: Path) -> list[Any] | None:
         the file could not be parsed.
     """
     from flowx.bundler.dab_writer import pipeline_dict_to_ir  # lazy: heavy import, only inspect/modify
+    from flowx.ir_serde import report_pipeline_dicts
 
     try:
         raw = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         print(f"Failed to read {report_path}: {error}", file=sys.stderr)
         return None
-    pipeline_dicts = _extract_pipeline_dicts(raw)
+    pipeline_dicts = report_pipeline_dicts(raw)
     return [pipeline_dict_to_ir(pipeline_dict)[0] for pipeline_dict in pipeline_dicts]
-
-
-def _extract_pipeline_dicts(raw: Any) -> list[dict[str, Any]]:
-    """Normalises a translation report into a list of pipeline IR dicts.
-
-    Args:
-        raw: Parsed JSON content from a report file.
-
-    Returns:
-        List of dicts, each in the shape ``engine._pipeline_to_dict``
-        produces.  Empty when *raw* does not contain a recognisable
-        pipeline payload.
-    """
-    # Single pipeline IR dict (has both "tasks" and "name" at top level)
-    if isinstance(raw, dict) and "tasks" in raw and "name" in raw:
-        return [raw]
-    # Multi-pipeline wrapper written by engine.py ({"pipelines": [...]})
-    if isinstance(raw, dict) and "pipelines" in raw and isinstance(raw["pipelines"], list):
-        return [p for p in raw["pipelines"] if isinstance(p, dict) and "tasks" in p and "name" in p]
-    # Legacy aggregated translation report shape
-    if isinstance(raw, dict) and "translations" in raw:
-        return [
-            {"name": entry["pipeline"], **entry["ir"]}
-            for entry in raw.get("translations", [])
-            if entry.get("status") == "translated" and entry.get("ir")
-        ]
-    return []
 
 
 def _configuration_from_answers(answers: dict[str, str]) -> TranslationConfiguration:
