@@ -182,7 +182,7 @@ instead of overwriting.
 An in-place merge also closes the merged gaps in `.work/gaps.json` and, after routing, is saved in
 `metadata/agentic_conversion.json` so a re-route keeps it. A merge to an `--output` copy changes nothing
 else. Run one merge at a time per output folder: an in-place merge refuses while a route, fill-agentic or
-another merge is writing there (see "One at a time per output folder" in the `flowx-route` skill).
+another merge is writing there (see "One at a time per output folder" in the `flowx-route` skill's `references/fill-agentic-rules.md`).
 
 ## Step 6.1 — Just-in-time translation configuration
 
