@@ -204,7 +204,14 @@ def _route_locked(args: argparse.Namespace) -> int:
     from flowx import routing
     from flowx.models.conversion_plan import PLAN_FILENAME, ConversionPlan
     from flowx.reporting.routing_review import write_routing_review
-    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan, missing_report_message
+    from flowx.route_agentic import (
+        REPORT_FILENAME,
+        WORK_DIRNAME,
+        apply_plan,
+        load_agentic_output,
+        missing_report_message,
+        stored_output_name_clashes,
+    )
 
     inventory_path = args.output_dir / "metadata" / "inventory.json"
     if not inventory_path.exists():
@@ -237,6 +244,13 @@ def _route_locked(args: argparse.Namespace) -> int:
         return 1
 
     violations = routing.validate_plan(plan, inventory)
+    if not violations:
+        # Checked before the plan is recorded: refusing after it would leave a report routed under another
+        # plan, which fill-agentic refuses too, so the clashing fill could not be redone.
+        try:
+            violations = stored_output_name_clashes(plan, load_agentic_output(args.output_dir).outputs)
+        except ValueError:
+            violations = []  # apply_plan reports an unreadable store
     if violations:
         _emit_json({"ok": False, "violations": violations, "components": 0}, args.out)
         return 1

@@ -1154,6 +1154,61 @@ def test_combine_idempotent_when_authored_name_collides_with_a_former_member(tmp
     assert names == ["parent"]  # exactly one authored pipeline, no duplicate
 
 
+def _plan_deciding(output_dir: Path, *, parent: str, child: str) -> dict[str, Any]:
+    """The two-component plan deciding 'parent' and 'child' as given, from the recommendation's component ids."""
+    inventory = json.loads((output_dir / "metadata" / "inventory.json").read_text(encoding="utf-8"))
+    return {
+        "components": [
+            {
+                "component_id": component["component_id"],
+                "members": component["members"],
+                "decision": parent if component["members"] == ["parent"] else child,
+            }
+            for component in build_recommendation(inventory)["components"]
+        ]
+    }
+
+
+def _fill_both_units_with_one_name(output_dir: Path) -> None:
+    """Fill 'parent' with 'Ingest', route it back to deterministic, then fill 'child' with its own 'Ingest'.
+
+    The second fill is allowed, because the first unit's output no longer applies.
+    """
+    _route_parent_agentic(output_dir, _report_two_pipelines())
+    assert apply_agentic_output(output_dir, ["parent"], [_named_lfc_pipeline("Ingest")])["ok"] is True
+    _route_two_components(output_dir, parent="deterministic", child="agentic")
+    assert apply_agentic_output(output_dir, ["child"], [_named_lfc_pipeline("Ingest")])["ok"] is True
+
+
+def test_route_refuses_a_plan_that_would_apply_two_stored_outputs_with_one_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _fill_both_units_with_one_name(tmp_path)
+    report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
+    report_before = report_path.read_bytes()
+    plan_before = (tmp_path / "metadata" / "conversion_plan.json").read_bytes()
+    plan_path = tmp_path / "both_agentic.json"
+    plan_path.write_text(json.dumps(_plan_deciding(tmp_path, parent="agentic", child="agentic")), encoding="utf-8")
+    capsys.readouterr()
+
+    exit_code = adapter_main(["route", "--output-dir", str(tmp_path), "--plan-path", str(plan_path)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert result["ok"] is False
+    assert any("'Ingest'" in violation and "fill one of them again" in violation for violation in result["violations"])
+    assert report_path.read_bytes() == report_before
+    assert (tmp_path / "metadata" / "conversion_plan.json").read_bytes() == plan_before
+
+
+def test_apply_plan_refuses_to_rebuild_two_stored_outputs_with_one_name(tmp_path: Path) -> None:
+    _fill_both_units_with_one_name(tmp_path)
+    plan = _plan_deciding(tmp_path, parent="agentic", child="agentic")
+
+    with pytest.raises(ValueError, match="'Ingest'"):
+        apply_plan_to_report(tmp_path, plan, inventory=None)
+
+
 # --------------------------------------------------------------------------- #
 # Combine membership is bound to the recorded, fingerprint-bound plan.
 # --------------------------------------------------------------------------- #

@@ -699,6 +699,40 @@ def _applied_outputs(plan: dict[str, Any], outputs: dict[str, dict[str, Any]] | 
     return applied
 
 
+def stored_output_name_clashes(plan: dict[str, Any], outputs: dict[str, dict[str, Any]] | None) -> list[str]:
+    """Say where the stored outputs a plan would apply share a pipeline name; empty when none do.
+
+    Fill-agentic checks a new output's names only against the outputs that apply when it runs, so a unit
+    routed deterministic and then agentic again can bring back an output whose name another unit's output
+    has taken since. Package keys each pipeline by ``to_lowercase_key(name)``, so two names that normalise
+    to one key clash too. A pipeline that stays as convert wrote it counts as well.
+    """
+    from flowx.utils import to_lowercase_key
+
+    units = routing_units(plan)
+    applied = _applied_outputs(plan, outputs)
+    owners_by_key: dict[str, list[tuple[str, str | None]]] = {}
+    for unit_id, unit in units.items():
+        if unit_id in applied:
+            for pipeline in applied[unit_id].get("pipelines", []):
+                if isinstance(pipeline, dict) and isinstance(pipeline.get("name"), str):
+                    owners_by_key.setdefault(to_lowercase_key(pipeline["name"]), []).append((pipeline["name"], unit_id))
+        else:
+            for member in unit["members"]:
+                owners_by_key.setdefault(to_lowercase_key(member), []).append((member, None))
+    clashes: list[str] = []
+    for owners in owners_by_key.values():
+        filled_units = sorted({unit_id for _name, unit_id in owners if unit_id is not None})
+        if len(owners) < 2 or not filled_units:
+            continue
+        names = sorted({name for name, _unit_id in owners})
+        clashes.append(
+            f"the stored outputs of components {filled_units} would put pipeline name(s) {names} in the report "
+            "more than once; fill one of them again with a different name, or route it deterministic"
+        )
+    return clashes
+
+
 # --------------------------------------------------------------------------- #
 # The edit step: rewrite the report for routed-agentic groups.
 # --------------------------------------------------------------------------- #
@@ -931,6 +965,9 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any], *, inventory: d
         if mismatch:
             raise ValueError(mismatch)
     stored = load_agentic_output(output_dir)
+    clashes = stored_output_name_clashes(plan, stored.outputs)
+    if clashes:
+        raise ValueError("; ".join(clashes))
     dropped = 0
     if record is None and stored.document.get("gap_fills"):
         baseline_report_sha256 = hashlib.sha256(baseline_report_bytes).hexdigest()
