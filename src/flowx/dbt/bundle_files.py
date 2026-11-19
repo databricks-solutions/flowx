@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 from pathlib import Path
 
@@ -39,13 +40,14 @@ def tree_artifacts(
     source_root: Path,
     destination_root: str,
     *,
-    excluded_parts: frozenset[str] = frozenset(),
+    excluded_paths: frozenset[str] = frozenset(),
     suffixes: frozenset[str] | None = None,
 ) -> list[DabNotebook]:
     """Returns bundle artifacts for files beneath a local source directory.
 
     Hidden files and folders (``.env``, ``.git``, ...) and files under build, cache, and log folders are
-    skipped, as are any under *excluded_parts*. With *suffixes*, only files with one of those suffixes are kept.
+    skipped, as are *excluded_paths* (relative to *source_root*) and the files under them. With *suffixes*, only
+    files with one of those suffixes are kept.
     """
     if not source_root.is_dir():
         return []
@@ -57,10 +59,20 @@ def tree_artifacts(
         for source in sorted(source_root.rglob("*"))
         if source.is_file()
         and not source.is_symlink()
-        and not ((_EXCLUDED_DBT_PATH_PARTS | excluded_parts) & set(source.relative_to(source_root).parts))
+        and not (_EXCLUDED_DBT_PATH_PARTS & set(source.relative_to(source_root).parts))
+        and not _under_any(source.relative_to(source_root).as_posix(), excluded_paths)
         and not any(part.startswith(".") for part in source.relative_to(source_root).parts)
         and (suffixes is None or source.suffix in suffixes)
     ]
+
+
+def _under_any(relative_path: str, folders: frozenset[str]) -> bool:
+    return any(relative_path == folder or relative_path.startswith(f"{folder}/") for folder in folders)
+
+
+def _relative_folder(folder: str) -> str:
+    """Returns a folder setting such as ``./build/target/`` as a plain relative path, ``build/target``."""
+    return posixpath.normpath(folder.replace("\\", "/"))
 
 
 def _project_settings(project: Path) -> dict:
@@ -129,13 +141,12 @@ def task_commands(commands: list[str], project: Path) -> list[str]:
     return commands
 
 
-def _project_folders(project: Path, *, include_packages: bool = False) -> list[str]:
-    """Returns the folders a dbt project reads: those ``dbt_project.yml`` names, or dbt's defaults for those it
-    leaves out, and its ``local:`` packages.
+def _project_folders(project: Path, settings: dict, *, include_packages: bool = False) -> list[str]:
+    """Returns the folders a dbt project reads: those its *settings* name, or dbt's defaults for those they
+    leave out, and its ``local:`` packages.
 
     With *include_packages*, the folder ``dbt deps`` installs packages into is included too.
     """
-    settings = _project_settings(project)
     folders: list[str] = []
     for setting, default in _PROJECT_FOLDER_SETTINGS.items():
         value = settings.get(setting, default)
@@ -146,24 +157,31 @@ def _project_folders(project: Path, *, include_packages: bool = False) -> list[s
         if folder not in folders:
             folders.append(folder)
     if include_packages:
-        folders.append(_packages_folder(project))
+        folders.append(_packages_folder(settings))
     return folders
 
 
-def _packages_folder(project: Path) -> str:
+def _packages_folder(settings: dict) -> str:
     """Returns the folder ``dbt deps`` installs packages into."""
-    packages = _project_settings(project).get("packages-install-path", "dbt_packages")
+    packages = settings.get("packages-install-path", "dbt_packages")
     return packages if isinstance(packages, str) else "dbt_packages"
 
 
-def _output_folders(project: Path) -> list[str]:
-    """Returns the folders dbt writes build output and logs into."""
-    settings = _project_settings(project)
-    return [
+def _root_exclusions(project: Path, settings: dict, *, include_packages: bool) -> frozenset[str]:
+    """Returns what a copy of the whole project root leaves out, as paths relative to the root.
+
+    That is ``profiles.yml``, dbt's build and log output, installed packages unless *include_packages*, and any
+    Python virtual environment at the top of the project.
+    """
+    folders = [
         value
         for value in (settings.get("target-path", "target"), settings.get("log-path", "logs"))
         if isinstance(value, str)
     ]
+    if not include_packages:
+        folders.append(_packages_folder(settings))
+    environments = [child.name for child in project.iterdir() if (child / "pyvenv.cfg").is_file()]
+    return frozenset({"profiles.yml", *environments, *(_relative_folder(folder) for folder in folders)})
 
 
 def project_artifacts(project: Path, destination_root: str, *, include_packages: bool = False) -> list[DabNotebook]:
@@ -182,21 +200,16 @@ def project_artifacts(project: Path, destination_root: str, *, include_packages:
         for name in _PROJECT_FILES
         if (project / name).is_file() and not (project / name).is_symlink()
     ]
-    for folder in _project_folders(project, include_packages=include_packages):
+    settings = _project_settings(project)
+    root = project.resolve()
+    for folder in _project_folders(project, settings, include_packages=include_packages):
         source = (project / folder).resolve()
-        if not source.is_relative_to(project.resolve()):
+        if not source.is_relative_to(root):
             continue
-        if source == project.resolve():
-            excluded = frozenset(
-                {
-                    "profiles.yml",
-                    *_output_folders(project),
-                    *(marker.parent.name for marker in project.rglob("pyvenv.cfg")),
-                }
-                | (set() if include_packages else {_packages_folder(project)})
-            )
+        if source == root:
+            excluded = _root_exclusions(project, settings, include_packages=include_packages)
             artifacts.extend(
-                tree_artifacts(project, destination_root, excluded_parts=excluded, suffixes=_RESOURCE_SUFFIXES)
+                tree_artifacts(project, destination_root, excluded_paths=excluded, suffixes=_RESOURCE_SUFFIXES)
             )
         else:
             artifacts.extend(tree_artifacts(project / folder, f"{destination_root}/{folder}"))

@@ -593,3 +593,45 @@ def test_two_dags_running_dbt_point_at_their_own_project_copy(tmp_path: Path) ->
         job = yaml.safe_load((output / "resources" / f"{dag_id}.yml").read_text(encoding="utf-8"))
         folder = job["resources"]["jobs"][dag_id]["tasks"][0]["dbt_task"]["project_directory"]
         assert (output / folder.removeprefix("../") / "models" / "dim.sql").is_file()
+
+
+def test_root_model_path_exclusions_are_paths_from_the_project_root(tmp_path: Path) -> None:
+    project = tmp_path / "flat"
+    (project / "build" / "target").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        "name: flat\nmodel-paths: ['.']\ntarget-path: ./build/target\n", encoding="utf-8"
+    )
+    (project / "build" / "target" / "compiled.sql").write_text("select 1\n", encoding="utf-8")
+    (project / "models" / "env").mkdir(parents=True)
+    (project / "models" / "env" / "orders.sql").write_text("select 1\n", encoding="utf-8")
+    (project / "env").mkdir()
+    (project / "env" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    (project / "env" / "module.py").write_text("x = 1\n", encoding="utf-8")
+    _, out = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
+    )
+
+    copied = next((out / "src" / "dbt_projects").iterdir())
+    files = sorted(path.relative_to(copied).as_posix() for path in copied.rglob("*") if path.is_file())
+    assert files == ["dbt_project.yml", "models/env/orders.sql"]
+
+
+def test_preparer_refuses_more_commands_than_a_dbt_task_runs(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    job, out = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"] * 11, project_dir=str(project))
+    )
+
+    task = job["tasks"][0]
+    assert "dbt_task" not in task
+    assert "at most 10" in (out / "src" / "notebooks" / "t_dbt_too_many_commands.py").read_text()
+
+
+def test_preparer_refuses_a_local_package_outside_the_project(tmp_path: Path) -> None:
+    project = _project(tmp_path, {"packages.yml": "packages:\n  - local: ../shared\n"})
+    job, out = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
+    )
+
+    assert "dbt_task" not in job["tasks"][0]
+    assert "../shared" in (out / "src" / "notebooks" / "t_dbt_local_packages.py").read_text()

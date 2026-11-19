@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from flowx.bundler.dab_writer import main as package_main
+from flowx.skipped_dags import without_skipped_dag_references
 from flowx.sources.airflow.convert import main as convert_main
 from flowx.sources.airflow.discover import main as discover_main
 
@@ -97,11 +98,33 @@ def test_skip_failed_dags_does_not_hide_a_malformed_report(tmp_path: Path) -> No
     assert _package(output, "--skip-failed-dags") == 1
 
 
-def test_only_failed_dags_leaves_nothing_to_package(tmp_path: Path) -> None:
+def test_only_failed_dags_leaves_nothing_to_package(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     output = _convert(tmp_path, {"bad.py": _BAD})
 
     assert _package(output, "--skip-failed-dags") == 1
     assert not (output / "resources").exists()
+    assert "every Airflow DAG failed reconciliation" in capsys.readouterr().err
+
+
+def test_setup_lists_the_left_out_dags(tmp_path: Path) -> None:
+    output = _convert(tmp_path, {"good.py": _GOOD, "bad.py": _BAD})
+
+    _package(output, "--skip-failed-dags")
+
+    setup = (output / "SETUP.md").read_text(encoding="utf-8")
+    assert "## Left-out DAGs" in setup
+    assert "- `bad`" in setup
+
+
+def test_run_now_task_with_a_left_out_dag_name_is_kept() -> None:
+    pipeline = {
+        "name": "caller",
+        "tasks": [
+            {"type": "RunJobActivity", "name": "bad", "task_key": "bad", "job_name": "bad", "existing_job_id": "123"}
+        ],
+    }
+
+    assert without_skipped_dag_references(pipeline, frozenset({"bad"})) is pipeline
 
 
 def test_mcp_package_returns_the_bundle_when_dags_were_left_out(
@@ -120,6 +143,7 @@ def test_mcp_package_returns_the_bundle_when_dags_were_left_out(
 
     result = server._cmd_package({"output_dir": str(output), "skip_failed_dags": True})
 
-    assert result["ok"] is False
-    assert result["dags_left_out"] is True
+    assert result["ok"] is True
+    assert result["status"] == "packaged_without_failed_dags"
+    assert result["left_out_dags"] == ["bad"]
     assert "bundle" in result
