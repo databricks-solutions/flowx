@@ -1,7 +1,7 @@
 """Unified CLI entry point that the flowx skills and MCP tools drive via subprocesses.
 
 Exposes stateless subcommands -- the ``extract``/``discover``/``convert``/``package`` phase runners plus
-``inspect``, ``modify``, ``resolve-agentic``, ``enrich``, ``inputs``, ``materialize-lookup``,
+``inspect``, ``modify``, ``resolve-agentic``, ``enrich``, ``validate``, ``inputs``, ``materialize-lookup``,
 ``workspace-paths``, ``record-results``, ``install-dashboard``, and ``deploy`` -- so each agent turn runs
 as an independent process holding no session state across user prompts.
 """
@@ -87,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_resolve_agentic(args)
     if args.command == "enrich":
         return _run_enrich(args)
+    if args.command == "validate":
+        return _run_validate(args)
     if args.command == "record-results":
         return _run_record_results(args)
     if args.command == "install-dashboard":
@@ -163,6 +165,54 @@ def _run_enrich(args: argparse.Namespace) -> int:
         return 1
     _emit_json(result, args.out)
     return 0 if result.get("ok") else 1
+
+
+def _run_validate(args: argparse.Namespace) -> int:
+    """Implements ``validate``: one step of the validate loop, chosen by ``action``.
+
+    Emits the step's result JSON. Returns 0 when the step succeeded, 1 when it reported violations or
+    an error, or when its inputs cannot be read.
+    """
+    from flowx.validate.agentic import apply_remediation, prepare_validation, record_validation
+    from flowx.validate.results_table import write_validation_results
+
+    try:
+        if args.action == "prepare":
+            result = prepare_validation(
+                args.output_dir,
+                pipeline=args.pipeline,
+                threshold=args.threshold,
+                max_iterations=args.max_iterations,
+                dry_run=args.dry_run,
+                require_approval=args.require_approval,
+                reset=args.reset,
+                bundle_validate=args.bundle_validate,
+                profile=args.profile or "",
+                translation_report=args.report,
+            )
+        elif args.action == "record":
+            result = record_validation(args.output_dir, _read_json_argument(args.reviews_path, "--reviews-path"))
+        elif args.action == "apply":
+            result = apply_remediation(
+                args.output_dir, _read_json_argument(args.edits_path, "--edits-path"), approve=args.approve
+            )
+        else:
+            if not args.results_table:
+                raise ValueError("validate publish requires --results-table.")
+            run_id, rows = write_validation_results(args.output_dir, args.results_table, warehouse_id=args.warehouse_id)
+            result = {"ok": True, "run_id": run_id, "rows": rows, "results_table": args.results_table}
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"validate {args.action} failed: {error}", file=sys.stderr)
+        return 1
+    _emit_json(result, args.out)
+    return 0 if result.get("ok") else 1
+
+
+def _read_json_argument(path: Path | None, flag: str) -> Any:
+    """Reads the JSON file passed with *flag*."""
+    if path is None:
+        raise ValueError(f"{flag} is required for this action.")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _run_deploy(args: argparse.Namespace) -> int:
@@ -539,6 +589,32 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional output file for the enrich result JSON; defaults to stdout.",
     )
+
+    validate = subparsers.add_parser(
+        "validate",
+        help="Run one step of the validate loop: prepare, record, apply, or publish.",
+    )
+    validate.add_argument("action", choices=("prepare", "record", "apply", "publish"))
+    validate.add_argument("--output-dir", type=Path, required=True, help="Migration output directory.")
+    validate.add_argument("--pipeline", default=None, help="prepare: limit a new run to one job or bundle.")
+    validate.add_argument("--threshold", type=float, default=None, help="prepare: approval rate that ends a new run.")
+    validate.add_argument("--max-iterations", type=int, default=None, help="prepare: iteration budget of a new run.")
+    validate.add_argument("--dry-run", action="store_true", default=None, help="prepare: never change the bundle.")
+    validate.add_argument(
+        "--require-approval", action="store_true", default=None, help="prepare: make apply wait for --approve."
+    )
+    validate.add_argument("--reset", action="store_true", help="prepare: start a new run.")
+    validate.add_argument(
+        "--bundle-validate", action="store_true", help="prepare: also run databricks bundle validate (local CLI)."
+    )
+    validate.add_argument("--profile", default=None, help="prepare: Databricks CLI profile for bundle validate.")
+    validate.add_argument("--report", type=Path, default=None, help="prepare: translation report (default: .work/).")
+    validate.add_argument("--reviews-path", type=Path, default=None, help="record: the agent's reviews JSON.")
+    validate.add_argument("--edits-path", type=Path, default=None, help="apply: the agent's bundle edits JSON.")
+    validate.add_argument("--approve", action="store_true", help="apply: the user approved these edits.")
+    validate.add_argument("--results-table", default=None, help="publish: target UC table catalog.schema.table.")
+    validate.add_argument("--warehouse-id", default=None, help="publish: SQL warehouse id; detected when omitted.")
+    validate.add_argument("--out", type=Path, default=None, help="Write the result JSON here instead of stdout.")
 
     record = subparsers.add_parser(
         "record-results",

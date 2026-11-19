@@ -1,4 +1,4 @@
-"""Tier-0 static validation: motif-aware DAG equivalence between ADF and IR."""
+"""Validation: Tier-0 static checks plus the agentic validate phase (see :mod:`flowx.validate.agentic`)."""
 
 from __future__ import annotations
 
