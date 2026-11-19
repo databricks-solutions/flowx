@@ -665,3 +665,104 @@ def test_airflow_migrate_end_to_end_prepares_gap_without_writing_bundle(tmp_path
     assert [gap["operator"] for gap in result["eligible_gaps"]] == ["KubernetesPodOperator"]
     assert (output / ".work" / "agentic" / "gaps.json").is_file()
     assert not (output / "databricks.yml").exists()
+
+
+def _failed_airflow_pipeline(name: str) -> dict:
+    return {
+        "name": name,
+        "tags": {"source": "airflow"},
+        "reconciliation_status": "failed",
+        "tasks": [],
+        "not_translatable": [
+            {"fingerprint": f"{name}-gap", "code": "operator_placeholder", "severity": "gap", "message": "gap"},
+            {"fingerprint": f"{name}-failed", "code": "unaudited_task", "severity": "failed", "message": "failed"},
+        ],
+        "audit": {"audited_activity_count": 1, "transformations": []},
+    }
+
+
+def test_airflow_migrate_skipping_failed_dags_ignores_their_gaps_and_packages(monkeypatch, tmp_path: Path):
+    output = tmp_path / "out"
+    calls: list[list[str]] = []
+    verified = {
+        "name": "good",
+        "tags": {"source": "airflow"},
+        "reconciliation_status": "verified",
+        "tasks": [],
+        "not_translatable": [],
+        "audit": {"audited_activity_count": 0, "transformations": []},
+    }
+
+    def fake_run_adapter(args):
+        argv = [str(value) for value in args]
+        calls.append(argv)
+        if argv[0] == "convert":
+            report_path = output / ".work" / "translation_report.json"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(
+                json.dumps({"pipelines": [verified, _failed_airflow_pipeline("bad")]}), encoding="utf-8"
+            )
+        if argv[0] == "package":
+            return _FakeResult()
+        return _FakeResult()
+
+    monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
+    monkeypatch.setattr(runner, "summarize_inventory", lambda _out: {"pipeline_count": 2})
+    monkeypatch.setattr(runner, "summarize_translation", lambda _out: {"pipelines": 2})
+    monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
+    monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
+
+    result = server._cmd_migrate(
+        {
+            "source": "airflow",
+            "airflow_source_path": str(tmp_path / "dags"),
+            "output_dir": str(output),
+            "skip_failed_dags": True,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "packaged_without_failed_dags"
+    assert result["left_out_dags"] == ["bad"]
+    assert [argv[0] for argv in calls] == ["discover", "convert", "package"]
+    assert "--skip-failed-dags" in calls[-1]
+
+
+def test_package_reports_unresolved_gaps_before_left_out_dags(monkeypatch, tmp_path: Path):
+    output = tmp_path / "out"
+    report = output / ".work" / "translation_report.json"
+    report.parent.mkdir(parents=True)
+    payload = _airflow_report(operator="KubernetesPodOperator")
+    payload["pipelines"].append(_failed_airflow_pipeline("bad"))
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def package_and_prune(args):
+        calls.append([str(value) for value in args])
+        report.unlink()
+        return _FakeResult()
+
+    monkeypatch.setattr(runner, "run_adapter", package_and_prune)
+    monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
+    monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
+
+    result = server._cmd_package({"output_dir": str(output), "allow_unresolved_gaps": True, "skip_failed_dags": True})
+
+    assert result["ok"] is True
+    assert result["status"] == "packaged_with_unresolved_gaps"
+    assert result["left_out_dags"] == ["bad"]
+    assert {"--allow-unresolved-gaps", "--skip-failed-dags"} <= set(calls[0])
+
+
+def test_package_without_left_out_dags_is_completed_when_only_failed_dags_had_gaps(monkeypatch, tmp_path: Path):
+    output = tmp_path / "out"
+    report = output / ".work" / "translation_report.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({"pipelines": [_failed_airflow_pipeline("bad")]}), encoding="utf-8")
+    monkeypatch.setattr(runner, "run_adapter", lambda _args: _FakeResult())
+    monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
+    monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
+
+    result = server._cmd_package({"output_dir": str(output), "allow_unresolved_gaps": True, "skip_failed_dags": True})
+
+    assert result["status"] == "packaged_without_failed_dags"

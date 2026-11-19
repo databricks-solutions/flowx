@@ -39,7 +39,7 @@ This phase runs one of two ways; run the **`setup`** skill first if you haven't.
   flowx(command="package", parameters={"output_dir": "<dir>", "report_path": "<optional>", "catalog": "<catalog>",
                                             "schema": "<schema>", "bundle_name": "<optional>", "profile": "<optional>",
                                             "download_workspace_files": true,
-                                            "allow_unresolved_gaps": false,
+                                            "allow_unresolved_gaps": false, "skip_failed_dags": false,
                                             "output_volume_path": "<optional /Volumes/... target>",
                                             "output_workspace_path": "<optional /Workspace/... target>"})
   flowx(command="workspace_paths", parameters={"source": "adf", "report_path": "...", "source_dir": "<optional source dir>"})
@@ -101,6 +101,7 @@ Ask the user for the following (provide defaults):
 | Target environments | Deployment targets to configure | `dev, staging, prod` |
 | Warehouse ID | SQL warehouse for SQL tasks (optional) | prompt if SQL tasks exist |
 | Packaging mode | How to lay out bundles for a multi-pipeline factory (`--packaging-mode`): `per-pipeline`, `single`, or `per-group`. See below. | `per-pipeline` |
+| Skip failed DAGs | Airflow only (`--skip-failed-dags`, the `skip_failed_dags` input): package the DAGs that passed reconciliation and leave out the ones that failed, instead of writing no bundle. See below. | off |
 | Databricks CLI profile | Profile used to download workspace-resident notebooks / JARs / Python files (`--profile`). Required only when the bundle references absolute workspace paths. | resolved from `~/.databrickscfg` (auto-prompt if multiple) |
 
 **Packaging mode** (`--packaging-mode`, surfaced as the `packaging_mode` input) controls how a
@@ -119,6 +120,8 @@ multi-pipeline migration is laid out. For a single-pipeline migration every mode
 Regardless of mode, a single top-level `DEPLOY.md` is written describing every bundle, its
 cross-bundle dependencies, and a suggested callees-first deploy order. Use the `flowx-deploy` skill
 (`python -m flowx.adapter deploy`) to deploy the bundles in that order automatically.
+
+**Skip failed DAGs** (`--skip-failed-dags`). By default, package writes no bundle when any Airflow DAG failed reconciliation. With this flag, package leaves those DAGs out, packages the rest, prints which DAGs it left out, lists them under "Left-out DAGs" in SETUP.md, and exits 0, as it does after skipping malformed report entries. Through MCP (`package`, or `migrate` with `skip_failed_dags`, including `resume_agentic`) the result is `ok: true` with the DAGs in `left_out_dags`, and `status: "packaged_without_failed_dags"` unless a stronger status below applies. Gaps in the left-out DAGs do not count toward the unresolved-gap preflight below; gaps in the DAGs that are packaged still do. A task that triggers a left-out DAG becomes a placeholder task that fails when it runs, and its job's schedule is paused. Ask the user before passing this flag, and tell them which DAGs were left out. To include those DAGs later, fix them and re-run discover, convert, and package.
 
 ### Step 2.5 — Detect workspace artifacts and authenticate
 
@@ -192,6 +195,7 @@ Execute the DAB writer:
   [--profile <databricks-cli-profile>] \
   [--no-download-workspace-files] \
   [--allow-unresolved-gaps] \
+  [--skip-failed-dags] \
   [--keep-intermediates]
 ```
 

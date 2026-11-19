@@ -590,7 +590,12 @@ def _load_airflow_module(
         if isinstance(activity, PlaceholderActivity) and call_node is not None:
             raw_definition = dict(activity.raw_definition or {})
             raw_definition["bound_source"] = ast.unparse(call_node)
-            project_sources = imported_sources.imported_sources(call_node, imports, import_roots)
+            named_call = ast.Call(
+                func=visitor.operator_functions.get(var, call_node.func),
+                args=call_node.args,
+                keywords=call_node.keywords,
+            )
+            project_sources = imported_sources.imported_sources(named_call, imports, import_roots)
             if project_sources:
                 raw_definition["imported_sources"] = project_sources
             activity.raw_definition = raw_definition

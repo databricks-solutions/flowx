@@ -510,6 +510,11 @@ def _reconcile_pipeline(
                     if disposition.get("unavailable_entries")
                     else {}
                 ),
+                **(
+                    {"message": disposition["message"]}
+                    if disposition["status"] == "mapped" and disposition.get("message")
+                    else {}
+                ),
                 "rationale": disposition["rationale"],
             }
         )

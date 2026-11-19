@@ -96,6 +96,7 @@ AVAILABLE_PROGRAMS = frozenset(
         "bzip2",
         "cat",
         "chmod",
+        "chown",
         "comm",
         "cp",
         "curl",
@@ -120,6 +121,7 @@ AVAILABLE_PROGRAMS = frozenset(
         "head",
         "hostname",
         "id",
+        "iconv",
         "java",
         "join",
         "ln",
@@ -132,6 +134,7 @@ AVAILABLE_PROGRAMS = frozenset(
         "nohup",
         "nproc",
         "paste",
+        "perl",
         "pip",
         "pip3",
         "printenv",
@@ -175,7 +178,9 @@ AVAILABLE_PROGRAMS = frozenset(
     }
 )
 
-_DEFINED_FUNCTION = re.compile(r"(?:^|[;&|\n{(]\s*)(?:function\s+)?([A-Za-z_][\w-]*)\s*\(\s*\)")
+_DEFINED_FUNCTION = re.compile(
+    r"(?:^|[;&|\n{(]\s*)(?:function\s+([A-Za-z_][\w-]*)(?:\s*\(\s*\))?|([A-Za-z_][\w-]*)\s*\(\s*\))"
+)
 
 
 def unavailable_programs(command: str) -> list[str]:
@@ -188,7 +193,7 @@ def unavailable_programs(command: str) -> list[str]:
     names = teradata.command_names(command)
     if names is None:
         return []
-    defined = set(_DEFINED_FUNCTION.findall(command))
+    defined = {name for names in _DEFINED_FUNCTION.findall(command) for name in names if name}
     return [
         name
         for name in names
