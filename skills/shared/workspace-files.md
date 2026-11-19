@@ -20,6 +20,9 @@ its own. This file covers the check before package and the login it may need. Th
 
 Over MCP: `flowx(command="workspace_paths", parameters={"source": "<source>", "report_path": "...", "source_dir": "<optional>"})`.
 
+Pass the report package will read: the stamped report above, or `.work/translation_report.json` when
+modify didn't run. A path that doesn't exist returns no workspace files rather than an error.
+
 `--source` is `adf` or `airflow`. It returns `paths` (the files the bundle will download; you may show
 them to the user), `suggested_hosts` (the Databricks workspace hosts found in the source: ADF linked
 services or Airflow DAGs) and `needs_auth`. When

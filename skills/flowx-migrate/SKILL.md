@@ -210,7 +210,8 @@ options are in [`../shared/translation-options.md`](../shared/translation-option
 
 ### Step 11: Check the workspace files the bundle needs
 
-Run `workspace-paths` on `.work/translation_report.stamped.json` with `--source-dir <source_path>`, and
+Run `workspace-paths` on the report package will read (`.work/translation_report.stamped.json`, or
+`.work/translation_report.json` when modify didn't run) with `--source-dir <source_path>`, and
 log in when it returns `needs_auth: true`, as
 [`../shared/workspace-files.md`](../shared/workspace-files.md) describes. Pass the resulting
 `--profile <name>` to package in Step 12, so package downloads the referenced notebooks into the bundle.
@@ -225,7 +226,9 @@ answer at the dot, strip backticks around either name, and pass them as `--catal
 text, so a pick always carries the names.
 
 Then run the `flowx-package` skill with the same `<output_dir>`; it reads the stamped report from
-`.work/` itself and writes the bundle there. After a successful build it deletes `.work/`, leaving the
+`.work/` itself (or `translation_report.json` when modify didn't run) and writes the bundle there. After
+the `flowx-resolve-airflow-gaps` skill, pass its `.work/translation_report.agentic.json` as `--report`
+(MCP `report_path`), or the accepted resolutions are not packaged. After a successful build it deletes `.work/`, leaving the
 bundle and `metadata/`.
 
 ### Step 13 (optional): Record coverage and install the dashboard

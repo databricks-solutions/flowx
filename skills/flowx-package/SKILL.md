@@ -44,7 +44,10 @@ The common MCP and CLI rules are in [`../shared/running-flowx.md`](../shared/run
 ### Step 1: Find the translation report
 
 Package reads `<output_dir>/.work/translation_report.stamped.json`, or `translation_report.json` when modify
-didn't run; you don't pass a path. If the output folder isn't known yet, ask: "Which migration output
+didn't run, so you pass a path only to override that. After the `flowx-resolve-airflow-gaps` skill has
+applied resolutions, pass its report, `--report <output_dir>/.work/translation_report.agentic.json` (MCP
+`report_path`): package checks the accepted evidence only when it reads that report, and without it the
+bundle ships the placeholders. If the output folder isn't known yet, ask: "Which migration output
 directory should I build the bundle in? (default `./flowx_output`)". Check that the report exists and that
 every required translation has status `translated`.
 
@@ -54,20 +57,22 @@ every required translation has status `translated`.
 |---|---|
 | Catalog and schema, asked as one free-text answer `catalog.schema` | `main.default` |
 | Output directory | `./flowx_output` |
-| Bundle name | the first pipeline's name |
-| SQL warehouse id, only when the report has SQL tasks | ask |
+| Bundle name | one bundle: its pipeline's name (`flowx_bundle` for `single` with several pipelines); several bundles: each pipeline's or group's name |
 | Packaging mode: `per-pipeline`, `single` or `per-group` | `per-pipeline` |
 | Databricks CLI profile, only when Step 3 needs one | from `~/.databrickscfg` |
 
 Every bundle gets three targets, `dev` (development mode), `staging` and `prod` (production mode); there is
-no input for them, so edit `databricks.yml` for others. Split the catalog and schema answer at the dot, strip backticks, and pass `--catalog` and `--schema`. If
+no input for them, so edit `databricks.yml` for others. A bundle with SQL or dbt tasks declares a
+`warehouse_id` variable; package takes no warehouse input, so the user sets it at deploy time
+(`--var warehouse_id=<id>`) or as a target default in `databricks.yml`. Split the catalog and schema answer at the dot, strip backticks, and pass `--catalog` and `--schema`. If
 you use a picker, its only way to enter a value must be free text.
 
 Packaging mode decides how a multi-pipeline factory is laid out (all modes are the same for one pipeline):
 `per-pipeline` writes one bundle per pipeline and wires cross-bundle Run Pipeline calls at deploy time;
 `single` writes one bundle; `per-group` writes one bundle per group of pipelines that call each other, or
 per an explicit `--group-by spec --group-spec <path>` mapping. Every mode writes `DEPLOY.md` with a
-callees-first deploy order.
+callees-first deploy order. The MCP `package` command takes no packaging mode and always writes the
+default `per-pipeline` layout; use the CLI for `single` or `per-group`.
 
 ### Step 3: Check the workspace files the bundle needs
 
@@ -117,7 +122,7 @@ describes.
 The folder layout is in [`../shared/output-folder.md`](../shared/output-folder.md). One bundle lands at the top of `<output_dir>`; several bundles each get their own
 folder there, named after the pipeline or group. Each bundle holds `databricks.yml`, `resources/*.yml`,
 `src/notebooks/`, `src/setup/` and `SETUP.md`; `<output_dir>` also holds `DEPLOY.md` and, in `metadata/`: `inventory.json`, `profile_report.csv`,
-`<pipeline>.arm.json`, `configuration.json`, `route_audit.json` (only with a routing plan),
+`<pipeline>.arm.json` (ADF only), `configuration.json`, `route_audit.json` (only with a routing plan),
 `packaged_bundles.json` and `archive/`.
 
 ## Reference
