@@ -33,8 +33,8 @@ This is the top-level orchestration skill. It runs the full migration pipeline:
 0. **Extract** (ADF only, optional) — If the user has no export yet, get the factory's
    definitions with `flowx-extract-metadata`
 1. **Discover** — Parse the source's definitions into a typed inventory
-2. **Enrich** *(default)* — Author the agentic `insights` layer over the inventory and merge it
-   (`flowx-enrich`); skippable for a deterministic-only pass
+2. **Enrich** *(optional)* — Author the agentic `insights` layer over the inventory and merge it
+   (`flowx-enrich`); it runs unless the user asks for a deterministic-only pass
 3. **Convert (deterministic baseline)** — Convert the source's tasks to Databricks IR, producing
    `.work/translation_report.json` (`flowx-convert`). Runs **before** routing
 4. **Route** — Route writes its recommendation and the suggested groupings into
@@ -78,7 +78,7 @@ small factories, inline as `adf_definitions` (a mapping of relative path → ARM
 the Git-export layout — `pipeline/…`, `dataset/…`, `linkedService/…`, `trigger/…`), which you read and
 supply yourself.
 
-**Run the same Workflow as the CLI path, one `flowx` call per phase**: discover → enrich (default) →
+**Run the same Workflow as the CLI path, one `flowx` call per phase**: discover → enrich (optional) →
 convert → route → fill → configuration options → package, in the order of the steps below. Do **not**
 replace it with one `migrate` call: `migrate` is server code, which can't author the insights or ask
 the user for the routing decisions, so it runs only discover → convert → package and never enriches
@@ -259,7 +259,7 @@ If the user says no, explain the options:
 
 If the user says yes, proceed to Step 4.
 
-### Step 4 — Enrich the inventory (default)
+### Step 4 — Enrich the inventory (optional)
 
 By default, chain into enrichment: invoke the **`flowx:flowx-enrich`** skill to author the agentic
 `insights` layer (factory-wide recommendation, per-pipeline intent + recommended Databricks patterns,

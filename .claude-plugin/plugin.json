@@ -1,6 +1,6 @@
 {
   "name": "flowx",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "description": "Translate data pipelines to Databricks Lakeflow Jobs via Declarative Automation Bundles. Deterministic translation for known activity types with agentic fallback.",
   "author": {
     "name": "Greg Hansen",

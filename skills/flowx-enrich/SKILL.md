@@ -28,9 +28,9 @@ a single additive `insights` key; you never pass it anything for that step. Airf
 `source_graphs.json` yet, so for Airflow the file is bound to `inventory.json` alone (through its
 `inventory_sha256`), and the inventory is rebuilt from that.
 
-This is the standard step **between discover and convert** in the flowx workflow. `flowx-migrate`
-runs this skill after discover by default; the routing step (`flowx-route`) reads the `insights` block to
-present the agentic conversion option per connected component. The one-shot MCP `migrate` command
+This is an optional phase 1.a of the flowx migration workflow. `flowx-migrate` runs this skill after
+discover unless the user asks for a deterministic-only pass; the routing step (`flowx-route`) reads the
+`insights` block to present the agentic conversion option per connected component. The one-shot MCP `migrate` command
 runs discover, convert and package without it, so it records no insights.
 
 ## How much to write
@@ -99,20 +99,27 @@ narrative.
 
    **Check every pattern you recommend against the current Databricks platform limits.** Before you name
    a pattern in `recommended_patterns` or `system_recommendation`, read the limits it rests on live from
-   the current public Databricks docs (for Lakeflow Connect, the connector's limits page and the resource
-   limits page) and check the estate's facts against them. Don't recommend a pattern a limit rules out.
-   Record each limit you relied on in the `conversion_notes` of every pipeline the recommendation covers
-   (for `system_recommendation`, each pipeline it applies to) as
-   `limit: <name> = <value> (source: <page>, read <date>)`. When an estate fact a limit check needs is
-   still unknown, note the pattern there as `not qualified: needs <fact>`; when the docs can't be
-   reached, as `not qualified: limits not checked`. Never use a remembered number. Release state isn't a
-   limit: it follows the rule above, so an unlabelled page is `release_state: unknown`. `flowx-route`
-   lists the limits its database-ingestion patterns rest on; for any other pattern, read the limits on
-   that capability's own pages.
+   the current public Databricks docs and check the estate's facts against them.
 
-3. **Tell the user what you found, then ask at most three open questions.** Some facts that decide
-   the target pattern aren't in the export, such as how long a list read at run time really is. Asking
-   now, before convert, brings scale up before anything is converted. See "Summarise and ask" below.
+   - **Where to read them:** for Lakeflow Connect, the connector's limits page and the resource limits
+     page; `flowx-route` lists the limits its database-ingestion patterns rest on; for any other
+     pattern, that capability's own pages.
+   - Don't recommend a pattern a limit rules out.
+   - Never use a remembered number.
+   - Release state isn't a limit; it follows the rule above (an unlabelled page is
+     `release_state: unknown`).
+
+   Record the outcome in the `conversion_notes` of every pipeline the recommendation covers (for
+   `system_recommendation`, each pipeline it applies to):
+
+   - each limit you relied on: `limit: <name> = <value> (source: <page>, read <date>)`;
+   - a pattern whose limit check needs an estate fact still unknown: `not qualified: needs <fact>`;
+   - a pattern whose limits page couldn't be reached: `not qualified: limits not checked`.
+
+3. **Tell the user what you found, then ask the open questions that decide the target pattern.**
+   Some facts that decide it aren't in the export: the size and shape of the workload, how its data
+   changes, the service bar it must meet, and what policy allows. Asking now, before convert, brings
+   them up before anything is converted. See "Summarise and ask" below.
 4. **Author the insights JSON, then call `enrich`.** The library validates it against the inventory
    and the saved source graphs and, only when clean, writes `agentic_insights.json` and rebuilds the
    inventory. On any violation both files are left untouched and you get the full list of
@@ -129,7 +136,7 @@ This works the same for every source. On a source where route records determinis
 1. **Read** the raw source behind each loop, copy and query, and any worklist you can reach. A
    worklist is a runtime list that drives a loop: a control table, a CSV, a Lookup result, an array
    parameter or a mapped-task input. If the user can share the worklist, or you can query it, count it
-   rather than asking. The source guide (`flowx-discover`'s `sources/<source>.md`) says where to look.
+   rather than asking. "Where the facts sit" below says where to look.
 2. **Summarise it back** in about five lines:
    - what the workflows do;
    - their shape in plain words, for example "a list read at run time drives a loop that calls one
@@ -140,7 +147,7 @@ This works the same for every source. On a source where route records determinis
 3. **Pick the questions.** For each fact a candidate pattern needs, decide whether the code shows it
    (cite the code), whether it is data you can read (read it), or whether it is unknown. Ask about an
    unknown only when a plausible answer would rule a candidate in or out, and ask first about the one
-   whose answer splits the candidates most. Ask at most three, in one turn.
+   whose answer splits the candidates most. Ask them together, in one turn.
 
 The facts, named for what the workload does:
 
@@ -155,8 +162,19 @@ The facts, named for what the workload does:
 | Policy | What may be enabled on the source and the workspace; which compute and network are allowed | Connections and runtimes |
 | Shaping | Whether transforms inside the extraction must stay at landing | Column lists, casts, joins or filters in extraction queries |
 
-Ask about the estate and the business, in the user's words, and name the code that raised each
-question. For example: *"`Orchestrator` loops over a list of databases it reads at run time. How many
+Keep each question within these guardrails:
+
+- **Size and shape:** how much the workload covers and how it repeats or fans in (scale, repeat,
+  fan-in).
+- **Change and history:** how much changes per run, how the change is captured, and how much history
+  must be kept (change, history).
+- **Service bar:** when it must run, how long it may take and what it may cost (bar).
+- **Constraints:** what may be enabled or used on the source and the workspace, and which transforms
+  must stay at landing (policy, shaping).
+
+Don't ask about anything the code shows or data you can read, or anything whose answer wouldn't change
+the candidates. Ask about the estate and the business, in the user's words, and name the code that
+raised each question. For example: *"`Orchestrator` loops over a list of databases it reads at run time. How many
 does that list hold in production, and does every database get the same table list?"* Don't ask in
 platform terms, such as *"do you need more than 250 tables per pipeline?"*
 
@@ -166,7 +184,27 @@ know" is recorded as `fact: unknown` and isn't asked again. A count the user onl
 `assumed`, not `user`. `flowx-route` carries these into the plan's `conversation` and asks only about
 facts still open.
 
-When the source guide's database-source signal is present, also record the source system and
+### Where the facts sit
+
+The inventory carries no `raw` payloads. In ADF, read each activity's `raw` JSON in
+`metadata/source_graphs.json` (and `metadata/<pipeline>.arm.json`):
+
+- a Lookup feeding `ForEach.items`, and an `ExecutePipeline` called once per item (scale, repeat);
+- dataset parameters and sink paths templated by item (fan-in);
+- query text, such as a version or watermark read before the copy, or change functions (change,
+  shaping);
+- `ForEach.batchCount` and trigger schedules (bar);
+- a Copy or Lookup `typeProperties.source.type` of `SqlServerSource`, `AzureSqlSource` or
+  `SqlMISource`, which marks a SQL Server source.
+
+In Airflow, read the DAG source:
+
+- dynamic task mapping (`expand`) and task groups, and the list a mapped task is given (scale,
+  repeat);
+- operator SQL, such as a watermark read before the load (change, shaping);
+- the DAG's `schedule` and `max_active_tasks` (bar).
+
+When a database-source signal is present, also record the source system and
 connector in that pipeline's `conversion_notes`, for example `source: SQL Server via AzureSqlSource`
 (or `SqlServerSource`, `SqlMISource`).
 

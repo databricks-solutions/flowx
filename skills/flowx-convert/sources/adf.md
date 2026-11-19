@@ -164,15 +164,14 @@ Where the fragment leaves a value out, flowx adds only the plumbing the task nee
 ```
 
 Placeholders are replaced in place, status → `translated`. Exits non-zero if any result can't be
-matched. A result whose task, or a task nested in it, is a `PlaceholderActivity`, an
-`UnsupportedActivity` or not an IR task type (package would build it as a stub) counts as unmatched
-and is not merged, so its gap stays open. Add `--output <path>` to write a copy instead of overwriting. An in-place merge into
-`.work/translation_report.json` also takes the merged activities' gaps out of `.work/gaps.json`. After
-routing, only such an in-place merge is also stored as a gap fill in `metadata/agentic_conversion.json`
-(so a re-route keeps it, while route's saved deterministic baseline stays as convert wrote it); a merge
-written to an `--output` copy stores nothing and leaves `gaps.json` alone. A merge into the live report
-refuses, writing nothing, while a route, fill-agentic or another merge is writing to the same output
-folder, so run merges one at a time (see "One at a time per output folder" in the `flowx-route` skill).
+matched. A result holding a `PlaceholderActivity`, an `UnsupportedActivity` or a task that isn't an IR
+type, at any depth, counts as unmatched, so its gap stays open. Add `--output <path>` to write a copy
+instead of overwriting.
+
+An in-place merge also closes the merged gaps in `.work/gaps.json` and, after routing, is saved in
+`metadata/agentic_conversion.json` so a re-route keeps it. A merge to an `--output` copy changes nothing
+else. Run one merge at a time per output folder: an in-place merge refuses while a route, fill-agentic or
+another merge is writing there (see "One at a time per output folder" in the `flowx-route` skill).
 
 ## Step 6.1 — Just-in-time translation configuration
 

@@ -72,7 +72,7 @@ across ADF and Airflow.
   `show_when` condition). Walk it locally; ask an option only when its `show_when` is satisfied.
 - `modify <report> --output-dir <dir> --answer OPTION_ID=VALUE ...` — validate and apply collected
   answers, writing `.work/translation_report.stamped.json` + `metadata/configuration.json`.
-- `merge_agentic --report <report> --agentic-results <dir>` — **ADF only**. Fold agent-produced per-activity translations into an ADF report, filling convert's own agentic gaps. It refuses, writing nothing, any result landing in a pipeline the routing record routes agentic (fill those with `fill-agentic`). After routing, a merge written in place into the live `.work/translation_report.json` is also stored as a gap fill in `metadata/agentic_conversion.json`, so the next rebuild re-applies it on top of route's unchanged deterministic baseline; a merge written to a separate `--output` copy stores nothing, so a re-route does not keep it. Airflow's legacy name-based merge is disabled.
+- `merge_agentic --report <report> --agentic-results <dir>` — **ADF only**. Fill convert's own agentic gaps with agent-produced per-activity translations. It refuses, and writes nothing, if a result lands in a pipeline routed agentic (fill those with `fill-agentic`). After routing, a re-route keeps an in-place merge but not a merge written to an `--output` copy. Airflow's legacy name-based merge is disabled.
 
 ## Output artifacts (shared, transient under `<output_dir>/.work/`)
 

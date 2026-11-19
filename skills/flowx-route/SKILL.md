@@ -62,7 +62,7 @@ applies nothing while one is pending.
 ## Where routing sits
 
 ```
-discover → enrich (default) → convert (deterministic baseline) → route (recommend → decide → apply) → fill-agentic → package
+discover → enrich (optional) → convert (deterministic baseline) → route (recommend → decide → apply) → fill-agentic → package
 ```
 
 Run convert **before** route: it builds the deterministic baseline report that routing edits, and
@@ -136,8 +136,8 @@ component (next section). Record each question and answer in the plan's `convers
 
 A component that ingests from a database can land in one of four patterns. Tell which components do
 from the `source:` line enrich wrote in a pipeline's `conversion_notes`, or else from the signals in
-`flowx-discover`'s `sources/adf.md`; the connector decides which limits apply. The library doesn't run
-these checks; you do, from the facts and the limits, and you record them as free text in the plan's
+"Where the facts sit" in the `flowx-enrich` skill; the connector decides which limits apply. The library
+doesn't run these checks; you do, from the facts and the limits, and you record them as free text in the plan's
 `conversation`.
 
 | Pattern | What it is | Facts it needs | Decision |

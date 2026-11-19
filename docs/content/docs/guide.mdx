@@ -56,7 +56,7 @@ flowx migrate pipelines in `/Volumes/main/default/adf_export`. Save output in `.
 Your agent will use flowx's `migrate` skill to run an end-to-end migration consisting of several phases:
 
 1. `discover` parses JSON files, builds an inventory, assigns a translation strategy for each resource, and creates a complexity report.
-2. `enrich` (default) has the agent author insights over the inventory and records them.
+2. `enrich` (optional) has the agent author insights over the inventory and records them. `migrate` runs it unless you ask for a deterministic-only pass.
 3. `convert` converts each activity to an intermediate representation. The agent will ask for confirmation before running any LLM-based translation.
 4. `route` (ADF) recommends deterministic or agentic conversion per group of connected pipelines, shows the plan on a review page, and records your decisions; the agent then fills the groups you route agentic.
 5. `package` creates a [Declarative Automation Bundle](https://docs.databricks.com/aws/en/dev-tools/bundles/resources) with job configuration, code, and setup scripts (e.g. to create Databricks Secret Scopes or Unity Catalog connections).

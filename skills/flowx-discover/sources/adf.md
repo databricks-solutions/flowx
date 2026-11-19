@@ -19,9 +19,10 @@ The directory should contain subdirectories or files for:
 - `linkedService/` or `linked_services/` — linked service JSON files (optional)
 - `trigger/` or `triggers/` — trigger definition JSON files (optional)
 
-On the MCP path the hosted server cannot read your local files, so reference the source via
-`adf_volume_path` / `adf_workspace_path` (the server reads them through the SDK), or for small
-factories pass the ADF JSON inline as `adf_definitions` (a mapping of relative path → JSON content).
+On the MCP path the hosted server cannot read files in the local file system, workspace, or a
+Databricks volume by path. For a workspace or volume source, pass `adf_workspace_path` /
+`adf_volume_path` and the server downloads it through the SDK; for local files or a small factory, pass
+the ADF JSON inline as `adf_definitions` (a mapping of relative path → JSON content).
 
 ## Step 2 — Download from UC volumes if needed
 
@@ -114,20 +115,6 @@ from the activity's ARM JSON (no built-in deterministic translator exists), e.g.
 
 For `unsupported` activities, warn clearly, e.g. `ExecuteSSISPackage` — recommend manual conversion
 to a PySpark notebook.
-
-## Where to look for the facts enrich asks about
-
-`flowx-enrich` reads each activity's `raw` JSON in `metadata/source_graphs.json` (and
-`metadata/<pipeline>.arm.json`) to find the facts that narrow the target pattern. The inventory itself
-carries no `raw` payloads. In ADF they sit in:
-
-- a Lookup feeding `ForEach.items`, and an `ExecutePipeline` called once per item (scale, repeat);
-- dataset parameters and sink paths templated by item (fan-in);
-- query text, such as a version or watermark read before the copy, or change functions (change,
-  shaping);
-- `ForEach.batchCount` and trigger schedules (bar);
-- a Copy or Lookup `typeProperties.source.type` of `SqlServerSource`, `AzureSqlSource` or
-  `SqlMISource`, which marks a SQL Server source.
 
 ## Step 8 — Confirm output location
 
