@@ -79,7 +79,7 @@ ADF JSON Exports
 **Key decisions:**
 - Enrich contains no LLM: the agent authors, the library validates and records.
 - Every deterministic inventory key stays byte-identical.
-- `flowx-migrate` runs enrich unless the user asks for a deterministic-only pass.
+- `flowx-migrate` runs enrich unless the user asks for a deterministic-only pass; the one-shot MCP `migrate` command never runs it.
 
 ## Phase 2: Convert
 

@@ -4,8 +4,9 @@ description: >
   Enrich the discover inventory with an agent-authored layer of judgment — a factory-wide
   architecture recommendation, per-pipeline intent + recommended Databricks patterns, and
   cross-pipeline relationships. The library validates it, records it in agentic_insights.json and
-  rebuilds inventory.json from discovery plus that file. flowx-migrate runs it after discover by
-  default, and the routing step consumes it.
+  rebuilds inventory.json from discovery plus that file. Optional phase 1.a, after discover and
+  before convert; use it unless the user asked for a deterministic-only pass. The routing step reads
+  it.
 triggers:
   - "enrich inventory"
   - "enrich pipelines"
@@ -28,8 +29,8 @@ a single additive `insights` key; you never pass it anything for that step. Airf
 `source_graphs.json` yet, so for Airflow the file is bound to `inventory.json` alone (through its
 `inventory_sha256`), and the inventory is rebuilt from that.
 
-This is an optional phase 1.a of the flowx migration workflow. `flowx-migrate` runs this skill after
-discover unless the user asks for a deterministic-only pass; the routing step (`flowx-route`) reads the
+This is an optional phase 1.a of the flowx migration workflow. `flowx-migrate` runs it after discover
+unless the user asks for a deterministic-only pass; the routing step (`flowx-route`) reads the
 `insights` block to present the agentic conversion option per connected component. The one-shot MCP `migrate` command
 runs discover, convert and package without it, so it records no insights.
 
@@ -54,12 +55,12 @@ whatever valid insights you give it, so a partial set is fine.
 
 ## When to skip enrich (deterministic-only)
 
-Enrichment is on by default, but it is skippable. A standalone, deterministic-only discover — no
-agent, no LLM — is fully valid: `metadata/inventory.json` from discover is complete and self-standing
-without an `insights` block, and `flowx-route` still recommends and records a plan from the
-deterministic structure alone (the agentic option simply shows no recommended patterns). Skip enrich
-when the caller asked for a headless/deterministic pass, or when no human reader needs a migration
-narrative.
+Enrichment is optional: `flowx-migrate` runs it unless the user asks for a deterministic-only pass.
+A standalone, deterministic-only discover — no agent, no LLM — is fully valid:
+`metadata/inventory.json` from discover is complete and self-standing without an `insights` block,
+and `flowx-route` still recommends and records a plan from the deterministic structure alone (the
+agentic option simply shows no recommended patterns). Skip enrich when the caller asked for a
+headless/deterministic pass, or when no human reader needs a migration narrative.
 
 ## How to author (four steps)
 

@@ -4,8 +4,8 @@ description: >
   Route each connected component of the discovered inventory to a deterministic (1:1 engine) or
   agentic (LLM-assisted re-architecture) conversion: route writes its recommendation and the
   suggested groupings into metadata/conversion_plan.json and a standard review page, the user decides,
-  route applies the plan, and fill-agentic fills each routed-agentic unit. Runs after enrich and
-  convert, before package.
+  route applies the plan, and fill-agentic fills each routed-agentic unit. Runs after convert (and
+  the optional enrich), before package.
 triggers:
   - "route pipelines"
   - "route conversion"
@@ -19,12 +19,13 @@ triggers:
 
 # Route the Conversion (deterministic vs. agentic) and Fill the Gaps
 
-After discover (and, by default, `flowx-enrich`), routing decides **per connected component** whether
-each part of the factory converts **deterministically** (the typed engine's 1:1 translation) or
-**agentically** (an LLM-authored re-architecture, e.g. collapsing five extractors onto one Lakeflow
-Connect pipeline). Route writes its recommendation straight into `metadata/conversion_plan.json`, the
-one readable record of the decisions, and draws it as `metadata/routing_review.html`. The user decides,
-you edit the plan, route applies it to the translation report, and you author the fill.
+After discover (and the optional `flowx-enrich`, which runs unless the user asked for a
+deterministic-only pass), routing decides **per connected component** whether each part of the
+factory converts **deterministically** (the typed engine's 1:1 translation) or **agentically** (an
+LLM-authored re-architecture, e.g. collapsing five extractors onto one Lakeflow Connect pipeline).
+Route writes its recommendation straight into `metadata/conversion_plan.json`, the one readable
+record of the decisions, and draws it as `metadata/routing_review.html`. The user decides, you edit
+the plan, route applies it to the translation report, and you author the fill.
 
 **ADF only (current scope).** Enrich runs for every source, but the route → fill agentic-conversion
 flow is supported for **ADF today**, and `route` enforces it: for an Airflow inventory it recommends and

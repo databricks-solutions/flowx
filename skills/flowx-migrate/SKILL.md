@@ -18,7 +18,7 @@ triggers:
 
 Orchestrate the complete migration of a source orchestrator's pipelines to Databricks Lakeflow Jobs
 via Declarative Automation Bundles. This skill runs the full flow in sequence: discover → enrich
-(default) → convert (deterministic baseline) → route (recommend → decide → apply) → fill agentic gaps → package.
+(optional) → convert (deterministic baseline) → route (recommend → decide → apply) → fill agentic gaps → package.
 
 ## Context
 
@@ -262,12 +262,12 @@ If the user says yes, proceed to Step 4.
 
 ### Step 4 — Enrich the inventory (optional)
 
-By default, chain into enrichment: invoke the **`flowx:flowx-enrich`** skill to author the agentic
-`insights` layer (factory-wide recommendation, per-pipeline intent + recommended Databricks patterns,
-cross-pipeline relationships) and merge it into `<output_dir>/metadata/inventory.json`. flowx has no
-LLM — you author the insights JSON and `enrich` validates + merges it additively, leaving every
-deterministic inventory key byte-identical. The routing step consumes this block to present the
-agentic conversion option per group.
+Unless the user chose a deterministic-only pass, chain into enrichment: invoke the
+**`flowx:flowx-enrich`** skill to author the agentic `insights` layer (factory-wide recommendation,
+per-pipeline intent + recommended Databricks patterns, cross-pipeline relationships) and merge it
+into `<output_dir>/metadata/inventory.json`. flowx has no LLM — you author the insights JSON and
+`enrich` validates + merges it additively, leaving every deterministic inventory key byte-identical.
+The routing step consumes this block to present the agentic conversion option per group.
 
 Before recording the insights, tell the user in a few lines what the analysis found and ask the open
 questions whose answers would rule a target pattern in or out (the skill's "Summarise and ask"). Record
@@ -275,7 +275,7 @@ the answers in the insights so route doesn't ask them again.
 
 **Skip only for a deterministic-only pass.** When the user chose a deterministic-only pass in Step 1
 (no agent/LLM authoring), skip enrich and the routing review (Steps 7–8) — the deterministic
-`inventory.json` is complete. Otherwise enrich by default.
+`inventory.json` is complete. Otherwise run enrich.
 
 ### Step 5 — Phase 2: Convert (deterministic baseline)
 
