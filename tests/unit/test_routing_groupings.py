@@ -481,3 +481,32 @@ def test_package_refuses_a_recorded_plan_whose_grouping_accepted_is_not_a_boolea
     assert code == 1
     assert "'accepted' must be true or false" in capsys.readouterr().err
     assert not (tmp_path / "databricks.yml").exists()
+
+
+def test_route_refuses_an_edited_plan_whose_accepted_grouping_would_bring_back_a_clashing_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The edited plan's groupings carry only their ids, so the name check must read them as route records them."""
+    inventory = _enriched(tmp_path)
+    _write_report(tmp_path)
+    _route(tmp_path, _plan(inventory, agentic={"component-2", "component-3"}, accepted={_EXTRACTS}))
+    assert apply_agentic_output(tmp_path, ["extract_a", "extract_b"], [_authored("Ingest")])["ok"] is True
+    _route(tmp_path, _plan(inventory, agentic={"component-4"}, accepted=set()))
+    assert apply_agentic_output(tmp_path, ["extract_c"], [_authored("Ingest")])["ok"] is True
+
+    plan_path = tmp_path / "metadata" / "conversion_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    for component in plan["components"]:
+        if component["component_id"] in {"component-2", "component-3"}:
+            component["decision"] = "agentic"
+    for grouping in plan["suggested_groupings"]:
+        grouping["accepted"] = grouping["grouping_id"] == _EXTRACTS
+    plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    edited = plan_path.read_bytes()
+    capsys.readouterr()
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 1
+
+    result = json.loads(capsys.readouterr().out)
+    assert any("'Ingest'" in violation for violation in result["violations"])
+    assert plan_path.read_bytes() == edited
