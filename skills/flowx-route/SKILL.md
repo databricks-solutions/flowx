@@ -128,76 +128,7 @@ component (next section). Record each question and answer in the plan's `convers
 
 ### Qualify the target pattern before you suggest one
 
-A component that ingests from a database can land in one of four patterns. Tell which components do
-from the `source:` line enrich wrote in a pipeline's `conversion_notes`, or else from the signals in
-"Where the facts sit" in the `flowx-enrich` skill; the connector decides which limits apply. The library
-doesn't run these checks; you do, from the facts and the limits, and you record them as free text in the plan's
-`conversation`.
-
-| Pattern | What it is | Facts it needs | Decision |
-|---|---|---|---|
-| **D1** deterministic 1:1 | The engine's port (For each + JDBC notebooks), same behaviour | None | `deterministic` |
-| **M1** Lakeflow Connect managed | Gateway or integrated CDC ingestion pipelines generated from the worklist, sharded by database or schema | Scale, repeat, fan-in, change, bar, policy, shaping | `agentic` |
-| **M2** metadata-driven worklist | A job over the worklist that skips unchanged sources, reads the change feed over JDBC, MERGEs (fan-in allowed) and reseeds when retention lapses | Scale, change, fan-in, bar | `agentic` |
-| **A1** agentic re-architecture | Bespoke, for example several workspaces or metastores, an accelerator or partner tool, or mixed patterns | Whatever conflicts remain | `agentic` |
-
-The facts are the ones `flowx-enrich` asks about. **Follow-up questions:** carry each question and
-answer from the insights' `conversion_notes` into `conversation`, then ask at most three more, only on
-facts still open for the patterns still in play. These are usually platform-side: whether a feature is
-enabled on the workspace, which compute is allowed, how many tables the metastore already holds. Never
-re-ask a fact already answered, a "don't know" included. End each answer with the fact on one line,
-`fact: value (source: code | data | user | assumed)`.
-
-**Limits** are read live, as `flowx-enrich` does; flowx keeps no copy of them, because they change.
-Before you suggest a pattern, open the current Databricks docs for every limit its checks below rest
-on, and record each in `conversation` as `limit: <name> = <value> (source: <page>, read <date>)`.
-Reuse a limit enrich recorded in `conversion_notes` only after confirming it on its page. For SQL
-Server they are on the connector's limits and integrated CDC pages, the resource limits page, the Unity
-Catalog metastore page, the For each and pipeline task pages and the serverless Private Link page; for
-another connector, read its limits page the same way. The docs don't state three claims the checks
-use, marked *Assumption:* below: say so beside the pattern, and confirm the claim with the account
-team before ruling a pattern out on it. When the docs can't be reached, show the pattern as
-*not qualified: limits not checked*; never use a remembered number.
-
-Let **N** be the total tables and **L** the recommended tables per pipeline for the chosen mode
-(gateway or integrated CDC). When a pipeline can't hold two tables with the same name, even from
-different schemas or databases, and names repeat across databases, the pipeline count is
-**P** = Σ over databases of ⌈tables in the database / L⌉; otherwise P = ⌈N / L⌉. In gateway mode, let
-**G** be the gateways those P pipelines need: P when each ingestion pipeline needs its own gateway.
-When the pipelines run from a pipeline task inside For each, let **F** be how many iterations that task
-runs at once. Read all three rules live like any limit; if the same-name page now lets a pipeline hold
-more than one table of a name, size P from what it allows and show the sum in `conversation`.
-
-| Check | Passes when | Limits | When it fails |
-|---|---|---|---|
-| C1 fan-in | Fan-in isn't required, or only a few sources feed each logical table (a UNION view over a handful is fine) | *Assumption:* each destination table is written by one pipeline only | M1 out |
-| C2 pipelines | P ≤ saved pipelines per workspace; in gateway mode count P + G (the pipelines and their gateways). Warn when P > concurrent updates; in gateway mode, when G running gateways plus the ingestion updates exceed it | Saved pipelines per workspace; concurrent pipeline updates per workspace; *Assumption:* a running gateway holds one concurrent update | M1 strained or out |
-| C3 tables | N plus the tables the metastore already holds fits per metastore, and tables per schema and schemas per catalog fit | Tables per metastore; tables per schema; schemas per catalog | M1 out, or a quota and a multi-catalog plan |
-| C4 history | Current state is enough, or every table has a change feed that carries every change, on a source tier that supports it | Source docs | M1 is limited to SCD1 without CDC and M2 gives state per run only, so SCD2 required without CDC tips to A1 |
-| C5 mode | Gateway: G always-on classic gateways are acceptable. Integrated CDC: the workspace has it enabled | One gateway per ingestion pipeline; the compute a gateway runs on; integrated CDC enabled on the workspace | Pick the other mode and re-check; if neither mode passes, M1 out, so D1 or A1 |
-| C6 run time | ⌈P / min(slots, chosen concurrency, F)⌉ × the minimum update run fits the allowed run time (leave F out when no For each pipeline task runs them), where slots is concurrent updates, or concurrent updates − G in gateway mode. If slots is zero or less (G at or above concurrent updates in gateway mode), M1 is out in gateway mode; re-check with integrated CDC | Concurrent pipeline updates per workspace; *Assumption:* a running gateway holds one concurrent update; the minimum run of each integrated CDC extraction; concurrent iterations of a pipeline task inside For each | M1 out |
-| C7 cost floor | P × updates per day × the minimum update run × the cluster rate, plus G always-on classic gateway clusters in gateway mode, fits the budget or today's spend. Compare M2, which pays mostly for sources that changed | The minimum run of each integrated CDC extraction; the compute a gateway runs on | M1 not preferred |
-| C8 retention | Change-feed retention is longer than the longest gap between successful runs, with margin | Source docs | Disclose on whichever pattern is suggested: a reseed risk, and history is lost on a full refresh |
-| C9 network | Classic compute has a network path to the source; serverless has NCC private endpoints within the region's limit | NCC private endpoints per region | Choose the compute |
-| C10 connections | The source servers fit the connections per metastore | Connections per metastore | M1 needs a quota, or M2 |
-| C11 shaping | No expression, join or row filter has to happen at landing | None | M1 isn't 1:1; M2 or D1 |
-| C12 release | The chosen mode's release state, checked live as `flowx-enrich` requires, is disclosed and the customer accepts it | *Assumption:* integrated CDC's release state, which its page doesn't label; state what the page says | M1 in the other mode only, re-checked; if that mode fails too, D1 or A1 |
-| C13 jobs (M2, D1) | Tasks and parent tasks running at once, and saved jobs, fit; For each inputs fit through task values, so batch sources per task | Tasks running at once; Run job and For each parent tasks running at once; saved jobs per workspace; For each inputs passed through task values | Batch, or A1 |
-
-**Suggestion order:**
-
-1. **M1** when C1 to C7 and C9 to C12 pass. It's the managed option. A C8 failure doesn't rule it out; it's a
-   reseed and lost-history risk you disclose on whichever pattern is suggested.
-2. **M2** when M1 fails on C1, C2, C3, C6, C7, C10 or C11, and C13 passes.
-3. **D1** when the customer wants like-for-like, or no database ingestion is in scope.
-4. **A1** when no pattern passes, or the requirements conflict.
-
-Beside each pattern you rule out, show the failing check and its source: the limit's page and the
-date you read it, or the fact and where it came from. A pattern whose facts are still unknown
-shows as *not qualified: needs <fact>*; present the remaining candidates with their assumptions marked
-rather than asking again. The customer still decides, and the fill (Step 3) builds the pattern they
-chose. On a source where route records deterministic decisions only, D1 is the decision and the facts
-inform the per-gap fills.
+A component that ingests from a database can land in one of four patterns. Before you suggest one, read [`references/ingestion-patterns.md`](references/ingestion-patterns.md): the four patterns, the checks C1 to C13 and the limits each rests on (read live), and how to show a pattern you rule out.
 
 ### Suggested groupings
 
@@ -356,71 +287,7 @@ Its guarantees:
 
 ### Authoring an `AgenticComponentActivity` (the escape hatch)
 
-When the target can't be expressed by the typed engine (e.g. a managed Lakeflow Connect ingestion
-pipeline), emit an `AgenticComponentActivity` task inside the authored pipeline. The authored
-**pipeline** carries the required `tags.source == "adf"`; the task carries the raw bundle components
-the package phase writes verbatim:
-
-```json
-{
-  "name": "IngestAll",
-  "tags": {"source": "adf"},
-  "tasks": [
-    {
-      "name": "IngestAll",
-      "task_key": "ingest_all",
-      "type": "AgenticComponentActivity",
-      "files": [
-        {"path": "ingest/lakeflow_connect.py", "content": "# authored pipeline source ..."}
-      ],
-      "resources": [
-        {"resource_key": "ingest_all_pipeline", "definition": { "channel": "current", "...": "raw pipeline resource" }}
-      ],
-      "task": {"pipeline_task": {"pipeline_id": "${resources.pipelines.ingest_all_pipeline.id}"}},
-      "raw_definition": { "...": "original source definitions, retained for auditing" }
-    }
-  ]
-}
-```
-
-- `tags`: the authored pipeline **must** set `tags.source` to `"adf"` (routing/agentic is ADF-only);
-  fill-agentic fails closed otherwise.
-- `files`: files written below the bundle `src/`, so `path` is relative to it (a resource refers to
-  one as `../src/<path>`); each is `path` + either UTF-8 `content` or base64 `binary_content`.
-- `resources`: bundle resources in the `resource_key` + raw `definition` shape the bundle writer
-  expects.
-- `environments` (optional): job environments, each `environment_key` + `spec`, for a serverless task
-  that names one.
-- `task`: the raw Databricks task fragment (`pipeline_task` or `notebook_task`) wiring to an
-  authored resource or file. Libraries and compute go here, never on the activity.
-- `raw_definition`: the original source definition, retained for provenance.
-
-The full contract, including every field package refuses, is the `AgenticComponentActivity` section of
-`flowx-convert`'s `sources/adf.md`. fill-agentic runs each authored pipeline through package's prepare
-and bundle-writing path, so a component package would refuse is refused at fill, with nothing written.
-
-**Default the Lakeflow pipeline / Connect resource `channel` to `current` (stable/GA).** Do **not**
-emit `channel: preview` by default. Let the enriched insight's **structured `release_state`** drive
-the channel — the routing recommendation exposes each agentic option's states as a neutral
-`release_disclosures` list (factual labels, no alarm). Surface the state as disclosure, tiered as:
-
-- `ga` — `channel: current`; **silent** (not surfaced).
-- `unknown` — **silent**, treated exactly like `ga` (no separate label — we can't distinguish them).
-- `public_preview` — the informational label **"Public Preview (production-ready)"**: generally
-  production-ready and supported per Databricks; still confirm workspace availability. Emit
-  `channel: preview` only with the cited `release_state_source`.
-- `private_preview` — the plain factual label **"Private Preview"**. Emit `channel: preview` only
-  with the cited `release_state_source`.
-- `beta` — the plain factual label **"Beta"**. Emit `channel: preview` only with the cited
-  `release_state_source`.
-
-As in `flowx-enrich`, the state is disclosure, not a gate: there is no `doNotSuggest` rule, so a
-verified **Private Preview** connector may still be recommended. Show its label, say that Private
-Preview typically needs workspace enrollment, and let the customer decide. And **verify GA-vs-Preview
-status before recommending any connector or Lakeflow Connect pattern**: do not hardcode GA/Preview status or dates (release state changes), check
-the feature's current release state **and** target-workspace availability against the current public
-Databricks docs, and cite the source. (Same structured grounding rule the `flowx-enrich` skill
-applies when authoring recommended patterns.)
+When the target can't be expressed by the typed engine (for example a managed Lakeflow Connect ingestion pipeline), the authored pipeline carries an `AgenticComponentActivity` task. Read [`references/agentic-component.md`](references/agentic-component.md) before you author one: its fields, the pipeline `channel` default, and how to show a release state.
 
 ## Step 4 — Continue to package
 
@@ -472,38 +339,13 @@ and documents what was packaged and how.
 
 ## After package: change the conversion
 
-Package prunes `.work/` once it has built the bundle, so route and fill-agentic refuse straight
-after a package and say that package pruned `.work/`. Everything they rebuild from is kept in
-`metadata/`: the decisions, accepted groupings and conversation in `conversion_plan.json`, every
-stored fill and its `replaced` history in `agentic_conversion.json`, and modify's answers in
-`configuration.json`. To change a decision, an answer or an agent output after a package, run:
-
-1. **convert**, with the same source and options. It writes `.work/` again.
-2. **route**, after editing the plan if a decision or an answer is what changes. Route takes the fresh
-   report as its new baseline and re-applies the plan and the stored outputs. Fills of convert's own
-   gaps come back when convert wrote the same report as before; otherwise route keeps them, says how
-   many it skipped, and they come back if convert writes that report again. Merge again to fill those
-   gaps in the new report.
-3. **fill-agentic**, only for a unit whose output changes. Revise the fill when a changed answer
-   changes the pattern or its shape; nothing flags that for you. New pipelines replace the stored ones
-   and add an entry to the unit's `replaced` history.
-4. **modify**, if it was used, with the same answers (`metadata/configuration.json` lists them).
-5. **package**.
-
-Package overwrites the bundle files it generates, so hand edits to them are lost, and moves any
-`resources/*.yml` it does not write again (one added by hand included) into
-`metadata/archive/<UTC time>/`. To keep a change to an agentic unit's resource, put it in the authored
-pipeline's resource `definition` and run fill-agentic. With `--keep-intermediates` (MCP
-`keep_intermediates`) package leaves `.work/` in place, so you can start at route or fill-agentic. A
-re-package after the pipeline count or names change moves the earlier bundle folders it recorded in
-`metadata/packaged_bundles.json` into `metadata/archive/<UTC time>/` before it writes the new ones, so
-a pipeline an agentic unit replaced under a new name no longer sits beside the new one. A re-discover
-moves `metadata/` and `.work/`, the plan and the fills with them, into `metadata/archive/<UTC time>/`.
-A deploy uploads `metadata/archive/` with the bundle unless it is git-ignored; nothing in it is a job
-or pipeline the bundle deploys.
+Package prunes `.work/`, so route and fill-agentic refuse straight after a package. To change a decision, an answer or an agent output after a package, follow [`references/after-package.md`](references/after-package.md).
 
 ## Reference
 
+- `references/ingestion-patterns.md`: the four ingestion patterns and the checks C1 to C13.
+- `references/agentic-component.md`: authoring an `AgenticComponentActivity` and its release state.
+- `references/after-package.md`: changing the conversion after package has run.
 - `flowx-enrich` skill — the `insights` layer routing's agentic option and groupings consume.
 - `flowx-convert` — the deterministic engine, `merge_agentic` for convert's own gaps, and just-in-time config.
 - `flowx-package` — turns the (filled) report into the deployable DAB bundle.
