@@ -176,12 +176,10 @@ The agentic approach trades speed for coverage — it can handle the long tail o
 
 ## Expression Function Coverage
 
-flowx deterministically translates 73 of 84 ADF expression functions to Python notebook code. The remaining 11 functions require agentic translation:
+flowx deterministically translates 77 of 84 ADF expression functions to Python notebook code. The remaining 7 functions require agentic translation:
 
 - `dataUri`, `dataUriToBinary`, `dataUriToString`, `decodeDataUri` — Data URI encoding/decoding (rare in practice)
 - `uriComponentToBinary` — URI component to binary conversion
 - `xml`, `xpath` — XML parsing and XPath evaluation (complex DOM handling)
-- `convertFromUtc`, `convertTimeZone`, `convertToUtc` — Timezone conversions using Windows timezone names
-- `ticks` — .NET DateTime ticks (100-nanosecond intervals since 0001-01-01)
 
 See [expression-functions.md](expression-functions.md) for the complete function mapping reference.

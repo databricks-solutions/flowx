@@ -61,7 +61,7 @@ loop variables from `dbutils.widgets`, surface final state as a task value.
 **ExecuteDataFlow:** translate from the raw `typeProperties` + the `dataflow/` JSON definition +
 linked-service source/sink connections, into an SDP pipeline or PySpark notebook.
 
-**Control flow (Switch, Until, Wait, Filter, AppendVariable):** translate from the raw activity
+**Control flow (Until):** translate from the raw activity
 JSON, the containing pipeline JSON, nested activities, and variable definitions.
 
 **Stored procedures / external calls (SqlServerStoredProcedure, AzureFunction, WebHook, Custom):**

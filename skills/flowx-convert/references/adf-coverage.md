@@ -4,8 +4,10 @@ Read this from the `flowx-convert` skill with `references/adf.md`. It lists each
 Factory export, what flowx produces for it, and what you and the user still have to do. It is the ADF
 counterpart of `../../shared/airflow-coverage.md`.
 
-**Anything this file and the two tables it points to don't list is unsupported: report it as
-unsupported and never guess a translation.**
+**An activity type the activity mapping doesn't list is unsupported: report it as unsupported and never
+guess a translation.** Anything else this file doesn't cover (a connector, a linked service type, a
+pattern) is not unsupported for that reason alone: convert's report says what it translated and leaves
+the rest as agentic gaps (see `references/adf.md`).
 
 ## Contents
 
@@ -34,18 +36,24 @@ other triggers on the same pipeline are for the user to wire.
 
 | ADF trigger | What flowx writes | What to tell the user |
 |---|---|---|
-| Schedule trigger (`ScheduleTrigger`) | The job's `schedule` (Quartz cron and time zone); a day, week or month interval above 1 becomes a periodic trigger | Nothing, beyond checking the time zone |
-| Storage events trigger (`BlobEventsTrigger`) | A file arrival trigger on the trigger's scope | Check that the location is reachable from the workspace |
-| Tumbling window trigger (`TumblingWindowTrigger`) | A periodic schedule, marked as approximated | Review the window boundaries; backfill and window dependencies are not carried over |
-| Custom events trigger (`CustomEventsTrigger`) | No trigger; a manual setup note in `SETUP.md` | Wire it by hand |
+| Schedule trigger (`ScheduleTrigger`) | The job's `schedule` (Quartz cron and time zone). A day or week interval above 1 becomes a periodic trigger, and a time of day it can't hold goes to `SETUP.md`. A month interval above 1 gets no schedule, only a `schedule_setup_note` in the job YAML | Check the time zone; schedule a multi-month interval by hand |
+| Storage events trigger (`BlobEventsTrigger`) | A file arrival trigger whose `url` is the trigger's `scope`, the storage account's resource ID; `blobPathBeginsWith` and the events are not carried over | Replace the `url` with the storage location to watch, and re-add the path filter |
+| Tumbling window trigger (`TumblingWindowTrigger`) | No schedule: only a `schedule_setup_note` in the job YAML, with the frequency and interval | Schedule the job by hand; backfill and window dependencies are not carried over |
+| Custom events trigger (`CustomEventsTrigger`) | No trigger: only a `schedule_setup_note` in the job YAML | Wire it by hand |
+
+A `schedule_setup_note` is not written to `SETUP.md`, so point the user to each job YAML that has one.
 
 Parameter values a trigger passes to its pipeline become the job's default parameter values.
 
 ## Dependencies between activities
 
-Each dependency condition becomes the task's run condition: Succeeded, Failed, Completed (run whatever
-the upstream result) and Skipped map one to one. An edge with both Succeeded and Failed becomes
-Completed; an edge that includes Skipped becomes Skipped; Failed with others becomes Failed.
+Each edge's dependency conditions collapse to one outcome: Succeeded and Failed together become
+Completed, a list that includes Skipped becomes Skipped, and Failed with others becomes Failed. A
+Databricks task has one run condition for all its upstream tasks, so the outcomes then combine per task:
+any Completed or Skipped edge makes the task `ALL_DONE`, otherwise any Failed edge makes it
+`AT_LEAST_ONE_FAILED`, otherwise it runs on `ALL_SUCCESS`. So a task that waits on one upstream's
+Skipped also runs when it succeeds, and a task with one Succeeded and one Completed edge also runs after
+the first fails: tell the user when a task mixes conditions.
 
 ## Parameters and global parameters
 
