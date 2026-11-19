@@ -647,24 +647,48 @@ def test_package_refuses_a_re_converted_report_with_no_record_while_a_gap_fill_i
     assert child["tasks"][0]["type"] == "NotebookActivity"
 
 
-def test_a_re_convert_drops_gap_fills_merged_against_the_old_baseline(tmp_path: Path) -> None:
-    _route_parent_agentic(tmp_path, _report_with_child_gap())
+def test_a_gap_fill_merged_against_an_earlier_convert_is_kept_and_applies_again_when_that_convert_returns(
+    tmp_path: Path,
+) -> None:
+    first_convert = _report_with_child_gap()
+    _route_parent_agentic(tmp_path, first_convert)
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
     results_dir = tmp_path / "agentic_results"
     _write_merge_result(results_dir, "child", "Load", "load")
     assert merge_agentic_results(report_path, results_dir) == (1, 0)
-    reconverted = _report_with_child_gap()
-    reconverted["pipelines"][0]["tasks"][0]["task_key"] = "extract_again"
-    _write_work(tmp_path, reconverted, gaps=[])
-
+    store_path = tmp_path / "metadata" / "agentic_conversion.json"
+    stored_fills = json.loads(store_path.read_text(encoding="utf-8"))["gap_fills"]
     recorded = ConversionPlan.load(tmp_path)
     assert recorded is not None
-    assert apply_plan(tmp_path, recorded)["dropped_gap_fills"] == 1
 
-    stored = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
-    assert stored["gap_fills"] == []
+    other_convert = copy.deepcopy(first_convert)
+    other_convert["pipelines"][0]["tasks"][0]["task_key"] = "extract_again"
+    _write_work(tmp_path, other_convert, gaps=[])
+    assert apply_plan(tmp_path, recorded)["skipped_gap_fills"] == 1
+    assert json.loads(store_path.read_text(encoding="utf-8"))["gap_fills"] == stored_fills
     child = next(p for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"] if p["name"] == "child")
     assert child["tasks"][0]["type"] == "PlaceholderActivity"
+
+    _write_work(tmp_path, first_convert, gaps=[])
+    assert apply_plan(tmp_path, recorded)["skipped_gap_fills"] == 0
+    child = next(p for p in json.loads(report_path.read_text(encoding="utf-8"))["pipelines"] if p["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+
+
+def test_package_ignores_a_gap_fill_merged_against_an_earlier_convert(tmp_path: Path) -> None:
+    first_convert = _report_with_child_gap()
+    for pipeline in first_convert["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, first_convert)
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    assert merge_agentic_results(tmp_path / WORK_DIRNAME / REPORT_FILENAME, results_dir) == (1, 0)
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+    other_convert = copy.deepcopy(first_convert)
+    other_convert["pipelines"][0]["tasks"][0]["task_key"] = "extract_again"
+    _write_work(tmp_path, other_convert, gaps=[])
+
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 0
 
 
 def test_a_merge_written_to_a_separate_copy_leaves_the_baseline_and_live_report_alone(tmp_path: Path) -> None:

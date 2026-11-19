@@ -485,8 +485,9 @@ stored fill and its `replaced` history in `agentic_conversion.json`, and modify'
 1. **convert**, with the same source and options. It writes `.work/` again.
 2. **route**, after editing the plan if a decision or an answer is what changes. Route takes the fresh
    report as its new baseline and re-applies the plan and the stored outputs. Fills of convert's own
-   gaps come back when convert wrote the same report as before; otherwise route says how many it
-   dropped, and you merge them again.
+   gaps come back when convert wrote the same report as before; otherwise route keeps them, says how
+   many it skipped, and they come back if convert writes that report again. Merge again to fill those
+   gaps in the new report.
 3. **fill-agentic**, only for a unit whose output changes. Revise the fill when a changed answer
    changes the pattern or its shape; nothing flags that for you. New pipelines replace the stored ones
    and add an entry to the unit's `replaced` history.

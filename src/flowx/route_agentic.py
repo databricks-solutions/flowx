@@ -926,8 +926,9 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any], *, inventory: d
     """Apply a routing decision to the report on disk by rebuilding it from the deterministic baseline.
 
     A report without a routing record is a fresh convert, so it becomes the baseline: the first time
-    the rebuild changes anything, route saves it and its gaps to ``.work/route_baseline/``; gap fills
-    merged against an earlier baseline are then dropped (merge them again). A routed report is rebuilt
+    the rebuild changes anything, route saves it and its gaps to ``.work/route_baseline/``. Gap fills
+    merged against another baseline are skipped but kept, so they apply again if convert writes that
+    report again. A routed report is rebuilt
     from the saved copy, refused when it no longer has the hashes the record names. The rebuild applies
     the stored gap fills, the plan and the stored unit outputs from ``metadata/agentic_conversion.json``,
     and the report + gaps are written atomically. When the rebuild changes nothing the baseline bytes
@@ -941,7 +942,7 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any], *, inventory: d
     (see :func:`rebuild`); ``None`` is only for a caller with no inventory to check against.
 
     Returns a summary dict with the altered pipeline names, the resulting gap count, each unit's
-    outcome and how many stale gap fills were dropped.
+    outcome and how many stored gap fills were skipped because they were merged against another baseline.
 
     Raises:
         FileNotFoundError: when the translation report is missing (run convert first).
@@ -968,14 +969,8 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any], *, inventory: d
     clashes = stored_output_name_clashes(plan, stored.outputs)
     if clashes:
         raise ValueError("; ".join(clashes))
-    dropped = 0
-    if record is None and stored.document.get("gap_fills"):
-        baseline_report_sha256 = hashlib.sha256(baseline_report_bytes).hexdigest()
-        kept = applied_gap_fills(stored.gap_fills, baseline_report_sha256)
-        dropped = len(stored.document["gap_fills"]) - len(kept)
-        if dropped:
-            save_agentic_output(output_dir, {"components": stored.document["components"], "gap_fills": kept})
-            stored = load_agentic_output(output_dir)
+    baseline_report_sha256 = hashlib.sha256(baseline_report_bytes).hexdigest()
+    skipped = len(stored.gap_fills) - len(applied_gap_fills(stored.gap_fills, baseline_report_sha256))
     new_report, new_gaps, new_record = rebuild(
         baseline_report,
         baseline_gaps,
@@ -986,7 +981,7 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any], *, inventory: d
         baseline_gaps_bytes,
         inventory=inventory,
     )
-    summary: dict[str, Any] = {"agentic_pipelines": sorted(agentic), "dropped_gap_fills": dropped}
+    summary: dict[str, Any] = {"agentic_pipelines": sorted(agentic), "skipped_gap_fills": skipped}
     if not new_record:
         if record is not None:
             _write_atomic(report_path, baseline_report_bytes)

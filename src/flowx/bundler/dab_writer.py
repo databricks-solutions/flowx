@@ -1002,7 +1002,8 @@ def _live_report_failures(
     may have been edited. The rebuild from the baseline, the stored gap fills, the plan and the stored
     outputs must then reproduce the report exactly, record included. Finally every agentic unit must
     have its agent output applied. A report without a record passes only when the plan routes nothing
-    agentic and no gap fill is stored, because route stamps a record whenever it applies one.
+    agentic and no stored gap fill applies to it, because route stamps a record whenever it applies one;
+    a fill merged against another convert never applies, so it does not count.
     """
     from flowx.discovery_serde import canonical_sha256
     from flowx.models.conversion_plan import DECISION_AGENTIC
@@ -1012,7 +1013,9 @@ def _live_report_failures(
         OUTCOME_AGENTIC_NOT_VIABLE,
         REPORT_FILENAME,
         ROUTING_RECORD_KEY,
+        WORK_DIRNAME,
         agentic_pipeline_names,
+        applied_gap_fills,
         baseline_pipeline_mismatch,
         load_agentic_output,
         load_routed_baseline,
@@ -1028,10 +1031,11 @@ def _live_report_failures(
                 f"the plan routes a component agentic but {REPORT_FILENAME} carries no routing record; re-run route"
             ]
         try:
-            stored_fills = load_agentic_output(output_dir).document.get("gap_fills")
+            stored = load_agentic_output(output_dir)
+            report_sha256 = hashlib.sha256((output_dir / WORK_DIRNAME / REPORT_FILENAME).read_bytes()).hexdigest()
         except (OSError, ValueError) as error:
             return [f"metadata/{AGENTIC_OUTPUT_FILENAME} is unreadable: {error}"]
-        if stored_fills:
+        if applied_gap_fills(stored.gap_fills, report_sha256):
             return [
                 f"metadata/{AGENTIC_OUTPUT_FILENAME} stores a gap fill but {REPORT_FILENAME} carries no routing "
                 "record; re-run route, which applies the fill, or drops it when it was merged against an earlier "
