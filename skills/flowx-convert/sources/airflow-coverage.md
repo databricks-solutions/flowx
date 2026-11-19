@@ -185,4 +185,4 @@ files are not copied, so a job that relied on such a file needs it moved into on
 
 1. **Full TaskGroup expansion** — lower a `@task_group` / `TaskGroup.partial().expand()` into its
    member tasks (a for-each over the group when mapped) instead of a placeholder.
-2. **Additional sensor families** — as demand warrants; unmapped sensors route to a placeholder.
+2. **Additional sensor families**: as demand warrants; unmapped sensors route to a placeholder.

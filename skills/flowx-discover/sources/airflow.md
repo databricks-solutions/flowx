@@ -12,7 +12,7 @@ classified:
 
 - **Deterministic** — a mapped operator (PythonOperator, BashOperator) that becomes a generated
   notebook task.
-- **Agentic** — an operator with no deterministic mapping; emitted as a placeholder for
+- **Agentic**: an operator with no deterministic mapping; emitted as a placeholder for
   LLM-assisted translation.
 
 ## Step 1 — Determine the Airflow source path
