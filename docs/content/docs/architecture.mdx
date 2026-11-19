@@ -30,6 +30,8 @@ Each activity is classified with a `TranslationStrategy`:
 
 The reporting layer (`reporting/`) can write per-run coverage to a Unity Catalog table and publish an AI/BI dashboard. Airflow rows use independently audited candidates as the denominator and persist reconciliation status, failed/excluded counts, stable finding fingerprints, translation-path coverage, deterministic coverage, reviewed agentic outcomes, and mechanically validated code-attached coverage. Provider-authored code remains distinct from deterministic translation and requires human review.
 
+After package, the optional **validate** phase (`validate/`) reviews the bundle against the source pipelines and fixes it in place; see [Validate](/docs/validate).
+
 ## Two surfaces over one core
 
 ```text

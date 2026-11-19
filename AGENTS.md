@@ -63,6 +63,12 @@ intermediates under `.work/` (pruned by `package`).
    multi-pipeline factory is laid out into bundles; a top-level `DEPLOY.md` records the suggested
    callees-first deploy order for every mode.
 
+An optional **Validate** phase (`python -m flowx.adapter validate <prepare|record|apply|publish>`) runs
+after Package: static checks, then an agent reviews each task's orchestration against the source
+pipeline, the library stamps and scores the findings into `metadata/validation/`, and the agent fixes the
+bundle YAML in place until a threshold, the iteration budget, or a repeated bundle hash stops the loop.
+The `flowx-validate` skill drives it.
+
 An optional **Extract** step (`python -m flowx.adapter extract --source adf`, ADF only) runs before
 Discover when the user has no export: it pulls one factory's definitions live from Azure Resource
 Manager (one paginated list call per resource type, throttling-aware retries) into the native layout
@@ -104,6 +110,11 @@ estimates current ADF spend from a live Azure scan and writes `metadata/tco/cost
 | `bundler/deployer.py` | Ordered multi-bundle deploy: discovers bundles, deploys callees first, wires cross-bundle job ids                                                             |
 | `bundler/notebook_writer.py` | Writes generated notebooks to bundle                                                                                                                          |
 | `bundler/setup_generator.py` | Setup scripts for UC volumes, secrets, connections                                                                                                            |
+| `models/validation.py` | Validate records: findings, stamps, per-iteration records, run report |
+| `validate/agentic.py` | Validate phase loop: static checks, review targets, stamps, reports, in-place remediation |
+| `validate/scoring.py` | Validate scoring: per-task score, verdict, job roll-up, weighted approval rate |
+| `validate/bundle_objects.py` | Reads jobs/tasks from bundles; content hashes, diffs, static checks |
+| `validate/results_table.py` | Writes validate stamps to a UC table, one row per object per iteration |
 | `reporting/coverage.py` | Builds per-pipeline coverage rows from `metadata/`                                                                                                            |
 | `reporting/results.py` | Writes per-run coverage to a UC table (run_id/run_date/run_by) via the SDK                                                                                    |
 | `reporting/dashboard.py` | Installs + publishes an AI/BI coverage dashboard over the results table                                                                                       |

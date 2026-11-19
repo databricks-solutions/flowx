@@ -17,6 +17,7 @@
     "./skills/flowx-profile",
     "./skills/flowx-convert",
     "./skills/flowx-package",
+    "./skills/flowx-validate",
     "./skills/flowx-deploy",
     "./skills/flowx-migrate"
   ]
