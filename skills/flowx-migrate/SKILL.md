@@ -27,7 +27,7 @@ This is the top-level orchestration skill. It runs the full migration pipeline:
 0. **Extract** (ADF only, optional) — If the user has no export yet, get the factory's
    definitions with `flowx-extract-metadata`
 1. **Discover** — Parse the source's definitions into a typed inventory
-2. **Enrich** *(optional)* — Author the agentic `insights` layer over the inventory and merge it
+2. **Enrich** *(optional)*: Author the agentic `insights` layer over the inventory and merge it
    (`flowx-enrich`); it runs unless the user asks for a deterministic-only pass
 3. **Convert (deterministic baseline)** — Convert the source's tasks to Databricks IR, producing
    `.work/translation_report.json` (`flowx-convert`). Runs **before** routing
@@ -159,12 +159,12 @@ If the user says no, explain the options:
 
 If the user says yes, proceed to Step 4.
 
-### Step 4 — Enrich the inventory (optional)
+### Step 4: Enrich the inventory (optional)
 
 Unless the user chose a deterministic-only pass, chain into enrichment: invoke the
 **`flowx:flowx-enrich`** skill to author the agentic `insights` layer (factory-wide recommendation,
 per-pipeline intent + recommended Databricks patterns, cross-pipeline relationships) and merge it
-into `<output_dir>/metadata/inventory.json`. flowx has no LLM — you author the insights JSON and
+into `<output_dir>/metadata/inventory.json`. flowx has no LLM: you author the insights JSON and
 `enrich` validates + merges it additively, leaving every deterministic inventory key byte-identical.
 The routing step consumes this block to present the agentic conversion option per group.
 

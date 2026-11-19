@@ -50,7 +50,7 @@ whatever valid insights you give it, so a partial set is fine.
 ## When to skip enrich (deterministic-only)
 
 Enrichment is optional: `flowx-migrate` runs it unless the user asks for a deterministic-only pass.
-A standalone, deterministic-only discover — no agent, no LLM — is fully valid:
+A standalone, deterministic-only discover, with no agent and no LLM, is fully valid:
 `metadata/inventory.json` from discover is complete and self-standing without an `insights` block,
 and `flowx-route` still recommends and records a plan from the deterministic structure alone (the
 agentic option simply shows no recommended patterns). Skip enrich when the caller asked for a

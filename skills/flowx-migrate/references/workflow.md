@@ -85,8 +85,8 @@ ADF JSON Exports
 4. `enrich` validates the insights against the inventory and the saved source graphs and, only when they are valid, records them and rebuilds the inventory
 
 **Output:**
-- `agentic_insights.json` — the validated insights, bound to the saved `source_graphs.json` (for Airflow, to `inventory.json`)
-- `inventory.json` — rebuilt with a single additive `insights` key
+- `agentic_insights.json`: the validated insights, bound to the saved `source_graphs.json` (for Airflow, to `inventory.json`)
+- `inventory.json`: rebuilt with a single additive `insights` key
 
 **Key decisions:**
 - Enrich contains no LLM: the agent authors, the library validates and records.
@@ -135,9 +135,9 @@ ADF JSON Exports
 5. Fill each routed-agentic unit with `fill-agentic`, which stores the fill in `agentic_conversion.json` and rebuilds the report
 
 **Output:**
-- `conversion_plan.json` — the recommendation, the decisions and the routing conversation
-- `routing_review.html` — the review page drawn from the plan
-- `translation_report.json` and `gaps.json` — rebuilt; they carry a routing record when any unit is agentic or a gap fill applies
+- `conversion_plan.json`: the recommendation, the decisions and the routing conversation
+- `routing_review.html`: the review page drawn from the plan
+- `translation_report.json` and `gaps.json`: rebuilt; they carry a routing record when any unit is agentic or a gap fill applies
 
 **Key decisions:**
 - Route contains no LLM. Applying a fully decided plan needs the report convert wrote; without one it refuses ("run the convert phase first").
