@@ -605,10 +605,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     validate.add_argument("--reset", action="store_true", help="prepare: start a new run.")
     validate.add_argument(
-        "--bundle-validate", action="store_true", help="prepare: also run databricks bundle validate (local CLI)."
+        "--no-bundle-validate",
+        dest="bundle_validate",
+        action="store_false",
+        help="prepare: skip databricks bundle validate (it runs by default when the CLI is on PATH).",
     )
     validate.add_argument("--profile", default=None, help="prepare: Databricks CLI profile for bundle validate.")
-    validate.add_argument("--report", type=Path, default=None, help="prepare: translation report (default: .work/).")
+    validate.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="prepare: translation report (default: metadata/translation_report.json, kept by package).",
+    )
     validate.add_argument("--reviews-path", type=Path, default=None, help="record: the agent's reviews JSON.")
     validate.add_argument("--edits-path", type=Path, default=None, help="apply: the agent's bundle edits JSON.")
     validate.add_argument("--approve", action="store_true", help="apply: the user approved these edits.")

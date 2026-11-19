@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,23 @@ VALIDATION_RESULTS_COLUMNS: tuple[tuple[str, str], ...] = (
     ("ruleset_version", "STRING"),
     ("content_hash", "STRING"),
 )
+
+
+_IDENTIFIER_PART = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,254}")
+
+
+def quote_table_name(table_fqn: str) -> str:
+    """Returns *table_fqn* as a backtick-quoted ``catalog.schema.table``.
+
+    Raises:
+        ValueError: When the name is not exactly three parts of letters, digits, ``_``, and ``-``.
+    """
+    parts = table_fqn.split(".")
+    if len(parts) != 3 or not all(_IDENTIFIER_PART.fullmatch(part) for part in parts):
+        raise ValueError(
+            f"results table {table_fqn!r} must be catalog.schema.table, each part made of letters, digits, _ or -."
+        )
+    return ".".join(f"`{part}`" for part in parts)
 
 
 def build_rows(iterations: list[ValidationIteration]) -> list[dict[str, Any]]:
@@ -60,7 +78,7 @@ def _value_sql(column: str, value: Any) -> str:
 def build_create_table_sql(table_fqn: str) -> str:
     """Returns ``CREATE TABLE IF NOT EXISTS`` for the validation results table."""
     columns = ",\n  ".join(f"{name} {sql_type}" for name, sql_type in VALIDATION_RESULTS_COLUMNS)
-    return f"CREATE TABLE IF NOT EXISTS {table_fqn} (\n  {columns}\n)"
+    return f"CREATE TABLE IF NOT EXISTS {quote_table_name(table_fqn)} (\n  {columns}\n)"
 
 
 def build_insert_sql(table_fqn: str, rows: list[dict[str, Any]]) -> str:
@@ -77,7 +95,9 @@ def build_insert_sql(table_fqn: str, rows: list[dict[str, Any]]) -> str:
         )
         for row in rows
     ]
-    return f"INSERT INTO {table_fqn} ({', '.join(names)}) VALUES\n  " + ",\n  ".join(f"({row})" for row in values)
+    return f"INSERT INTO {quote_table_name(table_fqn)} ({', '.join(names)}) VALUES\n  " + ",\n  ".join(
+        f"({row})" for row in values
+    )
 
 
 def write_validation_results(
@@ -95,8 +115,9 @@ def write_validation_results(
         ``(run_id, row_count)``.
 
     Raises:
-        ValueError: When no validation iteration has been recorded.
+        ValueError: When *table_fqn* is not a valid three-part name, or no validation iteration has been recorded.
     """
+    table = quote_table_name(table_fqn)
     report = load_report(output_dir)
     rows = build_rows(load_iterations(output_dir))
     if report is None or not rows:
@@ -107,6 +128,6 @@ def write_validation_results(
         client = _get_workspace_client()
     warehouse = resolve_warehouse_id(client, warehouse_id)
     execute_statement(client, build_create_table_sql(table_fqn), warehouse)
-    execute_statement(client, f"DELETE FROM {table_fqn} WHERE run_id = {sql_string(report.run_id)}", warehouse)
+    execute_statement(client, f"DELETE FROM {table} WHERE run_id = {sql_string(report.run_id)}", warehouse)
     execute_statement(client, build_insert_sql(table_fqn, rows), warehouse)
     return report.run_id, len(rows)

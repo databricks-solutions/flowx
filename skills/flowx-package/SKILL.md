@@ -199,8 +199,9 @@ Where:
   Pass `--report <path>` only to override.
 - Other parameters are from step 2
 - After a successful build, `package` **prunes the transient `<output_dir>/.work/`** so the
-  final tree contains only the bundle and the kept `metadata/` files. Pass `--keep-intermediates`
-  to retain `.work/` for debugging.
+  final tree contains only the bundle and the kept `metadata/` files. Before pruning it copies the
+  report it built from to `metadata/translation_report.json`, which `flowx-validate` reads. Pass
+  `--keep-intermediates` to retain `.work/` for debugging.
 
 **Workspace artifact downloading (default: enabled).** When the report references workspace-resident notebooks (`/Shared/...`), DBFS Spark JARs (`dbfs:/...`), or Spark Python files, the preparer downloads them via the Databricks CLI auth so the resulting bundle is self-contained and deployable across environments. Downloaded notebooks are downloaded under `src/notebooks/` and bound to the default `job_cluster` (since they may rely on classic-compute features). The original `notebook_path` in the resource YAML is rewritten to the bundle-relative path `../src/notebooks/<file>.py`.
 

@@ -114,7 +114,7 @@ flowx(command="convert", parameters={"source": "adf", "output_dir": ..., "pipeli
 flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., "agentic_results_dir": ..., "output_path": ...})  # ADF only, if agentic results
 flowx(command="inspect", parameters={"report_path": ...})
 flowx(command="apply_answers", parameters={"report_path": ..., "answers": [...], "output_dir": ...})
-flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema": ..., "keep_intermediates": true})
+flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema": ...})
 flowx(command="validate", parameters={"output_dir": ..., "action": "prepare"})  # default: review loop (see flowx-validate)
 flowx(command="record_results", parameters={...}) / flowx(command="install_dashboard", parameters={...})
 ```
@@ -357,8 +357,8 @@ Invoke the `flowx:flowx-package` skill with:
 - Schema: user-specified or `default`
 
 Package prunes the transient `<output_dir>/.work/` after a successful build, leaving the
-bundle (databricks.yml, resources/, src/, SETUP.md) plus the kept `metadata/` folder. When validate
-will run (the default), pass `--keep-intermediates` so validate can read the translation report.
+bundle (databricks.yml, resources/, src/, SETUP.md) plus the kept `metadata/` folder. It keeps a copy
+of the translation report at `metadata/translation_report.json`, which validate reads.
 
 ### Step 7.2 — Phase 4: Validate
 
@@ -446,7 +446,7 @@ Next Steps:
 ### Step 9 — Offer follow-up actions
 
 Ask if the user wants to:
-1. Validate the bundle now (`databricks bundle validate`, or `flowx-validate` with `--bundle-validate`)
+1. Validate the bundle now (`databricks bundle validate`, which `flowx-validate` also runs when the CLI is available)
 2. Deploy to dev (`databricks bundle deploy --target dev`)
 3. Review specific generated files
 4. Re-translate any failed activities
@@ -473,4 +473,5 @@ All three phases write into a single shared `<output_dir>` (default `./flowx_out
 | `metadata/` | Profile + Modify | `inventory.json`, `profile_report.csv`, `<pipeline>.arm.json`, `configuration.json` |
 | `databricks.yml`, `resources/`, `src/`, `SETUP.md` | Package | The deployable DAB bundle |
 | `metadata/validation/` | Validate | `validation_report.json` + per-iteration records under `runs/<run_id>/` |
-| `.work/` | Convert/Modify (transient) | Translation report + IR; pruned by package unless `--keep-intermediates` |
+| `metadata/translation_report.json` | Package | The translation report package built from, kept for validate |
+| `.work/` | Convert/Modify (transient) | Translation report + IR; pruned by package |

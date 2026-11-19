@@ -279,6 +279,7 @@ flowx_output/
     profile_report.csv        # discover: per-pipeline complexity report
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
     configuration.json        # modify: collected configuration answers
+    translation_report.json   # package: the translation report it built from, kept for validate
     validation/               # validate: validation_report.json + runs/<run_id>/iteration_NNN.json
   .work/                      # transient intermediates (translation report, IR, gaps.json); pruned by package
 ```

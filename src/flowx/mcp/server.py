@@ -58,7 +58,7 @@ Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("convert", {"source": "adf", "output_dir": "..."})
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
-  flowx("package", {"output_dir": "...", "catalog": "main", "schema": "default", "keep_intermediates": true})
+  flowx("package", {"output_dir": "...", "catalog": "main", "schema": "default"})
   flowx("validate", {"output_dir": "...", "action": "prepare"})  # optional: review the bundle (flowx-validate)
 To estimate current ADF spend (live Azure scan; needs the server's `azure` extra and Azure
 credentials in its environment):
@@ -395,7 +395,6 @@ _VALIDATE_SWITCHES = {
     "dry_run": "--dry-run",
     "require_approval": "--require-approval",
     "reset": "--reset",
-    "bundle_validate": "--bundle-validate",
     "approve": "--approve",
 }
 
@@ -408,6 +407,8 @@ def _cmd_validate(p: dict[str, Any]) -> dict[str, Any]:
     args: list[Any] = ["validate", action, "--output-dir", p.get("output_dir", "./flowx_output")]
     args += [item for key, flag in _VALIDATE_PREPARE_FLAGS.items() if p.get(key) is not None for item in (flag, p[key])]
     args += [flag for key, flag in _VALIDATE_SWITCHES.items() if p.get(key)]
+    if p.get("bundle_validate") is False:
+        args += ["--no-bundle-validate"]
     if p.get("results_table"):
         args += ["--results-table", p["results_table"]]
     if p.get("warehouse_id"):
@@ -730,11 +731,13 @@ def build_server() -> FastMCP:
           to the inventory's source_graphs_sha256 when it records one. The flowx-enrich skill covers the
           insights shape and what to do when enrich reports a leftover lock.
         - "validate": action(prepare | record | apply | publish, default prepare), output_dir. prepare:
-          pipeline, threshold, max_iterations, dry_run, require_approval, reset, report_path — run static
-          checks and return the objects to review with their source pipelines. record: reviews(req, inline
-          object or its JSON text) — stamp and score the reviews; `result.violations` lists problems. apply:
-          edits(req, list of {path, content}), approve — fix bundle YAML in place. publish: results_table(req),
-          warehouse_id. The flowx-validate skill covers the loop, the review shape, and the scoring.
+          pipeline, threshold, max_iterations, dry_run, require_approval, reset, report_path,
+          bundle_validate(bool, default true) — run static checks and return the objects to review with
+          their source pipelines; `databricks bundle validate` is recorded as skipped when the server has
+          no CLI. record: reviews(req, inline object or its JSON text) — stamp and score the reviews;
+          `result.violations` lists problems. apply: edits(req, list of {path, content}), approve — fix
+          bundle YAML in place. publish: results_table(req), warehouse_id. The flowx-validate skill covers
+          the loop, the review shape, and the scoring.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

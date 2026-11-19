@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from flowx.bundler.constants import KEPT_TRANSLATION_REPORT
 from flowx.models.validation import (
     RULESET_VERSION,
     SEVERITIES,
@@ -33,6 +34,7 @@ from flowx.validate.bundle_objects import (
     bundle_hash,
     collect_objects,
     find_bundles,
+    is_editable,
     object_diff,
     run_static_checks,
     text_diff,
@@ -48,7 +50,6 @@ from flowx.validate.scoring import (
 
 STATIC_REVIEWER = "flowx-static"
 _FINDING_KEYS = frozenset(field.name for field in fields(ValidationFinding))
-_EDITABLE_SUFFIXES = (".yml", ".yaml")
 
 
 def validation_dir(output_dir: Path) -> Path:
@@ -111,15 +112,12 @@ def _customizations(output_dir: Path) -> dict[str, Any]:
 
 
 def _translation_entries(output_dir: Path, translation_report: Path | None) -> dict[str, Any]:
-    work = Path(output_dir) / ".work"
-    candidates = (
-        [translation_report]
-        if translation_report
-        else [work / "translation_report.stamped.json", work / "translation_report.json"]
-    )
-    path = next((candidate for candidate in candidates if candidate and candidate.is_file()), None)
-    if path is None:
-        return {}
+    path = translation_report or Path(output_dir) / KEPT_TRANSLATION_REPORT
+    if not path.is_file():
+        raise ValueError(
+            f"No translation report at {path}. Run package, which keeps it at {KEPT_TRANSLATION_REPORT}, "
+            "or pass the convert report with --report."
+        )
     pipelines = _read_json(path).get("pipelines") or []
     return {
         entry["name"]: {key: value for key, value in entry.items() if key != "tasks"}
@@ -160,7 +158,7 @@ def prepare_validation(
     dry_run: bool | None = None,
     require_approval: bool | None = None,
     reset: bool = False,
-    bundle_validate: bool = False,
+    bundle_validate: bool = True,
     profile: str = "",
     translation_report: Path | None = None,
 ) -> dict[str, Any]:
@@ -179,20 +177,23 @@ def prepare_validation(
         dry_run: Review only; never change the bundle.
         require_approval: Make remediation wait for user approval.
         reset: Start a new run even when one is in progress. Approved stamps still carry over.
-        bundle_validate: Also run ``databricks bundle validate`` as a static check.
+        bundle_validate: Run ``databricks bundle validate`` as a static check when the CLI is available;
+            otherwise the check is recorded as skipped with the reason.
         profile: Databricks CLI profile for ``bundle validate``.
-        translation_report: The convert report; defaults to the one under ``.work/``.
+        translation_report: The convert report; defaults to the copy package keeps in ``metadata/``.
 
     Returns:
         ``status`` is ``review`` (review ``targets``), ``static_failed`` (fix ``static`` findings), or
         ``terminated`` (the run already ended; pass ``reset`` to start again).
 
     Raises:
-        ValueError: When the output folder holds no bundle, or settings are out of range.
+        ValueError: When the output folder holds no bundle, *pipeline* matches nothing, the translation
+            report is missing, or settings are out of range.
     """
     output_dir = Path(output_dir)
-    if not find_bundles(output_dir):
+    if not find_bundles(output_dir, pipeline or ""):
         raise ValueError(f"No bundle (databricks.yml) under {output_dir}; run package first.")
+    translation = _translation_entries(output_dir, translation_report)
     if threshold is not None and not 0 < threshold <= 1:
         raise ValueError("threshold must be greater than 0 and at most 1.")
     if max_iterations is not None and max_iterations < 1:
@@ -216,10 +217,12 @@ def prepare_validation(
     iteration = report.iterations + 1
     bundle_dirs = find_bundles(output_dir, report.pipeline)
     content_hash = bundle_hash(bundle_dirs)
-    static = run_static_checks(bundle_dirs, bundle_validate=bundle_validate, profile=profile)
+    static, checks = run_static_checks(bundle_dirs, bundle_validate=bundle_validate, profile=profile)
     if static:
         stamps = [_static_stamp(bundle, findings, iteration) for bundle, findings in static.items()]
-        summary = _finish_iteration(output_dir, report, iteration, content_hash, stamps, [], STATIC_REVIEWER, static)
+        summary = _finish_iteration(
+            output_dir, report, iteration, content_hash, stamps, [], STATIC_REVIEWER, static, checks
+        )
         return {"ok": True, "status": "static_failed", **summary}
     objects = collect_objects(output_dir, report.pipeline)
     prior = _prior_stamps(output_dir, report)
@@ -231,6 +234,7 @@ def prepare_validation(
             "iteration": iteration,
             "content_hash": content_hash,
             "targets": [item.object_id for item in targets],
+            "checks": checks,
         },
     )
     jobs = {item.job: item for item in objects if item.object_kind == "job"}
@@ -240,12 +244,11 @@ def prepare_validation(
         "run_id": report.run_id,
         "iteration": iteration,
         "settings": _settings(report),
+        "checks": checks,
         "targets": [_target_view(item) for item in targets],
         "skipped": [item.object_id for item in objects if item not in targets],
         "sources": {job: _source_definition(output_dir, job, item.definition) for job, item in jobs.items()},
-        "translation": {
-            name: entry for name, entry in _translation_entries(output_dir, translation_report).items() if name in jobs
-        },
+        "translation": {name: entry for name, entry in translation.items() if name in jobs},
         "customizations": _customizations(output_dir),
         "ruleset": {"version": RULESET_VERSION, "severities": SEVERITY_PENALTIES, "rejection_score": REJECTION_SCORE},
     }
@@ -328,7 +331,9 @@ def record_validation(output_dir: Path, reviews: dict[str, Any]) -> dict[str, An
     prior = _prior_stamps(output_dir, report)
     iteration = pending["iteration"]
     stamps = _stamp_objects(objects, findings_by_object, prior, reviewer, iteration)
-    summary = _finish_iteration(output_dir, report, iteration, content_hash, stamps, objects, reviewer, {})
+    summary = _finish_iteration(
+        output_dir, report, iteration, content_hash, stamps, objects, reviewer, {}, pending.get("checks", [])
+    )
     pending_path.unlink()
     return {"ok": True, **summary}
 
@@ -374,19 +379,34 @@ def _parse_finding(
         if not isinstance(raw.get(key), str) or not raw[key]
     ]
     problems += [
-        f"{key} must be a string" for key in ("location", "customization") if not isinstance(raw.get(key, ""), str)
+        f"{key} must be a string"
+        for key in ("location", "customization", "customization_value")
+        if not isinstance(raw.get(key, ""), str)
     ]
     if raw.get("severity") not in SEVERITIES:
         problems.append(f"severity must be one of {list(SEVERITIES)}")
-    customization = raw.get("customization", "")
-    if customization and customization not in customizations:
-        problems.append(f"customization {customization!r} is not an option in metadata/configuration.json")
-    if customization and raw.get("severity") == "blocker":
-        problems.append("a blocker cannot be excused by a customization")
+    problems += _waiver_problems(raw, customizations)
     if problems:
         violations.extend(f"{label}: {problem}." for problem in problems)
         return None
     return finding_from_dict(raw)
+
+
+def _waiver_problems(raw: dict[str, Any], customizations: dict[str, Any]) -> list[str]:
+    option = raw.get("customization", "")
+    value = raw.get("customization_value", "")
+    if not option:
+        return ["customization_value needs a customization option"] if value else []
+    if raw.get("severity") == "blocker":
+        return ["waiver rejected: a blocker cannot be excused by a customization"]
+    if option not in customizations:
+        return [f"waiver rejected: {option!r} is not an option in metadata/configuration.json"]
+    if value != str(customizations[option]):
+        return [
+            f"waiver rejected: customization_value {value!r} does not match the chosen "
+            f"{option}={customizations[option]!r} in metadata/configuration.json"
+        ]
+    return []
 
 
 def _stamp_objects(
@@ -446,6 +466,7 @@ def _finish_iteration(
     objects: list[BundleObject],
     reviewer: str,
     static: dict[str, list[ValidationFinding]],
+    checks: list[dict[str, str]],
 ) -> dict[str, Any]:
     previous = load_iterations(output_dir)
     snapshots = {item.object_id: item.definition for item in objects}
@@ -465,6 +486,7 @@ def _finish_iteration(
         terminated=terminated,
         stamps=stamps,
         static=[finding for findings in static.values() for finding in findings],
+        checks=checks,
         diffs=diffs,
         snapshots=snapshots,
     )
@@ -475,6 +497,7 @@ def _finish_iteration(
     report.approval_rate = rate
     report.content_hash = content_hash
     report.stamps = stamps
+    report.static_checks = checks
     report.trajectory = [
         *report.trajectory,
         {"iteration": iteration, "approval_rate": rate, "content_hash": content_hash, "terminated": terminated},
@@ -487,6 +510,7 @@ def _finish_iteration(
         "threshold": report.threshold,
         "terminated": terminated,
         "static": [asdict(finding) for finding in record.static],
+        "checks": checks,
         "actionable": actionable_findings(stamps),
         "changed_objects": sorted(diffs),
         "report_path": str(report_path(output_dir)),
@@ -576,8 +600,9 @@ def _resolve_edits(
             errors.append(f"edits[{index}] needs a string path and content")
             continue
         path = (output_dir / relative).resolve()
-        if path.suffix not in _EDITABLE_SUFFIXES or not any(path.is_relative_to(bundle) for bundle in bundle_dirs):
-            errors.append(f"edits[{index}]: {relative} is not a YAML file inside a bundle")
+        bundle = next((bundle for bundle in bundle_dirs if path.is_relative_to(bundle)), None)
+        if bundle is None or not is_editable(path.relative_to(bundle)):
+            errors.append(f"edits[{index}]: {relative} is not databricks.yml or resource YAML inside a bundle")
             continue
         resolved.append((path.relative_to(output_dir).as_posix(), path, content))
     return resolved, errors

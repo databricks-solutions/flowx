@@ -1,0 +1,233 @@
+{
+  "name": "all-activity-types",
+  "parameters": [
+    {
+      "name": "items",
+      "type": "Array",
+      "default": [
+        "one"
+      ]
+    }
+  ],
+  "schedule": {
+    "kind": "file_arrival",
+    "url": "<STORAGE_ACCOUNT_ID>",
+    "events": [
+      "Microsoft.Storage.BlobCreated"
+    ],
+    "pause_status": "PAUSED"
+  },
+  "tags": {
+    "source": "adf",
+    "pipeline": "all-activity-types"
+  },
+  "tasks": [
+    {
+      "name": "_init_status",
+      "task_key": "_init_status",
+      "type": "SetVariableActivity",
+      "variable_name": "status",
+      "variable_value": "new",
+      "value_kind": "literal"
+    },
+    {
+      "name": "append-variable",
+      "task_key": "append-variable",
+      "type": "AppendVariableActivity",
+      "variable_name": "results",
+      "append_value": "ok",
+      "value_kind": "literal"
+    },
+    {
+      "name": "copy",
+      "task_key": "copy",
+      "type": "CopyActivity",
+      "source_type": "DelimitedTextSource",
+      "sink_type": "ParquetSink",
+      "source_properties": {
+        "linked_service_name": "adls-gen2",
+        "connection": {
+          "type": "AzureBlobFS"
+        }
+      },
+      "sink_properties": {
+        "volume_name": "curated",
+        "volume_external_location": "abfss://curated@${var.storage_account}.dfs.core.windows.net/",
+        "volume_relative_path": "parquet",
+        "volume_location_type": "AzureBlobFSLocation",
+        "linked_service_name": "adls-gen2",
+        "resolved_path": "/Volumes/${var.catalog}/${var.schema}/curated/parquet"
+      },
+      "sink_dataset_type": "Parquet",
+      "sink_format": "parquet",
+      "sink_resolved_path": "/Volumes/${var.catalog}/${var.schema}/curated/parquet"
+    },
+    {
+      "name": "databricks-job",
+      "task_key": "databricks-job",
+      "type": "RunJobActivity",
+      "job_name": "1",
+      "existing_job_id": "1"
+    },
+    {
+      "name": "delete",
+      "task_key": "delete",
+      "type": "DeleteActivity",
+      "dataset_name": "",
+      "recursive": true
+    },
+    {
+      "name": "execute-child",
+      "task_key": "execute-child",
+      "type": "ExecutePipelineActivity",
+      "pipeline_name": "child-pipeline",
+      "wait_on_completion": true
+    },
+    {
+      "name": "filter",
+      "task_key": "filter",
+      "type": "FilterActivity",
+      "items_expression": "{{job.parameters.items}}",
+      "condition_expression": "@not(empty(item()))",
+      "condition_code": "(not (len(item.get('input')) == 0))"
+    },
+    {
+      "name": "foreach",
+      "task_key": "foreach",
+      "type": "ForEachActivity",
+      "items_expression": "{{job.parameters.items}}",
+      "concurrency": 20,
+      "inner_activities": [
+        {
+          "name": "foreach-wait",
+          "task_key": "foreach-wait",
+          "type": "WaitActivity",
+          "wait_time_seconds": 1
+        }
+      ]
+    },
+    {
+      "name": "if-condition",
+      "task_key": "if-condition",
+      "type": "IfConditionActivity",
+      "op": "EQUAL_TO",
+      "left": "1",
+      "right": "1",
+      "if_true_activities": [
+        {
+          "name": "true-wait",
+          "task_key": "true-wait",
+          "type": "WaitActivity",
+          "wait_time_seconds": 1
+        }
+      ],
+      "if_false_activities": [
+        {
+          "name": "false-wait",
+          "task_key": "false-wait",
+          "type": "WaitActivity",
+          "wait_time_seconds": 1
+        }
+      ]
+    },
+    {
+      "name": "lookup",
+      "task_key": "lookup",
+      "type": "LookupActivity",
+      "source_type": "AzureSqlSource",
+      "source_properties": {
+        "sqlReaderQuery": "SELECT 1 AS value"
+      },
+      "first_row_only": true,
+      "source_query": "SELECT 1 AS value"
+    },
+    {
+      "name": "notebook",
+      "task_key": "notebook",
+      "type": "NotebookActivity",
+      "cluster": {
+        "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+        "_adf_authentication": "MSI"
+      },
+      "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+      "notebook_path": "/Shared/flowx/integration"
+    },
+    {
+      "name": "set-variable",
+      "task_key": "set-variable",
+      "type": "SetVariableActivity",
+      "variable_name": "status",
+      "variable_value": "running",
+      "value_kind": "literal"
+    },
+    {
+      "name": "spark-jar",
+      "task_key": "spark-jar",
+      "type": "SparkJarActivity",
+      "cluster": {
+        "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+        "_adf_authentication": "MSI"
+      },
+      "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+      "main_class_name": "com.example.Integration"
+    },
+    {
+      "name": "spark-python",
+      "task_key": "spark-python",
+      "type": "SparkPythonActivity",
+      "cluster": {
+        "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+        "_adf_authentication": "MSI"
+      },
+      "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+      "python_file": "dbfs:/flowx/integration.py"
+    },
+    {
+      "name": "switch",
+      "task_key": "switch",
+      "type": "SwitchActivity",
+      "on_expression": "{{tasks.set-variable.values.status}}",
+      "cases": [
+        {
+          "value": "running",
+          "activities": [
+            {
+              "name": "case-wait",
+              "task_key": "case-wait",
+              "type": "WaitActivity",
+              "wait_time_seconds": 1
+            }
+          ]
+        }
+      ],
+      "default_activities": [
+        {
+          "name": "default-wait",
+          "task_key": "default-wait",
+          "type": "WaitActivity",
+          "wait_time_seconds": 1
+        }
+      ]
+    },
+    {
+      "name": "wait",
+      "task_key": "wait",
+      "type": "WaitActivity",
+      "wait_time_seconds": 1
+    },
+    {
+      "name": "web",
+      "task_key": "web",
+      "type": "WebActivity",
+      "url": "https://example.invalid/flowx",
+      "method": "GET"
+    }
+  ],
+  "not_translatable": [],
+  "reconciliation_status": null,
+  "migration_status": "included",
+  "audit": {},
+  "synthesized_variable_init_keys": [
+    "_init_status"
+  ]
+}

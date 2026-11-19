@@ -1,0 +1,256 @@
+{
+  "name": "agentic-activities",
+  "parameters": null,
+  "schedule": null,
+  "tags": {
+    "source": "adf",
+    "pipeline": "agentic-activities"
+  },
+  "tasks": [
+    {
+      "name": "azure-function",
+      "task_key": "azure-function",
+      "type": "PlaceholderActivity",
+      "cluster": {
+        "_adf_authentication": "Anonymous"
+      },
+      "original_type": "AzureFunction",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "linkedServiceName": {
+          "referenceName": "azure-function-parameterized",
+          "type": "LinkedServiceReference"
+        },
+        "name": "azure-function",
+        "type": "AzureFunction",
+        "typeProperties": {
+          "functionName": "flowx",
+          "method": "GET"
+        }
+      }
+    },
+    {
+      "name": "azure-ml",
+      "task_key": "azure-ml",
+      "type": "PlaceholderActivity",
+      "original_type": "AzureMLExecutePipeline",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "name": "azure-ml",
+        "type": "AzureMLExecutePipeline",
+        "typeProperties": {
+          "mlPipelineId": "<AZURE_ML_PIPELINE_ID>",
+          "version": "1"
+        }
+      }
+    },
+    {
+      "name": "custom",
+      "task_key": "custom",
+      "type": "PlaceholderActivity",
+      "original_type": "Custom",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "linkedServiceName": {
+          "referenceName": "batch-parameterized",
+          "type": "LinkedServiceReference"
+        },
+        "name": "custom",
+        "type": "Custom",
+        "typeProperties": {
+          "command": "echo flowx",
+          "folderPath": "integration",
+          "resourceLinkedService": {
+            "referenceName": "blob",
+            "type": "LinkedServiceReference"
+          }
+        }
+      }
+    },
+    {
+      "name": "data-flow",
+      "task_key": "data-flow",
+      "type": "PlaceholderActivity",
+      "original_type": "ExecuteDataFlow",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "name": "data-flow",
+        "type": "ExecuteDataFlow",
+        "typeProperties": {
+          "compute": {
+            "computeType": "General",
+            "coreCount": 8
+          },
+          "dataFlow": {
+            "referenceName": "placeholder-data-flow",
+            "type": "DataFlowReference"
+          }
+        }
+      }
+    },
+    {
+      "name": "fail",
+      "task_key": "fail",
+      "type": "PlaceholderActivity",
+      "original_type": "Fail",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "name": "fail",
+        "type": "Fail",
+        "typeProperties": {
+          "errorCode": "FLOWX_TEST",
+          "message": "intentional integration fixture"
+        }
+      }
+    },
+    {
+      "name": "get-metadata",
+      "task_key": "get-metadata",
+      "type": "PlaceholderActivity",
+      "original_type": "GetMetadata",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "name": "get-metadata",
+        "type": "GetMetadata",
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "csv-adls",
+            "type": "DatasetReference"
+          },
+          "fieldList": [
+            "exists"
+          ]
+        }
+      }
+    },
+    {
+      "name": "script",
+      "task_key": "script",
+      "type": "PlaceholderActivity",
+      "original_type": "Script",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "linkedServiceName": {
+          "referenceName": "azure-sql",
+          "type": "LinkedServiceReference"
+        },
+        "name": "script",
+        "type": "Script",
+        "typeProperties": {
+          "scripts": [
+            {
+              "text": "SELECT 1",
+              "type": "Query"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "ssis",
+      "task_key": "ssis",
+      "type": "PlaceholderActivity",
+      "original_type": "ExecuteSSISPackage",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "name": "ssis",
+        "type": "ExecuteSSISPackage",
+        "typeProperties": {
+          "connectVia": {
+            "referenceName": "azure-ssis-placeholder",
+            "type": "IntegrationRuntimeReference"
+          },
+          "packageLocation": {
+            "packagePath": "flowx/package.dtsx",
+            "type": "SSISDB"
+          }
+        }
+      }
+    },
+    {
+      "name": "stored-procedure",
+      "task_key": "stored-procedure",
+      "type": "PlaceholderActivity",
+      "original_type": "SqlServerStoredProcedure",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "linkedServiceName": {
+          "referenceName": "azure-sql",
+          "type": "LinkedServiceReference"
+        },
+        "name": "stored-procedure",
+        "type": "SqlServerStoredProcedure",
+        "typeProperties": {
+          "storedProcedureName": "dbo.flowx_integration"
+        }
+      }
+    },
+    {
+      "name": "until",
+      "task_key": "until",
+      "type": "PlaceholderActivity",
+      "original_type": "Until",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "name": "until",
+        "type": "Until",
+        "typeProperties": {
+          "activities": [
+            {
+              "name": "until-wait",
+              "type": "Wait",
+              "typeProperties": {
+                "waitTimeInSeconds": 1
+              }
+            }
+          ],
+          "expression": {
+            "type": "Expression",
+            "value": "@equals(1,1)"
+          },
+          "timeout": "0.00:01:00"
+        }
+      }
+    },
+    {
+      "name": "validation",
+      "task_key": "validation",
+      "type": "PlaceholderActivity",
+      "original_type": "Validation",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "name": "validation",
+        "type": "Validation",
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "csv-adls",
+            "type": "DatasetReference"
+          },
+          "minimumSize": 0,
+          "sleep": 1,
+          "timeout": "0.00:01:00"
+        }
+      }
+    },
+    {
+      "name": "webhook",
+      "task_key": "webhook",
+      "type": "PlaceholderActivity",
+      "original_type": "WebHook",
+      "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+      "raw_definition": {
+        "name": "webhook",
+        "type": "WebHook",
+        "typeProperties": {
+          "method": "POST",
+          "timeout": "00:01:00",
+          "url": "https://example.invalid/webhook"
+        }
+      }
+    }
+  ],
+  "not_translatable": [],
+  "reconciliation_status": null,
+  "migration_status": "included",
+  "audit": {}
+}

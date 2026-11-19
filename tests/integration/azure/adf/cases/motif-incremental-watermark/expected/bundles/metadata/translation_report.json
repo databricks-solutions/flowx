@@ -1,0 +1,44 @@
+{
+  "name": "motif-incremental-watermark",
+  "parameters": null,
+  "schedule": {
+    "kind": "schedule",
+    "tumbling": true,
+    "frequency": "Hour",
+    "interval": 1,
+    "pause_status": "PAUSED",
+    "note": "Approximated from TumblingWindowTrigger; review window boundaries."
+  },
+  "tags": {
+    "source": "adf",
+    "pipeline": "motif-incremental-watermark"
+  },
+  "tasks": [
+    {
+      "name": "Incremental Load (Watermark)",
+      "task_key": "motif_incremental_load_watermark",
+      "type": "MotifActivity",
+      "description": "Collapsed motif: Incremental Load (Watermark). Replaces 4 ADF activities with auto_loader.",
+      "motif_id": "incremental_load_watermark",
+      "display_name": "Incremental Load (Watermark)",
+      "databricks_replacement": "auto_loader",
+      "matched_activity_names": [
+        "old-watermark",
+        "new-watermark",
+        "incremental-copy",
+        "update-watermark"
+      ],
+      "source_type_hint": "database",
+      "confidence_notes": [
+        "Lookup 'old-watermark' contains watermark-style query",
+        "Lookup 'new-watermark' contains watermark-style query",
+        "StoredProcedure 'update-watermark' updates watermark after Copy"
+      ],
+      "notebook_template": "incremental_watermark.py"
+    }
+  ],
+  "not_translatable": [],
+  "reconciliation_status": null,
+  "migration_status": "included",
+  "audit": {}
+}

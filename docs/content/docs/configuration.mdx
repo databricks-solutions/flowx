@@ -138,8 +138,8 @@ translation strategy, warnings raised during translation, and the location of an
 artifacts. Review the translation report for any warnings, unsupported resources, or to-do
 items before deploying to your Databricks workspace.
 
-The `package` phase prunes `.work/` after building the bundle. Pass `--keep-intermediates` to
-retain it.
+The `package` phase keeps a copy of the report it built from at `metadata/translation_report.json`,
+then prunes `.work/`. Pass `--keep-intermediates` to retain `.work/`.
 
 ## Coverage results table & dashboard (Genie Code)
 

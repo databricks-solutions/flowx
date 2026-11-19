@@ -23,6 +23,8 @@ class ValidationFinding:
         suggested_fix: How a person or an agent can resolve it.
         customization: The ``metadata/configuration.json`` option the difference follows from, when the
             user asked for it. Such findings are recorded but do not lower the score.
+        customization_value: The value the user chose for *customization*, as evidence for the waiver. It
+            must match ``metadata/configuration.json``.
     """
 
     code: str
@@ -31,6 +33,7 @@ class ValidationFinding:
     location: str = ""
     suggested_fix: str = ""
     customization: str = ""
+    customization_value: str = ""
 
 
 @dataclass(slots=True, kw_only=True)
@@ -75,6 +78,7 @@ class ValidationIteration:
         terminated: The stop reason when the loop ended here, else empty.
         stamps: Every current stamp, including ones carried forward unchanged.
         static: Static-check findings; when present no agentic review ran.
+        checks: Each static check run or skipped: ``check``, ``bundle``, ``status``, ``reason``.
         diffs: Unified diff per object whose definition changed since the previous iteration.
         snapshots: The reviewed definition of every object.
         remediation: Bundle files changed after this iteration.
@@ -87,6 +91,7 @@ class ValidationIteration:
     terminated: str = ""
     stamps: list[ValidationStamp] = field(default_factory=list)
     static: list[ValidationFinding] = field(default_factory=list)
+    checks: list[dict[str, str]] = field(default_factory=list)
     diffs: dict[str, str] = field(default_factory=dict)
     snapshots: dict[str, Any] = field(default_factory=dict)
     remediation: list[str] = field(default_factory=list)
@@ -111,6 +116,7 @@ class ValidationReport:
         dry_run: When true the bundle is never changed.
         require_approval: When true remediation waits for user approval.
         pipeline: Job or bundle name the run is limited to, or empty for all.
+        static_checks: The static checks of the latest iteration, including skipped ones and why.
         trajectory: ``iteration`` / ``approval_rate`` / ``content_hash`` per iteration.
     """
 
@@ -128,6 +134,7 @@ class ValidationReport:
     dry_run: bool = False
     require_approval: bool = False
     pipeline: str = ""
+    static_checks: list[dict[str, str]] = field(default_factory=list)
     trajectory: list[dict[str, Any]] = field(default_factory=list)
 
 

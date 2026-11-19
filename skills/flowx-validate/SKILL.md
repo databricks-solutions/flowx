@@ -29,8 +29,11 @@ stamps every object, writes the reports, and applies your fixes.
   schedules, branches, and loops (`for_each_task` inputs and concurrency). Do not grade generated code
   or notebooks.
 - **User choices:** `customizations` holds the answers from `metadata/configuration.json`. When a
-  difference follows from one of them, record the finding with `customization` set to that option id. It
-  is kept in the report but does not lower the score.
+  difference follows from one of them, waive it: set `customization` to the option id and
+  `customization_value` to the value the user chose, copied from `customizations`. The library checks both
+  against `metadata/configuration.json` and rejects the waiver (the record fails with a `waiver rejected`
+  violation) when the option is missing or the value differs. A waived finding is kept in the report but
+  does not lower the score. A blocker cannot be waived.
 
 ## Scoring
 
@@ -52,13 +55,17 @@ The library computes every score and verdict from your findings; you never send 
 
 ## The loop
 
-Run the **`setup`** skill first if you haven't. Package with `--keep-intermediates` (MCP:
-`"keep_intermediates": true`) so the convert report is still under `.work/`; validate shows its
-per-pipeline status in `translation` when it is there.
+Run the **`setup`** skill first if you haven't. Validate needs the translation report: `package` keeps a
+copy at `metadata/translation_report.json`, and `report_path` / `--report` points at another one. Without
+either, prepare fails with an error naming the missing file. A `pipeline` that matches no bundle directory
+or job key also fails, with `Pipeline '<name>' not found`.
 
 1. **Prepare.** Start or resume a run. Static checks run first. If they fail (`status: static_failed`),
    the iteration is already recorded with every failing bundle rejected; fix the `static` findings
-   (step 4) and prepare again. Otherwise (`status: review`) you get the `targets` to review with their
+   (step 4) and prepare again. `checks` lists each static check per bundle as `passed`, `failed`, or
+   `skipped` with a `reason`. `databricks bundle validate` runs by default when the `databricks` CLI is on
+   PATH. Where it is missing (serverless, Genie Code), or when turned off, it is recorded as `skipped`;
+   tell the user it did not run. Otherwise (`status: review`) you get the `targets` to review with their
    `definition`, the `sources`, `translation`, `customizations`, and the `ruleset`. Objects unchanged
    since an `approved` stamp are listed in `skipped` and need no review. `status: terminated` means the
    run already ended; pass `reset` to start a new one.
@@ -77,6 +84,14 @@ per-pipeline status in `translation` when it is there.
          "message": "Source ForEach runs 5 items at a time; the job runs 20.",
          "location": "pl_ingest/resources/pl_ingest.yml",
          "suggested_fix": "Set for_each_task.concurrency to 5."
+       }]},
+       {"object_id": "pl_ingest/copy_orders", "findings": [{
+         "code": "ORCH-COPY-AS-PIPELINE",
+         "severity": "major",
+         "message": "The source Copy activity became a pipeline task, as the user chose.",
+         "suggested_fix": "None needed; the user chose SDP for copies.",
+         "customization": "copy_activity_paradigm",
+         "customization_value": "sdp"
        }]}
      ]
    }
@@ -86,7 +101,8 @@ per-pipeline status in `translation` when it is there.
    stop and present the result.
 4. **Remediate** while the run has not ended. Fix the actionable findings in the bundle's YAML (job
    resources or `databricks.yml`) and send each changed file whole: `[{"path": "<path relative to
-   output_dir>", "content": "<new file text>"}]`. Only YAML inside a bundle can change.
+   output_dir>", "content": "<new file text>"}]`. Only `databricks.yml` and YAML under a bundle's
+   `resources/` can change; paths outside the bundle, including through symlinks, are refused.
    - `status: needs_approval`: the run requires approval. Show the user the `diffs`, ask, and send the same
      edits again with `approve` only if they agree.
    - `status: dry_run`: nothing was written; show the `diffs` as proposals.
@@ -108,7 +124,8 @@ The loop stops with `terminated` set to:
   ```
   flowx(command="validate", parameters={"output_dir": "<dir>", "action": "prepare",
                                         "threshold": 0.9, "max_iterations": 3, "pipeline": "<optional>",
-                                        "dry_run": false, "require_approval": false})
+                                        "dry_run": false, "require_approval": false,
+                                        "bundle_validate": true})
   flowx(command="validate", parameters={"output_dir": "<dir>", "action": "record", "reviews": {...}})
   flowx(command="validate", parameters={"output_dir": "<dir>", "action": "apply", "edits": [...], "approve": false})
   flowx(command="validate", parameters={"output_dir": "<dir>", "action": "publish", "results_table": "c.s.t"})
@@ -120,15 +137,14 @@ The loop stops with `terminated` set to:
   export PYTHONPATH="<plugin_dir>/src"
   PY="$(cat <plugin_dir>/.migration-venv)"
   "$PY" -m flowx.adapter validate prepare --output-dir <dir> [--threshold 0.9] [--max-iterations 3] \
-      [--pipeline <job>] [--dry-run] [--require-approval] [--reset] [--bundle-validate --profile <p>]
+      [--pipeline <job>] [--dry-run] [--require-approval] [--reset] [--no-bundle-validate] [--profile <p>] [--report <file>]
   "$PY" -m flowx.adapter validate record  --output-dir <dir> --reviews-path reviews.json
   "$PY" -m flowx.adapter validate apply   --output-dir <dir> --edits-path edits.json [--approve]
   "$PY" -m flowx.adapter validate publish --output-dir <dir> --results-table <catalog.schema.table>
   ```
 
-  Exit code 0 means the step succeeded; 1 prints the violations or error. `--bundle-validate` also runs
-  `databricks bundle validate` in each bundle as a static check; it needs a local Databricks CLI and is
-  not available on serverless.
+  Exit code 0 means the step succeeded; 1 prints the violations or error. `--no-bundle-validate` skips
+  `databricks bundle validate`; the skip is still recorded in `checks`.
 
 Run settings (`threshold`, `max_iterations`, `pipeline`, `dry_run`, `require_approval`) apply when a run
 starts. A saved run resumes with its own settings; pass `reset` to change them.
@@ -139,8 +155,10 @@ Everything lives under `<output_dir>/metadata/validation/`:
 
 - `validation_report.json`: the run report: `run_id`, `run_by`, `ruleset_version`, `reviewer`,
   `terminated`, `iterations`, `approval_rate`, `content_hash`, the latest `stamps`, the run settings, and
-  the `trajectory` of approval rate and bundle hash per iteration.
-- `runs/<run_id>/iteration_NNN.json`: one file per iteration with its stamps, static findings, the
+  the `static_checks` of the latest iteration, and the `trajectory` of approval rate and bundle hash per
+  iteration. The bundle hash covers only deployable inputs (`databricks.yml`, `resources/`, `src/`), so
+  `metadata/` and validate's own state never change it.
+- `runs/<run_id>/iteration_NNN.json`: one file per iteration with its stamps, static findings and checks, the
   per-object `diffs` since the previous iteration, the reviewed `snapshots`, and the files changed by
   `remediation`. A reset keeps the old run's files and copies its report here.
 
@@ -149,6 +167,8 @@ Each stamp records `object_id`, `object_kind`, `verdict`, `score`, `findings`, `
 
 `publish` writes one row per object per iteration to a Unity Catalog table (`run_id`, `run_date`,
 `run_by`, `iteration`, `object_id`, `object_kind`, `verdict`, `score`, `finding_count`, `blocker_count`,
-`major_count`, `reviewer`, `ruleset_version`, `content_hash`). Publishing a run again replaces its rows.
+`major_count`, `reviewer`, `ruleset_version`, `content_hash`). The table must be `catalog.schema.table`,
+each part made of letters, digits, `_`, or `-`; each part is backtick-quoted. Publishing a run again
+replaces its rows.
 
 Don't run two validate steps on the same output folder at once.

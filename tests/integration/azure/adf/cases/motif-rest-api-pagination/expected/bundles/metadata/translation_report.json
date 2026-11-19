@@ -1,0 +1,34 @@
+{
+  "name": "motif-rest-api-pagination",
+  "parameters": null,
+  "schedule": null,
+  "tags": {
+    "source": "adf",
+    "pipeline": "motif-rest-api-pagination"
+  },
+  "tasks": [
+    {
+      "name": "REST API Pagination",
+      "task_key": "motif_rest_api_pagination",
+      "type": "MotifActivity",
+      "description": "Collapsed motif: REST API Pagination. Replaces 2 ADF activities with python_rest_ingestion.",
+      "motif_id": "rest_api_pagination",
+      "display_name": "REST API Pagination",
+      "databricks_replacement": "python_rest_ingestion",
+      "matched_activity_names": [
+        "initial-request",
+        "paginate"
+      ],
+      "source_type_hint": "rest_api",
+      "confidence_notes": [
+        "Until child 'page-request' uses pagination",
+        "Until child 'set-continuation' uses pagination"
+      ],
+      "notebook_template": "rest_api_pagination.py"
+    }
+  ],
+  "not_translatable": [],
+  "reconciliation_status": null,
+  "migration_status": "included",
+  "audit": {}
+}

@@ -37,6 +37,16 @@ prepare ──▶ static checks ──fail──▶ iteration recorded, every fa
   schedules, branches, and loops. Generated code is not graded.
 - A task is skipped when its definition still matches its last `approved` stamp.
 
+## Static checks
+
+The structural checks always run. `databricks bundle validate` runs by default when the `databricks` CLI
+is on PATH. When the CLI is missing (serverless, Genie Code) or the check is turned off with
+`--no-bundle-validate`, it is recorded as `skipped` with the reason in `checks` and in the report's
+`static_checks`. It is never skipped silently.
+
+Validate reads the translation report from `metadata/translation_report.json`, which package keeps, or
+from `--report`. It fails with a clear error when neither exists.
+
 ## Scoring
 
 | Severity | Penalty |
@@ -46,8 +56,9 @@ prepare ──▶ static checks ──fail──▶ iteration recorded, every fa
 | `minor` | 5 |
 | `advisory` | 0 |
 
-- Task score is `100 - sum(penalties)`, floored at 0. Findings tied to a user's configuration answer
-  (`customization`) carry no penalty.
+- Task score is `100 - sum(penalties)`, floored at 0. A finding waived by a user's configuration answer
+  carries no penalty. The waiver names the option (`customization`) and the chosen value
+  (`customization_value`), and both must match `metadata/configuration.json`.
 - A task with a blocker, or a score below 60, is rejected.
 - A job's score is the lower of its own job-level score and the mean of its task scores. A job with a
   blocker or a rejected task is rejected.
@@ -68,7 +79,8 @@ With `require_approval`, `apply` returns the diffs and waits until the same edit
 ## Outputs
 
 - `metadata/validation/validation_report.json`: run id, user, reviewer, stop reason, iteration count,
-  approval rate, bundle hash, the latest stamps, and the per-iteration trajectory.
+  approval rate, bundle hash (deployable inputs only), the latest stamps and static checks, and the
+  per-iteration trajectory.
 - `metadata/validation/runs/<run_id>/iteration_NNN.json`: each iteration's stamps, static findings,
   per-object diffs, and the files remediation changed. Runs are kept, so a run can be resumed or reset.
 - Optional Unity Catalog table with one row per object per iteration (`run_id`, `run_date`, `run_by`,

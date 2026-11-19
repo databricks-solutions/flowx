@@ -58,7 +58,8 @@ intermediates under `.work/` (pruned by `package`).
 
 1. **Discover** -- Parse ADF JSON from UC volumes -> typed AST -> `metadata/source_graphs.json` (hashed) -> `metadata/inventory.json` + `metadata/profile_report.csv` + verbatim `metadata/<pipeline>.arm.json`
 2. **Convert** -- Registry dispatch + topological sort -> Pipeline IR (deterministic + agentic gaps); transient report at `.work/translation_report.json`
-3. **Package** -- IR -> DAB YAML + generated notebooks + setup scripts; prunes `.work/`. The
+3. **Package** -- IR -> DAB YAML + generated notebooks + setup scripts; keeps the report it built from at
+   `metadata/translation_report.json`, then prunes `.work/`. The
    `--packaging-mode` flag (`per-pipeline` default / `single` / `per-group`) controls how a
    multi-pipeline factory is laid out into bundles; a top-level `DEPLOY.md` records the suggested
    callees-first deploy order for every mode.
