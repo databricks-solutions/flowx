@@ -39,7 +39,7 @@ This phase runs one of two ways; run the **`setup`** skill first if you haven't.
   flowx(command="package", parameters={"output_dir": "<dir>", "report_path": "<optional>", "catalog": "<catalog>",
                                             "schema": "<schema>", "bundle_name": "<optional>", "profile": "<optional>",
                                             "download_workspace_files": true,
-                                            "allow_unresolved_gaps": false,
+                                            "allow_unresolved_gaps": false, "skip_failed_dags": false,
                                             "output_volume_path": "<optional /Volumes/... target>",
                                             "output_workspace_path": "<optional /Workspace/... target>"})
   flowx(command="workspace_paths", parameters={"source": "adf", "report_path": "...", "source_dir": "<optional source dir>"})
@@ -121,7 +121,7 @@ Regardless of mode, a single top-level `DEPLOY.md` is written describing every b
 cross-bundle dependencies, and a suggested callees-first deploy order. Use the `flowx-deploy` skill
 (`python -m flowx.adapter deploy`) to deploy the bundles in that order automatically.
 
-**Skip failed DAGs** (`--skip-failed-dags`). By default, package writes no bundle when any Airflow DAG failed reconciliation. With this flag, package leaves those DAGs out, packages the rest, prints which DAGs it left out, lists them under "Left-out DAGs" in SETUP.md, and exits 4 so a script does not read the run as a full success. Through MCP the result is `ok: true` with `status: "packaged_without_failed_dags"` and the DAGs in `left_out_dags`. A task that triggers a left-out DAG becomes a placeholder task that fails when it runs, and its job's schedule is paused. Ask the user before passing this flag, and tell them which DAGs were left out. To include those DAGs later, fix them and re-run discover, convert, and package.
+**Skip failed DAGs** (`--skip-failed-dags`). By default, package writes no bundle when any Airflow DAG failed reconciliation. With this flag, package leaves those DAGs out, packages the rest, prints which DAGs it left out, lists them under "Left-out DAGs" in SETUP.md, and exits 4 so a script does not read the run as a full success. Through MCP (`package`, or `migrate` with `skip_failed_dags`, including `resume_agentic`) the result is `ok: true` with the DAGs in `left_out_dags`, and `status: "packaged_without_failed_dags"` unless a stronger status below applies. Gaps in the left-out DAGs do not count toward the unresolved-gap preflight below; gaps in the DAGs that are packaged still do. A task that triggers a left-out DAG becomes a placeholder task that fails when it runs, and its job's schedule is paused. Ask the user before passing this flag, and tell them which DAGs were left out. To include those DAGs later, fix them and re-run discover, convert, and package.
 
 ### Step 2.5 — Detect workspace artifacts and authenticate
 
