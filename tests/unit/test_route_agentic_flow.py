@@ -655,6 +655,27 @@ def test_a_merged_top_level_gap_is_stored_apart_and_survives_a_re_route_with_the
     assert (tmp_path / "child" / "databricks.yml").exists()
 
 
+def test_an_in_place_merge_given_a_relative_report_path_is_stored_as_a_gap_fill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run from inside .work/, the report's parent of a parent is '.', which made the merge look like a copy."""
+    _route_parent_agentic(tmp_path, _report_with_child_gap())
+    results_dir = tmp_path / "agentic_results"
+    _write_merge_result(results_dir, "child", "Load", "load")
+    monkeypatch.chdir(tmp_path / WORK_DIRNAME)
+
+    assert merge_agentic_results(Path(REPORT_FILENAME), results_dir) == (1, 0)
+
+    stored = json.loads((tmp_path / "metadata" / "agentic_conversion.json").read_text(encoding="utf-8"))
+    assert [(fill["pipeline"], fill["activity_name"]) for fill in stored["gap_fills"]] == [("child", "Load")]
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    apply_plan(tmp_path, recorded)
+    report = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    child = next(pipeline for pipeline in report["pipelines"] if pipeline["name"] == "child")
+    assert child["tasks"][0]["type"] == "NotebookActivity"
+
+
 def test_a_gap_fill_survives_switching_every_component_back_to_deterministic(tmp_path: Path) -> None:
     _route_parent_agentic(tmp_path, _report_with_child_gap())
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME

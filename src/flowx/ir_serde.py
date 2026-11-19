@@ -624,6 +624,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     """
     from flowx.route_agentic import REPORT_FILENAME, ROUTE_LOCK_HELD, WORK_DIRNAME, route_lock
 
+    # Resolved first: a relative path such as "translation_report.json" run from inside .work/ has "." as
+    # its parent's parent, which would misread an in-place merge as a copy and store no gap fill.
+    report_path = Path(report_path).resolve()
     output_dir = report_path.parent.parent
     destination = output_path or report_path
     live_report_path = output_dir / WORK_DIRNAME / REPORT_FILENAME
