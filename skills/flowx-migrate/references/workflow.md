@@ -10,21 +10,21 @@ flowx follows a three-phase pipeline architecture. Each phase is independently r
 ADF JSON Exports
       |
       v
-  Phase 1: PROFILE
+  Phase 1: DISCOVER
   (parse + classify)
       |
       v
   inventory.json
       |
       v
-  Phase 2: TRANSLATE
+  Phase 2: CONVERT
   (deterministic + agentic)
       |
       v
   translation_report.json + IR + notebooks
       |
       v
-  Phase 3: PREPARE
+  Phase 3: PACKAGE
   (bundle generation)
       |
       v

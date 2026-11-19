@@ -583,6 +583,6 @@ All phases write into a single shared `<output_dir>` (default `./flowx_output`):
 
 | Path | Phase | Contents |
 |---|---|---|
-| `metadata/` | Profile + Modify | `inventory.json`, `profile_report.csv`, `<pipeline>.arm.json`, `configuration.json` |
+| `metadata/` | Discover + Modify | `inventory.json`, `profile_report.csv`, `<pipeline>.arm.json`, `configuration.json` |
 | `databricks.yml`, `resources/`, `src/`, `SETUP.md` | Package | The deployable DAB bundle |
 | `.work/` | Convert/Modify (transient) | Translation report + IR; pruned by package |
