@@ -4,7 +4,7 @@ Read this from the `flowx-migrate` skill before Step 1 when you run the phases t
 
 In Genie Code this is the **only** path — the phases run on the deployed `mcp-flowx` app, so
 there is **no venv, no `bootstrap.sh`, and no `.migration-venv`**. Run **no** `python3`/`$PY`/`bash`
-commands on this path; the `"$PY" -m …` snippets in the steps below are the **local-CLI fallback
+commands on this path; the `"$PY" -m …` snippets in the SKILL.md steps are the **local-CLI fallback
 only**. Everything goes through the single **`flowx`** tool, one `command` per step:
 
 The hosted server **cannot read files by path**, whether they sit in your local file system, the
@@ -15,13 +15,13 @@ the Git-export layout — `pipeline/…`, `dataset/…`, `linkedService/…`, `t
 supply yourself.
 
 **Run the same Workflow as the CLI path, one `flowx` call per phase**: discover → enrich (optional) →
-convert → route → fill → configuration options → package, in the order of the steps below. Do **not**
+convert → route → fill → configuration options → package, in the order of the SKILL.md steps. Do **not**
 replace it with one `migrate` call: `migrate` is server code, which can't author the insights or ask
 the user for the routing decisions, so it runs only discover → convert → package and never enriches
 or routes. Convert reads the source again, so pass the **same source key to `discover` and
 `convert`**. With inline `adf_definitions` that means sending the payload twice; a volume or workspace
 path (below) sends only the path. Every other command reuses `output_dir`. Ask each phase's inputs
-when that phase runs, as Steps 0 and 1 below describe: call `inputs` for a phase just before it, not
+when that phase runs, as SKILL.md Steps 0 and 1 describe: call `inputs` for a phase just before it, not
 for every phase at the start. `source` ("adf" | "airflow") is required for discover/convert and for
 `inputs discover`/`inputs convert`; for Airflow, swap `adf_definitions` for `airflow_source_path`.
 On non-ADF sources route records deterministic decisions only; agentic decisions and `fill_agentic`
@@ -93,7 +93,7 @@ The server's `output_dir` is ephemeral and not reachable from your workspace, so
 `bundle_uploaded`). Only when neither is set is the bundle returned inline as `bundle = {"files":
 {relpath: text,…}, "truncated": [...]}` (small bundles), which you must then persist yourself. Either
 way the user ends up with the DAB to validate and deploy. Each call returns a structured result
-(summaries / file trees); use those in place of reading files. Wherever a step below shows `"$PY" -m flowx.adapter <cmd> …`, call
+(summaries / file trees); use those in place of reading files. Wherever a SKILL.md step shows `"$PY" -m flowx.adapter <cmd> …`, call
 `flowx(command="<cmd>", parameters={...})` instead.
 
 > `databricks bundle validate` / `deploy` of the *generated* bundle is still a user-driven CLI step

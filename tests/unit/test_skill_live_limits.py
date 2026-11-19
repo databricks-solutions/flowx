@@ -14,7 +14,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).parents[2]
 SKILLS_DIR = REPO_ROOT / "skills"
 ENRICH_SKILL = SKILLS_DIR / "flowx-enrich" / "SKILL.md"
-ROUTE_SKILL = SKILLS_DIR / "flowx-route" / "SKILL.md"
+ROUTE_PATTERNS = SKILLS_DIR / "flowx-route" / "references" / "ingestion-patterns.md"
 LIMIT_RECORD = "`limit: <name> = <value> (source: <page>, read <date>)`"
 SKIPPED_DIRS = {
     ".git",
@@ -42,7 +42,7 @@ ASSUMPTIONS = {
 def _route_checks_limits_column() -> dict[str, str]:
     """Return each route check's id (C1 to C13) with the text of its Limits column."""
     limits_by_check = {}
-    for line in ROUTE_SKILL.read_text(encoding="utf-8").splitlines():
+    for line in ROUTE_PATTERNS.read_text(encoding="utf-8").splitlines():
         match = re.match(r"\| (C\d+) [^|]*\|[^|]*\| ([^|]*) \|", line)
         if match:
             limits_by_check[match.group(1)] = match.group(2)
@@ -79,7 +79,7 @@ def test_enrich_checks_every_recommended_pattern_against_the_live_limits() -> No
 
 
 def test_route_reads_the_limits_live_and_records_them_the_way_enrich_does() -> None:
-    route = ROUTE_SKILL.read_text(encoding="utf-8")
+    route = ROUTE_PATTERNS.read_text(encoding="utf-8")
 
     assert "**Limits** are read live" in route
     assert LIMIT_RECORD in route
