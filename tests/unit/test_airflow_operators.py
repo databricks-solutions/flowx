@@ -2294,3 +2294,22 @@ def test_multiple_dags_in_one_file_are_loaded_as_separate_pipelines(tmp_path):
         ("one", ["a"]),
         ("two", ["b"]),
     ]
+
+
+@pytest.mark.parametrize("update", ["BASE = BASE + '/raw'", "BASE += '/raw'"])
+def test_string_constant_rebuilt_from_itself_keeps_its_value(tmp_path: Path, update: str) -> None:
+    dag_path = tmp_path / "dag.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "BASE = '/data'\n"
+        f"{update}\n"
+        "with DAG(dag_id='d') as dag:\n"
+        "    BashOperator(task_id='ls', bash_command='ls ' + BASE)\n",
+        encoding="utf-8",
+    )
+
+    task = load_airflow_dag(dag_path).tasks[0]
+
+    assert isinstance(task, NotebookActivity)
+    assert "ls /data/raw" in task.generated_source

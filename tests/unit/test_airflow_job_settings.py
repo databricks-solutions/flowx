@@ -15,11 +15,15 @@ from flowx.sources.airflow.loader import load_airflow_dag
 
 
 def _load(
-    tmp_path: Path, dag_arguments: str, *, task: str = "BashOperator(task_id='t', bash_command='echo hi')"
+    tmp_path: Path,
+    dag_arguments: str,
+    *,
+    task: str = "BashOperator(task_id='t', bash_command='echo hi')",
+    imports: str = "",
 ) -> Pipeline:
     dag_path = tmp_path / "dag.py"
     dag_path.write_text(
-        "import pendulum\n"
+        imports + "import pendulum\n"
         "from airflow import DAG\n"
         "from airflow.operators.bash import BashOperator\n"
         f"with DAG(dag_id='d', schedule_interval='0 1 * * *'{dag_arguments}) as dag:\n"
@@ -54,6 +58,39 @@ def test_default_args_start_date_sets_the_schedule_timezone(tmp_path: Path) -> N
 
     assert pipeline.schedule["timezone_id"] == "America/New_York"
     assert _transformation(pipeline, "schedule_timezone_defaulted") is None
+
+
+@pytest.mark.parametrize(
+    "start_date",
+    [
+        "pendulum.datetime(2024, 1, 1)",
+        "datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)",
+        "datetime.datetime(2024, 1, 1, tzinfo=pendulum.UTC)",
+        "datetime.datetime(2024, 1, 1, tzinfo=ZoneInfo('UTC'))",
+    ],
+)
+def test_utc_start_date_is_not_disclosed_as_defaulted(tmp_path: Path, start_date: str) -> None:
+    pipeline = _load(tmp_path, f", start_date={start_date}", imports="import datetime\nfrom zoneinfo import ZoneInfo\n")
+
+    assert pipeline.schedule["timezone_id"] == "UTC"
+    assert _transformation(pipeline, "schedule_timezone_defaulted") is None
+
+
+def test_manual_dag_with_a_start_date_has_no_schedule(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dag.py"
+    dag_path.write_text(
+        "from datetime import datetime\n"
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG('manual', start_date=datetime(2024, 1, 1), schedule=None, catchup=False) as dag:\n"
+        "    BashOperator(task_id='hi', bash_command='echo hi')\n",
+        encoding="utf-8",
+    )
+
+    pipeline = load_airflow_dag(dag_path)
+
+    assert pipeline.schedule is None
+    assert pipeline.reconciliation_status == "verified"
 
 
 def test_verified_job_keeps_its_schedule_active(tmp_path: Path) -> None:
@@ -130,6 +167,19 @@ def test_max_active_runs_sets_the_job_concurrency(tmp_path: Path) -> None:
     assert pipeline.max_concurrent_runs == 3
     assert pipeline.reconciliation_status == "verified"
     assert _transformation(pipeline, "max_concurrent_runs_defaulted") is None
+
+
+def test_max_active_runs_above_the_job_limit_is_capped(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, ", max_active_runs=5000, start_date=pendulum.datetime(2024, 1, 1, tz='UTC')")
+
+    assert pipeline.max_concurrent_runs == 1000
+    assert pipeline.reconciliation_status == "verified"
+    mapped = next(
+        item
+        for item in pipeline.audit["transformations"]
+        if item["code"] == "dag_setting_mapped" and item["setting"] == "max_active_runs"
+    )
+    assert "5000" in mapped["message"]
 
 
 def test_dynamic_max_active_runs_is_a_gap(tmp_path: Path) -> None:

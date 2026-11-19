@@ -11,10 +11,8 @@ import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import yaml
-
 from flowx.bundler.constants import DEFAULT_JOB_CLUSTER_KEY
-from flowx.dbt.bundle_files import DBT_PACKAGES, project_artifacts
+from flowx.dbt.bundle_files import DBT_PACKAGES, project_artifacts, task_commands
 from flowx.models.dab import DabNotebook
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
 from flowx.utils import to_lowercase_key
@@ -23,25 +21,6 @@ if TYPE_CHECKING:
     from flowx.models.ir import DbtCommandActivity
 
 _DBT_PROJECTS_RELATIVE_PATH = "dbt_projects"
-# Files that declare dbt packages, which a fresh task environment installs with ``dbt deps``.
-_PACKAGE_FILES = ("packages.yml", "dependencies.yml")
-
-
-def _declares_packages(project: Path) -> bool:
-    """Returns whether the project's package files list any package; one that cannot be read counts as yes."""
-    for name in _PACKAGE_FILES:
-        path = project / name
-        if not path.is_file():
-            continue
-        try:
-            content = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, yaml.YAMLError):
-            return True
-        if content is not None and (
-            not isinstance(content, dict) or content.get("packages") or content.get("projects")
-        ):
-            return True
-    return False
 
 
 def _project_folder(activity: DbtCommandActivity) -> str:
@@ -80,14 +59,7 @@ def prepare(activity: DbtCommandActivity, *, scope: str = "") -> PreparedActivit
     if not (project / "dbt_project.yml").is_file():
         return _missing_project(activity)
     folder = _project_folder(activity)
-    commands = list(activity.commands)
-    installs_packages = any(command.split()[:2] == ["dbt", "deps"] for command in commands)
-    if not installs_packages and _declares_packages(project):
-        # After any leading ``dbt clean``, which removes installed packages.
-        position = next(
-            (index for index, command in enumerate(commands) if command.split()[:2] != ["dbt", "clean"]), len(commands)
-        )
-        commands.insert(position, "dbt deps")
+    commands = task_commands(activity.commands, project)
 
     task = build_common_task_fields(activity)
     task["dbt_task"] = {

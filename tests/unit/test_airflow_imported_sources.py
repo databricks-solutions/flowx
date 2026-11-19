@@ -167,3 +167,28 @@ def test_module_file_too_large_to_read_is_recorded(tmp_path: Path) -> None:
     )
 
     assert sources["CopyOperator"]["unresolved"] == "the module file is too large to read"
+
+
+def test_operator_used_through_a_dotted_import_carries_its_class(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "dags/dag.py": (
+                "from airflow import DAG\n"
+                "import company.operators.custom\n"
+                "with DAG(dag_id='d') as dag:\n"
+                "    company.operators.custom.LoadOperator(task_id='load')\n"
+            ),
+            "dags/company/__init__.py": "",
+            "dags/company/operators/__init__.py": "",
+            "dags/company/operators/custom.py": (
+                "from airflow.models import BaseOperator\n\nclass LoadOperator(BaseOperator):\n    pass\n"
+            ),
+        },
+    )
+
+    sources = _sources(load_pipelines(tmp_path / "dags")[0], "load")
+
+    record = sources["company.operators.custom.LoadOperator"]
+    assert record["import"] == "import company.operators.custom"
+    assert "class LoadOperator(BaseOperator)" in record["content"]

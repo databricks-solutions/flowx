@@ -7,11 +7,14 @@ from pathlib import Path
 import pytest
 import yaml
 
+from flowx.bundler.dab_writer import main as package_main
 from flowx.bundler.dab_writer import pipeline_dict_to_ir, write_bundle
 from flowx.ir_serde import pipeline_to_dict
 from flowx.models.ir import DbtCommandActivity, NotebookActivity, Pipeline, PlaceholderActivity
 from flowx.preparer.workflow_preparer import prepare_workflow
 from flowx.sources.airflow import shell_dbt
+from flowx.sources.airflow.convert import main as convert_main
+from flowx.sources.airflow.discover import main as discover_main
 from flowx.sources.airflow.loader import load_pipelines
 
 
@@ -483,3 +486,110 @@ def test_project_with_models_at_its_root_copies_root_resource_files(tmp_path: Pa
     copied = next((out / "src" / "dbt_projects").iterdir())
     files = sorted(path.relative_to(copied).as_posix() for path in copied.rglob("*") if path.is_file())
     assert files == ["dbt_project.yml", "orders.sql", "schema.yml"]
+
+
+def test_jinja_cwd_is_not_lowered(tmp_path: Path) -> None:
+    _project(tmp_path)
+
+    pipeline = _load(
+        tmp_path, "BashOperator(task_id='t', bash_command='dbt run', cwd='/opt/{{ var.value.env }}/intelsat_ca')"
+    )
+
+    assert not isinstance(_task(pipeline), DbtCommandActivity)
+
+
+def test_env_var_with_a_default_is_not_a_gap(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    (project / "models" / "dim.sql").write_text(
+        "select * from {{ env_var('DBT_SOURCE_SCHEMA', 'raw') }}.orders\n", encoding="utf-8"
+    )
+
+    pipeline = _load(tmp_path, f"BashOperator(task_id='t', bash_command='dbt run', cwd={str(project)!r})")
+
+    assert isinstance(_task(pipeline), DbtCommandActivity)
+
+
+def test_local_package_inside_the_project_is_copied(tmp_path: Path) -> None:
+    project = _project(tmp_path, {"packages.yml": "packages:\n  - local: internal_pkg\n"})
+    (project / "internal_pkg").mkdir()
+    (project / "internal_pkg" / "dbt_project.yml").write_text("name: internal_pkg\n", encoding="utf-8")
+    _, out = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
+    )
+
+    copied = next((out / "src" / "dbt_projects").iterdir())
+    assert (copied / "internal_pkg" / "dbt_project.yml").is_file()
+
+
+def test_local_package_outside_the_project_is_a_gap(tmp_path: Path) -> None:
+    project = _project(tmp_path, {"packages.yml": "packages:\n  - local: ../shared\n"})
+
+    pipeline = _load(tmp_path, f"BashOperator(task_id='t', bash_command='dbt run', cwd={str(project)!r})")
+
+    task = _task(pipeline)
+    assert isinstance(task, PlaceholderActivity)
+    assert task.raw_definition["local_packages"] == ["../shared"]
+
+
+def test_more_commands_than_a_dbt_task_runs_is_a_gap(tmp_path: Path) -> None:
+    project = _project(tmp_path, {"packages.yml": "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\n"})
+    command = " && ".join(["dbt run"] * 10)
+
+    pipeline = _load(tmp_path, f"BashOperator(task_id='t', bash_command={command!r}, cwd={str(project)!r})")
+
+    task = _task(pipeline)
+    assert isinstance(task, PlaceholderActivity)
+    assert "11 dbt commands counting the dbt deps" in task.comment
+
+
+def test_root_model_path_skips_build_output_and_virtual_environments(tmp_path: Path) -> None:
+    project = tmp_path / "flat"
+    (project / "build").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text("name: flat\nmodel-paths: ['.']\ntarget-path: build\n", encoding="utf-8")
+    (project / "orders.sql").write_text("select 1\n", encoding="utf-8")
+    (project / "build" / "compiled.sql").write_text("select 1\n", encoding="utf-8")
+    (project / "venv" / "lib").mkdir(parents=True)
+    (project / "venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    (project / "venv" / "lib" / "module.py").write_text("x = 1\n", encoding="utf-8")
+    _, out = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
+    )
+
+    copied = next((out / "src" / "dbt_projects").iterdir())
+    files = sorted(path.relative_to(copied).as_posix() for path in copied.rglob("*") if path.is_file())
+    assert files == ["dbt_project.yml", "orders.sql"]
+
+
+def test_setup_lists_the_warehouse_a_dbt_task_needs(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    _, out = _bundle(
+        tmp_path, DbtCommandActivity(name="t", task_key="t", commands=["dbt run"], project_dir=str(project))
+    )
+
+    assert "| `warehouse_id` |" in (out / "SETUP.md").read_text(encoding="utf-8")
+
+
+def test_two_dags_running_dbt_point_at_their_own_project_copy(tmp_path: Path) -> None:
+    dags = tmp_path / "dags"
+    project = _project(tmp_path)
+    for dag_id, task in (
+        ("dag_a", f"BashOperator(task_id='run_dbt', bash_command='cd {project} && dbt run')"),
+        ("dag_b", f"BashOperator(task_id='test_dbt', bash_command='dbt test', cwd={str(project)!r})"),
+    ):
+        (dags / f"{dag_id}.py").write_text(
+            "from airflow import DAG\n"
+            "from airflow.operators.bash import BashOperator\n"
+            f"with DAG(dag_id={dag_id!r}) as dag:\n"
+            f"    {task}\n",
+            encoding="utf-8",
+        )
+    output = tmp_path / "out"
+    discover_main(["--source-dir", str(dags), "--output-dir", str(output)])
+    convert_main(["--source-dir", str(dags), "--output-dir", str(output)])
+
+    assert package_main(["--output-dir", str(output), "--no-download-workspace-files"]) == 0
+
+    for dag_id in ("dag_a", "dag_b"):
+        job = yaml.safe_load((output / "resources" / f"{dag_id}.yml").read_text(encoding="utf-8"))
+        folder = job["resources"]["jobs"][dag_id]["tasks"][0]["dbt_task"]["project_directory"]
+        assert (output / folder.removeprefix("../") / "models" / "dim.sql").is_file()

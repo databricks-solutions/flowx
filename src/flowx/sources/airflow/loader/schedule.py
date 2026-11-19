@@ -96,22 +96,27 @@ def _extract_timezone(node: ast.expr | None) -> str | None:
     """Extracts an IANA timezone from a ``pendulum.timezone("…")`` / ``Timezone("…")`` call or a tz string kwarg.
 
     Handles ``start_date=datetime(..., tzinfo=pendulum.timezone("Europe/Madrid"))``,
-    ``timezone="Europe/Madrid"``, and ``pendulum.timezone("…")`` directly. Returns None
-    when no literal timezone is present (caller falls back to UTC).
+    ``timezone="Europe/Madrid"``, ``pendulum.timezone("…")`` and ``ZoneInfo("…")`` directly, and UTC as
+    ``timezone.utc`` or ``pendulum.UTC``. ``pendulum.datetime(...)`` without a timezone is in UTC, as pendulum
+    defaults. Returns None when no literal timezone is present (caller falls back to UTC).
     """
     if node is None:
         return None
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    if isinstance(node, ast.Attribute) and node.attr in ("utc", "UTC"):
+        return "UTC"
     if isinstance(node, ast.Call):
         func = node.func
         name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
-        if name in ("timezone", "timezone_", "Timezone") and node.args:
+        if name in ("timezone", "timezone_", "Timezone", "ZoneInfo") and node.args:
             return ops.literal_str(node.args[0])
         # datetime(..., tzinfo=pendulum.timezone("…")) / tz=...
         for kw in node.keywords:
             if kw.arg in ("tzinfo", "tz"):
                 return _extract_timezone(kw.value)
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "pendulum":
+            return "UTC" if name == "datetime" else None
     return None
 
 
@@ -208,8 +213,11 @@ def _anchored_delta_schedule(
     Airflow repeats a timedelta schedule from ``start_date``. A one-day interval keeps the local time of
     day across daylight-saving changes, so it fires at ``start_date``'s local time in the DAG timezone;
     an interval that evenly divides a day or an hour advances by elapsed time, so it is anchored to
-    ``start_date`` in UTC. Any other length has no Quartz form and returns None.
+    ``start_date`` in UTC. Any other length, or a schedule that is not a timedelta, has no Quartz form and
+    returns None.
     """
+    if total_seconds <= 0:
+        return None
     if total_seconds == 86400:
         zone = ZoneInfo(timezone or "UTC")
         local = start_date.astimezone(zone)

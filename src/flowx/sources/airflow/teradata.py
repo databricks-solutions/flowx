@@ -33,6 +33,8 @@ _HEREDOC = re.compile(
 )
 _JINJA_EXPRESSION = re.compile(r"\{\{.*?\}\}", re.DOTALL)
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=", re.DOTALL)
+# What ends one branch of a ``case``.
+_CASE_TERMINATORS = frozenset({";;", ";&", ";;&"})
 
 # Shell keywords that can stand before a command, as in ``do bteq < x`` or ``if ...; then bteq < x``.
 _KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!", "{", "time"})
@@ -131,13 +133,40 @@ def _split_operators(word: str) -> list[str]:
     return operators
 
 
+def _mask_arithmetic(command: str) -> str:
+    """Replaces each ``$(( ... ))`` expansion with ``0`` and each ``(( ... ))`` command with ``:``.
+
+    Arithmetic holds expressions, not commands, so ``i++`` or ``START + 10`` must not be read as programs.
+    """
+    output: list[str] = []
+    index = 0
+    while index < len(command):
+        expansion = command.startswith("$((", index)
+        if not expansion and not command.startswith("((", index):
+            output.append(command[index])
+            index += 1
+            continue
+        start = index + (3 if expansion else 2)
+        depth = 2
+        end = start
+        while end < len(command) and depth:
+            depth += {"(": 1, ")": -1}.get(command[end], 0)
+            end += 1
+        if depth:
+            output.append(command[index:])
+            break
+        output.append("0" if expansion else " : ")
+        index = end
+    return "".join(output)
+
+
 def _shell_words(command: str) -> list[str] | None:
     """Splits a command into shell words and separators, with here-document bodies and comments removed.
 
-    Jinja expressions stay whole, each line break becomes a separator, and ``#`` starts a comment only at
-    the start of a word, as in bash. Returns None when the command does not parse.
+    Jinja expressions stay whole, each line break becomes a separator, ``#`` starts a comment only at
+    the start of a word, as in bash, and arithmetic is masked. Returns None when the command does not parse.
     """
-    masked, expressions = _mask_jinja(_strip_heredocs(command))
+    masked, expressions = _mask_jinja(_mask_arithmetic(_strip_heredocs(command)))
     lexer = shlex.shlex(masked.replace("\n", f" {_LINE_BREAK} "), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -208,8 +237,28 @@ def _segments(command: str) -> list[_Segment] | None:
             )
         current.clear()
 
+    # One state per open ``case``: "subject" before ``in``, "pattern" before a pattern's ``)``, then "body".
+    cases: list[str] = []
     for word in words:
-        if word in _SEPARATORS:
+        state = cases[-1] if cases else None
+        if state == "subject":
+            if word == "in":
+                cases[-1] = "pattern"
+        elif state == "pattern":
+            if word == "esac":
+                cases.pop()
+            elif word == ")":
+                cases[-1] = "body"
+        elif state == "body" and word in _CASE_TERMINATORS:
+            close(word)
+            cases[-1] = "pattern"
+        elif state == "body" and word == "esac" and _command_start(current) == len(current):
+            close(word)
+            cases.pop()
+        elif word == "case" and _command_start(current) == len(current):
+            close(word)
+            cases.append("subject")
+        elif word in _SEPARATORS:
             close(word)
         else:
             current.append(word)

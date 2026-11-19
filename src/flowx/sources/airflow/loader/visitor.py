@@ -108,6 +108,8 @@ class _DagVisitor(ast.NodeVisitor):
         self.operators: dict[str, tuple[str, str, dict[str, ast.expr]]] = {}
         # task variable name -> the operator's ast.Call node (for source-slicing placeholders)
         self.calls: dict[str, ast.Call] = {}
+        # The operator as the DAG names it, such as ``company.operators.LoadOperator``, by capture id.
+        self.operator_functions: dict[str, ast.expr] = {}
         self.edges: list[tuple[str, str]] = []  # (upstream_var, downstream_var)
         self.dag_id: str | None = None
         # The dag_id expression when the DAG gives one that cannot be evaluated statically.
@@ -243,6 +245,8 @@ class _DagVisitor(ast.NodeVisitor):
             self._claimed_statement_ids.add(id(node))
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        # Resolved before the dict sync, which forgets the target's old value that ``X = X + "..."`` reads.
+        static_value = _safe_static_value(node.value, self._constants)
         self._sync_dict_constants(self._dicts.assign(node.targets, node.value))
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call):
             var = node.targets[0].id
@@ -282,7 +286,7 @@ class _DagVisitor(ast.NodeVisitor):
             if self._bind_file_path_constant(target, node.value):
                 self._claimed_statement_ids.add(id(node))
                 return
-            value = _safe_static_value(node.value, self._constants)
+            value = static_value
             if value is not _UNRESOLVED:
                 self._constants[target] = value
                 self._task_bindings.pop(target, None)
@@ -310,8 +314,8 @@ class _DagVisitor(ast.NodeVisitor):
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         """Reads ``name: type = value`` like a plain assignment for dict tracking and constants."""
         if node.value is not None and isinstance(node.target, ast.Name):
-            self._sync_dict_constants(self._dicts.assign([node.target], node.value))
             value = _safe_static_value(node.value, self._constants)
+            self._sync_dict_constants(self._dicts.assign([node.target], node.value))
             if value is _UNRESOLVED:
                 self._constants.pop(node.target.id, None)
             else:
@@ -319,7 +323,14 @@ class _DagVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        """Follows ``name op= value`` as ``name = name op value`` for constants, such as ``BASE += "/raw"``."""
+        value = _UNRESOLVED
+        if isinstance(node.target, ast.Name):
+            current = ast.Name(id=node.target.id, ctx=ast.Load())
+            value = _safe_static_value(ast.BinOp(left=current, op=node.op, right=node.value), self._constants)
         self._sync_dict_constants(self._dicts.augment(node.target))
+        if isinstance(node.target, ast.Name) and value is not _UNRESOLVED:
+            self._constants[node.target.id] = value
         self.generic_visit(node)
 
     def visit_Delete(self, node: ast.Delete) -> None:
@@ -371,6 +382,7 @@ class _DagVisitor(ast.NodeVisitor):
             return False
         if id(node) in self._calls_joined_by_wiring:
             self.adopted_capture_ids.add(var)
+        original_function = call.func
         call = ast.Call(
             func=ast.Name(id=construct, ctx=ast.Load()),
             args=[],
@@ -379,6 +391,7 @@ class _DagVisitor(ast.NodeVisitor):
         ast.copy_location(call, node)
         task_id = ops.literal_str(kwargs.get("task_id")) or ops.literal_str(kwargs.get("group_id")) or var
         self.operators[var] = (task_id, construct, kwargs)
+        self.operator_functions[var] = original_function
         self.calls[var] = call
         self._task_bindings[binding or var] = var
         self.task_captures[var] = TaskCapture(
