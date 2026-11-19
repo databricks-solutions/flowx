@@ -8,75 +8,67 @@ description: >
   inventory a source.
 ---
 
-# Discover Source Pipeline Definitions
+# Discover the source pipelines
 
-Parse a source orchestrator's definitions into a typed inventory. This is phase 1 of the flowx
-migration workflow; it produces `metadata/inventory.json` (consumed by `flowx-convert`) plus a
-per-pipeline complexity report at `metadata/profile_report.csv`.
+Phase 1 of the flowx workflow. Discover parses a source orchestrator's definitions into a typed inventory
+that classifies every task as deterministic (a built-in translator exists, no LLM needed), agentic (needs
+LLM-assisted translation from the source definition) or unsupported (no known translation path; needs
+manual work). It writes `metadata/inventory.json`, which `flowx-convert` reads, and a per-pipeline
+complexity report, `metadata/profile_report.csv`. Each source has its own parser and guide: ADF ships ARM
+JSON, Airflow ships Python DAG modules.
 
-flowx supports more than one **source**, and discovery is source-specific — ADF ships ARM JSON,
-Airflow ships Python DAG modules, and the two share no parser. This skill routes to the right
-source guide; the shared mechanics (output layout, inventory shape, how to run a phase) live here.
+## Before you start
 
-## Step 1 — Identify the source (required)
+- The user needs a copy of the definitions. For ADF without an export, run the `flowx-extract-metadata`
+  skill first; it returns the exact path to use.
 
-Ask the user which orchestrator they are migrating **from**, or infer it from the input:
+## How to run
 
-- **Azure Data Factory / Fabric Data Factory** → source `adf` → read `sources/adf.md`
-- **Apache Airflow** → source `airflow` → read `sources/airflow.md`
+The common MCP and CLI rules are in [`../shared/running-flowx.md`](../shared/running-flowx.md).
 
-There is no default source. Every phase invocation passes `--source <name>` explicitly.
+- **MCP:** `flowx(command="discover", parameters={"source": "<source>", ...})`; each source guide lists
+  its source keys.
+- **CLI:** `"$PY" -m flowx.adapter discover --source <source> --source-path <path> --output-dir <dir> [--pipeline <name>]`.
+  `--source-path` is the generic flag; each source also accepts its own alias (for example
+  `--adf-source-path`), and both become the phase's `--source-dir`.
 
-## Step 2 — Follow the source guide
+## Steps
 
-Read the matching `sources/<source>.md` in this skill directory and follow it. Each guide covers
-the source's input layout, the exact discover command, and how to read its inventory.
+### Step 1: Identify the source
 
-## How to run a phase — MCP tool or venv CLI
+Ask which orchestrator the user is migrating from, or infer it from the input. There is no default
+source.
 
-Both paths are the same across sources; only `--source` and the source path differ. Run the
-**`setup`** skill first if you haven't.
+- Azure Data Factory or Fabric Data Factory: source `adf`, read [`sources/adf.md`](sources/adf.md).
+- Apache Airflow: source `airflow`, read [`sources/airflow.md`](sources/airflow.md).
 
-- **MCP tool (Databricks Genie Code, or a local stdio registration):** call the single **`flowx`**
-  tool with `command="discover"` and `parameters` including `"source": "<source>"`. Run **no**
-  `python3`/`$PY` commands on this path.
+### Step 2: Follow the source guide
 
-- **venv CLI (local, no MCP server):** ensure the venv exists (`setup` / `bootstrap.sh`), then:
+Each guide covers the source's input layout, the exact discover command and how to read its inventory.
 
-  ```bash
-  export PYTHONPATH="<plugin_dir>/src"
-  PY="$(cat <plugin_dir>/.migration-venv)"
-  "$PY" -m flowx.adapter discover --source <source> --source-path <path> --output-dir <dir> [--pipeline <name>]
-  ```
+## Output
 
-  `--source-path` is the generic flag (each source also accepts its own alias, e.g.
-  `--adf-source-path`); both normalise to the phase's `--source-dir`. `--source` is required.
+In `<output_dir>/metadata/` (layout in [`../shared/output-folder.md`](../shared/output-folder.md)):
 
-## Output artifacts (shared across sources)
-
-All under the shared `<output_dir>/metadata/` folder:
-
-| File | Description |
+| File | What it holds |
 |---|---|
-| `metadata/inventory.json` | Classified activity inventory for the convert phase |
-| `metadata/source_graphs.json` | (ADF) The saved source graphs (activities, lineage and detected motifs), versioned and content-hashed; the inventory is built from it and records its hash as `source_graphs_sha256` |
-| `metadata/profile_report.csv` | Per-pipeline complexity report (counts + T-shirt size) |
-| `metadata/<pipeline>.arm.json` | (ADF) Verbatim original source for each pipeline (provenance) |
-| `metadata/archive/<UTC time>/` | Only on a re-run: the earlier run's `metadata/`, `.work/` and bundle, moved here with an `archive.json` of what moved, from where and when |
+| `inventory.json` | The classified inventory for convert |
+| `source_graphs.json` | ADF only: the saved source graphs (activities, lineage and detected motifs), versioned and content-hashed; the inventory is built from it and records its hash as `source_graphs_sha256` |
+| `profile_report.csv` | Per-pipeline complexity (counts and a T-shirt size) |
+| `<pipeline>.arm.json` | ADF only: the verbatim source of each pipeline |
+| `archive/<UTC time>/` | Only on a re-run: the earlier run's `metadata/`, `.work/` and bundle, with an `archive.json` of what moved, from where and when |
 
-Discover starts each run afresh. Over an output folder that already holds a run, it moves that run's
-files into a new archive folder instead of deleting them, and says so; package keeps `metadata/`,
-so the archive stays.
-
-The inventory classifies every task into one of three strategies:
-
-- **Deterministic** — a built-in translator exists; converted without an LLM.
-- **Agentic** — requires LLM-assisted translation from the source definition.
-- **Unsupported** — no known translation path; needs manual intervention.
+Discover starts each run afresh: over a folder that already holds a run, it moves that run into a new
+archive folder instead of deleting it, and says so. Package keeps `metadata/`, so the archive stays.
 
 ## Reference
 
-- `sources/adf.md` — Azure Data Factory discovery (ARM JSON, UC-volume download, complexity report)
-- `sources/airflow.md` — Apache Airflow discovery (DAG `.py` parsing, operator classification)
-- `flowx-convert` skill, `sources/airflow-coverage.md`: what the Airflow path converts and what it does not
-- `flowx-enrich` skill — adds agent-authored insights to the inventory (`flowx-migrate` runs it after discover)
+- [`sources/adf.md`](sources/adf.md): ADF discovery (ARM JSON, volume download, complexity report).
+- [`sources/airflow.md`](sources/airflow.md): Airflow discovery (DAG `.py` parsing, operator
+  classification).
+- The `flowx-convert` skill's `sources/airflow-coverage.md`: what the Airflow path converts and what it
+  does not.
+- The `flowx-enrich` skill: adds agent-authored insights to the inventory (`flowx-migrate` runs it after
+  discover unless the user asks for a deterministic-only pass).
+- [`../shared/running-flowx.md`](../shared/running-flowx.md) and
+  [`../shared/output-folder.md`](../shared/output-folder.md): running a phase and the output folder.
