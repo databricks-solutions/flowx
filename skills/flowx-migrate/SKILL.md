@@ -358,7 +358,7 @@ and packaged:
 - **`fill-agentic` is the only fill for a routed-agentic unit** (N pipelines → M, e.g. one Lakeflow
   Connect pipeline, or one same-named pipeline to keep a pipeline 1:1): author the replacement
   pipeline IR (typically with `AgenticComponentActivity` nodes) and run
-  `fill-agentic --output-dir <output_dir> --members "<a,b,...>" --pipelines-path <file>`;
+  `fill-agentic --output-dir <output_dir> --member <a> --member <b> --pipelines-path <file>`;
   the members must exactly match the routed-agentic component or accepted grouping and the merged
   report is validated structurally before it is written. The authored pipelines are stored in
   `metadata/agentic_conversion.json`, so a later re-route re-applies them.

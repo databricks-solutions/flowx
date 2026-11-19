@@ -299,7 +299,7 @@ pipelines you author (no LLM in the library, which validates and records).
 ```bash
 "$PY" -m flowx.adapter fill-agentic \
   --output-dir <output_dir> \
-  --members "IngestSalesforce,IngestWorkday" \
+  --member IngestSalesforce --member IngestWorkday \
   --pipelines-path authored_pipelines.json \
   [--out <result.json>]
 ```
@@ -322,7 +322,8 @@ the unchanged baseline.
 
 Its guarantees:
 
-- `--members` (comma-separated; MCP accepts a list) must **exactly match** a routed-**agentic** unit —
+- The members (one `--member` per name, taken exactly as given, so a name may hold a comma; or
+  `--members` comma-separated; MCP accepts a list) must **exactly match** a routed-**agentic** unit —
   a component, or an accepted grouping's full member list — in the recorded plan, whose
   `inventory_sha256`, `source_graphs_sha256` and `agentic_insights_sha256` must still match the
   current inventory, with nothing pending. A partial group, a superset, a typo, or a deterministic

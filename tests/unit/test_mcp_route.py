@@ -322,8 +322,19 @@ def test_fill_agentic_inline_pipelines_are_staged(captured_fill, tmp_path: Path,
     assert out["ok"] is True
     argv = captured_fill[0]
     assert argv[0] == "fill-agentic" and argv[1] == "--output-dir"
-    assert argv[argv.index("--members") + 1] == "parent,child"
+    assert [argv[index + 1] for index, arg in enumerate(argv) if arg == "--member"] == ["parent", "child"]
+    assert "--members" not in argv
     assert staged == [pipelines]
+
+
+def test_fill_agentic_passes_each_listed_member_whole_so_a_comma_in_a_name_survives(
+    captured_fill, tmp_path: Path
+) -> None:
+    """Commas are legal in ADF pipeline names; joining the list with ',' split 'Load Sales, EU' in two."""
+    server._cmd_fill_agentic({"output_dir": str(tmp_path), "members": ["Load Sales, EU", " padded "], "pipelines": []})
+
+    argv = captured_fill[0]
+    assert [argv[index + 1] for index, arg in enumerate(argv) if arg == "--member"] == ["Load Sales, EU", " padded "]
 
 
 def test_fill_agentic_forwards_members_string_and_path(captured_fill, tmp_path: Path) -> None:

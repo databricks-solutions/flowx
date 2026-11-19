@@ -1194,6 +1194,44 @@ def test_a_malformed_authored_task_is_refused_with_a_violation_not_a_crash(
     assert not (tmp_path / "metadata" / "agentic_conversion.json").exists()
 
 
+def test_fill_agentic_fills_a_unit_whose_member_name_holds_a_comma(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    member = "Load Sales, EU"
+    report = {"pipelines": [{"name": member, "tasks": [_copy_task("Extract", "extract")]}]}
+    _write_work(tmp_path, report, gaps=[])
+    metadata = tmp_path / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    inventory = build_source_inventory(
+        [SourceGraph(name=member, source="adf", tasks=[_node("extract", "Copy")])], source="adf", source_dir="/tmp/src"
+    )
+    (metadata / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+    [component] = build_recommendation(inventory)["components"]
+    plan = {"components": [{**{key: component[key] for key in ("component_id", "members")}, "decision": "agentic"}]}
+    assert record_plan(tmp_path, plan=plan)["ok"] is True
+    recorded = ConversionPlan.load(tmp_path)
+    assert recorded is not None
+    apply_plan(tmp_path, recorded)
+    pipelines_path = tmp_path / "authored.json"
+    pipelines_path.write_text(json.dumps([_named_lfc_pipeline("sales_lfc")]), encoding="utf-8")
+    capsys.readouterr()
+
+    exit_code = adapter_main(
+        ["fill-agentic", "--output-dir", str(tmp_path), "--member", member, "--pipelines-path", str(pipelines_path)]
+    )
+
+    assert exit_code == 0, capsys.readouterr()
+    report_after = json.loads((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert [pipeline["name"] for pipeline in report_after["pipelines"]] == ["sales_lfc"]
+
+
+def test_fill_agentic_refuses_both_member_forms_at_once(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        adapter_main(
+            ["fill-agentic", "--output-dir", str(tmp_path), "--member", "a", "--members", "a", "--pipelines-path", "x"]
+        )
+
+
 def test_combine_rejects_an_authored_pipeline_missing_the_source_tag(tmp_path: Path) -> None:
     """FIX 2: an authored pipeline without tags.source == 'adf' fails closed at combine (nothing written)."""
     _setup_routed_agentic(tmp_path, decision="agentic")

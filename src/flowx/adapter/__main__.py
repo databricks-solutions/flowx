@@ -304,7 +304,8 @@ def _route_locked(args: argparse.Namespace) -> int:
 def _run_fill_agentic(args: argparse.Namespace) -> int:
     """Implements ``fill-agentic``: fill a routed-agentic unit with the agent's pipelines.
 
-    Replaces a routed-agentic unit's pipelines (``--members`` as a comma-separated list) with the
+    Replaces a routed-agentic unit's pipelines (one ``--member`` per name, or ``--members`` as a
+    comma-separated list) with the
     agent-authored pipeline(s) read from ``--pipelines-path`` (a JSON list of pipeline IR dicts, each
     typically carrying ``AgenticComponentActivity`` nodes), and stores them in
     ``metadata/agentic_conversion.json``. The membership must exactly match a routed-agentic component
@@ -314,9 +315,12 @@ def _run_fill_agentic(args: argparse.Namespace) -> int:
     """
     from flowx.route_agentic import apply_agentic_output
 
-    members = [member.strip() for member in args.members.split(",") if member.strip()]
+    if args.member is not None:
+        members = [member for member in args.member if member]
+    else:
+        members = [member.strip() for member in args.members.split(",") if member.strip()]
     if not members:
-        print("fill-agentic requires a non-empty --members list.", file=sys.stderr)
+        print("fill-agentic requires a non-empty --member or --members list.", file=sys.stderr)
         return 2
     try:
         authored = json.loads(Path(args.pipelines_path).read_text(encoding="utf-8"))
@@ -761,9 +765,18 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Migration output directory (reads and rewrites .work/translation_report.json).",
     )
-    fill_agentic.add_argument(
+    member_forms = fill_agentic.add_mutually_exclusive_group(required=True)
+    member_forms.add_argument(
+        "--member",
+        action="append",
+        dest="member",
+        help=(
+            "One pipeline name of the routed-agentic component or accepted grouping to replace, taken exactly as "
+            "given; repeat it for each member. Use this form when a name holds a comma."
+        ),
+    )
+    member_forms.add_argument(
         "--members",
-        required=True,
         help="Comma-separated pipeline names of the routed-agentic component or accepted grouping to replace.",
     )
     fill_agentic.add_argument(
