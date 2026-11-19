@@ -22,6 +22,7 @@ kept files under `metadata/`, and transient files under `.work/`.
 | `conversion_plan.json`, `routing_review.html` | route | The routing decisions and the review page |
 | `agentic_conversion.json` | fill-agentic, merge_agentic | The agent's conversion output |
 | `configuration.json` | modify | The configuration answers |
+| `agentic/` | resolve-agentic, Airflow only | The accepted Airflow resolutions and their evidence, kept when package deletes `.work/` |
 | `route_audit.json`, `packaged_bundles.json` | package | What each routing unit became; the bundle folders package wrote |
 | `tco/cost_comparison.csv`, `tco/cost_comparison.md` | profile | The ADF cost estimate |
 
@@ -31,9 +32,11 @@ kept files under `metadata/`, and transient files under `.work/`.
 |---|---|---|
 | `translation_report.json` | convert, then route | The report with the IR for every task |
 | `<pipeline>.json` | convert | Per-pipeline IR |
-| `gaps.json` | convert | Unmapped source constructs |
+| `gaps.json` | convert, then route | Unmapped source constructs |
 | `translation_report.stamped.json` | modify | The report with the configuration answers applied |
 | `route_baseline/` | route | Convert's report as route first found it, never rewritten |
+| `agentic/` | resolve-agentic prepare, Airflow only | The resolver's baseline, source snapshot, manifest and gap envelopes |
+| `translation_report.agentic.json` | resolve-agentic apply, Airflow only | The report with the accepted resolutions; pass it to package as `--report` |
 
 Package deletes `.work/` after a successful build unless `--keep-intermediates` is set.
 

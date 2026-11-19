@@ -31,9 +31,10 @@ Use the same source path and `--pipeline` scoping the discover phase used. This 
 
 ## Step 2 — Review the report
 
-Read `<output_dir>/.work/translation_report.json`. Each task is a `NotebookActivity` (from a
-PythonOperator callable or BashOperator command, carrying `generated_source`) or a
-`PlaceholderActivity` (an unmapped operator). Dependencies come from `>>` / `<<`; the DAG's cron
+Read `<output_dir>/.work/translation_report.json`. A mapped task is a `NotebookActivity` (for example
+from a PythonOperator callable or BashOperator command, carrying `generated_source`), a `SqlActivity`, a
+`SparkPythonActivity` or `SparkJarActivity`, a `RunJobActivity` or a `DbtCommandActivity`; an unmapped
+operator is a `PlaceholderActivity`. `../../shared/airflow-coverage.md` lists which operator becomes which. Dependencies come from `>>` / `<<`; the DAG's cron
 `schedule_interval` is carried as the pipeline `schedule`.
 
 ## Step 3 — Review deterministic gaps

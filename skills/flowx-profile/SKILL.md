@@ -1,8 +1,8 @@
 ---
 name: flowx-profile
 description: >
-  Estimate what an Azure Data Factory estate costs today: a live scan of the factories' recent
-  pipeline and activity runs, priced at Azure list rates and reconciled against Azure-billed
+  Estimate what an Azure Data Factory estate costs to run: a live scan of the factories' pipeline
+  and activity runs over the last N days (default 30), priced at Azure list rates and reconciled against Azure-billed
   actuals from Cost Management. Writes a cost report under metadata/tco/. Independent of the
   discover/convert/package phases.
   Use when the user asks what their ADF costs, for an ADF TCO or cost report, or to profile a data

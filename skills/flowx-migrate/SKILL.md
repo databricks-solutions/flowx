@@ -135,17 +135,20 @@ if convert writes that report again), so merge them again for the new one.
 After a package, this is also how you change the conversion (Step 15).
 
 ```
-Convert complete
-Deterministic translated:   35 (74.5%)
-Agentic translated:          8 (17.0%)
-Failed:                      4 ( 8.5%)
-Overall coverage:           91.5%
+Translation Summary
+===================
+Deterministic:    35
+Agentic:          8
+Unsupported:      4
+Total:            47
 ```
+
+Here "Agentic" counts the gaps convert left for the agent; none of them is translated yet.
 
 ### Step 6: Present the translation details
 
-Show the counts translated deterministically by type, each agentic translation with the skill used,
-and each failure with its reason. For a failure, suggest a hand-written notebook, a retry with more
+Show the counts translated deterministically by type, each agentic gap with what fills it (Step 7 and
+Step 8), and each unsupported activity with its reason. For an unsupported activity, suggest a hand-written notebook, a retry with more
 context, or skipping it with a placeholder.
 
 ### Step 7: Route the conversion

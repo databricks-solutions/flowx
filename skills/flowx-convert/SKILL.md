@@ -10,8 +10,8 @@ description: >
 
 # Convert the inventory to Databricks IR
 
-Phase 2 of the flowx workflow. Convert reads the source again, with the inventory discover wrote in
-`<output_dir>/metadata/inventory.json`, and writes a translation report under `<output_dir>/.work/`:
+Phase 2 of the flowx workflow. Convert reads the source again (the same path discover read; it does not read
+`<output_dir>/metadata/inventory.json`) and writes a translation report under `<output_dir>/.work/`:
 deterministic translators handle the known types, and the gaps are left for agentic translation. The
 `flowx-package` skill turns the report into a bundle. Translation is source-specific, so each source has
 its own guide.

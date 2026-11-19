@@ -41,7 +41,7 @@ ADF JSON Exports
       |
       v
   Databricks DABs Project
-  (databricks.yml + resources/ + src/ + setup/)
+  (databricks.yml + resources/ + src/ + SETUP.md)
       |
       v
   databricks bundle deploy
@@ -63,9 +63,9 @@ ADF JSON Exports
 4. Generate the inventory with summary statistics
 
 **Output:**
-- `inventory.json` — classified activity inventory
-- `ast/*.json` — typed AST per pipeline
-- `parse_errors.json` — any parsing failures
+- `metadata/inventory.json` — classified activity inventory
+- `metadata/profile_report.csv` — the complexity report
+- `metadata/source_graphs.json` and `metadata/<pipeline>.arm.json` — the saved source graphs and each pipeline's verbatim ARM JSON (ADF only)
 
 **Key decisions:**
 - Classification is based on the activity `type` field, not the activity content. This makes classification fast and deterministic.
@@ -97,29 +97,25 @@ ADF JSON Exports
 
 **Skill:** `flowx:flowx-convert`
 
-**Input:** `inventory.json` from phase 1 + original ADF JSON files
+**Input:** the same source export discover read (convert reads the source again, not `inventory.json`)
 
 **Process:**
-1. Run deterministic translators for all activities classified as `deterministic`
-2. For each `agentic` activity, perform LLM-assisted translation from the activity's ARM JSON:
-   - ExecuteDataFlow activities → a purpose-built PySpark notebook
-   - control flow and external-call activities → a notebook implementing the activity's semantics
-   - complex ADF expressions → Python/SQL equivalents
-   - trigger schedules → Databricks schedule/trigger configuration
-3. Merge deterministic and agentic results into a unified translation report
-4. Generate Databricks IR (intermediate representation) for each activity
+1. Run the deterministic translators for every activity and trigger they handle
+2. Leave each activity they can't translate as an agentic gap with a placeholder task; convert runs no LLM
+3. Write the deterministic baseline report with Databricks IR (intermediate representation) for each pipeline
 
-**Output:**
-- `translation_report.json` — unified report with IR for all activities
-- `ir/*.json` — Databricks IR per activity
-- `notebooks/*.py` — generated helper notebooks
-- `agentic_results/*.json` — raw agentic skill outputs
+**Output (under `.work/`):**
+- `translation_report.json` — the deterministic baseline, with IR for every task and the gaps marked
+- `<pipeline>.json` — IR per pipeline
+- `gaps.json` — the agentic gaps, when there are any
+
+The agent fills the gaps afterwards: route and fill-agentic for routed-agentic units, `convert --merge-agentic` for convert's own gaps (ADF only), and the `flowx-resolve-airflow-gaps` skill for Airflow.
 
 **Key decisions:**
 - Deterministic translators run first because they are fast and reliable. Agentic skills are only invoked for gaps.
 - The IR is an intermediate format that decouples translation from DABs generation. This allows the package phase to target different output formats in the future.
 - Each source's deterministic translators are standalone Python modules under `src/flowx/sources/<source>/` (e.g. ADF's live in `src/flowx/sources/adf/translators/`). Adding support for a new activity type means adding a new module there.
-- Agentic results are saved separately before merging, so they can be inspected, retried, or manually overridden.
+- Agentic fills are stored in `metadata/agentic_conversion.json`, apart from convert's baseline, so they can be inspected, revised, or applied again after a fresh convert.
 
 ## Phase 2.a: Route
 
@@ -161,7 +157,6 @@ ADF JSON Exports
 4. Generate the `databricks.yml` root configuration with target environments
 5. Copy/generate notebooks to `src/notebooks/`
 6. Generate setup scripts for infrastructure (volumes, secrets, connections)
-7. Generate skeleton test files
 
 **Output:**
 - Complete DABs project ready for `databricks bundle validate` and `databricks bundle deploy`

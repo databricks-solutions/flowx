@@ -12,7 +12,7 @@ description: >
 
 After package, local CLI only. With several bundles (`per-pipeline` or `per-group` packaging), a
 pipeline A that calls pipeline B through Run Pipeline (`ExecutePipeline`) gets a `run_job_task` that
-points at a job in B's own bundle. flowx writes that reference as `${var.<B>}` with a matching bundle
+points at a job in B's own bundle. flowx writes that reference as `${var.<B>_job_id}` with a matching bundle
 variable, so each bundle is valid on its own, but someone has to pass B's numeric job id to A. This skill
 does it: it deploys every bundle under `<output_dir>`, callees first, and wires each deployed job id into
 its callers. The top-level `DEPLOY.md` package writes is the same order for a human to follow.
@@ -47,14 +47,14 @@ CLI only, with the venv from `flowx-setup` (rules in [`../shared/running-flowx.m
 
 Run with `--dry-run` and show the user the order. The command finds the bundles itself (any immediate
 subfolder with a `databricks.yml`, no manifest needed), reads each bundle's job keys and its
-`${var.<callee>}` references from `resources/*.yml`, and sorts them callees first. The order is
+`${var.<callee>_job_id}` references from `resources/*.yml`, and sorts them callees first. The order is
 deterministic. A cyclic call graph can't be ordered, and the command stops with an error.
 
 ### Step 2: Deploy
 
 Run without `--dry-run`. Each bundle is deployed with `databricks bundle deploy`; then the deployed job id
 is read from `databricks bundle summary -o json` at `.resources.jobs.<key>.id` and passed to its callers
-as `--var "<callee>=<id>"`. A resource with no deployed job id (for example a Lakeflow pipeline) is
+as `--var "<callee>_job_id=<id>"`. A resource with no deployed job id (for example a Lakeflow pipeline) is
 skipped, so no empty `--var` is passed. Because it passes the numeric id, not a name, the `[dev <user>]`
 name prefix of dev mode doesn't matter: it works the same for `dev` and `prod`.
 

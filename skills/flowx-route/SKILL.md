@@ -69,8 +69,10 @@ Common MCP and CLI rules: [`../shared/running-flowx.md`](../shared/running-flowx
 
 ### Step 1: Route writes the recommendation into the plan
 
-Run `route` with no plan. It writes `metadata/conversion_plan.json` and `metadata/routing_review.html`
-and touches nothing else. Over MCP the plan and the page come back under `bundle` (or are uploaded to
+Run `route` with no plan. With none recorded yet, it writes `metadata/conversion_plan.json` and
+`metadata/routing_review.html` and touches nothing else. Run without `--plan-path` again after editing the
+recorded plan: while a decision is pending it only records the plan, and once every decision is made it
+applies it, rebuilding `.work/translation_report.json` and `gaps.json`. Over MCP the plan and the page come back under `bundle` (or are uploaded to
 `output_volume_path` or `output_workspace_path`), because a hosted agent cannot read the server's
 `output_dir`. When either is missing or unreadable, or too large to return inline, `ok` is false, nothing
 is uploaded, and the error says which; call route again (with an upload path when a file was too large).
