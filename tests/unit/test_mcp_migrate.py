@@ -681,12 +681,6 @@ def _failed_airflow_pipeline(name: str) -> dict:
     }
 
 
-def _dags_left_out() -> _FakeResult:
-    result = _FakeResult(ok=False)
-    result.returncode = 4
-    return result
-
-
 def test_airflow_migrate_skipping_failed_dags_ignores_their_gaps_and_packages(monkeypatch, tmp_path: Path):
     output = tmp_path / "out"
     calls: list[list[str]] = []
@@ -709,7 +703,7 @@ def test_airflow_migrate_skipping_failed_dags_ignores_their_gaps_and_packages(mo
                 json.dumps({"pipelines": [verified, _failed_airflow_pipeline("bad")]}), encoding="utf-8"
             )
         if argv[0] == "package":
-            return _dags_left_out()
+            return _FakeResult()
         return _FakeResult()
 
     monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
@@ -746,7 +740,7 @@ def test_package_reports_unresolved_gaps_before_left_out_dags(monkeypatch, tmp_p
     def package_and_prune(args):
         calls.append([str(value) for value in args])
         report.unlink()
-        return _dags_left_out()
+        return _FakeResult()
 
     monkeypatch.setattr(runner, "run_adapter", package_and_prune)
     monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
@@ -765,7 +759,7 @@ def test_package_without_left_out_dags_is_completed_when_only_failed_dags_had_ga
     report = output / ".work" / "translation_report.json"
     report.parent.mkdir(parents=True)
     report.write_text(json.dumps({"pipelines": [_failed_airflow_pipeline("bad")]}), encoding="utf-8")
-    monkeypatch.setattr(runner, "run_adapter", lambda _args: _dags_left_out())
+    monkeypatch.setattr(runner, "run_adapter", lambda _args: _FakeResult())
     monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
     monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
 

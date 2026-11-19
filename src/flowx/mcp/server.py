@@ -20,7 +20,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from flowx.agentic import airflow_gap_findings, classify_airflow_gaps
 from flowx.mcp import runner
-from flowx.skipped_dags import DAGS_LEFT_OUT_EXIT_CODE, failed_airflow_pipelines
+from flowx.skipped_dags import failed_airflow_pipelines
 
 
 def _allowed_origins() -> list[str]:
@@ -490,24 +490,22 @@ def _package_status(
     left_out_dags: list[str],
     reviewed: bool = False,
     allow_unresolved_gaps: bool = False,
-) -> tuple[bool, str]:
-    """Returns ``(ok, status)`` for a package run of *report*.
+) -> str:
+    """Returns the status of a package run of *report*.
 
-    A bundle written without the *left_out_dags*, which package signals with its own exit code, is a success
-    the caller asked for. The status names what the bundle still lacks, most important first: reviewed gaps
+    The status names what a written bundle still lacks, most important first: reviewed gaps
     (``completed_with_reviewed_gaps``), gaps kept with ``allow_unresolved_gaps``
-    (``packaged_with_unresolved_gaps``), then left-out DAGs (``packaged_without_failed_dags``). Gaps in the
+    (``packaged_with_unresolved_gaps``), then the *left_out_dags* (``packaged_without_failed_dags``). Gaps in the
     left-out DAGs do not count, since those DAGs are not in the bundle.
     """
-    ok = result.ok or (result.returncode == DAGS_LEFT_OUT_EXIT_CODE and bool(left_out_dags))
-    if not ok:
-        return False, "failed"
+    if not result.ok:
+        return "failed"
     unresolved_gaps = airflow_gap_findings(_without_pipelines(report, left_out_dags))
     if reviewed and unresolved_gaps:
-        return True, "completed_with_reviewed_gaps"
+        return "completed_with_reviewed_gaps"
     if allow_unresolved_gaps and unresolved_gaps:
-        return True, "packaged_with_unresolved_gaps"
-    return True, "packaged_without_failed_dags" if left_out_dags else "completed"
+        return "packaged_with_unresolved_gaps"
+    return "packaged_without_failed_dags" if left_out_dags else "completed"
 
 
 def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
@@ -543,7 +541,7 @@ def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
     report = runner.read_json(report_path)
     left_out_dags = failed_airflow_pipelines(report) if p.get("skip_failed_dags") else []
     result = runner.run_adapter(args)
-    ok, status = _package_status(
+    status = _package_status(
         result,
         report,
         left_out_dags=left_out_dags,
@@ -551,19 +549,16 @@ def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
         allow_unresolved_gaps=bool(p.get("allow_unresolved_gaps")),
     )
     setup_md = runner.read_text(out / "SETUP.md") or runner.read_text(out / "setup" / "SETUP.md")
-    extra = _bundle_output(p, out) if ok else {}
-    return {
-        **_phase_result(
-            result,
-            out,
-            status=status,
-            left_out_dags=left_out_dags if ok and left_out_dags else None,
-            bundle_files=runner.list_tree(out),
-            setup_md=setup_md,
-            **extra,
-        ),
-        "ok": ok,
-    }
+    extra = _bundle_output(p, out) if result.ok else {}
+    return _phase_result(
+        result,
+        out,
+        status=status,
+        left_out_dags=left_out_dags if result.ok and left_out_dags else None,
+        bundle_files=runner.list_tree(out),
+        setup_md=setup_md,
+        **extra,
+    )
 
 
 def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
@@ -642,9 +637,10 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
         if left_out_dags:
             package_args += ["--skip-failed-dags"]
         package_res = runner.run_adapter(package_args)
-        ok, status = _package_status(package_res, reviewed_payload, left_out_dags=left_out_dags, reviewed=True)
+        ok = package_res.ok
+        status = _package_status(package_res, reviewed_payload, left_out_dags=left_out_dags, reviewed=True)
         extra = _bundle_output(p, out) if ok else {}
-        steps["package"] = {**_phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra), "ok": ok}
+        steps["package"] = _phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra)
         return {
             "ok": ok,
             "status": status,
@@ -800,9 +796,10 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
         if left_out_dags:
             package_args += ["--skip-failed-dags"]
         package_res = runner.run_adapter(package_args)
-        ok, status = _package_status(package_res, converted_report, left_out_dags=left_out_dags)
+        ok = package_res.ok
+        status = _package_status(package_res, converted_report, left_out_dags=left_out_dags)
         extra = _bundle_output(p, out) if ok else {}
-        steps["package"] = {**_phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra), "ok": ok}
+        steps["package"] = _phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra)
         return {
             "ok": ok,
             "status": status,
