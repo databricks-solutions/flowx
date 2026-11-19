@@ -2239,6 +2239,24 @@ def _edit_store(output_dir: Path, edit: Any) -> None:
     store_path.write_text(json.dumps(store, indent=2), encoding="utf-8")
 
 
+def test_package_warns_about_an_edited_entry_for_a_unit_the_plan_no_longer_has_and_still_runs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fill-agentic cannot target a vanished unit and a hosted agent cannot delete the file, so refusing dead-ends."""
+    report = _report_two_pipelines()
+    for pipeline in report["pipelines"]:
+        pipeline["tags"] = {"source": "adf"}
+    _route_parent_agentic(tmp_path, report)
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    _edit_store(tmp_path, lambda store: store["components"].update({"grouping-gone": {"members": ["x"]}}))
+    capsys.readouterr()
+
+    assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 0
+
+    error = capsys.readouterr().err
+    assert "Warning:" in error and "grouping-gone" in error
+
+
 def test_a_stored_output_moved_to_another_unit_is_not_applied(tmp_path: Path) -> None:
     units = _two_filled_components(tmp_path)
 
