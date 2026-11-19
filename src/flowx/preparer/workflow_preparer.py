@@ -10,6 +10,7 @@ from typing import Any
 from flowx.models.dab import DabNotebook, ParameterApproximation, SecretInstruction, SetupTask
 from flowx.models.ir import (
     Activity,
+    AgenticComponentActivity,
     AppendVariableActivity,
     CopyActivity,
     DbtCommandActivity,
@@ -36,6 +37,8 @@ from flowx.models.ir import (
 )
 from flowx.motifs.collapsed_lookup_refs import repair_collapsed_lookup_references
 
+_TASK_NOTIFICATION_KEYS = ("email_notifications", "webhook_notifications")
+
 
 @dataclass(slots=True, kw_only=True)
 class PreparedActivity:
@@ -51,6 +54,8 @@ class PreparedActivity:
     task_key_remap: dict[str, str] = field(default_factory=dict)
     # Lakeflow pipeline resources emitted under resources/<resource_key>.yml ({resource_key, definition}).
     pipeline_resources: list[dict[str, Any]] = field(default_factory=list)
+    # Job environments ({environment_key, spec}) written into each job whose tasks reference them.
+    environments: list[dict[str, Any]] = field(default_factory=list)
     parameter_approximations: list[ParameterApproximation] = field(default_factory=list)
 
 
@@ -67,6 +72,7 @@ class PreparedWorkflow:
     parameters: list[dict[str, Any]] = field(default_factory=list)
     cluster_hints: list[dict[str, Any]] = field(default_factory=list)
     pipeline_resources: list[dict[str, Any]] = field(default_factory=list)
+    environments: list[dict[str, Any]] = field(default_factory=list)
     parameter_approximations: list[ParameterApproximation] = field(default_factory=list)
     # C-10 (SCHED-001): serialised schedule / trigger spec the bundler
     # renders as ``schedule:`` / ``trigger:`` on the emitted DAB job.
@@ -146,6 +152,7 @@ def prepare_activity(
 ) -> PreparedActivity:
     """Dispatches to the appropriate activity preparer based on activity type."""
     from flowx.preparer.activity_preparers import (
+        agentic_component,
         append_variable,
         copy,
         databricks_job,
@@ -169,6 +176,7 @@ def prepare_activity(
     )
 
     dispatch: dict[type, Any] = {
+        AgenticComponentActivity: agentic_component.prepare,
         NotebookActivity: notebook.prepare,
         SparkJarActivity: spark_jar.prepare,
         SparkPythonActivity: spark_python.prepare,
@@ -213,7 +221,7 @@ def prepare_activity(
     prepared.task = _stamp_compute_mode(prepared.task, activity.compute_mode)
 
     # Wire any notification spec the adapter stamped onto this task (generic across task types, not just Copy).
-    if activity.notifications:
+    if activity.notifications and not any(key in prepared.task for key in _TASK_NOTIFICATION_KEYS):
         from flowx.preparer.notifications import resolve_task_notifications
 
         notification_keys, notification_setup = resolve_task_notifications(activity.notifications)
@@ -307,6 +315,7 @@ class PreparedArtifacts:
     setup_tasks: tuple[SetupTask, ...] = ()
     inner_workflows: tuple[PreparedWorkflow, ...] = ()
     pipeline_resources: tuple[dict[str, Any], ...] = ()
+    environments: tuple[dict[str, Any], ...] = ()
     parameter_approximations: tuple[ParameterApproximation, ...] = ()
 
 
@@ -321,6 +330,7 @@ def merge_prepared_artifacts(
         setup_tasks=artifacts.setup_tasks + tuple(prepared.setup_tasks),
         inner_workflows=artifacts.inner_workflows + tuple(prepared.inner_workflows),
         pipeline_resources=artifacts.pipeline_resources + tuple(prepared.pipeline_resources),
+        environments=artifacts.environments + tuple(prepared.environments),
         parameter_approximations=artifacts.parameter_approximations + tuple(prepared.parameter_approximations),
     )
 
@@ -449,6 +459,7 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         inner_workflows=list(artifacts.inner_workflows),
         cluster_hints=cluster_hints,
         pipeline_resources=list(artifacts.pipeline_resources),
+        environments=list(artifacts.environments),
         parameter_approximations=list(artifacts.parameter_approximations),
         schedule=pipeline.schedule,
         bundle_variables=dict(pipeline.bundle_variables),
