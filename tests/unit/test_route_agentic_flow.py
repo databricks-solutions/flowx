@@ -1245,6 +1245,26 @@ def test_fill_agentic_refuses_both_member_forms_at_once(tmp_path: Path) -> None:
         )
 
 
+def test_a_pipeline_convert_wrote_that_package_cannot_build_is_an_error_not_a_fill_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blaming the fill for a packager failure in an untouched pipeline would send the agent rewriting valid work."""
+    import flowx.preparer.workflow_preparer as workflow_preparer
+
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    prepare = workflow_preparer.prepare_workflow
+
+    def failing_for_child(pipeline: Any, *arguments: Any, **keywords: Any) -> Any:
+        if pipeline.name == "child":
+            raise KeyError("a packager bug")
+        return prepare(pipeline, *arguments, **keywords)
+
+    monkeypatch.setattr(workflow_preparer, "prepare_workflow", failing_for_child)
+
+    with pytest.raises(KeyError, match="a packager bug"):
+        apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])
+
+
 def test_combine_rejects_an_authored_pipeline_missing_the_source_tag(tmp_path: Path) -> None:
     """FIX 2: an authored pipeline without tags.source == 'adf' fails closed at combine (nothing written)."""
     _setup_routed_agentic(tmp_path, decision="agentic")

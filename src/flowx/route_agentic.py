@@ -1604,7 +1604,9 @@ def _fill_unit(output_dir: Path, members: set[str], authored_pipelines: list[dic
         return {"ok": False, "error": None, "violations": folder_clashes, "pipelines": 0}
     new_report[ROUTING_RECORD_KEY] = new_record
 
-    result = validate_report_structurally(new_report)
+    result = validate_report_structurally(
+        new_report, authored_names=[name for name in authored_names if isinstance(name, str)]
+    )
     if not result.ok:
         violations = [f"[{finding.code}] {finding.location}: {finding.message}" for finding in result.violations]
         return {"ok": False, "error": None, "violations": violations, "pipelines": 0}
@@ -1635,15 +1637,16 @@ def _fill_unit(output_dir: Path, members: set[str], authored_pipelines: list[dic
 # --------------------------------------------------------------------------- #
 
 
-def validate_report_structurally(report: dict[str, Any]) -> Any:
+def validate_report_structurally(report: dict[str, Any], *, authored_names: Iterable[str] = ()) -> Any:
     """Package the report to a throwaway bundle and run the existing structural invariants over it.
 
     Uses the same ``prepare_workflow -> write_bundle`` path as the package phase, then aggregates
     :func:`flowx.validate.bundle_invariants.check_bundle_dir` findings across every emitted bundle so
     duplicate keys, dangling dependencies, cycles, and dangling pipeline/run_job references are all
-    caught before the merged report is trusted. A pipeline package cannot build at all, such as an
-    authored task with a field of the wrong shape, is reported as an ``unbuildable_pipeline`` finding
-    naming the error, so the agent gets a violation to fix instead of a crash. Returns a
+    caught before the merged report is trusted. An authored pipeline (one named in ``authored_names``)
+    package cannot build at all, such as one with a task field of the wrong shape, is reported as an
+    ``unbuildable_pipeline`` finding naming the error, so the agent gets a violation to fix instead of a
+    crash. Any other pipeline is one convert wrote, so its failure is a packager error and is raised. Returns a
     :class:`~flowx.validate.bundle_invariants.BundleInvariantResult`.
     """
     from flowx.bundler.dab_writer import pipeline_dict_to_ir, write_bundle
@@ -1652,6 +1655,7 @@ def validate_report_structurally(report: dict[str, Any]) -> Any:
     from flowx.validate.bundle_invariants import BundleFinding, BundleInvariantResult, check_bundle_dir
 
     pipelines = _report_pipelines(report)
+    authored = set(authored_names)
     findings: list[Any] = []
     with tempfile.TemporaryDirectory(prefix="flowx-fill-validate-") as temporary:
         root = Path(temporary)
@@ -1663,6 +1667,8 @@ def validate_report_structurally(report: dict[str, Any]) -> Any:
                 bundle_dir = root / to_lowercase_key(pipeline.name) if len(pipelines) > 1 else root
                 write_bundle(workflow, bundle_dir)
             except (AttributeError, KeyError, TypeError, ValueError) as error:
+                if pipeline_dict.get("name") not in authored:
+                    raise
                 findings.append(
                     BundleFinding(
                         code="unbuildable_pipeline",
