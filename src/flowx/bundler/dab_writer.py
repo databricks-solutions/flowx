@@ -1065,8 +1065,9 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns a process exit code so the adapter can run this phase in-process (instead of spawning a
     second interpreter) and still propagate failures: ``0`` on success, ``1`` when the report has no
-    translated pipelines, ``2`` when workspace-file auth is required but unavailable, and ``3`` when
-    every entry in the report was malformed (nothing left to package).
+    translated pipelines, ``2`` when workspace-file auth is required but unavailable, ``3`` when
+    every entry in the report was malformed (nothing left to package), and ``4`` when the bundle was written
+    without the Airflow DAGs that ``--skip-failed-dags`` left out.
     """
     parser = argparse.ArgumentParser(
         description="Generate a Databricks Declarative Automation Bundle from a translation report.",
@@ -1412,7 +1413,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  3. Validate the bundle: databricks bundle validate")
         print("  4. Deploy: databricks bundle deploy -t dev")
-    return 1 if invariant_violations else 0
+    if invariant_violations:
+        return 1
+    # A bundle was written, but without the DAGs --skip-failed-dags left out.
+    return 4 if skipped_dags else 0
 
 
 def _required_cluster_variables_in(databricks_yml: Path) -> set[str]:

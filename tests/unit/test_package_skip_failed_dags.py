@@ -63,7 +63,7 @@ def test_a_failed_dag_still_stops_package_by_default(tmp_path: Path) -> None:
 def test_skip_failed_dags_packages_the_others(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     output = _convert(tmp_path, {"good.py": _GOOD, "bad.py": _BAD})
 
-    assert _package(output, "--skip-failed-dags") == 0
+    assert _package(output, "--skip-failed-dags") == 4
 
     assert sorted(path.stem for path in (output / "resources").glob("*.yml")) == ["good"]
     assert _job(output, "good")["schedule"]["pause_status"] == "UNPAUSED"
@@ -73,7 +73,7 @@ def test_skip_failed_dags_packages_the_others(tmp_path: Path, capsys: pytest.Cap
 def test_task_triggering_a_left_out_dag_becomes_a_placeholder_and_pauses_its_job(tmp_path: Path) -> None:
     output = _convert(tmp_path, {"good.py": _GOOD, "bad.py": _BAD, "caller.py": _CALLER})
 
-    assert _package(output, "--skip-failed-dags") == 0
+    assert _package(output, "--skip-failed-dags") == 4
 
     job = _job(output, "caller")
     task = next(task for task in job["tasks"] if task["task_key"] == "kick")
@@ -81,6 +81,12 @@ def test_task_triggering_a_left_out_dag_becomes_a_placeholder_and_pauses_its_job
     notebook = (output / task["notebook_task"]["notebook_path"].removeprefix("../")).read_text(encoding="utf-8")
     assert "Airflow DAG 'bad' failed reconciliation and was left out of this bundle" in notebook
     assert job["schedule"]["pause_status"] == "PAUSED"
+
+
+def test_skip_failed_dags_exits_zero_when_nothing_failed(tmp_path: Path) -> None:
+    output = _convert(tmp_path, {"good.py": _GOOD})
+
+    assert _package(output, "--skip-failed-dags") == 0
 
 
 def test_skip_failed_dags_does_not_hide_a_malformed_report(tmp_path: Path) -> None:
@@ -96,3 +102,24 @@ def test_only_failed_dags_leaves_nothing_to_package(tmp_path: Path) -> None:
 
     assert _package(output, "--skip-failed-dags") == 1
     assert not (output / "resources").exists()
+
+
+def test_mcp_package_returns_the_bundle_when_dags_were_left_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mcp")
+    from flowx.mcp import runner, server
+
+    output = _convert(tmp_path, {"good.py": _GOOD, "bad.py": _BAD})
+
+    def run_package(arguments: list[str]) -> runner.AdapterResult:
+        returncode = _package(output, *[str(argument) for argument in arguments[3:]])
+        return runner.AdapterResult(command=arguments, returncode=returncode, stdout="", stderr="")
+
+    monkeypatch.setattr(runner, "run_adapter", run_package)
+
+    result = server._cmd_package({"output_dir": str(output), "skip_failed_dags": True})
+
+    assert result["ok"] is False
+    assert result["dags_left_out"] is True
+    assert "bundle" in result
