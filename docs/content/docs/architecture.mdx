@@ -41,7 +41,7 @@ The reporting layer (`reporting/`) can write per-run coverage to a Unity Catalog
                                   │ subprocess (same contract)
                     ┌─────────────────────────────┐
    MCP tool  ──────▶│  flowx.mcp (FastMCP)     │
-   (Claude / Genie) │  1 tool, 12 commands →       │
+   (Claude / Genie) │  1 tool, all commands →      │
                     │  adapter bridge              │
                     └─────────────────────────────┘
 ```
@@ -59,7 +59,7 @@ The unified `flowx.adapter` CLI is the single contract. Both surfaces go through
 | `mcp/runner.py`   | Subprocess bridge to `flowx.adapter` with artifact summarizers (for running translation without the `mcp` dependency) |
 | `mcp/__main__.py` | `python -m flowx.mcp` entry point (stdio default, `--http` for hosting)                                               |
 
-The `flowx` tool's `command` selects the adapter operation: `inputs`, `discover`, `convert`, `merge_agentic` (ADF only), `resolve_agentic` (Airflow only), `inspect`, `apply_answers`, `materialize_lookup`, `workspace_paths`, `package`, `migrate`, `record_results`, and `install_dashboard` (with `parameters` carrying that command's arguments).
+The `flowx` tool's `command` selects the adapter operation, with `parameters` carrying that command's arguments; the command table in `app/README.md` lists every command and the adapter call it wraps.
 
 ## Deployment topology
 

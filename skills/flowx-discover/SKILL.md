@@ -65,7 +65,7 @@ All under the shared `<output_dir>/metadata/` folder:
 | File | Description |
 |---|---|
 | `metadata/inventory.json` | Classified activity inventory for the convert phase |
-| `metadata/source_graphs.json` | (ADF) Saved, content-hashed source graphs (activities, lineage, detected motifs); the inventory is built from it and records its hash as `source_graphs_sha256` |
+| `metadata/source_graphs.json` | (ADF) The saved source graphs (activities, lineage and detected motifs), versioned and content-hashed; the inventory is built from it and records its hash as `source_graphs_sha256` |
 | `metadata/profile_report.csv` | Per-pipeline complexity report (counts + T-shirt size) |
 | `metadata/<pipeline>.arm.json` | (ADF) Verbatim original source for each pipeline (provenance) |
 
@@ -79,3 +79,4 @@ The inventory classifies every task into one of three strategies:
 
 - `sources/adf.md` — Azure Data Factory discovery (ARM JSON, UC-volume download, complexity report)
 - `sources/airflow.md` — Apache Airflow discovery (DAG `.py` parsing, operator classification)
+- `flowx-enrich` skill — adds agent-authored insights to the inventory (`flowx-migrate` runs it after discover)
