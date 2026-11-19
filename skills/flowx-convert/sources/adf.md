@@ -10,6 +10,17 @@ Translation is **deterministic-first**:
 2. Activities needing interpretation, expression conversion, or lacking a translator are handled by
    agentic translation the agent performs from the ARM JSON.
 
+## Contents
+
+- [Step 1: Locate the inventory](#step-1--locate-the-inventory)
+- [Step 2: Run deterministic translation](#step-2--run-deterministic-translation)
+- [Step 3: Read the translation report](#step-3--read-the-translation-report)
+- [Step 4: Handle agentic gaps](#step-4--handle-agentic-gaps)
+- [Step 5: Collect agentic results](#step-5--collect-agentic-results)
+- [Step 6: Merge agentic results](#step-6--merge-agentic-results)
+- [Step 6.1: Just-in-time translation configuration](#step-61--just-in-time-translation-configuration)
+- [Step 7: Present translation summary](#step-7--present-translation-summary)
+
 ## Step 1 — Locate the inventory
 
 The discover phase wrote `<output_dir>/metadata/inventory.json`. Confirm the shared `<output_dir>`

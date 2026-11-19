@@ -2,6 +2,18 @@
 
 This reference documents how all 84 ADF expression functions are translated by `flowx.parser.expression_parser`.
 
+## Contents
+
+- [Translation Categories](#translation-categories)
+- [String Functions (12): notebook_code](#string-functions-12--notebook_code)
+- [Collection Functions (10): notebook_code](#collection-functions-10--notebook_code)
+- [Logical Functions (9): notebook_code](#logical-functions-9--notebook_code)
+- [Conversion Functions (24): notebook_code / agentic](#conversion-functions-24--notebook_code--agentic)
+- [Math Functions (9): notebook_code](#math-functions-9--notebook_code)
+- [Date/Time Functions (20): notebook_code / agentic](#datetime-functions-20--notebook_code--agentic)
+- [Summary](#summary)
+- [Agentic Functions (11 total)](#agentic-functions-11-total)
+
 ## Translation Categories
 
 - **notebook_code** — Translated to Python code embedded in the generated notebook body.

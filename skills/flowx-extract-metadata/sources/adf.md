@@ -2,6 +2,13 @@
 
 Source guide for `--source adf`. See the parent `SKILL.md` for how the phase runs and the MCP note.
 
+## Contents
+
+- [Step 1: Ask the user how to export](#step-1--ask-the-user-how-to-export)
+- [Step 2: Export the pipelines](#step-2--export-the-pipelines)
+- [Step 3: Check the result (all options)](#step-3--check-the-result-all-options)
+- [Step 4: Hand off to discover](#step-4--hand-off-to-discover)
+
 ## Step 1 — Ask the user how to export
 
 Ask in plain language, and keep it short. Suggested wording:

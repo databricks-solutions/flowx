@@ -2,6 +2,18 @@
 
 End-to-end architecture for migrating Azure Data Factory (ADF) pipelines to Databricks Lakeflow Jobs via Declarative Automation Bundles (DABs).
 
+## Contents
+
+- [Overview](#overview)
+- [Phase 1: Discover](#phase-1-discover)
+- [Phase 1.a: Enrich (optional)](#phase-1a-enrich-optional)
+- [Phase 2: Convert](#phase-2-convert)
+- [Phase 2.a: Route](#phase-2a-route)
+- [Phase 3: Package](#phase-3-package)
+- [Design Principles](#design-principles)
+- [ADF Concepts to Databricks Mapping](#adf-concepts-to-databricks-mapping)
+- [Error Handling](#error-handling)
+
 ## Overview
 
 flowx follows a three-phase pipeline architecture. Each phase is independently runnable and produces artifacts consumed by the next phase. The design principle is **deterministic-first, agentic fallback**: well-known ADF patterns are translated by fast, reliable Python code, while complex or ambiguous patterns are handled by LLM-assisted skills.

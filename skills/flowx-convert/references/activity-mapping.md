@@ -2,6 +2,14 @@
 
 This reference defines the mapping between Azure Data Factory activity types and their translation strategy in flowx.
 
+## Contents
+
+- [Strategy Definitions](#strategy-definitions)
+- [Activity Mapping Table](#activity-mapping-table)
+- [Deterministic Translator Details](#deterministic-translator-details)
+- [Agentic Translation Notes](#agentic-translation-notes)
+- [Expression Function Coverage](#expression-function-coverage)
+
 ## Strategy Definitions
 
 - **Deterministic** — Handled by a built-in Python translator module. Fast, reliable, no LLM required. These mappings are well-defined and produce consistent output.

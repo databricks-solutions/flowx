@@ -7,6 +7,14 @@ Use it to set expectations before a migration and to prioritize follow-up work.
 The Airflow parser is a **static AST walk** — it reads DAG modules with `ast.parse`, never installs
 Airflow, and never executes a DAG. Anything the static walk can't see, it can't convert.
 
+## Contents
+
+- [Supported](#supported)
+- [Not supported](#not-supported)
+- [Dataproc and Managed Spark](#dataproc-and-managed-spark)
+- [dbt factory mode](#dbt-factory-mode)
+- [Priority for remaining follow-ups](#priority-for-remaining-follow-ups)
+
 ## Supported
 
 | Construct | Result |

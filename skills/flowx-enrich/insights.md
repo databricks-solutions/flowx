@@ -9,6 +9,11 @@ Author the insights when a human reader would benefit from a migration narrative
 collapse onto a managed capability, how the factory hangs together, what the risky couplings are.
 The `flowx-route` step reads this block to present the agentic conversion option per component.
 
+## Contents
+
+- [The insights shape](#the-insights-shape)
+- [Idempotency & safety](#idempotency--safety)
+
 ## The insights shape
 
 You author these four content fields, plus `authored_against` by default: copy the
