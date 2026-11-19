@@ -1,6 +1,6 @@
 # ADF coverage: what flowx does with each part of a factory
 
-Read this from the `flowx-convert` skill with `sources/adf.md`. It lists each area of an Azure Data
+Read this from the `flowx-convert` skill with `references/adf.md`. It lists each area of an Azure Data
 Factory export, what flowx produces for it, and what you and the user still have to do. It is the ADF
 counterpart of `../../shared/airflow-coverage.md`.
 
@@ -77,4 +77,4 @@ getting one from Git, ADF Studio or a live pull. Fabric Data Factory uses the `a
 
 Mapping data flows and SSIS packages are agentic. Multi-activity patterns (metadata-driven copy, watermark
 incremental loads, REST pagination, activity-and-notify) are detected as motifs and offered as
-consolidation options; see `sources/adf.md`.
+consolidation options; see `references/adf.md`.

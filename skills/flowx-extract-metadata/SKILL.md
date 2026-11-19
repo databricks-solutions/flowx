@@ -36,11 +36,11 @@ The common MCP and CLI rules are in [`../shared/running-flowx.md`](../shared/run
 - **MCP (Genie Code with the `mcp-flowx` app): the `flowx` MCP tool has no `extract` command, so never
   call `flowx(command="extract", ...)`.** Tell the user plainly, for example: *"The flowx MCP tool can't
   run the extraction for you. I can run it in this notebook session instead, or generate a notebook for
-  you to run."* Then continue with option 3a or 3c in `sources/adf.md`.
+  you to run."* Then continue with option 3a or 3c in `references/adf.md`.
 
 The extraction signs in as the user (`az login`, or a device code in a Databricks notebook). Identities
 that need no sign-in (a service principal, or a Unity Catalog service credential) need an admin's help;
-offer them only when the user's own sign-in doesn't work or the user asks (`sources/adf.md`, option 3).
+offer them only when the user's own sign-in doesn't work or the user asks (`references/adf.md`, option 3).
 
 ## Steps
 
@@ -53,7 +53,7 @@ offer them only when the user's own sign-in doesn't work or the user asks (`sour
 ### Step 2: Follow the ADF guide
 
 Check that the user has no ADF export, ARM template or Git clone, then follow
-[`sources/adf.md`](sources/adf.md). If they already have one, skip its first two steps and start at the
+[`references/adf.md`](references/adf.md). If they already have one, skip its first two steps and start at the
 path check (its step 3) before running `flowx-discover`: a wrong path silently yields an empty inventory.
 
 ## Output
@@ -63,6 +63,6 @@ it), handed to `flowx-discover`.
 
 ## Reference
 
-- [`sources/adf.md`](sources/adf.md): the options, permissions, steps, path check and hand-off for Azure
+- [`references/adf.md`](references/adf.md): the options, permissions, steps, path check and hand-off for Azure
   Data Factory.
 - [`../shared/running-flowx.md`](../shared/running-flowx.md): running a phase.

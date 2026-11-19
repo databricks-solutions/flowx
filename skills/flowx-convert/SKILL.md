@@ -34,8 +34,8 @@ The common MCP and CLI rules are in [`../shared/running-flowx.md`](../shared/run
 
 ### Step 1: Pick the source guide
 
-- Azure Data Factory or Fabric Data Factory: source `adf`, read [`sources/adf.md`](sources/adf.md).
-- Apache Airflow: source `airflow`, read [`sources/airflow.md`](sources/airflow.md).
+- Azure Data Factory or Fabric Data Factory: source `adf`, read [`references/adf.md`](references/adf.md).
+- Apache Airflow: source `airflow`, read [`references/airflow.md`](references/airflow.md).
 
 ### Step 2: Follow the source guide
 
@@ -72,15 +72,15 @@ source-neutral (`flowx.ir_serde`), so `flowx-package` reads it the same way for 
 
 ## Reference
 
-- [`sources/adf.md`](sources/adf.md): ADF translation: the deterministic engine, agentic gaps,
+- [`references/adf.md`](references/adf.md): ADF translation: the deterministic engine, agentic gaps,
   just-in-time configuration, notify motifs and metadata-driven consolidation.
-- [`sources/adf-coverage.md`](sources/adf-coverage.md): what flowx does with each ADF feature area, and
+- [`references/adf-coverage.md`](references/adf-coverage.md): what flowx does with each ADF feature area, and
   what you and the user must do.
 - [`references/activity-mapping.md`](references/activity-mapping.md): each ADF activity type and its
   strategy.
 - [`references/expression-functions.md`](references/expression-functions.md): how each ADF expression
   function translates.
-- [`sources/airflow.md`](sources/airflow.md): Airflow deterministic-first translation plus reviewed
+- [`references/airflow.md`](references/airflow.md): Airflow deterministic-first translation plus reviewed
   leaf-gap resolution.
 - [`../shared/airflow-coverage.md`](../shared/airflow-coverage.md): what the Airflow path converts and what it
   does not.

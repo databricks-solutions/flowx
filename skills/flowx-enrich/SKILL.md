@@ -206,7 +206,7 @@ wrong or missing insight would change the migration:
   factory, cover the factory-wide decision and the pipelines it touches first; enrich records whatever
   valid insights you give it, so a partial set is fine.
 
-The exact shape, every field and the validator's rules are in [`insights.md`](insights.md). Then run
+The exact shape, every field and the validator's rules are in [`references/insights.md`](references/insights.md). Then run
 enrich (see How to run). Only when the insights are clean does it write `agentic_insights.json` and
 rebuild the inventory; on any violation both files are left untouched and you get the full list of
 problems to fix in one pass.
@@ -237,6 +237,6 @@ stopped mid-write. Clear the lock, then enrich again:
 
 ## Reference
 
-- [`insights.md`](insights.md): the insights shape, every field, and the validator's rules.
+- [`references/insights.md`](references/insights.md): the insights shape, every field, and the validator's rules.
 - [`../shared/running-flowx.md`](../shared/running-flowx.md): the MCP and CLI paths every phase shares.
 - [`../shared/output-folder.md`](../shared/output-folder.md): what each phase writes in `<output_dir>`.

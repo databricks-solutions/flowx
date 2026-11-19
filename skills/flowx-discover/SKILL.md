@@ -39,8 +39,8 @@ The common MCP and CLI rules are in [`../shared/running-flowx.md`](../shared/run
 Ask which orchestrator the user is migrating from, or infer it from the input. There is no default
 source.
 
-- Azure Data Factory or Fabric Data Factory: source `adf`, read [`sources/adf.md`](sources/adf.md).
-- Apache Airflow: source `airflow`, read [`sources/airflow.md`](sources/airflow.md).
+- Azure Data Factory or Fabric Data Factory: source `adf`, read [`references/adf.md`](references/adf.md).
+- Apache Airflow: source `airflow`, read [`references/airflow.md`](references/airflow.md).
 
 ### Step 2: Follow the source guide
 
@@ -63,8 +63,8 @@ archive folder instead of deleting it, and says so. Package keeps `metadata/`, s
 
 ## Reference
 
-- [`sources/adf.md`](sources/adf.md): ADF discovery (ARM JSON, volume download, complexity report).
-- [`sources/airflow.md`](sources/airflow.md): Airflow discovery (DAG `.py` parsing, operator
+- [`references/adf.md`](references/adf.md): ADF discovery (ARM JSON, volume download, complexity report).
+- [`references/airflow.md`](references/airflow.md): Airflow discovery (DAG `.py` parsing, operator
   classification).
 - [`../shared/airflow-coverage.md`](../shared/airflow-coverage.md): what the Airflow path converts and what it
   does not.

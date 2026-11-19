@@ -24,7 +24,7 @@ rejected with "profiling is not supported for the airflow source".
   to its live Azure features question (it runs `bootstrap.sh --source-deps azure`). For an existing venv:
   `"$PY" -m pip install 'azure-identity>=1.17'` (from a source checkout, `pip install -e '.[azure]'` is the
   same extra `flowx extract` uses). Without it the phase exits with code 2 and the same install hint.
-- The roles the Azure identity needs are in [`sources/adf.md`](sources/adf.md).
+- The roles the Azure identity needs are in [`references/adf.md`](references/adf.md).
 
 ## How to run
 
@@ -117,6 +117,6 @@ How to read it:
 
 ## Reference
 
-- [`sources/adf.md`](sources/adf.md): the Azure roles needed, what each one unlocks, and the known
+- [`references/adf.md`](references/adf.md): the Azure roles needed, what each one unlocks, and the known
   limits of the estimate.
 - [`../shared/running-flowx.md`](../shared/running-flowx.md): running a phase.
