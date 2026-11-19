@@ -765,6 +765,19 @@ def test_package_ignores_a_gap_fill_merged_against_an_earlier_convert(tmp_path: 
     assert package_main(["--output-dir", str(tmp_path), "--no-download-workspace-files", "--keep-intermediates"]) == 0
 
 
+def test_package_does_not_need_the_live_report_when_nothing_is_routed_and_no_fill_is_stored(tmp_path: Path) -> None:
+    """A modify --out copy packaged after an earlier package pruned .work/ must not be refused."""
+    from flowx.bundler.dab_writer import _routing_plan_failures
+
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    _route_two_components(tmp_path, parent="deterministic", child="deterministic")
+    configured_copy = tmp_path / "configured.json"
+    configured_copy.write_bytes((tmp_path / WORK_DIRNAME / REPORT_FILENAME).read_bytes())
+    (tmp_path / WORK_DIRNAME / REPORT_FILENAME).unlink()
+
+    assert _routing_plan_failures(tmp_path, configured_copy) == []
+
+
 def test_a_merge_written_to_a_separate_copy_leaves_the_baseline_and_live_report_alone(tmp_path: Path) -> None:
     _route_parent_agentic(tmp_path, _report_with_child_gap())
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME

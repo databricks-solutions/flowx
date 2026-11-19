@@ -1033,14 +1033,18 @@ def _live_report_failures(
             ]
         try:
             stored = load_agentic_output(output_dir)
-            report_sha256 = hashlib.sha256((output_dir / WORK_DIRNAME / REPORT_FILENAME).read_bytes()).hexdigest()
         except (OSError, ValueError) as error:
             return [f"metadata/{AGENTIC_OUTPUT_FILENAME} is unreadable: {error}"]
-        if applied_gap_fills(stored.gap_fills, report_sha256):
+        if not stored.gap_fills:
+            return []
+        try:
+            report_sha256 = hashlib.sha256((output_dir / WORK_DIRNAME / REPORT_FILENAME).read_bytes()).hexdigest()
+        except OSError:
+            report_sha256 = None  # no live report to compare with, so a stored fill may apply to it
+        if report_sha256 is None or applied_gap_fills(stored.gap_fills, report_sha256):
             return [
                 f"metadata/{AGENTIC_OUTPUT_FILENAME} stores a gap fill but {REPORT_FILENAME} carries no routing "
-                "record; re-run route, which applies the fill, or drops it when it was merged against an earlier "
-                "convert"
+                "record; re-run route, which applies the fill"
             ]
         return []
     failures: list[str] = []
