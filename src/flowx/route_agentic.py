@@ -745,17 +745,22 @@ def _unit_owned_activity_names(
 
     That is every name the unit's pipelines hold in the report (tasks, containers' children and the
     activities a motif collapsed) or in the inventory (activities the report no longer has as tasks),
-    less any name a pipeline that stays deterministic also holds, whose gap may be that pipeline's.
-    Other agentic pipelines do not keep a name: their gaps go once they are filled too.
+    less any name a pipeline that stays deterministic may still own a gap for: one still open in its tasks
+    (see :func:`_open_task_names`), or one its inventory lists that the report has no task for. A name
+    such a pipeline holds only as a translated task has no gap left there; ADF's default activity names
+    repeat across pipelines, so counting those would keep done gaps. Other agentic pipelines do not keep
+    a name: their gaps go once they are filled too.
     """
     owned: set[str] = set()
     elsewhere: set[str] = set()
+    report_task_names: dict[Any, set[str]] = {}
     for pipeline in _report_pipelines(report):
         name = pipeline.get("name")
+        report_task_names[name] = _task_names(pipeline.get("tasks"))
         if name in members:
-            owned.update(_task_names(pipeline.get("tasks")))
+            owned.update(report_task_names[name])
         elif name not in agentic_names:
-            elsewhere.update(_task_names(pipeline.get("tasks")))
+            elsewhere.update(_open_task_names(pipeline.get("tasks")))
     for pipeline in _inventory_pipelines(inventory or {}):
         activities = pipeline.get("activities")
         names = {
@@ -766,7 +771,7 @@ def _unit_owned_activity_names(
         if pipeline.get("name") in members:
             owned.update(names)
         elif pipeline.get("name") not in agentic_names:
-            elsewhere.update(names)
+            elsewhere.update(names - report_task_names.get(pipeline.get("name"), set()))
     return owned - elsewhere
 
 
@@ -842,13 +847,14 @@ def alter_report(
 
     report = copy.deepcopy(report)
 
-    # Task names owned by pipelines that are NOT routed agentic. Convert gaps are untagged (they carry
-    # no pipeline), so a name that also belongs to a non-routed pipeline is ambiguous: dropping it
-    # could remove that pipeline's gap, so it is preserved. Computed before mutating routed pipelines.
+    # Names still open in pipelines that are NOT routed agentic. Convert gaps are untagged (they carry no
+    # pipeline), so a name still open in a non-routed pipeline is ambiguous: dropping it could remove that
+    # pipeline's gap, so it is preserved. A name such a pipeline holds only as a translated task has no gap
+    # there. Computed before mutating routed pipelines.
     nonrouted_task_names: set[str] = set()
     for pipeline in _report_pipelines(report):
         if pipeline.get("name") not in agentic:
-            nonrouted_task_names.update(_task_names(pipeline.get("tasks")))
+            nonrouted_task_names.update(_open_task_names(pipeline.get("tasks")))
 
     # Emit exactly one pipeline-tagged gap per routed task, replacing (never appending to) any prior
     # gap for a routed pipeline's tasks. Without this, a task that convert already recorded as an

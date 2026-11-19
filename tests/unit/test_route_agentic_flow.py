@@ -328,11 +328,18 @@ def test_alter_report_is_idempotent_on_gaps() -> None:
 
 def test_alter_report_keeps_a_non_routed_gap_that_shares_a_task_name_with_a_routed_task() -> None:
     # Both pipelines have a task named "Sync"; only 'parent' is routed agentic. The untagged convert
-    # gap belongs to the non-routed 'other' and must survive -- the drop must not match by global name.
+    # gap may belong to the non-routed 'other', whose "Sync" is still open, and must survive -- the drop
+    # must not match by global name.
+    other_sync = {
+        "name": "Sync",
+        "task_key": "sync_other",
+        "type": "PlaceholderActivity",
+        "original_type": "ExecuteDataFlow",
+    }
     report = {
         "pipelines": [
             {"name": "parent", "tasks": [_copy_task("Sync", "sync_parent")]},
-            {"name": "other", "tasks": [_copy_task("Sync", "sync_other")]},
+            {"name": "other", "tasks": [other_sync]},
         ]
     }
     existing = [{"activity_name": "Sync", "activity_type": "ExecuteDataFlow", "raw_definition": None}]
@@ -453,6 +460,48 @@ def test_a_filled_unit_with_a_nested_convert_gap_leaves_no_gaps(tmp_path: Path, 
     assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
 
     assert json.loads((tmp_path / WORK_DIRNAME / GAPS_FILENAME).read_text(encoding="utf-8")) == []
+
+
+def _named_node(name: str, native_type: str) -> SourceNode:
+    node = _node(name.replace(" ", "_"), native_type)
+    node.name = name
+    return node
+
+
+def test_a_shared_default_name_translated_in_a_deterministic_pipeline_leaves_no_stale_gap(tmp_path: Path) -> None:
+    """ADF default names repeat: only 'parent''s 'Copy data1' is a stub, 'child''s is already translated."""
+    parent_stub = {
+        "name": "Copy data1",
+        "task_key": "Copy_data1",
+        "type": "PlaceholderActivity",
+        "original_type": "Copy",
+    }
+    report = {
+        "pipelines": [
+            {"name": "parent", "tasks": [parent_stub]},
+            {"name": "child", "tasks": [_copy_task("Copy data1", "Copy_data1")]},
+        ]
+    }
+    convert_gap = {"activity_name": "Copy data1", "activity_type": "Copy", "raw_definition": None}
+    _write_work(tmp_path, report, gaps=[convert_gap])
+    metadata = tmp_path / "metadata"
+    metadata.mkdir(parents=True, exist_ok=True)
+    inventory = build_source_inventory(
+        [
+            SourceGraph(name="parent", source="adf", tasks=[_named_node("Copy data1", "Copy")]),
+            SourceGraph(name="child", source="adf", tasks=[_named_node("Copy data1", "Copy")]),
+        ],
+        source="adf",
+        source_dir="/tmp/src",
+    )
+    (metadata / "inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+    gaps_path = tmp_path / WORK_DIRNAME / GAPS_FILENAME
+
+    _route_two_components(tmp_path, parent="agentic", child="deterministic")
+    assert [gap.get("pipeline") for gap in json.loads(gaps_path.read_text(encoding="utf-8"))] == ["parent"]
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_lfc_pipeline()])["ok"] is True
+    assert json.loads(gaps_path.read_text(encoding="utf-8")) == []
 
 
 def test_alter_report_keeps_gaps_for_non_routed_pipelines() -> None:
@@ -1919,8 +1968,15 @@ def _motif_task() -> dict[str, Any]:
     }
 
 
-def _route_parent_with_motif_and_missing_activity(output_dir: Path, *, child_activities: list[str]) -> None:
-    """Route 'parent' agentic: its report task is a collapsed motif, and 'probe_folder' is in the inventory only."""
+def _route_parent_with_motif_and_missing_activity(
+    output_dir: Path, *, child_activities: list[str], child_report_activities: list[str] | None = None
+) -> None:
+    """Route 'parent' agentic: its report task is a collapsed motif, and 'probe_folder' is in the inventory only.
+
+    'child' lists ``child_activities`` in the inventory and has a translated task for each of
+    ``child_report_activities`` (all of them by default).
+    """
+    child_report_activities = child_activities if child_report_activities is None else child_report_activities
     parent = SourceGraph(
         name="parent",
         source="adf",
@@ -1934,7 +1990,7 @@ def _route_parent_with_motif_and_missing_activity(output_dir: Path, *, child_act
     report = {
         "pipelines": [
             {"name": "parent", "tasks": [_motif_task()]},
-            {"name": "child", "tasks": [_copy_task(name, name) for name in child_activities]},
+            {"name": "child", "tasks": [_copy_task(name, name) for name in child_report_activities]},
         ]
     }
     convert_gaps = [
@@ -1960,7 +2016,10 @@ def test_a_filled_unit_drops_the_gaps_of_its_collapsed_motif_and_inventory_only_
 
 
 def test_a_filled_unit_keeps_a_gap_whose_name_a_non_routed_pipeline_also_holds(tmp_path: Path) -> None:
-    _route_parent_with_motif_and_missing_activity(tmp_path, child_activities=["publish", "probe_folder"])
+    """'child' lists 'probe_folder' but has no task for it, so the gap may be 'child''s own and stays."""
+    _route_parent_with_motif_and_missing_activity(
+        tmp_path, child_activities=["publish", "probe_folder"], child_report_activities=["publish"]
+    )
 
     assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
 
