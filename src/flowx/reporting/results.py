@@ -71,7 +71,7 @@ _STRING_METRICS: frozenset[str] = frozenset(
 _FLOAT_METRICS: frozenset[str] = frozenset({"coverage_pct", "deterministic_coverage_pct", "code_attached_coverage_pct"})
 
 
-def _sql_str(value: Any) -> str:
+def sql_string(value: Any) -> str:
     """Renders a value as a single-quoted SQL string literal (quotes doubled)."""
     return "'" + str(value).replace("'", "''") + "'"
 
@@ -79,7 +79,7 @@ def _sql_str(value: Any) -> str:
 def _metric_value_sql(column: str, value: Any) -> str:
     """Renders one metric column value as a SQL literal."""
     if column in _STRING_METRICS:
-        return _sql_str(value)
+        return sql_string(value)
     if column in _FLOAT_METRICS:
         return repr(float(value or 0))
     return str(int(value or 0))
@@ -112,7 +112,7 @@ def build_insert_sql(table_fqn: str, rows: list[dict[str, Any]], run_id: str) ->
     tuples: list[str] = []
     for row in rows:
         metrics = ", ".join(_metric_value_sql(col, row.get(col)) for col in COVERAGE_METRIC_COLUMNS)
-        tuples.append(f"({_sql_str(run_id)}, CURRENT_TIMESTAMP(), CURRENT_USER(), {metrics})")
+        tuples.append(f"({sql_string(run_id)}, CURRENT_TIMESTAMP(), CURRENT_USER(), {metrics})")
     values = ",\n  ".join(tuples)
     return f"INSERT INTO {table_fqn} ({column_names}) VALUES\n  {values}"
 
@@ -155,7 +155,7 @@ def resolve_warehouse_id(client: Any, warehouse_id: str | None = None) -> str:
     return best.id
 
 
-def _execute(client: Any, statement: str, warehouse_id: str) -> Any:
+def execute_statement(client: Any, statement: str, warehouse_id: str) -> Any:
     """Runs a SQL statement via the Statement Execution API; raises on failure."""
     resp = client.statement_execution.execute_statement(
         statement=statement, warehouse_id=warehouse_id, wait_timeout="50s"
@@ -170,7 +170,7 @@ def _execute(client: Any, statement: str, warehouse_id: str) -> Any:
 
 def _existing_columns(client: Any, table_fqn: str, warehouse_id: str) -> set[str]:
     """Reads the current table column names through Databricks SQL."""
-    response = _execute(client, f"SHOW COLUMNS IN {table_fqn}", warehouse_id)
+    response = execute_statement(client, f"SHOW COLUMNS IN {table_fqn}", warehouse_id)
     data = getattr(getattr(response, "result", None), "data_array", None) or []
     return {str(row[0]) for row in data if row}
 
@@ -207,11 +207,11 @@ def write_results(
 
     resolved_wh = resolve_warehouse_id(client, warehouse_id)
     run_id = str(uuid.uuid4())
-    _execute(client, build_create_table_sql(table_fqn), resolved_wh)
+    execute_statement(client, build_create_table_sql(table_fqn), resolved_wh)
     existing_columns = _existing_columns(client, table_fqn, resolved_wh)
     add_columns_sql = build_add_columns_sql(table_fqn, existing_columns)
     if add_columns_sql:
-        _execute(client, add_columns_sql, resolved_wh)
-    _execute(client, build_insert_sql(table_fqn, rows, run_id), resolved_wh)
+        execute_statement(client, add_columns_sql, resolved_wh)
+    execute_statement(client, build_insert_sql(table_fqn, rows, run_id), resolved_wh)
     logger.info("Recorded %d pipeline rows to %s (run_id=%s).", len(rows), table_fqn, run_id)
     return run_id, len(rows)

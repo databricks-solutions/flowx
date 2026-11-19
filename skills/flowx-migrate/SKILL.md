@@ -2,7 +2,7 @@
 name: flowx-migrate
 description: >
   End-to-end migration of a source orchestrator's pipelines (Azure Data Factory, Apache Airflow)
-  to Databricks Lakeflow Jobs. Orchestrates discover, enrich, convert, and package in sequence.
+  to Databricks Lakeflow Jobs. Orchestrates discover, enrich, convert, package, and validate in sequence.
 triggers:
   - "migrate pipelines"
   - "migrate ADF"
@@ -17,7 +17,7 @@ triggers:
 
 Orchestrate the complete migration of a source orchestrator's pipelines to Databricks Lakeflow Jobs
 via Declarative Automation Bundles. This skill runs the phases in sequence: discover, enrich
-(default), convert, package.
+(default), convert, package, validate (default).
 
 ## Context
 
@@ -30,6 +30,8 @@ This is the top-level orchestration skill. It runs the full migration pipeline:
    (`flowx-enrich`); skippable for a deterministic-only pass
 3. **Convert** — Convert the source's tasks to Databricks IR (deterministic + agentic)
 4. **Package** — Generate Databricks Declarative Automation Bundles for deployment
+5. **Validate** *(default)* — Review the bundle against the source pipelines and fix it in place until
+   it meets the approval threshold (`flowx-validate`); skippable for a deterministic-only pass
 
 Each phase builds on the output of the previous phase. The user is shown a summary and asked to confirm before proceeding to the next phase.
 
@@ -113,6 +115,7 @@ flowx(command="merge_agentic", parameters={"source": "adf", "report_path": ..., 
 flowx(command="inspect", parameters={"report_path": ...})
 flowx(command="apply_answers", parameters={"report_path": ..., "answers": [...], "output_dir": ...})
 flowx(command="package", parameters={"output_dir": ..., "catalog": ..., "schema": ...})
+flowx(command="validate", parameters={"output_dir": ..., "action": "prepare"})  # default: review loop (see flowx-validate)
 flowx(command="record_results", parameters={...}) / flowx(command="install_dashboard", parameters={...})
 ```
 
@@ -354,7 +357,26 @@ Invoke the `flowx:flowx-package` skill with:
 - Schema: user-specified or `default`
 
 Package prunes the transient `<output_dir>/.work/` after a successful build, leaving the
-bundle (databricks.yml, resources/, src/, SETUP.md) plus the kept `metadata/` folder.
+bundle (databricks.yml, resources/, src/, SETUP.md) plus the kept `metadata/` folder. It keeps a copy
+of the translation report at `metadata/translation_report.json`, which validate reads.
+
+### Step 7.2 — Phase 4: Validate
+
+Unless the user asked for a deterministic-only pass, invoke the **`flowx:flowx-validate`** skill on the
+same `<output_dir>`. Ask the user first whether they want a dry run (review only, no changes) and
+whether each fix needs their approval, and pass `dry_run` / `require_approval` accordingly. Follow its
+loop (prepare, review, record, remediate) until it reports `terminated`, then present:
+
+```
+Phase 4: Validate — Complete (threshold_met)
+==========================================
+Iterations:       2
+Approval rate:    0.94 (threshold 0.90)
+Rejected jobs:    0
+Open findings:    3 (see metadata/validation/validation_report.json)
+```
+
+When the results table from Step 7.5 is set, also run validate `publish` with it.
 
 ### Step 7.5 — (Optional) Persist coverage results and install a dashboard
 
@@ -424,7 +446,7 @@ Next Steps:
 ### Step 9 — Offer follow-up actions
 
 Ask if the user wants to:
-1. Validate the bundle now (`databricks bundle validate`)
+1. Validate the bundle now (`databricks bundle validate`, which `flowx-validate` also runs when the CLI is available)
 2. Deploy to dev (`databricks bundle deploy --target dev`)
 3. Review specific generated files
 4. Re-translate any failed activities
@@ -450,4 +472,6 @@ All three phases write into a single shared `<output_dir>` (default `./flowx_out
 |---|---|---|
 | `metadata/` | Profile + Modify | `inventory.json`, `profile_report.csv`, `<pipeline>.arm.json`, `configuration.json` |
 | `databricks.yml`, `resources/`, `src/`, `SETUP.md` | Package | The deployable DAB bundle |
+| `metadata/validation/` | Validate | `validation_report.json` + per-iteration records under `runs/<run_id>/` |
+| `metadata/translation_report.json` | Package | The translation report package built from, kept for validate |
 | `.work/` | Convert/Modify (transient) | Translation report + IR; pruned by package |

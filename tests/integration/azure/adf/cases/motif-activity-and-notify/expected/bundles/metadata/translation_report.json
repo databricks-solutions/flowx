@@ -1,0 +1,37 @@
+{
+  "name": "motif-activity-and-notify",
+  "parameters": null,
+  "schedule": null,
+  "tags": {
+    "source": "adf",
+    "pipeline": "motif-activity-and-notify"
+  },
+  "tasks": [
+    {
+      "name": "work",
+      "task_key": "work",
+      "type": "WaitActivity",
+      "wait_time_seconds": 1
+    },
+    {
+      "name": "notify",
+      "task_key": "notify",
+      "type": "WebActivity",
+      "depends_on": [
+        {
+          "task_key": "work",
+          "outcome": "Completed"
+        }
+      ],
+      "url": "https://example.invalid/notify",
+      "method": "POST",
+      "body": {
+        "status": "complete"
+      }
+    }
+  ],
+  "not_translatable": [],
+  "reconciliation_status": null,
+  "migration_status": "included",
+  "audit": {}
+}

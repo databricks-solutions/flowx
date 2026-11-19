@@ -607,3 +607,28 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     destination.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote merged report to %s (%d merged, %d unmatched)", destination, merged, unmatched)
     return merged, unmatched
+
+
+def report_pipeline_dicts(raw: Any) -> list[dict[str, Any]]:
+    """Returns the pipeline IR dicts in a parsed translation report, whatever its shape.
+
+    A report is a single pipeline dict (Airflow writes one when it converts one DAG), a
+    ``{"pipelines": [...]}`` wrapper, or the legacy ``{"translations": [...]}`` shape.
+
+    Args:
+        raw: Parsed JSON content from a report file.
+
+    Returns:
+        The pipeline dicts, each with ``name`` and ``tasks``; empty when *raw* holds none.
+    """
+    if isinstance(raw, dict) and "tasks" in raw and "name" in raw:
+        return [raw]
+    if isinstance(raw, dict) and isinstance(raw.get("pipelines"), list):
+        return [p for p in raw["pipelines"] if isinstance(p, dict) and "tasks" in p and "name" in p]
+    if isinstance(raw, dict) and "translations" in raw:
+        return [
+            {"name": entry["pipeline"], **entry["ir"]}
+            for entry in raw.get("translations", [])
+            if entry.get("status") == "translated" and entry.get("ir")
+        ]
+    return []

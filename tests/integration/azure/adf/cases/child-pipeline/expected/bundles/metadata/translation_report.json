@@ -1,0 +1,26 @@
+{
+  "name": "child-pipeline",
+  "parameters": null,
+  "schedule": null,
+  "tags": {
+    "source": "adf",
+    "pipeline": "child-pipeline"
+  },
+  "tasks": [
+    {
+      "name": "child-notebook",
+      "task_key": "child-notebook",
+      "type": "NotebookActivity",
+      "cluster": {
+        "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+        "_adf_authentication": "MSI"
+      },
+      "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+      "notebook_path": "/Shared/flowx/child"
+    }
+  ],
+  "not_translatable": [],
+  "reconciliation_status": null,
+  "migration_status": "included",
+  "audit": {}
+}

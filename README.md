@@ -101,6 +101,7 @@ Or run individual phases:
 /flowx:flowx-enrich      # Validate and record agent-authored insights on the inventory
 /flowx:flowx-convert     # Deterministic + agentic translation
 /flowx:flowx-package     # Generate DABs project
+/flowx:flowx-validate    # Review the bundle against the source, stamp and score it, fix it in place
 /flowx:flowx-profile     # (ADF, optional) Estimate current ADF spend from a live Azure scan
 ```
 
@@ -278,6 +279,8 @@ flowx_output/
     profile_report.csv        # discover: per-pipeline complexity report
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
     configuration.json        # modify: collected configuration answers
+    translation_report.json   # package: the translation report it built from, kept for validate
+    validation/               # validate: validation_report.json + runs/<run_id>/iteration_NNN.json
   .work/                      # transient intermediates (translation report, IR, gaps.json); pruned by package
 ```
 

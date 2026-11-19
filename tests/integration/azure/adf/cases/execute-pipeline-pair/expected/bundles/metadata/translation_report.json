@@ -1,0 +1,119 @@
+{
+  "pipelines": [
+    {
+      "name": "child-pipeline",
+      "parameters": null,
+      "schedule": null,
+      "tags": {
+        "source": "adf",
+        "pipeline": "child-pipeline"
+      },
+      "tasks": [
+        {
+          "name": "child-notebook",
+          "task_key": "child-notebook",
+          "type": "NotebookActivity",
+          "cluster": {
+            "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+            "_adf_authentication": "MSI"
+          },
+          "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+          "notebook_path": "/Shared/flowx/child"
+        }
+      ],
+      "not_translatable": [],
+      "reconciliation_status": null,
+      "migration_status": "included",
+      "audit": {}
+    },
+    {
+      "name": "complex-orchestration",
+      "parameters": null,
+      "schedule": {
+        "kind": "schedule",
+        "quartz_cron_expression": "0 0 0 * * ?",
+        "timezone_id": "UTC",
+        "pause_status": "PAUSED"
+      },
+      "tags": {
+        "source": "adf",
+        "pipeline": "complex-orchestration"
+      },
+      "tasks": [
+        {
+          "name": "_init_state",
+          "task_key": "_init_state",
+          "type": "SetVariableActivity",
+          "variable_name": "state",
+          "variable_value": "start",
+          "value_kind": "literal"
+        },
+        {
+          "name": "launch-child",
+          "task_key": "launch-child",
+          "type": "ExecutePipelineActivity",
+          "pipeline_name": "child-pipeline",
+          "wait_on_completion": true
+        },
+        {
+          "name": "mixed-script",
+          "task_key": "mixed-script",
+          "type": "PlaceholderActivity",
+          "depends_on": [
+            {
+              "task_key": "launch-child",
+              "outcome": "Succeeded"
+            }
+          ],
+          "original_type": "Script",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "dependsOn": [
+              {
+                "activity": "launch-child",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "mixed-script",
+            "type": "Script",
+            "typeProperties": {
+              "scripts": [
+                {
+                  "text": "SELECT 1",
+                  "type": "Query"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "complete",
+          "task_key": "complete",
+          "type": "SetVariableActivity",
+          "depends_on": [
+            {
+              "task_key": "mixed-script",
+              "outcome": "Succeeded"
+            }
+          ],
+          "variable_name": "state",
+          "variable_value": "complete",
+          "value_kind": "literal"
+        }
+      ],
+      "not_translatable": [],
+      "reconciliation_status": null,
+      "migration_status": "included",
+      "audit": {},
+      "synthesized_variable_init_keys": [
+        "_init_state"
+      ]
+    }
+  ]
+}

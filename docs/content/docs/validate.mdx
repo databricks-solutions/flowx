@@ -1,0 +1,88 @@
+---
+title: Validate
+description: Review a converted bundle against the source pipelines, score it, and fix it in place.
+---
+
+The validate phase runs after package. It checks that each generated job keeps the intent of its
+source pipeline, records an approval stamp on every job and task, and repeats a review-and-fix loop
+until the bundle is good enough or the loop stops making progress.
+
+flowx runs no model. The agent running the `flowx-validate` skill reviews the bundle; flowx runs the
+static checks, picks what to review, scores the findings, writes the reports, and applies the fixes.
+
+## The loop
+
+```text
+prepare ──▶ static checks ──fail──▶ iteration recorded, every failing bundle rejected
+               │ pass
+               ▼
+         review targets (agent) ──▶ record: stamp + score ──▶ stop?
+                                                               │ no
+                                                               ▼
+                                                apply fixes to bundle YAML ──▶ prepare
+```
+
+| Step | CLI | MCP |
+|---|---|---|
+| Start or resume a run, get targets | `validate prepare` | `validate` `action: prepare` |
+| Record the agent's findings | `validate record --reviews-path` | `validate` `action: record`, `reviews` |
+| Fix the bundle in place | `validate apply --edits-path [--approve]` | `validate` `action: apply`, `edits` |
+| Write stamps to a UC table | `validate publish --results-table` | `validate` `action: publish` |
+
+## What is reviewed
+
+- Each **task**, rolled up to its **job**.
+- Against the **source pipeline only** (`metadata/<pipeline>.arm.json`, or the inventory entry).
+- **Orchestration only**: task graph, dependencies, run conditions, parameters, triggers and
+  schedules, branches, and loops. Generated code is not graded.
+- A task is skipped when its definition still matches its last `approved` stamp.
+
+## Static checks
+
+The structural checks always run. `databricks bundle validate` runs by default when the `databricks` CLI
+is on PATH. When the CLI is missing (serverless, Genie Code) or the check is turned off with
+`--no-bundle-validate`, it is recorded as `skipped` with the reason in `checks` and in the report's
+`static_checks`. It is never skipped silently.
+
+Validate reads the translation report from `metadata/translation_report.json`, which package keeps, or
+from `--report`. It fails with a clear error when neither exists.
+
+## Scoring
+
+| Severity | Penalty |
+|---|---|
+| `blocker` | 100 |
+| `major` | 20 |
+| `minor` | 5 |
+| `advisory` | 0 |
+
+- Task score is `100 - sum(penalties)`, floored at 0. A finding waived by a user's configuration answer
+  carries no penalty. The waiver names the option (`customization`) and the chosen value
+  (`customization_value`), and both must match `metadata/configuration.json`.
+- A task with a blocker, or a score below 60, is rejected.
+- A job's score is the lower of its own job-level score and the mean of its task scores. A job with a
+  blocker or a rejected task is rejected.
+- The approval rate is the mean over jobs of `score / 100`, counting rejected jobs as 0.
+
+## When the loop stops
+
+| `terminated` | When |
+|---|---|
+| `threshold_met` | The approval rate reaches the threshold (default 0.9). |
+| `budget_exhausted` | The iteration budget (default 3) is used up. |
+| `oscillation` | The bundle hash repeats an earlier iteration's. |
+| `dry_run` | A dry run ends after one review and never changes the bundle. |
+
+With `require_approval`, `apply` returns the diffs and waits until the same edits are sent with
+`approve`.
+
+## Outputs
+
+- `metadata/validation/validation_report.json`: run id, user, reviewer, stop reason, iteration count,
+  approval rate, bundle hash (deployable inputs only), the latest stamps and static checks, and the
+  per-iteration trajectory.
+- `metadata/validation/runs/<run_id>/iteration_NNN.json`: each iteration's stamps, static findings,
+  per-object diffs, and the files remediation changed. Runs are kept, so a run can be resumed or reset.
+- Optional Unity Catalog table with one row per object per iteration (`run_id`, `run_date`, `run_by`,
+  `iteration`, `object_id`, `object_kind`, `verdict`, `score`, `finding_count`, `blocker_count`,
+  `major_count`, `reviewer`, `ruleset_version`, `content_hash`).

@@ -339,6 +339,15 @@ class TestPackageMainModes:
         # callee deploys before caller.
         assert deploy_md.index("`callee/`") < deploy_md.index("`caller/`")
 
+    def test_package_keeps_the_translation_report_after_pruning_work(self, tmp_path):
+        from flowx.bundler.dab_writer import main
+
+        _write_two_pipeline_report(tmp_path)
+        report = (tmp_path / ".work" / "translation_report.json").read_text()
+        assert main(["--output-dir", str(tmp_path), "--no-download-workspace-files"]) == 0
+        assert not (tmp_path / ".work").exists()
+        assert (tmp_path / "metadata" / "translation_report.json").read_text() == report
+
     def test_single_mode_one_bundle_at_root(self, tmp_path):
         _write_two_pipeline_report(tmp_path)
         assert self._run(tmp_path, "--packaging-mode", "single") == 0

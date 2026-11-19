@@ -1,0 +1,761 @@
+{
+  "pipelines": [
+    {
+      "name": "agentic-activities",
+      "parameters": null,
+      "schedule": null,
+      "tags": {
+        "source": "adf",
+        "pipeline": "agentic-activities"
+      },
+      "tasks": [
+        {
+          "name": "azure-function",
+          "task_key": "azure-function",
+          "type": "PlaceholderActivity",
+          "cluster": {
+            "_adf_authentication": "Anonymous"
+          },
+          "original_type": "AzureFunction",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "linkedServiceName": {
+              "referenceName": "azure-function-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "azure-function",
+            "type": "AzureFunction",
+            "typeProperties": {
+              "functionName": "flowx",
+              "method": "GET"
+            }
+          }
+        },
+        {
+          "name": "azure-ml",
+          "task_key": "azure-ml",
+          "type": "PlaceholderActivity",
+          "original_type": "AzureMLExecutePipeline",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "name": "azure-ml",
+            "type": "AzureMLExecutePipeline",
+            "typeProperties": {
+              "mlPipelineId": "<AZURE_ML_PIPELINE_ID>",
+              "version": "1"
+            }
+          }
+        },
+        {
+          "name": "custom",
+          "task_key": "custom",
+          "type": "PlaceholderActivity",
+          "original_type": "Custom",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "linkedServiceName": {
+              "referenceName": "batch-parameterized",
+              "type": "LinkedServiceReference"
+            },
+            "name": "custom",
+            "type": "Custom",
+            "typeProperties": {
+              "command": "echo flowx",
+              "folderPath": "integration",
+              "resourceLinkedService": {
+                "referenceName": "blob",
+                "type": "LinkedServiceReference"
+              }
+            }
+          }
+        },
+        {
+          "name": "data-flow",
+          "task_key": "data-flow",
+          "type": "PlaceholderActivity",
+          "original_type": "ExecuteDataFlow",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "name": "data-flow",
+            "type": "ExecuteDataFlow",
+            "typeProperties": {
+              "compute": {
+                "computeType": "General",
+                "coreCount": 8
+              },
+              "dataFlow": {
+                "referenceName": "placeholder-data-flow",
+                "type": "DataFlowReference"
+              }
+            }
+          }
+        },
+        {
+          "name": "fail",
+          "task_key": "fail",
+          "type": "PlaceholderActivity",
+          "original_type": "Fail",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "name": "fail",
+            "type": "Fail",
+            "typeProperties": {
+              "errorCode": "FLOWX_TEST",
+              "message": "intentional integration fixture"
+            }
+          }
+        },
+        {
+          "name": "get-metadata",
+          "task_key": "get-metadata",
+          "type": "PlaceholderActivity",
+          "original_type": "GetMetadata",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "name": "get-metadata",
+            "type": "GetMetadata",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              },
+              "fieldList": [
+                "exists"
+              ]
+            }
+          }
+        },
+        {
+          "name": "script",
+          "task_key": "script",
+          "type": "PlaceholderActivity",
+          "original_type": "Script",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "script",
+            "type": "Script",
+            "typeProperties": {
+              "scripts": [
+                {
+                  "text": "SELECT 1",
+                  "type": "Query"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "ssis",
+          "task_key": "ssis",
+          "type": "PlaceholderActivity",
+          "original_type": "ExecuteSSISPackage",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "name": "ssis",
+            "type": "ExecuteSSISPackage",
+            "typeProperties": {
+              "connectVia": {
+                "referenceName": "azure-ssis-placeholder",
+                "type": "IntegrationRuntimeReference"
+              },
+              "packageLocation": {
+                "packagePath": "flowx/package.dtsx",
+                "type": "SSISDB"
+              }
+            }
+          }
+        },
+        {
+          "name": "stored-procedure",
+          "task_key": "stored-procedure",
+          "type": "PlaceholderActivity",
+          "original_type": "SqlServerStoredProcedure",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "stored-procedure",
+            "type": "SqlServerStoredProcedure",
+            "typeProperties": {
+              "storedProcedureName": "dbo.flowx_integration"
+            }
+          }
+        },
+        {
+          "name": "until",
+          "task_key": "until",
+          "type": "PlaceholderActivity",
+          "original_type": "Until",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "name": "until",
+            "type": "Until",
+            "typeProperties": {
+              "activities": [
+                {
+                  "name": "until-wait",
+                  "type": "Wait",
+                  "typeProperties": {
+                    "waitTimeInSeconds": 1
+                  }
+                }
+              ],
+              "expression": {
+                "type": "Expression",
+                "value": "@equals(1,1)"
+              },
+              "timeout": "0.00:01:00"
+            }
+          }
+        },
+        {
+          "name": "validation",
+          "task_key": "validation",
+          "type": "PlaceholderActivity",
+          "original_type": "Validation",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "name": "validation",
+            "type": "Validation",
+            "typeProperties": {
+              "dataset": {
+                "referenceName": "csv-adls",
+                "type": "DatasetReference"
+              },
+              "minimumSize": 0,
+              "sleep": 1,
+              "timeout": "0.00:01:00"
+            }
+          }
+        },
+        {
+          "name": "webhook",
+          "task_key": "webhook",
+          "type": "PlaceholderActivity",
+          "original_type": "WebHook",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "name": "webhook",
+            "type": "WebHook",
+            "typeProperties": {
+              "method": "POST",
+              "timeout": "00:01:00",
+              "url": "https://example.invalid/webhook"
+            }
+          }
+        }
+      ],
+      "not_translatable": [],
+      "reconciliation_status": null,
+      "migration_status": "included",
+      "audit": {}
+    },
+    {
+      "name": "all-activity-types",
+      "parameters": [
+        {
+          "name": "items",
+          "type": "Array",
+          "default": [
+            "one"
+          ]
+        }
+      ],
+      "schedule": {
+        "kind": "file_arrival",
+        "url": "<STORAGE_ACCOUNT_ID>",
+        "events": [
+          "Microsoft.Storage.BlobCreated"
+        ],
+        "pause_status": "PAUSED"
+      },
+      "tags": {
+        "source": "adf",
+        "pipeline": "all-activity-types"
+      },
+      "tasks": [
+        {
+          "name": "_init_status",
+          "task_key": "_init_status",
+          "type": "SetVariableActivity",
+          "variable_name": "status",
+          "variable_value": "new",
+          "value_kind": "literal"
+        },
+        {
+          "name": "append-variable",
+          "task_key": "append-variable",
+          "type": "AppendVariableActivity",
+          "variable_name": "results",
+          "append_value": "ok",
+          "value_kind": "literal"
+        },
+        {
+          "name": "copy",
+          "task_key": "copy",
+          "type": "CopyActivity",
+          "source_type": "DelimitedTextSource",
+          "sink_type": "ParquetSink",
+          "source_properties": {
+            "linked_service_name": "adls-gen2",
+            "connection": {
+              "type": "AzureBlobFS"
+            }
+          },
+          "sink_properties": {
+            "volume_name": "curated",
+            "volume_external_location": "abfss://curated@${var.storage_account}.dfs.core.windows.net/",
+            "volume_relative_path": "parquet",
+            "volume_location_type": "AzureBlobFSLocation",
+            "linked_service_name": "adls-gen2",
+            "resolved_path": "/Volumes/${var.catalog}/${var.schema}/curated/parquet"
+          },
+          "sink_dataset_type": "Parquet",
+          "sink_format": "parquet",
+          "sink_resolved_path": "/Volumes/${var.catalog}/${var.schema}/curated/parquet"
+        },
+        {
+          "name": "databricks-job",
+          "task_key": "databricks-job",
+          "type": "RunJobActivity",
+          "job_name": "1",
+          "existing_job_id": "1"
+        },
+        {
+          "name": "delete",
+          "task_key": "delete",
+          "type": "DeleteActivity",
+          "dataset_name": "",
+          "recursive": true
+        },
+        {
+          "name": "execute-child",
+          "task_key": "execute-child",
+          "type": "ExecutePipelineActivity",
+          "pipeline_name": "child-pipeline",
+          "wait_on_completion": true
+        },
+        {
+          "name": "filter",
+          "task_key": "filter",
+          "type": "FilterActivity",
+          "items_expression": "{{job.parameters.items}}",
+          "condition_expression": "@not(empty(item()))",
+          "condition_code": "(not (len(item.get('input')) == 0))"
+        },
+        {
+          "name": "foreach",
+          "task_key": "foreach",
+          "type": "ForEachActivity",
+          "items_expression": "{{job.parameters.items}}",
+          "concurrency": 20,
+          "inner_activities": [
+            {
+              "name": "foreach-wait",
+              "task_key": "foreach-wait",
+              "type": "WaitActivity",
+              "wait_time_seconds": 1
+            }
+          ]
+        },
+        {
+          "name": "if-condition",
+          "task_key": "if-condition",
+          "type": "IfConditionActivity",
+          "op": "EQUAL_TO",
+          "left": "1",
+          "right": "1",
+          "if_true_activities": [
+            {
+              "name": "true-wait",
+              "task_key": "true-wait",
+              "type": "WaitActivity",
+              "wait_time_seconds": 1
+            }
+          ],
+          "if_false_activities": [
+            {
+              "name": "false-wait",
+              "task_key": "false-wait",
+              "type": "WaitActivity",
+              "wait_time_seconds": 1
+            }
+          ]
+        },
+        {
+          "name": "lookup",
+          "task_key": "lookup",
+          "type": "LookupActivity",
+          "source_type": "AzureSqlSource",
+          "source_properties": {
+            "sqlReaderQuery": "SELECT 1 AS value"
+          },
+          "first_row_only": true,
+          "source_query": "SELECT 1 AS value"
+        },
+        {
+          "name": "notebook",
+          "task_key": "notebook",
+          "type": "NotebookActivity",
+          "cluster": {
+            "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+            "_adf_authentication": "MSI"
+          },
+          "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+          "notebook_path": "/Shared/flowx/integration"
+        },
+        {
+          "name": "set-variable",
+          "task_key": "set-variable",
+          "type": "SetVariableActivity",
+          "variable_name": "status",
+          "variable_value": "running",
+          "value_kind": "literal"
+        },
+        {
+          "name": "spark-jar",
+          "task_key": "spark-jar",
+          "type": "SparkJarActivity",
+          "cluster": {
+            "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+            "_adf_authentication": "MSI"
+          },
+          "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+          "main_class_name": "com.example.Integration"
+        },
+        {
+          "name": "spark-python",
+          "task_key": "spark-python",
+          "type": "SparkPythonActivity",
+          "cluster": {
+            "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+            "_adf_authentication": "MSI"
+          },
+          "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+          "python_file": "dbfs:/flowx/integration.py"
+        },
+        {
+          "name": "switch",
+          "task_key": "switch",
+          "type": "SwitchActivity",
+          "on_expression": "{{tasks.set-variable.values.status}}",
+          "cases": [
+            {
+              "value": "running",
+              "activities": [
+                {
+                  "name": "case-wait",
+                  "task_key": "case-wait",
+                  "type": "WaitActivity",
+                  "wait_time_seconds": 1
+                }
+              ]
+            }
+          ],
+          "default_activities": [
+            {
+              "name": "default-wait",
+              "task_key": "default-wait",
+              "type": "WaitActivity",
+              "wait_time_seconds": 1
+            }
+          ]
+        },
+        {
+          "name": "wait",
+          "task_key": "wait",
+          "type": "WaitActivity",
+          "wait_time_seconds": 1
+        },
+        {
+          "name": "web",
+          "task_key": "web",
+          "type": "WebActivity",
+          "url": "https://example.invalid/flowx",
+          "method": "GET"
+        }
+      ],
+      "not_translatable": [],
+      "reconciliation_status": null,
+      "migration_status": "included",
+      "audit": {},
+      "synthesized_variable_init_keys": [
+        "_init_status"
+      ]
+    },
+    {
+      "name": "child-pipeline",
+      "parameters": null,
+      "schedule": null,
+      "tags": {
+        "source": "adf",
+        "pipeline": "child-pipeline"
+      },
+      "tasks": [
+        {
+          "name": "child-notebook",
+          "task_key": "child-notebook",
+          "type": "NotebookActivity",
+          "cluster": {
+            "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+            "_adf_authentication": "MSI"
+          },
+          "existing_cluster_id": "<DATABRICKS_CLUSTER_ID>",
+          "notebook_path": "/Shared/flowx/child"
+        }
+      ],
+      "not_translatable": [],
+      "reconciliation_status": null,
+      "migration_status": "included",
+      "audit": {}
+    },
+    {
+      "name": "complex-orchestration",
+      "parameters": null,
+      "schedule": {
+        "kind": "schedule",
+        "quartz_cron_expression": "0 0 0 * * ?",
+        "timezone_id": "UTC",
+        "pause_status": "PAUSED"
+      },
+      "tags": {
+        "source": "adf",
+        "pipeline": "complex-orchestration"
+      },
+      "tasks": [
+        {
+          "name": "_init_state",
+          "task_key": "_init_state",
+          "type": "SetVariableActivity",
+          "variable_name": "state",
+          "variable_value": "start",
+          "value_kind": "literal"
+        },
+        {
+          "name": "launch-child",
+          "task_key": "launch-child",
+          "type": "ExecutePipelineActivity",
+          "pipeline_name": "child-pipeline",
+          "wait_on_completion": true
+        },
+        {
+          "name": "mixed-script",
+          "task_key": "mixed-script",
+          "type": "PlaceholderActivity",
+          "depends_on": [
+            {
+              "task_key": "launch-child",
+              "outcome": "Succeeded"
+            }
+          ],
+          "original_type": "Script",
+          "comment": "Requires agentic (LLM-assisted) translation from the ADF/ARM JSON",
+          "raw_definition": {
+            "dependsOn": [
+              {
+                "activity": "launch-child",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "linkedServiceName": {
+              "referenceName": "azure-sql",
+              "type": "LinkedServiceReference"
+            },
+            "name": "mixed-script",
+            "type": "Script",
+            "typeProperties": {
+              "scripts": [
+                {
+                  "text": "SELECT 1",
+                  "type": "Query"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "complete",
+          "task_key": "complete",
+          "type": "SetVariableActivity",
+          "depends_on": [
+            {
+              "task_key": "mixed-script",
+              "outcome": "Succeeded"
+            }
+          ],
+          "variable_name": "state",
+          "variable_value": "complete",
+          "value_kind": "literal"
+        }
+      ],
+      "not_translatable": [],
+      "reconciliation_status": null,
+      "migration_status": "included",
+      "audit": {},
+      "synthesized_variable_init_keys": [
+        "_init_state"
+      ]
+    },
+    {
+      "name": "motif-activity-and-notify",
+      "parameters": null,
+      "schedule": null,
+      "tags": {
+        "source": "adf",
+        "pipeline": "motif-activity-and-notify"
+      },
+      "tasks": [
+        {
+          "name": "work",
+          "task_key": "work",
+          "type": "WaitActivity",
+          "wait_time_seconds": 1
+        },
+        {
+          "name": "notify",
+          "task_key": "notify",
+          "type": "WebActivity",
+          "depends_on": [
+            {
+              "task_key": "work",
+              "outcome": "Completed"
+            }
+          ],
+          "url": "https://example.invalid/notify",
+          "method": "POST",
+          "body": {
+            "status": "complete"
+          }
+        }
+      ],
+      "not_translatable": [],
+      "reconciliation_status": null,
+      "migration_status": "included",
+      "audit": {}
+    },
+    {
+      "name": "motif-incremental-watermark",
+      "parameters": null,
+      "schedule": {
+        "kind": "schedule",
+        "tumbling": true,
+        "frequency": "Hour",
+        "interval": 1,
+        "pause_status": "PAUSED",
+        "note": "Approximated from TumblingWindowTrigger; review window boundaries."
+      },
+      "tags": {
+        "source": "adf",
+        "pipeline": "motif-incremental-watermark"
+      },
+      "tasks": [
+        {
+          "name": "Incremental Load (Watermark)",
+          "task_key": "motif_incremental_load_watermark",
+          "type": "MotifActivity",
+          "description": "Collapsed motif: Incremental Load (Watermark). Replaces 4 ADF activities with auto_loader.",
+          "motif_id": "incremental_load_watermark",
+          "display_name": "Incremental Load (Watermark)",
+          "databricks_replacement": "auto_loader",
+          "matched_activity_names": [
+            "old-watermark",
+            "new-watermark",
+            "incremental-copy",
+            "update-watermark"
+          ],
+          "source_type_hint": "database",
+          "confidence_notes": [
+            "Lookup 'old-watermark' contains watermark-style query",
+            "Lookup 'new-watermark' contains watermark-style query",
+            "StoredProcedure 'update-watermark' updates watermark after Copy"
+          ],
+          "notebook_template": "incremental_watermark.py"
+        }
+      ],
+      "not_translatable": [],
+      "reconciliation_status": null,
+      "migration_status": "included",
+      "audit": {}
+    },
+    {
+      "name": "motif-metadata-bulk-copy",
+      "parameters": null,
+      "schedule": null,
+      "tags": {
+        "source": "adf",
+        "pipeline": "motif-metadata-bulk-copy"
+      },
+      "tasks": [
+        {
+          "name": "Metadata-Driven Bulk Copy",
+          "task_key": "motif_metadata_driven_bulk_copy",
+          "type": "MotifActivity",
+          "description": "Collapsed motif: Metadata-Driven Bulk Copy. Replaces 2 ADF activities with for_each_ingestion.",
+          "motif_id": "metadata_driven_bulk_copy",
+          "display_name": "Metadata-Driven Bulk Copy",
+          "databricks_replacement": "for_each_ingestion",
+          "matched_activity_names": [
+            "lookup-metadata",
+            "copy-each-table"
+          ],
+          "source_type_hint": "database",
+          "confidence_notes": [
+            "Lookup 'lookup-metadata' appears to read a control/metadata table"
+          ],
+          "notebook_template": "metadata_bulk_copy.py",
+          "motif_config": {
+            "lookup_query": "SELECT schema_name, table_name FROM dbo.copy_config",
+            "lookup_source_type": "AzureSqlSource",
+            "lookup_scope": "lookup-metadata"
+          }
+        }
+      ],
+      "not_translatable": [],
+      "reconciliation_status": null,
+      "migration_status": "included",
+      "audit": {}
+    },
+    {
+      "name": "motif-rest-api-pagination",
+      "parameters": null,
+      "schedule": null,
+      "tags": {
+        "source": "adf",
+        "pipeline": "motif-rest-api-pagination"
+      },
+      "tasks": [
+        {
+          "name": "REST API Pagination",
+          "task_key": "motif_rest_api_pagination",
+          "type": "MotifActivity",
+          "description": "Collapsed motif: REST API Pagination. Replaces 2 ADF activities with python_rest_ingestion.",
+          "motif_id": "rest_api_pagination",
+          "display_name": "REST API Pagination",
+          "databricks_replacement": "python_rest_ingestion",
+          "matched_activity_names": [
+            "initial-request",
+            "paginate"
+          ],
+          "source_type_hint": "rest_api",
+          "confidence_notes": [
+            "Until child 'page-request' uses pagination",
+            "Until child 'set-continuation' uses pagination"
+          ],
+          "notebook_template": "rest_api_pagination.py"
+        }
+      ],
+      "not_translatable": [],
+      "reconciliation_status": null,
+      "migration_status": "included",
+      "audit": {}
+    }
+  ]
+}

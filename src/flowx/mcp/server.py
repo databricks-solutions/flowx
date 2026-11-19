@@ -59,6 +59,7 @@ Typical flow (ADF shown; swap source + source-path for Airflow):
   flowx("inspect", {"report_path": "<output_dir>/.work/translation_report.json"})
   flowx("apply_answers", {"report_path": "...", "answers": ["id=value"], "output_dir": "..."})
   flowx("package", {"output_dir": "...", "catalog": "main", "schema": "default"})
+  flowx("validate", {"output_dir": "...", "action": "prepare"})  # optional: review the bundle (flowx-validate)
 To estimate current ADF spend (live Azure scan; needs the server's `azure` extra and Azure
 credentials in its environment):
   flowx("profile", {"source": "adf", "output_dir": "...", "days": 30})
@@ -383,6 +384,52 @@ def _cmd_enrich(p: dict[str, Any]) -> dict[str, Any]:
         return _run(str(inline_path))
 
 
+_VALIDATE_PREPARE_FLAGS = {
+    "pipeline": "--pipeline",
+    "threshold": "--threshold",
+    "max_iterations": "--max-iterations",
+    "profile": "--profile",
+    "report_path": "--report",
+}
+_VALIDATE_SWITCHES = {
+    "dry_run": "--dry-run",
+    "require_approval": "--require-approval",
+    "reset": "--reset",
+    "approve": "--approve",
+}
+
+
+def _cmd_validate(p: dict[str, Any]) -> dict[str, Any]:
+    """Run one validate step; inline ``reviews`` / ``edits`` are staged to a temp file for the CLI."""
+    action = p.get("action", "prepare")
+    if action not in {"prepare", "record", "apply", "publish"}:
+        return {"ok": False, "error": "validate action must be prepare, record, apply, or publish."}
+    args: list[Any] = ["validate", action, "--output-dir", p.get("output_dir", "./flowx_output")]
+    args += [item for key, flag in _VALIDATE_PREPARE_FLAGS.items() if p.get(key) is not None for item in (flag, p[key])]
+    args += [flag for key, flag in _VALIDATE_SWITCHES.items() if p.get(key)]
+    if p.get("bundle_validate") is False:
+        args += ["--no-bundle-validate"]
+    if p.get("results_table"):
+        args += ["--results-table", p["results_table"]]
+    if p.get("warehouse_id"):
+        args += ["--warehouse-id", p["warehouse_id"]]
+    inline_key, flag = {"record": ("reviews", "--reviews-path"), "apply": ("edits", "--edits-path")}.get(
+        action, ("", "")
+    )
+    with tempfile.TemporaryDirectory(prefix="flowx-validate-") as temporary:
+        if inline_key:
+            payload = p.get(inline_key)
+            if payload is None:
+                return {"ok": False, "error": f"validate {action} requires {inline_key!r}."}
+            inline_path = Path(temporary) / f"{inline_key}.json"
+            inline_path.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+            args += [flag, inline_path]
+        result = runner.run_adapter(args)
+    payload = runner.parse_stdout_json(result)
+    ok = bool(isinstance(payload, dict) and payload.get("ok"))
+    return {"ok": ok, "result": payload, "process": result.as_dict()}
+
+
 def _cmd_inspect(p: dict[str, Any]) -> dict[str, Any]:
     args: list[Any] = ["inspect", p["report_path"]]
     for answer in p.get("answers") or []:
@@ -620,6 +667,7 @@ _COMMANDS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "merge_agentic": _cmd_merge_agentic,
     "resolve_agentic": _cmd_resolve_agentic,
     "enrich": _cmd_enrich,
+    "validate": _cmd_validate,
     "inspect": _cmd_inspect,
     "apply_answers": _cmd_apply_answers,
     "materialize_lookup": _cmd_materialize_lookup,
@@ -682,6 +730,14 @@ def build_server() -> FastMCP:
           them; `ok` reflects validation and `result.violations` lists every problem. Set `authored_against`
           to the inventory's source_graphs_sha256 when it records one. The flowx-enrich skill covers the
           insights shape and what to do when enrich reports a leftover lock.
+        - "validate": action(prepare | record | apply | publish, default prepare), output_dir. prepare:
+          pipeline, threshold, max_iterations, dry_run, require_approval, reset, report_path,
+          bundle_validate(bool, default true) — run static checks and return the objects to review with
+          their source pipelines; `databricks bundle validate` is recorded as skipped when the server has
+          no CLI. record: reviews(req, inline object or its JSON text) — stamp and score the reviews;
+          `result.violations` lists problems. apply: edits(req, list of {path, content}), approve — fix
+          bundle YAML in place. publish: results_table(req), warehouse_id. The flowx-validate skill covers
+          the loop, the review shape, and the scoring.
         - "inspect": report_path(req) — return the full translation-option schema (every option with
           a `show_when` condition) for the agent to walk locally. See "Collecting options" below.
         - "apply_answers": report_path(req), answers(req, list of "ID=VALUE"), output_dir, lookup_csv.

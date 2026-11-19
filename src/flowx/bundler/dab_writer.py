@@ -9,6 +9,7 @@ import fnmatch
 import json
 import posixpath
 import re
+import shutil
 import sys
 import tempfile
 from collections.abc import Callable, Iterator
@@ -21,6 +22,7 @@ from flowx.adapter.operations import collect_workspace_artifact_paths
 from flowx.bundler.constants import (
     COMPUTE_MODE_TO_CLUSTER_KEY,
     DEFAULT_JOB_CLUSTER_KEY,
+    KEPT_TRANSLATION_REPORT,
     MULTI_NODE_CLUSTER_NODE_TYPE_ID,
     MULTI_NODE_JOB_CLUSTER_KEY,
     SINGLE_NODE_JOB_CLUSTER_KEY,
@@ -885,6 +887,15 @@ def _iter_workflow_setup_tasks(workflow: PreparedWorkflow) -> list[SetupTask]:
     return tasks
 
 
+def _keep_translation_report(report: Path, output_dir: Path) -> None:
+    """Copies the packaged translation report to ``metadata/`` so it outlives the pruned ``.work/`` folder."""
+    kept = output_dir / KEPT_TRANSLATION_REPORT
+    if report.resolve() == kept.resolve():
+        return
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(report, kept)
+
+
 def _default_report_path(output_dir: Path) -> Path:
     """Returns the conventional report path under a migration dir's .work/ folder.
 
@@ -1358,11 +1369,10 @@ def main(argv: list[str] | None = None) -> int:
             print(format_result(result), file=sys.stderr)
         invariant_violations += len(result.violations)
 
+    _keep_translation_report(args.report, args.output_dir)
     if not args.keep_intermediates:
         work_dir = args.output_dir / ".work"
         if work_dir.is_dir():
-            import shutil
-
             shutil.rmtree(work_dir, ignore_errors=True)
             print(f"Pruned transient {work_dir}")
 
