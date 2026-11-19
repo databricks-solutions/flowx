@@ -1,13 +1,8 @@
 # The agentic insights shape
 
-This is the reference for the `insights` JSON you author before calling `enrich`. The `flowx-enrich`
-SKILL.md covers the workflow (how much to write, the authoring steps, how to run `enrich`, and
-when a deterministic-only pass skips it); this file covers **what to write** and the rules the
-validator enforces.
-
-Author the insights when a human reader would benefit from a migration narrative — which pipelines
-collapse onto a managed capability, how the factory hangs together, what the risky couplings are.
-The `flowx-route` step reads this block to present the agentic conversion option per component.
+Read this from Step 4 of the `flowx-enrich` skill, which covers when to skip enrich, how much to write
+and how to run it. This file covers what to write and the rules the validator enforces. The
+`flowx-route` step reads the block to present the agentic conversion option per component.
 
 ## Contents
 
@@ -149,4 +144,4 @@ writes a table (or file) that another pipeline reads, record it on the `inferred
 
 ## Idempotency & safety
 
-See the `flowx-enrich` SKILL.md "Idempotency & safety" section: a validation failure writes nothing.
+See "Idempotency and safety" under Output in the `flowx-enrich` SKILL.md: a validation failure writes nothing.
