@@ -595,8 +595,8 @@ def validate_plan(raw: Any, inventory: dict[str, Any]) -> list[str]:
     decided_ids: list[str] = []
     decision_by_id: dict[str, Any] = {}
     for index, component in enumerate(components):
-        loc = f"components[{index}]"
-        matched_id = _validate_component_entry(component, loc, names, computed_by_members, violations)
+        location = f"components[{index}]"
+        matched_id = _validate_component_entry(component, location, names, computed_by_members, violations)
         if matched_id is not None:
             decided_ids.append(matched_id)
             decision_by_id[matched_id] = component.get("decision")
@@ -623,7 +623,7 @@ def validate_plan(raw: Any, inventory: dict[str, Any]) -> list[str]:
 
 def _validate_component_entry(
     component: Any,
-    loc: str,
+    location: str,
     names: set[str],
     computed_by_members: dict[frozenset[str], str],
     violations: list[str],
@@ -634,52 +634,54 @@ def _validate_component_entry(
     connected component (so the caller can enforce the bijection), else ``None``.
     """
     if not isinstance(component, dict):
-        violations.append(f"{loc} must be an object")
+        violations.append(f"{location} must be an object")
         return None
 
     for key in sorted(set(component) - COMPONENT_AUTHORED_KEYS - COMPONENT_LIBRARY_KEYS):
-        violations.append(f"{loc}: unknown field {key!r}")
+        violations.append(f"{location}: unknown field {key!r}")
 
     decision = component.get("decision")
     if decision is not None and decision not in DECISIONS:
         allowed = ", ".join(repr(value) for value in DECISIONS)
-        violations.append(f"{loc}: 'decision' must be one of {{{allowed}}}, or null while pending, got {decision!r}")
+        violations.append(
+            f"{location}: 'decision' must be one of {{{allowed}}}, or null while pending, got {decision!r}"
+        )
 
     rationale = component.get("rationale")
     if rationale is not None and (not isinstance(rationale, str) or not rationale.strip()):
-        violations.append(f"{loc}: 'rationale' must be a non-empty string when present")
+        violations.append(f"{location}: 'rationale' must be a non-empty string when present")
 
     component_id = component.get("component_id")
     if not isinstance(component_id, str) or not component_id:
-        violations.append(f"{loc}: 'component_id' must be a non-empty string")
+        violations.append(f"{location}: 'component_id' must be a non-empty string")
 
     members = component.get("members")
     if not isinstance(members, list) or not all(isinstance(member, str) for member in members):
-        violations.append(f"{loc}: 'members' must be a list of pipeline names")
+        violations.append(f"{location}: 'members' must be a list of pipeline names")
         return None
 
     for member in members:
         if member not in names:
-            violations.append(f"{loc}: pipeline {member!r} not in inventory")
+            violations.append(f"{location}: pipeline {member!r} not in inventory")
 
     # Reject duplicate members explicitly: a frozenset match would collapse ["a", "a"] to {"a"} and
     # wrongly accept it as the component {"a"}, breaking the members-match / bijection contract.
     duplicates = sorted({member for member in members if members.count(member) > 1})
     if duplicates:
-        violations.append(f"{loc}: duplicate members {duplicates}; list each pipeline once")
+        violations.append(f"{location}: duplicate members {duplicates}; list each pipeline once")
         return None
 
     matched_id = computed_by_members.get(frozenset(members))
     if matched_id is None:
         violations.append(
-            f"{loc}: members {sorted(members)} do not form a connected component "
+            f"{location}: members {sorted(members)} do not form a connected component "
             f"(they split or span computed components); route each component as a whole, "
             "or accept a suggested grouping to convert several together"
         )
         return None
     if isinstance(component_id, str) and component_id and component_id != matched_id:
         violations.append(
-            f"{loc}: component_id {component_id!r} does not match the component for these members "
+            f"{location}: component_id {component_id!r} does not match the component for these members "
             f"(expected {matched_id!r})"
         )
     return matched_id
@@ -693,39 +695,39 @@ def _grouping_violations(groupings: Any, inventory: dict[str, Any], decision_by_
     violations: list[str] = []
     seen: set[str] = set()
     for index, entry in enumerate(groupings):
-        loc = f"suggested_groupings[{index}]"
+        location = f"suggested_groupings[{index}]"
         if not isinstance(entry, dict):
-            violations.append(f"{loc} must be an object")
+            violations.append(f"{location} must be an object")
             continue
         for key in sorted(set(entry) - GROUPING_AUTHORED_KEYS - GROUPING_LIBRARY_KEYS):
-            violations.append(f"{loc}: unknown field {key!r}")
+            violations.append(f"{location}: unknown field {key!r}")
         grouping_id = entry.get("grouping_id")
         suggestion = suggestions.get(grouping_id) if isinstance(grouping_id, str) else None
         if suggestion is None and ("members" in entry or "components" in entry):
             violations.append(
-                f"{loc}: {grouping_id!r} is no longer a grouping route suggests; the suggestions changed since this "
-                "plan was written, so run route without a plan to see the current ones"
+                f"{location}: {grouping_id!r} is no longer a grouping route suggests; the suggestions changed "
+                "since this plan was written, so run route without a plan to see the current ones"
             )
             continue
         if suggestion is None:
             violations.append(
-                f"{loc}: {grouping_id!r} is not a grouping route suggests for this inventory; only a suggested "
+                f"{location}: {grouping_id!r} is not a grouping route suggests for this inventory; only a suggested "
                 "grouping can be accepted (to group other components, record an inferred relationship through enrich)"
             )
             continue
         if grouping_id in seen:
-            violations.append(f"{loc}: grouping {grouping_id!r} is listed more than once")
+            violations.append(f"{location}: grouping {grouping_id!r} is listed more than once")
         seen.add(str(grouping_id))
         changed = [key for key in ("components", "members") if key in entry and entry[key] != suggestion[key]]
         if changed:
             violations.append(
-                f"{loc}: grouping {grouping_id!r} now joins {suggestion['components']} ({suggestion['members']}), "
+                f"{location}: grouping {grouping_id!r} now joins {suggestion['components']} ({suggestion['members']}), "
                 f"not the {' and '.join(changed)} this plan lists; the suggestions changed since it was written, "
                 "so review the grouping again"
             )
         accepted = entry.get("accepted", False)
         if not isinstance(accepted, bool):
-            violations.append(f"{loc}: 'accepted' must be true or false, got {accepted!r}")
+            violations.append(f"{location}: 'accepted' must be true or false, got {accepted!r}")
         elif accepted:
             deterministic = [
                 component_id
@@ -734,9 +736,9 @@ def _grouping_violations(groupings: Any, inventory: dict[str, Any], decision_by_
             ]
             if deterministic:
                 violations.append(
-                    f"{loc}: grouping {grouping_id!r} converts {suggestion['components']} together agentically, but "
-                    f"{deterministic} {'is' if len(deterministic) == 1 else 'are'} decided 'deterministic'; decide "
-                    "each of its components 'agentic', or set accepted to false"
+                    f"{location}: grouping {grouping_id!r} converts {suggestion['components']} together "
+                    f"agentically, but {deterministic} {'is' if len(deterministic) == 1 else 'are'} decided "
+                    "'deterministic'; decide each of its components 'agentic', or set accepted to false"
                 )
     return violations
 
@@ -747,16 +749,16 @@ def _conversation_violations(conversation: Any) -> list[str]:
         return ["'conversation' must be a list of {question, answer} objects"]
     violations: list[str] = []
     for index, entry in enumerate(conversation):
-        loc = f"conversation[{index}]"
+        location = f"conversation[{index}]"
         if not isinstance(entry, dict):
-            violations.append(f"{loc} must be an object")
+            violations.append(f"{location} must be an object")
             continue
         for key in sorted(set(entry) - CONVERSATION_KEYS):
-            violations.append(f"{loc}: unknown field {key!r}")
+            violations.append(f"{location}: unknown field {key!r}")
         for key in sorted(CONVERSATION_KEYS):
             value = entry.get(key)
             if not isinstance(value, str) or not value.strip():
-                violations.append(f"{loc}: {key!r} must be a non-empty string")
+                violations.append(f"{location}: {key!r} must be a non-empty string")
     return violations
 
 

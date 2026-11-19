@@ -325,16 +325,16 @@ def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
         problems.append("'suggested_groupings' must be a list")
     else:
         for index, grouping in enumerate(groupings):
-            loc = f"suggested_groupings[{index}]"
+            location = f"suggested_groupings[{index}]"
             if not isinstance(grouping, dict) or not isinstance(grouping.get("grouping_id"), str):
-                problems.append(f"{loc} must be an object with a 'grouping_id'")
+                problems.append(f"{location} must be an object with a 'grouping_id'")
                 continue
-            problems.extend(_unknown_key_problems(grouping, GROUPING_AUTHORED_KEYS | GROUPING_LIBRARY_KEYS, loc))
+            problems.extend(_unknown_key_problems(grouping, GROUPING_AUTHORED_KEYS | GROUPING_LIBRARY_KEYS, location))
             for key, kind in (("components", str), ("members", str), ("basis", dict)):
                 if key in grouping and not _is_list_of(grouping[key], kind):
-                    problems.append(f"{loc} '{key}' must be a list")
+                    problems.append(f"{location} '{key}' must be a list")
             if "accepted" in grouping and not isinstance(grouping["accepted"], bool):
-                problems.append(f"{loc} 'accepted' must be true or false, got {grouping['accepted']!r}")
+                problems.append(f"{location} 'accepted' must be true or false, got {grouping['accepted']!r}")
     conversation = raw.get("conversation", [])
     if not isinstance(conversation, list) or not all(
         isinstance(item, dict) and isinstance(item.get("question"), str) and isinstance(item.get("answer"), str)
@@ -349,9 +349,9 @@ def _recorded_shape_problems(raw: dict[str, Any]) -> list[str]:
     return problems
 
 
-def _unknown_key_problems(entry: dict[str, Any], known: frozenset[str], loc: str) -> list[str]:
+def _unknown_key_problems(entry: dict[str, Any], known: frozenset[str], location: str) -> list[str]:
     """One problem per key of ``entry`` outside ``known``, in sorted order."""
-    return [f"{loc} has an unknown key {key!r}" for key in sorted(set(entry) - known)]
+    return [f"{location} has an unknown key {key!r}" for key in sorted(set(entry) - known)]
 
 
 def _is_list_of(value: Any, kind: type) -> bool:
