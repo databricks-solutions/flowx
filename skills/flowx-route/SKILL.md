@@ -21,12 +21,12 @@ record of the decisions, and draws it as `metadata/routing_review.html`. The use
 the plan, route applies it to the translation report, and you author the fill.
 
 **ADF only (current scope).** Enrich runs for every source, but the route → fill agentic-conversion
-flow is supported for **ADF today**, and `route` enforces it: for an Airflow inventory it recommends and
+flow is supported for **ADF only**, and `route` enforces it: for an Airflow inventory it recommends and
 records only `deterministic` decisions, suggests no groupings, and rejects an `agentic` decision (the
 plan is not recorded and the report is left untouched). `convert --merge-agentic --source airflow` is
 disabled too. Airflow DAGs are often one connected component, so Airflow agentic conversion follows the
 Airflow track's own per-gap and patch contract rather than this whole-component flow. For **Airflow
-agentic gaps today, use the `flowx-resolve-airflow-gaps` skill** (the strict per-gap resolver), not
+agentic gaps, use the `flowx-resolve-airflow-gaps` skill** (the strict per-gap resolver), not
 this routing flow.
 
 **There is no LLM inside flowx.** The library computes the recommendation deterministically and only

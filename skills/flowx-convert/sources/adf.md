@@ -116,7 +116,7 @@ activity are replaced. The placeholder's other source metadata
 like) is kept for each field you leave out; a value you set wins. Of these, only `notifications` and
 `compute_mode` change the task flowx writes, and `parameter_approximations` (each exactly
 `widget_name`, `raw_expression`, `replacement` and `note` strings) are listed in SETUP.md for a
-top-level component, as for a notebook task; an IfCondition, ForEach or Switch does not yet pass
+top-level component, as for a notebook task; an IfCondition, ForEach or Switch does not pass
 any child's approximations on. Put libraries and compute in the task fragment: setting
 `libraries` or `existing_cluster_id` on the activity is an error, and neither is taken from the
 placeholder. flowx does not override or remove any

@@ -61,9 +61,9 @@ Identities that need no sign-in (a service principal, or a Unity Catalog service
 an admin's help; offer them only when the user's own sign-in doesn't work or the user asks. See
 `sources/adf.md`, option 3.
 
-**MCP (Genie Code with the `mcp-flowx` app): the `flowx` MCP tool has no `extract` command yet.**
+**MCP (Genie Code with the `mcp-flowx` app): the `flowx` MCP tool has no `extract` command.**
 Say so plainly when the user is on the MCP path — for example: *"The flowx MCP tool can't run
-the extraction for you yet. I can run it in this notebook session instead, or generate a
+the extraction for you. I can run it in this notebook session instead, or generate a
 notebook for you to run."* — then continue with option 3a or 3c in `sources/adf.md`. Don't call
 `flowx(command="extract", ...)`.
 

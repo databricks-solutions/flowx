@@ -150,7 +150,7 @@ Then ask who should run it, and recommend based on where you are:
 | | When to recommend | Sign-in |
 |---|---|---|
 | **3a. I run it** | Claude Code or a local agent with `az` available | The user's `az login` |
-| **3b. One MCP tool call** | — | **Not available yet.** Tell the user the flowx MCP tool can't run the extraction yet and offer 3a or 3c. |
+| **3b. One MCP tool call** | — | **Not available.** Tell the user the flowx MCP tool can't run the extraction and offer 3a or 3c. |
 | **3c. You run a notebook** | Genie Code; the user wants to run it in their own workspace; the agent can't reach Azure; a customer runs it for you | Device code (the notebook's default) |
 
 #### Option 3a — The assistant runs the calls

@@ -126,7 +126,7 @@ validation rules the library enforces.
 ## Summarise and ask (step 3)
 
 This works the same for every source. On a source where route records deterministic decisions only
-(Airflow today), the answers still shape the port and the per-gap fills.
+(Airflow), the answers still shape the port and the per-gap fills.
 
 1. **Read** the raw source behind each loop, copy and query, and any worklist you can reach. A
    worklist is a runtime list that drives a loop: a control table, a CSV, a Lookup result, an array

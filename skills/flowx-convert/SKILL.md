@@ -62,7 +62,7 @@ across ADF and Airflow.
 
 ## Shared adapter commands
 
-`inspect` and `modify` operate on the report rather than raw source definitions. The ADF guide uses them heavily; Airflow currently needs only the base conversion:
+`inspect` and `modify` operate on the report rather than raw source definitions. The ADF guide uses them heavily; Airflow needs only the base conversion:
 
 - `inspect <report>` — emit the full just-in-time option schema (each option annotated with a
   `show_when` condition). Walk it locally; ask an option only when its `show_when` is satisfied.
