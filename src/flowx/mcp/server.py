@@ -24,6 +24,7 @@ from flowx.agentic import (
     classify_airflow_gaps,
 )
 from flowx.mcp import runner
+from flowx.skipped_dags import DAGS_LEFT_OUT_EXIT_CODE, failed_airflow_pipelines
 
 
 def _allowed_origins() -> list[str]:
@@ -493,8 +494,43 @@ def _parse_airflow_review_counts(stdout: str) -> dict[str, int]:
     return {}
 
 
-# The exit code package uses when it wrote a bundle but left out DAGs that failed reconciliation.
-_DAGS_LEFT_OUT_EXIT_CODE = 4
+def _without_pipelines(report: Any, names: list[str]) -> Any:
+    """Returns a parsed report without the named pipelines, such as the DAGs package leaves out."""
+    if not names or not isinstance(report, dict) or not isinstance(report.get("pipelines"), list):
+        return report
+    return {
+        **report,
+        "pipelines": [
+            entry for entry in report["pipelines"] if not (isinstance(entry, dict) and entry.get("name") in names)
+        ],
+    }
+
+
+def _package_status(
+    result: runner.AdapterResult,
+    report: Any,
+    *,
+    left_out_dags: list[str],
+    reviewed: bool = False,
+    allow_unresolved_gaps: bool = False,
+) -> tuple[bool, str]:
+    """Returns ``(ok, status)`` for a package run of *report*.
+
+    A bundle written without the *left_out_dags*, which package signals with its own exit code, is a success
+    the caller asked for. The status names what the bundle still lacks, most important first: reviewed gaps
+    (``completed_with_reviewed_gaps``), gaps kept with ``allow_unresolved_gaps``
+    (``packaged_with_unresolved_gaps``), then left-out DAGs (``packaged_without_failed_dags``). Gaps in the
+    left-out DAGs do not count, since those DAGs are not in the bundle.
+    """
+    ok = result.ok or (result.returncode == DAGS_LEFT_OUT_EXIT_CODE and bool(left_out_dags))
+    if not ok:
+        return False, "failed"
+    unresolved_gaps = airflow_gap_findings(_without_pipelines(report, left_out_dags))
+    if reviewed and unresolved_gaps:
+        return True, "completed_with_reviewed_gaps"
+    if allow_unresolved_gaps and unresolved_gaps:
+        return True, "packaged_with_unresolved_gaps"
+    return True, "packaged_without_failed_dags" if left_out_dags else "completed"
 
 
 def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
@@ -528,26 +564,31 @@ def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
         default_report = out / ".work" / "translation_report.json"
     report_path = Path(p["report_path"]) if p.get("report_path") else default_report
     report = runner.read_json(report_path)
+    left_out_dags = failed_airflow_pipelines(report) if p.get("skip_failed_dags") else []
     result = runner.run_adapter(args)
-    unresolved_gaps = airflow_gap_findings(report) if result.ok else []
     counts = _parse_airflow_review_counts(result.stdout)
-    status = (
-        "failed"
-        if not result.ok
-        else "completed_with_reviewed_gaps"
-        if counts.get("accepted_count") and unresolved_gaps
-        else "packaged_with_unresolved_gaps"
-        if p.get("allow_unresolved_gaps") and unresolved_gaps
-        else "completed"
+    ok, status = _package_status(
+        result,
+        report,
+        left_out_dags=left_out_dags,
+        reviewed=bool(counts.get("accepted_count")),
+        allow_unresolved_gaps=bool(p.get("allow_unresolved_gaps")),
     )
     setup_md = runner.read_text(out / "SETUP.md") or runner.read_text(out / "setup" / "SETUP.md")
-    dags_left_out = result.returncode == _DAGS_LEFT_OUT_EXIT_CODE
-    extra = _bundle_output(p, out) if result.ok or dags_left_out else {}
-    if dags_left_out:
-        extra["dags_left_out"] = True
-    return _phase_result(
-        result, out, status=status, bundle_files=runner.list_tree(out), setup_md=setup_md, **counts, **extra
-    )
+    extra = _bundle_output(p, out) if ok else {}
+    return {
+        **_phase_result(
+            result,
+            out,
+            status=status,
+            left_out_dags=left_out_dags if ok and left_out_dags else None,
+            bundle_files=runner.list_tree(out),
+            setup_md=setup_md,
+            **counts,
+            **extra,
+        ),
+        "ok": ok,
+    }
 
 
 def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
@@ -615,7 +656,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
         return {
             "ok": package["ok"],
             "status": package["status"],
-            **{key: package[key] for key in ("reviewed_count", "unreviewed_count") if key in package},
+            **{key: package[key] for key in ("reviewed_count", "unreviewed_count", "left_out_dags") if key in package},
             "failed_phase": None if package["ok"] else "package",
             "report_path": str(reviewed_report),
             "steps": steps,
@@ -696,8 +737,12 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
             if not apply_res.get("ok"):
                 return {"ok": False, "status": "failed", "failed_phase": "apply_answers", "steps": steps}
 
+        converted_report = runner.read_json(Path(report_path))
+        left_out_dags = (
+            failed_airflow_pipelines(converted_report) if source_name == "airflow" and p.get("skip_failed_dags") else []
+        )
         if source_name == "airflow":
-            report = runner.read_json(Path(report_path))
+            report = _without_pipelines(converted_report, left_out_dags)
             gap_findings = airflow_gap_findings(report)
             if gap_findings:
                 operator_gaps = [finding for finding in gap_findings if finding.get("code") == "operator_placeholder"]
@@ -772,15 +817,18 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                     **({"prepare_unavailable": prepare_unavailable} if prepare_unavailable else {}),
                 }
 
-        package_res = runner.run_adapter(
-            ["package", "--output-dir", output_dir, "--catalog", catalog, "--schema", schema]
-        )
-        extra = _bundle_output(p, out) if package_res.ok else {}
-        steps["package"] = _phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra)
+        package_args = ["package", "--output-dir", output_dir, "--catalog", catalog, "--schema", schema]
+        if left_out_dags:
+            package_args += ["--skip-failed-dags"]
+        package_res = runner.run_adapter(package_args)
+        ok, status = _package_status(package_res, converted_report, left_out_dags=left_out_dags)
+        extra = _bundle_output(p, out) if ok else {}
+        steps["package"] = {**_phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra), "ok": ok}
         return {
-            "ok": package_res.ok,
-            "status": "completed" if package_res.ok else "failed",
-            "failed_phase": None if package_res.ok else "package",
+            "ok": ok,
+            "status": status,
+            "failed_phase": None if ok else "package",
+            **({"left_out_dags": left_out_dags} if ok and left_out_dags else {}),
             "steps": steps,
         }
     finally:
@@ -913,10 +961,13 @@ def build_server() -> FastMCP:
         - "workspace_paths": source(req), report_path(req), one source-specific input key | source_dir.
         - "package": output_dir, output_volume_path, output_workspace_path, report_path,
           catalog(default "main"), schema(default "default"), bundle_name, profile,
-          download_workspace_files(bool), keep_intermediates(bool), allow_unresolved_gaps(bool), skip_failed_dags(bool).
+          download_workspace_files(bool), keep_intermediates(bool), allow_unresolved_gaps(bool),
+          skip_failed_dags(bool, Airflow). With skip_failed_dags, the bundle leaves out the DAGs that failed
+          reconciliation, which the result lists in ``left_out_dags``; when that is all it leaves out, status is
+          "packaged_without_failed_dags".
         - "migrate": source(req), one source-specific input key (req unless resuming), output_dir,
           output_volume_path, output_workspace_path, catalog, schema, pipeline,
-          exclude_dag | exclude_dags (Airflow, repeatable list),
+          exclude_dag | exclude_dags (Airflow, repeatable list), skip_failed_dags(bool, Airflow, as for package),
           answers(ADF only, list of "ID=VALUE"), interactive(ADF only, bool, default true), lookup_csv,
           resume_agentic(bool) — runs discover→convert→package, returning the full
           option schema once (status "needs_input") when configuration is available. Airflow gaps pause

@@ -66,6 +66,7 @@ from flowx.preparer.workspace_downloader import (
     prompt_for_auth_if_missing,
     set_profile,
 )
+from flowx.skipped_dags import DAGS_LEFT_OUT_EXIT_CODE, failed_airflow_pipelines, without_skipped_dag_references
 from flowx.utils import to_lowercase_key
 
 
@@ -518,6 +519,7 @@ def write_bundle_group(
     schema: str = "default",
     bundle_name: str | None = None,
     skipped_pipelines: list[str] | None = None,
+    left_out_dags: list[str] | None = None,
 ) -> list[Path]:
     """Writes one DAB bundle holding every workflow in *workflows*.
 
@@ -834,6 +836,7 @@ def write_bundle_group(
         pydabs_dbt_factories=pydabs_dbt_factory_configs,
         airflow_backfills=airflow_backfill_configs,
         skipped_pipelines=list(skipped_pipelines or []),
+        left_out_dags=list(left_out_dags or []),
         required_variables={
             name: declaration["description"]
             for name, declaration in databricks_yml_dict.get("variables", {}).items()
@@ -1182,7 +1185,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     review_counts: dict[str, int] = {}
-    skipped_dags = _failed_airflow_pipelines(args.report) if args.skip_failed_dags else []
+    skipped_dags = failed_airflow_pipelines(_read_report(args.report)) if args.skip_failed_dags else []
     report_failures = _report_reconciliation_failures(
         args.report,
         allow_unresolved_gaps=args.allow_unresolved_gaps,
@@ -1230,6 +1233,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not workflows:
         # Distinguish "every entry was malformed" (something to fix) from a genuinely empty report.
+        if skipped_dags:
+            print(
+                "No pipelines to package: every Airflow DAG failed reconciliation and --skip-failed-dags left "
+                "them all out.",
+                file=sys.stderr,
+            )
+            return 1
         if skipped_pipelines:
             print(
                 "No valid pipelines to package: every entry in the report was malformed.",
@@ -1280,6 +1290,7 @@ def main(argv: list[str] | None = None) -> int:
                 schema=args.schema,
                 bundle_name=combined_name,
                 skipped_pipelines=skipped_pipelines,
+                left_out_dags=skipped_dags,
             )
         )
         bundle_dirs = [args.output_dir]
@@ -1331,6 +1342,7 @@ def main(argv: list[str] | None = None) -> int:
                     schema=args.schema,
                     bundle_name=group_name,
                     skipped_pipelines=skipped_pipelines,
+                    left_out_dags=skipped_dags,
                 )
                 created_all.extend(created)
                 dirs.append(b_dir)
@@ -1419,8 +1431,7 @@ def main(argv: list[str] | None = None) -> int:
         print("  4. Deploy: databricks bundle deploy -t dev")
     if invariant_violations:
         return 1
-    # A bundle was written, but without the DAGs --skip-failed-dags left out.
-    return 4 if skipped_dags else 0
+    return DAGS_LEFT_OUT_EXIT_CODE if skipped_dags else 0
 
 
 def _required_variables_in(databricks_yml: Path) -> set[str]:
@@ -3032,7 +3043,7 @@ def _load_report(
                 if pipeline_dict.get("migration_status") == "excluded" or pipeline_dict["name"] in skipped_dags:
                     continue
                 if skipped_dags:
-                    pipeline_dict = _without_skipped_dag_references(pipeline_dict, skipped_dags)
+                    pipeline_dict = without_skipped_dag_references(pipeline_dict, skipped_dags)
                 workflows.append(_pipeline_dict_to_workflow(pipeline_dict))
             else:
                 # A non-conforming entry (corruption / an internal bug) is skipped so the other
@@ -3058,28 +3069,13 @@ def _load_report(
     return workflows, skipped
 
 
-def _failed_airflow_pipelines(report_path: Path) -> list[str]:
-    """Returns the names of the included Airflow pipelines in a report whose reconciliation failed.
-
-    A report that cannot be read returns nothing, so the preflight reports the problem itself.
-    """
+def _read_report(report_path: Path) -> Any:
+    """Returns a translation report's parsed JSON, or None when it cannot be read; the preflight reports why."""
     try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
+        with report_path.open(encoding="utf-8") as handle:
+            return json.load(handle)
     except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(report, dict):
-        return []
-    entries = report["pipelines"] if isinstance(report.get("pipelines"), list) else [report]
-    return [
-        entry["name"]
-        for entry in entries
-        if isinstance(entry, dict)
-        and isinstance(entry.get("name"), str)
-        and isinstance(entry.get("tags"), dict)
-        and entry["tags"].get("source") == "airflow"
-        and entry.get("migration_status", "included") == "included"
-        and entry.get("reconciliation_status") == "failed"
-    ]
+        return None
 
 
 def _report_reconciliation_failures(
@@ -3238,81 +3234,6 @@ def _report_reconciliation_failures(
         else:
             failures.append(f"{pipeline.get('name', 'unknown')}: reconciliation_failed")
     return failures
-
-
-# Report task fields that hold nested task lists.
-_NESTED_TASK_LISTS = ("inner_activities", "if_true_activities", "if_false_activities", "default_activities")
-
-
-def _without_skipped_dag_references(pipeline_dict: dict[str, Any], skipped_dags: frozenset[str]) -> dict[str, Any]:
-    """Returns a copy of a report pipeline whose tasks that trigger a left-out DAG are placeholders.
-
-    The placeholder keeps the task's key and dependencies. The pipeline gains a gap finding per
-    replaced task, a ``verified`` status becomes ``verified_with_gaps``, and its schedule is paused,
-    since the job can no longer run as migrated.
-    """
-    skipped_by_key = {to_lowercase_key(name): name for name in skipped_dags}
-    replaced: list[tuple[str, str]] = []
-
-    def rewrite(tasks: list[Any]) -> list[Any]:
-        rewritten: list[Any] = []
-        for task in tasks:
-            if not isinstance(task, dict):
-                rewritten.append(task)
-                continue
-            if task.get("type") == "RunJobActivity" and task.get("job_name") in skipped_by_key:
-                skipped = skipped_by_key[task["job_name"]]
-                replaced.append((str(task.get("task_key", "")), skipped))
-                placeholder = {
-                    key: task[key] for key in ("name", "task_key", "depends_on", "description") if key in task
-                }
-                placeholder.update(
-                    {
-                        "type": "PlaceholderActivity",
-                        "original_type": "SkippedDagReference",
-                        "comment": (
-                            f"Airflow DAG {skipped!r} failed reconciliation and was left out of this bundle "
-                            "(--skip-failed-dags). Fix it and package it, then point this task at its job."
-                        ),
-                        "raw_definition": {"skipped_dag": skipped},
-                    }
-                )
-                rewritten.append(placeholder)
-                continue
-            task = dict(task)
-            for field in _NESTED_TASK_LISTS:
-                if isinstance(task.get(field), list):
-                    task[field] = rewrite(task[field])
-            if isinstance(task.get("cases"), list):
-                task["cases"] = [
-                    {**case, "activities": rewrite(case["activities"])}
-                    if isinstance(case, dict) and isinstance(case.get("activities"), list)
-                    else case
-                    for case in task["cases"]
-                ]
-            rewritten.append(task)
-        return rewritten
-
-    updated = {**pipeline_dict, "tasks": rewrite(list(pipeline_dict.get("tasks") or []))}
-    if not replaced:
-        return pipeline_dict
-    updated["not_translatable"] = [
-        *(pipeline_dict.get("not_translatable") or []),
-        *(
-            {
-                "code": "skipped_dag_reference",
-                "severity": "gap",
-                "message": f"Task {task_key!r} triggers Airflow DAG {skipped!r}, which was left out of this bundle.",
-                "details": {"task_key": task_key, "skipped_dag": skipped},
-            }
-            for task_key, skipped in replaced
-        ),
-    ]
-    if updated.get("reconciliation_status") == "verified":
-        updated["reconciliation_status"] = "verified_with_gaps"
-    if isinstance(updated.get("schedule"), dict):
-        updated["schedule"] = {**updated["schedule"], "pause_status": "PAUSED"}
-    return updated
 
 
 def _pipeline_dict_to_workflow(pipeline_dict: dict[str, Any]) -> PreparedWorkflow:

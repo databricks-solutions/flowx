@@ -190,13 +190,16 @@ def resolve_import(imported: ImportedName, roots: tuple[Path, ...]) -> dict[str,
 
 
 def _dotted_name(node: ast.Attribute) -> tuple[list[str], ast.expr]:
-    """Returns the names of an attribute chain such as ``a.b.c``, with the expression the chain starts from."""
+    """Returns the names of an attribute chain such as ``a.b.c``, with the expression the chain starts from.
+
+    A chain that starts from anything but a name, such as ``get_config().utils``, has no names.
+    """
     parts: list[str] = []
     current: ast.expr = node
     while isinstance(current, ast.Attribute):
         parts.append(current.attr)
         current = current.value
-    return ([current.id] if isinstance(current, ast.Name) else []) + parts[::-1], current
+    return ([current.id, *parts[::-1]] if isinstance(current, ast.Name) else []), current
 
 
 def _resolve_module_attribute(
