@@ -78,4 +78,5 @@ The inventory classifies every task into one of three strategies:
 
 - `sources/adf.md` — Azure Data Factory discovery (ARM JSON, UC-volume download, complexity report)
 - `sources/airflow.md` — Apache Airflow discovery (DAG `.py` parsing, operator classification)
+- `flowx-convert` skill, `sources/airflow-coverage.md`: what the Airflow path converts and what it does not
 - `flowx-enrich` skill — adds agent-authored insights to the inventory (`flowx-migrate` runs it after discover)

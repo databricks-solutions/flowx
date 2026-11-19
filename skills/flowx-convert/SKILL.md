@@ -84,3 +84,5 @@ across ADF and Airflow.
 - `sources/adf.md` — ADF translation: deterministic engine, agentic gaps, just-in-time config,
   notify motifs, metadata-driven consolidation. See also `references/activity-mapping.md`.
 - `sources/airflow.md` — Airflow deterministic-first translation plus reviewed leaf-gap resolution.
+- `sources/airflow-coverage.md`: what the Airflow path converts and what it does not.
+- `references/expression-functions.md`: how each ADF expression function translates.
