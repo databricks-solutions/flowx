@@ -25,6 +25,10 @@ import hashlib
 import json
 import os
 import re
+import socket
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -2255,7 +2259,7 @@ def test_fill_agentic_refuses_while_another_command_holds_the_route_lock(tmp_pat
 def test_route_refuses_while_another_command_holds_the_route_lock(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Its hosted recovery says to convert before route, since discover moves .work/ too."""
+    """It says the lock clears once its holder has stopped, so the hosted recovery no longer re-runs discover."""
     _route_parent_agentic(tmp_path, _report_two_pipelines())
     plan_path = tmp_path / "metadata" / "conversion_plan.json"
     report_path = tmp_path / WORK_DIRNAME / REPORT_FILENAME
@@ -2269,8 +2273,8 @@ def test_route_refuses_while_another_command_holds_the_route_lock(
     assert payload["ok"] is False
     [violation] = payload["violations"]
     assert "another route, fill-agentic or merge" in violation
-    hosted_recovery = violation.split("on the hosted MCP server", 1)[1]
-    assert hosted_recovery.index("convert") < hosted_recovery.index("route")
+    assert "FLOWX_MCP_TIMEOUT" in violation
+    assert "discover" not in violation
     assert plan_path.read_bytes() == plan_before
     assert report_path.read_bytes() == report_before
 
@@ -2318,6 +2322,65 @@ def test_the_route_lock_holds_an_output_folder_with_no_metadata_folder_yet(tmp_p
         with route_lock(tmp_path) as second:
             assert second is False
     assert not (tmp_path / "metadata" / ROUTE_LOCK_FILENAME).exists()
+
+
+def _write_route_lock(output_dir: Path, *, pid: int, started_at: float, host: str | None = None) -> Path:
+    """Leave a route lock as a command that started at ``started_at`` as process ``pid`` would."""
+    lock_path = output_dir / "metadata" / ROUTE_LOCK_FILENAME
+    holder = {"token": "earlier-command", "pid": pid, "host": host or socket.gethostname(), "started_at": started_at}
+    lock_path.write_text(json.dumps(holder), encoding="utf-8")
+    return lock_path
+
+
+def _finished_process_id() -> int:
+    """The id of a process that has already exited."""
+    probe = subprocess.Popen([sys.executable, "-c", "pass"])
+    probe.wait()
+    return probe.pid
+
+
+def test_route_takes_over_a_lock_whose_process_has_exited(tmp_path: Path) -> None:
+    """The hosted runner kills a timed-out route, so its lock outlives it; the next command must not dead-end."""
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    lock_path = _write_route_lock(tmp_path, pid=_finished_process_id(), started_at=time.time())
+
+    assert adapter_main(["route", "--output-dir", str(tmp_path)]) == 0
+    assert not lock_path.exists()
+
+
+def test_route_takes_over_a_lock_older_than_the_mcp_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    monkeypatch.setenv("FLOWX_MCP_TIMEOUT", "60")
+    lock_path = _write_route_lock(tmp_path, pid=os.getpid(), started_at=time.time() - 120, host="another-host")
+
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    assert not lock_path.exists()
+
+
+@pytest.mark.parametrize("host", [None, "another-host"], ids=["this-host", "another-host"])
+def test_a_fresh_lock_held_by_a_running_process_still_refuses(tmp_path: Path, host: str | None) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    lock_path = _write_route_lock(tmp_path, pid=os.getpid(), started_at=time.time(), host=host)
+    lock_before = lock_path.read_bytes()
+
+    result = apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])
+
+    assert result["ok"] is False and any("another route" in violation for violation in result["violations"])
+    assert lock_path.read_bytes() == lock_before
+
+
+def test_a_lock_in_an_unknown_format_is_stale_only_once_older_than_the_mcp_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _route_parent_agentic(tmp_path, _report_two_pipelines())
+    monkeypatch.setenv("FLOWX_MCP_TIMEOUT", "60")
+    lock_path = _hold_route_lock(tmp_path)
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is False
+
+    old = time.time() - 120
+    os.utime(lock_path, (old, old))
+    assert apply_agentic_output(tmp_path, ["parent"], [_named_lfc_pipeline("parent_lfc")])["ok"] is True
+    assert not lock_path.exists()
 
 
 def test_a_merge_into_a_separate_copy_takes_no_route_lock(tmp_path: Path) -> None:

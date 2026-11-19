@@ -47,14 +47,16 @@ import hashlib
 import json
 import os
 import secrets
+import socket
 import tempfile
+import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from flowx.discovery_insights import _holds_lock, _inventory_pipelines, _is_open_file
+from flowx.discovery_insights import _inventory_pipelines, _is_open_file
 from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
 from flowx.models.ir import Activity
@@ -75,13 +77,16 @@ AGENTIC_OUTPUT_FILENAME = "agentic_conversion.json"
 # Held in metadata/ while route, fill-agentic or a merge into the live report reads and rewrites the plan, the
 # report, its gaps and the agent's output, so two of them never interleave on one output folder.
 ROUTE_LOCK_FILENAME = ".route.lock"
-# A hosted agent cannot delete files in output_dir, but discover moves metadata/, the lock with it, into the archive.
+# How long a route lock may be held before another command takes it over. The hosted MCP runner kills a
+# command after FLOWX_MCP_TIMEOUT seconds (flowx.mcp.runner reads the same variable), which leaves its lock.
+ROUTE_LOCK_STALE_AFTER_VARIABLE = "FLOWX_MCP_TIMEOUT"
+ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS = 1800
 ROUTE_LOCK_HELD = (
     f"another route, fill-agentic or merge is writing to this output folder (metadata/{ROUTE_LOCK_FILENAME} "
-    "exists); run this command again once it finishes. If none is running, one was stopped mid-write: locally, "
-    f"delete metadata/{ROUTE_LOCK_FILENAME}, run route, then run this command again; on the hosted MCP server, "
-    "run discover again (it moves metadata/ and .work/, the lock with them, into metadata/archive/), then enrich "
-    "if you used it, convert, route, and every fill and merge again"
+    "exists); run this command again once it finishes. If none is running, one was stopped mid-write: its lock "
+    f"is taken over once that process has exited, or once it is older than {ROUTE_LOCK_STALE_AFTER_VARIABLE} "
+    f"seconds ({ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS} by default), so run route, then this command again; "
+    f"locally you can also delete metadata/{ROUTE_LOCK_FILENAME} first"
 )
 
 # Top-level report key holding the routing record. It lives in the report, so a fresh convert (which
@@ -405,6 +410,97 @@ def _gap_fill_checks_out(entry: Any) -> bool:
     )
 
 
+def _route_lock_stale_after_seconds() -> float:
+    """How old a route lock may be before it is taken over: ``FLOWX_MCP_TIMEOUT``, read when it is checked."""
+    try:
+        return float(os.environ.get(ROUTE_LOCK_STALE_AFTER_VARIABLE, ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS))
+    except ValueError:
+        return float(ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS)
+
+
+def _process_is_running(process_id: int) -> bool:
+    """Whether a process with this id is running on this machine."""
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError, ValueError):
+        return False
+    return True
+
+
+def _route_lock_holder(content: str) -> dict[str, Any] | None:
+    """The holder a route lock names (``token``, ``pid``, ``host``, ``started_at``), or ``None`` for another format."""
+    try:
+        holder = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if (
+        isinstance(holder, dict)
+        and isinstance(holder.get("token"), str)
+        and isinstance(holder.get("pid"), int)
+        and isinstance(holder.get("host"), str)
+        and isinstance(holder.get("started_at"), (int, float))
+    ):
+        return holder
+    return None
+
+
+def _route_lock_is_stale(content: str, modified_at: float) -> bool:
+    """Whether a route lock was left by a command that has stopped.
+
+    It is stale when the process it names has exited on this machine, or when it is older than
+    :func:`_route_lock_stale_after_seconds`. A lock in another format (one written by hand, or by an
+    older flowx) goes by its file's age alone.
+    """
+    holder = _route_lock_holder(content)
+    started_at = holder["started_at"] if holder is not None else modified_at
+    if time.time() - started_at > _route_lock_stale_after_seconds():
+        return True
+    return holder is not None and holder["host"] == socket.gethostname() and not _process_is_running(holder["pid"])
+
+
+def _take_over_stale_route_lock(lock_path: Path) -> None:
+    """Remove the route lock at ``lock_path`` when it is stale, leaving a live one in place.
+
+    Two commands may judge the same lock stale at once, so the lock is first moved aside under a name only
+    this command uses; only one move succeeds. If the moved file is not the one judged stale (another
+    command took the lock over in between and made its own), it is put back, unless yet another command
+    has made a lock since, in which case that one stands.
+    """
+    try:
+        content = lock_path.read_text(encoding="utf-8")
+        modified_at = lock_path.stat().st_mtime
+    except OSError:
+        return
+    if not _route_lock_is_stale(content, modified_at):
+        return
+    moved = lock_path.with_name(f"{lock_path.name}.stale-{secrets.token_hex(8)}")
+    try:
+        os.rename(lock_path, moved)
+    except OSError:
+        return
+    try:
+        if moved.read_text(encoding="utf-8") != content:
+            try:
+                os.link(moved, lock_path)
+            except OSError:
+                pass
+    finally:
+        moved.unlink(missing_ok=True)
+
+
+def _owns_route_lock(lock_path: Path, token: str) -> bool:
+    """Whether the route lock at ``lock_path`` is still the one this command created (holding ``token``)."""
+    try:
+        holder = _route_lock_holder(lock_path.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+    return holder is not None and holder["token"] == token
+
+
 @contextmanager
 def route_lock(output_dir: Path) -> Iterator[bool]:
     """Hold the output folder's route lock, yielding ``False`` when another command already holds it.
@@ -413,12 +509,13 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
     the agent's output and then write some of them, so each takes this lock first and refuses with
     :data:`ROUTE_LOCK_HELD` while another holds it. Like enrich's lock it is a file created with
     ``O_EXCL`` holding a random token, so a command never removes a lock a later one created after
-    discover moved ``metadata/`` away, and when writing the token fails it is removed only while it is
-    still the file this command opened. It is removed when the command finishes or raises; only a
-    killed process, or a failed token write that cannot confirm the lock is its own, leaves it behind.
-    Discover and convert take no lock. An output folder with no ``metadata/`` yet gets one, so a merge
-    there is still held; a folder that does not exist holds no files to guard, and the command then
-    reports what it is missing.
+    discover moved ``metadata/`` away, and when writing it fails it is removed only while it is still the
+    file this command opened. It also names the process, machine and start time, so a lock a killed
+    process left behind is taken over by the next command (see :func:`_route_lock_is_stale`): the hosted
+    MCP runner kills a command that runs past ``FLOWX_MCP_TIMEOUT``, and a hosted agent cannot delete the
+    file. It is removed when the command finishes or raises. Discover and convert take no lock. An output folder
+    with no ``metadata/`` yet gets one, so a merge there is still held; a folder that does not exist holds no
+    files to guard, and the command then reports what it is missing.
     """
     if not Path(output_dir).is_dir():
         yield True
@@ -427,6 +524,8 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
     metadata_dir.mkdir(exist_ok=True)
     lock_path = metadata_dir / ROUTE_LOCK_FILENAME
     token = secrets.token_hex(16)
+    holder = json.dumps({"token": token, "pid": os.getpid(), "host": socket.gethostname(), "started_at": time.time()})
+    _take_over_stale_route_lock(lock_path)
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -434,7 +533,7 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
         return
     try:
         try:
-            if os.write(descriptor, token.encode("ascii")) != len(token):
+            if os.write(descriptor, holder.encode("utf-8")) != len(holder.encode("utf-8")):
                 raise OSError(f"could not write the route lock {lock_path}")
         except BaseException:
             # The token may be missing or partial, so compare file identity, as enrich's lock does.
@@ -444,13 +543,13 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
         finally:
             os.close(descriptor)
     except BaseException:
-        if _holds_lock(lock_path, token):
+        if _owns_route_lock(lock_path, token):
             lock_path.unlink(missing_ok=True)
         raise
     try:
         yield True
     finally:
-        if _holds_lock(lock_path, token):
+        if _owns_route_lock(lock_path, token):
             lock_path.unlink(missing_ok=True)
 
 
