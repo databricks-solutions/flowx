@@ -71,8 +71,8 @@ once every decision is made route refuses without it ("run the convert phase fir
 see "After package" below). If you run
 `convert` again after routing, run `route` straight after it: a fresh report carries no routing
 record, so route takes it as the new baseline and re-applies the plan and the agent's stored outputs
-(fills of convert's own gaps merged against the earlier report are dropped and must be merged again;
-route says how many). Route and fill-agentic also refuse, writing nothing, an `inventory.json` not
+(fills of convert's own gaps merged against a different report are kept but not applied, so merge
+them again for the new report; route says how many it skipped). Route and fill-agentic also refuse, writing nothing, an `inventory.json` not
 shaped the way discover writes it (not a JSON object, a pipeline with no name or no `activities`, a
 motif with no string `motif_id` or no `member_task_keys`, or its `pipelines`, a pipeline's
 `activities` or `motifs`, or a motif's `member_task_keys` not a list of the right kind), since
@@ -461,8 +461,8 @@ Package refuses, writing nothing, when:
   `components` and `gap_fills`, so an added key is never dropped on the next save and a deleted one
   never silently drops what it held;
 - a plan is recorded and the report carries no routing record while the plan routes a unit agentic
-  or `agentic_conversion.json` stores a gap fill, as after a re-convert ("re-run route", which applies
-  the fill, or drops it when it was merged against an earlier convert). With no plan recorded the
+  or `agentic_conversion.json` stores a gap fill that applies to it, as after a re-convert ("re-run
+  route", which applies the fill). With no plan recorded the
   folder is not routed, so package ignores the stored outputs and fills;
 - the live `.work/translation_report.json` does not match a fresh rebuild ("re-run route"), or any
   other packaged report — modify's configured `.work/translation_report.stamped.json`, or a

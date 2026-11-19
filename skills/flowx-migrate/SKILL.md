@@ -291,7 +291,8 @@ hasn't answered; for ADF that is how factory global parameters are resolved
 Run this deterministic convert **before routing.** If you re-run it after routing (for example with
 different options), re-run `route` straight after: a fresh report carries no routing record, so route
 takes it as the new deterministic baseline and re-applies the plan and the agent's stored outputs.
-Merges of convert's own gaps made against the earlier report are dropped and must be merged again.
+Merges of convert's own gaps made against a different report are kept but not applied (they come back
+if convert writes that report again), so merge them again for the new one.
 After a package, this is also how you change the conversion (Step 15).
 
 Wait for the translation to complete and present the summary:
