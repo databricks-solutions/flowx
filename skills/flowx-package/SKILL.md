@@ -55,12 +55,12 @@ every required translation has status `translated`.
 | Catalog and schema, asked as one free-text answer `catalog.schema` | `main.default` |
 | Output directory | `./flowx_output` |
 | Bundle name | the first pipeline's name |
-| Target environments | `dev, staging, prod` |
 | SQL warehouse id, only when the report has SQL tasks | ask |
 | Packaging mode: `per-pipeline`, `single` or `per-group` | `per-pipeline` |
 | Databricks CLI profile, only when Step 3 needs one | from `~/.databrickscfg` |
 
-Split the catalog and schema answer at the dot, strip backticks, and pass `--catalog` and `--schema`. If
+Every bundle gets three targets, `dev` (development mode), `staging` and `prod` (production mode); there is
+no input for them, so edit `databricks.yml` for others. Split the catalog and schema answer at the dot, strip backticks, and pass `--catalog` and `--schema`. If
 you use a picker, its only way to enter a value must be free text.
 
 Packaging mode decides how a multi-pipeline factory is laid out (all modes are the same for one pipeline):
@@ -99,10 +99,12 @@ Show the generated tree, then explain:
   Ask the user to review them before running, and to fill in the real secret values.
 - `databricks.yml` holds the targets and the variables (catalog, schema, warehouse); each
   `resources/*.yml` is one job with tasks and dependencies mapped from the source.
-- Next: `databricks bundle validate --target dev`, then `databricks bundle deploy --target dev`, run a
-  job with `databricks bundle run <job_name> --target dev`, then deploy to the other targets.
-- With several bundles, point to `DEPLOY.md` and the `flowx-deploy` skill, which deploys them in order
-  and wires the cross-bundle job ids.
+- With one bundle (one pipeline, or `single`): `databricks bundle validate --target dev`, then
+  `databricks bundle deploy --target dev`, run a job with `databricks bundle run <job_name> --target dev`,
+  then deploy to the other targets.
+- With several bundles (the default `per-pipeline` layout for a multi-pipeline factory, or `per-group`):
+  point to `DEPLOY.md` and the `flowx-deploy` skill, which deploys them callees first and wires the
+  cross-bundle job ids.
 
 ### Step 6 (optional): Record coverage and install the dashboard
 
@@ -112,8 +114,9 @@ describes.
 
 ## Output
 
-The folder layout is in [`../shared/output-folder.md`](../shared/output-folder.md). All under `<output_dir>`: `databricks.yml`, `resources/*.yml`, `src/notebooks/`, `src/setup/`, `SETUP.md`
-(one per bundle), `DEPLOY.md`, and in `metadata/`: `inventory.json`, `profile_report.csv`,
+The folder layout is in [`../shared/output-folder.md`](../shared/output-folder.md). One bundle lands at the top of `<output_dir>`; several bundles each get their own
+folder there, named after the pipeline or group. Each bundle holds `databricks.yml`, `resources/*.yml`,
+`src/notebooks/`, `src/setup/` and `SETUP.md`; `<output_dir>` also holds `DEPLOY.md` and, in `metadata/`: `inventory.json`, `profile_report.csv`,
 `<pipeline>.arm.json`, `configuration.json`, `route_audit.json` (only with a routing plan),
 `packaged_bundles.json` and `archive/`.
 

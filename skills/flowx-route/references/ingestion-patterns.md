@@ -16,8 +16,8 @@ doesn't run these checks; you do, from the facts and the limits, and you record 
 | **A1** agentic re-architecture | Bespoke, for example several workspaces or metastores, an accelerator or partner tool, or mixed patterns | Whatever conflicts remain | `agentic` |
 
 The facts are the ones `flowx-enrich` asks about. **Follow-up questions:** carry each question and
-answer from the insights' `conversion_notes` into `conversation`, then ask at most three more, only on
-facts still open for the patterns still in play. These are usually platform-side: whether a feature is
+answer from the insights' `conversion_notes` into `conversation`, then ask, in one turn, only about
+facts still open for the patterns still in play that the code and data can't show. These are usually platform-side: whether a feature is
 enabled on the workspace, which compute is allowed, how many tables the metastore already holds. Never
 re-ask a fact already answered, a "don't know" included. End each answer with the fact on one line,
 `fact: value (source: code | data | user | assumed)`.

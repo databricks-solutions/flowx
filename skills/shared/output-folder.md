@@ -39,13 +39,16 @@ Package deletes `.work/` after a successful build unless `--keep-intermediates` 
 
 ## The bundle
 
-Package writes `databricks.yml`, `resources/*.yml`, `src/notebooks/`, `src/setup/`, `SETUP.md` (one per
-bundle) and a top-level `DEPLOY.md`.
+Package writes one bundle at the top of `<output_dir>` (one pipeline, or `single` packaging), or one folder
+per bundle named after its pipeline or group (`per-pipeline`, the default, and `per-group`). Each bundle
+holds `databricks.yml`, `resources/*.yml`, `src/notebooks/`, `src/setup/` and `SETUP.md`; a top-level
+`DEPLOY.md` gives the deploy order.
 
 ## Re-runs and the archive
 
 Discover starts each run afresh: over a folder that already holds a run, it moves that run's
 `metadata/`, `.work/` and bundle into `metadata/archive/<UTC time>/` with an `archive.json` of what moved,
 from where and when, and says so. Package moves bundle files it no longer writes into the same archive.
-`metadata/archive/` sits inside the bundle folder, so `databricks bundle deploy` uploads it unless it is
-git-ignored; nothing in it is a job or pipeline the bundle deploys.
+When the bundle sits at the top of `<output_dir>`, `metadata/archive/` is inside it, so
+`databricks bundle deploy` uploads it unless it is git-ignored; nothing in it is a job or pipeline the
+bundle deploys. Bundles in their own folders don't contain `metadata/`.

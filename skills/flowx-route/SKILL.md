@@ -14,7 +14,8 @@ description: >
 
 Phase 2.a of the flowx workflow, ADF only. Route decides, per connected component, whether each part of
 the factory converts deterministically (the typed engine's 1:1 translation) or agentically (an
-LLM-authored re-architecture, for example five extractors collapsed onto one Lakeflow Connect pipeline).
+LLM-authored re-architecture, for example several near-identical extractors consolidated onto one managed
+ingestion or metadata-driven pipeline).
 It reads the inventory, the insights enrich wrote and convert's report; it writes its recommendation into
 `metadata/conversion_plan.json`, the one readable record of the decisions, and draws it as
 `metadata/routing_review.html`. The user decides, you edit the plan, route applies it to the translation
@@ -110,8 +111,10 @@ customer, or walk through the same sections in that order.
 
 #### Qualify the target pattern before you suggest one
 
-Ask what they want the conversion to achieve. A component that ingests from a database can land in one
-of four patterns: before you suggest one, read
+Ask what they want the conversion to achieve. For a component that doesn't ingest from a database (files,
+APIs, transformations), suggest only patterns enrich recommended, checked against their limits the same
+way (read live). A component that ingests from a database can land in one of four patterns: before you
+suggest one, read
 [`references/ingestion-patterns.md`](references/ingestion-patterns.md) for the patterns, the checks C1 to
 C13 and the limits each rests on (read live), and how to show a pattern you rule out. Record each
 question and answer in the plan's `conversation` (`[{"question": "...", "answer": "..."}]`); package
@@ -120,8 +123,8 @@ copies it into `route_audit.json`.
 #### Suggested groupings
 
 A grouping is two or more whole components the insights suggest converting
-together, agentically, as one unit: one agent output replaces all of their pipelines (for example five
-independent extractors become one Lakeflow Connect pipeline). It never splits a component. Route
+together, agentically, as one unit: one agent output replaces all of their pipelines (for example several
+independent extractors become one ingestion pipeline). It never splits a component. Route
 suggests one from two kinds of link in the insights:
 
 - an `inferred` pipeline relationship (with its evidence and confidence) between pipelines of different
@@ -154,8 +157,8 @@ applying writes, including the routing record, are in
 
 A routed-agentic unit is filled only by `fill-agentic`, which replaces the whole unit with pipelines you
 author; the library validates and records them. Author the pattern the customer chose (Step 1), from the
-facts recorded in the plan's `conversation`, and don't pick one they didn't choose. An M1 fill authors one
-ingestion pipeline per shard, each within L tables and with no table name twice; an M2 fill authors the
+facts recorded in the plan's `conversation`, and don't pick one they didn't choose. For the database
+ingestion patterns, an M1 fill authors one ingestion pipeline per shard, each within L tables and with no table name twice; an M2 fill authors the
 job, a seed for its control table, and its notebooks. To keep a pipeline 1:1, fill its component with one
 authored pipeline of the same name.
 

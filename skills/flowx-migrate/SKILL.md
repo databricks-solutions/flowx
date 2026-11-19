@@ -70,8 +70,10 @@ At the start, ask for only these three:
 If the user has no ADF export, run the `flowx-extract-metadata` skill first and use the `discover_path`
 it returns as the source path.
 
-> To migrate your ADF pipelines, I need:
-> 1. Where are your ADF JSON exports? (UC volume path like `/Volumes/main/default/adf_export` or local directory, or I can help you get them)
+Ask in plain words, adapted to the source, for example:
+
+> To migrate your pipelines, I need:
+> 1. Where are your pipeline definitions? (for ADF a UC volume path such as `/Volumes/main/default/adf_export` or a local folder with the JSON export, or I can help you get them; for Airflow the DAG file or folder)
 > 2. Where should I write the output? (default: `./flowx_output/`)
 > 3. The full flow (enrich and a routing review), or a deterministic-only pass? (default: the full flow)
 
@@ -255,9 +257,9 @@ Generated Files (under ./flowx_output/):
   metadata/           inventory.json, profile_report.csv, <pipeline>.arm.json, configuration.json
 
 Setup Required:
-  - Run setup/create_volumes.py to create UC volumes
-  - Run setup/create_secrets.py to configure secrets (review credentials first)
-  - Run setup/register_connections.py to register external connections
+  - Run src/setup/create_volumes.py to create UC volumes
+  - Run src/setup/create_secrets.py to configure secrets (review credentials first)
+  - Run src/setup/create_connections.py to create external connections
 
 Next Steps:
   1. cd ./flowx_output/
@@ -269,10 +271,16 @@ Next Steps:
   7. Verify job output and promote to staging/prod
 ```
 
+This shows one bundle at the top of the output folder (one pipeline, or `single` packaging). With
+several bundles (the default `per-pipeline` layout, or `per-group`), list each bundle folder with its own
+`databricks.yml`, `resources/`, `src/` and `SETUP.md`, point to the top-level `DEPLOY.md`, and replace the
+deploy steps with the `flowx-deploy` skill, which deploys callees first and wires the cross-bundle job ids.
+List only the setup scripts package actually wrote.
+
 ### Step 15: Offer follow-up actions
 
 Offer to validate the bundle (`databricks bundle validate`), deploy to dev
-(`databricks bundle deploy --target dev`), review specific generated files, translate failed
+(`databricks bundle deploy --target dev`, or the `flowx-deploy` skill for several bundles), review specific generated files, translate failed
 activities again, or export a migration report. To change a decision, an answer or an agent output:
 package deleted `.work/`, so run convert (same source and options), route, fill-agentic for a unit whose
 output changes, modify if it was used, then package. The plan, the stored fills and modify's answers

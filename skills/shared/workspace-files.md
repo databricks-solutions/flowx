@@ -15,13 +15,14 @@ its own. This file covers the check before package and the login it may need. Th
 
 ```bash
 "$PY" -m flowx.adapter workspace-paths <output_dir>/.work/translation_report.stamped.json \
-  --source adf --source-dir <source_dir>
+  --source <source> --source-dir <source_dir>
 ```
 
-Over MCP: `flowx(command="workspace_paths", parameters={"source": "adf", "report_path": "...", "source_dir": "<optional>"})`.
+Over MCP: `flowx(command="workspace_paths", parameters={"source": "<source>", "report_path": "...", "source_dir": "<optional>"})`.
 
-It returns `paths` (the files the bundle will download; you may show them to the user),
-`suggested_hosts` (taken from the Databricks linked services in the export) and `needs_auth`. When
+`--source` is `adf` or `airflow`. It returns `paths` (the files the bundle will download; you may show
+them to the user), `suggested_hosts` (the Databricks workspace hosts found in the source: ADF linked
+services or Airflow DAGs) and `needs_auth`. When
 `needs_auth` is false, there is nothing to do.
 
 ## Log in when it asks

@@ -129,7 +129,7 @@ fills.
    runtime list that drives a loop: a control table, a CSV, a Lookup result, an array parameter or a
    mapped-task input. If the user can share the worklist, or you can query it, count it rather than
    asking. "Where the facts sit" below says where to look.
-2. Summarise it back in about five lines: what the workflows do; their shape in plain words (for example
+2. Summarise it back briefly (a few lines; more for a large estate): what the workflows do; their shape in plain words (for example
    "a list read at run time drives a loop that calls one child per item; the child copies each table from
    the last saved version; hourly"); what that tells you, naming the activity or task it comes from;
    which candidate patterns are still in play (`flowx-route` lists them, and the facts each needs); and
@@ -159,7 +159,7 @@ Don't ask about anything the code shows or data you can read, or anything whose 
 candidates. Ask about the estate and the business, in the user's words, and name the code that raised each
 question. For example: *"`Orchestrator` loops over a list of databases it reads at run time. How many does
 that list hold in production, and does every database get the same table list?"* Don't ask in platform
-terms, such as *"do you need more than 250 tables per pipeline?"*
+terms, such as *"do you need more tables per pipeline than the connector allows?"*
 
 Record each answer in the `conversion_notes` of the pipeline that raised it, as the question and its
 answer, then the fact on one line: `fact: value (source: code | data | user | assumed)`. A "don't know" is
@@ -175,8 +175,9 @@ In ADF, read each activity's `raw` JSON in `metadata/source_graphs.json` (and
 - dataset parameters and sink paths templated by item (fan-in);
 - query text, such as a version or watermark read before the copy, or change functions (change, shaping);
 - `ForEach.batchCount` and trigger schedules (bar);
-- a Copy or Lookup `typeProperties.source.type` of `SqlServerSource`, `AzureSqlSource` or `SqlMISource`,
-  which marks a SQL Server source.
+- a Copy or Lookup `typeProperties.source.type` that names a database: `SqlServerSource`, `AzureSqlSource`
+  or `SqlMISource` for SQL Server, and other databases by their own types, such as `OracleSource`,
+  `PostgreSqlSource` or `MySqlSource`.
 
 In Airflow, read the DAG source:
 
@@ -185,8 +186,7 @@ In Airflow, read the DAG source:
 - the DAG's `schedule` and `max_active_tasks` (bar).
 
 When a database-source signal is present, also record the source system and connector in that pipeline's
-`conversion_notes`, for example `source: SQL Server via AzureSqlSource` (or `SqlServerSource`,
-`SqlMISource`).
+`conversion_notes`, for example `source: SQL Server via AzureSqlSource` or `source: Oracle via OracleSource`.
 
 ### Step 4: Author the insights and run enrich
 
@@ -194,7 +194,8 @@ Insights are advice for the people planning the migration, not a full report. Sp
 wrong or missing insight would change the migration:
 
 - Start with the factory-wide decision (`system_recommendation`) when one choice, such as a managed
-  connector for a family of extractors, reshapes many pipelines. Leave it out when there is none.
+  connector for a family of extractors or one metadata-driven job for many similar loads, reshapes many
+  pipelines. Leave it out when there is none.
 - Write a pipeline insight only when a migrator would act on it: a target pattern that differs from a
   like-for-like port, a risk, or a conversion note. A pipeline that ports as it is needs no entry.
 - Record the couplings a migrator could miss and that would break if dropped. Give an `inferred` one only
