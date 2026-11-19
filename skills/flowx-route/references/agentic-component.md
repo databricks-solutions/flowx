@@ -42,7 +42,7 @@ the package phase writes verbatim:
 - `raw_definition`: the original source definition, retained for provenance.
 
 The full contract, including every field package refuses, is the `AgenticComponentActivity` section of
-`flowx-convert`'s `references/adf.md`. fill-agentic runs each authored pipeline through package's prepare
+`flowx-convert`'s [`references/adf.md`](../../flowx-convert/references/adf.md). fill-agentic runs each authored pipeline through package's prepare
 and bundle-writing path, so a component package would refuse is refused at fill, with nothing written.
 
 **Default the Lakeflow pipeline / Connect resource `channel` to `current` (stable/GA).** Do **not**

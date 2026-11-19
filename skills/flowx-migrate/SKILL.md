@@ -33,8 +33,10 @@ works; this skill owns the order, the checkpoints, what to ask when, and what to
 
 - **MCP (the only path in Genie Code):** the phases run on the deployed `mcp-flowx` app. Before Step 1,
   read [`references/mcp-path.md`](references/mcp-path.md): how to pass the source to the hosted server
-  and the `flowx` call for each step. Wherever a step shows `"$PY" -m flowx.adapter <cmd> ...`, call
-  `flowx(command="<cmd>", parameters={...})` instead.
+  and the `flowx` call for each step. Wherever a step shows `"$PY" -m flowx.adapter <cmd> ...`, call the
+  `flowx` command of the same name, with underscores for hyphens (`fill-agentic` is `fill_agentic`,
+  `record-results` is `record_results`), except that `modify` is `apply_answers` and
+  `convert --merge-agentic` is `merge_agentic`.
 - **CLI (local):** run each command with the venv interpreter, for example
   `"$PY" -m flowx.adapter inputs discover --source adf`.
 - What is the same for every phase (the `flowx` tool, the venv, a missing Python) is in
@@ -97,7 +99,7 @@ Coverage:             95.7%
 
 > The discover phase found 47 activities across 12 pipelines. 95.7% have a translation path (74.5% deterministic, 21.3% agentic). 2 activities are unsupported and will need manual handling.
 >
-> Proceed to the translation phase? (yes/no)
+> Proceed to the convert phase? (yes/no)
 
 If the user says no, offer to run discover again with a different source directory, to review
 `metadata/inventory.json` and `profile_report.csv` for the unsupported activities and pipeline
