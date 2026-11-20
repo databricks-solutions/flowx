@@ -126,20 +126,20 @@ End-to-end, to use it from Genie Code:
    grant that principal access to the catalogs / schemas / Unity Catalog volumes
    the migration reads/writes (and any SQL warehouse used by `record-results` /
    `install-dashboard`).
-4. **Add it in Genie Code (Agent mode):** open Genie Code **Settings → MCP Servers →
-   Add Server**, choose **Custom MCP server**, select the `mcp-flowx` app, and
-   **Save**. The `flowx` tool becomes available immediately. Verify via the
-   health endpoint `<app-url>/`.
+4. **Add it in Genie Code:** add the `mcp-flowx` app as a custom MCP server, as
+   https://docs.databricks.com/aws/en/genie-code/mcp describes; read the edition for
+   the target workspace's cloud (the page's cloud selector, or learn.microsoft.com for
+   Azure Databricks). The `flowx` tool then becomes available. Verify via the health
+   endpoint `<app-url>/`.
 
-> The `mcp-` name prefix also makes the app **auto-listed in the AI Playground**. Genie Code's
-> **Custom MCP server** picker selects any Databricks App by name regardless of prefix.
+> The `mcp-` name prefix also makes the app **auto-listed in the AI Playground**.
 
 Genie Code requires a custom MCP app to be (1) in the **same workspace**, (2) reachable
 at `https://<app-url>/mcp`, and (3) **stateless** — this server sets
 `stateless_http=True` and adds CORS, so it qualifies. If a browser CORS error appears,
 set the app env var `FLOWX_ALLOWED_ORIGINS` to your workspace URL and redeploy.
-MCP access is capped at **20 tools** across all servers; flowx exposes just **one** tool
-(`flowx`, covering every command in the table above), so it uses a single slot.
+flowx exposes just **one** tool (`flowx`, covering every command in the table above); check
+the Genie Code MCP page above for any limit on tools.
 
 > In serverless Genie Code, deploy with the `app/deploy_app.py` notebook (SDK-based). `./app/deploy.sh`
 > must run from a Databricks CLI session (workspace web terminal or a local machine), since
