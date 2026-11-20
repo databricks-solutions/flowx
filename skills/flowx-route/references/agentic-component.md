@@ -51,7 +51,8 @@ the channel — the routing recommendation exposes each agentic option's states 
 `release_disclosures` list (factual labels, no alarm). Surface the state as disclosure, tiered as:
 
 - `ga` — `channel: current`; **silent** (not surfaced).
-- `unknown` — **silent**, treated exactly like `ga` (no separate label — we can't distinguish them).
+- `unknown`: the plain label **"Release state not verified"**, so a state nobody could verify never
+  looks the same as a verified `ga`.
 - `public_preview` — the informational label **"Public Preview (production-ready)"**: generally
   production-ready and supported per Databricks; still confirm workspace availability. Emit
   `channel: preview` only with the cited `release_state_source`.

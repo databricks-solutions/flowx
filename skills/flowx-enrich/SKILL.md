@@ -95,8 +95,8 @@ the states. Check first, then recommend. Record the state in the pattern's `rele
 `public_preview`, `private_preview`, `beta`, or `unknown` when you could not verify it) and cite the page
 in `release_state_source`. The validator requires a state on every `simplification_pattern: true` pattern
 and a source for the preview and beta states. A preview or beta capability may still be recommended:
-record its state and let the customer decide. `flowx-route` shows the state as a plain label, and nothing
-for `ga` and `unknown`.
+record its state and let the customer decide. `flowx-route` shows the state as a plain label, nothing
+for `ga`, and "Release state not verified" for `unknown`.
 
 **Check every pattern you recommend against the current Databricks platform limits.** Before you name a
 pattern in `recommended_patterns` or `system_recommendation`, read the limits it rests on live from the

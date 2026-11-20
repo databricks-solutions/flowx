@@ -44,10 +44,9 @@ DECISION_AGENTIC = "agentic"
 DECISIONS: tuple[str, ...] = (DECISION_DETERMINISTIC, DECISION_AGENTIC)
 
 # Recommended-pattern release states surfaced as a neutral disclosure label on the agentic option's
-# ``release_disclosures``. ``"ga"`` and ``"unknown"`` are deliberately **silent**
-# -- they contribute no entry, and ``"unknown"`` is treated exactly like ``"ga"`` (we do not surface
-# or distinguish it). This is factual labelling, never a warning or an alarm.
-DISCLOSED_RELEASE_STATES: tuple[str, ...] = ("public_preview", "private_preview", "beta")
+# ``release_disclosures``. Only ``"ga"`` is silent; ``"unknown"`` is labelled "Release state not
+# verified" so it never looks like a verified GA. This is factual labelling, never a warning or an alarm.
+DISCLOSED_RELEASE_STATES: tuple[str, ...] = ("public_preview", "private_preview", "beta", "unknown")
 
 # The two kinds of link a grouping suggestion can rest on: an inferred relationship from the insights,
 # or a simplification pattern the insights recommend for pipelines in different components.
