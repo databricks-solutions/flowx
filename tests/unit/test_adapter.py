@@ -85,8 +85,10 @@ def _delta_copy(name: str = "copy_to_delta") -> CopyActivity:
     )
 
 
-def _metadata_driven_motif(task_key: str = "motif_metadata_driven_bulk_copy") -> MotifActivity:
-    """Builds a metadata-driven bulk-copy motif activity for tests."""
+def _metadata_driven_motif(
+    task_key: str = "motif_metadata_driven_bulk_copy", copy_source_type: str | None = "AzureSqlSource"
+) -> MotifActivity:
+    """Builds a metadata-driven bulk-copy motif activity for tests; its loop's Copy reads SQL Server by default."""
     return MotifActivity(
         **_make_base(task_key, task_key),
         motif_id="metadata_driven_bulk_copy",
@@ -94,6 +96,7 @@ def _metadata_driven_motif(task_key: str = "motif_metadata_driven_bulk_copy") ->
         databricks_replacement="for_each_ingestion",
         matched_activity_names=["GetTables", "ForEachTable", "CopyTable"],
         source_type_hint="database",
+        motif_config={"copy_source_type": copy_source_type} if copy_source_type else {},
     )
 
 
@@ -845,6 +848,36 @@ class TestCli:
         assert motif_task["consolidate_metadata_driven"] is True
         assert motif_task["lookup_values"] == [{"source_table": "orders"}]
 
+    def test_modify_refuses_a_lookup_whose_rows_repeat_a_table_name(self, tmp_path: Path, capsys):
+        """One Lakeflow Connect pipeline can't hold two tables with the same name, even from different schemas."""
+        from flowx.ir_serde import pipeline_to_dict
+
+        pipeline = Pipeline(name="p", tasks=[_metadata_driven_motif()])
+        report_path = tmp_path / "report.json"
+        report_path.write_text(json.dumps(pipeline_to_dict(pipeline)))
+        out_path = tmp_path / "modified.json"
+        exit_code = adapter_cli_main(
+            [
+                "modify",
+                str(report_path),
+                "--answer",
+                "metadata_driven_consolidate=consolidate",
+                "--answer",
+                "metadata_driven_access=yes",
+                "--answer",
+                "metadata_driven_size=small",
+                "--lookup-csv",
+                "source_schema,source_table\ndbo,orders\nsales,Orders",
+                "--out",
+                str(out_path),
+                "--config-out",
+                str(tmp_path / "configuration.json"),
+            ]
+        )
+        assert exit_code == 2
+        assert not out_path.exists()
+        assert "orders" in capsys.readouterr().err.lower()
+
     def test_modify_rejects_invalid_answer(self, tmp_path: Path):
         from flowx.ir_serde import pipeline_to_dict
 
@@ -1133,6 +1166,31 @@ class TestBundleOutput:
         )
         modified = apply_configuration(pipeline, prefs)
         assert modified.tasks[0].consolidate_metadata_driven is False
+
+    @pytest.mark.parametrize("copy_source_type", ["OracleSource", "PostgreSqlSource", "DelimitedTextSource", None])
+    def test_modifier_keeps_the_for_each_port_when_the_source_is_not_sql_server(self, copy_source_type):
+        """Consolidation builds a SQL Server connection, so any other or unknown source keeps the for-each port."""
+        pipeline = Pipeline(name="p", tasks=[_metadata_driven_motif(copy_source_type=copy_source_type)])
+        prefs = TranslationConfiguration(
+            metadata_driven_consolidate="consolidate",
+            metadata_driven_access="yes",
+            metadata_driven_size="small",
+        )
+        modified = apply_configuration(pipeline, prefs)
+        motif = modified.tasks[0]
+        assert motif.consolidate_metadata_driven is False
+        assert motif.databricks_replacement == "for_each_ingestion"
+        assert "SQL Server sources only" in (motif.description or "")
+
+    def test_modifier_consolidates_every_sql_server_source_type(self):
+        prefs = TranslationConfiguration(
+            metadata_driven_consolidate="consolidate",
+            metadata_driven_access="yes",
+            metadata_driven_size="small",
+        )
+        for copy_source_type in ("SqlServerSource", "AzureSqlSource", "MicrosoftSqlServerSource"):
+            pipeline = Pipeline(name="p", tasks=[_metadata_driven_motif(copy_source_type=copy_source_type)])
+            assert apply_configuration(pipeline, prefs).tasks[0].consolidate_metadata_driven is True
 
     def test_modifier_does_not_consolidate_when_access_is_no(self):
         pipeline = Pipeline(name="p", tasks=[_metadata_driven_motif()])

@@ -48,6 +48,12 @@ The options the adapter raises. `inspect` returns only those that apply to the r
 There is no connector type option: with `use_lakeflow_connectors=lakeflow_connect`, modify picks the
 connector each Copy can use (CDC for a table read, query-based for a query with a cursor column).
 
+`metadata_driven_consolidate=consolidate` takes effect only when the loop's Copy reads a SQL Server
+source (`SqlServerSource`, `AzureSqlSource` or `MicrosoftSqlServerSource`), `metadata_driven_access=yes`
+and `metadata_driven_size` is `small` or `medium`. It then emits one Lakeflow Connect pipeline on a SQL
+Server connection. Any other source keeps the for-each task, with a note in its task description.
+Modify refuses lookup rows that name the same source table twice.
+
 DatabricksNotebook and DatabricksSparkPython tasks always inherit the cluster binding derived from
 their source linked service.
 

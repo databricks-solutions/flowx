@@ -5,7 +5,15 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from flowx.models.ir import Activity, CopyActivity, Dependency, LookupActivity, MotifActivity, Pipeline
+from flowx.models.ir import (
+    Activity,
+    CopyActivity,
+    Dependency,
+    ForEachActivity,
+    LookupActivity,
+    MotifActivity,
+    Pipeline,
+)
 from flowx.models.motifs import DetectedMotif
 
 logger = logging.getLogger(__name__)
@@ -154,10 +162,24 @@ def _build_motif_config(
         sink_table = sink_properties.get("table") or sink_properties.get("tableName")
         if sink_table:
             config["sink_table"] = sink_table
-        if copy.source_type:
-            config["copy_source_type"] = copy.source_type
         config["copy_scope"] = copy.task_key or motif_task_key
+    source_copy = copy or _first_copy_inside_a_for_each(original_activities)
+    if source_copy is not None and source_copy.source_type:
+        config["copy_source_type"] = source_copy.source_type
     return config
+
+
+def _first_copy_inside_a_for_each(activities: list[Activity]) -> CopyActivity | None:
+    """Returns the Copy a bulk-copy loop runs, which sits inside the For each rather than beside it.
+
+    Consolidation reads its source type to decide whether one Lakeflow Connect pipeline can replace the loop.
+    """
+    for activity in activities:
+        if isinstance(activity, ForEachActivity):
+            for inner_activity in activity.inner_activities:
+                if isinstance(inner_activity, CopyActivity):
+                    return inner_activity
+    return None
 
 
 def _collect_external_dependencies(

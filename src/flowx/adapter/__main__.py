@@ -1123,14 +1123,18 @@ def _run_modify(args: argparse.Namespace) -> int:
 
     from flowx.motifs.collapsed_lookup_refs import repair_collapsed_lookup_references
 
-    stamped_pipelines = [
-        repair_collapsed_lookup_references(
-            _stamp_lookup_values_into_metadata_driven_motifs(
-                apply_configuration(pipeline, configuration), lookup_values
+    try:
+        stamped_pipelines = [
+            repair_collapsed_lookup_references(
+                _stamp_lookup_values_into_metadata_driven_motifs(
+                    apply_configuration(pipeline, configuration), lookup_values
+                )
             )
-        )
-        for pipeline in pipelines
-    ]
+            for pipeline in pipelines
+        ]
+    except ValueError as error:
+        print(f"Invalid --lookup-csv: {error}", file=sys.stderr)
+        return 2
     # Prompt-time provisioning: create/reuse the Databricks notification destination for any non-email
     # activity_and_notify spec now, so its resolved id is baked into the report (email needs none).
     provisioned_pipelines = []
@@ -1207,16 +1211,28 @@ def _stamp_lookup_values_into_metadata_driven_motifs(pipeline, lookup_values: li
         A new :class:`Pipeline` whose metadata-driven motif activities
         carry the supplied lookup rows.  When *lookup_values* is empty
         the pipeline is returned unchanged.
+
+    Raises:
+        ValueError: When the rows would go into a consolidated pipeline
+            and two of them name the same source table.
     """
     if not lookup_values:
         return pipeline
     import dataclasses as _dataclasses
 
     from flowx.models.ir import MotifActivity as _MotifActivity
+    from flowx.preparer.activity_preparers.motif import repeated_source_table_names
 
     stamped_tasks = []
     for task in pipeline.tasks:
         if isinstance(task, _MotifActivity) and task.consolidate_metadata_driven:
+            repeated = repeated_source_table_names(lookup_values)
+            if repeated:
+                raise ValueError(
+                    f"rows repeat the table name {', '.join(repeated)}; one Lakeflow Connect pipeline can't "
+                    "ingest two tables with the same name, even from different schemas. Keep the for-each port "
+                    "(metadata_driven_consolidate=keep), or consolidate only a lookup whose table names are distinct."
+                )
             stamped_tasks.append(_dataclasses.replace(task, lookup_values=list(lookup_values)))
         else:
             stamped_tasks.append(task)

@@ -74,6 +74,7 @@ from flowx.models.ir import (
     WebActivity,
 )
 from flowx.models.motifs import MOTIF_LAKEFLOW_CONNECT_DATABASE
+from flowx.models.source_types import SQL_SERVER_SOURCE_TYPES
 
 # Free-text option ids (no backing enum) that validate_answer accepts with any value, vs a genuinely
 # unknown id which it rejects -- the set is the NOTIFY_FREE_TEXT_OPTION_IDS registry defined below.
@@ -938,10 +939,12 @@ def _build_metadata_driven_consolidate_option(
         prompt="Consolidate the metadata-driven ingestions into one managed pipeline?",
         rationale=(
             "A Lookup feeds a ForEach that copies each row's table.  Consolidating "
-            "replaces this loop with a single Lakeflow Connect or Lakeflow Spark "
-            "Declarative Pipeline whose objects list materialises each source as "
-            "its own streaming table.  Keeping it emits a Databricks for-each task "
-            "that runs one Spark JDBC read per source table (no managed pipeline)."
+            "replaces this loop with a single Lakeflow Connect ingestion pipeline on a "
+            "SQL Server connection whose objects list materialises each source as its "
+            "own streaming table; it applies only when the loop's Copy reads SQL Server, "
+            "and the lookup's table names must be distinct.  Keeping it emits a "
+            "Databricks for-each task that runs one Spark JDBC read per source table "
+            "(no managed pipeline)."
         ),
         options=(
             OptionChoice(
@@ -952,7 +955,10 @@ def _build_metadata_driven_consolidate_option(
             OptionChoice(
                 value=MetadataDrivenConsolidate.CONSOLIDATE.value,
                 label="Consolidate into one pipeline",
-                description="Emits one pipeline resource that ingests every source from the lookup.",
+                description=(
+                    "SQL Server sources only: emits one Lakeflow Connect pipeline resource that ingests "
+                    "every table from the lookup. Any other source keeps the per-table loop."
+                ),
             ),
         ),
         affected_task_keys=affected,
@@ -1506,7 +1512,9 @@ def _stamp_motif_activity(
         database ingestion and the user opted into Lakeflow Connect.
         Metadata-driven motifs also pick up the
         ``consolidate_metadata_driven`` flag when the user approved
-        consolidation, granted access, and the size bucket is S or M.
+        consolidation, granted access, the size bucket is S or M, and the
+        loop's Copy reads a SQL Server source; when only the source fails,
+        the description says why the for-each port was kept.
     """
     qualifies_for_lakeflow_connect = (
         activity_configuration.use_lakeflow_connectors is UseLakeflowConnectors.LAKEFLOW_CONNECT
@@ -1518,9 +1526,14 @@ def _stamp_motif_activity(
         if qualifies_for_lakeflow_connect
         else activity.notebook_template
     )
-    consolidate = _should_consolidate_metadata_driven(activity, activity_configuration)
+    consolidation_requested = _metadata_driven_consolidation_requested(activity, activity_configuration)
+    consolidate = consolidation_requested and _loop_reads_sql_server(activity)
+    description = activity.description
+    if consolidation_requested and not consolidate:
+        description = _append_sentence(description, _not_consolidated_note(activity))
     return dataclasses.replace(
         activity,
+        description=description,
         databricks_replacement=replacement,
         notebook_template=notebook_template,
         compute_mode=_resolve_compute_mode(activity, activity_configuration),
@@ -1528,11 +1541,36 @@ def _stamp_motif_activity(
     )
 
 
-def _should_consolidate_metadata_driven(
+def _loop_reads_sql_server(activity: MotifActivity) -> bool:
+    """Returns True when the Copy inside a metadata-driven loop reads a SQL Server family source.
+
+    The consolidated pipeline is built on a SQL Server connection (see the motif preparer), so any
+    other source, or a loop whose source type was not recorded, keeps the for-each port.
+    """
+    return (activity.motif_config or {}).get("copy_source_type") in SQL_SERVER_SOURCE_TYPES
+
+
+def _not_consolidated_note(activity: MotifActivity) -> str:
+    """Explains, in the task description, why a requested consolidation was not applied."""
+    source_type = (activity.motif_config or {}).get("copy_source_type") or "an unrecorded source type"
+    return (
+        "Kept as a for-each port, not consolidated into one Lakeflow Connect pipeline: consolidation "
+        f"supports SQL Server sources only, and this loop's Copy reads {source_type}."
+    )
+
+
+def _append_sentence(text: str | None, sentence: str) -> str:
+    """Appends one sentence to an optional description."""
+    return f"{text} {sentence}" if text else sentence
+
+
+def _metadata_driven_consolidation_requested(
     activity: MotifActivity,
     activity_configuration: TranslationConfiguration,
 ) -> bool:
-    """Returns True when the modifier should consolidate a metadata-driven motif.
+    """Returns True when the answers ask to consolidate a metadata-driven motif.
+
+    The source check comes after this, in :func:`_loop_reads_sql_server`.
 
     Args:
         activity: Source motif activity.
