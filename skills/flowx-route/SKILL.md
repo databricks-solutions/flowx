@@ -113,14 +113,14 @@ customer, or walk through the same sections in that order.
 
 #### Qualify the target pattern before you suggest one
 
-Ask what they want the conversion to achieve. For a component that doesn't ingest from a database (files,
-APIs, transformations), suggest only patterns enrich recommended, checked against their limits the same
-way (read live). A component that ingests from a database can land in one of four patterns: before you
-suggest one, read
-[`references/ingestion-patterns.md`](references/ingestion-patterns.md) for the patterns, the checks C1 to
-C13 and the limits each rests on (read live), and how to show a pattern you rule out. Record each
-question and answer in the plan's `conversation` (`[{"question": "...", "answer": "..."}]`); package
-copies it into `route_audit.json`.
+Ask what they want the conversion to achieve. Before you suggest a target pattern for any component,
+whether it ingests from a database, files, an application or an API, or transforms data, follow the
+method in [`references/target-patterns.md`](references/target-patterns.md): gather the facts about
+the source and the target, find every current option in the official Databricks documentation, add what
+flowx's deterministic port and convert's options produce, check each option against the limits read
+live, mark assumptions, and show why each ruled-out option fails. Record each question and answer in the
+plan's `conversation` (`[{"question": "...", "answer": "..."}]`); package copies it into
+`route_audit.json`.
 
 #### Suggested groupings
 
@@ -159,13 +159,12 @@ applying writes, including the routing record, are in
 
 A routed-agentic unit is filled only by `fill-agentic`, which replaces the whole unit with pipelines you
 author; the library validates and records them. Author the pattern the customer chose (Step 1), from the
-facts recorded in the plan's `conversation`, and don't pick one they didn't choose. For the database
-ingestion patterns, an M1 fill authors one ingestion pipeline per shard, each within L tables and with no table name twice; an M2 fill authors the
-job, a seed for its control table, and its notebooks. To keep a pipeline 1:1, fill its component with one
-authored pipeline of the same name.
+facts recorded in the plan's `conversation`, and don't pick one they didn't choose. Keep it within the
+limits recorded there, and author every resource it needs (its pipelines or jobs, any seed data, its
+notebooks). To keep a pipeline 1:1, fill its component with one authored pipeline of the same name.
 
-When the target can't be expressed by the typed engine (for example a managed Lakeflow Connect ingestion
-pipeline), the authored pipeline carries an `AgenticComponentActivity` task: read
+When a task of the authored pipeline is one no typed activity produces (for example a pipeline resource
+of your own design), the authored pipeline carries an `AgenticComponentActivity` task: read
 [`references/agentic-component.md`](references/agentic-component.md) first for its fields, the pipeline
 `channel` default, and how to show a release state. Before you run fill-agentic, read
 [`references/fill-agentic-rules.md`](references/fill-agentic-rules.md): which unit it accepts, what
@@ -246,7 +245,7 @@ of `.work/` and documents what was packaged and how. The folder layout is in
 
 ## Reference
 
-- [`references/ingestion-patterns.md`](references/ingestion-patterns.md): the four ingestion patterns and the checks C1 to C13.
+- [`references/target-patterns.md`](references/target-patterns.md): how to qualify a target pattern for any component, from the facts and the current documentation.
 - [`references/plan-rules.md`](references/plan-rules.md): the editable fields, passing a plan, the validator's rules, and what applying writes.
 - [`references/fill-agentic-rules.md`](references/fill-agentic-rules.md): everything fill-agentic checks, and the one-at-a-time lock.
 - [`references/agentic-component.md`](references/agentic-component.md): authoring an `AgenticComponentActivity` and its release state.

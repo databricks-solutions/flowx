@@ -1,9 +1,10 @@
 # Authoring an `AgenticComponentActivity` (the escape hatch)
 
-Read this from Step 3 of the `flowx-route` skill, when the target can't be expressed by the typed engine.
+Read this from Step 3 of the `flowx-route` skill, when a task of the authored pipeline is one no typed
+activity produces.
 
-When the target can't be expressed by the typed engine (e.g. a managed Lakeflow Connect ingestion
-pipeline), emit an `AgenticComponentActivity` task inside the authored pipeline. The authored
+When a task is one no typed activity produces (for example a pipeline resource of your own design), emit
+an `AgenticComponentActivity` task inside the authored pipeline. The authored
 **pipeline** carries the required `tags.source == "adf"`; the task carries the raw bundle components
 the package phase writes verbatim:
 
@@ -45,21 +46,19 @@ The full contract, including every field package refuses, is the `AgenticCompone
 `flowx-convert`'s [`references/adf.md`](../../flowx-convert/references/adf.md). fill-agentic runs each authored pipeline through package's prepare
 and bundle-writing path, so a component package would refuse is refused at fill, with nothing written.
 
-**Default the Lakeflow pipeline / Connect resource `channel` to `current` (stable/GA).** Do **not**
-emit `channel: preview` by default. Let the enriched insight's **structured `release_state`** drive
-the channel — the routing recommendation exposes each agentic option's states as a neutral
-`release_disclosures` list (factual labels, no alarm). Surface the state as disclosure, tiered as:
+**Set the Lakeflow pipeline / Connect resource `channel` to `current`.** A pipeline's channel picks its
+runtime, not access to a feature, so never map a release state to `channel: preview`. Use `preview` only
+when the official page for that connector or feature says its pipelines must, and cite that page in the
+plan's `conversation`. The routing recommendation exposes each agentic option's release states as a
+neutral `release_disclosures` list (factual labels, no alarm). Show the state as disclosure:
 
-- `ga` — `channel: current`; **silent** (not surfaced).
+- `ga`: not shown.
 - `unknown`: the plain label **"Release state not verified"**, so a state nobody could verify never
   looks the same as a verified `ga`.
-- `public_preview` — the informational label **"Public Preview (production-ready)"**: generally
-  production-ready and supported per Databricks; still confirm workspace availability. Emit
-  `channel: preview` only with the cited `release_state_source`.
-- `private_preview` — the plain factual label **"Private Preview"**. Emit `channel: preview` only
-  with the cited `release_state_source`.
-- `beta` — the plain factual label **"Beta"**. Emit `channel: preview` only with the cited
-  `release_state_source`.
+- `public_preview`: the label **"Public Preview (production-ready)"**: generally production-ready and
+  supported per Databricks; still confirm workspace availability.
+- `private_preview`: the plain label **"Private Preview"**.
+- `beta`: the plain label **"Beta"**.
 
 As in `flowx-enrich`, the state is disclosure, not a gate: there is no `doNotSuggest` rule, so a
 verified **Private Preview** connector may still be recommended. Show its label, say that Private

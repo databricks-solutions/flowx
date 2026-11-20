@@ -1,8 +1,9 @@
 """Tests that the flowx skills check recommended patterns against the Databricks platform limits read live.
 
 flowx keeps no copy of the platform limits, because they change. Enrich checks every pattern it recommends
-against the current docs, and route reads the limits its checks rest on the same way. The skills are text the
-agent follows, so these tests hold the text to that promise.
+against the current docs, and route qualifies every target pattern the same way, with one method for any source
+or component that names no source system, limit or size. The skills are text the agent follows, so these tests
+hold the text to that promise.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).parents[2]
 SKILLS_DIR = REPO_ROOT / "skills"
 ENRICH_SKILL = SKILLS_DIR / "flowx-enrich" / "SKILL.md"
-ROUTE_PATTERNS = SKILLS_DIR / "flowx-route" / "references" / "ingestion-patterns.md"
+ROUTE_PATTERNS = SKILLS_DIR / "flowx-route" / "references" / "target-patterns.md"
 LIMIT_RECORD = "`limit: <name> = <value> (source: <page>, read <date>)`"
 SKIPPED_DIRS = {
     ".git",
@@ -30,23 +31,27 @@ SKIPPED_DIRS = {
     "build",
 }
 
-# The three claims the public docs don't state, by the route check that rests on each.
-ASSUMPTIONS = {
-    "C1": "each destination table is written by one pipeline only",
-    "C2": "a running gateway holds one concurrent update",
-    "C6": "a running gateway holds one concurrent update",
-    "C12": "integrated CDC's release state, which its page doesn't label; state what the page says",
-}
+# Words that would tie route's method to one source system, its modes or its sizing.
+SOURCE_SPECIFIC_TERMS = (
+    "SQL Server",
+    "Oracle",
+    "PostgreSQL",
+    "MySQL",
+    "Salesforce",
+    "gateway",
+    "integrated CDC",
+    "Σ",
+    "⌈",
+)
 
-
-def _route_checks_limits_column() -> dict[str, str]:
-    """Return each route check's id (C1 to C13) with the text of its Limits column."""
-    limits_by_check = {}
-    for line in ROUTE_PATTERNS.read_text(encoding="utf-8").splitlines():
-        match = re.match(r"\| (C\d+) [^|]*\|[^|]*\| ([^|]*) \|", line)
-        if match:
-            limits_by_check[match.group(1)] = match.group(2)
-    return limits_by_check
+# The steps of the method, in the order route's reference gives them.
+METHOD_STEPS = (
+    "## 1. Gather the facts about the source and the target",
+    "## 2. Find every current option in the official documentation",
+    "## 3. Check each option against the current limits",
+    "## 4. Mark what the docs don't settle",
+    "## 5. Show each ruled-out option, and leave the choice to the customer",
+)
 
 
 def _repository_files() -> list[Path]:
@@ -88,13 +93,15 @@ def test_route_reads_the_limits_live_and_records_them_the_way_enrich_does() -> N
     assert "never use a remembered number" in route
 
 
-def test_route_names_each_limit_in_words_and_marks_what_the_docs_do_not_state() -> None:
-    limits_by_check = _route_checks_limits_column()
+def test_route_gives_one_method_for_any_source_and_names_no_source_or_sizing() -> None:
+    route = ROUTE_PATTERNS.read_text(encoding="utf-8")
 
-    assert list(limits_by_check) == [f"C{number}" for number in range(1, 14)]
-    for check, limits in limits_by_check.items():
-        assert not re.search(r"\b[a-z]+(?:_[a-z]+)+\b", limits), f"{check} names a limit by an id: {limits}"
-    marked = {check for check, limits in limits_by_check.items() if "*Assumption:*" in limits}
-    assert marked == set(ASSUMPTIONS)
-    for check, claim in ASSUMPTIONS.items():
-        assert f"*Assumption:* {claim}" in limits_by_check[check], check
+    headings = [line for line in route.splitlines() if line.startswith("## ")]
+    assert headings == list(METHOD_STEPS)
+    one_line = " ".join(route.split())
+    assert "Don't take the list of options from memory" in one_line
+    assert "*Assumption:*" in one_line
+    assert "Never pick the pattern on the customer's behalf" in one_line
+    for term in SOURCE_SPECIFIC_TERMS:
+        assert term not in route, term
+    assert not re.search(r"\b[ACDM]\d+\b", route), "names a fixed pattern or check id"
