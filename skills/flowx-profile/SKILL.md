@@ -46,7 +46,7 @@ The profiler uses `DefaultAzureCredential`, so the code is the same everywhere; 
 | Where you run | How to authenticate |
 |---|---|
 | Claude Code or a local laptop | `az login` (a browser opens), or `az login --use-device-code`. A service principal through env vars also works. |
-| Genie Code or a Databricks serverless notebook | A service principal from the customer's Azure tenant, kept in a Databricks secret scope and exported as env vars (recipe below). There is no browser or `az` CLI there, and the workspace's own identity belongs to the wrong tenant. |
+| Genie Code or a Databricks serverless notebook | A service principal from the customer's Azure tenant, kept in a Databricks secret scope and exported as env vars (recipe below). There is no browser or `az` CLI there, and profile signs in through `DefaultAzureCredential` only (`src/flowx/sources/adf/profile/azure_client.py`), so it needs the service principal env vars. |
 | Headless or CI | The `AZURE_*` service principal env vars (in a notebook, read them from a secret scope, as `extract` does). |
 
 The service principal env vars are `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` and `AZURE_TENANT_ID`.
@@ -77,8 +77,9 @@ and names both setup paths above.
 
 - `--subscription-id` limits the scan to one subscription; `--resource-group` to one resource group.
 - `--factory-name` narrows it to one factory and needs `--resource-group`; alone it exits with code 2.
-- `--days` sets the window (default 30). ADF keeps pipeline runs for 45 days only: a longer window adds
-  Cost Management data but no run history, which over-estimates per-run costs.
+- `--days` sets the window (default 30). ADF keeps pipeline run data for a limited time (see
+  https://learn.microsoft.com/en-us/azure/data-factory/monitor-data-factory): a window longer than that
+  adds Cost Management data but no run history, which over-estimates per-run costs.
 
 Over MCP, keep scans scoped: set `resource_group` and/or `factory_name` and keep `days` small. The scan
 makes about one REST call per pipeline run, so a subscription-wide scan can take hours, longer than an MCP
@@ -107,8 +108,8 @@ How to read it:
   (ADF's compute/orchestration meter) or `Azure Data Factory v2 Data Flow - <tier>` (Mapping Data
   Flow vCores). Infrastructure meters (Managed Airflow, Private Link and others) and wrangling data flows
   are left out so the comparison is like-for-like.
-- **Pipeline rows** are estimates only. Azure bills per factory unless per-pipeline billing is
-  enabled in Factory Settings.
+- **Pipeline rows** are estimates only. How Azure reports billing per factory or per pipeline is on
+  https://learn.microsoft.com/en-us/azure/data-factory/plan-manage-costs.
 
 - ADF Datasets are intentionally not scanned: they are definitions only and have no runtime meter, so
   they add no cost.
