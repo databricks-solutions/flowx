@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from flowx.adapter import constants as adapter_constants
 from flowx.adapter.constants import INPUT_GLOBAL_PARAMETER_RESOLUTION
 from flowx.sources.adf.loader import AGENTIC_TYPES, DETERMINISTIC_TYPES
 
@@ -258,6 +259,8 @@ PICKS_FOR_THE_USER = re.compile(
 )
 PICK_FILES = ("flowx-enrich", "flowx-route")
 INLINE_CODE = re.compile(r"`[^`]*`")
+# A sentence ends at ".", "!" or "?" before a capital, a backtick or bold, but not at "e.g." or "i.e.".
+SENTENCE_BREAK = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<=[.!?])\s+(?=[A-Z`*])")
 SOURCE_ROOT = REPO_ROOT / "src"
 
 
@@ -301,7 +304,7 @@ def _sentences(path: Path) -> list[str]:
     sentences = []
     for paragraph in paragraphs:
         joined = " ".join(paragraph.split())
-        sentences.extend(part for part in re.split(r"(?<=[.!?])\s+(?=[A-Z`*])", joined) if part)
+        sentences.extend(part for part in SENTENCE_BREAK.split(joined) if part)
     return sentences
 
 
@@ -473,6 +476,12 @@ def test_the_strategy_check_flags_the_example_lists_the_audit_found(sentence: st
     assert _strategy_mismatches(sentence)
 
 
+def test_an_example_list_stays_one_sentence_when_split() -> None:
+    sentences = SENTENCE_BREAK.split(SENTENCES_THE_AUDIT_FOUND[0])
+
+    assert sentences == [SENTENCES_THE_AUDIT_FOUND[0]]
+
+
 def test_the_source_check_flags_a_sentence_that_lists_source_types() -> None:
     assert len(SOURCE_TYPE_NAME.findall(SOURCE_TYPE_LIST_THE_AUDIT_FOUND)) > MAX_SOURCE_TYPES_PER_SENTENCE
 
@@ -482,3 +491,233 @@ def test_the_file_check_flags_a_file_name_the_code_never_writes() -> None:
 
     assert names == ["parse_errors.json"]
     assert names[0] not in _source_text()
+
+
+UNSOURCED_PERCENT = re.compile(r"\d+(\.\d+)?\s?%")
+CITED = re.compile(r"\(source:|https?://")
+# A menu path is bold or Title Case items joined by ">", or bold items joined by an arrow. Plain words joined by an
+# arrow ("Cron → Quartz") are the code's mappings, not a path in a product's UI.
+BOLD_ITEM = r"\*\*[^*\n]+\*\*"
+MENU_ITEM = rf"(?:{BOLD_ITEM}|[A-Z][\w-]*(?: [A-Z][\w-]*)*)"
+MENU_PATH = re.compile(rf"{MENU_ITEM}\s*>\s*{MENU_ITEM}|{BOLD_ITEM}\s*→\s*{BOLD_ITEM}")
+MENU_PATH_WITH_COMMAS = re.compile(r"\b(Settings|Catalog|Workspace|Manage|Customizations),\s+[A-Z]")
+DOCS_LINK = re.compile(r"https://(docs\.databricks\.com|learn\.microsoft\.com)/")
+DATABRICKS_DOCS_LINK = "https://docs.databricks.com/"
+CLOUD_EDITION_RULE = "edition for the target workspace's cloud"
+OPTION_FILES = (SHARED_DIR / "translation-options.md", SKILLS_DIR / "flowx-convert" / "references" / "adf.md")
+
+
+def _blocks(path: Path) -> list[str]:
+    """Return the prose units a UI-path check reads: each paragraph, and each table row on its own."""
+    units: list[str] = []
+    for paragraph in "\n".join(line for _, line in _prose_lines(path)).split("\n\n"):
+        lines = [line for line in paragraph.splitlines() if line.strip()]
+        if lines and all(line.lstrip().startswith("|") for line in lines):
+            units.extend(lines)
+        elif lines:
+            units.append(" ".join(line.strip() for line in lines))
+    return units
+
+
+def _has_unsourced_percent(line: str) -> bool:
+    return bool(UNSOURCED_PERCENT.search(line)) and not CITED.search(line)
+
+
+def _menu_paths(unit: str) -> list[str]:
+    if DOCS_LINK.search(unit):
+        return []
+    without_code = INLINE_CODE.sub("", unit)
+    return [match.group(0) for match in MENU_PATH.finditer(without_code)] + [
+        match.group(0) for match in MENU_PATH_WITH_COMMAS.finditer(without_code)
+    ]
+
+
+def _option_ids() -> set[str]:
+    return {
+        value
+        for name, value in vars(adapter_constants).items()
+        if name.startswith("OPTION_") and isinstance(value, str)
+    }
+
+
+def _numbers_that_differ(skill_text: str, skill_pattern: str, expected: int, unit: int) -> list[str]:
+    """Return each number a skill states with a pattern that, times its unit, differs from the code's value."""
+    one_line = " ".join(skill_text.split())
+    return [value for value in re.findall(skill_pattern, one_line) if int(value.replace(",", "")) * unit != expected]
+
+
+def _tabled_option_ids(row: str) -> set[str]:
+    return set(re.findall(r"`([\w:<>]+)`", row)) & _option_ids()
+
+
+def _lacks_cloud_edition_rule(text: str) -> bool:
+    return DATABRICKS_DOCS_LINK in text and CLOUD_EDITION_RULE not in " ".join(text.split())
+
+
+def _code_default(relative_path: str, pattern: str) -> int:
+    """Return the integer a pattern captures from a source file, failing when the pattern no longer matches."""
+    source = (SOURCE_ROOT / relative_path).read_text(encoding="utf-8")
+    match = re.search(pattern, source)
+    assert match, f"{relative_path} no longer matches {pattern!r}; update the check"
+    return int(match.group(1).replace("_", ""))
+
+
+# Each number a skill keeps from the code, with the code it must equal: (skill file, the skill's phrase with
+# the number captured, source file, the source pattern with the value captured, how to compare them).
+KEPT_CODE_NUMBERS = (
+    (
+        "flowx-migrate/references/mcp-path.md",
+        r"capped near (\d+) MB",
+        "flowx/mcp/runner.py",
+        r'"FLOWX_MAX_INLINE_BYTES", str\(([\d_]+)\)',
+        1_000_000,
+    ),
+    (
+        "flowx-route/references/fill-agentic-rules.md",
+        r"`FLOWX_MCP_TIMEOUT` \((\d+)",
+        "flowx/mcp/runner.py",
+        r'"FLOWX_MCP_TIMEOUT", "(\d+)"',
+        1,
+    ),
+    (
+        "flowx-profile/SKILL.md",
+        r"`FLOWX_MCP_TIMEOUT` \(default (\d+) s\)",
+        "flowx/mcp/runner.py",
+        r'"FLOWX_MCP_TIMEOUT", "(\d+)"',
+        1,
+    ),
+    (
+        "flowx-enrich/SKILL.md",
+        r"The ([\d,]+)-character cap",
+        "flowx/models/insights.py",
+        r"MAX_TEXT_FIELD_CHARS = ([\d_]+)",
+        1,
+    ),
+    (
+        "flowx-enrich/references/insights.md",
+        r"may exceed ([\d,]+) characters",
+        "flowx/models/insights.py",
+        r"MAX_TEXT_FIELD_CHARS = ([\d_]+)",
+        1,
+    ),
+    (
+        "flowx-profile/references/adf.md",
+        r"assumed to have used (\d+)",
+        "flowx/sources/adf/profile/cost_model.py",
+        r'"usedCloudDataMovementUnits", (\d+)\)',
+        1,
+    ),
+    (
+        "flowx-profile/references/adf.md",
+        r"assumed to use (\d+) vCores",
+        "flowx/sources/adf/profile/cost_model.py",
+        r"DATAFLOW_MIN_VCORES = (\d+)",
+        1,
+    ),
+    (
+        "flowx-profile/references/adf.md",
+        r"Mapping Data Flow: (\d+) vCores",
+        "flowx/sources/adf/profile/cost_model.py",
+        r"DATAFLOW_MIN_VCORES = (\d+)",
+        1,
+    ),
+    (
+        "flowx-profile/SKILL.md",
+        r"`--days` sets the window \(default (\d+)\)",
+        "flowx/sources/adf/profile/runner.py",
+        r'"--days",\s*type=int,\s*default=(\d+)',
+        1,
+    ),
+)
+
+
+@pytest.mark.parametrize("path", _markdown_files(), ids=_relative)
+def test_skill_text_gives_no_unsourced_percentage(path: Path) -> None:
+    flagged = _flagged(path, "unsourced-number", _has_unsourced_percent)
+
+    assert not flagged, "use a placeholder filled from the phase's output, or cite the source:\n" + "\n".join(flagged)
+
+
+@pytest.mark.parametrize("path", _markdown_files(), ids=_relative)
+def test_every_menu_path_in_the_skills_cites_its_docs_page(path: Path) -> None:
+    flagged = [
+        f"{_relative(path)}: {menu_path}"
+        for unit in _blocks(path)
+        for menu_path in _menu_paths(unit)
+        if not _allowed(path, unit, "ui-path")
+    ]
+
+    assert not flagged, "point to the docs page that owns the menu path:\n" + "\n".join(flagged)
+
+
+@pytest.mark.parametrize(("skill_file", "skill_pattern", "source_file", "source_pattern", "unit"), KEPT_CODE_NUMBERS)
+def test_each_number_a_skill_keeps_from_the_code_equals_it(
+    skill_file: str, skill_pattern: str, source_file: str, source_pattern: str, unit: int
+) -> None:
+    skill_text = (SKILLS_DIR / skill_file).read_text(encoding="utf-8")
+    expected = _code_default(source_file, source_pattern)
+
+    assert re.findall(skill_pattern, " ".join(skill_text.split())), f"{skill_file} no longer says {skill_pattern!r}"
+    assert not _numbers_that_differ(skill_text, skill_pattern, expected, unit), f"the code has {expected}"
+
+
+@pytest.mark.parametrize("path", OPTION_FILES, ids=_relative)
+def test_option_files_point_to_inspect_instead_of_tabling_its_options(path: Path) -> None:
+    option_ids = _option_ids()
+    table_rows = [line for _, line in _prose_lines(path) if line.lstrip().startswith("|")]
+
+    assert option_ids, "found no OPTION_ constants; the check needs updating"
+    for row in table_rows:
+        assert not _tabled_option_ids(row), f"inspect returns these options with their choices: {row.strip()}"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [path for path in _markdown_files() if DATABRICKS_DOCS_LINK in path.read_text(encoding="utf-8")],
+    ids=_relative,
+)
+def test_files_with_databricks_docs_links_say_to_read_the_target_clouds_edition(path: Path) -> None:
+    assert not _lacks_cloud_edition_rule(path.read_text(encoding="utf-8")), (
+        "say to read the edition for the target workspace's cloud"
+    )
+
+
+# The last five checks against lines the audit found at a9c0b86, before they were fixed.
+PERCENTAGES_THE_AUDIT_FOUND = [
+    "  Deterministic:      35 (74.5%)",
+    "> Translation is 91.5% complete (35 deterministic, 8 filled by the agent).",
+]
+MENU_PATHS_THE_AUDIT_FOUND = [
+    "3. **Add it in Genie Code (Agent mode):** Settings, MCP Servers, Add Server, choose Custom MCP server,",
+    "  1. Add a Git credential if they don't have one: **Settings > Linked accounts > Add Git credential**.",
+    "   **Catalog > External data > Credentials > Create credential > Service credential**, with the",
+]
+OPTION_ROW_THE_AUDIT_FOUND = "| `copy_activity_paradigm` | `notebook`, `sdp` | `notebook` |"
+LINK_WITHOUT_EDITION_RULE_THE_AUDIT_FOUND = (
+    "offers, including the ways each option can run (for ingestion, the\n"
+    "[ingestion overview](https://docs.databricks.com/aws/en/ingestion/overview) is a starting point). Record"
+)
+
+
+@pytest.mark.parametrize("line", PERCENTAGES_THE_AUDIT_FOUND)
+def test_the_percentage_check_flags_the_example_figures_the_audit_found(line: str) -> None:
+    assert _has_unsourced_percent(line)
+
+
+@pytest.mark.parametrize("line", MENU_PATHS_THE_AUDIT_FOUND)
+def test_the_menu_path_check_flags_the_paths_the_audit_found(line: str) -> None:
+    assert _menu_paths(line)
+
+
+def test_the_constant_check_flags_a_number_that_drifted_from_the_code() -> None:
+    expected = _code_default("flowx/mcp/runner.py", r'"FLOWX_MAX_INLINE_BYTES", str\(([\d_]+)\)')
+
+    assert _numbers_that_differ("is capped near 4 MB;", r"capped near (\d+) MB", expected, 1_000_000) == ["4"]
+
+
+def test_the_option_check_flags_a_table_of_inspects_options() -> None:
+    assert _tabled_option_ids(OPTION_ROW_THE_AUDIT_FOUND) == {"copy_activity_paradigm"}
+
+
+def test_the_cloud_edition_check_flags_a_docs_link_with_no_rule() -> None:
+    assert _lacks_cloud_edition_rule(LINK_WITHOUT_EDITION_RULE_THE_AUDIT_FOUND)
