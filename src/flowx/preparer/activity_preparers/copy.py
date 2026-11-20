@@ -9,7 +9,7 @@ from typing import Any
 
 from flowx.models.dab import SecretInstruction, SetupTask
 from flowx.models.ir import CopyActivity
-from flowx.models.source_types import FILE_SOURCE_TYPES, JDBC_SOURCE_TYPES
+from flowx.models.source_types import FILE_SOURCE_TYPES, JDBC_SOURCE_TYPES, SQL_SERVER_SOURCE_TYPES
 from flowx.preparer.activity_preparers.helpers import (
     build_notebook_activity_task,
     make_jdbc_secrets,
@@ -19,9 +19,7 @@ from flowx.preparer.code_generator import generate_copy_notebook
 from flowx.preparer.workflow_preparer import PreparedActivity, build_common_task_fields
 
 _LAKEFLOW_SOURCE_TYPE_TO_CONNECTION_TYPE: dict[str, str] = {
-    "SqlServerSource": "SQLSERVER",
-    "AzureSqlSource": "SQLSERVER",
-    "MicrosoftSqlServerSource": "SQLSERVER",
+    **dict.fromkeys(SQL_SERVER_SOURCE_TYPES, "SQLSERVER"),
     "MySqlSource": "MYSQL",
     "AzureMySqlSource": "MYSQL",
     "PostgreSqlSource": "POSTGRESQL",

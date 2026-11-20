@@ -1,10 +1,9 @@
-"""Unit tests for the source-neutral lineage substrate (#61).
+"""Unit tests for the IR side of the source-neutral lineage substrate (#61).
 
-Covers the pure derivation (:mod:`flowx.lineage`) -- control fan-out, nested and
-Switch recursion, the identity-vs-signature join tiers, no self-edges, no
-duplicate edges -- and the ``ir_serde`` round-trip for the new IR types plus the
-new ``Activity`` base fields, including a MotifActivity round-trip that proves the
-R1 ``motif_id`` collision is handled.
+Covers the ``ir_serde`` round-trip for the lineage IR types plus the ``Activity``
+base fields, including a MotifActivity round-trip that proves the R1 ``motif_id``
+collision is handled. The edge rules themselves are tested on the shared cores in
+``test_discovery_lineage.py``.
 """
 
 from __future__ import annotations
@@ -15,28 +14,15 @@ import pytest
 
 from flowx.bundler.dab_writer import pipeline_dict_to_ir
 from flowx.ir_serde import lineage_from_dict, pipeline_to_dict
-from flowx.lineage import (
-    build_control_edges,
-    build_data_edges,
-    build_lineage,
-    build_motif_annotations,
-    with_lineage,
-)
 from flowx.models.ir import (
     ControlEdge,
     DataAsset,
     DataEdge,
-    ExecutePipelineActivity,
-    ForEachActivity,
-    IfConditionActivity,
     Lineage,
     MotifActivity,
     MotifAnnotation,
     NotebookActivity,
     Pipeline,
-    RunJobActivity,
-    SwitchActivity,
-    SwitchCase,
     WaitActivity,
 )
 
@@ -50,341 +36,6 @@ def _notebook(task_key: str, *, reads=None, writes=None, motif_id=None) -> Noteb
         data_writes=list(writes or []),
         motif_id=motif_id,
     )
-
-
-def _execute(task_key: str, callee: str, *, wait: bool = True) -> ExecutePipelineActivity:
-    return ExecutePipelineActivity(name=task_key, task_key=task_key, pipeline_name=callee, wait_on_completion=wait)
-
-
-# --------------------------------------------------------------------------- #
-# Control-edge derivation
-# --------------------------------------------------------------------------- #
-
-
-def test_control_edges_fan_out_and_nested_switch_recursion():
-    """ExecutePipeline calls are found at top level and inside ForEach/If/Switch."""
-    pipeline = Pipeline(
-        name="parent",
-        tasks=[
-            _execute("call_a", "child_a"),
-            ForEachActivity(
-                name="fe",
-                task_key="fe",
-                items_expression="@x",
-                inner_activities=[_execute("call_b", "child_b")],
-            ),
-            IfConditionActivity(
-                name="cond",
-                task_key="cond",
-                op="equals",
-                left="@a",
-                right="@b",
-                if_true_activities=[_execute("call_c", "child_c")],
-                if_false_activities=[_execute("call_d", "child_d")],
-            ),
-            SwitchActivity(
-                name="sw",
-                task_key="sw",
-                on_expression="@e",
-                cases=[SwitchCase(value="one", activities=[_execute("call_e", "child_e")])],
-                default_activities=[_execute("call_f", "child_f")],
-            ),
-        ],
-    )
-
-    edges = build_control_edges(
-        pipeline, known_workflows={"child_a", "child_b", "child_c", "child_d", "child_e", "child_f"}
-    )
-
-    targets = sorted(edge.target_workflow for edge in edges)
-    assert targets == ["child_a", "child_b", "child_c", "child_d", "child_e", "child_f"]
-    assert all(edge.source_workflow == "parent" for edge in edges)
-    # Each call site keeps its own via_task_key (fan-out preserved).
-    assert {edge.via_task_key for edge in edges} == {
-        "call_a",
-        "call_b",
-        "call_c",
-        "call_d",
-        "call_e",
-        "call_f",
-    }
-
-
-def test_control_edges_run_job_activity_is_source_neutral():
-    """A RunJobActivity (Airflow) produces a control edge just like ExecutePipeline."""
-    pipeline = Pipeline(
-        name="dag_main",
-        tasks=[RunJobActivity(name="run", task_key="run", job_name="downstream_job")],
-    )
-
-    edges = build_control_edges(pipeline, known_workflows={"dag_main", "downstream_job"})
-
-    assert len(edges) == 1
-    assert edges[0].source_workflow == "dag_main"
-    assert edges[0].target_workflow == "downstream_job"
-    assert edges[0].via_task_key == "run"
-    assert edges[0].wait_for_completion is None
-    assert edges[0].resolved is True
-
-
-def test_run_now_of_an_existing_job_is_not_a_cross_workflow_edge():
-    """A run-now by job ID targets a job outside the source; its job_name is only the caller's task key."""
-    pipeline = Pipeline(
-        name="dag_main",
-        tasks=[RunJobActivity(name="trigger", task_key="trigger", job_name="trigger", existing_job_id="123")],
-    )
-
-    assert build_control_edges(pipeline, known_workflows=set()) == []
-
-
-def test_control_edges_unresolved_callee_is_recorded_not_dropped():
-    """An empty callee is kept with resolved=False rather than silently dropped."""
-    pipeline = Pipeline(name="parent", tasks=[_execute("call", "")])
-
-    edges = build_control_edges(pipeline, known_workflows=set())
-
-    assert len(edges) == 1
-    assert edges[0].target_workflow == ""
-    assert edges[0].resolved is False
-
-
-def test_control_edges_callee_missing_from_known_workflows_is_unresolved():
-    """Given the workflows in the export, only a callee that is one of them counts as resolved."""
-    pipeline = Pipeline(name="parent", tasks=[_execute("call_child", "child"), _execute("call_missing", "missing")])
-
-    edges = build_control_edges(pipeline, known_workflows={"parent", "child"})
-
-    assert {edge.target_workflow: edge.resolved for edge in edges} == {"child": True, "missing": False}
-    assert [edge.resolved for edge in build_lineage(pipeline, known_workflows={"child"}).control_edges] == [True, False]
-
-
-def test_control_edges_no_self_edge():
-    """A pipeline invoking itself produces no edge."""
-    pipeline = Pipeline(name="loop", tasks=[_execute("call", "loop")])
-
-    assert build_control_edges(pipeline, known_workflows={"loop"}) == []
-
-
-def test_control_edges_no_duplicate_from_recursion():
-    """A single call site nested in a container is emitted exactly once."""
-    pipeline = Pipeline(
-        name="parent",
-        tasks=[
-            ForEachActivity(
-                name="fe",
-                task_key="fe",
-                items_expression="@x",
-                inner_activities=[_execute("call", "child")],
-            )
-        ],
-    )
-
-    edges = build_control_edges(pipeline, known_workflows={"child"})
-
-    assert len(edges) == 1
-    assert edges[0].target_workflow == "child"
-
-
-# --------------------------------------------------------------------------- #
-# Data-edge derivation: identity vs signature tiers
-# --------------------------------------------------------------------------- #
-
-
-def test_data_edges_identity_tier_joins_across_different_signatures():
-    """Two assets with the same resolved identity match even when their names differ."""
-    pipeline = Pipeline(
-        name="p",
-        tasks=[
-            _notebook("writer", writes=[DataAsset(signature="ds_out", identity="curated.orders")]),
-            _notebook("reader", reads=[DataAsset(signature="ds_in_other_name", identity="curated.orders")]),
-        ],
-    )
-
-    edges = build_data_edges(pipeline)
-
-    assert len(edges) == 1
-    assert edges[0].source_task_key == "writer"
-    assert edges[0].target_task_key == "reader"
-    assert edges[0].match_kind == "identity"
-    assert edges[0].match_key == "curated.orders"
-    assert edges[0].identity == "curated.orders"
-
-
-def test_data_edges_signature_tier_when_identity_unresolved():
-    """When identity is unresolvable, matching falls back to the neutral signature."""
-    pipeline = Pipeline(
-        name="p",
-        tasks=[
-            _notebook("writer", writes=[DataAsset(signature="shared_ds")]),
-            _notebook("reader", reads=[DataAsset(signature="shared_ds")]),
-        ],
-    )
-
-    edges = build_data_edges(pipeline)
-
-    assert len(edges) == 1
-    assert edges[0].match_kind == "signature"
-    assert edges[0].match_key == "shared_ds"
-    assert edges[0].identity is None
-
-
-def test_data_edges_distinct_identities_do_not_fall_back_to_signature():
-    """Two resolved-but-different identities never manufacture a signature edge (#36)."""
-    pipeline = Pipeline(
-        name="p",
-        tasks=[
-            _notebook("writer", writes=[DataAsset(signature="shared", identity="a.first")]),
-            _notebook("reader", reads=[DataAsset(signature="shared", identity="b.second")]),
-        ],
-    )
-
-    assert build_data_edges(pipeline) == []
-
-
-def test_data_edges_fan_out_one_writer_many_readers():
-    """One producer handing off to several consumers yields one edge each."""
-    pipeline = Pipeline(
-        name="p",
-        tasks=[
-            _notebook("writer", writes=[DataAsset(signature="ds", identity="x.y")]),
-            _notebook("reader_one", reads=[DataAsset(signature="ds", identity="x.y")]),
-            _notebook("reader_two", reads=[DataAsset(signature="ds", identity="x.y")]),
-        ],
-    )
-
-    edges = build_data_edges(pipeline)
-
-    assert sorted(edge.target_task_key for edge in edges) == ["reader_one", "reader_two"]
-    assert all(edge.source_task_key == "writer" for edge in edges)
-
-
-def test_data_edges_no_self_edge():
-    """An activity that both writes and reads the same asset does not edge to itself."""
-    pipeline = Pipeline(
-        name="p",
-        tasks=[
-            _notebook(
-                "roundtrip",
-                writes=[DataAsset(signature="ds", identity="x.y")],
-                reads=[DataAsset(signature="ds", identity="x.y")],
-            )
-        ],
-    )
-
-    assert build_data_edges(pipeline) == []
-
-
-def test_data_edges_no_duplicate_from_repeated_asset():
-    """A producer listing the same asset twice still yields a single edge."""
-    pipeline = Pipeline(
-        name="p",
-        tasks=[
-            _notebook(
-                "writer",
-                writes=[DataAsset(signature="ds", identity="x.y"), DataAsset(signature="ds", identity="x.y")],
-            ),
-            _notebook("reader", reads=[DataAsset(signature="ds", identity="x.y")]),
-        ],
-    )
-
-    edges = build_data_edges(pipeline)
-
-    assert len(edges) == 1
-
-
-def test_data_edges_nested_switch_recursion():
-    """A producer buried in a Switch case hands off to a top-level consumer."""
-    pipeline = Pipeline(
-        name="p",
-        tasks=[
-            SwitchActivity(
-                name="sw",
-                task_key="sw",
-                on_expression="@e",
-                cases=[
-                    SwitchCase(
-                        value="one",
-                        activities=[_notebook("writer", writes=[DataAsset(signature="ds", identity="x.y")])],
-                    )
-                ],
-                default_activities=[],
-            ),
-            _notebook("reader", reads=[DataAsset(signature="ds", identity="x.y")]),
-        ],
-    )
-
-    edges = build_data_edges(pipeline)
-
-    assert len(edges) == 1
-    assert edges[0].source_task_key == "writer"
-    assert edges[0].target_task_key == "reader"
-
-
-# --------------------------------------------------------------------------- #
-# Motif annotations + composition + purity
-# --------------------------------------------------------------------------- #
-
-
-def test_build_motif_annotations_groups_members_by_tag():
-    """A MotifActivity plus tagged members become one annotation over their task keys."""
-    pipeline = Pipeline(
-        name="p",
-        tasks=[
-            MotifActivity(
-                name="motif",
-                task_key="motif_auto_loader",
-                motif_id="auto_loader",
-                display_name="Auto Loader",
-                databricks_replacement="auto_loader",
-                matched_activity_names=["Copy A", "Copy B"],
-                confidence_notes=["matched on file source"],
-            ),
-            _notebook("member", motif_id="auto_loader"),
-            _notebook("unrelated"),
-        ],
-    )
-
-    annotations = build_motif_annotations(pipeline)
-
-    assert len(annotations) == 1
-    assert annotations[0].motif_id == "auto_loader"
-    assert annotations[0].member_task_keys == ["motif_auto_loader", "member"]
-    assert annotations[0].display_name == "Auto Loader"
-    assert annotations[0].databricks_replacement == "auto_loader"
-
-
-def test_build_motif_annotations_carries_the_source_type_hint():
-    """The detector's source classification survives into the IR lineage annotation."""
-    pipeline = Pipeline(
-        name="p",
-        tasks=[
-            MotifActivity(
-                name="motif",
-                task_key="motif_bulk_copy",
-                motif_id="metadata_driven_bulk_copy",
-                display_name="Bulk copy",
-                databricks_replacement="lakeflow_connect",
-                matched_activity_names=["Lookup", "ForEach"],
-                source_type_hint="database",
-            ),
-        ],
-    )
-
-    (annotation,) = build_motif_annotations(pipeline)
-
-    assert annotation.source_type_hint == "database"
-
-
-def test_with_lineage_is_pure():
-    """with_lineage returns a new pipeline and never mutates the input."""
-    pipeline = Pipeline(name="p", tasks=[_notebook("n")])
-    lineage = build_lineage(pipeline, known_workflows=set())
-
-    updated = with_lineage(pipeline, lineage)
-
-    assert pipeline.lineage is None
-    assert updated is not pipeline
-    assert updated.lineage is lineage
 
 
 # --------------------------------------------------------------------------- #
@@ -542,7 +193,7 @@ def test_an_empty_motif_id_survives_a_round_trip_and_an_untagged_task_writes_non
 
 def test_lineage_block_always_emits_lists_never_null():
     """An attached empty lineage serialises its edge collections as lists, not null."""
-    pipeline = with_lineage(Pipeline(name="p", tasks=[_notebook("n")]), Lineage())
+    pipeline = Pipeline(name="p", tasks=[_notebook("n")], lineage=Lineage())
 
     serialised = pipeline_to_dict(pipeline)
 

@@ -400,3 +400,39 @@ def test_a_dependency_must_say_whether_it_resolved() -> None:
     """A mapper that forgets ``resolved`` fails here instead of reporting a missing upstream as resolved."""
     with pytest.raises(TypeError, match="resolved"):
         SourceDependency(upstream="a")  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("written_name", [5, {}, ["Copy A"]])
+def test_an_upstream_name_read_back_that_is_not_a_string_is_ignored(written_name: object) -> None:
+    """Only a string ``upstream_name`` is read back, so ``depends_on`` never lists an object instead of a name."""
+    node = _node_from_dict(
+        {
+            "node_type": "SourceNode",
+            "source_id": "Next",
+            "task_key": "Next",
+            "concept": "notebook",
+            "source": "adf",
+            "dependencies": [{"upstream": "Copy_A", "conditions": [], "resolved": True, "upstream_name": written_name}],
+        }
+    )
+
+    assert node.dependencies[0].upstream_name is None
+
+
+def test_an_upstream_name_round_trips_only_when_set() -> None:
+    """A dependency keeps its name as written through the saved graph, and one without it writes none."""
+    node = SourceNode(
+        source_id="Next",
+        task_key="Next",
+        concept="notebook",
+        source="adf",
+        dependencies=[
+            SourceDependency(upstream="Copy_A", resolved=True, upstream_name="Copy A"),
+            SourceDependency(upstream="Other", resolved=True),
+        ],
+    )
+    written = _node_to_dict(node)
+
+    assert [dependency.get("upstream_name") for dependency in written["dependencies"]] == ["Copy A", None]
+    assert "upstream_name" not in written["dependencies"][1]
+    assert _node_from_dict(json.loads(json.dumps(written))).dependencies == node.dependencies

@@ -16,6 +16,7 @@ from flowx.sources.adf.dataset_identity import (
     resolve_file_store,
     resolve_table_reference,
     resolve_table_store,
+    type_properties,
     unparameterised_linked_service_name,
     written_file_system,
 )
@@ -71,7 +72,7 @@ def resolve_dataset_store(
     properties = dataset_props(dataset_ref, definitions)
     if properties is None:
         return None, True
-    type_props = properties.get("typeProperties") or properties
+    type_props = type_properties(properties)
     location = type_props.get("location")
     file_system: str | None = None
     account: str | None = None

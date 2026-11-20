@@ -515,7 +515,8 @@ def _route_files(p: dict[str, Any], output_dir: Path, *, route_ok: bool) -> dict
 def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
     """Fill a routed-agentic unit: replace its pipelines with agent-authored pipeline(s).
 
-    ``members`` (a list of pipeline names, or a comma-separated string) names the routed-agentic
+    ``members`` (a list of pipeline names, each passed whole so a name may hold a comma, or a
+    comma-separated string) names the routed-agentic
     component or accepted grouping to replace; the authored pipeline IR dicts come inline as
     ``pipelines`` (a JSON list) or via ``pipelines_path`` (exactly one, staged to a temp file so the
     same CLI contract runs on both). They are stored in ``metadata/agentic_conversion.json``. The merged
@@ -525,9 +526,11 @@ def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
     """
     output_dir = p.get("output_dir", "./flowx_output")
     members = p.get("members")
-    if isinstance(members, list) and all(isinstance(member, str) and member for member in members):
-        members = ",".join(members)
-    if not isinstance(members, str) or not members:
+    if isinstance(members, list) and members and all(isinstance(member, str) and member for member in members):
+        member_arguments: list[Any] = [argument for member in members for argument in ("--member", member)]
+    elif isinstance(members, str) and members:
+        member_arguments = ["--members", members]
+    else:
         return {"ok": False, "error": "provide 'members' (a list of pipeline names or comma-separated string)."}
 
     pipelines = p.get("pipelines")
@@ -536,7 +539,7 @@ def _cmd_fill_agentic(p: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "provide exactly one of 'pipelines' (inline list) or 'pipelines_path'."}
 
     def _run(path: str) -> dict[str, Any]:
-        args: list[Any] = ["fill-agentic", "--output-dir", output_dir, "--members", members]
+        args: list[Any] = ["fill-agentic", "--output-dir", output_dir, *member_arguments]
         args += ["--pipelines-path", path]
         result = runner.run_adapter(args)
         payload = runner.parse_stdout_json(result)

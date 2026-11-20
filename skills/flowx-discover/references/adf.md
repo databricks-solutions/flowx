@@ -4,6 +4,18 @@ Source guide for `--source adf`. Parse Azure Data Factory pipeline, dataset, lin
 trigger JSON files into a typed AST and produce a classified inventory. See the parent `SKILL.md`
 for the shared output layout, inventory shape, and how to run a phase.
 
+## Contents
+
+- [Step 1: Determine the ADF source path](#step-1--determine-the-adf-source-path)
+- [Step 2: Download from UC volumes if needed](#step-2--download-from-uc-volumes-if-needed)
+- [Step 3: Run the deterministic parser](#step-3--run-the-deterministic-parser)
+- [Step 4: Read and validate the inventory](#step-4--read-and-validate-the-inventory)
+- [Step 4b: Review the complexity report](#step-4b--review-the-complexity-report)
+- [Step 5: Present the summary](#step-5--present-the-summary)
+- [Step 6: Detail agentic activities](#step-6--detail-agentic-activities)
+- [Step 7: Warn about unsupported activities](#step-7--warn-about-unsupported-activities)
+- [Step 8: Confirm output location](#step-8--confirm-output-location)
+
 ## Step 1 — Determine the ADF source path
 
 Ask the user for the location of their ADF JSON exports. If they don't have one yet, run the
@@ -19,9 +31,11 @@ The directory should contain subdirectories or files for:
 - `linkedService/` or `linked_services/` — linked service JSON files (optional)
 - `trigger/` or `triggers/` — trigger definition JSON files (optional)
 
-On the MCP path the hosted server cannot read your local files, so reference the source via
-`adf_volume_path` / `adf_workspace_path` (the server reads them through the SDK), or for small
-factories pass the ADF JSON inline as `adf_definitions` (a mapping of relative path → JSON content).
+On the MCP path the hosted server cannot read files by path, whether they sit in your local file
+system, the workspace, or a Databricks volume. For a workspace or volume source, pass
+`adf_workspace_path` or `adf_volume_path` and the server downloads it through the SDK. For files on
+your machine, upload them to a volume first, or for a small factory pass the ADF JSON inline as
+`adf_definitions` (a mapping of relative path → JSON content).
 
 ## Step 2 — Download from UC volumes if needed
 
@@ -68,7 +82,9 @@ Read `<output_dir>/metadata/inventory.json`:
 Each activity's `task_key` is the task key convert gives it: the ADF activity name with every
 character outside `A-Z`, `a-z`, `0-9`, `_` and `-` replaced by `_` (runs of `_` collapsed, leading
 and trailing `_` dropped, and `unnamed` when nothing is left), so `Copy Orders (daily)` is
-`Copy_Orders_daily`. `name` and the legacy `depends_on` keep the names as written. A resolved
+`Copy_Orders_daily`. Two names that differ only in those characters (`Copy A`, `Copy (A)`) share
+one key, as they do in convert; discover logs a warning naming them, and one should be renamed.
+`name` and the legacy `depends_on` keep the names as written. A resolved
 `dependencies[].upstream`, the lineage edges and the motifs' `member_task_keys` use the task key, so
 they join with convert's task keys; an unresolved upstream keeps the name as written, since no
 activity carries it. `source_graphs_sha256` names the saved `metadata/source_graphs.json` the
@@ -112,20 +128,6 @@ from the activity's ARM JSON (no built-in deterministic translator exists), e.g.
 
 For `unsupported` activities, warn clearly, e.g. `ExecuteSSISPackage` — recommend manual conversion
 to a PySpark notebook.
-
-## Where to look for the facts enrich asks about
-
-`flowx-enrich` reads each activity's `raw` JSON in `metadata/source_graphs.json` (and
-`metadata/<pipeline>.arm.json`) to find the facts that narrow the target pattern. The inventory itself
-carries no `raw` payloads. In ADF they sit in:
-
-- a Lookup feeding `ForEach.items`, and an `ExecutePipeline` called once per item (scale, repeat);
-- dataset parameters and sink paths templated by item (fan-in);
-- query text, such as a version or watermark read before the copy, or change functions (change,
-  shaping);
-- `ForEach.batchCount` and trigger schedules (bar);
-- a Copy or Lookup `typeProperties.source.type` of `SqlServerSource`, `AzureSqlSource` or
-  `SqlMISource`, which marks a SQL Server source.
 
 ## Step 8 — Confirm output location
 

@@ -1,0 +1,14 @@
+schema_version: "1.1"
+name: triggers-flowx-extract-metadata
+description: The flowx-extract-metadata skill should trigger for a request it describes.
+tags: [trigger, flowx-extract-metadata]
+runs: 3
+execution:
+  prompt: "I don't have an export of my Azure Data Factory. How do I get the pipeline definitions out of the factory so flowx can read them?"
+  max_turns: 4
+  allowed_tools: [Read, Glob, Grep, Skill]
+graders:
+  - name: flowx-extract-metadata-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?flowx-extract-metadata"'

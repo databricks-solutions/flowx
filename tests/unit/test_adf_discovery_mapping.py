@@ -1090,3 +1090,20 @@ def test_a_republish_that_only_changes_the_etag_keeps_the_hash() -> None:
 
     assert republished["document_sha256"] == first["document_sha256"]
     assert republished["graphs"][0]["raw"] == {"name": "pl_orders", "properties": pipeline["properties"]}
+
+
+def test_activity_names_that_share_a_task_key_are_warned_about(caplog: pytest.LogCaptureFixture) -> None:
+    """``Copy A`` and ``Copy (A)`` both get the key ``Copy_A``, as convert gives them, so discover warns."""
+    activities = [
+        {"name": "Copy A", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}},
+        {"name": "Copy (A)", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}},
+        {"name": "Other", "type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}},
+    ]
+    with caplog.at_level("WARNING", logger="flowx.sources.adf.discovery_mapping"):
+        graph = _pipeline(activities, name="shared_keys")
+
+    assert [node.task_key for node in graph.tasks] == ["Copy_A", "Copy_A", "Other"]
+    [record] = [record for record in caplog.records if "share the task key" in record.getMessage()]
+    assert "shared_keys" in record.getMessage()
+    assert "'Copy_A'" in record.getMessage()
+    assert "['Copy A', 'Copy (A)']" in record.getMessage()

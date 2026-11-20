@@ -29,7 +29,7 @@ from flowx.discovery_insights import (
     validate_insights,
 )
 from flowx.discovery_inventory import STRATEGY_PROPERTY, build_source_inventory
-from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, read_source_graphs, write_source_graphs
+from flowx.discovery_serde import SOURCE_GRAPHS_FILENAME, canonical_sha256, read_source_graphs, write_source_graphs
 from flowx.models.discovery import CONCEPT_NOTEBOOK, SourceGraph, SourceNode
 from flowx.sources.adf.loader import main as adf_discover_main
 
@@ -90,7 +90,8 @@ def test_enrich_writes_agentic_insights_and_renders_the_inventory_from_it(tmp_pa
     assert "authored_against" not in inventory[INSIGHTS_KEY]
     assert agentic_insights["inventory_sha256"] == inventory_fingerprint(before)
     assert result["agentic_insights_sha256"] == agentic_insights["agentic_insights_sha256"]
-    assert agentic_insights_hash_violations(agentic_insights) == []
+    content = {key: value for key, value in agentic_insights.items() if key != "agentic_insights_sha256"}
+    assert agentic_insights["agentic_insights_sha256"] == canonical_sha256(content)
 
 
 def test_re_enriching_is_byte_identical_and_keeps_the_routing_fingerprint(tmp_path: Path) -> None:
@@ -176,8 +177,9 @@ def test_an_edited_agentic_insights_file_fails_its_hash_check(tmp_path: Path) ->
     _discover(tmp_path)
     enrich_inventory(tmp_path, insights=_authored(tmp_path))
     document = json.loads((tmp_path / "metadata" / AGENTIC_INSIGHTS_FILENAME).read_text(encoding="utf-8"))
-    document["overview"] = "Edited after enrich."
 
+    assert agentic_insights_hash_violations(document) == []
+    document["overview"] = "Edited after enrich."
     assert agentic_insights_hash_violations(document) != []
 
 

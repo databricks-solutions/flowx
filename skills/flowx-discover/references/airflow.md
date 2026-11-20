@@ -10,9 +10,9 @@ never executed. It extracts operators, `>>` / `<<` task dependencies, the DAG's
 `schedule_interval`, and inline PythonOperator callables / BashOperator commands. Each task is
 classified:
 
-- **Deterministic** — a mapped operator (PythonOperator, BashOperator) that becomes a generated
-  notebook task.
-- **Agentic** — an operator with no deterministic mapping yet; emitted as a placeholder for
+- **Deterministic**: a mapped operator or sensor that becomes a notebook, SQL, Spark, run-job or dbt
+  task; [`../../shared/airflow-coverage.md`](../../shared/airflow-coverage.md) lists each one.
+- **Agentic**: an operator with no deterministic mapping; emitted as a placeholder for
   LLM-assisted translation.
 
 ## Step 1 — Determine the Airflow source path
@@ -43,28 +43,31 @@ tasks with a `strategy`. `metadata/profile_report.csv` carries one row per DAG (
 ```
 Airflow Discover Summary
 ========================
-DAGs parsed:        3
-Total tasks:        8
-  Deterministic:    7
-  Agentic:          1
-Coverage:           87.5%
+DAGs parsed:          3
+  Ready to deploy:    2  (verified, no gaps or placeholders)
+Total tasks:          8
+  Converted:          7  (deterministic; runs as translated)
+  Placeholders:       1  (agentic; must be translated before deploying)
+  Failed:             0
+  Excluded:           0
+Converted:            87.5% of tasks
+Classified:           100.0% of tasks (converted or placeholder; not readiness)
+Reconciliation:       verified_with_gaps
+
+Job settings to review:
+  - nightly_load: The job's schedule is emitted paused because the migration has open gaps or placeholder tasks. Unpause it once every task is converted and checked.
 ```
+
+Lead with **Converted %** and **Ready to deploy**. **Classified** counts placeholders too, so 100% there
+does not mean anything converted. Repeat every line under "Job settings to review" to the user: they
+name a schedule emitted paused, a timezone assumed to be UTC, a job name that fell back to the file
+name, or a job that allows one run at a time where Airflow allowed more. Each DAG's `ready_to_deploy` flag in `inventory.json` says the same per DAG.
 
 ## Step 5 — Detail agentic tasks
 
-For `agentic` tasks, name the operator that has no deterministic mapping yet (e.g. a custom or
+For `agentic` tasks, name the operator that has no deterministic mapping (e.g. a custom or
 provider operator) and note it will be emitted as a placeholder notebook for the convert phase to
 fill via LLM-assisted translation.
-
-## Where to look for the facts enrich asks about
-
-`flowx-enrich` reads the DAG source to find the facts that narrow the target pattern. In Airflow they
-sit in:
-
-- dynamic task mapping (`expand`) and task groups, and the list a mapped task is given (scale,
-  repeat);
-- operator SQL, such as a watermark read before the load (change, shaping);
-- the DAG's `schedule` and `max_active_tasks` (bar).
 
 ## Coverage notes
 
@@ -76,6 +79,6 @@ location and proceed to `flowx-convert` with the same `<output_dir>` and `--sour
 For the full verified support matrix — classic operators, TaskFlow (`@dag`/`@task`), sensors,
 TaskGroups (incl. group-level dependencies), and dbt factory (static + PyDABs) — plus the constructs
 that are **not** handled (dynamic TaskGroup mapping, shared multi-DAG bundle), see
-[`../../flowx-convert/sources/airflow-coverage.md`](../../flowx-convert/sources/airflow-coverage.md).
+[`../../shared/airflow-coverage.md`](../../shared/airflow-coverage.md).
 Callables reading Airflow task context (`**context` / `ti`) or XCom, and runtime-branching
 decorators, are routed to placeholders for manual/agentic translation rather than converted.

@@ -132,6 +132,29 @@ def test_an_agentic_recommendation_says_it_rests_on_a_gap_and_an_enrich_pattern(
     assert "recommends a group here only when part of it can't convert 1:1 and enrich suggested a" in components
 
 
+def test_a_release_label_shows_only_beside_the_pipeline_whose_pattern_carries_it() -> None:
+    """Two pipelines may recommend the same pattern with different release states."""
+    component = ComponentPlan(
+        component_id="component-1",
+        members=["extract", "load"],
+        recommended="agentic",
+        options={
+            "agentic": {
+                "recommended_patterns": [
+                    {"pipeline": "extract", "pattern": "Some connector", "release_state": "ga"},
+                    {"pipeline": "load", "pattern": "Some connector", "release_state": "unknown"},
+                ],
+                "release_disclosures": [
+                    {"pipeline": "load", "pattern": "Some connector", "label": "Release state not verified"}
+                ],
+            },
+        },
+    )
+    page = render_routing_review(_plan(components=[component]), None, None)
+
+    assert "Release state not verified" not in _section(page, "components")
+
+
 def test_a_group_routed_agentic_by_the_user_does_not_claim_an_enrich_pattern() -> None:
     chosen = ComponentPlan(
         component_id="component-1",

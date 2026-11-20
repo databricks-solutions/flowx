@@ -4,87 +4,87 @@ description: >
   Translate a source's parsed inventory into Databricks IR (intermediate representation): run
   deterministic translators for known types, then agentic (LLM-assisted) translation for the gaps.
   Phase 2 of the flowx migration workflow; routes to a source-specific guide.
-triggers:
-  - "convert pipelines"
-  - "translate pipelines"
-  - "convert ADF"
-  - "convert airflow"
-  - "run translation"
+  Use when the user asks to convert or translate ADF or Airflow pipelines, or to run the
+  translation.
 ---
 
-# Convert Source to Databricks IR
+# Convert the inventory to Databricks IR
 
-Convert a source's discovered inventory into Databricks intermediate representation (IR). This is
-phase 2 of the flowx migration workflow; it produces a transient translation report under
-`<output_dir>/.work/` that the `flowx-package` skill turns into a Databricks Asset Bundle.
+Phase 2 of the flowx workflow. Convert reads the source again (the same path discover read; it does not read
+`<output_dir>/metadata/inventory.json`) and writes a translation report under `<output_dir>/.work/`:
+deterministic translators handle the known types, and the gaps are left for agentic translation. The
+`flowx-package` skill turns the report into a bundle. Translation is source-specific, so each source has
+its own guide.
 
-Translation is **source-specific** (ADF activity translators vs. Airflow operator mapping), so this
-skill routes to the right source guide. The shared mechanics — how to run the phase, the report
-contract, and the `inspect`/`modify` machinery — live here. The legacy `merge_agentic` command is ADF-only; Airflow uses `resolve-agentic prepare|stage|apply` instead.
+## Before you start
 
-## Step 1 — Identify the source (required)
+- Discover must have run for this `<output_dir>`. Use the same source it used: it is recorded as
+  `"source"` in `metadata/inventory.json`. There is no default source.
 
-Use the same source the discover phase used (it is recorded as `"source"` in
-`<output_dir>/metadata/inventory.json`):
+## How to run
 
-- **Azure Data Factory / Fabric Data Factory** → source `adf` → read `sources/adf.md`
-- **Apache Airflow** → source `airflow` → read `sources/airflow.md`
+The common MCP and CLI rules are in [`../shared/running-flowx.md`](../shared/running-flowx.md).
 
-There is no default source. Every phase invocation passes `--source <name>` explicitly.
-
-## Step 2 — Follow the source guide
-
-Read the matching `sources/<source>.md` and follow it. ADF has a rich deterministic-first +
-agentic-gap flow with just-in-time configuration. Airflow converts deterministically first and may then use the separately reviewed, fingerprint-bound `flowx-resolve-airflow-gaps` workflow.
-
-## How to run this phase — MCP tool or venv CLI
-
-Run the **`setup`** skill first if you haven't.
-
-- **MCP tool (Genie Code, or local stdio):** call the single **`flowx`** tool with
-  `command="convert"` and `parameters` including `"source": "<source>"`, `"output_dir": "<dir>"` and
-  the same source key discover read (`adf_definitions`, `adf_volume_path`, `adf_workspace_path` or
+- **MCP:** `flowx(command="convert", parameters={"source": "<source>", "output_dir": "<dir>", ...})`
+  with the same source key discover read (`adf_definitions`, `adf_volume_path`, `adf_workspace_path` or
   `airflow_source_path`): convert reads the source again.
+- **CLI:** `"$PY" -m flowx.adapter convert --source <source> --source-path <path> --output-dir <dir> [--pipeline <name>]`
 
-- **venv CLI (local):**
+## Steps
 
-  ```bash
-  export PYTHONPATH="<plugin_dir>/src"
-  PY="$(cat <plugin_dir>/.migration-venv)"
-  "$PY" -m flowx.adapter convert --source <source> --source-path <path> --output-dir <dir> [--pipeline <name>]
-  ```
+### Step 1: Pick the source guide
 
-  `--source` is required. The convert phase writes `<output_dir>/.work/translation_report.json`.
+- Azure Data Factory or Fabric Data Factory: source `adf`, read [`references/adf.md`](references/adf.md).
+- Apache Airflow: source `airflow`, read [`references/airflow.md`](references/airflow.md).
 
-## The translation report contract (shared)
+### Step 2: Follow the source guide
 
-Every source's convert phase writes `<output_dir>/.work/translation_report.json` in the same shape:
-a single pipeline IR dict (keys `name`, `tasks`, optional `schedule`/`parameters`), or a
-`{"pipelines": [...]}` wrapper for many. The `flowx-package` phase consumes this regardless of
-source. IR serialization is source-neutral (`flowx.ir_serde`), so the report format is identical
-across ADF and Airflow.
+ADF converts deterministically first, then fills its agentic gaps and asks the just-in-time
+configuration. Airflow converts deterministically first and may then use the separately reviewed,
+fingerprint-bound `flowx-resolve-airflow-gaps` skill.
 
-## Shared adapter commands
+### Step 3: Use the shared report commands the guide calls for
 
-`inspect` and `modify` operate on the report rather than raw source definitions. The ADF guide uses them heavily; Airflow currently needs only the base conversion:
+`inspect` and `modify` work on the report, not on the source. The ADF guide uses them; Airflow needs only
+the base conversion. Their flags and the options the adapter raises are in
+[`../shared/translation-options.md`](../shared/translation-options.md).
 
-- `inspect <report>` — emit the full just-in-time option schema (each option annotated with a
-  `show_when` condition). Walk it locally; ask an option only when its `show_when` is satisfied.
-- `modify <report> --output-dir <dir> --answer OPTION_ID=VALUE ...` — validate and apply collected
-  answers, writing `.work/translation_report.stamped.json` + `metadata/configuration.json`.
-- `merge_agentic --report <report> --agentic-results <dir>` — **ADF only**. Fold agent-produced per-activity translations into an ADF report, filling convert's own agentic gaps. It refuses, writing nothing, any result landing in a pipeline the routing record routes agentic (fill those with `fill-agentic`). After routing, a merge written in place into the live `.work/translation_report.json` is also stored as a gap fill in `metadata/agentic_conversion.json`, so the next rebuild re-applies it on top of route's unchanged deterministic baseline; a merge written to a separate `--output` copy stores nothing, so a re-route does not keep it. Airflow's legacy name-based merge is disabled.
+- `inspect <report>`: the full just-in-time option schema, each option with a `show_when` condition. Walk
+  it locally and ask an option only when its `show_when` is satisfied.
+- `modify <report> --output-dir <dir> --answer OPTION_ID=VALUE ...`: validates and applies the answers,
+  writing `.work/translation_report.stamped.json` and `metadata/configuration.json`.
+- `merge_agentic --report <report> --agentic-results <dir>`: ADF only. Fills convert's own agentic gaps
+  with the agent's per-activity translations. It refuses, and writes nothing, if a result lands in a
+  pipeline routed agentic (fill those with `fill-agentic`). After routing, a re-route keeps an in-place
+  merge but not a merge written to an `--output` copy. Airflow's name-based merge is disabled; Airflow
+  uses `resolve-agentic prepare|stage|apply` instead.
 
-## Output artifacts (shared, transient under `<output_dir>/.work/`)
+## Output
 
-| File | Description |
-|---|---|
-| `.work/translation_report.json` | Full translation report with IR for all tasks |
-| `.work/<pipeline>.json` | Per-pipeline Databricks IR |
-| `.work/gaps.json` | Unmapped source constructs; agentic inputs for ADF and review-only gaps for Airflow |
-| `.work/translation_report.stamped.json` | Configuration-stamped report (written by `modify`) |
+Under `<output_dir>/.work/` (transient; layout in [`../shared/output-folder.md`](../shared/output-folder.md)):
+`translation_report.json` (the report with the IR for every task), `<pipeline>.json` (per-pipeline IR),
+`gaps.json` (unmapped constructs: agentic inputs for ADF, review-only gaps for Airflow), and
+`translation_report.stamped.json` when `modify` runs.
+
+Every source writes the report in the same shape: one pipeline IR dict (keys `name`, `tasks`, optional
+`schedule` and `parameters`), or a `{"pipelines": [...]}` wrapper for many. IR serialization is
+source-neutral (`flowx.ir_serde`), so `flowx-package` reads it the same way for every source.
 
 ## Reference
 
-- `sources/adf.md` — ADF translation: deterministic engine, agentic gaps, just-in-time config,
-  notify motifs, metadata-driven consolidation. See also `references/activity-mapping.md`.
-- `sources/airflow.md` — Airflow deterministic-first translation plus reviewed leaf-gap resolution.
+- [`references/adf.md`](references/adf.md): ADF translation: the deterministic engine, agentic gaps,
+  just-in-time configuration, notify motifs and metadata-driven consolidation.
+- [`references/adf-coverage.md`](references/adf-coverage.md): what flowx does with each ADF feature area, and
+  what you and the user must do.
+- [`references/activity-mapping.md`](references/activity-mapping.md): each ADF activity type and its
+  strategy.
+- [`references/expression-functions.md`](references/expression-functions.md): how each ADF expression
+  function translates.
+- [`references/airflow.md`](references/airflow.md): Airflow deterministic-first translation plus reviewed
+  leaf-gap resolution.
+- [`../shared/airflow-coverage.md`](../shared/airflow-coverage.md): what the Airflow path converts and what it
+  does not.
+- [`../shared/translation-options.md`](../shared/translation-options.md): the `inspect` and `modify` commands
+  and the options they raise.
+- [`../shared/running-flowx.md`](../shared/running-flowx.md) and
+  [`../shared/output-folder.md`](../shared/output-folder.md): running a phase and the output folder.

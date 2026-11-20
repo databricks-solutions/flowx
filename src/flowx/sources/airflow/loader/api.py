@@ -15,10 +15,13 @@ from flowx.sources.airflow import audit as source_audit
 from flowx.sources.airflow.loader.ast_utils import _expand_top_level_loops
 from flowx.sources.airflow.loader.dag_discovery import (
     _failed_dag_declaration_pipeline,
+    _failed_dag_generator_pipeline,
     _module_for_dag,
     _top_level_dag_declarations,
+    dag_generator,
 )
 from flowx.sources.airflow.loader.lowering import _load_airflow_module
+from flowx.sources.airflow.loader.reconcile import pause_unfinished_schedule
 from flowx.utils import to_lowercase_key
 
 _HOST_PATTERN = re.compile(r"https://([A-Za-z0-9._-]*(?:azuredatabricks\.net|databricks\.com|cloud\.databricks\.com))")
@@ -37,11 +40,17 @@ def load_airflow_dags(
     *,
     dbt_mode: str = "static",
     source_file: str | None = None,
+    source_root: Path | None = None,
 ) -> list[Pipeline]:
-    """Parses every independently declared Airflow DAG in a Python file."""
+    """Parses every independently declared Airflow DAG in a Python file.
+
+    *source_root* is the folder discover was pointed at; project code the DAG imports is read from the
+    DAG's folder up to it.
+    """
     source = Path(dag_path).read_text(encoding="utf-8")
     module = _expand_top_level_loops(ast.parse(source))
     declarations = _top_level_dag_declarations(module)
+    generator = dag_generator(module, declarations)
     pipelines: list[Pipeline] = []
     for declaration in declarations:
         if declaration.unsupported_reason is not None:
@@ -64,6 +73,16 @@ def load_airflow_dags(
                     other.variable for other in declarations if other is not declaration and other.variable
                 ),
                 source_file=source_file or dag_path.name,
+                source_root=source_root,
+            )
+        )
+    if generator is not None:
+        pipelines.append(
+            _failed_dag_generator_pipeline(
+                dag_path,
+                generator,
+                source_file=source_file or dag_path.name,
+                name=f"{Path(dag_path).stem}__generated_dags" if declarations else None,
             )
         )
     return pipelines
@@ -95,6 +114,7 @@ def load_pipelines(
             dag_path,
             dbt_mode=dbt_mode,
             source_file=source_audit.source_label(dag_path, root),
+            source_root=root,
         )
     ]
     if pipeline is not None:
@@ -145,6 +165,7 @@ def _replace_excluded_dag_references(pipelines: list[Pipeline], excluded: set[st
                 pipeline.not_translatable.append(entry)
                 if pipeline.reconciliation_status != "failed":
                     pipeline.reconciliation_status = "verified_with_gaps"
+                pause_unfinished_schedule(pipeline)
                 pipeline.audit["agentic_count"] = int(pipeline.audit.get("agentic_count", 0)) + 1
                 pipeline.audit["deterministic_count"] = max(0, int(pipeline.audit.get("deterministic_count", 0)) - 1)
 
@@ -154,7 +175,8 @@ def discover_dags(source_path: Path) -> list[Path]:
 
     Accepts either a single ``.py`` file or a directory (scanned recursively).
     Discovery uses the same static declaration model as loading, including
-    import aliases and qualified TaskFlow decorators.
+    import aliases and qualified TaskFlow decorators. A file that builds its DAGs through dag-factory,
+    gusty, or ``globals()`` is included so it is reported as a failed source rather than skipped.
     """
     source_path = Path(source_path)
     candidates = [source_path] if source_path.is_file() else sorted(source_path.rglob("*.py"))
@@ -166,7 +188,7 @@ def discover_dags(source_path: Path) -> list[Path]:
             module = _expand_top_level_loops(ast.parse(candidate.read_text(encoding="utf-8")))
         except (OSError, SyntaxError):
             continue
-        if _top_level_dag_declarations(module):
+        if _top_level_dag_declarations(module) or dag_generator(module) is not None:
             dags.append(candidate)
     return dags
 

@@ -314,13 +314,14 @@ def _switch_pipeline_json() -> dict:
 
 class TestSwitchNesting:
     def test_parse_populates_switch_cases_and_default(self):
-        """parse_activity captures cases[].activities (keyed by value) + defaultActivities."""
+        """parse_activity captures each case's value and activities, in order, plus defaultActivities."""
         pipeline = _parse_pipeline_json(_switch_pipeline_json())
         switch = next(a for a in pipeline.activities if a.type == "Switch")
         assert switch.switch_cases is not None
-        assert set(switch.switch_cases) == {"prod", "dev"}
-        assert [a.name for a in switch.switch_cases["prod"]] == ["ProdNotebook", "RunProdChild"]
-        assert [a.name for a in switch.switch_cases["dev"]] == ["DevNotebook"]
+        assert [(case.value, [a.name for a in case.activities]) for case in switch.switch_cases] == [
+            ("prod", ["ProdNotebook", "RunProdChild"]),
+            ("dev", ["DevNotebook"]),
+        ]
         assert switch.switch_default_activities is not None
         assert [a.name for a in switch.switch_default_activities] == ["UnknownEnvNotebook"]
 
@@ -346,7 +347,7 @@ class TestSwitchNesting:
             assert expected in names
 
     def test_switch_cases_sharing_a_value_keep_every_activity(self):
-        """A repeated case value adds its activities to that value in declared order, so every walk counts them all."""
+        """Every declared case stays its own case, empty or sharing a value, so every walk reads one list."""
         data = {
             "name": "routing",
             "properties": {
@@ -369,10 +370,12 @@ class TestSwitchNesting:
         pipeline = _parse_pipeline_json(data)
         switch = pipeline.activities[0]
         assert switch.switch_cases is not None
-        assert {value: [a.name for a in acts] for value, acts in switch.switch_cases.items()} == {
-            "full": ["CopyA", "CopyC"],
-            "delta": ["CopyB"],
-        }
+        assert [(case.value, [a.name for a in case.activities]) for case in switch.switch_cases] == [
+            ("full", ["CopyA"]),
+            ("delta", ["CopyB"]),
+            ("full", []),
+            ("full", ["CopyC"]),
+        ]
         definitions = AdfDefinitions(pipelines=[pipeline])
         [row] = build_profile_rows(definitions)
         assert row["activities"] == 4

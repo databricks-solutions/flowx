@@ -204,7 +204,14 @@ def _route_locked(args: argparse.Namespace) -> int:
     from flowx import routing
     from flowx.models.conversion_plan import PLAN_FILENAME, ConversionPlan
     from flowx.reporting.routing_review import write_routing_review
-    from flowx.route_agentic import REPORT_FILENAME, WORK_DIRNAME, apply_plan, missing_report_message
+    from flowx.route_agentic import (
+        REPORT_FILENAME,
+        WORK_DIRNAME,
+        apply_plan,
+        load_agentic_output,
+        missing_report_message,
+        stored_output_name_clashes,
+    )
 
     inventory_path = args.output_dir / "metadata" / "inventory.json"
     if not inventory_path.exists():
@@ -237,6 +244,19 @@ def _route_locked(args: argparse.Namespace) -> int:
         return 1
 
     violations = routing.validate_plan(plan, inventory)
+    if not violations:
+        # Checked before the plan is recorded: refusing after it would leave a report routed under another
+        # plan, which fill-agentic refuses too, so the clashing fill could not be redone. It reads the plan as
+        # route records it, since an edited plan's groupings carry only their ids and accepted flags.
+        # A plan with a pending decision is recorded without being applied, so it never reads the store.
+        to_record = routing.build_plan(inventory, plan)
+        if not to_record.pending_components():
+            try:
+                violations = stored_output_name_clashes(
+                    to_record.to_dict(), load_agentic_output(args.output_dir).outputs
+                )
+            except (OSError, ValueError) as error:
+                violations = [f"metadata/agentic_conversion.json is unreadable: {error}"]
     if violations:
         _emit_json({"ok": False, "violations": violations, "components": 0}, args.out)
         return 1
@@ -290,7 +310,8 @@ def _route_locked(args: argparse.Namespace) -> int:
 def _run_fill_agentic(args: argparse.Namespace) -> int:
     """Implements ``fill-agentic``: fill a routed-agentic unit with the agent's pipelines.
 
-    Replaces a routed-agentic unit's pipelines (``--members`` as a comma-separated list) with the
+    Replaces a routed-agentic unit's pipelines (one ``--member`` per name, or ``--members`` as a
+    comma-separated list) with the
     agent-authored pipeline(s) read from ``--pipelines-path`` (a JSON list of pipeline IR dicts, each
     typically carrying ``AgenticComponentActivity`` nodes), and stores them in
     ``metadata/agentic_conversion.json``. The membership must exactly match a routed-agentic component
@@ -300,9 +321,12 @@ def _run_fill_agentic(args: argparse.Namespace) -> int:
     """
     from flowx.route_agentic import apply_agentic_output
 
-    members = [member.strip() for member in args.members.split(",") if member.strip()]
+    if args.member is not None:
+        members = [member for member in args.member if member]
+    else:
+        members = [member.strip() for member in args.members.split(",") if member.strip()]
     if not members:
-        print("fill-agentic requires a non-empty --members list.", file=sys.stderr)
+        print("fill-agentic requires a non-empty --member or --members list.", file=sys.stderr)
         return 2
     try:
         authored = json.loads(Path(args.pipelines_path).read_text(encoding="utf-8"))
@@ -747,9 +771,18 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Migration output directory (reads and rewrites .work/translation_report.json).",
     )
-    fill_agentic.add_argument(
+    member_forms = fill_agentic.add_mutually_exclusive_group(required=True)
+    member_forms.add_argument(
+        "--member",
+        action="append",
+        dest="member",
+        help=(
+            "One pipeline name of the routed-agentic component or accepted grouping to replace, taken exactly as "
+            "given; repeat it for each member. Use this form when a name holds a comma."
+        ),
+    )
+    member_forms.add_argument(
         "--members",
-        required=True,
         help="Comma-separated pipeline names of the routed-agentic component or accepted grouping to replace.",
     )
     fill_agentic.add_argument(
@@ -1090,14 +1123,16 @@ def _run_modify(args: argparse.Namespace) -> int:
 
     from flowx.motifs.collapsed_lookup_refs import repair_collapsed_lookup_references
 
-    stamped_pipelines = [
-        repair_collapsed_lookup_references(
-            _stamp_lookup_values_into_metadata_driven_motifs(
-                apply_configuration(pipeline, configuration), lookup_values
-            )
-        )
-        for pipeline in pipelines
-    ]
+    configured_pipelines = [apply_configuration(pipeline, configuration) for pipeline in pipelines]
+    try:
+        with_lookup_values = [
+            _stamp_lookup_values_into_metadata_driven_motifs(pipeline, lookup_values)
+            for pipeline in configured_pipelines
+        ]
+    except ValueError as error:
+        print(f"Invalid --lookup-csv: {error}", file=sys.stderr)
+        return 2
+    stamped_pipelines = [repair_collapsed_lookup_references(pipeline) for pipeline in with_lookup_values]
     # Prompt-time provisioning: create/reuse the Databricks notification destination for any non-email
     # activity_and_notify spec now, so its resolved id is baked into the report (email needs none).
     provisioned_pipelines = []
@@ -1174,16 +1209,29 @@ def _stamp_lookup_values_into_metadata_driven_motifs(pipeline, lookup_values: li
         A new :class:`Pipeline` whose metadata-driven motif activities
         carry the supplied lookup rows.  When *lookup_values* is empty
         the pipeline is returned unchanged.
+
+    Raises:
+        ValueError: When the rows would go into a consolidated pipeline
+            and two of them name the same source or destination table.
     """
     if not lookup_values:
         return pipeline
     import dataclasses as _dataclasses
 
     from flowx.models.ir import MotifActivity as _MotifActivity
+    from flowx.preparer.activity_preparers.motif import repeated_table_names
 
     stamped_tasks = []
     for task in pipeline.tasks:
         if isinstance(task, _MotifActivity) and task.consolidate_metadata_driven:
+            repeated = repeated_table_names(lookup_values)
+            if repeated:
+                raise ValueError(
+                    f"rows repeat the table name {', '.join(repeated)}; one Lakeflow Connect pipeline can't "
+                    "ingest two tables with the same name, even from different schemas, or write two into one "
+                    "destination table. Keep the for-each port "
+                    "(metadata_driven_consolidate=keep), or consolidate only a lookup whose table names are distinct."
+                )
             stamped_tasks.append(_dataclasses.replace(task, lookup_values=list(lookup_values)))
         else:
             stamped_tasks.append(task)

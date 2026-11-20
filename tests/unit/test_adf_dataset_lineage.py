@@ -2787,3 +2787,386 @@ def test_an_empty_container_value_is_not_a_dynamic_container(empty_container: di
     _, writes = activity_data_assets(_dynamic_container_copy("W", dataset="ds_out", produced=True), definitions)
 
     assert writes[0].signature == "FP[landing/orders]/FN[]"
+
+
+_ODD_TYPE_PROPERTIES = [["not", "an", "object"], "not an object"]
+
+
+@pytest.mark.parametrize("odd_type_properties", _ODD_TYPE_PROPERTIES)
+@pytest.mark.parametrize("dataset_type", ["AzureSqlTable", "DelimitedText"])
+def test_a_dataset_whose_type_properties_is_not_an_object_has_no_identity(
+    dataset_type: str, odd_type_properties: object
+) -> None:
+    """A list or string ``typeProperties`` on a dataset gives no identity or signature instead of crashing."""
+    dataset = AdfDataset(
+        name="ds_odd",
+        type=dataset_type,
+        properties={"typeProperties": odd_type_properties, "linkedServiceName": {"referenceName": "ls_lake"}},
+    )
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_odd": dataset},
+        linked_services={"ls_lake": _adls_linked_service("ls_lake", account="acctone")},
+    )
+    reads, _ = activity_data_assets(_copy("Copy", source="ds_odd", sink="ds_odd"), definitions)
+
+    assert reads[0].identity is None
+    assert reads[0].signature == ""
+
+
+@pytest.mark.parametrize("odd_type_properties", _ODD_TYPE_PROPERTIES)
+def test_a_linked_service_whose_type_properties_is_not_an_object_names_no_store(odd_type_properties: object) -> None:
+    """A list or string ``typeProperties`` on a linked service is read as naming no server or account.
+
+    So the SQL table falls back to the linked service name, as for a server hidden in a secret,
+    and the file, whose account cannot be read, has no identity.
+    """
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_orders": _table_dataset("ds_orders", schema="dbo", table="orders", linked_service="ls_sql"),
+            "ds_landing": _adls_dataset(
+                "ds_landing", file_system="raw", folder_path="landing", linked_service="ls_lake", file_name="a.csv"
+            ),
+        },
+        linked_services={
+            "ls_sql": AdfLinkedService(
+                name="ls_sql", type="AzureSqlDatabase", properties={"typeProperties": odd_type_properties}
+            ),
+            "ls_lake": AdfLinkedService(
+                name="ls_lake", type="AzureBlobFS", properties={"typeProperties": odd_type_properties}
+            ),
+        },
+    )
+    reads, writes = activity_data_assets(_copy("Copy", source="ds_orders", sink="ds_landing"), definitions)
+
+    assert reads[0].identity == "ls_sql/dbo.orders"
+    assert writes[0].identity is None
+
+
+@pytest.mark.parametrize(
+    "wrapped_table",
+    [{"value": "Orders", "type": "Expression"}, {"value": "Orders", "type": "SecureString"}, {"value": "Orders"}],
+)
+def test_a_table_name_wrapped_in_a_value_object_is_read_as_the_server_is(wrapped_table: dict) -> None:
+    """A table name in an Expression, SecureString or untyped ``{"value": ...}`` object is read by its value."""
+    assert _orders_identity({"schema": "dbo", "table": wrapped_table}) == _orders_identity(
+        {"schema": "dbo", "table": "Orders"}
+    )
+
+
+def test_a_masked_secure_string_table_name_has_no_identity() -> None:
+    """An export writes a SecureString as ``**********``, which names no table, so two such datasets never join."""
+    masked = {"value": "**********", "type": "SecureString"}
+
+    assert _orders_identity({"schema": "dbo", "table": masked}) is None
+
+
+@pytest.mark.parametrize(
+    ("separate_fields", "same_table", "other_table"),
+    [
+        ({"schema": "dbo", "table": "a.b"}, {"tableName": "[dbo].[a.b]"}, {"tableName": "dbo.a.b"}),
+        (
+            {"schema": "sales.eu", "table": "Orders"},
+            {"tableName": "[sales.eu].Orders"},
+            {"tableName": "sales.eu.Orders"},
+        ),
+        ({"schema": "dbo", "table": "a]b"}, {"tableName": "[dbo].[a]]b]"}, {"tableName": "dbo.a]b"}),
+    ],
+)
+def test_a_dot_inside_a_separate_schema_or_table_field_stays_inside_that_part(
+    separate_fields: dict, same_table: dict, other_table: dict
+) -> None:
+    """``schema=dbo, table=a.b`` is ``[dbo].[a.b]``; only a legacy ``tableName`` is split on its dots."""
+    identity = _orders_identity(separate_fields)
+
+    assert identity is not None
+    assert identity == _orders_identity(same_table)
+    assert identity != _orders_identity(other_table)
+
+
+@pytest.mark.parametrize(
+    "separate_fields",
+    [
+        {"schema": "dbo", "table": "Orders"},
+        {"schema": "[dbo]", "table": "[Orders]"},
+        {"schema": " dbo", "table": "Orders "},
+    ],
+)
+def test_plain_separate_fields_still_match_the_legacy_table_name(separate_fields: dict) -> None:
+    """A schema and table with nothing to quote read as ``dbo.Orders``, as ``tableName=dbo.Orders`` does."""
+    assert _orders_identity(separate_fields) == _orders_identity({"tableName": "dbo.Orders"}) is not None
+
+
+def test_double_quoted_separate_fields_match_the_double_quoted_table_name() -> None:
+    """A double-quoted schema and table are kept as written, as a double-quoted ``tableName`` is."""
+    assert _orders_identity({"schema": '"dbo"', "table": '"Orders"'}) == _orders_identity(
+        {"tableName": '"dbo"."Orders"'}
+    )
+
+
+def test_a_dotted_table_field_with_no_schema_reads_as_a_qualified_name() -> None:
+    """With no schema, ``table=dbo.Orders`` (a generic dataset given a qualified name) is ``dbo.Orders``."""
+    assert _orders_identity({"table": "dbo.Orders"}) == _orders_identity({"schema": "dbo", "table": "Orders"})
+
+
+def test_an_empty_type_properties_object_still_reads_the_flattened_fields() -> None:
+    """``typeProperties: {}`` beside fields written straight under ``properties`` reads those fields, as before."""
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={
+            "ds_landing": AdfDataset(
+                name="ds_landing",
+                type="DelimitedText",
+                properties={
+                    "typeProperties": {},
+                    "location": {"fileSystem": "raw", "folderPath": "landing", "fileName": "a.csv"},
+                    "linkedServiceName": {"referenceName": "ls_lake"},
+                },
+            )
+        },
+        linked_services={"ls_lake": _adls_linked_service("ls_lake", account="acctone")},
+    )
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_landing"), definitions) is not None
+
+
+_MASKED = {"type": "SecureString", "value": "**********"}
+
+
+@pytest.mark.parametrize(("masked_folder", "masked_file"), [(True, False), (False, True), (True, True)])
+def test_datasets_with_masked_folders_or_file_names_never_link(masked_folder: bool, masked_file: bool) -> None:
+    """An export writes a SecureString as ``**********``, which names no folder or file, so the two stay apart.
+
+    Each read and write passes a literal folder at the call site, so a signature could form; a masked
+    part must still block both the identity and the signature.
+    """
+
+    def _masked_dataset(name: str) -> AdfDataset:
+        location = {
+            "type": "AzureBlobFSLocation",
+            "fileSystem": "raw",
+            "folderPath": _MASKED if masked_folder else "@dataset().folderPath",
+            "fileName": _MASKED if masked_file else "a.csv",
+        }
+        return AdfDataset(
+            name=name,
+            type="DelimitedText",
+            properties={"typeProperties": {"location": location}, "linkedServiceName": {"referenceName": "ls_lake"}},
+        )
+
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_one": _masked_dataset("ds_one"), "ds_two": _masked_dataset("ds_two")},
+        linked_services={"ls_lake": _adls_linked_service("ls_lake", account="acctone")},
+    )
+
+    def _copy_with_folder(name: str, dataset: str, *, produced: bool) -> AdfActivity:
+        reference = AdfDatasetReference(reference_name=dataset, parameters={"folderPath": "landing"})
+        return AdfActivity(
+            name=name, type="Copy", **({"outputs": [reference]} if produced else {"inputs": [reference]})
+        )
+
+    _, writes = activity_data_assets(_copy_with_folder("Write", "ds_one", produced=True), definitions)
+    reads, _ = activity_data_assets(_copy_with_folder("Read", "ds_two", produced=False), definitions)
+
+    assert writes[0].identity is None
+    assert reads[0].identity is None
+    assert "*" not in writes[0].signature and "*" not in reads[0].signature
+    assert data_edges_from_endpoints([("Write", writes[0])], [("Read", reads[0])]) == []
+
+
+def test_a_masked_schema_gives_no_table_identity() -> None:
+    """A masked schema is unknown, not absent, so ``**********.Orders`` never reads as a bare ``Orders``."""
+    assert _orders_identity({"schema": _MASKED, "table": "Orders"}) is None
+
+
+def test_a_table_name_that_resolves_to_a_mask_has_no_identity() -> None:
+    """A global parameter whose value is masked is caught after it resolves, not only when written directly."""
+    definitions = _definitions(
+        ds_global=AdfDataset(
+            name="ds_global",
+            type="AzureSqlTable",
+            properties={
+                "linkedServiceName": {"referenceName": "ls_sql"},
+                "typeProperties": {"schema": "dbo", "table": "@pipeline().globalParameters.table"},
+            },
+        )
+    )
+    context = TranslationContext(global_parameters=MappingProxyType({"table": "**********"}))
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_global"), definitions, context) is None
+
+
+@pytest.mark.parametrize(
+    ("file_system", "parameters"),
+    [
+        ("raw*****", {}),
+        (
+            "@dataset().a",
+            {"a": {"type": "String", "defaultValue": "@dataset().b"}, "b": {"type": "String", "defaultValue": "*****"}},
+        ),
+    ],
+)
+def test_a_part_masked_or_chained_masked_container_does_not_join_by_folder_shape(
+    file_system: str, parameters: dict
+) -> None:
+    """A container that holds ``*``, as written or at the end of a chain of parameters, names no provable store."""
+    definitions = _landing_definitions(ds_a=(file_system, "accta"), ds_b=(file_system, "accta"))
+    for name in ("ds_a", "ds_b"):
+        definitions.datasets[name].properties["parameters"] = dict(parameters)
+    _, writes = activity_data_assets(_landing_copy("WriteA", dataset="ds_a", produced=True), definitions)
+    reads, _ = activity_data_assets(_landing_copy("ReadB", dataset="ds_b", produced=False), definitions)
+
+    assert writes[0].signature == ""
+    assert reads[0].signature == ""
+
+
+def test_a_folder_passed_masked_at_the_call_site_forms_no_signature() -> None:
+    """A call site that passes its folder as a masked SecureString names no folder, so no signature joins on it."""
+    definitions = _landing_definitions(ds_a=("raw", "accta"), ds_b=("raw", "accta"))
+
+    def _masked_call(name: str, dataset: str, *, produced: bool) -> AdfActivity:
+        reference = AdfDatasetReference(reference_name=dataset, parameters={"folderPath": _MASKED})
+        return AdfActivity(
+            name=name, type="Copy", **({"outputs": [reference]} if produced else {"inputs": [reference]})
+        )
+
+    _, writes = activity_data_assets(_masked_call("WriteA", "ds_a", produced=True), definitions)
+    reads, _ = activity_data_assets(_masked_call("ReadB", "ds_b", produced=False), definitions)
+
+    assert writes[0].signature == ""
+    assert reads[0].signature == ""
+
+
+def test_a_masked_call_site_value_the_path_does_not_use_keeps_the_signature() -> None:
+    """Only a mask in the folder or file name blocks the signature; an unrelated masked parameter does not."""
+    definitions = _landing_definitions(ds_a=("raw", "accta"))
+    run_folder = {"value": "@concat('landing/', pipeline().parameters.run)", "type": "Expression"}
+    reference = AdfDatasetReference(reference_name="ds_a", parameters={"folderPath": run_folder, "token": _MASKED})
+    _, writes = activity_data_assets(AdfActivity(name="WriteA", type="Copy", outputs=[reference]), definitions)
+
+    assert writes[0].identity is None
+    assert writes[0].signature.startswith("ST[raw@accta]/FP[landing/")
+
+
+def test_a_masked_connection_string_still_falls_back_to_the_linked_service_name() -> None:
+    """The mask check is on name parts only: a masked connection string is still a hidden server, as before."""
+    assert _sql_store_identity({"connectionString": _MASKED}) == "ls_sql/dbo.Orders"
+
+
+def test_a_masked_url_still_lets_the_service_endpoint_name_the_account() -> None:
+    """A masked ``url`` names no account, so the account is still read from the next field that does."""
+    assert (
+        _storage_account_identity({"url": _MASKED, "serviceEndpoint": "https://acct.blob.core.windows.net/"})
+        == _storage_account_identity({"serviceEndpoint": "https://acct.blob.core.windows.net/"})
+        is not None
+    )
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [
+        {"schema": "dbo", "table": "@concat('prefix_', pipeline().globalParameters.secret)"},
+        {"schema": "@concat('s_', pipeline().globalParameters.secret)", "table": "Orders"},
+    ],
+)
+def test_a_mask_joined_to_other_text_in_a_table_name_has_no_identity(type_properties: dict) -> None:
+    """``prefix_*****`` is as unknown as ``*****``: the mask is caught in the resolved name."""
+    definitions = _definitions(
+        ds_global=AdfDataset(
+            name="ds_global",
+            type="AzureSqlTable",
+            properties={"linkedServiceName": {"referenceName": "ls_sql"}, "typeProperties": type_properties},
+        )
+    )
+    context = TranslationContext(global_parameters=MappingProxyType({"secret": "*****"}))
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_global"), definitions, context) is None
+
+
+def test_a_mask_joined_to_other_text_in_a_folder_has_no_identity() -> None:
+    """``landing/*****`` from a masked global parameter is an unknown folder, so the file has no identity."""
+    definitions = _definitions(
+        ds_landing=_adls_dataset(
+            "ds_landing",
+            file_system="raw",
+            folder_path="@concat('landing/', pipeline().globalParameters.secret)",
+            linked_service="ls_lake",
+            file_name="a.csv",
+        )
+    )
+    definitions.linked_services["ls_lake"] = _adls_linked_service("ls_lake", account="acct")
+    context = TranslationContext(global_parameters=MappingProxyType({"secret": "*****"}))
+
+    assert resolve_dataset_identity(AdfDatasetReference(reference_name="ds_landing"), definitions, context) is None
+
+
+@pytest.mark.parametrize(("sub_default", "file_default"), [(_MASKED, "a.csv"), ("orders", "*****")])
+def test_a_masked_dataset_default_in_the_folder_or_file_forms_no_signature(
+    sub_default: object, file_default: object
+) -> None:
+    """A masked default reaches the path through the dataset's own parameters, so it is caught in the shape."""
+    dataset = _adls_dataset(
+        "ds_masked",
+        file_system="raw",
+        folder_path="@concat('landing/', dataset().sub)",
+        linked_service="ls_lake",
+        file_name="@dataset().fn",
+    )
+    dataset.properties["parameters"] = {
+        "sub": {"type": "String", "defaultValue": sub_default},
+        "fn": {"type": "String", "defaultValue": file_default},
+    }
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_masked": dataset},
+        linked_services={"ls_lake": _adls_linked_service("ls_lake", account="acct")},
+    )
+    run_folder = {"value": "@concat('landing/', pipeline().parameters.run)", "type": "Expression"}
+    reference = AdfDatasetReference(reference_name="ds_masked", parameters={"folderPath": run_folder})
+    _, writes = activity_data_assets(AdfActivity(name="W", type="Copy", outputs=[reference]), definitions)
+
+    assert writes[0].identity is None
+    assert writes[0].signature == ""
+
+
+def test_an_unused_masked_file_name_at_the_call_site_keeps_the_signature() -> None:
+    """A location that reads only ``dir`` and writes its own file name ignores a masked ``fileName`` beside it."""
+    dataset = _adls_dataset(
+        "ds_dir", file_system="raw", folder_path="@dataset().dir", linked_service="ls_lake", file_name="a.csv"
+    )
+    definitions = AdfDefinitions(
+        pipelines=[],
+        datasets={"ds_dir": dataset},
+        linked_services={"ls_lake": _adls_linked_service("ls_lake", account="acct")},
+    )
+    run_folder = {"value": "@concat('landing/', pipeline().parameters.run)", "type": "Expression"}
+    reference = AdfDatasetReference(reference_name="ds_dir", parameters={"dir": run_folder, "fileName": _MASKED})
+    _, writes = activity_data_assets(AdfActivity(name="W", type="Copy", outputs=[reference]), definitions)
+
+    assert writes[0].signature == "ST[raw@acct]/FP[landing/<P>]/FN[a.csv]"
+
+
+@pytest.mark.parametrize(
+    "type_properties",
+    [{"schema": "dbo", "table": "[Sales*Archive]"}, {"schema": "dbo", "table": "Sales*Archive"}],
+)
+def test_a_single_star_in_a_table_name_is_not_a_mask(type_properties: dict) -> None:
+    """A bracket-quoted SQL name may hold one ``*``; only a run of them marks a mask."""
+    assert _orders_identity(type_properties) is not None
+
+
+def test_a_single_star_in_a_file_name_is_not_a_mask() -> None:
+    """A blob name such as ``report*2024.csv`` keeps its identity; only a run of ``*`` marks a mask."""
+    definitions = _definitions(
+        ds_report=_adls_dataset(
+            "ds_report", file_system="raw", folder_path="exports", linked_service="ls_lake", file_name="report*2024.csv"
+        )
+    )
+    definitions.linked_services["ls_lake"] = _adls_linked_service("ls_lake", account="acct")
+
+    assert (
+        resolve_dataset_identity(AdfDatasetReference(reference_name="ds_report"), definitions)
+        == "abfss://raw@acct.dfs.core.windows.net/exports/report*2024.csv"
+    )

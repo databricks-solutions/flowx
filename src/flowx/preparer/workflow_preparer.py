@@ -13,6 +13,7 @@ from flowx.models.ir import (
     AgenticComponentActivity,
     AppendVariableActivity,
     CopyActivity,
+    DbtCommandActivity,
     DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
@@ -78,6 +79,7 @@ class PreparedWorkflow:
     schedule: dict[str, Any] | None = None
     bundle_variables: dict[str, dict[str, Any]] = field(default_factory=dict)
     timeout_seconds: int | None = None
+    max_concurrent_runs: int | None = None
     email_notifications: dict[str, list[str]] = field(default_factory=dict)
     source: str | None = None
     description: str | None = None
@@ -154,6 +156,7 @@ def prepare_activity(
         append_variable,
         copy,
         databricks_job,
+        dbt_command,
         dbt_factory,
         delete,
         execute_pipeline,
@@ -193,6 +196,7 @@ def prepare_activity(
         WaitActivity: wait.prepare,
         MotifActivity: motif.prepare,
         DbtFactoryActivity: dbt_factory.prepare,
+        DbtCommandActivity: dbt_command.prepare,
     }
 
     preparer_fn = dispatch.get(type(activity))
@@ -460,6 +464,7 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
         schedule=pipeline.schedule,
         bundle_variables=dict(pipeline.bundle_variables),
         timeout_seconds=pipeline.timeout_seconds if is_airflow else None,
+        max_concurrent_runs=pipeline.max_concurrent_runs if is_airflow else None,
         email_notifications=dict(pipeline.email_notifications) if is_airflow else {},
         source=str(pipeline.tags.get("source")) if pipeline.tags.get("source") else None,
         description=pipeline.description if is_airflow else None,

@@ -2,6 +2,14 @@
 
 This reference defines the mapping between Azure Data Factory activity types and their translation strategy in flowx.
 
+## Contents
+
+- [Strategy Definitions](#strategy-definitions)
+- [Activity Mapping Table](#activity-mapping-table)
+- [Deterministic Translator Details](#deterministic-translator-details)
+- [Agentic Translation Notes](#agentic-translation-notes)
+- [Expression Function Coverage](#expression-function-coverage)
+
 ## Strategy Definitions
 
 - **Deterministic** — Handled by a built-in Python translator module. Fast, reliable, no LLM required. These mappings are well-defined and produce consistent output.
@@ -12,7 +20,7 @@ This reference defines the mapping between Azure Data Factory activity types and
 
 | ADF Activity Type | Strategy | Translator / Skill | Databricks Target |
 |---|---|---|---|
-| Copy | Deterministic | `copy.py` | `notebook_task` (Auto Loader / COPY INTO / JDBC) or `pipeline_task` (DLT) |
+| Copy | Deterministic | `copy.py` | `notebook_task` (Auto Loader, JDBC, REST pagination or a generic Spark read; an SDP scaffold notebook with `copy_activity_paradigm=sdp`), or `pipeline_task` on a Lakeflow Connect pipeline with `use_lakeflow_connectors=lakeflow_connect` |
 | DatabricksNotebook | Deterministic | `notebook.py` | `notebook_task` |
 | DatabricksSparkJar | Deterministic | `spark_jar.py` | `spark_jar_task` |
 | DatabricksSparkPython | Deterministic | `spark_python.py` | `spark_python_task` |
@@ -36,18 +44,27 @@ This reference defines the mapping between Azure Data Factory activity types and
 | Custom | Agentic | Agentic (LLM-assisted) | custom notebook |
 | ExecuteSSISPackage | Agentic | Agentic (LLM-assisted) | PySpark notebook |
 | AzureMLExecutePipeline | Agentic | Agentic (LLM-assisted) | MLflow notebook |
-| Triggers (Schedule) | Agentic | Agentic (LLM-assisted) | `quartz_cron_expression` |
-| Triggers (Tumbling Window) | Agentic | Agentic (LLM-assisted) | periodic schedule |
-| Triggers (Blob Event) | Agentic | Agentic (LLM-assisted) | `file_arrival` trigger |
+| GetMetadata | Agentic | Agentic (LLM-assisted) | `notebook_task` that reads file or table metadata |
+| Validation | Agentic | Agentic (LLM-assisted) | `notebook_task` that waits for and checks a dataset |
+| Fail | Agentic | Agentic (LLM-assisted) | `notebook_task` that raises the activity's error |
+| Script | Agentic | Agentic (LLM-assisted) | SQL task or `notebook_task` |
+| Triggers (`ScheduleTrigger`) | Deterministic | convert (`src/flowx/sources/adf/translate.py`) | job `schedule` (`quartz_cron_expression`), or a periodic trigger for a day or week interval above 1; a month interval above 1 gets only a `schedule_setup_note` |
+| Triggers (`TumblingWindowTrigger`) | Manual setup | convert (`src/flowx/sources/adf/translate.py`) | no schedule; only a `schedule_setup_note` in the job YAML |
+| Triggers (`BlobEventsTrigger`) | Deterministic | convert (`src/flowx/sources/adf/translate.py`) | `file_arrival` trigger |
+| Triggers (`CustomEventsTrigger`) | Manual setup | convert (`src/flowx/sources/adf/translate.py`) | no trigger; only a `schedule_setup_note` in the job YAML (not in `SETUP.md`) |
 
 ## Deterministic Translator Details
 
 ### Copy (`copy.py`)
 
 Translates ADF Copy activities based on source/sink types:
-- **Blob/ADLS to Delta** — Auto Loader (`cloudFiles`) notebook or COPY INTO
-- **SQL to Delta** — JDBC read notebook
-- **Delta to Delta** — DLT pipeline with `pipeline_task`
+- **Blob/ADLS to Delta**: Auto Loader (`cloudFiles`) notebook
+- **SQL to Delta**: JDBC read notebook
+- **REST source**: a notebook with a pagination loop
+- **Any other source**: a generic Spark read and write notebook
+- With `copy_activity_paradigm=sdp`, a Copy to Delta becomes an SDP scaffold notebook instead, unless
+  its source query has constructs such as joins or aggregates; it is still a `notebook_task`. A `pipeline_task` comes only from `use_lakeflow_connectors=lakeflow_connect`,
+  for a database Copy to Delta that a Lakeflow Connect connector can take.
 - Handles type mapping, column mapping, and partitioning from ADF typeProperties
 
 ### DatabricksNotebook (`notebook.py`)
@@ -163,12 +180,10 @@ The agentic approach trades speed for coverage — it can handle the long tail o
 
 ## Expression Function Coverage
 
-flowx deterministically translates 73 of 84 ADF expression functions to Python notebook code. The remaining 11 functions require agentic translation:
+flowx deterministically translates 77 of 84 ADF expression functions to Python notebook code. The remaining 7 functions require agentic translation:
 
 - `dataUri`, `dataUriToBinary`, `dataUriToString`, `decodeDataUri` — Data URI encoding/decoding (rare in practice)
 - `uriComponentToBinary` — URI component to binary conversion
 - `xml`, `xpath` — XML parsing and XPath evaluation (complex DOM handling)
-- `convertFromUtc`, `convertTimeZone`, `convertToUtc` — Timezone conversions using Windows timezone names
-- `ticks` — .NET DateTime ticks (100-nanosecond intervals since 0001-01-01)
 
 See [expression-functions.md](expression-functions.md) for the complete function mapping reference.

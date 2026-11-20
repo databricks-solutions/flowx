@@ -297,20 +297,44 @@ def _insights_one_pattern(pattern: dict[str, Any]) -> dict[str, Any]:
     return {"pipeline_insights": [{"pipeline": "a", "recommended_patterns": [pattern]}]}
 
 
-def test_agentic_option_ga_and_unknown_are_silent() -> None:
-    # 'ga' and 'unknown' both contribute NO disclosure entry -- 'unknown' is treated exactly like 'ga'.
-    for state in ("ga", "unknown"):
-        graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook")])]
-        insights = _insights_one_pattern(
-            {
-                "pattern": "Lakeflow Job",
-                "fit": "Native orchestration",
-                "simplification_pattern": False,
-                "release_state": state,
-            }
-        )
-        _, options = recommend_component(["a"], _inventory(graphs, insights=insights))
-        assert options["agentic"]["release_disclosures"] == [], f"{state!r} must be silent"
+def test_agentic_option_ga_is_silent() -> None:
+    graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook")])]
+    insights = _insights_one_pattern(
+        {
+            "pattern": "Lakeflow Job",
+            "fit": "Native orchestration",
+            "simplification_pattern": False,
+            "release_state": "ga",
+        }
+    )
+    _, options = recommend_component(["a"], _inventory(graphs, insights=insights))
+    assert options["agentic"]["release_disclosures"] == []
+
+
+def test_agentic_option_unknown_is_labelled_not_verified() -> None:
+    """A state the agent could not verify must not look the same as a verified GA."""
+    graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook")])]
+    insights = _insights_one_pattern(
+        {
+            "pattern": "Some connector",
+            "fit": "Managed ingestion",
+            "simplification_pattern": True,
+            "release_state": "unknown",
+        }
+    )
+    _, options = recommend_component(["a"], _inventory(graphs, insights=insights))
+    disclosures = options["agentic"]["release_disclosures"]
+    assert len(disclosures) == 1
+    assert disclosures[0]["release_state"] == "unknown"
+    assert disclosures[0]["label"] == "Release state not verified"
+    assert "severity" not in disclosures[0]
+
+
+def test_disclosed_release_states_are_the_states_routing_labels() -> None:
+    from flowx.models.conversion_plan import DISCLOSED_RELEASE_STATES
+    from flowx.routing import _RELEASE_STATE_LABELS
+
+    assert tuple(_RELEASE_STATE_LABELS) == DISCLOSED_RELEASE_STATES
 
 
 def test_agentic_option_public_preview_is_disclosed_as_production_ready() -> None:
@@ -360,7 +384,7 @@ def test_agentic_option_private_preview_and_beta_are_plain_labels() -> None:
 
 def test_agentic_option_discloses_each_non_silent_pattern() -> None:
     # A component with a public-preview pattern and a private-preview pattern discloses BOTH as plain
-    # neutral labels (public preview noted production-ready); a ga/unknown pattern would add nothing.
+    # neutral labels (public preview noted production-ready); a ga pattern would add nothing.
     graphs = [
         SourceGraph(
             name="parent",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow.loader.ast_utils import (
     _UNRESOLVED,
     _bind_constants,
+    _canonical_name,
     _construct_name,
     _import_aliases,
     _safe_static_value,
@@ -300,6 +302,124 @@ def _module_for_dag(
     return isolated
 
 
+# Libraries that build DAGs from configuration files at import time, and the calls that register them.
+_DAG_GENERATOR_PACKAGES = frozenset({"dagfactory", "gusty"})
+_DAG_FACTORY_REGISTRATIONS = frozenset({"generate_dags", "load_yaml_dags"})
+_GUSTY_REGISTRATIONS = frozenset({"create_dag", "create_dags"})
+
+
+def _import_time_nodes(module: ast.Module) -> list[ast.AST]:
+    """Returns the nodes that run when Airflow imports a module: module-level code and the functions it calls.
+
+    A class body runs at import time, but function bodies, methods included, are left out unless module-level
+    code calls the function by name.
+    """
+    functions = {node.name: node for node in module.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    nodes: list[ast.AST] = []
+    visited: set[str] = set()
+
+    def walk(statements: list[ast.stmt]) -> None:
+        pending: list[ast.AST] = list(statements)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            nodes.append(node)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                called = functions.get(node.func.id)
+                if called is not None and called.name not in visited:
+                    visited.add(called.name)
+                    walk(called.body)
+            pending.extend(ast.iter_child_nodes(node))
+
+    walk(module.body)
+    return nodes
+
+
+def dag_generator(module: ast.Module, declarations: Sequence[DagDeclaration] = ()) -> ast.AST | None:
+    """Returns the first construct through which a module builds DAGs flowx cannot see, or None.
+
+    That is a call that registers DAGs through a DAG-generating library (dag-factory's ``generate_dags`` or
+    ``load_yaml_dags``, gusty's ``create_dag`` or ``create_dags``), or a registration through ``globals()`` (an
+    item assignment, ``globals().update(...)``, or ``globals()`` passed to a function), which Airflow scans for
+    DAGs. Only code that runs at import time counts: module-level statements and the functions they call.
+    Reading ``globals()``, importing a library, or only constructing a ``DagFactory`` does not count, and
+    neither does a registration that is one of *declarations*, such as a static factory call stored with
+    ``globals()[name]``.
+    """
+    aliases = _import_aliases(module)
+    declared = {id(node) for declaration in declarations for node in ast.walk(declaration.node)}
+    dag_variables = {
+        name for declaration in declarations for name in (declaration.variable, declaration.target_dag_variable) if name
+    } | {
+        item.optional_vars.id
+        for declaration in declarations
+        if isinstance(declaration.node, ast.With)
+        for item in declaration.node.items
+        if isinstance(item.optional_vars, ast.Name)
+    }
+
+    def is_globals(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "globals"
+            and not node.args
+        )
+
+    for node in _import_time_nodes(module):
+        if id(node) in declared:
+            continue
+        if isinstance(node, ast.Call):
+            leaf = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            canonical = _canonical_name(node.func, aliases)
+            if leaf in _DAG_FACTORY_REGISTRATIONS or (
+                canonical.split(".")[0] in _DAG_GENERATOR_PACKAGES
+                and canonical.rsplit(".", 1)[-1] in _GUSTY_REGISTRATIONS
+            ):
+                return node
+            if any(is_globals(argument) for argument in [*node.args, *(item.value for item in node.keywords)]):
+                return node
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "update" and is_globals(node.func.value):
+                return node
+        if (
+            isinstance(node, ast.Assign)
+            and not (isinstance(node.value, ast.Name) and node.value.id in dag_variables)
+            and any(isinstance(target, ast.Subscript) and is_globals(target.value) for target in node.targets)
+        ):
+            return node
+    return None
+
+
+def _failed_dag_generator_pipeline(
+    dag_path: Path, node: ast.AST, *, source_file: str, name: str | None = None
+) -> Pipeline:
+    """Returns a failed, reportable pipeline for a module that builds its DAGs in a way flowx cannot follow."""
+    span = _span(node)
+    candidate = source_audit.AuditCandidate(
+        kind="dag",
+        code="unsupported_dag_generator",
+        line=span.line,
+        column=span.column,
+        occurrence=1,
+        end_line=span.end_line,
+        end_column=span.end_column,
+        details={"expression": ast.unparse(node)},
+    )
+    finding = source_audit.finding(
+        source_file=source_file,
+        code="unsupported_dag_generator",
+        severity="failed",
+        message=(
+            "This file builds Airflow DAGs at import time (through dag-factory, gusty, or globals()), so flowx "
+            "cannot see them. Convert each generated DAG from its rendered definition, or point discover at "
+            "DAG files that declare them."
+        ),
+        candidate=candidate,
+    )
+    return _failed_pipeline(name or Path(dag_path).stem, finding, source_file)
+
+
 def _failed_dag_declaration_pipeline(
     dag_path: Path,
     declaration: DagDeclaration,
@@ -324,7 +444,11 @@ def _failed_dag_declaration_pipeline(
         message=declaration.unsupported_reason or "Airflow DAG declaration could not be captured statically.",
         candidate=candidate,
     )
-    name = declaration.variable or Path(dag_path).stem
+    return _failed_pipeline(declaration.variable or Path(dag_path).stem, finding, source_file)
+
+
+def _failed_pipeline(name: str, finding: dict[str, Any], source_file: str) -> Pipeline:
+    """Returns an empty pipeline that reports one failed source construct."""
     return Pipeline(
         name=name,
         tasks=[],

@@ -20,8 +20,9 @@ from pathlib import Path
 
 import pytest
 
+from flowx.adapter.predicates import walk_activities
 from flowx.discovery_serde import read_source_graphs
-from flowx.lineage import build_control_edges, walk_activities
+from flowx.models.ir import ExecutePipelineActivity
 from flowx.reporting.coverage import build_coverage_rows
 from flowx.sources.adf.loader import build_inventory, load_adf_definitions, main
 from flowx.sources.adf.translate import translate_pipeline
@@ -161,7 +162,7 @@ def test_discover_names_tasks_and_edges_by_the_keys_convert_gives_them(tmp_path:
     definitions = load_adf_definitions(source_dir)
     adf_pipeline = next(candidate for candidate in definitions.pipelines if candidate.name == "pl_punctuated")
     convert_pipeline = translate_pipeline(adf_pipeline, definitions, motif_consolidations={}).pipeline
-    convert_tasks = list(walk_activities(convert_pipeline.tasks))
+    convert_tasks = walk_activities(convert_pipeline.tasks)
 
     assert {activity["name"]: activity["task_key"] for activity in pipeline["activities"]} == {
         "Copy Orders (daily)": "Copy_Orders_daily",
@@ -189,9 +190,29 @@ def test_discover_names_tasks_and_edges_by_the_keys_convert_gives_them(tmp_path:
     assert {key for edge in data_edges for key in edge} <= convert_task_keys
     via_task_keys = [edge["via_task_key"] for edge in pipeline["lineage"]["control_edges"]]
     assert via_task_keys == ["Run_Child_x"]
-    assert via_task_keys == [
-        edge.via_task_key for edge in build_control_edges(convert_pipeline, known_workflows={"pl_child"})
+    assert via_task_keys == [task.task_key for task in convert_tasks if isinstance(task, ExecutePipelineActivity)]
+
+
+def test_depends_on_names_the_upstream_as_written_when_two_names_share_a_task_key(tmp_path: Path) -> None:
+    """``Copy A`` and ``Copy (A)`` share the key ``Copy_A``, but ``depends_on`` still names the one ADF wrote."""
+    wait = {"type": "Wait", "typeProperties": {"waitTimeInSeconds": 1}}
+    activities = [
+        {"name": "Copy A", **wait},
+        {"name": "Copy (A)", **wait},
+        {"name": "Next", **wait, "dependsOn": [{"activity": "Copy A", "dependencyConditions": ["Succeeded"]}]},
     ]
+    source_dir = tmp_path / "export"
+    pipeline_file = source_dir / "pipelines" / "pl_shared_key.json"
+    pipeline_file.parent.mkdir(parents=True)
+    pipeline_file.write_text(json.dumps({"name": "pl_shared_key", "properties": {"activities": activities}}))
+
+    output_dir = tmp_path / "out"
+    assert main(["--source-dir", str(source_dir), "--output-dir", str(output_dir)]) == 0
+    inventory = json.loads((output_dir / "metadata" / "inventory.json").read_text())
+    next_activity = next(activity for activity in inventory["pipelines"][0]["activities"] if activity["name"] == "Next")
+
+    assert next_activity["depends_on"] == ["Copy A"]
+    assert next_activity["dependencies"] == [{"upstream": "Copy_A", "conditions": ["Succeeded"], "resolved": True}]
 
 
 def _write_punctuated_names_export(source_dir: Path) -> None:
@@ -499,6 +520,42 @@ def test_a_motif_detected_over_the_same_members_in_another_order_is_counted_once
     reordered = replace(motif, matched_activities=list(reversed(motif.matched_activities)))
     monkeypatch.setattr(
         detector, "detect_motifs", lambda pipeline, defs: [motif, reordered] if pipeline.name == name else []
+    )
+
+    metadata = _run_discover(tmp_path)
+
+    with (metadata / "profile_report.csv").open(newline="") as handle:
+        row = next(row for row in csv.DictReader(handle) if row["pipeline"] == name)
+    graph = next(graph for graph in read_source_graphs(metadata / "source_graphs.json") if graph.name == name)
+    inventory = json.loads((metadata / "inventory.json").read_text())
+    entry = next(entry for entry in inventory["pipelines"] if entry["name"] == name)
+
+    assert row["collapsible_patterns"] == "1"
+    assert graph.lineage is not None and len(graph.lineage.motifs) == 1
+    assert len(entry["motifs"]) == 1
+
+
+def test_a_motif_detected_over_names_that_share_task_keys_is_counted_once_everywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Members named ``Lookup ETL Config`` and ``Lookup (ETL) Config`` share one task key, so it is one motif."""
+    import csv
+    from dataclasses import replace
+
+    from flowx.motifs import detector
+
+    definitions = load_adf_definitions(FIXTURES_DIR)
+    original = detector.detect_motifs
+    name, motif = next(
+        (pipeline.name, found[0])
+        for pipeline in definitions.pipelines
+        if (found := original(pipeline, definitions)) and any(" " in member for member in found[0].matched_activities)
+    )
+    respelled = replace(
+        motif, matched_activities=[member.replace(" ", " (", 1) + ")" for member in motif.matched_activities]
+    )
+    monkeypatch.setattr(
+        detector, "detect_motifs", lambda pipeline, definitions: [motif, respelled] if pipeline.name == name else []
     )
 
     metadata = _run_discover(tmp_path)

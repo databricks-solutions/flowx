@@ -281,19 +281,27 @@ def _policy_from_dict(raw: dict[str, Any]) -> PolicySpec:
 
 
 def _dependency_to_dict(dependency: SourceDependency) -> dict[str, Any]:
-    return {
+    result: dict[str, Any] = {
         "upstream": dependency.upstream,
         "conditions": list(dependency.conditions),
         "resolved": dependency.resolved,
     }
+    if dependency.upstream_name is not None:
+        result["upstream_name"] = dependency.upstream_name
+    return result
 
 
 def _dependency_from_dict(raw: dict[str, Any]) -> SourceDependency:
-    """Rehydrate a dependency; only an explicit ``resolved: true`` reads as resolved."""
+    """Rehydrate a dependency; only an explicit ``resolved: true`` reads as resolved.
+
+    Only a string ``upstream_name`` is read back.
+    """
+    upstream_name = raw.get("upstream_name")
     return SourceDependency(
         upstream=raw.get("upstream", ""),
         conditions=list(raw.get("conditions") or []),
         resolved=raw.get("resolved") is True,
+        upstream_name=upstream_name if isinstance(upstream_name, str) else None,
     )
 
 

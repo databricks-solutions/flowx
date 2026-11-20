@@ -60,6 +60,7 @@ from flowx.models.adf_ast import (
     AdfDependency,
     AdfParameter,
     AdfPipeline,
+    AdfSwitchCase,
     AdfTrigger,
     AdfVariable,
 )
@@ -86,7 +87,7 @@ from flowx.models.discovery import (
     SourceNode,
 )
 from flowx.sources.adf.dataset_lineage import activity_data_assets
-from flowx.sources.adf.loader import classify_activity, parse_activity
+from flowx.sources.adf.loader import classify_activity
 from flowx.utils import to_case_preserving_key
 
 logger = logging.getLogger(__name__)
@@ -338,7 +339,29 @@ def adf_pipeline_to_source_graph(pipeline: AdfPipeline, definitions: AdfDefiniti
         raw=_pipeline_without_get_defaults(pipeline.raw),
     )
     _warn_duplicate_switch_cases(graph)
+    _warn_shared_task_keys(graph)
     return graph
+
+
+def _warn_shared_task_keys(graph: SourceGraph) -> None:
+    """Log each task key that more than one activity name maps to, naming those activities.
+
+    Names that differ only in characters a task key cannot hold, such as ``Copy A`` and
+    ``Copy (A)``, share one key, as they do in convert, so joins on the key cannot tell
+    them apart, and package refuses a job in which two tasks share one. Every node is
+    kept. Keys convert adds itself (such as a variable's ``_init_`` task) are not checked.
+    """
+    names_by_task_key: dict[str, list[str]] = {}
+    for node in walk_nodes(graph.tasks):
+        names_by_task_key.setdefault(node.task_key, []).append(node.source_id)
+    for task_key, names in names_by_task_key.items():
+        if len(names) > 1:
+            logger.warning(
+                "Activities %s in pipeline %r share the task key %r; rename one so each has its own key",
+                names,
+                graph.name,
+                task_key,
+            )
 
 
 def _warn_duplicate_switch_cases(graph: SourceGraph) -> None:
@@ -442,12 +465,18 @@ def _activity_to_node(activity: AdfActivity, definitions: AdfDefinitions, siblin
 
 
 def _dependency(dependency: AdfDependency, sibling_names: frozenset[str]) -> SourceDependency:
-    """Map one ``dependsOn`` entry, naming a resolved upstream by its task key and an unresolved one as written."""
+    """Map one ``dependsOn`` entry, naming a resolved upstream by its task key and an unresolved one as written.
+
+    A resolved upstream whose key differs from its name also keeps the name as written, so the
+    inventory's ``depends_on`` can name it even when another activity shares the key.
+    """
     resolved = dependency.activity in sibling_names
+    upstream = to_case_preserving_key(dependency.activity) if resolved else dependency.activity
     return SourceDependency(
-        upstream=to_case_preserving_key(dependency.activity) if resolved else dependency.activity,
+        upstream=upstream,
         conditions=list(dependency.dependency_conditions),
         resolved=resolved,
+        upstream_name=dependency.activity if upstream != dependency.activity else None,
     )
 
 
@@ -488,34 +517,33 @@ def _record_duplicate_switch_cases(activity: AdfActivity, properties: dict[str, 
     if activity.type != "Switch":
         return
     labels_by_value: dict[str, list[str]] = {}
-    for value, label, _ in _switch_case_labels(activity):
-        labels_by_value.setdefault(value, []).append(label)
+    for label, case in _switch_case_labels(activity):
+        labels_by_value.setdefault(case.value, []).append(label)
     duplicates = [{"value": value, "branches": labels} for value, labels in labels_by_value.items() if len(labels) > 1]
     if not duplicates:
         return
     properties[DUPLICATE_SWITCH_CASES_PROPERTY] = duplicates
 
 
-def _switch_case_labels(activity: AdfActivity) -> list[tuple[str, str, dict[str, Any]]]:
-    """Pair each declared Switch case with its value and a branch label no other branch uses.
+def _switch_case_labels(activity: AdfActivity) -> list[tuple[str, AdfSwitchCase]]:
+    """Pair each declared Switch case with a branch label no other branch uses.
 
     A case keeps its own value as its label unless that label is taken (by the
     default branch or an earlier case with the same value); then it gets ``case:``
     prefixes until the label is neither taken nor any case's declared value.
     """
-    declared_cases = (activity.type_properties or {}).get("cases") or []
-    declared_values = {str(case.get("value", "")) for case in declared_cases}
+    declared_cases = activity.switch_cases or []
+    declared_values = {case.value for case in declared_cases}
     labels_in_use = {"default"}
-    labelled_cases: list[tuple[str, str, dict[str, Any]]] = []
+    labelled_cases: list[tuple[str, AdfSwitchCase]] = []
     for case in declared_cases:
-        value = str(case.get("value", ""))
-        label = value
+        label = case.value
         if label in labels_in_use:
             label = f"case:{label}"
             while label in labels_in_use or label in declared_values:
                 label = f"case:{label}"
         labels_in_use.add(label)
-        labelled_cases.append((value, label, case))
+        labelled_cases.append((label, case))
     return labelled_cases
 
 
@@ -542,12 +570,8 @@ def _control_flow_branches(activity: AdfActivity, definitions: AdfDefinitions) -
         return {"body": _nodes_for_scope(activity.activities or [], definitions)}
     if activity.type == "Switch":
         branches: dict[str, list[SourceNode]] = {}
-        # Built from the raw cases: the parsed AST merges cases that share a value and skips empty
-        # ones, while each declared case stays its own branch here.
-        for _, label, case in _switch_case_labels(activity):
-            branches[label] = _nodes_for_scope(
-                [parse_activity(child) for child in case.get("activities") or []], definitions
-            )
+        for label, case in _switch_case_labels(activity):
+            branches[label] = _nodes_for_scope(case.activities, definitions)
         branches["default"] = _nodes_for_scope(activity.switch_default_activities or [], definitions)
         return branches
     return None

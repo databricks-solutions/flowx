@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from flowx.sources.airflow.dict_tracking import DictTracker
+
 _EDGE_MODIFIER_CONSTRUCTS = frozenset({"Label"})
 
 
@@ -110,6 +112,12 @@ class _SourceAuditor(ast.NodeVisitor):
         self.other_dag_variables = other_dag_variables
         self.occurrences: dict[tuple[str, int, int], int] = {}
         self.values: dict[str, Any] = {}
+        # Module dicts by name, kept current through the changes made to them, so a DAG's
+        # ``default_args=<name>`` is audited key by key.
+        self.dicts = DictTracker(
+            lambda name: name in self.taskflow_defs or _is_operator(name),
+            lambda function: _leaf(function, self.aliases),
+        )
         self.task_refs: dict[str, list[str]] = {}
         # Tasks built without a DAG of their own while a DAG variable is selected, kept only if wiring
         # reaches the DAG. Each instance gets a key; current_dagless maps a reference (a variable name or
@@ -179,6 +187,7 @@ class _SourceAuditor(ast.NodeVisitor):
             self.visit(statement)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        self.dicts.assign(node.targets, node.value)
         target = node.targets[0].id if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) else None
         if target:
             self.current_dagless.pop(target, None)
@@ -213,8 +222,22 @@ class _SourceAuditor(ast.NodeVisitor):
                 self.task_refs.pop(target, None)
         self.generic_visit(node)
 
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self.dicts.assign([node.target], node.value)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.dicts.augment(node.target)
+        self.generic_visit(node)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        self.dicts.delete(node.targets)
+        self.generic_visit(node)
+
     def visit_Expr(self, node: ast.Expr) -> None:
         value = node.value
+        self.dicts.follow_calls(value)
         if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.RShift, ast.LShift)):
             self._audit_shift(value)
             return
@@ -465,17 +488,11 @@ class _SourceAuditor(ast.NodeVisitor):
         for keyword in call.keywords:
             if keyword.arg:
                 self.audit.settings.append(self._candidate("setting", "dag_setting", keyword.value, name=keyword.arg))
-                if keyword.arg == "default_args" and isinstance(keyword.value, ast.Dict):
-                    for key, value in zip(keyword.value.keys, keyword.value.values):
-                        if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                            self.audit.settings.append(
-                                self._candidate(
-                                    "setting",
-                                    "dag_default_arg",
-                                    value,
-                                    name=f"default_args.{key.value}",
-                                )
-                            )
+                if keyword.arg == "default_args":
+                    for key, value in (self.dicts.literal(keyword.value) or {}).items():
+                        self.audit.settings.append(
+                            self._candidate("setting", "dag_default_arg", value, name=f"default_args.{key}")
+                        )
 
 
 _TASK_DECORATORS = {

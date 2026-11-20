@@ -37,6 +37,7 @@ from flowx.models.ir import (
     AgenticComponentActivity,
     AppendVariableActivity,
     CopyActivity,
+    DbtCommandActivity,
     DbtFactoryActivity,
     DeleteActivity,
     Dependency,
@@ -615,11 +616,11 @@ def write_bundle_group(
     all_environments = [environment for environments in environments_by_workflow for environment in environments]
     _check_authored_file_references(workflows, all_environments, catalog, schema, pipeline_resources)
     pipeline_variable_declarations = _build_pipeline_variable_declarations(pipeline_resources, catalog, schema)
-    # sql_task references ${var.warehouse_id}; declare it once if any workflow in the group uses one
-    # (no default -> user supplies at deploy).
-    if any(_bundle_uses_sql_task(workflow) for workflow in workflows):
+    # sql_task and dbt_task reference ${var.warehouse_id}; declare it once if any workflow in the group
+    # uses one (no default -> user supplies at deploy).
+    if any(_bundle_uses_warehouse(workflow) for workflow in workflows):
         pipeline_variable_declarations.setdefault(
-            "warehouse_id", {"description": "SQL warehouse id for sql_task queries"}
+            "warehouse_id", {"description": "SQL warehouse id for sql_task queries and dbt_task runs"}
         )
     for name, declaration in _build_authored_variable_declarations(workflows, all_environments).items():
         pipeline_variable_declarations.setdefault(name, declaration)
@@ -1001,7 +1002,8 @@ def _live_report_failures(
     may have been edited. The rebuild from the baseline, the stored gap fills, the plan and the stored
     outputs must then reproduce the report exactly, record included. Finally every agentic unit must
     have its agent output applied. A report without a record passes only when the plan routes nothing
-    agentic and no gap fill is stored, because route stamps a record whenever it applies one.
+    agentic and no stored gap fill applies to it, because route stamps a record whenever it applies one;
+    a fill merged against another convert never applies, so it does not count.
     """
     from flowx.discovery_serde import canonical_sha256
     from flowx.models.conversion_plan import DECISION_AGENTIC
@@ -1011,13 +1013,16 @@ def _live_report_failures(
         OUTCOME_AGENTIC_NOT_VIABLE,
         REPORT_FILENAME,
         ROUTING_RECORD_KEY,
+        WORK_DIRNAME,
         agentic_pipeline_names,
+        applied_gap_fills,
         baseline_pipeline_mismatch,
         load_agentic_output,
         load_routed_baseline,
         rebuild,
         routing_record,
         routing_record_mismatches,
+        routing_units,
     )
 
     record = routing_record(report)
@@ -1027,14 +1032,27 @@ def _live_report_failures(
                 f"the plan routes a component agentic but {REPORT_FILENAME} carries no routing record; re-run route"
             ]
         try:
-            stored_fills = load_agentic_output(output_dir).document.get("gap_fills")
+            stored = load_agentic_output(output_dir)
         except (OSError, ValueError) as error:
             return [f"metadata/{AGENTIC_OUTPUT_FILENAME} is unreadable: {error}"]
-        if stored_fills:
+        if not stored.gap_fills:
+            return []
+        try:
+            report_sha256 = hashlib.sha256((output_dir / WORK_DIRNAME / REPORT_FILENAME).read_bytes()).hexdigest()
+        except FileNotFoundError:
+            # No live report to compare with (package pruned .work/), so a stored fill may apply to it, and
+            # route needs that report before it can apply anything.
+            return [
+                f"metadata/{AGENTIC_OUTPUT_FILENAME} stores a gap fill but .work/{REPORT_FILENAME} is missing; "
+                "re-run convert with the same source, then route, which applies any fill that matches, then "
+                "modify if you used it"
+            ]
+        except OSError as error:
+            return [f".work/{REPORT_FILENAME} is unreadable: {error}"]
+        if applied_gap_fills(stored.gap_fills, report_sha256):
             return [
                 f"metadata/{AGENTIC_OUTPUT_FILENAME} stores a gap fill but {REPORT_FILENAME} carries no routing "
-                "record; re-run route, which applies the fill, or drops it when it was merged against an earlier "
-                "convert"
+                "record; re-run route, which applies the fill"
             ]
         return []
     failures: list[str] = []
@@ -1058,9 +1076,24 @@ def _live_report_failures(
         stored = load_agentic_output(output_dir)
     except (OSError, ValueError) as error:
         return [f"metadata/{AGENTIC_OUTPUT_FILENAME} is unreadable: {error}"]
-    if stored.edited:
+    # An edited entry for a unit the plan no longer has, or no longer routes agentic, is never applied, and
+    # fill-agentic cannot target that unit to replace it, so refusing would leave package stuck (a hosted
+    # agent cannot delete the file).
+    edited_unit_ids = set(stored.document.get("components", {})) - set(stored.outputs)
+    agentic_unit_ids = {
+        unit_id for unit_id, unit in routing_units(plan_document).items() if unit["decision"] == DECISION_AGENTIC
+    }
+    vanished = sorted(edited_unit_ids - agentic_unit_ids)
+    if vanished:
+        print(
+            f"Warning: metadata/{AGENTIC_OUTPUT_FILENAME} holds edited entries for components the plan does not "
+            f"route agentic ({', '.join(vanished)}); they are never applied, so package ignores them.",
+            file=sys.stderr,
+        )
+    edited = [label for label in stored.edited if label not in vanished]
+    if edited:
         return [
-            f"metadata/{AGENTIC_OUTPUT_FILENAME} has been edited ({', '.join(stored.edited)}); "
+            f"metadata/{AGENTIC_OUTPUT_FILENAME} has been edited ({', '.join(edited)}); "
             "re-run fill-agentic for that component, or merge that gap again"
         ]
 
@@ -2858,10 +2891,12 @@ def _any_task_uses_classic_cluster(tasks: list[dict[str, Any]]) -> bool:
     return any(task.get("job_cluster_key") for task in _iter_tasks_recursively(tasks))
 
 
-def _bundle_uses_sql_task(workflow: PreparedWorkflow) -> bool:
-    """Return True if any task (parent or inner workflow) is a sql_task."""
+def _bundle_uses_warehouse(workflow: PreparedWorkflow) -> bool:
+    """Return True if any task (parent or inner workflow) is a sql_task or dbt_task."""
     task_lists = [workflow.tasks, *(inner.tasks for inner in workflow.inner_workflows)]
-    return any("sql_task" in task for tasks in task_lists for task in _iter_tasks_recursively(tasks))
+    return any(
+        "sql_task" in task or "dbt_task" in task for tasks in task_lists for task in _iter_tasks_recursively(tasks)
+    )
 
 
 def _bind_cluster_to_notebook_tasks(tasks: list[dict[str, Any]]) -> None:
@@ -3232,6 +3267,12 @@ def _build_job_resource(
         job_def["tags"] = dict(workflow.tags)
     if workflow.timeout_seconds is not None:
         job_def["timeout_seconds"] = workflow.timeout_seconds
+    if workflow.max_concurrent_runs is not None:
+        job_def["max_concurrent_runs"] = workflow.max_concurrent_runs
+    if workflow.source == "airflow" and workflow.schedule:
+        # Airflow holds a run that would exceed max_active_runs until a slot frees; without queueing a
+        # Databricks job skips it instead.
+        job_def["queue"] = {"enabled": True}
     if workflow.email_notifications:
         job_def["email_notifications"] = {
             event: list(recipients) for event, recipients in workflow.email_notifications.items()
@@ -3636,6 +3677,11 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds <= 0
     ):
         raise ValueError("Pipeline timeout_seconds must be a positive integer")
+    max_concurrent_runs = pipeline_dict.get("max_concurrent_runs")
+    if max_concurrent_runs is not None and (
+        isinstance(max_concurrent_runs, bool) or not isinstance(max_concurrent_runs, int) or max_concurrent_runs <= 0
+    ):
+        raise ValueError("Pipeline max_concurrent_runs must be a positive integer")
     raw_email_notifications = pipeline_dict.get("email_notifications") or {}
     if not isinstance(raw_email_notifications, dict):
         raise ValueError("Pipeline email_notifications must be an object")
@@ -3666,6 +3712,7 @@ def pipeline_dict_to_ir(pipeline_dict: dict[str, Any]) -> tuple[Pipeline, list[d
         schedule=pipeline_dict.get("schedule"),
         bundle_variables=pipeline_dict.get("bundle_variables") or {},
         timeout_seconds=timeout_seconds,
+        max_concurrent_runs=max_concurrent_runs,
         email_notifications=email_notifications,
         tags=dict(pipeline_dict.get("tags") or {}),
         not_translatable=list(pipeline_dict.get("not_translatable") or []),
@@ -3833,6 +3880,14 @@ def _reconstruct_ir(task_ir: dict[str, Any]) -> Activity:
             full_refresh=bool(task_ir.get("full_refresh", False)),
             resource_types=list(task_ir.get("resource_types") or []),
             nodes=list(task_ir.get("nodes") or []),
+        )
+    if task_type == "DbtCommandActivity":
+        return DbtCommandActivity(
+            **base,
+            commands=list(task_ir.get("commands") or []),
+            project_dir=task_ir.get("project_dir", ""),
+            source_project_dir=task_ir.get("source_project_dir"),
+            warehouse_ref=task_ir.get("warehouse_ref", "${var.warehouse_id}"),
         )
     if task_type == "SqlActivity":
         return SqlActivity(

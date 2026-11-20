@@ -2,6 +2,18 @@
 
 This reference documents how all 84 ADF expression functions are translated by `flowx.parser.expression_parser`.
 
+## Contents
+
+- [Translation Categories](#translation-categories)
+- [String Functions (12): notebook_code](#string-functions-12--notebook_code)
+- [Collection Functions (10): notebook_code](#collection-functions-10--notebook_code)
+- [Logical Functions (9): notebook_code](#logical-functions-9--notebook_code)
+- [Conversion Functions (24): notebook_code / agentic](#conversion-functions-24--notebook_code--agentic)
+- [Math Functions (9): notebook_code](#math-functions-9--notebook_code)
+- [Date/Time Functions (20): notebook_code / agentic](#datetime-functions-20--notebook_code--agentic)
+- [Summary](#summary)
+- [Agentic Functions (7 total)](#agentic-functions-7-total)
+
 ## Translation Categories
 
 - **notebook_code** — Translated to Python code embedded in the generated notebook body.
@@ -109,9 +121,9 @@ All date functions use `from datetime import datetime, timezone, timedelta`.
 | `addMinutes(ts, minutes, fmt?)` | `(datetime.fromisoformat(ts) + timedelta(minutes=minutes)).strftime(fmt)` | notebook_code |
 | `addSeconds(ts, seconds, fmt?)` | `(datetime.fromisoformat(ts) + timedelta(seconds=seconds)).strftime(fmt)` | notebook_code |
 | `addToTime(ts, interval, unit, fmt?)` | `(datetime.fromisoformat(ts) + timedelta(**{unit}=interval)).strftime(fmt)` | notebook_code |
-| `convertFromUtc(ts, tz, fmt?)` | — | **agentic** (timezone handling complex) |
-| `convertTimeZone(ts, srcTz, destTz, fmt?)` | — | **agentic** (timezone handling complex) |
-| `convertToUtc(ts, srcTz, fmt?)` | — | **agentic** (timezone handling complex) |
+| `convertFromUtc(ts, tz, fmt?)` | `ts.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(tz)).strftime(fmt)` | notebook_code |
+| `convertTimeZone(ts, srcTz, destTz, fmt?)` | `ts.replace(tzinfo=ZoneInfo(srcTz)).astimezone(ZoneInfo(destTz)).strftime(fmt)` | notebook_code |
+| `convertToUtc(ts, srcTz, fmt?)` | `ts.replace(tzinfo=ZoneInfo(srcTz)).astimezone(timezone.utc).strftime(fmt)` | notebook_code |
 | `dayOfMonth(ts)` | `datetime.fromisoformat(ts).day` | notebook_code |
 | `dayOfWeek(ts)` | `datetime.fromisoformat(ts).isoweekday() % 7` | notebook_code (ADF: 0=Sunday) |
 | `dayOfYear(ts)` | `datetime.fromisoformat(ts).timetuple().tm_yday` | notebook_code |
@@ -122,8 +134,14 @@ All date functions use `from datetime import datetime, timezone, timedelta`.
 | `startOfHour(ts, fmt?)` | `datetime.fromisoformat(ts).replace(minute=0,...).strftime(fmt)` | notebook_code |
 | `startOfMonth(ts, fmt?)` | `datetime.fromisoformat(ts).replace(day=1,...).strftime(fmt)` | notebook_code |
 | `subtractFromTime(ts, interval, unit, fmt?)` | `(datetime.fromisoformat(ts) - timedelta(...)).strftime(fmt)` | notebook_code |
-| `ticks(ts)` | — | **agentic** (.NET ticks conversion complex) |
+| `ticks(ts)` | `int((ts - datetime(1, 1, 1, tzinfo=timezone.utc)).total_seconds() * 10_000_000)` | notebook_code |
 | `utcNow(fmt?)` | `datetime.now(timezone.utc).strftime(fmt)` | notebook_code (dedicated handler) |
+
+The three time zone functions pass the zone name to `ZoneInfo`, which reads IANA names
+(`America/Los_Angeles`). ADF takes Windows names (`Pacific Standard Time`), which fail when the notebook
+runs, so check each zone name and change it to its IANA name. `ticks` uses float arithmetic, so the last
+digits can differ from ADF's, and it fails on a timestamp with no UTC offset; check any id or sort key
+built from it.
 
 ## Summary
 
@@ -134,10 +152,10 @@ All date functions use `from datetime import datetime, timezone, timedelta`.
 | Logical | 9 | 9 | 0 |
 | Conversion | 24 | 17 | 7 |
 | Math | 9 | 9 | 0 |
-| Date/Time | 20 | 16 | 4 |
-| **Total** | **84** | **73** | **11** |
+| Date/Time | 20 | 20 | 0 |
+| **Total** | **84** | **77** | **7** |
 
-## Agentic Functions (11 total)
+## Agentic Functions (7 total)
 
 These functions return `None` from `resolve_expression()` and require LLM-assisted translation:
 
@@ -148,7 +166,3 @@ These functions return `None` from `resolve_expression()` and require LLM-assist
 5. `uriComponentToBinary` — URI component to binary
 6. `xml` — XML parsing (complex DOM handling)
 7. `xpath` — XPath evaluation (requires XML context)
-8. `convertFromUtc` — UTC to timezone conversion (Windows timezone names)
-9. `convertTimeZone` — Timezone conversion (Windows timezone names)
-10. `convertToUtc` — Timezone to UTC conversion (Windows timezone names)
-11. `ticks` — .NET DateTime ticks (100-nanosecond intervals since 0001-01-01)

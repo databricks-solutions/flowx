@@ -386,6 +386,29 @@ class SqlActivity(Activity):
 
 
 @dataclass(slots=True, kw_only=True)
+class DbtCommandActivity(Activity):
+    """dbt CLI commands -> one Databricks ``dbt_task``.
+
+    A source task that runs dbt commands from a shell (an Airflow BashOperator running ``dbt run``)
+    becomes one native dbt task running the same commands in order, on the bundle's SQL warehouse, which
+    generates the dbt profile.
+
+    Attributes:
+        commands: The dbt commands, each starting with ``dbt``, run in order; the task stops at the first
+            that fails.
+        project_dir: Where the dbt project was found where flowx ran; the preparer copies it into the bundle.
+        source_project_dir: The project path as the source task names it, such as its ``cwd``. It names the
+            project's folder in the bundle, so the folder is the same wherever flowx runs.
+        warehouse_ref: DAB reference for the warehouse id (defaults to the ``warehouse_id`` bundle variable).
+    """
+
+    commands: list[str]
+    project_dir: str
+    source_project_dir: str | None = None
+    warehouse_ref: str = "${var.warehouse_id}"
+
+
+@dataclass(slots=True, kw_only=True)
 class SparkJarActivity(Activity):
     """Spark JAR activity.
 
@@ -678,6 +701,7 @@ class Pipeline:
         parameters: Pipeline parameter definitions.
         schedule: Serialized schedule definition, if any.
         timeout_seconds: Maximum execution time for one workflow run.
+        max_concurrent_runs: How many runs of the job may be active at once, when the source sets it.
         email_notifications: Job-level email recipients grouped by notification event.
         tasks: Ordered list of translated activities.
         tags: System and user-defined tags.
@@ -703,6 +727,7 @@ class Pipeline:
     parameters: list[dict[str, Any]] | None = None
     schedule: dict[str, Any] | None = None
     timeout_seconds: int | None = None
+    max_concurrent_runs: int | None = None
     email_notifications: dict[str, list[str]] = field(default_factory=dict)
     tasks: list[Activity] = field(default_factory=list)
     tags: dict[str, str] = field(default_factory=dict)

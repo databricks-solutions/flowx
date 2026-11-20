@@ -17,7 +17,9 @@ from flowx.sources.adf.dataset_identity import (
     dataset_props,
     effective_dataset_params,
     expression_value,
+    holds_mask,
     is_arm_expression,
+    type_properties,
 )
 
 _QUOTED_LITERAL_RE = re.compile(r"'((?:[^']|'')*)'", re.DOTALL)
@@ -57,7 +59,10 @@ def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions
     The file name is read the same way; one with no literal text gives ``FN[]``. A
     location folder or file name the code cannot read (a list, or an object of a type
     other than Expression or SecureString) is unknown, so it gives ``None`` rather than
-    borrowing the call site's. An untyped object is read by its ``value``.
+    borrowing the call site's. An untyped object is read by its ``value``. A folder or
+    file name whose shape holds a mask (:func:`~flowx.sources.adf.dataset_identity.holds_mask`),
+    from the location, a dataset default or the call site, names nothing, so it gives
+    ``None`` too.
 
     A legacy dataset (such as ``AzureBlob``) writes ``folderPath`` or ``fileName``
     straight under ``typeProperties``, with no ``location`` or one that sets neither.
@@ -66,7 +71,7 @@ def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions
     """
     call_site = call_site_parameters(dataset_ref)
     properties = dataset_props(dataset_ref, definitions) or {}
-    type_props = properties.get("typeProperties") or properties
+    type_props = type_properties(properties)
     written_location = type_props.get("location")
     if _uses_legacy_location(type_props, written_location):
         return None
@@ -91,9 +96,11 @@ def path_signature(dataset_ref: AdfDatasetReference, definitions: AdfDefinitions
         return _path_shape(call_site.get(key), {}, require_physical=require_physical)
 
     folder_shape = _shape_of("folderPath", require_physical=True)
-    if folder_shape is None or not _has_literal_anchor(folder_shape):
+    if folder_shape is None or not _has_literal_anchor(folder_shape) or holds_mask(folder_shape):
         return None
     file_shape = _shape_of("fileName", require_physical=False)
+    if file_shape is not None and holds_mask(file_shape):
+        return None
     names_a_file = file_shape and (_has_literal_anchor(file_shape) or "<P:" in file_shape)
     return f"FP[{folder_shape}]/FN[{file_shape if names_a_file else ''}]"
 

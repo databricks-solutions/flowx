@@ -173,7 +173,7 @@ PY="$(cat <plugin_dir>/.migration-venv)"
 
 Any tool that supports the [Agent Skills](https://agentskills.io/) open standard can install flowx:
 
-1. Copy each skill folder (e.g. `skills/flowx-migrate`) into the tool's configured skills folder. Ensure the folder contains `SKILL.md` directly.
+1. Copy each skill folder (e.g. `skills/flowx-migrate`) into the tool's configured skills folder, and copy `skills/shared/` beside them: the skills link to its files as `../shared/`. Ensure each skill folder contains `SKILL.md` directly.
 2. Restart the tool if it caches skill metadata at startup.
 3. Run the `flowx-setup` skill to create flowx's Python environment
 
@@ -181,6 +181,8 @@ Any tool that supports the [Agent Skills](https://agentskills.io/) open standard
 If your tool expects a single Markdown file instead of a directory tree, run the following command to concatenate the skills:
 
 ```bash
-cat skills/*/SKILL.md > flowx-skills.md
+cat skills/*/SKILL.md skills/shared/*.md > flowx-skills.md
 ```
+
+The flattened file leaves out each skill's `references/` files, which the skills link to for detail.
 </Callout>

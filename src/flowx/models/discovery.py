@@ -122,11 +122,16 @@ class SourceDependency:
             or misspelled upstream. The edge is kept, not dropped. It has no default on
             purpose: each source mapper must say whether it resolved the edge, so one
             that forgets cannot report a missing upstream as resolved.
+        upstream_name: The upstream's name as the source wrote it, when that differs
+            from :attr:`upstream`; ``None`` when they are the same. Two names can share
+            one task key (``Copy A`` and ``Copy (A)`` are both ``Copy_A``), so the name
+            cannot be recovered from the key and is kept here instead.
     """
 
     upstream: str
     conditions: list[str] = field(default_factory=list)
     resolved: bool
+    upstream_name: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -137,10 +142,13 @@ class SourceNode:
         source_id: Stable identifier from the source (ADF activity name, an
             Airflow capture id) used to resolve dependency edges before task
             keys are allocated.
-        task_key: Normalised task key unique within the graph: the key convert gives
-            the same task, so discover and convert join on it. For ADF that is
+        task_key: Normalised task key: the key convert gives the same task, so
+            discover and convert join on it. For ADF that is
             :func:`~flowx.utils.to_case_preserving_key` of the activity name, so
-            ``Copy Orders (daily)`` is ``Copy_Orders_daily``.
+            ``Copy Orders (daily)`` is ``Copy_Orders_daily``. It is not always unique:
+            names that differ only in characters a key cannot hold (``Copy A`` and
+            ``Copy (A)``) share one, as they do in convert, and the ADF mapper logs a
+            warning when they do.
         concept: Neutral, classified kind (see the ``CONCEPT_*`` constants);
             ``CONCEPT_GAP`` when the source could not classify it.
         source: Source discriminator (``SOURCE_ADF`` / ``SOURCE_AIRFLOW``).

@@ -16,7 +16,7 @@ _REPRO_CORPUS = {
     "a2_task_key_collision.py": [("collide", "verified", 3)],
     "a8_classic_mapping.py": [("fan", "verified_with_gaps", 1)],
     "t1_loop.py": [("loop_dag", "verified", 3)],
-    "t2_sparksubmit.py": [("ss_dag", "verified", 3)],
+    "t2_sparksubmit.py": [("ss_dag", "verified_with_gaps", 3)],
     "t3_collide.py": [("collide_dag", "verified", 3)],
     "t4_bashjinja.py": [("jinja_dag", "verified_with_gaps", 1)],
     "t5_alias.py": [("alias_dag", "verified", 2)],
@@ -71,7 +71,7 @@ def test_assigned_dag_preserves_configuration_and_tasks() -> None:
         "kind": "schedule",
         "quartz_cron_expression": "0 0 3 ? * *",
         "timezone_id": "UTC",
-        "pause_status": "UNPAUSED",
+        "pause_status": "PAUSED",
     }
     assert pipeline.tags["airflow_catchup"] == "true"
     assert {task.task_key for task in pipeline.tasks} == {"__flowx_airflow_dates", "extract", "load"}
@@ -220,13 +220,13 @@ def test_spark_submit_requires_a_single_invocation_and_known_option_arities() ->
     assert isinstance(first, SparkPythonActivity)
     assert first.python_file == "/jobs/etl.py"
     assert first.parameters == ["--date", "2024-01-01"]
-    assert isinstance(second, NotebookActivity)
-    assert "cd /opt/app && spark-submit" in (second.generated_source or "")
-    assert isinstance(third, NotebookActivity)
-    assert "spark-submit /jobs/x.py && aws" in (third.generated_source or "")
+    assert isinstance(second, PlaceholderActivity)
+    assert second.raw_definition["unavailable_programs"] == ["spark-submit"]
+    assert isinstance(third, PlaceholderActivity)
+    assert third.raw_definition["unavailable_programs"] == ["spark-submit", "aws"]
 
 
-def test_unknown_spark_submit_option_falls_back_to_bash(tmp_path: Path) -> None:
+def test_unknown_spark_submit_option_is_a_gap(tmp_path: Path) -> None:
     dag = tmp_path / "spark.py"
     dag.write_text(
         "from airflow import DAG\n"
@@ -238,8 +238,8 @@ def test_unknown_spark_submit_option_falls_back_to_bash(tmp_path: Path) -> None:
 
     task = load_airflow_dag(dag).tasks[0]
 
-    assert isinstance(task, NotebookActivity)
-    assert "--future-option value app.py" in (task.generated_source or "")
+    assert isinstance(task, PlaceholderActivity)
+    assert task.raw_definition["unavailable_programs"] == ["spark-submit"]
 
 
 def test_spark_submit_option_cannot_consume_another_option_as_its_value(tmp_path: Path) -> None:
@@ -257,8 +257,8 @@ def test_spark_submit_option_cannot_consume_another_option_as_its_value(tmp_path
 
     task = load_airflow_dag(dag).tasks[0]
 
-    assert isinstance(task, NotebookActivity)
-    assert "spark-submit --conf --driver-memory=4g app.py" in (task.generated_source or "")
+    assert isinstance(task, PlaceholderActivity)
+    assert "spark-submit --conf --driver-memory=4g app.py" in task.raw_definition["bound_source"]
 
 
 def test_unresolved_jinja_in_generated_source_becomes_placeholder() -> None:

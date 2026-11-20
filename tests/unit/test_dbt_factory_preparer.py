@@ -449,3 +449,42 @@ def test_pydabs_runner_authenticates_through_the_databricks_sdk(tmp_path):
     assert "apiUrl()" not in runner.content
     assert runner.content.count("getContext()") == 1
     assert "context.notebookPath()" in runner.content
+
+
+def test_project_copy_keeps_installed_packages_and_leaves_out_secrets(tmp_path):
+    from flowx.dbt.bundle_files import project_artifacts
+
+    project = tmp_path / "project"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_packages" / "dbt_utils").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text("name: demo\nprofile: demo\n")
+    (project / "models" / "orders.sql").write_text("select 1\n")
+    (project / "dbt_packages" / "dbt_utils" / "dbt_project.yml").write_text("name: dbt_utils\n")
+    (project / ".env").write_text("DBT_PASSWORD=secret\n")
+    (project / "service_account.json").write_text("{}\n")
+
+    copied = sorted(artifact.relative_path for artifact in project_artifacts(project, "p", include_packages=True))
+
+    assert copied == ["p/dbt_packages/dbt_utils/dbt_project.yml", "p/dbt_project.yml", "p/models/orders.sql"]
+
+
+def test_static_bundle_copies_the_custom_paths_dbt_project_yml_names(tmp_path):
+    from flowx.bundler.dab_writer import write_bundle
+
+    project = tmp_path / "project"
+    (project / "transform").mkdir(parents=True)
+    (project / "functions").mkdir()
+    (project / "dbt_project.yml").write_text(
+        "name: demo\nprofile: demo\nmodel-paths: ['transform']\nmacro-paths: ['functions']\n"
+    )
+    (project / "transform" / "orders.sql").write_text("select 1\n")
+    (project / "functions" / "cents.sql").write_text("{% macro cents() %}{% endmacro %}\n")
+    (project / "scratch.txt").write_text("not part of the project\n")
+    output = tmp_path / "bundle"
+
+    write_bundle(prepare_workflow(Pipeline(name="orders", tasks=[_dbt_activity(project_dir=str(project))])), output)
+
+    copied = output / "src" / "dbt_project"
+    assert (copied / "transform" / "orders.sql").exists()
+    assert (copied / "functions" / "cents.sql").exists()
+    assert not (copied / "scratch.txt").exists()

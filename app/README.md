@@ -92,7 +92,7 @@ env:
 
 The service principal needs Reader and Data Factory Contributor on the subscription or resource
 group it scans, and Cost Management Reader on the subscription (see
-`skills/flowx-profile/sources/adf.md`). Anyone with **Can use** on the app can run `profile` with this
+`skills/flowx-profile/references/adf.md`). Anyone with **Can use** on the app can run `profile` with this
 identity, so grant it only to people who may see these factories' runs and costs.
 
 **CLI alternative — `deploy.sh`:**

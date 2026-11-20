@@ -32,6 +32,7 @@ from flowx.models.ir import (
     AgenticComponentActivity,
     AppendVariableActivity,
     CopyActivity,
+    DbtCommandActivity,
     DbtFactoryActivity,
     DeleteActivity,
     ExecutePipelineActivity,
@@ -85,6 +86,8 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict[str, Any]:
         result["description"] = pipeline.description
     if pipeline.timeout_seconds is not None:
         result["timeout_seconds"] = pipeline.timeout_seconds
+    if pipeline.max_concurrent_runs is not None:
+        result["max_concurrent_runs"] = pipeline.max_concurrent_runs
     if pipeline.email_notifications:
         result["email_notifications"] = {
             event: list(recipients) for event, recipients in pipeline.email_notifications.items()
@@ -313,6 +316,12 @@ def activity_extra_fields(activity: Activity) -> dict[str, Any]:
                 extra["bridge_required_parameters"] = dict(activity.bridge_required_parameters)
         case WaitActivity():
             extra["wait_time_seconds"] = activity.wait_time_seconds
+        case DbtCommandActivity():
+            extra["commands"] = list(activity.commands)
+            extra["project_dir"] = activity.project_dir
+            if activity.source_project_dir is not None:
+                extra["source_project_dir"] = activity.source_project_dir
+            extra["warehouse_ref"] = activity.warehouse_ref
         case SqlActivity():
             extra["sql"] = activity.sql
             if activity.parameters:
@@ -463,6 +472,7 @@ def pipeline_to_debug_dict(pipeline: Pipeline) -> dict[str, Any]:
         "parameters": pipeline.parameters,
         "schedule": pipeline.schedule,
         "timeout_seconds": pipeline.timeout_seconds,
+        "max_concurrent_runs": pipeline.max_concurrent_runs,
         "email_notifications": pipeline.email_notifications,
         "tags": pipeline.tags,
         "tasks": [activity_to_debug_dict(task) for task in pipeline.tasks],
@@ -614,6 +624,9 @@ def merge_agentic_results(report_path: Path, results_dir: Path, output_path: Pat
     """
     from flowx.route_agentic import REPORT_FILENAME, ROUTE_LOCK_HELD, WORK_DIRNAME, route_lock
 
+    # Resolved first: a relative path such as "translation_report.json" run from inside .work/ has "." as
+    # its parent's parent, which would misread an in-place merge as a copy and store no gap fill.
+    report_path = Path(report_path).resolve()
     output_dir = report_path.parent.parent
     destination = output_path or report_path
     live_report_path = output_dir / WORK_DIRNAME / REPORT_FILENAME

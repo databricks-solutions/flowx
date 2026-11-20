@@ -10,6 +10,17 @@ Translation is **deterministic-first**:
 2. Activities needing interpretation, expression conversion, or lacking a translator are handled by
    agentic translation the agent performs from the ARM JSON.
 
+## Contents
+
+- [Step 1: Locate the inventory](#step-1--locate-the-inventory)
+- [Step 2: Run deterministic translation](#step-2--run-deterministic-translation)
+- [Step 3: Read the translation report](#step-3--read-the-translation-report)
+- [Step 4: Handle agentic gaps](#step-4--handle-agentic-gaps)
+- [Step 5: Collect agentic results](#step-5--collect-agentic-results)
+- [Step 6: Merge agentic results](#step-6--merge-agentic-results)
+- [Step 6.1: Just-in-time translation configuration](#step-61--just-in-time-translation-configuration)
+- [Step 7: Present translation summary](#step-7--present-translation-summary)
+
 ## Step 1 — Locate the inventory
 
 The discover phase wrote `<output_dir>/metadata/inventory.json`. Confirm the shared `<output_dir>`
@@ -50,7 +61,7 @@ loop variables from `dbutils.widgets`, surface final state as a task value.
 **ExecuteDataFlow:** translate from the raw `typeProperties` + the `dataflow/` JSON definition +
 linked-service source/sink connections, into an SDP pipeline or PySpark notebook.
 
-**Control flow (Switch, Until, Wait, Filter, AppendVariable):** translate from the raw activity
+**Control flow (Until):** translate from the raw activity
 JSON, the containing pipeline JSON, nested activities, and variable definitions.
 
 **Stored procedures / external calls (SqlServerStoredProcedure, AzureFunction, WebHook, Custom):**
@@ -116,7 +127,7 @@ activity are replaced. The placeholder's other source metadata
 like) is kept for each field you leave out; a value you set wins. Of these, only `notifications` and
 `compute_mode` change the task flowx writes, and `parameter_approximations` (each exactly
 `widget_name`, `raw_expression`, `replacement` and `note` strings) are listed in SETUP.md for a
-top-level component, as for a notebook task; an IfCondition, ForEach or Switch does not yet pass
+top-level component, as for a notebook task; an IfCondition, ForEach or Switch does not pass
 any child's approximations on. Put libraries and compute in the task fragment: setting
 `libraries` or `existing_cluster_id` on the activity is an error, and neither is taken from the
 placeholder. flowx does not override or remove any
@@ -164,15 +175,14 @@ Where the fragment leaves a value out, flowx adds only the plumbing the task nee
 ```
 
 Placeholders are replaced in place, status → `translated`. Exits non-zero if any result can't be
-matched. A result whose task, or a task nested in it, is a `PlaceholderActivity`, an
-`UnsupportedActivity` or not an IR task type (package would build it as a stub) counts as unmatched
-and is not merged, so its gap stays open. Add `--output <path>` to write a copy instead of overwriting. An in-place merge into
-`.work/translation_report.json` also takes the merged activities' gaps out of `.work/gaps.json`. After
-routing, only such an in-place merge is also stored as a gap fill in `metadata/agentic_conversion.json`
-(so a re-route keeps it, while route's saved deterministic baseline stays as convert wrote it); a merge
-written to an `--output` copy stores nothing and leaves `gaps.json` alone. A merge into the live report
-refuses, writing nothing, while a route, fill-agentic or another merge is writing to the same output
-folder, so run merges one at a time (see "One at a time per output folder" in the `flowx-route` skill).
+matched. A result holding a `PlaceholderActivity`, an `UnsupportedActivity` or a task that isn't an IR
+type, at any depth, counts as unmatched, so its gap stays open. Add `--output <path>` to write a copy
+instead of overwriting.
+
+An in-place merge also closes the merged gaps in `.work/gaps.json` and, after routing, is saved in
+`metadata/agentic_conversion.json` so a re-route keeps it. A merge to an `--output` copy changes nothing
+else. Run one merge at a time per output folder: an in-place merge refuses while a route, fill-agentic or
+another merge is writing there (see "One at a time per output folder" in the `flowx-route` skill's `references/fill-agentic-rules.md`).
 
 ## Step 6.1 — Just-in-time translation configuration
 
@@ -219,12 +229,21 @@ as CSV; when `none`, ask the user for a CSV file/string. Pass it inline to `modi
     --output-dir <output_dir> \
     --answer metadata_driven_consolidate=consolidate \
     --answer metadata_driven_access=yes \
+    --answer metadata_driven_size=small \
     --lookup-csv "<csv-file-path-or-literal-csv-string>"
 ```
 
 When no metadata-driven motif is consolidated, `--lookup-csv` is omitted and the motif becomes a
-Databricks for-each task running one Spark JDBC read per source table. Consolidating instead emits
-one managed Lakeflow Connect ingestion pipeline.
+Databricks for-each task running one Spark JDBC read per source table, unless
+`use_lakeflow_connectors=lakeflow_connect` applies to its database source: then it becomes a scaffold
+notebook that raises `NotImplementedError` until you write its Lakeflow Connect ingestion by hand. Consolidating instead emits
+one Lakeflow Connect ingestion pipeline on a SQL Server connection, so inspect offers it, and modify
+applies it, only when the loop's Copy reads a SQL Server source (`SqlServerSource`, `AzureSqlSource`,
+`AzureSqlDatabaseSource`, `SqlMISource`, `SqlSource` or `MicrosoftSqlServerSource`), access is `yes`
+and the size is `small` or `medium`. A loop on any other source is not consolidated, and when the answer is given anyway its task
+description says why. Modify refuses a `--lookup-csv` whose rows name the same source table twice
+(ignoring case, even from different schemas), because one pipeline can't ingest two tables with the
+same name, or the same destination table twice.
 
 `modify` writes `.work/translation_report.stamped.json` (consumed by package) and
 `metadata/configuration.json` (the kept configuration record). When `inspect` raises no options,

@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from flowx.discovery_lineage import distinct_motif_matches
 from flowx.models.adf_ast import (
     AdfActivity,
     AdfDataset,
@@ -26,6 +27,7 @@ from flowx.models.adf_ast import (
     AdfParameter,
     AdfPipeline,
     AdfPolicy,
+    AdfSwitchCase,
     AdfTrigger,
     AdfVariable,
     Inventory,
@@ -393,7 +395,7 @@ def parse_activity(data: dict[str, Any]) -> AdfActivity:
     if_true_activities: list[AdfActivity] | None = None
     if_false_activities: list[AdfActivity] | None = None
     child_activities: list[AdfActivity] | None = None
-    switch_cases: dict[str, list[AdfActivity]] | None = None
+    switch_cases: list[AdfSwitchCase] | None = None
     switch_default_activities: list[AdfActivity] | None = None
 
     if type_properties:
@@ -406,19 +408,18 @@ def parse_activity(data: dict[str, Any]) -> AdfActivity:
         raw_children = type_properties.get("activities")
         if raw_children:
             child_activities = [parse_activity(raw_activity) for raw_activity in raw_children]
-        # Switch: cases[].activities (keyed by case value) + defaultActivities. Without
-        # this, a Switch's nested activities never enter the AST, so inventory counts and
-        # lineage edges silently drop everything inside a Switch case.
+        # Switch: cases[] + defaultActivities. Without this, a Switch's nested activities
+        # never enter the AST, so inventory counts and lineage edges silently drop everything
+        # inside a Switch case.
         raw_cases = type_properties.get("cases")
         if raw_cases:
-            parsed_cases: dict[str, list[AdfActivity]] = {}
-            for raw_case in raw_cases:
-                case_value = str(raw_case.get("value", ""))
-                case_activities = [parse_activity(raw_activity) for raw_activity in raw_case.get("activities", [])]
-                if case_activities:
-                    parsed_cases.setdefault(case_value, []).extend(case_activities)
-            if parsed_cases:
-                switch_cases = parsed_cases
+            switch_cases = [
+                AdfSwitchCase(
+                    value=str(raw_case.get("value", "")),
+                    activities=[parse_activity(raw_activity) for raw_activity in raw_case.get("activities") or []],
+                )
+                for raw_case in raw_cases
+            ]
         raw_default = type_properties.get("defaultActivities")
         if raw_default:
             switch_default_activities = [parse_activity(raw_activity) for raw_activity in raw_default]
@@ -900,37 +901,28 @@ def detect_motifs_by_pipeline(definitions: AdfDefinitions) -> dict[str, list[Det
     detection raises is logged and recorded with an empty list, never allowed to
     hard-fail discover. This only *detects* motifs -- it never collapses their
     member activities, which stays a convert-phase decision. Repeated detections are
-    kept once (see :func:`_distinct_detections`), so the saved graph, the inventory and
-    the profile report's pattern count all read the same list.
+    kept once, by the rule the inventory uses
+    (:func:`~flowx.discovery_lineage.distinct_motif_matches`, on members' task keys),
+    so the saved graph, the inventory and the profile report's pattern count all read
+    the same list.
     """
     from flowx.motifs.detector import detect_motifs
 
     results: dict[str, list[DetectedMotif]] = {}
     for pipeline in definitions.pipelines:
         try:
-            results[pipeline.name] = _distinct_detections(detect_motifs(pipeline, definitions))
+            results[pipeline.name] = distinct_motif_matches(
+                detect_motifs(pipeline, definitions), motif_key=_motif_task_keys
+            )
         except Exception as exc:  # noqa: BLE001 - detection must never hard-fail discover
             logger.warning("Motif detection failed for pipeline %r: %s", pipeline.name, exc)
             results[pipeline.name] = []
     return results
 
 
-def _distinct_detections(detections: list[DetectedMotif]) -> list[DetectedMotif]:
-    """Drop repeated motif detections, keeping the first one seen and the original order.
-
-    Two detections are the same motif when they have the same motif id and claim the
-    same activities, in any order. That is the rule the inventory uses to collapse
-    repeats, so the profile report and the saved graph count motifs the way the
-    inventory lists them.
-    """
-    seen: set[tuple[str, frozenset[str]]] = set()
-    distinct: list[DetectedMotif] = []
-    for motif in detections:
-        key = (motif.definition.motif_id, frozenset(motif.matched_activities))
-        if key not in seen:
-            seen.add(key)
-            distinct.append(motif)
-    return distinct
+def _motif_task_keys(motif: DetectedMotif) -> tuple[str, list[str]]:
+    """A detected motif's id and its members' task keys, as the inventory names them."""
+    return motif.definition.motif_id, [to_case_preserving_key(member) for member in motif.matched_activities]
 
 
 def attach_motifs_to_graphs(graphs: list[SourceGraph], motifs_by_pipeline: Mapping[str, list[DetectedMotif]]) -> None:

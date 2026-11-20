@@ -182,11 +182,11 @@ def _suggested_pattern(component: Any) -> str:
         return '<span class="muted">None suggested</span>'
     first = patterns[0]
     labels = {
-        str(entry.get("pattern")): str(entry.get("label"))
+        (str(entry.get("pipeline")), str(entry.get("pattern"))): str(entry.get("label"))
         for entry in agentic.get("release_disclosures") or []
         if isinstance(entry, dict)
     }
-    label = labels.get(str(first.get("pattern")))
+    label = labels.get((str(first.get("pipeline")), str(first.get("pattern"))))
     simplification = " " + _pill("Simplifies", "agt") if first.get("simplification_pattern") else ""
     release = f' <span class="muted small">{escape(label)}</span>' if label else ""
     return f"{_text(first.get('pattern'))}{simplification}{release}"

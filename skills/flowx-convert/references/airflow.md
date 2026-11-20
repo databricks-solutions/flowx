@@ -7,7 +7,7 @@ Airflow translation is **deterministic-first**. The static parse maps ~35 operat
 `PlaceholderActivity` tasks and are recorded in `gaps.json` with their raw source for review. The
 placeholder remains a deliberate runtime failure until it is resolved manually or through the fingerprint-bound `flowx-resolve-airflow-gaps` workflow.
 
-**Before converting, check [`sources/airflow-coverage.md`](airflow-coverage.md)** — the verified
+**Before converting, check [`../../shared/airflow-coverage.md`](../../shared/airflow-coverage.md)**: the verified
 support matrix (classic operators, TaskFlow, sensors, TaskGroups, dbt factory) and the constructs
 still **not** handled (including dynamic TaskGroup mapping). Constructs flowx can't lower
 deterministically — callables reading task context (`**context` / `ti`) or XCom, and runtime-branching
@@ -31,9 +31,10 @@ Use the same source path and `--pipeline` scoping the discover phase used. This 
 
 ## Step 2 — Review the report
 
-Read `<output_dir>/.work/translation_report.json`. Each task is a `NotebookActivity` (from a
-PythonOperator callable or BashOperator command, carrying `generated_source`) or a
-`PlaceholderActivity` (an unmapped operator). Dependencies come from `>>` / `<<`; the DAG's cron
+Read `<output_dir>/.work/translation_report.json`. A mapped task is a `NotebookActivity` (for example
+from a PythonOperator callable or BashOperator command, carrying `generated_source`), a `SqlActivity`, a
+`SparkPythonActivity` or `SparkJarActivity`, a `RunJobActivity`, a `DbtCommandActivity`, or a `ForEachActivity` for a TaskFlow `.expand()`; an unmapped
+operator is a `PlaceholderActivity`. `../../shared/airflow-coverage.md` lists which operator becomes which. Dependencies come from `>>` / `<<`; the DAG's cron
 `schedule_interval` is carried as the pipeline `schedule`.
 
 ## Step 3 — Review deterministic gaps

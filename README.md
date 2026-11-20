@@ -200,6 +200,7 @@ Unlike the ADF path, an Airflow operator's path is decided **per instance** by w
 | Sensors — cross-DAG | `ExternalTaskSensor` (+ `…Async`) | Placeholder + gap | Agentic |
 | Sensors — time | `TimeSensor`, `TimeDeltaSensor` | Placeholder + gap | Agentic |
 | dbt | `DbtRun/Test/Seed/Snapshot/Build/DepsOperator`, Cosmos `DbtDag` / `DbtTaskGroup` | single `DbtFactoryActivity` (static explosion, or PyDABs via `--dbt-mode pydabs`) | Deterministic |
+| dbt (shell) | `BashOperator` that only runs dbt (`dbt run ...`, `$DBT_PATH snapshot ...`) | native `dbt_task` on the bundle's SQL warehouse | Deterministic |
 | Dataproc / Managed Spark | `DataprocSubmitJobOperator`, `DataprocCreateBatchOperator` (+ `ManagedSpark…` aliases) with `pyspark_job` / `pyspark_batch` | `spark_python_task` | Deterministic † |
 | Dataproc / Managed Spark | same, with `spark_job` / `spark_batch` | `spark_jar_task` (JARs as task libraries) | Deterministic † |
 | Dataproc / Managed Spark | same, with inline `spark_sql_job` | `sql_task` | Deterministic † |
@@ -230,7 +231,7 @@ data-interval timetable, the fire time for an Airflow 3 raw cron, and the trigge
 
 Operators without a deterministic mapping become a failing placeholder and are recorded in
 `gaps.json` for review. Eligible leaf gaps can use the fingerprint-bound resolver backed by the pinned [`airflow-to-dabs`](https://github.com/park-peter/airflow-to-dabs/tree/main/providers/flowx-gap-resolver) provider profile; flowx retains ownership of parsing, graph identity, policy, IR, and packaging. Full matrix:
-[`skills/flowx-convert/sources/airflow-coverage.md`](skills/flowx-convert/sources/airflow-coverage.md).
+[`skills/shared/airflow-coverage.md`](skills/shared/airflow-coverage.md).
 
 Airflow discovery independently audits DAG declarations, task candidates, dependency declarations,
 DAG settings, mapped calls, and operator arguments before comparing them with captured IR. An

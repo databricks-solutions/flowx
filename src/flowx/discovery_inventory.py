@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from flowx.discovery_lineage import walk_nodes
+from flowx.discovery_lineage import distinct_motif_matches, walk_nodes
 from flowx.lineage_serde import lineage_to_dict
 from flowx.models.discovery import SourceGraph, SourceNode
 from flowx.models.lineage import MotifAnnotation
@@ -73,7 +73,7 @@ def build_source_inventory(
     they go in a separate ``motifs`` list, and their member activities stay listed:
     collapsing a motif is a convert decision, never a discover one. Exact-duplicate detections
     (same ``motif_id`` and same member set) collapse to one (see
-    :func:`_dedupe_motif_entries`); overlapping-but-distinct matches are all kept.
+    :func:`~flowx.discovery_lineage.distinct_motif_matches`); overlapping-but-distinct matches are all kept.
 
     Returns:
         A JSON-friendly dict with ``source``, ``source_dir``, ``pipelines`` and
@@ -92,8 +92,9 @@ def build_source_inventory(
     unsupported = 0
 
     for graph in graphs:
-        nodes = list(walk_nodes(graph.tasks))
-        flattened = [node for node in nodes if node.properties.get(INVENTORY_VISIBLE_PROPERTY) is not False]
+        flattened = [
+            node for node in walk_nodes(graph.tasks) if node.properties.get(INVENTORY_VISIBLE_PROPERTY) is not False
+        ]
         for node in flattened:
             strategy = _strategy(node)
             if strategy == _DETERMINISTIC:
@@ -103,17 +104,19 @@ def build_source_inventory(
             else:
                 unsupported += 1
         if flattened or include_empty_pipelines:
-            names_by_task_key = {node.task_key: node.name for node in nodes if node.name is not None}
             entry: dict[str, Any] = {
                 "name": graph.name,
-                "activities": [_activity_entry(node, names_by_task_key) for node in flattened],
+                "activities": [_activity_entry(node) for node in flattened],
             }
             if graph.lineage is not None:
                 lineage_block = lineage_to_dict(graph.lineage)
                 del lineage_block["motifs"]
                 entry["lineage"] = lineage_block
                 if graph.lineage.motifs:
-                    entry["motifs"] = _dedupe_motif_entries([_motif_entry(motif) for motif in graph.lineage.motifs])
+                    entry["motifs"] = distinct_motif_matches(
+                        [_motif_entry(motif) for motif in graph.lineage.motifs],
+                        motif_key=lambda motif_entry: (motif_entry["motif_id"], motif_entry["member_task_keys"]),
+                    )
             pipeline_entries.append(entry)
 
     total = deterministic + agentic + unsupported
@@ -146,17 +149,17 @@ def _strategy(node: SourceNode) -> str:
     return strategy if strategy in (_DETERMINISTIC, _AGENTIC) else _UNSUPPORTED
 
 
-def _activity_entry(node: SourceNode, names_by_task_key: dict[str, str]) -> dict[str, Any]:
+def _activity_entry(node: SourceNode) -> dict[str, Any]:
     """Build one per-activity inventory entry from a node.
 
     The first three keys (plus ``depends_on`` when the node has dependencies)
     reproduce the historical ADF activity shape byte-for-byte; the rest are the
     additive standardised fields.
 
-    ``depends_on`` lists each upstream by name, as the historical shape did: a
-    resolved upstream's task key is turned back into that node's name through
-    *names_by_task_key* (the graph's task keys and names), and an unresolved one is
-    already the name as written. It is kept so existing readers keep working; new
+    ``depends_on`` lists each upstream by name as the source wrote it, as the
+    historical shape did: the dependency's ``upstream_name`` when the mapper kept one,
+    otherwise its ``upstream``. The name is never looked up by task key, because two
+    names can share a key. It is kept so existing readers keep working; new
     readers should use ``dependencies``, whose ``upstream`` is the task key, so it
     joins with ``task_key``, and which also records each edge's conditions and
     whether it resolved.
@@ -172,7 +175,7 @@ def _activity_entry(node: SourceNode, names_by_task_key: dict[str, str]) -> dict
         "strategy": _strategy(node),
     }
     upstream_names = [
-        names_by_task_key.get(dependency.upstream, dependency.upstream) if dependency.resolved else dependency.upstream
+        dependency.upstream if dependency.upstream_name is None else dependency.upstream_name
         for dependency in node.dependencies
     ]
     if upstream_names:
@@ -209,26 +212,3 @@ def _motif_entry(motif: MotifAnnotation) -> dict[str, Any]:
         "source_type_hint": motif.source_type_hint,
         "confidence_notes": list(motif.notes),
     }
-
-
-def _dedupe_motif_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse exact-duplicate motif entries, preserving first-seen order.
-
-    A detector can report the same match more than once (e.g. two upstreams that
-    each pair with the same notification activity), which would otherwise emit
-    identical inventory entries. Two entries are the *same* motif only when they
-    share both ``motif_id`` **and** the exact same set of ``member_task_keys``;
-    such duplicates collapse to the first occurrence. Entries that merely overlap
-    -- same ``motif_id`` but a different member set -- are genuinely distinct
-    matches and are all kept. The member comparison is order-insensitive (a set),
-    so the same activities in a different order still count as one motif.
-    """
-    seen: set[tuple[str, frozenset[str]]] = set()
-    deduped: list[dict[str, Any]] = []
-    for entry in entries:
-        identity = (entry["motif_id"], frozenset(entry["member_task_keys"]))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        deduped.append(entry)
-    return deduped

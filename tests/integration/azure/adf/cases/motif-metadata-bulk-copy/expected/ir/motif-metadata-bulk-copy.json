@@ -23,6 +23,7 @@
         "copy-each-table"
       ],
       "motif_config": {
+        "copy_source_type": "AzureSqlSource",
         "lookup_query": "SELECT schema_name, table_name FROM dbo.copy_config",
         "lookup_scope": "lookup-metadata",
         "lookup_source_type": "AzureSqlSource"

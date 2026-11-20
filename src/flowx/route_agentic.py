@@ -47,14 +47,17 @@ import hashlib
 import json
 import os
 import secrets
+import socket
+import subprocess
 import tempfile
+import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from flowx.discovery_insights import _holds_lock, _inventory_pipelines, _is_open_file
+from flowx.discovery_insights import _inventory_pipelines, _is_open_file
 from flowx.discovery_serde import canonical_sha256
 from flowx.models.conversion_plan import DECISION_AGENTIC, ConversionPlan
 from flowx.models.ir import Activity
@@ -75,13 +78,16 @@ AGENTIC_OUTPUT_FILENAME = "agentic_conversion.json"
 # Held in metadata/ while route, fill-agentic or a merge into the live report reads and rewrites the plan, the
 # report, its gaps and the agent's output, so two of them never interleave on one output folder.
 ROUTE_LOCK_FILENAME = ".route.lock"
-# A hosted agent cannot delete files in output_dir, but discover moves metadata/, the lock with it, into the archive.
+# How long a route lock may be held before another command takes it over. The hosted MCP runner kills a
+# command after FLOWX_MCP_TIMEOUT seconds (flowx.mcp.runner reads the same variable), which leaves its lock.
+ROUTE_LOCK_STALE_AFTER_VARIABLE = "FLOWX_MCP_TIMEOUT"
+ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS = 1800
 ROUTE_LOCK_HELD = (
     f"another route, fill-agentic or merge is writing to this output folder (metadata/{ROUTE_LOCK_FILENAME} "
-    "exists); run this command again once it finishes. If none is running, one was stopped mid-write: locally, "
-    f"delete metadata/{ROUTE_LOCK_FILENAME}, run route, then run this command again; on the hosted MCP server, "
-    "run discover again (it moves metadata/ and .work/, the lock with them, into metadata/archive/), then enrich "
-    "if you used it, convert, route, and every fill and merge again"
+    "exists); run this command again once it finishes. If none is running, one was stopped mid-write: its lock "
+    "is taken over once that process has exited (a lock from another machine, or any lock on Windows, once it is "
+    f"older than {ROUTE_LOCK_STALE_AFTER_VARIABLE} seconds, {ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS} by default), "
+    f"so run route, then this command again; locally you can also delete metadata/{ROUTE_LOCK_FILENAME} first"
 )
 
 # Top-level report key holding the routing record. It lives in the report, so a fresh convert (which
@@ -405,6 +411,165 @@ def _gap_fill_checks_out(entry: Any) -> bool:
     )
 
 
+def _route_lock_stale_after_seconds() -> float:
+    """How old a route lock may be before it is taken over: ``FLOWX_MCP_TIMEOUT``, read when it is checked."""
+    try:
+        return float(os.environ.get(ROUTE_LOCK_STALE_AFTER_VARIABLE, ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS))
+    except ValueError:
+        return float(ROUTE_LOCK_STALE_AFTER_DEFAULT_SECONDS)
+
+
+# On Windows os.kill(pid, 0) does not probe: it terminates the process, so the lock never signals there.
+_CAN_PROBE_PROCESSES = os.name != "nt"
+
+
+def _process_is_running(process_id: int) -> bool | None:
+    """Whether a process with this id is running on this machine, or ``None`` where that can't be probed safely."""
+    if not _CAN_PROBE_PROCESSES:
+        return None
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError, ValueError):
+        return False
+    return True
+
+
+def _process_start_marker(process_id: int) -> str | None:
+    """A mark of when the process with this id started, or ``None`` when it can't be read.
+
+    Two processes that get the same id one after the other have different marks, which is how a lock tells
+    its holder from a later process that reused the id. On Linux it is the start time in ``/proc``; on other
+    POSIX systems, the start time ``ps`` prints. It is only ever compared with another mark read the same way.
+    """
+    if not _CAN_PROBE_PROCESSES:
+        return None
+    try:
+        status = Path(f"/proc/{process_id}/stat").read_text(encoding="utf-8")
+        return "proc:" + status.rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        pass
+    try:
+        listed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(process_id)], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    started = listed.stdout.strip()
+    return f"ps:{started}" if listed.returncode == 0 and started else None
+
+
+def _route_lock_holder(content: str) -> dict[str, Any] | None:
+    """The holder a route lock names (``token``, ``pid``, ``host``, ``started_at``), or ``None`` for another format."""
+    try:
+        holder = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if (
+        isinstance(holder, dict)
+        and isinstance(holder.get("token"), str)
+        and isinstance(holder.get("pid"), int)
+        and isinstance(holder.get("host"), str)
+        and isinstance(holder.get("started_at"), (int, float))
+    ):
+        return holder
+    return None
+
+
+def _route_lock_is_stale(content: str, modified_at: float) -> bool:
+    """Whether a route lock was left by a command that has stopped.
+
+    A lock this machine wrote is stale when the process it names has exited, or when that id now belongs
+    to a process that started at another time (a restart reused it), however long the holder has run,
+    since a local route or fill may run past the MCP timeout. A lock from another machine, one whose
+    process can't be probed here (Windows), or one in another format (written by hand, or by an older
+    flowx) is stale once older than :func:`_route_lock_stale_after_seconds`.
+    """
+    holder = _route_lock_holder(content)
+    if holder is not None and holder["host"] == socket.gethostname():
+        running = _process_is_running(holder["pid"])
+        if running is not None:
+            if not running:
+                return True
+            recorded = holder.get("process_started")
+            current = _process_start_marker(holder["pid"])
+            return isinstance(recorded, str) and current is not None and recorded != current
+    started_at = holder["started_at"] if holder is not None else modified_at
+    return time.time() - started_at > _route_lock_stale_after_seconds()
+
+
+def _take_over_stale_route_lock(lock_path: Path) -> bool:
+    """Remove the route lock at ``lock_path`` when it is stale, leaving a live one in place.
+
+    Returns ``False`` when this command moved a live lock aside and could not put it back: the command
+    that holds it is still writing, so this one must refuse rather than make a lock of its own.
+
+    Two commands may judge the same lock stale at once, so the lock is first moved aside under a name only
+    this command uses; only one move succeeds. If the moved file is not the one judged stale (another
+    command took the lock over in between and made its own), it is put back by creating the lock again
+    with its content, unless yet another command has made a lock since, in which case that one stands.
+    It is put back by content, not with a hard link, which a workspace or volume mount may not support.
+    """
+    try:
+        content = lock_path.read_text(encoding="utf-8")
+        modified_at = lock_path.stat().st_mtime
+    except OSError:
+        return True
+    if not _route_lock_is_stale(content, modified_at):
+        return True
+    moved = lock_path.with_name(f"{lock_path.name}.stale-{secrets.token_hex(8)}")
+    try:
+        os.rename(lock_path, moved)
+    except OSError:
+        return True
+    try:
+        moved_content = moved.read_text(encoding="utf-8")
+        if moved_content != content:
+            _create_lock_file(lock_path, moved_content)
+    except OSError:
+        return False
+    finally:
+        moved.unlink(missing_ok=True)
+    return True
+
+
+def _create_lock_file(lock_path: Path, content: str) -> bool:
+    """Create the lock file holding ``content``, returning ``False`` when a lock exists there already.
+
+    It is created with ``O_EXCL``, so only one command makes it. When writing fails or is cut short it is
+    removed again while it is still the file this call opened (compared by file identity, since its
+    content may be partial), so no empty or partial lock is left behind, and the error is raised.
+    """
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    try:
+        try:
+            data = content.encode("utf-8")
+            if os.write(descriptor, data) != len(data):
+                raise OSError(f"could not write the lock {lock_path}")
+        except BaseException:
+            if _is_open_file(descriptor, lock_path):
+                lock_path.unlink(missing_ok=True)
+            raise
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def _owns_route_lock(lock_path: Path, token: str) -> bool:
+    """Whether the route lock at ``lock_path`` is still the one this command created (holding ``token``)."""
+    try:
+        holder = _route_lock_holder(lock_path.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+    return holder is not None and holder["token"] == token
+
+
 @contextmanager
 def route_lock(output_dir: Path) -> Iterator[bool]:
     """Hold the output folder's route lock, yielding ``False`` when another command already holds it.
@@ -413,12 +578,13 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
     the agent's output and then write some of them, so each takes this lock first and refuses with
     :data:`ROUTE_LOCK_HELD` while another holds it. Like enrich's lock it is a file created with
     ``O_EXCL`` holding a random token, so a command never removes a lock a later one created after
-    discover moved ``metadata/`` away, and when writing the token fails it is removed only while it is
-    still the file this command opened. It is removed when the command finishes or raises; only a
-    killed process, or a failed token write that cannot confirm the lock is its own, leaves it behind.
-    Discover and convert take no lock. An output folder with no ``metadata/`` yet gets one, so a merge
-    there is still held; a folder that does not exist holds no files to guard, and the command then
-    reports what it is missing.
+    discover moved ``metadata/`` away, and when writing it fails it is removed only while it is still the
+    file this command opened. It also names the process, machine and start time, so a lock a killed
+    process left behind is taken over by the next command (see :func:`_route_lock_is_stale`): the hosted
+    MCP runner kills a command that runs past ``FLOWX_MCP_TIMEOUT``, and a hosted agent cannot delete the
+    file. It is removed when the command finishes or raises. Discover and convert take no lock. An output folder
+    with no ``metadata/`` yet gets one, so a merge there is still held; a folder that does not exist holds no
+    files to guard, and the command then reports what it is missing.
     """
     if not Path(output_dir).is_dir():
         yield True
@@ -427,30 +593,31 @@ def route_lock(output_dir: Path) -> Iterator[bool]:
     metadata_dir.mkdir(exist_ok=True)
     lock_path = metadata_dir / ROUTE_LOCK_FILENAME
     token = secrets.token_hex(16)
-    try:
-        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
+    holder = json.dumps(
+        {
+            "token": token,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "started_at": time.time(),
+            "process_started": _process_start_marker(os.getpid()),
+        }
+    )
+    if not _take_over_stale_route_lock(lock_path):
         yield False
         return
     try:
-        try:
-            if os.write(descriptor, token.encode("ascii")) != len(token):
-                raise OSError(f"could not write the route lock {lock_path}")
-        except BaseException:
-            # The token may be missing or partial, so compare file identity, as enrich's lock does.
-            if _is_open_file(descriptor, lock_path):
-                lock_path.unlink(missing_ok=True)
-            raise
-        finally:
-            os.close(descriptor)
+        created = _create_lock_file(lock_path, holder)
     except BaseException:
-        if _holds_lock(lock_path, token):
+        if _owns_route_lock(lock_path, token):
             lock_path.unlink(missing_ok=True)
         raise
+    if not created:
+        yield False
+        return
     try:
         yield True
     finally:
-        if _holds_lock(lock_path, token):
+        if _owns_route_lock(lock_path, token):
             lock_path.unlink(missing_ok=True)
 
 
@@ -699,6 +866,40 @@ def _applied_outputs(plan: dict[str, Any], outputs: dict[str, dict[str, Any]] | 
     return applied
 
 
+def stored_output_name_clashes(plan: dict[str, Any], outputs: dict[str, dict[str, Any]] | None) -> list[str]:
+    """Say where the stored outputs a plan would apply share a pipeline name; empty when none do.
+
+    Fill-agentic checks a new output's names only against the outputs that apply when it runs, so a unit
+    routed deterministic and then agentic again can bring back an output whose name another unit's output
+    has taken since. Package keys each pipeline by ``to_lowercase_key(name)``, so two names that normalise
+    to one key clash too. A pipeline that stays as convert wrote it counts as well.
+    """
+    from flowx.utils import to_lowercase_key
+
+    units = routing_units(plan)
+    applied = _applied_outputs(plan, outputs)
+    owners_by_key: dict[str, list[tuple[str, str | None]]] = {}
+    for unit_id, unit in units.items():
+        if unit_id in applied:
+            for pipeline in applied[unit_id].get("pipelines", []):
+                if isinstance(pipeline, dict) and isinstance(pipeline.get("name"), str):
+                    owners_by_key.setdefault(to_lowercase_key(pipeline["name"]), []).append((pipeline["name"], unit_id))
+        else:
+            for member in unit["members"]:
+                owners_by_key.setdefault(to_lowercase_key(member), []).append((member, None))
+    clashes: list[str] = []
+    for owners in owners_by_key.values():
+        filled_units = sorted({unit_id for _name, unit_id in owners if unit_id is not None})
+        if len(owners) < 2 or not filled_units:
+            continue
+        names = sorted({name for name, _unit_id in owners})
+        clashes.append(
+            f"the stored outputs of components {filled_units} would put pipeline name(s) {names} in the report "
+            "more than once; fill one of them again with a different name, or route it deterministic"
+        )
+    return clashes
+
+
 # --------------------------------------------------------------------------- #
 # The edit step: rewrite the report for routed-agentic groups.
 # --------------------------------------------------------------------------- #
@@ -711,17 +912,22 @@ def _unit_owned_activity_names(
 
     That is every name the unit's pipelines hold in the report (tasks, containers' children and the
     activities a motif collapsed) or in the inventory (activities the report no longer has as tasks),
-    less any name a pipeline that stays deterministic also holds, whose gap may be that pipeline's.
-    Other agentic pipelines do not keep a name: their gaps go once they are filled too.
+    less any name a pipeline that stays deterministic may still own a gap for: one still open in its tasks
+    (see :func:`_open_task_names`), or one its inventory lists that the report has no task for. A name
+    such a pipeline holds only as a translated task has no gap left there; ADF's default activity names
+    repeat across pipelines, so counting those would keep done gaps. Other agentic pipelines do not keep
+    a name: their gaps go once they are filled too.
     """
     owned: set[str] = set()
     elsewhere: set[str] = set()
+    report_task_names: dict[Any, set[str]] = {}
     for pipeline in _report_pipelines(report):
         name = pipeline.get("name")
+        report_task_names[name] = _task_names(pipeline.get("tasks"))
         if name in members:
-            owned.update(_task_names(pipeline.get("tasks")))
+            owned.update(report_task_names[name])
         elif name not in agentic_names:
-            elsewhere.update(_task_names(pipeline.get("tasks")))
+            elsewhere.update(_open_task_names(pipeline.get("tasks")))
     for pipeline in _inventory_pipelines(inventory or {}):
         activities = pipeline.get("activities")
         names = {
@@ -732,7 +938,7 @@ def _unit_owned_activity_names(
         if pipeline.get("name") in members:
             owned.update(names)
         elif pipeline.get("name") not in agentic_names:
-            elsewhere.update(names)
+            elsewhere.update(names - report_task_names.get(pipeline.get("name"), set()))
     return owned - elsewhere
 
 
@@ -808,13 +1014,14 @@ def alter_report(
 
     report = copy.deepcopy(report)
 
-    # Task names owned by pipelines that are NOT routed agentic. Convert gaps are untagged (they carry
-    # no pipeline), so a name that also belongs to a non-routed pipeline is ambiguous: dropping it
-    # could remove that pipeline's gap, so it is preserved. Computed before mutating routed pipelines.
+    # Names still open in pipelines that are NOT routed agentic. Convert gaps are untagged (they carry no
+    # pipeline), so a name still open in a non-routed pipeline is ambiguous: dropping it could remove that
+    # pipeline's gap, so it is preserved. A name such a pipeline holds only as a translated task has no gap
+    # there. Computed before mutating routed pipelines.
     nonrouted_task_names: set[str] = set()
     for pipeline in _report_pipelines(report):
         if pipeline.get("name") not in agentic:
-            nonrouted_task_names.update(_task_names(pipeline.get("tasks")))
+            nonrouted_task_names.update(_open_task_names(pipeline.get("tasks")))
 
     # Emit exactly one pipeline-tagged gap per routed task, replacing (never appending to) any prior
     # gap for a routed pipeline's tasks. Without this, a task that convert already recorded as an
@@ -892,8 +1099,9 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any], *, inventory: d
     """Apply a routing decision to the report on disk by rebuilding it from the deterministic baseline.
 
     A report without a routing record is a fresh convert, so it becomes the baseline: the first time
-    the rebuild changes anything, route saves it and its gaps to ``.work/route_baseline/``; gap fills
-    merged against an earlier baseline are then dropped (merge them again). A routed report is rebuilt
+    the rebuild changes anything, route saves it and its gaps to ``.work/route_baseline/``. Gap fills
+    merged against another baseline are skipped but kept, so they apply again if convert writes that
+    report again. A routed report is rebuilt
     from the saved copy, refused when it no longer has the hashes the record names. The rebuild applies
     the stored gap fills, the plan and the stored unit outputs from ``metadata/agentic_conversion.json``,
     and the report + gaps are written atomically. When the rebuild changes nothing the baseline bytes
@@ -907,7 +1115,7 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any], *, inventory: d
     (see :func:`rebuild`); ``None`` is only for a caller with no inventory to check against.
 
     Returns a summary dict with the altered pipeline names, the resulting gap count, each unit's
-    outcome and how many stale gap fills were dropped.
+    outcome and how many stored gap fills were skipped because they were merged against another baseline.
 
     Raises:
         FileNotFoundError: when the translation report is missing (run convert first).
@@ -931,14 +1139,11 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any], *, inventory: d
         if mismatch:
             raise ValueError(mismatch)
     stored = load_agentic_output(output_dir)
-    dropped = 0
-    if record is None and stored.document.get("gap_fills"):
-        baseline_report_sha256 = hashlib.sha256(baseline_report_bytes).hexdigest()
-        kept = applied_gap_fills(stored.gap_fills, baseline_report_sha256)
-        dropped = len(stored.document["gap_fills"]) - len(kept)
-        if dropped:
-            save_agentic_output(output_dir, {"components": stored.document["components"], "gap_fills": kept})
-            stored = load_agentic_output(output_dir)
+    clashes = stored_output_name_clashes(plan, stored.outputs)
+    if clashes:
+        raise ValueError("; ".join(clashes))
+    baseline_report_sha256 = hashlib.sha256(baseline_report_bytes).hexdigest()
+    skipped = len(stored.gap_fills) - len(applied_gap_fills(stored.gap_fills, baseline_report_sha256))
     new_report, new_gaps, new_record = rebuild(
         baseline_report,
         baseline_gaps,
@@ -949,7 +1154,7 @@ def apply_plan_to_report(output_dir: Path, plan: dict[str, Any], *, inventory: d
         baseline_gaps_bytes,
         inventory=inventory,
     )
-    summary: dict[str, Any] = {"agentic_pipelines": sorted(agentic), "dropped_gap_fills": dropped}
+    summary: dict[str, Any] = {"agentic_pipelines": sorted(agentic), "skipped_gap_fills": skipped}
     if not new_record:
         if record is not None:
             _write_atomic(report_path, baseline_report_bytes)
@@ -1447,7 +1652,9 @@ def _fill_unit(output_dir: Path, members: set[str], authored_pipelines: list[dic
         return {"ok": False, "error": None, "violations": folder_clashes, "pipelines": 0}
     new_report[ROUTING_RECORD_KEY] = new_record
 
-    result = validate_report_structurally(new_report)
+    result = validate_report_structurally(
+        new_report, authored_names=[name for name in authored_names if isinstance(name, str)]
+    )
     if not result.ok:
         violations = [f"[{finding.code}] {finding.location}: {finding.message}" for finding in result.violations]
         return {"ok": False, "error": None, "violations": violations, "pipelines": 0}
@@ -1478,28 +1685,49 @@ def _fill_unit(output_dir: Path, members: set[str], authored_pipelines: list[dic
 # --------------------------------------------------------------------------- #
 
 
-def validate_report_structurally(report: dict[str, Any]) -> Any:
+def validate_report_structurally(report: dict[str, Any], *, authored_names: Iterable[str] = ()) -> Any:
     """Package the report to a throwaway bundle and run the existing structural invariants over it.
 
     Uses the same ``prepare_workflow -> write_bundle`` path as the package phase, then aggregates
     :func:`flowx.validate.bundle_invariants.check_bundle_dir` findings across every emitted bundle so
     duplicate keys, dangling dependencies, cycles, and dangling pipeline/run_job references are all
-    caught before the merged report is trusted. Returns a
+    caught before the merged report is trusted. A pipeline package cannot build at all, such as one with a
+    task field of the wrong shape, is reported as an ``unbuildable_pipeline`` finding naming the error, so
+    the caller gets a violation instead of a crash. The finding says whether the pipeline is one of
+    ``authored_names`` (the fill being checked): any other pipeline holds a stored gap fill, another unit's
+    output or convert's own tasks, so the fix is not in this fill. Returns a
     :class:`~flowx.validate.bundle_invariants.BundleInvariantResult`.
     """
     from flowx.bundler.dab_writer import pipeline_dict_to_ir, write_bundle
     from flowx.preparer.workflow_preparer import prepare_workflow
     from flowx.utils import to_lowercase_key
-    from flowx.validate.bundle_invariants import BundleInvariantResult, check_bundle_dir
+    from flowx.validate.bundle_invariants import BundleFinding, BundleInvariantResult, check_bundle_dir
 
     pipelines = _report_pipelines(report)
+    authored = set(authored_names)
     findings: list[Any] = []
     with tempfile.TemporaryDirectory(prefix="flowx-fill-validate-") as temporary:
         root = Path(temporary)
-        for pipeline_dict in pipelines:
-            pipeline, _skipped = pipeline_dict_to_ir(pipeline_dict)
-            workflow = prepare_workflow(pipeline)
-            bundle_dir = root / to_lowercase_key(pipeline.name) if len(pipelines) > 1 else root
-            write_bundle(workflow, bundle_dir)
+        for index, pipeline_dict in enumerate(pipelines):
+            label = pipeline_dict.get("name") if isinstance(pipeline_dict.get("name"), str) else f"pipeline[{index}]"
+            try:
+                pipeline, _skipped = pipeline_dict_to_ir(pipeline_dict)
+                workflow = prepare_workflow(pipeline)
+                bundle_dir = root / to_lowercase_key(pipeline.name) if len(pipelines) > 1 else root
+                write_bundle(workflow, bundle_dir)
+            except (AttributeError, KeyError, TypeError, ValueError) as error:
+                cause = f"{type(error).__name__}: {error}"
+                if pipeline_dict.get("name") in authored:
+                    message = (
+                        f"package cannot build this pipeline ({cause}); check each task's fields against its IR "
+                        "task type"
+                    )
+                else:
+                    message = (
+                        f"package cannot build this pipeline, which this fill did not author ({cause}); check the "
+                        "gap fills merged into it and any other unit's stored output, or report it as a packager error"
+                    )
+                findings.append(BundleFinding(code="unbuildable_pipeline", location=str(label), message=message))
+                continue
             findings.extend(check_bundle_dir(bundle_dir).findings)
     return BundleInvariantResult(findings=findings)
