@@ -231,23 +231,34 @@ def _build_object_from_lookup_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# The lookup-row columns that name a source table, in the order they are read.
+_SOURCE_TABLE_COLUMNS = ("source_table", "table_name", "table")
+
+
 def lookup_row_source_table(row: dict[str, Any]) -> str:
     """Returns the source table a lookup row names, or the bundle variable that stands in for it."""
-    return row.get("source_table") or row.get("table_name") or row.get("table") or "${var.source_table}"
+    return next((row[column] for column in _SOURCE_TABLE_COLUMNS if row.get(column)), "${var.source_table}")
 
 
-def repeated_source_table_names(rows: list[dict[str, Any]]) -> list[str]:
-    """Returns the source table names that more than one lookup row names, ignoring case.
+def repeated_table_names(rows: list[dict[str, Any]]) -> list[str]:
+    """Returns the table names that more than one lookup row uses as its source or its destination, ignoring case.
 
     One Lakeflow Connect pipeline can't ingest two tables with the same name, even from different
-    schemas or databases, so a consolidated pipeline must not be built from such rows.
+    schemas or databases, and two objects can't write one destination table, so a consolidated
+    pipeline must not be built from such rows. A row that names no table is left to the bundle
+    variable and isn't counted.
     """
-    seen: set[str] = set()
     repeated: list[str] = []
-    for row in rows:
-        name = lookup_row_source_table(row)
-        key = name.casefold()
-        if key in seen and name not in repeated:
-            repeated.append(name)
-        seen.add(key)
+    reported: set[str] = set()
+    for column_names in (_SOURCE_TABLE_COLUMNS, ("destination_table", *_SOURCE_TABLE_COLUMNS)):
+        seen: set[str] = set()
+        for row in rows:
+            name = next((row[column] for column in column_names if row.get(column)), None)
+            if not name:
+                continue
+            key = name.casefold()
+            if key in seen and key not in reported:
+                repeated.append(name)
+                reported.add(key)
+            seen.add(key)
     return repeated

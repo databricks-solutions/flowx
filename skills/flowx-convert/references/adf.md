@@ -235,12 +235,13 @@ as CSV; when `none`, ask the user for a CSV file/string. Pass it inline to `modi
 
 When no metadata-driven motif is consolidated, `--lookup-csv` is omitted and the motif becomes a
 Databricks for-each task running one Spark JDBC read per source table. Consolidating instead emits
-one Lakeflow Connect ingestion pipeline on a SQL Server connection, so modify applies it only when
-the loop's Copy reads a SQL Server source (`SqlServerSource`, `AzureSqlSource` or
-`MicrosoftSqlServerSource`), access is `yes` and the size is `small` or `medium`. Any other source keeps
-the for-each task, and its task description says why. Modify refuses a `--lookup-csv` whose rows
-name the same source table twice (ignoring case, even from different schemas), because one pipeline
-can't ingest two tables with the same name.
+one Lakeflow Connect ingestion pipeline on a SQL Server connection, so inspect offers it, and modify
+applies it, only when the loop's Copy reads a SQL Server source (`SqlServerSource`, `AzureSqlSource`,
+`SqlMISource`, `SqlSource` or `MicrosoftSqlServerSource`), access is `yes` and the size is `small` or
+`medium`. A loop on any other source is not consolidated, and when the answer is given anyway its task
+description says why. Modify refuses a `--lookup-csv` whose rows name the same source table twice
+(ignoring case, even from different schemas), because one pipeline can't ingest two tables with the
+same name, or the same destination table twice.
 
 `modify` writes `.work/translation_report.stamped.json` (consumed by package) and
 `metadata/configuration.json` (the kept configuration record). When `inspect` raises no options,

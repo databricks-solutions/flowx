@@ -878,6 +878,41 @@ class TestCli:
         assert not out_path.exists()
         assert "orders" in capsys.readouterr().err.lower()
 
+    @pytest.mark.parametrize(
+        ("csv", "accepted"),
+        [
+            ("source_table,destination_table\nA,x\nB,x", False),
+            ("source_schema,source_table\ndbo,orders\nsales,customers", True),
+            ("TABLE_SCHEMA,TABLE_NAME\ndbo,orders\nsales,customers", True),
+        ],
+    )
+    def test_modify_checks_destination_names_and_skips_rows_with_no_table_name(
+        self, tmp_path: Path, csv: str, accepted: bool
+    ):
+        from flowx.ir_serde import pipeline_to_dict
+
+        report_path = tmp_path / "report.json"
+        report_path.write_text(json.dumps(pipeline_to_dict(Pipeline(name="p", tasks=[_metadata_driven_motif()]))))
+        exit_code = adapter_cli_main(
+            [
+                "modify",
+                str(report_path),
+                "--answer",
+                "metadata_driven_consolidate=consolidate",
+                "--answer",
+                "metadata_driven_access=yes",
+                "--answer",
+                "metadata_driven_size=small",
+                "--lookup-csv",
+                csv,
+                "--out",
+                str(tmp_path / "modified.json"),
+                "--config-out",
+                str(tmp_path / "configuration.json"),
+            ]
+        )
+        assert (exit_code == 0) is accepted
+
     def test_modify_rejects_invalid_answer(self, tmp_path: Path):
         from flowx.ir_serde import pipeline_to_dict
 
@@ -1182,13 +1217,44 @@ class TestBundleOutput:
         assert motif.databricks_replacement == "for_each_ingestion"
         assert "SQL Server sources only" in (motif.description or "")
 
+    def test_refusal_note_does_not_claim_a_for_each_port_when_lakeflow_connect_replaced_the_loop(self):
+        pipeline = Pipeline(name="p", tasks=[_metadata_driven_motif(copy_source_type="OracleSource")])
+        prefs = TranslationConfiguration(
+            use_lakeflow_connectors="lakeflow_connect",
+            metadata_driven_consolidate="consolidate",
+            metadata_driven_access="yes",
+            metadata_driven_size="small",
+        )
+        motif = apply_configuration(pipeline, prefs).tasks[0]
+        assert motif.consolidate_metadata_driven is False
+        assert motif.databricks_replacement == LAKEFLOW_CONNECT_REPLACEMENT
+        assert "for-each" not in (motif.description or "")
+        assert "SQL Server sources only" in (motif.description or "")
+
+    def test_consolidation_options_are_asked_only_for_a_loop_that_reads_sql_server(self):
+        oracle = Pipeline(name="p", tasks=[_metadata_driven_motif(copy_source_type="OracleSource")])
+        answers = {OPTION_METADATA_DRIVEN_CONSOLIDATE: "consolidate", OPTION_METADATA_DRIVEN_ACCESS: "yes"}
+        oracle_ids = {q.option_id for q in gather_options(oracle, answers=answers).options}
+        assert not oracle_ids & {
+            OPTION_METADATA_DRIVEN_CONSOLIDATE,
+            OPTION_METADATA_DRIVEN_ACCESS,
+            OPTION_METADATA_DRIVEN_SIZE,
+            OPTION_METADATA_DRIVEN_LOOKUP_TOOL,
+        }
+
     def test_modifier_consolidates_every_sql_server_source_type(self):
         prefs = TranslationConfiguration(
             metadata_driven_consolidate="consolidate",
             metadata_driven_access="yes",
             metadata_driven_size="small",
         )
-        for copy_source_type in ("SqlServerSource", "AzureSqlSource", "MicrosoftSqlServerSource"):
+        for copy_source_type in (
+            "SqlServerSource",
+            "AzureSqlSource",
+            "SqlMISource",
+            "SqlSource",
+            "MicrosoftSqlServerSource",
+        ):
             pipeline = Pipeline(name="p", tasks=[_metadata_driven_motif(copy_source_type=copy_source_type)])
             assert apply_configuration(pipeline, prefs).tasks[0].consolidate_metadata_driven is True
 

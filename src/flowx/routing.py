@@ -319,6 +319,7 @@ def _deterministic_option(members: list[str], inventory: dict[str, Any]) -> dict
 # entry, so it is silent. ``"unknown"`` is labelled so a state nobody verified never looks the same as a
 # verified GA. ``"public_preview"`` is labelled production-ready per Databricks; ``"private_preview"`` /
 # ``"beta"`` are stated as plain factual labels. This is disclosure, not a warning.
+# Keep the keys in step with ``DISCLOSED_RELEASE_STATES`` in ``flowx.models.conversion_plan`` (a test checks it).
 _RELEASE_STATE_LABELS: dict[str, str] = {
     "public_preview": "Public Preview (production-ready)",
     "private_preview": "Private Preview",

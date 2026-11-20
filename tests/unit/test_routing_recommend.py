@@ -330,6 +330,13 @@ def test_agentic_option_unknown_is_labelled_not_verified() -> None:
     assert "severity" not in disclosures[0]
 
 
+def test_disclosed_release_states_are_the_states_routing_labels() -> None:
+    from flowx.models.conversion_plan import DISCLOSED_RELEASE_STATES
+    from flowx.routing import _RELEASE_STATE_LABELS
+
+    assert tuple(_RELEASE_STATE_LABELS) == DISCLOSED_RELEASE_STATES
+
+
 def test_agentic_option_public_preview_is_disclosed_as_production_ready() -> None:
     graphs = [SourceGraph(name="a", source="adf", tasks=[_node("load", "Notebook")])]
     insights = _insights_one_pattern(

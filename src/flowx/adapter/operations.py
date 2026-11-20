@@ -1195,14 +1195,17 @@ def _metadata_driven_motif_task_keys(
 
     Returns:
         Tuple of motif activity task keys whose source motif is the
-        metadata-driven bulk-copy pattern.  Empty when no such motif is
-        present.
+        metadata-driven bulk-copy pattern and whose loop reads SQL Server,
+        the only source consolidation supports.  Empty when no such motif
+        is present.
     """
     del motifs
     return tuple(
         activity.task_key
         for activity in pipeline.tasks
-        if isinstance(activity, MotifActivity) and activity.motif_id == METADATA_DRIVEN_MOTIF_ID
+        if isinstance(activity, MotifActivity)
+        and activity.motif_id == METADATA_DRIVEN_MOTIF_ID
+        and _loop_reads_sql_server(activity)
     )
 
 
@@ -1554,8 +1557,8 @@ def _not_consolidated_note(activity: MotifActivity) -> str:
     """Explains, in the task description, why a requested consolidation was not applied."""
     source_type = (activity.motif_config or {}).get("copy_source_type") or "an unrecorded source type"
     return (
-        "Kept as a for-each port, not consolidated into one Lakeflow Connect pipeline: consolidation "
-        f"supports SQL Server sources only, and this loop's Copy reads {source_type}."
+        "Not consolidated into one Lakeflow Connect pipeline: consolidation supports SQL Server "
+        f"sources only, and this loop's Copy reads {source_type}."
     )
 
 
