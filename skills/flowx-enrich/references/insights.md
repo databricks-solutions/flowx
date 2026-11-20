@@ -27,33 +27,33 @@ of those four keys yourself:
   "system_recommendation": {
     "headline": "The one decision a migrator must make before any per-pipeline work",
     "recommended_patterns": [
-      {"pattern": "<managed connector for your source>", "fit": "Replaces the child extractor family", "simplification_pattern": true, "release_state": "<verify live; do not copy — one of ga|public_preview|private_preview|beta|unknown>", "release_state_source": "<cite the current Databricks doc you verified>"},
-      {"pattern": "Parameterised Lakeflow Job", "fit": "Like-for-like orchestration fallback", "simplification_pattern": false}
+      {"pattern": "<an option you found in the current Databricks docs>", "fit": "<why it fits these pipelines>", "simplification_pattern": true, "release_state": "<verify live, one of ga|public_preview|private_preview|beta|unknown>", "release_state_source": "<cite the current Databricks doc you verified>"},
+      {"pattern": "<the like-for-like port>", "fit": "<why it remains an option>", "simplification_pattern": false}
     ],
-    "cascade": ["5 child extractors -> managed connector pipelines"],
-    "decision_driver": "Is a managed connector available and its release state verified/approved for this source?"
+    "cascade": ["<which pipelines the decision replaces or changes>"],
+    "decision_driver": "<the open fact or check that decides between the patterns>"
   },
   "pipeline_insights": [
     {
-      "pipeline": "IngestSalesforce",
-      "intent": "Land Salesforce objects into the bronze layer nightly",
-      "databricks_pattern": "Managed ingestion",
+      "pipeline": "LoadSource",
+      "intent": "<what the pipeline does, in a sentence>",
+      "databricks_pattern": "<the target pattern, in plain words>",
       "recommended_patterns": [
-        {"pattern": "<managed CDC ingestion connector>", "fit": "Managed CDC ingestion replaces the copy loop", "simplification_pattern": true, "release_state": "<verify live; do not copy — one of ga|public_preview|private_preview|beta|unknown>", "release_state_source": "<cite the current Databricks doc you verified>"}
+        {"pattern": "<an option you found in the current Databricks docs>", "fit": "<why it fits this pipeline>", "simplification_pattern": true, "release_state": "<verify live, one of ga|public_preview|private_preview|beta|unknown>", "release_state_source": "<cite the current Databricks doc you verified>"}
       ],
-      "conversion_notes": ["Point the connector at the same source objects"],
-      "risk_if_ignored": "Bespoke extractor code and its watermark table carry forward"
+      "conversion_notes": ["source: <system> via <source type>", "fact: <value> (source: code | data | user | assumed)"],
+      "risk_if_ignored": "<what breaks or is lost if the insight is ignored>"
     }
   ],
   "pipeline_relationships": [
     {
       "from_pipeline": "Orchestrator",
-      "to_pipeline": "IngestSalesforce",
+      "to_pipeline": "LoadSource",
       "lineage_edge": {"edge_type": "control", "edge_identity": "<via_task_key from a real control edge>"},
-      "relationship_summary": "Orchestrator invokes IngestSalesforce"
+      "relationship_summary": "Orchestrator invokes LoadSource"
     },
     {
-      "from_pipeline": "IngestSalesforce",
+      "from_pipeline": "LoadSource",
       "to_pipeline": "BuildMart",
       "lineage_edge": {
         "edge_type": "inferred",
@@ -124,19 +124,19 @@ writes a table (or file) that another pipeline reads, record it on the `inferred
 ```jsonc
 // WRONG — the validator rejects this and tells you to use the 'inferred' tier
 {
-  "from_pipeline": "IngestSalesforce",
+  "from_pipeline": "LoadSource",
   "to_pipeline": "BuildMart",
   "lineage_edge": {"edge_type": "data", "edge_identity": "sales.curated"}
 }
 
 // RIGHT — a cross-pipeline data coupling rides the 'inferred' tier
 {
-  "from_pipeline": "IngestSalesforce",
+  "from_pipeline": "LoadSource",
   "to_pipeline": "BuildMart",
   "lineage_edge": {
     "edge_type": "inferred",
     "edge_identity": "shared table sales.curated",
-    "evidence": "IngestSalesforce writes sales.curated; BuildMart reads it — the hand-off is inside notebook code the parser can't see",
+    "evidence": "LoadSource writes sales.curated and BuildMart reads it; the hand-off is inside notebook code the parser can't see",
     "confidence": "medium"
   }
 }

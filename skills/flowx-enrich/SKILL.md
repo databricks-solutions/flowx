@@ -102,9 +102,10 @@ for `ga`, and "Release state not verified" for `unknown`.
 pattern in `recommended_patterns` or `system_recommendation`, read the limits it rests on live from the
 current public Databricks docs and check the estate's facts against them.
 
-- **Where to read them:** for Lakeflow Connect, the connector's limits page and the resource limits page;
-  `flowx-route` lists the limits its database-ingestion patterns rest on; for any other pattern, that
-  capability's own pages.
+- **Where to read them:** the capability's own requirements and limitations pages, the workspace and
+  resource limits pages, and the pages of what it runs on, found in the current official Databricks
+  documentation. `flowx-route`'s
+  [`references/target-patterns.md`](../flowx-route/references/target-patterns.md) uses the same method.
 - Don't recommend a pattern a limit rules out.
 - Never use a remembered number.
 - Release state isn't a limit; it follows the rule above (an unlabelled page is
@@ -129,11 +130,12 @@ fills.
    runtime list that drives a loop: a control table, a CSV, a Lookup result, an array parameter or a
    mapped-task input. If the user can share the worklist, or you can query it, count it rather than
    asking. "Where the facts sit" below says where to look.
-2. Summarise it back briefly (a few lines; more for a large estate): what the workflows do; their shape in plain words (for example
-   "a list read at run time drives a loop that calls one child per item; the child copies each table from
-   the last saved version; hourly"); what that tells you, naming the activity or task it comes from;
-   which candidate patterns are still in play (`flowx-route` lists them, and the facts each needs); and
-   what the export can't tell.
+2. Summarise it back briefly (a few lines; more for a large estate): what the workflows do; their shape
+   in plain words (for example "a list read at run time drives a loop that runs one copy per item;
+   daily"); what that tells you, naming the activity or task it comes from; which candidate patterns are
+   still in play (every current option the official Databricks documentation offers for that source or
+   component, plus flowx's deterministic port and convert's options, as `flowx-route`'s target-patterns
+   reference describes) and the facts each needs; and what the export can't tell.
 3. Pick the questions. For each fact a candidate pattern needs, decide whether the code shows it (cite
    the code), whether it is data you can read (read it), or whether it is unknown. Ask about an unknown
    only when a plausible answer would rule a candidate in or out, and ask first about the one whose
@@ -141,25 +143,26 @@ fills.
 
 | Fact | What it means | What in the code raises it |
 |---|---|---|
-| Scale | How many sources and objects a loop covers, now and in a year or two | A loop over a worklist; one worklist inside another |
-| Repeat | Whether the same object names recur across sources | A per-item child that applies one object list to every item |
+| Scale | How many sources and objects a component covers, how much data, now and in a year or two; whether object names recur across sources | A loop over a worklist; one worklist inside another; one object list applied to every item |
+| Data shape | Keys, a column that only ever grows, hard deletes, schema changes | Key columns, watermark or range filters, schema settings |
 | Fan-in | One target per source object, or one per logical object across all sources | Targets templated by source; a merge downstream |
-| Change | The share of sources that change per run; the change feed's kind and retention | A version or watermark read before copying; skip-if-unchanged; change functions in query text |
+| Change | How much changes per run and how the change is captured and kept | A version or watermark read before copying; skip-if-unchanged; change functions in query text |
 | History | Current state only, or every change | Rarely visible in code |
-| Bar | Schedule, allowed run time, today's run time and cost | Triggers, schedules, concurrency and batch settings |
+| Bar | Schedule or latency, allowed run time, today's run time and cost | Triggers, schedules, concurrency and batch settings |
 | Policy | What may be enabled on the source and the workspace; which compute and network are allowed | Connections and runtimes |
 | Shaping | Whether transforms inside the extraction must stay at landing | Column lists, casts, joins or filters in extraction queries |
+| Consumers | Who reads the targets and what they rely on | Downstream activities, shared tables |
 
-Keep each question within these guardrails: size and shape (scale, repeat, fan-in); change and history
-(how much changes per run, how the change is captured, how much history must be kept); service bar
-(when it must run, how long it may take, what it may cost); constraints (what may be enabled or used on
-the source and the workspace, and which transforms must stay at landing: policy, shaping).
+Ask within these categories: size and shape (scale, data shape, fan-in); change and history; service
+bar; constraints (policy, shaping); consumers. They are a floor, not a cap: when an option's current
+documentation names a requirement or limit that turns on another fact, ask about that fact too.
 
 Don't ask about anything the code shows or data you can read, or anything whose answer wouldn't change the
 candidates. Ask about the estate and the business, in the user's words, and name the code that raised each
-question. For example: *"`Orchestrator` loops over a list of databases it reads at run time. How many does
-that list hold in production, and does every database get the same table list?"* Don't ask in platform
-terms, such as *"do you need more tables per pipeline than the connector allows?"*
+question. The form is *"`<activity>` <does what the code shows>. <What the export can't tell>?"*, for
+example *"`<activity>` reads a list at run time and runs one copy per item. How many items does that
+list hold in production?"* Don't ask in platform terms, such as *"do you need more objects than the
+product allows?"*
 
 Record each answer in the `conversion_notes` of the pipeline that raised it, as the question and its
 answer, then the fact on one line: `fact: value (source: code | data | user | assumed)`. A "don't know" is
@@ -171,30 +174,29 @@ recorded as `fact: unknown` and isn't asked again. A count the user only estimat
 In ADF, read each activity's `raw` JSON in `metadata/source_graphs.json` (and
 `metadata/<pipeline>.arm.json`):
 
-- a Lookup feeding `ForEach.items`, and an `ExecutePipeline` called once per item (scale, repeat);
+- a Lookup feeding `ForEach.items`, and an `ExecutePipeline` called once per item (scale);
 - dataset parameters and sink paths templated by item (fan-in);
-- query text, such as a version or watermark read before the copy, or change functions (change, shaping);
+- query text, such as a version or watermark read before the copy, or change functions (change, data shape, shaping);
 - `ForEach.batchCount` and trigger schedules (bar);
-- a Copy or Lookup `typeProperties.source.type` that names a database: `SqlServerSource`, `AzureSqlSource`
-  or `SqlMISource` for SQL Server, and other databases by their own types, such as `OracleSource`,
-  `PostgreSqlSource` or `MySqlSource`.
+- a Copy or Lookup `typeProperties.source.type` that names a database. flowx's own list is
+  `JDBC_SOURCE_TYPES` in `src/flowx/models/source_types.py`; a type outside it may still be a database,
+  so read the dataset's linked service too.
 
 In Airflow, read the DAG source:
 
-- dynamic task mapping (`expand`) and task groups, and the list a mapped task is given (scale, repeat);
+- dynamic task mapping (`expand`) and task groups, and the list a mapped task is given (scale);
 - operator SQL, such as a watermark read before the load (change, shaping);
 - the DAG's `schedule` and `max_active_tasks` (bar).
 
-When a database-source signal is present, also record the source system and connector in that pipeline's
-`conversion_notes`, for example `source: SQL Server via AzureSqlSource` or `source: Oracle via OracleSource`.
+When a source signal is present, also record the source system and the source type in that pipeline's
+`conversion_notes`, as `source: <system> via <source type>`.
 
 ### Step 4: Author the insights and run enrich
 
 Insights are advice for the people planning the migration, not a full report. Spend your effort where a
 wrong or missing insight would change the migration:
 
-- Start with the factory-wide decision (`system_recommendation`) when one choice, such as a managed
-  connector for a family of extractors or one metadata-driven job for many similar loads, reshapes many
+- Start with the factory-wide decision (`system_recommendation`) when one choice reshapes many
   pipelines. Leave it out when there is none.
 - Write a pipeline insight only when a migrator would act on it: a target pattern that differs from a
   like-for-like port, a risk, or a conversion note. A pipeline that ports as it is needs no entry.
