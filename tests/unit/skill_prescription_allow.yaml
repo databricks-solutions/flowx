@@ -1,0 +1,7 @@
+# Lines in the skills that a prescription check in test_skills_standard.py flags but that are rightly
+# prescriptive. Each entry names the file under skills/, a phrase from the line, the check's class and why
+# the line stays. An entry that no longer matches any line fails the suite, so remove it with its line.
+- path: flowx-enrich/SKILL.md
+  phrase: "today's run time"
+  class: time-word
+  reason: A fact the agent asks the customer for, how long the job runs now, not a claim dated by the skill.
