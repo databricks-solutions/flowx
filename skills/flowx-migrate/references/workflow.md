@@ -173,12 +173,12 @@ The agent fills the gaps afterwards: route and fill-agentic for routed-agentic u
 ### Deterministic-first, agentic fallback
 
 The majority of ADF activities (Copy, DatabricksNotebook, ForEach, IfCondition, etc.) have well-defined Databricks equivalents. Building deterministic translators for these ensures:
-- **Speed** — no LLM calls needed for 70-80% of activities
+- **Speed**: no LLM calls for the activities a translator covers
 - **Reliability** — same input always produces same output
 - **Testability** — translators are unit-testable Python functions
 - **Cost** — no token consumption for the bulk of translation
 
-Agentic skills handle the remaining 20-30% that require interpretation or generation. This is where LLM reasoning adds value — complex data flows, exotic activity types, expression conversion.
+Agentic skills handle the rest, the activities that need interpretation or generation: data flows, activity types with no translator, and expressions the parser can't translate. How large that share is depends on the factory; the inventory's `summary` counts the activities per strategy.
 
 ### Phased execution with checkpoints
 
