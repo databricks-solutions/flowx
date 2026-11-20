@@ -10,7 +10,9 @@ type or activity type in the code fails here until the skill text says what happ
 
 from __future__ import annotations
 
+import functools
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -218,7 +220,6 @@ PRESCRIPTION_CLASSES = {
     "unsourced-number",
     "named-source",
     "ui-path",
-    "restated-strategy",
     "restated-file",
     "picks-for-the-user",
 }
@@ -228,8 +229,9 @@ TIME_WORDS = re.compile(
 )
 SENTENCE_STARTING_WITH_CURRENT = re.compile(r"(^|[.!?]\s+)Current\b")
 PRICE = re.compile(r"\$\s?\d|\d[\d.,]*\s?(USD|EUR|GBP)\b|\b(USD|EUR|GBP)\s?\d|\d[^\n]{0,40}\bper (vCore-hour|DBU)\b")
-# Words that would tie a skill to one source system, estate or tool. shared/airflow-coverage.md is exempt: it is
-# the map of what the Airflow code does with each operator, and the operators carry the names of their systems.
+# Words that would tie a skill to one source system, estate, tool or sizing formula. They match anywhere in a line,
+# inside inline code too, so a plural, a hyphenated form or a backticked name is caught; "SAP" alone needs word
+# boundaries so it doesn't match inside other words.
 SOURCE_SPECIFIC_TERMS = (
     "SQL Server",
     "Oracle",
@@ -248,18 +250,20 @@ SOURCE_SPECIFIC_TERMS = (
     "Σ",
     "⌈",
 )
-SOURCE_TERMS_EXEMPT = {"shared/airflow-coverage.md"}
+WHOLE_WORD_SOURCE_TERMS = {"SAP"}
 SOURCE_TYPE_NAME = re.compile(r"`\w+Source`")
 MAX_SOURCE_TYPES_PER_SENTENCE = 2
 STRATEGY_FILES = ("flowx-discover", "flowx-convert", "flowx-migrate")
 EXAMPLE_LIST = re.compile(r"\b(e\.g\.|for example)", re.IGNORECASE)
 WRITTEN_FILE_NAME = re.compile(r"`(?:[\w./-]*/)?([\w.-]+\.(?:json|csv|html))`")
+FILE_NAME_IN_CODE = r"(?<![\w.-]){name}(?![\w-])"
 PICKS_FOR_THE_USER = re.compile(
     r"best-first|ahead of like-for-like|\blist\b[^.]*\bfirst\b|\bprefer\b[^.]*\bover\b", re.IGNORECASE
 )
 PICK_FILES = ("flowx-enrich", "flowx-route")
 INLINE_CODE = re.compile(r"`[^`]*`")
 # A sentence ends at ".", "!" or "?" before a capital, a backtick or bold, but not at "e.g." or "i.e.".
+UNIT_START = re.compile(r"([-*+]|\d+\.)\s")
 SENTENCE_BREAK = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<=[.!?])\s+(?=[A-Z`*])")
 SOURCE_ROOT = REPO_ROOT / "src"
 
@@ -268,10 +272,11 @@ def _relative(path: Path) -> str:
     return str(path.relative_to(SKILLS_DIR))
 
 
-def _allow_entries() -> list[dict[str, str]]:
+@functools.cache
+def _allow_entries() -> tuple[dict[str, str], ...]:
     entries = yaml.safe_load(ALLOW_LIST.read_text(encoding="utf-8")) or []
     assert isinstance(entries, list), "skill_prescription_allow.yaml must be a list"
-    return entries
+    return tuple(entries)
 
 
 def _allowed(path: Path, line: str, check_class: str) -> bool:
@@ -280,6 +285,15 @@ def _allowed(path: Path, line: str, check_class: str) -> bool:
         entry["path"] == relative and entry["class"] == check_class and entry["phrase"] in line
         for entry in _allow_entries()
     )
+
+
+def _without_allowed_phrases(path: Path, line: str, check_class: str) -> str:
+    """Return a line with the phrases the allow list excuses for this check removed, so the rest is still checked."""
+    relative = _relative(path)
+    for entry in _allow_entries():
+        if entry["path"] == relative and entry["class"] == check_class:
+            line = line.replace(entry["phrase"], " ")
+    return line
 
 
 def _prose_lines(path: Path) -> list[tuple[int, str]]:
@@ -298,21 +312,36 @@ def _all_lines(path: Path) -> list[tuple[int, str]]:
     return list(enumerate(path.read_text(encoding="utf-8").splitlines(), start=1))
 
 
+def _prose_units(path: Path) -> list[str]:
+    """Return a file's prose outside code fences as units: each table row, each list item, each other paragraph."""
+    units: list[list[str]] = []
+    previous_blank = True
+    for _, line in _prose_lines(path):
+        stripped = line.strip()
+        if not stripped:
+            previous_blank = True
+            continue
+        if previous_blank or UNIT_START.match(stripped) or stripped.startswith("|") or units[-1][0].startswith("|"):
+            units.append([stripped])
+        else:
+            units[-1].append(stripped)
+        previous_blank = False
+    return [" ".join(unit) for unit in units]
+
+
 def _sentences(path: Path) -> list[str]:
-    """Return the prose of a file split into sentences, with each paragraph's lines joined."""
-    paragraphs = "\n".join(line for _, line in _prose_lines(path)).split("\n\n")
-    sentences = []
-    for paragraph in paragraphs:
-        joined = " ".join(paragraph.split())
-        sentences.extend(part for part in SENTENCE_BREAK.split(joined) if part)
-    return sentences
+    """Return a file's prose units split into sentences."""
+    return [part for unit in _prose_units(path) for part in SENTENCE_BREAK.split(unit) if part]
 
 
-def _flagged(path: Path, check_class: str, pattern_matches: object) -> list[str]:
-    """Return the lines a check flags in a file, leaving out the ones the allow list covers."""
+def _flagged(path: Path, check_class: str, pattern_matches: Callable[[str], bool]) -> list[str]:
+    """Return the lines a check flags in a file, code fences included, leaving out what the allow list covers.
+
+    Code fences are scanned on purpose: the example outputs the audit found sat inside them.
+    """
     flagged = []
     for number, line in _all_lines(path):
-        if pattern_matches(line) and not _allowed(path, line, check_class):  # type: ignore[operator]
+        if pattern_matches(_without_allowed_phrases(path, line, check_class)):
             flagged.append(f"{_relative(path)}:{number}: {line.strip()}")
     return flagged
 
@@ -327,8 +356,11 @@ def _has_price(line: str) -> bool:
 
 
 def _source_terms(line: str) -> list[str]:
-    without_code = INLINE_CODE.sub("", line)
-    return [term for term in SOURCE_SPECIFIC_TERMS if re.search(rf"(?<![\w-]){re.escape(term)}(?![\w-])", without_code)]
+    return [
+        term
+        for term in SOURCE_SPECIFIC_TERMS
+        if (re.search(rf"\b{term}\b", line) if term in WHOLE_WORD_SOURCE_TERMS else term in line)
+    ]
 
 
 def _strategy_mismatches(sentence: str) -> list[str]:
@@ -345,12 +377,13 @@ def _strategy_mismatches(sentence: str) -> list[str]:
     return sorted(name for name in named & (DETERMINISTIC_TYPES | AGENTIC_TYPES))
 
 
+@functools.cache
 def _source_text() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in SOURCE_ROOT.rglob("*.py"))
 
 
 def _has_pick(line: str) -> bool:
-    return bool(PICKS_FOR_THE_USER.search(line)) and not re.search(r"\b(facts?|customer)\b", line)
+    return bool(PICKS_FOR_THE_USER.search(line))
 
 
 @pytest.mark.parametrize("path", _markdown_files(), ids=_relative)
@@ -369,11 +402,11 @@ def test_skill_text_states_no_price(path: Path) -> None:
 
 @pytest.mark.parametrize("path", _markdown_files(), ids=_relative)
 def test_skill_text_names_no_source_system(path: Path) -> None:
-    if _relative(path) in SOURCE_TERMS_EXEMPT:
-        return
     flagged = _flagged(path, "named-source", lambda line: bool(_source_terms(line)))
     for sentence in _sentences(path):
-        if len(SOURCE_TYPE_NAME.findall(sentence)) > MAX_SOURCE_TYPES_PER_SENTENCE:
+        if len(SOURCE_TYPE_NAME.findall(sentence)) > MAX_SOURCE_TYPES_PER_SENTENCE and not _allowed(
+            path, sentence, "named-source"
+        ):
             flagged.append(f"{_relative(path)}: lists source types: {sentence[:120]}")
 
     assert not flagged, "use a placeholder or what a flowx step reports instead:\n" + "\n".join(flagged)
@@ -397,7 +430,8 @@ def test_every_file_name_the_skills_give_exists_in_the_code(path: Path) -> None:
         f"{_relative(path)}:{number}: {name}"
         for number, line in _all_lines(path)
         for name in WRITTEN_FILE_NAME.findall(line)
-        if "<" not in name and name not in source_text and not _allowed(path, line, "restated-file")
+        if not re.search(FILE_NAME_IN_CODE.format(name=re.escape(name)), source_text)
+        and not _allowed(path, line, "restated-file")
     ]
 
     assert not missing, "no file of that name appears in src/:\n" + "\n".join(missing)
@@ -419,7 +453,11 @@ def test_every_allow_entry_has_a_reason_and_still_matches_a_line() -> None:
         assert len(entry["reason"].split()) >= 5, f"give a real reason: {entry}"
         path = SKILLS_DIR / entry["path"]
         assert path.exists(), entry
-        assert any(entry["phrase"] in line for _, line in _all_lines(path)), f"no line matches: {entry}"
+        matching = [line for _, line in _all_lines(path) if entry["phrase"] in line]
+        assert matching, f"no line matches: {entry}"
+        check = ALLOW_CHECKS.get(entry["class"])
+        if check is not None:
+            assert any(check(line) for line in matching), f"its check no longer flags the line; remove it: {entry}"
 
 
 # Lines the prescription audit found in the skills at a9c0b86, before they were fixed. Each check must flag its
@@ -434,11 +472,15 @@ LINES_THE_AUDIT_FOUND = {
         "  - Mapping Data Flow: 8 vCores × $0.274 per vCore-hour.",
     ],
     "named-source": [
+        "pipelines = ⌈tables / 250⌉",
+        "use gateways for each source",
+        "a `SQL Server` connector",
         "applies it, only when the loop's Copy reads a SQL Server source (`SqlServerSource`, `AzureSqlSource`,",
         "connection through a gateway): tell the user it is a prerequisite for the migrated job.",
         "convert it to Databricks SQL, for example with Lakebridge. |",
     ],
     "picks-for-the-user": [
+        "order them best-first for the customer",
         "  convention (not validated), order them best-first and list the `simplification_pattern: true` ones",
         "  ahead of like-for-like ports.",
     ],
@@ -490,7 +532,12 @@ def test_the_file_check_flags_a_file_name_the_code_never_writes() -> None:
     names = WRITTEN_FILE_NAME.findall(FILE_NAME_THE_AUDIT_FOUND)
 
     assert names == ["parse_errors.json"]
-    assert names[0] not in _source_text()
+    assert not re.search(FILE_NAME_IN_CODE.format(name=re.escape(names[0])), _source_text())
+
+
+def test_the_file_check_needs_the_whole_name_not_a_suffix_of_one() -> None:
+    assert "plan.json" in _source_text()
+    assert not re.search(FILE_NAME_IN_CODE.format(name=re.escape("plan.json")), _source_text())
 
 
 UNSOURCED_PERCENT = re.compile(r"\d+(\.\d+)?\s?%")
@@ -507,15 +554,14 @@ CLOUD_EDITION_RULE = "edition for the target workspace's cloud"
 OPTION_FILES = (SHARED_DIR / "translation-options.md", SKILLS_DIR / "flowx-convert" / "references" / "adf.md")
 
 
-def _blocks(path: Path) -> list[str]:
-    """Return the prose units a UI-path check reads: each paragraph, and each table row on its own."""
+def _citation_units(path: Path) -> list[str]:
+    """Return the units a menu path must be cited within: each table cell, and each sentence elsewhere."""
     units: list[str] = []
-    for paragraph in "\n".join(line for _, line in _prose_lines(path)).split("\n\n"):
-        lines = [line for line in paragraph.splitlines() if line.strip()]
-        if lines and all(line.lstrip().startswith("|") for line in lines):
-            units.extend(lines)
-        elif lines:
-            units.append(" ".join(line.strip() for line in lines))
+    for unit in _prose_units(path):
+        if unit.startswith("|"):
+            units.extend(cell.strip() for cell in unit.strip("|").split("|") if cell.strip())
+        else:
+            units.extend(part for part in SENTENCE_BREAK.split(unit) if part)
     return units
 
 
@@ -530,6 +576,17 @@ def _menu_paths(unit: str) -> list[str]:
     return [match.group(0) for match in MENU_PATH.finditer(without_code)] + [
         match.group(0) for match in MENU_PATH_WITH_COMMAS.finditer(without_code)
     ]
+
+
+# The line check each allow-list class answers to, so an entry whose line its check no longer flags fails.
+ALLOW_CHECKS: dict[str, Callable[[str], bool]] = {
+    "time-word": _has_time_word,
+    "price": _has_price,
+    "unsourced-number": _has_unsourced_percent,
+    "named-source": lambda line: bool(_source_terms(line)),
+    "ui-path": lambda line: bool(_menu_paths(line)),
+    "picks-for-the-user": _has_pick,
+}
 
 
 def _option_ids() -> set[str]:
@@ -642,7 +699,7 @@ def test_skill_text_gives_no_unsourced_percentage(path: Path) -> None:
 def test_every_menu_path_in_the_skills_cites_its_docs_page(path: Path) -> None:
     flagged = [
         f"{_relative(path)}: {menu_path}"
-        for unit in _blocks(path)
+        for unit in _citation_units(path)
         for menu_path in _menu_paths(unit)
         if not _allowed(path, unit, "ui-path")
     ]
@@ -671,11 +728,15 @@ def test_option_files_point_to_inspect_instead_of_tabling_its_options(path: Path
         assert not _tabled_option_ids(row), f"inspect returns these options with their choices: {row.strip()}"
 
 
-@pytest.mark.parametrize(
-    "path",
-    [path for path in _markdown_files() if DATABRICKS_DOCS_LINK in path.read_text(encoding="utf-8")],
-    ids=_relative,
-)
+def _files_with_databricks_docs_links() -> list[Path]:
+    return [path for path in _markdown_files() if DATABRICKS_DOCS_LINK in path.read_text(encoding="utf-8")]
+
+
+def test_the_cloud_edition_check_has_files_to_read() -> None:
+    assert _files_with_databricks_docs_links(), "no skill links the Databricks docs; the check would pass vacuously"
+
+
+@pytest.mark.parametrize("path", _files_with_databricks_docs_links(), ids=_relative)
 def test_files_with_databricks_docs_links_say_to_read_the_target_clouds_edition(path: Path) -> None:
     assert not _lacks_cloud_edition_rule(path.read_text(encoding="utf-8")), (
         "say to read the edition for the target workspace's cloud"
@@ -721,3 +782,13 @@ def test_the_option_check_flags_a_table_of_inspects_options() -> None:
 
 def test_the_cloud_edition_check_flags_a_docs_link_with_no_rule() -> None:
     assert _lacks_cloud_edition_rule(LINK_WITHOUT_EDITION_RULE_THE_AUDIT_FOUND)
+
+
+def test_an_allowed_phrase_excuses_only_itself_on_its_line() -> None:
+    path = SHARED_DIR / "airflow-coverage.md"
+    line = (
+        "| `BteqOperator`, `TeradataOperator` | Gap carrying the BTEQ script or the Teradata SQL; convert it to"
+        " Databricks SQL, for example with Lakebridge. |"
+    )
+
+    assert _source_terms(_without_allowed_phrases(path, line, "named-source")) == ["Lakebridge"]

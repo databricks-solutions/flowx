@@ -78,11 +78,11 @@ This reference documents how the ADF expression functions are translated by `flo
 | `bool(value)` | `bool(value)` | notebook_code |
 | `coalesce(a, b, ...)` | `next((x for x in [a, b, ...] if x is not None), None)` | notebook_code |
 | `createArray(a, b, ...)` | `[a, b, ...]` | notebook_code |
-| `dataUri(value)` | none | **agentic** (complex encoding) |
-| `dataUriToBinary(value)` | none | **agentic** |
-| `dataUriToString(value)` | none | **agentic** |
+| `dataUri(value)` | not translated | **agentic** (complex encoding) |
+| `dataUriToBinary(value)` | not translated | **agentic** |
+| `dataUriToString(value)` | not translated | **agentic** |
 | `decodeBase64(value)` | `base64.b64decode(value).decode()` | notebook_code (alias of base64ToString) |
-| `decodeDataUri(value)` | none | **agentic** |
+| `decodeDataUri(value)` | not translated | **agentic** |
 | `decodeUriComponent(value)` | `urllib.parse.unquote(value)` | notebook_code |
 | `encodeUriComponent(value)` | `urllib.parse.quote(str(value), safe='')` | notebook_code |
 | `float(value)` | `float(value)` | notebook_code |
@@ -90,10 +90,10 @@ This reference documents how the ADF expression functions are translated by `flo
 | `json(value)` | `json.loads(value)` | notebook_code |
 | `string(value)` | `str(value)` | notebook_code |
 | `uriComponent(value)` | `urllib.parse.quote(str(value), safe='')` | notebook_code (alias of encodeUriComponent) |
-| `uriComponentToBinary(value)` | none | **agentic** |
+| `uriComponentToBinary(value)` | not translated | **agentic** |
 | `uriComponentToString(value)` | `urllib.parse.unquote(value)` | notebook_code (alias of decodeUriComponent) |
-| `xml(value)` | none | **agentic** (XML handling complex) |
-| `xpath(xml, expr)` | none | **agentic** (XPath complex) |
+| `xml(value)` | not translated | **agentic** (XML handling complex) |
+| `xpath(xml, expr)` | not translated | **agentic** (XPath complex) |
 
 ## Math Functions: notebook_code
 

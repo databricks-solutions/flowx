@@ -85,12 +85,17 @@ schema, the bundle name and any other `inputs package` option at Step 12.
 
 Run the `flowx-discover` skill with `--source <source>`, the source path and `--output-dir <output_dir>`.
 It writes `metadata/inventory.json` and `metadata/profile_report.csv` (plus `<pipeline>.arm.json` for
-ADF). Present the inventory summary, with the values discover prints:
+ADF). Present the summary discover prints, with its values (the ADF one is below; the Airflow one is in
+`flowx-discover`'s `references/airflow.md`):
 
 ```
-Discover complete
+ADF Profile Summary
+===================
 Pipelines parsed:     <n>
-Total activities:     <n>
+Total activities:     <n>  (raw activities, incl. nested)
+  (convert counts only top-level activities, before any motif collapse, so its total may differ)
+
+Strategy Breakdown:
   Deterministic:      <n>
   Agentic:            <n>
   Unsupported:        <n>
@@ -145,7 +150,8 @@ Unsupported:      <n>
 Total:            <n>
 ```
 
-Here "Agentic" counts the gaps convert left for the agent; none of them is translated yet.
+Here "Agentic" counts the top-level activities convert left for the agent, none of them translated
+yet; `.work/gaps.json` lists every open gap, nested ones included.
 
 ### Step 6: Present the translation details
 

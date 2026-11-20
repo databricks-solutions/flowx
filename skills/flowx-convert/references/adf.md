@@ -55,9 +55,11 @@ the placeholder notebook's fenced `json` block). Nested gaps (an `Until` inside 
 **Until activities:** check the current Lakeflow Jobs control-flow and trigger pages
 (https://docs.databricks.com/aws/en/jobs/control-flow, https://docs.databricks.com/aws/en/jobs/triggers).
 Propose the options with their trade-offs, for example a bounded polling notebook, a trigger on the
-awaited condition, or a redesign, and record the customer's choice. For a polling notebook, turn
-`typeProperties.expression` into the loop guard, bound the loop by `typeProperties.timeout`, and translate
-`typeProperties.activities` (the loop body) inline.
+awaited condition, or a redesign, and record the customer's choice. For a polling notebook: an ADF
+`Until` stops when its expression becomes true, so turn `typeProperties.expression` into the
+`while not (<condition>):` guard, wrap it in a `time.monotonic()` deadline from `typeProperties.timeout`,
+and translate `typeProperties.activities` (the loop body) inline. Read loop variables from
+`dbutils.widgets`, and surface the final state as a task value.
 
 **ExecuteDataFlow:** translate from the raw `typeProperties` + the `dataflow/` JSON definition +
 linked-service source/sink connections, into the target the customer chooses from the options the
@@ -256,7 +258,8 @@ Unsupported:      <n>
 Total:            <n>
 ```
 
-Until the gaps are filled, `Agentic` counts open gaps, not translated activities.
+`Agentic` counts the top-level activities convert left for the agent, none of them translated yet;
+`.work/gaps.json` lists every open gap, nested ones included.
 
 If any activity is still an open gap or unsupported, explain the options: manual notebook creation, retry
 agentic translation with more context, or skip with a placeholder task. See

@@ -5,3 +5,15 @@
   phrase: "today's run time"
   class: time-word
   reason: A fact the agent asks the customer for, how long the job runs now, not a claim dated by the skill.
+- path: shared/airflow-coverage.md
+  phrase: "A command that runs a Teradata utility"
+  class: named-source
+  reason: The coverage map states what the Airflow code does when a shell command runs a Teradata utility, a code rule the agent needs.
+- path: shared/airflow-coverage.md
+  phrase: "`BteqOperator`, `TeradataOperator`"
+  class: named-source
+  reason: The row maps the Airflow operators named after Teradata to what the code emits for them, not a recommendation of a source.
+- path: shared/airflow-coverage.md
+  phrase: "or the Teradata SQL"
+  class: named-source
+  reason: The same row says which SQL the code carries in the gap for those operators, a code rule the agent needs.

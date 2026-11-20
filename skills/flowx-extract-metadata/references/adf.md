@@ -46,7 +46,7 @@ When the user picks one, explain what it needs before starting, using the table 
 | | 1. Git repository | 2. ADF Studio download | 3. Azure API |
 |---|---|---|---|
 | **Permissions** | Read access to the repository. No Azure role. | **Data Factory Contributor** on the factory (see Microsoft's [roles and permissions page](https://learn.microsoft.com/en-us/azure/data-factory/concepts-roles-permissions)). | **Reader** on the factory, for the user. Reader on the resource group also works but exposes more than needed. |
-| **You'll need** | The repo, its branches and the factory's *root folder* (ADF Studio > Manage > Source control > Git configuration; see [source control](https://learn.microsoft.com/en-us/azure/data-factory/source-control)). In Databricks, a Git credential for that provider. | A browser with ADF Studio | Tenant ID, subscription ID, resource group and factory name (ADF Studio > Manage > Properties); network access to `management.azure.com`. Device-code sign-in may be blocked by company policy (see Step 4). |
+| **You'll need** | The repo, its branches and the factory's *root folder* (ADF Studio > Manage > Source control > Git configuration; see [source control](https://learn.microsoft.com/en-us/azure/data-factory/source-control)). In Databricks, a Git credential for that provider. | A browser with ADF Studio | Tenant ID, subscription ID, resource group and factory name (in the factory's properties in ADF Studio); network access to `management.azure.com`. Device-code sign-in may be blocked by company policy (see Step 4). |
 | **Gets you** | The latest commit on the collaboration branch, a release tag, or the published template — the user confirms which | The factory as it is now in ADF Studio | The factory exactly as it is now |
 
 ### Options 1 and 2 are done by the user
@@ -243,8 +243,9 @@ connector's managed identity, so there is no code and no secret. Setup, once:
 1. **Azure:** give an access connector's managed identity **Reader** on the factory. Prefer a
    connector dedicated to this over the one behind the metastore's storage credential, so the
    access isn't tied to an identity the platform team treats as storage-only.
-2. **Unity Catalog:** create a service credential with the access connector's resource ID, as
-   https://docs.databricks.com/aws/en/connect/unity-catalog/cloud-services/service-credentials
+2. **Unity Catalog:** create a service credential with the access connector's resource ID, as the
+   Azure Databricks page
+   https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-services/service-credentials
    describes; the page names the privilege it needs.
 3. **Grant use:** grant the users or groups who run the extraction access to the credential, as the
    same page describes, and check it is bound to the workspace if workspace bindings are used.

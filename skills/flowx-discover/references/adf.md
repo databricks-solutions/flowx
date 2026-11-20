@@ -114,6 +114,8 @@ ADF Profile Summary
 ===================
 Pipelines parsed:     <n>
 Total activities:     <n>  (raw activities, incl. nested)
+  (convert counts only top-level activities, before any motif collapse, so its total may differ)
+
 Strategy Breakdown:
   Deterministic:      <n>
   Agentic:            <n>

@@ -41,8 +41,8 @@ from typing import Literal
 # backwards-incompatible change to the authored shape.
 SCHEMA_VERSION = "1"
 
-# Cap on a ranked ``recommended_patterns`` list (per pipeline and system-wide). A short,
-# ranked shortlist keeps the recommendation legible; an unbounded list is noise.
+# Cap on a ``recommended_patterns`` list (per pipeline and system-wide). A short list keeps
+# the recommendation legible; an unbounded list is noise.
 MAX_RECOMMENDED_PATTERNS = 4
 
 # Cap on the characters in any one authored text value. One oversized insight would otherwise be
