@@ -71,10 +71,8 @@ fill via LLM-assisted translation.
 
 ## Coverage notes
 
-Current deterministic coverage: `PythonOperator` (callable body → generated PySpark notebook) and
-`BashOperator` (command → `%sh` notebook). Dependencies (`>>` / `<<`) and cron
-`schedule_interval` → Quartz are handled. Other operators become placeholders. Confirm the output
-location and proceed to `flowx-convert` with the same `<output_dir>` and `--source airflow`.
+Confirm the output location and proceed to `flowx-convert` with the same `<output_dir>` and
+`--source airflow`.
 
 For the full verified support matrix — classic operators, TaskFlow (`@dag`/`@task`), sensors,
 TaskGroups (incl. group-level dependencies), and dbt factory (static + PyDABs) — plus the constructs
