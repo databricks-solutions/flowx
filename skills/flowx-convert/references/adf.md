@@ -52,14 +52,16 @@ translation from the activity's **full ADF/ARM JSON** (under `raw_activity_json`
 the placeholder notebook's fenced `json` block). Nested gaps (an `Until` inside `IfCondition` /
 `Switch` / `ForEach`) are reported individually.
 
-**Until activities:** Lakeflow Jobs have no native repeat-until, so translate the `Until` into one
-Python notebook task implementing a bounded polling loop — convert `typeProperties.expression` into
-the `while not (<condition>):` guard, wrap in a `time.monotonic()` deadline from
-`typeProperties.timeout`, and translate `typeProperties.activities` (the loop body) inline. Read
-loop variables from `dbutils.widgets`, surface final state as a task value.
+**Until activities:** check the current Lakeflow Jobs control-flow and trigger pages
+(https://docs.databricks.com/aws/en/jobs/control-flow, https://docs.databricks.com/aws/en/jobs/triggers).
+Propose the options with their trade-offs, for example a bounded polling notebook, a trigger on the
+awaited condition, or a redesign, and record the customer's choice. For a polling notebook, turn
+`typeProperties.expression` into the loop guard, bound the loop by `typeProperties.timeout`, and translate
+`typeProperties.activities` (the loop body) inline.
 
 **ExecuteDataFlow:** translate from the raw `typeProperties` + the `dataflow/` JSON definition +
-linked-service source/sink connections, into an SDP pipeline or PySpark notebook.
+linked-service source/sink connections, into the target the customer chooses from the options the
+current docs give.
 
 **Control flow (Until):** translate from the raw activity
 JSON, the containing pipeline JSON, nested activities, and variable definitions.
@@ -200,21 +202,10 @@ option accepts any value). Perform data actions inline when an answer calls for 
 in one `modify` call.
 
 **Activity→Notify motifs.** When any activity is followed by notification Web activities, `inspect`
-raises `notify_destination`: `keep` (default) translates the Web activities directly; any other
-value (`email`/`slack`/`teams`/`pagerduty`/`webhook`) collapses the pattern into Databricks job-task
-`on_success`/`on_failure` notifications. Each destination chains follow-up field options (gated by
-`show_when`):
-
-| Destination | Chained field options (SDK arg) |
-|-------------|---------------------------------|
-| `email`     | `notify_email_recipients` (`addresses`, comma-separated) |
-| `slack`     | `notify_slack_url` (`url`), `notify_slack_channel_id` (optional), `notify_slack_oauth_token` (optional) |
-| `teams`     | `notify_teams_url` (`url`) |
-| `pagerduty` | `notify_pagerduty_integration_key` (`integration_key`) |
-| `webhook`   | `notify_webhook_url` (`url`), `notify_webhook_username` (optional), `notify_webhook_password` (optional) |
-
-All destinations also take optional `notify_destination_name` and `notify_events`
-(both/on_failure/on_success). For non-email destinations, `modify` creates (or reuses by name) the
+raises `notify_destination`: its default keeps the Web activities as they are, and any other choice
+collapses the pattern into Databricks job-task `on_success`/`on_failure` notifications. Each destination
+chains its own follow-up field options, gated by `show_when`; `inspect` lists them with their choices.
+For non-email destinations, `modify` creates (or reuses by name) the
 Databricks notification destination via the SDK when you submit answers, baking the id into the
 report; requires workspace auth at `modify` time. Email uses raw `email_notifications`, no SDK call.
 
@@ -254,16 +245,19 @@ skip `modify` — package falls back to the un-stamped report.
 
 ## Step 7 — Present translation summary
 
+Present the counts convert prints (`src/flowx/sources/adf/translate.py`):
+
 ```
 Translation Summary
 ===================
-Total activities:           47
-Deterministic translated:   35 (74.5%)
-Agentic translated:          8 (17.0%)
-Failed:                      4 ( 8.5%)
-Overall coverage:           91.5%
+Deterministic:    <n>
+Agentic:          <n>
+Unsupported:      <n>
+Total:            <n>
 ```
 
-If coverage is below 100%, explain options for failed translations: manual notebook creation, retry
+Until the gaps are filled, `Agentic` counts open gaps, not translated activities.
+
+If any activity is still an open gap or unsupported, explain the options: manual notebook creation, retry
 agentic translation with more context, or skip with a placeholder task. See
 `references/activity-mapping.md` for the full ADF activity → strategy mapping.
