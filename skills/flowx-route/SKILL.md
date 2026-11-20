@@ -5,7 +5,7 @@ description: >
   agentic (LLM-assisted re-architecture) conversion: route writes its recommendation and the
   suggested groupings into metadata/conversion_plan.json and a standard review page, the user decides,
   route applies the plan, and fill-agentic fills each routed-agentic unit. Runs after convert (and
-  the optional enrich), before package.
+  enrich, which runs unless the pass is deterministic-only), before package.
   Use when the user asks to route the conversion, choose deterministic or agentic per component,
   review the conversion plan, group pipelines, or fill agentic units.
 ---
@@ -14,8 +14,8 @@ description: >
 
 Phase 2.a of the flowx workflow, ADF only. Route decides, per connected component, whether each part of
 the factory converts deterministically (the typed engine's 1:1 translation) or agentically (an
-LLM-authored re-architecture, for example several near-identical extractors consolidated onto one managed
-ingestion or metadata-driven pipeline).
+LLM-authored redesign onto another pattern, for example consolidating pipelines or replacing a custom step
+with a managed capability).
 It reads the inventory, the insights enrich wrote and convert's report; it writes its recommendation into
 `metadata/conversion_plan.json`, the one readable record of the decisions, and draws it as
 `metadata/routing_review.html`. The user decides, you edit the plan, route applies it to the translation
@@ -125,14 +125,14 @@ plan's `conversation` (`[{"question": "...", "answer": "..."}]`); package copies
 #### Suggested groupings
 
 A grouping is two or more whole components the insights suggest converting
-together, agentically, as one unit: one agent output replaces all of their pipelines (for example several
-independent extractors become one ingestion pipeline). It never splits a component. Route
+together, agentically, as one unit: one agent output replaces all of their pipelines. It never splits a
+component. Route
 suggests one from two kinds of link in the insights:
 
 - an `inferred` pipeline relationship (with its evidence and confidence) between pipelines of different
   components;
 - one simplification pattern (same pattern name, `simplification_pattern: true`) recommended for
-  pipelines in more than one component: the independent extractors one managed pattern could replace.
+  pipelines in more than one component: the pipelines one pattern could replace.
 
 Components joined by these links, directly or through each other, form one suggestion
 (`grouping-<hash of its members>`), so suggestions never overlap. The same members keep the same id, so an

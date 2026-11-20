@@ -66,6 +66,9 @@ of those four keys yourself:
 }
 ```
 
+The order of the patterns in this example is not a ranking; order yours by the facts, as the rule on
+`recommended_patterns` below says.
+
 ### Rules the validator enforces
 
 - **Some content.** Set at least one of `overview`, `system_recommendation`, `pipeline_insights` or
@@ -87,9 +90,11 @@ of those four keys yourself:
   the count and that each has a non-empty `pattern` and `fit` and a boolean `simplification_pattern`;
   it does **not** enforce ordering. Set `simplification_pattern: true` **only** for a distinctive
   capability that collapses a whole legacy pattern (a managed connector, declarative `AUTO CDC`, Auto
-  Loader, system tables replacing a home-grown logging tier) — not for a like-for-like port. By
-  convention (not validated), order them best-first and list the `simplification_pattern: true` ones
-  ahead of like-for-like ports.
+  Loader, system tables replacing a home-grown logging tier), not for a like-for-like port. Order the
+  patterns by the facts you recorded, the one they favour first, and say why in `fit`. The review page
+  (`src/flowx/reporting/routing_review.py`) shows the first system-wide pattern as the recommended
+  approach and a component's first pattern as its suggested pattern, so put a like-for-like port first
+  when the facts favour it.
 - **`release_state` + `release_state_source`** (per recommended pattern): the pattern's *verified*
   Databricks release state and the doc that grounds it. `release_state` is one of `ga`,
   `public_preview`, `private_preview`, `beta`, `unknown`. It is **required** on any pattern with

@@ -109,7 +109,9 @@ complexity, or to classify activities by hand before going on.
 
 ### Step 4 (optional): Enrich the inventory
 
-Unless the user chose a deterministic-only pass, run the `flowx-enrich` skill. You author the
+Unless the user chose a deterministic-only pass, run the `flowx-enrich` skill: the agentic route comes
+only from its insights (without them route recommends `deterministic` for every component), so only a
+run with no agent skips it. You author the
 `insights` (the factory-wide recommendation, each pipeline's intent and recommended Databricks patterns,
 and cross-pipeline relationships); `enrich` validates them and merges them into `inventory.json`
 without changing any deterministic key. Before recording them, tell the user in a few lines what the
@@ -160,7 +162,7 @@ plan, convert and package behave exactly as before).
 Run the `flowx-route` skill on the baseline from Step 5. Route writes its per-component recommendation
 and the suggested groupings into `metadata/conversion_plan.json`, every decision pending, and draws them
 as `metadata/routing_review.html`. Present the page, ask what the customer wants the conversion to
-achieve, qualify the target pattern for any ingestion component (the skill's "Qualify the target
+achieve, qualify the target pattern for every component (the skill's "Qualify the target
 pattern"), record only the customer's decisions, and run route again. Once nothing is pending, route
 applies the plan: each routed-agentic unit's tasks become placeholder gaps, and deterministic units
 leave the report untouched. A user who wants a straight deterministic migration decides every

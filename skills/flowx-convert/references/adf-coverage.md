@@ -31,8 +31,10 @@ the rest as agentic gaps (see [`adf.md`](adf.md)).
 
 ## Triggers
 
-Convert takes the first trigger that references a pipeline; a Databricks job has one schedule, so any
-other triggers on the same pipeline are for the user to wire.
+Convert takes the first trigger that references a pipeline, so any other triggers on the same pipeline
+are for the user to wire. How a job's schedules and triggers work is on
+https://docs.databricks.com/aws/en/jobs/triggers; read the edition for the target workspace's cloud (the
+page's cloud selector, or learn.microsoft.com for Azure Databricks).
 
 | ADF trigger | What flowx writes | What to tell the user |
 |---|---|---|
@@ -73,8 +75,10 @@ notebook with the user before it runs.
 ## Integration runtimes and on-premises sources
 
 flowx does not translate integration runtimes. A pipeline that reads through a self-hosted integration
-runtime needs network access from Databricks to that source (for example a private endpoint or a
-connection through a gateway): tell the user it is a prerequisite for the migrated job.
+runtime needs network access from Databricks to that source: tell the user it is a prerequisite for the
+migrated job. The options depend on the compute the job will use; see the Databricks network security
+docs for it (https://docs.databricks.com/aws/en/security/network/serverless-network-security/ for
+serverless).
 
 ## Exports
 
