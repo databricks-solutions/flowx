@@ -109,7 +109,8 @@ complexity, or to classify activities by hand before going on.
 
 ### Step 4 (optional): Enrich the inventory
 
-Unless the user chose a deterministic-only pass, run the `flowx-enrich` skill. You author the
+Unless the user chose a deterministic-only pass, run the `flowx-enrich` skill: agentic conversion and
+routing need its insights, so only a run with no agent skips it. You author the
 `insights` (the factory-wide recommendation, each pipeline's intent and recommended Databricks patterns,
 and cross-pipeline relationships); `enrich` validates them and merges them into `inventory.json`
 without changing any deterministic key. Before recording them, tell the user in a few lines what the

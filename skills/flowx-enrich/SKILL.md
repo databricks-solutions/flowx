@@ -5,18 +5,18 @@ description: >
   architecture recommendation, per-pipeline intent + recommended Databricks patterns, and
   cross-pipeline relationships. The library validates it, records it in agentic_insights.json and
   rebuilds inventory.json from discovery plus that file. Optional phase 1.a, after discover and
-  before convert; use it unless the user asked for a deterministic-only pass. The routing step reads
-  it.
+  before convert, and on unless skipped: it runs unless the run is deterministic-only (no agent),
+  because agentic conversion and routing need it.
   Use when the user asks to enrich or annotate the inventory, author agentic insights, or recommend
   Databricks patterns.
 ---
 
 # Enrich the inventory with agentic insights
 
-Optional phase 1.a of the flowx workflow, after discover and before convert. Discover records what each
-source workflow is; you, the agent, author what to do about it: a factory-wide recommendation, each
-pipeline's intent and recommended Databricks patterns, and how pipelines couple. Enrich validates that
-and records it in `metadata/agentic_insights.json`, bound to the saved `metadata/source_graphs.json` it
+Optional phase 1.a of the flowx workflow, after discover and before convert, and on unless skipped.
+Discover records what each source workflow is; you, the agent, author what to do about it: a
+factory-wide recommendation, each pipeline's intent and recommended Databricks patterns, and how
+pipelines couple. Enrich validates that and records it in `metadata/agentic_insights.json`, bound to the saved `metadata/source_graphs.json` it
 was checked against, then rebuilds `metadata/inventory.json` from `source_graphs.json` plus that file, so
 the inventory carries the same block under one additive `insights` key (you pass nothing for that
 rebuild). Airflow discover saves no `source_graphs.json`, so for Airflow the file is bound to
@@ -26,9 +26,9 @@ rebuild). Airflow discover saves no `source_graphs.json`, so for Airflow the fil
 ## Before you start
 
 - Discover must have run for this `<output_dir>`.
-- `flowx-migrate` runs enrich unless the user asks for a deterministic-only pass. Skip it when the caller
-  asked for a headless or deterministic pass, or when no human reader needs a migration narrative. A
-  deterministic-only discover, with no agent and no LLM, is fully valid: its `inventory.json` is complete
+- Enrich runs unless the run is deterministic-only (no agent), because agentic conversion and routing
+  need its insights; `flowx-migrate` runs it unless the user asks for a deterministic-only pass. Only a
+  run with no agent skips it. A deterministic-only discover, with no agent and no LLM, is fully valid: its `inventory.json` is complete
   without an `insights` block, and `flowx-route` still recommends and records a plan from the
   deterministic structure (its agentic option then shows no recommended patterns).
 - The one-shot MCP `migrate` command runs discover, convert and package without enrich, so it records

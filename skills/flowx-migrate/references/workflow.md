@@ -76,6 +76,9 @@ ADF JSON Exports
 
 **Skill:** `flowx:flowx-enrich`
 
+Enrich runs unless the run is deterministic-only (no agent), because agentic conversion and routing need
+its insights.
+
 **Input:** `inventory.json` from phase 1, and for ADF the saved `source_graphs.json`
 
 **Process:**

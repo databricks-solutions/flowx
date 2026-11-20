@@ -5,7 +5,7 @@ description: >
   agentic (LLM-assisted re-architecture) conversion: route writes its recommendation and the
   suggested groupings into metadata/conversion_plan.json and a standard review page, the user decides,
   route applies the plan, and fill-agentic fills each routed-agentic unit. Runs after convert (and
-  the optional enrich), before package.
+  enrich, which runs unless the pass is deterministic-only), before package.
   Use when the user asks to route the conversion, choose deterministic or agentic per component,
   review the conversion plan, group pipelines, or fill agentic units.
 ---
